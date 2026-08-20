@@ -58,7 +58,7 @@ const DecodeOpaqueSurfaceProjection = (
 };
 
 /** Persists one safe surface and optional usage total in the raw-observation transaction. */
-export const PersistSurfaceProjection = (
+export const PersistSurfaceProjectionWithChange = (
 	transaction: DatabaseClient,
 	observation: EngineObservation,
 	input: {
@@ -81,7 +81,7 @@ export const PersistSurfaceProjection = (
 			(observation._tag === "tool" && observation.action === "progress") ||
 			(observation._tag === "native_action" && observation.diagnostic === true)
 		) {
-			return;
+			return false;
 		}
 		const attribution = {
 			agent_id: input.agent_id,
@@ -123,7 +123,7 @@ export const PersistSurfaceProjection = (
 				})
 				.onConflictDoNothing()
 				.returning({ projection_order: SurfaceItems.projection_order });
-			if (inserted.length === 0) return;
+			if (inserted.length === 0) return false;
 			const [retention_floor] = yield* transaction
 				.select({ projection_order: SurfaceItems.projection_order })
 				.from(SurfaceItems)
@@ -141,14 +141,14 @@ export const PersistSurfaceProjection = (
 						),
 					);
 			}
-			return;
+			return true;
 		}
 		const [prior] = yield* transaction
 			.select()
 			.from(SurfaceUsageTotals)
 			.where(eq(SurfaceUsageTotals.run_id, input.run_id))
 			.limit(1);
-		if (prior?.last_observation_id === observation.observation_id) return;
+		if (prior?.last_observation_id === observation.observation_id) return false;
 		const add = (prior_value: number | null | undefined, next: number | undefined) =>
 			next === undefined ? (prior_value ?? null) : (prior_value ?? 0) + next;
 		const next_total = (prior_value: number | null | undefined, next: number | undefined) => {
@@ -196,6 +196,7 @@ export const PersistSurfaceProjection = (
 					updated_at: input.occurred_at,
 				},
 			});
+		return true;
 	}).pipe(
 		Effect.mapError(
 			() =>
@@ -204,3 +205,10 @@ export const PersistSurfaceProjection = (
 				}),
 		),
 	);
+
+/** Preserves the public void persistence boundary for callers that do not need mutation evidence. */
+export const PersistSurfaceProjection = (
+	transaction: DatabaseClient,
+	observation: EngineObservation,
+	input: Parameters<typeof PersistSurfaceProjectionWithChange>[2],
+) => PersistSurfaceProjectionWithChange(transaction, observation, input).pipe(Effect.asVoid);

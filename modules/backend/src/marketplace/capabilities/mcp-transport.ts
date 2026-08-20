@@ -100,7 +100,6 @@ export function make_capability_transport_registry_layer(input: {
 const DefaultStdioLimits = {
 	invocation_timeout_ms: 30_000,
 	max_message_bytes: 4 * 1024 * 1024,
-	max_pending_requests: 64,
 	max_stderr_bytes: 1024 * 1024,
 } as const;
 
@@ -166,9 +165,6 @@ export const CapabilityTransportRegistryLive = Layer.effect(
 							max_message_bytes:
 								detail.transport.max_message_bytes ??
 								DefaultStdioLimits.max_message_bytes,
-							max_pending_requests:
-								detail.transport.max_pending_requests ??
-								DefaultStdioLimits.max_pending_requests,
 							max_stderr_bytes:
 								detail.transport.max_stderr_bytes ??
 								DefaultStdioLimits.max_stderr_bytes,

@@ -1,4 +1,4 @@
-import { asc, desc, eq } from "drizzle-orm";
+import { asc, desc, eq, inArray } from "drizzle-orm";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 
 import { JournalSequence, type ThreadListItem } from "@artisan/protocol";
@@ -65,27 +65,34 @@ export const ThreadReadModelLive = Layer.effect(
 	Effect.gen(function* () {
 		const database = yield* Database;
 		/** One coordinator per thread, so the launch policy joins one-to-one. */
-		const Lookup = (thread_id: string) =>
-			database.client
+		const Lookup = (thread_id: string) => {
+			const candidate_ids = thread_id.startsWith("thread_")
+				? [thread_id]
+				: [thread_id, `thread_${thread_id}`];
+			return database.client
 				.select()
 				.from(Threads)
 				.leftJoin(
 					OrchestrationCoordinators,
 					eq(OrchestrationCoordinators.thread_id, Threads.thread_id),
 				)
-				.where(eq(Threads.thread_id, thread_id))
-				.limit(1)
+				.where(inArray(Threads.thread_id, candidate_ids))
+				.limit(candidate_ids.length)
 				.pipe(
-					Effect.flatMap(([row]) =>
-						row
+					Effect.flatMap((rows) => {
+						const row =
+							rows.find((candidate) => candidate.threads.thread_id === thread_id) ??
+							rows.at(0);
+						return row
 							? DecodeThreadProjection(
 									row.threads,
 									row.orchestration_coordinators ?? undefined,
 								).pipe(Effect.map(Option.some))
-							: Effect.succeed(Option.none()),
-					),
+							: Effect.succeed(Option.none());
+					}),
 					Effect.mapError(normalize_thread_read_model_error),
 				);
+		};
 
 		const Snapshot = () =>
 			database.client

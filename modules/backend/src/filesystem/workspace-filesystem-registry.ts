@@ -8,7 +8,6 @@ import { make_node_filesystem } from "./node-filesystem";
 
 const WorkspaceFilesystemRegistration = Schema.Struct({
 	root: Schema.NonEmptyString,
-	watch_capacity: Schema.optional(Schema.Number),
 	workspace_id: Identifier,
 });
 
@@ -123,12 +122,7 @@ function PrepareWorkspaceRegistration(registration: unknown) {
 			),
 		);
 
-		const filesystem = yield* make_node_filesystem({
-			root: decoded.root,
-			...(decoded.watch_capacity === undefined
-				? {}
-				: { watch_capacity: decoded.watch_capacity }),
-		}).pipe(
+		const filesystem = yield* make_node_filesystem({ root: decoded.root }).pipe(
 			Effect.mapError((cause) =>
 				registration_error(
 					"Workspace filesystem root could not be registered",

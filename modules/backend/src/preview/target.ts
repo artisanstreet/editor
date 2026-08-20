@@ -39,7 +39,7 @@ export interface PreviewTargetRegistration {
 	readonly workspace_id: string;
 }
 
-/** Reports one registry change through the bounded sliding status stream. */
+/** Reports one registry change through the status stream. */
 export interface PreviewTargetEvent {
 	readonly kind: "health" | "registered" | "removed" | "state";
 	readonly target: PreviewTargetRecord;

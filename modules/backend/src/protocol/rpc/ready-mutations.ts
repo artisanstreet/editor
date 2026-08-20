@@ -2,7 +2,6 @@ import { Context, Effect, Option, Ref } from "effect";
 
 import {
 	type CommandEnvelope,
-	type EventEnvelope,
 	type GitIndexStageRequestEnvelope,
 	type GitIndexUnstageRequestEnvelope,
 	type GitMutationResolveEnvelope,
@@ -32,9 +31,18 @@ import type { ConnectionState, ReadyState } from "../connection-state";
 export class ReadyConnectionRuntime extends Context.Service<
 	ReadyConnectionRuntime,
 	{
-		readonly DeliverLiveEvents: (
-			events: ReadonlyArray<EventEnvelope>,
-		) => Effect.Effect<void, unknown>;
+		/**
+		 * Delivers every journal event this connection has not seen, not a
+		 * mutation's own events. A mutation's events carry the newest journal
+		 * sequences, so delivering them alone would advance the connection's
+		 * `delivered_journal_sequence` past events that run fibers journaled
+		 * since the last notifier wake — a window no later wake re-reads,
+		 * permanently silencing those events for this connection. The trusted
+		 * tail always contains the mutation's own committed events. Delivery
+		 * failures are answered as a retryable `journal.replay_failed` toward
+		 * `correlation_id` rather than surfaced to the caller.
+		 */
+		readonly DeliverCommittedTail: (correlation_id?: string) => Effect.Effect<void>;
 		readonly Enqueue: (envelope: OutboundControlEnvelope) => Effect.Effect<void>;
 		readonly EnqueueError: (
 			current: ConnectionState,
@@ -135,18 +143,6 @@ export const MakeReadyMutations = Effect.gen(function* () {
 	const workspace_files = yield* WorkspaceFileService;
 	const git = yield* GitService;
 
-	const DeliverUndelivered = (events: ReadonlyArray<EventEnvelope>) =>
-		Effect.gen(function* () {
-			const current = yield* Ref.get(runtime.state);
-			const undelivered =
-				current._tag === "Ready"
-					? events.filter(
-							(event) => event.journal_sequence > current.delivered_journal_sequence,
-						)
-					: [];
-			if (undelivered.length > 0) yield* runtime.DeliverLiveEvents(undelivered);
-		});
-
 	const HandleCommand = (command: CommandEnvelope) =>
 		Effect.gen(function* () {
 			if (command.payload.type === "thread.create") {
@@ -160,15 +156,12 @@ export const MakeReadyMutations = Effect.gen(function* () {
 				);
 			}
 			const output = yield* router.RouteCommand(command);
-			const events = output.filter(
-				(envelope): envelope is EventEnvelope => envelope.kind === "event",
-			);
 			yield* Effect.forEach(
 				output.filter((envelope) => envelope.kind !== "event"),
 				runtime.Enqueue,
 				{ discard: true },
 			);
-			yield* DeliverUndelivered(events);
+			yield* runtime.DeliverCommittedTail(command.message_id);
 		});
 
 	const HandleThreadCreate = (request: ThreadCreateEnvelope, current: ReadyState) =>
@@ -223,9 +216,7 @@ export const MakeReadyMutations = Effect.gen(function* () {
 				schema_version: 1,
 				sent_at: yield* metadata.Now,
 			});
-			yield* DeliverUndelivered(
-				output.filter((envelope): envelope is EventEnvelope => envelope.kind === "event"),
-			);
+			yield* runtime.DeliverCommittedTail(request.message_id);
 		}).pipe(
 			Effect.catchCause(() =>
 				runtime.EnqueueError(
@@ -360,28 +351,7 @@ export const MakeReadyMutations = Effect.gen(function* () {
 				onFailure: (error) => Receipt(envelope, undefined, git_error_detail(error)),
 				onSuccess: (acceptance) =>
 					Receipt(envelope, acceptance).pipe(
-						Effect.andThen(
-							Effect.gen(function* () {
-								const current = yield* Ref.get(runtime.state);
-								if (current._tag !== "Ready") return;
-								yield* journal
-									.ReadReplay({
-										after_journal_sequence: current.delivered_journal_sequence,
-									})
-									.pipe(
-										Effect.flatMap(runtime.DeliverLiveEvents),
-										Effect.catch(() =>
-											runtime.EnqueueError(
-												current,
-												"journal.replay_failed",
-												"Live journal delivery could not be resumed.",
-												true,
-												envelope.message_id,
-											),
-										),
-									);
-							}),
-						),
+						Effect.andThen(runtime.DeliverCommittedTail(envelope.message_id)),
 					),
 			}),
 		);

@@ -1139,23 +1139,14 @@ describe("protocol server", () => {
 		}
 	});
 
-	it("validates connection settings before constructing the server", async () => {
-		const invalid_capacity = await Effect.runPromise(
-			DecodeProtocolConnectionOptions({
-				heartbeat_interval_ms: 10,
-				heartbeat_timeout_ms: 20,
-				outbound_capacity: 0,
-			}).pipe(Effect.flip),
-		);
+	it("validates connection heartbeat settings before constructing the server", async () => {
 		const invalid_timeout = await Effect.runPromise(
 			DecodeProtocolConnectionOptions({
 				heartbeat_interval_ms: 20,
 				heartbeat_timeout_ms: 10,
-				outbound_capacity: 1,
 			}).pipe(Effect.flip),
 		);
 
-		expect(invalid_capacity._tag).toBe("ProtocolConfigurationError");
 		expect(invalid_timeout._tag).toBe("ProtocolConfigurationError");
 	});
 });

@@ -106,6 +106,7 @@ describe("conversation projection", () => {
 							artisan_run_id: "run_1",
 							exit_code: 0,
 							observation_id: "terminal_completed",
+							output: "\u001b[32mresolved dependencies\u001b[0m",
 							raw: { engine_id: "codex", frame: {}, transport: "test" },
 							sequence: 3,
 							state: "completed",
@@ -172,6 +173,7 @@ describe("conversation projection", () => {
 					expect.objectContaining({
 						detail: "pnpm install",
 						id: "activity:terminal_1",
+						output: "resolved dependencies",
 						status: "completed",
 					}),
 					expect.objectContaining({ id: "activity:tool_1", status: "completed" }),
@@ -520,6 +522,21 @@ describe("conversation projection", () => {
 								Delta("before_steer", 1, "The prior response. "),
 								context,
 							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "reasoning_summary_delta",
+									artisan_run_id: "run_steering_boundary",
+									delta: "Reasoning before the steer",
+									item_id: "reasoning_steering_boundary",
+									observation_id: "reasoning_before_steer",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 2,
+									summary_index: 0,
+									turn_id: "turn_1",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
 							yield* ApplyJournalEvent(transaction, event) as Effect.Effect<
 								unknown,
 								unknown,
@@ -553,6 +570,12 @@ describe("conversation projection", () => {
 						id: "assistant_1",
 						steering_fragment_boundaries: [
 							{ after_item_id: "message:command_steer", text_offset: 20 },
+						],
+					}),
+					expect.objectContaining({
+						id: "reasoning_steering_boundary",
+						steering_fragment_boundaries: [
+							{ after_item_id: "message:command_steer", text_offset: 26 },
 						],
 					}),
 				]),
@@ -845,6 +868,100 @@ describe("conversation projection", () => {
 				request: { kind: "command" },
 				type: "approval",
 			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	/**
+	 * An enumerated question is answered by choosing, not by retyping a choice,
+	 * so the offered options have to survive projection intact. An option whose
+	 * label does not survive text bounding cannot be selected, and offering the
+	 * rest would silently hide a choice the provider asked about.
+	 */
+	it("projects a question's offered options and drops an incomplete set whole", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-08-15T00:00:00.000Z",
+						last_activity_at: "2026-08-15T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-08-15T00:00:00.000Z",
+					});
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							const context = {
+								occurred_at: "2026-08-15T00:00:01.000Z",
+								run_id: "run_1",
+								thread_id: "thread_1",
+							};
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "question",
+									artisan_run_id: "run_1",
+									header: "Library",
+									multi_select: true,
+									observation_id: "question_observation",
+									options: [
+										{ description: "Already here", label: "Effect" },
+										{ label: "RxJS" },
+									],
+									question_id: "question-1:0",
+									raw: { engine_id: "claude", frame: {}, transport: "test" },
+									sequence: 1,
+									state: "requested",
+									text: "Which library should we use?",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "question",
+									artisan_run_id: "run_1",
+									observation_id: "blank_option_observation",
+									options: [{ label: "Effect" }, { label: "  " }],
+									question_id: "question-1:1",
+									raw: { engine_id: "claude", frame: {}, transport: "test" },
+									sequence: 2,
+									state: "requested",
+									text: "Which target?",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			expect(
+				availability.snapshot.items.find(
+					(item) => item.type === "question" && item.interaction_id === "question-1:0",
+				),
+			).toMatchObject({
+				header: "Library",
+				multi_select: true,
+				options: [{ description: "Already here", label: "Effect" }, { label: "RxJS" }],
+				prompt: "Which library should we use?",
+				state: "requested",
+				type: "question",
+			});
+			const degraded = availability.snapshot.items.find(
+				(item) => item.type === "question" && item.interaction_id === "question-1:1",
+			);
+			expect(degraded).toMatchObject({ prompt: "Which target?", type: "question" });
+			expect(
+				degraded && "options" in degraded ? degraded.options : undefined,
+			).toBeUndefined();
 		} finally {
 			await runtime.dispose();
 		}

@@ -198,6 +198,8 @@ describe("GitReadService", () => {
 			Authorize: () => Effect.succeed(capability),
 			Get: () => Effect.succeed(capability),
 			ListWorkspaceIds: Effect.succeed(["workspace_one"]),
+			Reconcile: () => Effect.succeed([]),
+			Register: () => Effect.succeed({ workspace_id: "workspace_one" }),
 		});
 		const read = await Effect.runPromise(
 			Effect.service(GitReadService).pipe(
@@ -257,6 +259,8 @@ describe("GitReadService", () => {
 			Authorize: () => Effect.succeed(capability),
 			Get: () => Effect.succeed(capability),
 			ListWorkspaceIds: Effect.succeed(["workspace_one"]),
+			Reconcile: () => Effect.succeed([]),
+			Register: () => Effect.succeed({ workspace_id: "workspace_one" }),
 		});
 		const read = await Effect.runPromise(
 			Effect.service(GitReadService).pipe(
@@ -339,6 +343,8 @@ describe("GitReadService", () => {
 			Authorize: () => Effect.succeed(capability),
 			Get: () => Effect.succeed(capability),
 			ListWorkspaceIds: Effect.succeed(["workspace_one"]),
+			Reconcile: () => Effect.succeed([]),
+			Register: () => Effect.succeed({ workspace_id: "workspace_one" }),
 		});
 		const read_layer = make_git_read_service_layer().pipe(
 			Layer.provideMerge(registry),
@@ -390,6 +396,8 @@ describe("GitReadService", () => {
 			Authorize: () => Effect.succeed(capability),
 			Get: () => Effect.succeed(capability),
 			ListWorkspaceIds: Effect.succeed(["workspace_one"]),
+			Reconcile: () => Effect.succeed([]),
+			Register: () => Effect.succeed({ workspace_id: "workspace_one" }),
 		});
 		const read_layer = make_git_read_service_layer().pipe(
 			Layer.provideMerge(registry),

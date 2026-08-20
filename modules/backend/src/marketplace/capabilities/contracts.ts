@@ -6,6 +6,7 @@ import type {
 	CapabilityInvocationApprovalRequest,
 	CapabilityInvocationMetadata,
 	CapabilityInvocationRequest,
+	MarketplaceScope,
 } from "@artisan/protocol";
 
 export class CapabilityServiceError extends Data.TaggedError("CapabilityServiceError")<{
@@ -51,31 +52,38 @@ export class CapabilityService extends Context.Service<
 		readonly Health: (input: {
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) => Effect.Effect<CapabilityDetail, unknown>;
 		readonly Disconnect: (input: {
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) => Effect.Effect<void, unknown>;
 		readonly Enable: (input: {
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) => Effect.Effect<void, unknown>;
 		readonly Disable: (input: {
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) => Effect.Effect<void, unknown>;
 		readonly Remove: (input: {
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) => Effect.Effect<void, unknown>;
 		readonly Uninstall: (input: {
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) => Effect.Effect<void, unknown>;
 		readonly SessionAction: (input: {
 			readonly action: "start" | "reconnect" | "restart";
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) => Effect.Effect<CapabilityDetail, unknown>;
 	}
 >()("Artisan/Marketplace/CapabilityService") {}

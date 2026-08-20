@@ -1,4 +1,4 @@
-import { Effect, Layer, Option } from "effect";
+import { Context, Deferred, Effect, Layer, Option, Scope } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -36,6 +36,10 @@ interface RichLinkTestHarness {
 	readonly get_asset: (asset_id: string) => Promise<Option.Option<RichLinkAsset>>;
 	readonly requests: Array<RichLinkHttpRequest>;
 	readonly resolve: (url: string) => Promise<RichLinkMetadataResult>;
+	readonly resolve_with_signal: (
+		url: string,
+		signal: AbortSignal,
+	) => Promise<RichLinkMetadataResult>;
 }
 
 async function resolve_error(harness: RichLinkTestHarness, url: string) {
@@ -54,6 +58,8 @@ interface RichLinkTestOptions {
 	readonly hang_urls?: ReadonlySet<string>;
 	readonly limits?: RichLinkMetadataOptions;
 	readonly metadata_cache?: InMemoryRichLinkCacheOptions;
+	readonly request_gates?: ReadonlyMap<string, Deferred.Deferred<void>>;
+	readonly request_started?: ReadonlyMap<string, Deferred.Deferred<void>>;
 	readonly routes: ReadonlyMap<string, RichLinkHttpResponse>;
 }
 
@@ -96,19 +102,28 @@ async function make_harness(options: RichLinkTestOptions): Promise<RichLinkTestH
 	const transport = Layer.succeed(RichLinkHttpTransport, {
 		Request: (input) =>
 			Effect.acquireUseRelease(
-				Effect.sync(() => {
+				Effect.gen(function* () {
 					active_requests += 1;
 					requests.push(input);
+					const started = options.request_started?.get(input.url);
+
+					if (started !== undefined) {
+						yield* Deferred.succeed(started, undefined);
+					}
 				}),
 				() => {
 					if (options.hang_urls?.has(input.url)) {
 						return Effect.never;
 					}
 
-					return Effect.succeed(
+					const resolved =
 						options.routes.get(input.url) ??
-							response(404, "missing", { "content-type": "text/plain" }),
-					);
+						response(404, "missing", { "content-type": "text/plain" });
+					const gate = options.request_gates?.get(input.url);
+
+					return gate === undefined
+						? Effect.succeed(resolved)
+						: Deferred.await(gate).pipe(Effect.as(resolved));
 				},
 				() =>
 					Effect.sync(() => {
@@ -130,14 +145,12 @@ async function make_harness(options: RichLinkTestOptions): Promise<RichLinkTestH
 		Layer.provide(infrastructure),
 		Layer.provideMerge(asset_store_layer),
 	);
-	const services = await Effect.runPromise(
-		Effect.gen(function* () {
-			return {
-				asset_store: yield* RichLinkAssetStore,
-				metadata: yield* RichLinkMetadata,
-			};
-		}).pipe(Effect.provide(layer)),
-	);
+	const scope = await Effect.runPromise(Scope.make());
+	const context = await Effect.runPromise(Layer.buildWithScope(layer, scope));
+	const services = {
+		asset_store: Context.get(context, RichLinkAssetStore),
+		metadata: Context.get(context, RichLinkMetadata),
+	};
 
 	return {
 		active_requests: () => active_requests,
@@ -148,6 +161,8 @@ async function make_harness(options: RichLinkTestOptions): Promise<RichLinkTestH
 		get_asset: (asset_id) => Effect.runPromise(services.asset_store.Get(asset_id)),
 		requests,
 		resolve: (url) => Effect.runPromise(services.metadata.Resolve(url)),
+		resolve_with_signal: (url, signal) =>
+			Effect.runPromise(services.metadata.Resolve(url), { signal }),
 	};
 }
 
@@ -466,7 +481,9 @@ describe("RichLinkMetadata", () => {
 				response(
 					200,
 					'<link rel="icon" href="/first.png"><link rel="icon" href="/second.png">',
-					{ "content-type": "text/html" },
+					{
+						"content-type": "text/html",
+					},
 				),
 			],
 			[
@@ -527,6 +544,114 @@ describe("RichLinkMetadata", () => {
 		expect(third.cache.status).toBe("miss");
 		expect(harness.requests).toHaveLength(4);
 		expect(harness.active_requests()).toBe(0);
+	});
+
+	it("coalesces overlapping canonical cold resolutions without retaining the result", async () => {
+		const url = "https://single-flight.example/";
+		const gate = await Effect.runPromise(Deferred.make<void>());
+		const started = await Effect.runPromise(Deferred.make<void>());
+		const harness = await make_harness({
+			request_gates: new Map([[url, gate]]),
+			request_started: new Map([[url, started]]),
+			routes: new Map([
+				[
+					url,
+					response(200, "<title>Single flight</title>", {
+						"content-type": "text/html",
+					}),
+				],
+				[
+					"https://single-flight.example/favicon.ico",
+					response(404, "missing", { "content-type": "text/plain" }),
+				],
+			]),
+		});
+
+		const first = harness.resolve(`${url}#first`);
+
+		await Effect.runPromise(Deferred.await(started));
+
+		const second = harness.resolve(url);
+
+		expect(harness.requests).toHaveLength(1);
+		await Effect.runPromise(Deferred.succeed(gate, undefined));
+
+		const [first_result, second_result] = await Promise.all([first, second]);
+
+		expect(first_result.cache.status).toBe("miss");
+		expect(second_result.cache.status).toBe("miss");
+		expect(harness.requests.map((request) => request.url)).toEqual([
+			url,
+			"https://single-flight.example/favicon.ico",
+		]);
+		expect(harness.active_requests()).toBe(0);
+
+		const refreshed = await harness.resolve(url);
+
+		expect(refreshed.cache.status).toBe("hit");
+	});
+
+	it("keeps joined cold resolution alive when the initiating route is interrupted", async () => {
+		const url = "https://interrupted-flight.example/";
+		const gate = await Effect.runPromise(Deferred.make<void>());
+		const started = await Effect.runPromise(Deferred.make<void>());
+		const harness = await make_harness({
+			request_gates: new Map([[url, gate]]),
+			request_started: new Map([[url, started]]),
+			routes: new Map([
+				[
+					url,
+					response(200, "<title>Shared flight</title>", { "content-type": "text/html" }),
+				],
+				[
+					"https://interrupted-flight.example/favicon.ico",
+					response(404, "missing", { "content-type": "text/plain" }),
+				],
+			]),
+		});
+		const controller = new AbortController();
+		const first = harness.resolve_with_signal(`${url}#route`, controller.signal);
+
+		await Effect.runPromise(Deferred.await(started));
+
+		const second = harness.resolve(url);
+		controller.abort();
+
+		await expect(first).rejects.toThrow("interrupted");
+		await Effect.runPromise(Deferred.succeed(gate, undefined));
+
+		await expect(second).resolves.toMatchObject({
+			cache: { status: "miss" },
+			final_url: url,
+		});
+		expect(harness.requests.map((request) => request.url)).toEqual([
+			url,
+			"https://interrupted-flight.example/favicon.ico",
+		]);
+		expect(harness.active_requests()).toBe(0);
+	});
+
+	it("does not retain a failed cold resolution for a later request", async () => {
+		const url = "https://retry-flight.example/";
+		const routes = new Map<string, RichLinkHttpResponse>();
+		const harness = await make_harness({ routes });
+
+		await expect(harness.resolve(url)).rejects.toMatchObject({ code: "status" });
+		routes.set(url, response(200, "<title>Retry</title>", { "content-type": "text/html" }));
+		routes.set(
+			"https://retry-flight.example/favicon.ico",
+			response(404, "missing", { "content-type": "text/plain" }),
+		);
+
+		await expect(harness.resolve(url)).resolves.toMatchObject({
+			cache: { status: "miss" },
+			final_url: url,
+		});
+		expect(harness.requests.map((request) => request.url)).toEqual([
+			url,
+			url,
+			"https://retry-flight.example/favicon.ico",
+		]);
 	});
 
 	it("evicts retained assets under both byte and entry limits", async () => {

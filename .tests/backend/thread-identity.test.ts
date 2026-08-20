@@ -161,6 +161,29 @@ describe("thread identity", () => {
 		}
 	});
 
+	it("resolves a legacy-prefixed thread from its public route id", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+					yield* router.Route(make_create_command());
+					return {
+						canonical: yield* threads.Lookup("thread_1"),
+						route: yield* threads.Lookup("1"),
+					};
+				}),
+			);
+
+			expect(result.route).toEqual(result.canonical);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("uses the latest accepted user message as the unlocked durable title", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({ database_path, migrations_path });

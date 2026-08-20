@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Data, Duration, Effect, Layer, Schema } from "effect";
 
 import { ProcessRunner } from "../git/process-runner";
 import { codex_auto_compaction_native_key } from "./codex-config";
@@ -30,8 +30,30 @@ export type CodexModelBehaviourProbeResult =
 export interface CodexModelBehaviourProbeOptions {
 	readonly command?: string;
 	readonly cwd: string;
+	/** Production supplies the managed toolchain resolver through this Layer. */
+	readonly executable?: Layer.Layer<CodexModelBehaviourExecutable>;
 	readonly temporary_directory?: string;
+	/** Bounds all isolated doctor processes and their temporary directories together. */
+	readonly timeout?: Duration.Input;
 }
+
+export class CodexModelBehaviourExecutableUnavailable extends Data.TaggedError(
+	"CodexModelBehaviourExecutableUnavailable",
+)<{
+	readonly cause?: unknown;
+}> {}
+
+/** Resolves the exact Codex executable used by the isolated capability probe. */
+export class CodexModelBehaviourExecutable extends Context.Service<
+	CodexModelBehaviourExecutable,
+	{
+		readonly Resolve: Effect.Effect<string, CodexModelBehaviourExecutableUnavailable>;
+	}
+>()("Artisan/CodexModelBehaviourExecutable") {}
+
+export const make_codex_model_behaviour_executable_layer = (
+	Resolve: typeof CodexModelBehaviourExecutable.Service.Resolve,
+) => Layer.succeed(CodexModelBehaviourExecutable, CodexModelBehaviourExecutable.of({ Resolve }));
 
 /** Probes installed Codex behavior without reading or changing the user's config. */
 export class CodexModelBehaviourProbe extends Context.Service<
@@ -68,19 +90,22 @@ function ReleaseProbeDirectory(directory: string) {
 
 /** Builds the shell-free Codex capability probe used by desktop composition. */
 export function make_codex_model_behaviour_probe_layer(options: CodexModelBehaviourProbeOptions) {
-	const command = options.command ?? "codex";
 	const temporary_directory = options.temporary_directory ?? tmpdir();
+	const timeout = options.timeout ?? "15 seconds";
+	const executable =
+		options.executable ??
+		make_codex_model_behaviour_executable_layer(Effect.succeed(options.command ?? "codex"));
 
 	return Layer.effect(
 		CodexModelBehaviourProbe,
 		Effect.gen(function* () {
 			const process_runner = yield* ProcessRunner;
-			const RunProbe = (directory: string, content: string) =>
+			const command = yield* CodexModelBehaviourExecutable;
+			const RunProbe = (command: string, directory: string, content: string) =>
 				Effect.gen(function* () {
 					yield* Effect.tryPromise(() =>
 						fs.writeFile(join(directory, "config.toml"), content, "utf8"),
 					);
-
 					const result = yield* process_runner.Run({
 						args: ["--strict-config", "doctor", "--json", "--summary"],
 						command,
@@ -107,29 +132,36 @@ export function make_codex_model_behaviour_probe_layer(options: CodexModelBehavi
 					);
 				});
 
-			const Probe = Effect.acquireUseRelease(
-				AcquireProbeDirectory(temporary_directory),
-				(directory) =>
-					Effect.gen(function* () {
-						const valid = yield* RunProbe(
-							directory,
-							`${codex_auto_compaction_native_key} = 250000\n`,
-						);
-						const invalid = yield* RunProbe(
-							directory,
+			const Probe = Effect.gen(function* () {
+				const resolved_command = yield* command.Resolve;
+				const RunIsolated = (content: string) =>
+					Effect.acquireUseRelease(
+						AcquireProbeDirectory(temporary_directory),
+						(directory) => RunProbe(resolved_command, directory, content),
+						ReleaseProbeDirectory,
+					);
+				const [valid, invalid] = yield* Effect.all(
+					[
+						RunIsolated(`${codex_auto_compaction_native_key} = 250000\n`),
+						RunIsolated(
 							`${codex_auto_compaction_native_key} = "artisan-invalid-probe"\n`,
-						);
+						),
+					],
+					{ concurrency: "unbounded" },
+				);
 
-						return {
-							installed_version: valid.codexVersion,
-							mapping_available:
-								valid.checks["config.load"].status === "ok" &&
-								invalid.checks["config.load"].status === "fail",
-							type: "available" as const,
-						};
-					}),
-				ReleaseProbeDirectory,
-			).pipe(
+				return {
+					installed_version: valid.codexVersion,
+					mapping_available:
+						valid.checks["config.load"].status === "ok" &&
+						invalid.checks["config.load"].status === "fail",
+					type: "available" as const,
+				};
+			}).pipe(
+				Effect.timeoutOrElse({
+					duration: timeout,
+					orElse: () => Effect.fail("process_failed" as const),
+				}),
 				Effect.catch((reason) =>
 					Effect.succeed({
 						reason:
@@ -143,5 +175,5 @@ export function make_codex_model_behaviour_probe_layer(options: CodexModelBehavi
 
 			return { Probe };
 		}),
-	);
+	).pipe(Layer.provide(executable));
 }

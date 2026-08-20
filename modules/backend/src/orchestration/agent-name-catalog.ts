@@ -1,8 +1,8 @@
 import { Context, Effect, Layer, Schema } from "effect";
 
 import { DefaultAgentNameDatasetId, type AgentNameDatasetId } from "@artisan/protocol";
+import british from "@artisan/data/names/british-females.json" with { type: "json" };
 import norwegian from "@artisan/data/names/norwegian-females.json" with { type: "json" };
-import playful from "@artisan/data/names/playful.json" with { type: "json" };
 
 import { SessionDefaultsService } from "../settings/session-defaults-service";
 import type { JournalStoreError } from "../persistence/journal-store";
@@ -22,7 +22,7 @@ export const AgentNameCatalogLive = Layer.effect(
 		const default_names = yield* Schema.decodeUnknownEffect(NameList)(norwegian);
 		const datasets = new Map<AgentNameDatasetId, ReadonlyArray<string>>([
 			["norwegian", default_names],
-			["playful", yield* Schema.decodeUnknownEffect(NameList)(playful)],
+			["british", yield* Schema.decodeUnknownEffect(NameList)(british)],
 		]);
 		const Names = Effect.gen(function* () {
 			const selected = (yield* defaults.Read).agent_name_dataset ?? DefaultAgentNameDatasetId;

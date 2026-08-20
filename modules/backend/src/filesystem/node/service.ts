@@ -28,6 +28,7 @@ import {
 import { ReadFileIdentity, same_file_identity, type FileIdentity } from "../file-identity";
 import { type NodeBoundedRegularFileStoreHooks, type RegularFileSnapshot } from "./context";
 import { MakeNodeReplacementService, make_node_replacement_context_layer } from "./replacement";
+import { FileDescriptorOf } from "./file-descriptor";
 
 export type { NodeBoundedRegularFileStoreHooks } from "./context";
 
@@ -47,13 +48,6 @@ interface RawFilesystemWatchEvent {
 	readonly event: "change" | "rename";
 	readonly filename: string;
 }
-
-interface RawFilesystemWatchOverflow {
-	readonly _tag: "RawFilesystemWatchOverflow";
-	readonly dropped: number;
-}
-
-type RawFilesystemWatchChange = RawFilesystemWatchEvent | RawFilesystemWatchOverflow;
 
 function make_error(operation: FilesystemError["operation"], cause: unknown, path?: string) {
 	return new FilesystemError(
@@ -150,10 +144,7 @@ function entry_from(
 function BuildNodeFilesystemCapabilities(options: {
 	readonly hooks?: NodeBoundedRegularFileStoreHooks;
 	readonly root: string;
-	readonly watch_capacity?: number;
 }) {
-	const capacity = options.watch_capacity ?? 256;
-
 	return Effect.gen(function* () {
 		const file_system = yield* FileSystem.FileSystem;
 		const path_service = yield* Path.Path;
@@ -193,7 +184,9 @@ function BuildNodeFilesystemCapabilities(options: {
 					}
 
 					const file = yield* file_system.open(resolved, { flag: "r" });
-					const identity = yield* ReadFileIdentity(file.fd);
+					const identity = yield* ReadFileIdentity(
+						yield* FileDescriptorOf(file, "regular file identity"),
+					);
 					const descriptor_stat = yield* file.stat;
 					const mode = descriptor_stat.mode & 0o7777;
 
@@ -254,12 +247,6 @@ function BuildNodeFilesystemCapabilities(options: {
 						: Effect.fail(cause),
 				),
 			);
-		if (!Number.isSafeInteger(capacity) || capacity <= 0) {
-			return yield* Effect.fail(
-				make_error("watch", new Error("watch_capacity must be a positive safe integer")),
-			);
-		}
-
 		const root = yield* RealPath("resolve", options.root);
 		const trash = path_service.resolve(root, trash_directory);
 		const canonical_existing_ancestor = (candidate: string) =>
@@ -384,27 +371,19 @@ function BuildNodeFilesystemCapabilities(options: {
 					path_service,
 				);
 			});
-		/** Native watch remains necessary because Effect FileSystem.watch has no dropped-event accounting. */
+		/** Native watch remains necessary because Effect FileSystem.watch lacks recursive Windows support. */
 		const watch = (path?: string) =>
 			Stream.scoped(
 				Stream.unwrap(
 					Effect.gen(function* () {
 						const watched = yield* resolve_path(path ?? ".", "watch");
-						const queue = yield* Queue.dropping<
+						const queue = yield* Queue.unbounded<
 							RawFilesystemWatchEvent,
 							FilesystemError
-						>(capacity);
+						>();
 						let active = true;
-						let dropped_changes = 0;
-						const normalize_raw_change = (change: RawFilesystemWatchChange) =>
+						const normalize_raw_change = (change: RawFilesystemWatchEvent) =>
 							Effect.gen(function* () {
-								if (change._tag === "RawFilesystemWatchOverflow") {
-									return Option.some<FilesystemChange>({
-										dropped: change.dropped,
-										kind: "overflow",
-									});
-								}
-
 								const absolute = path_service.resolve(watched, change.filename);
 
 								if (
@@ -453,11 +432,7 @@ function BuildNodeFilesystemCapabilities(options: {
 										event,
 										filename: String(filename),
 									};
-									if (active && !Queue.offerUnsafe(queue, change))
-										dropped_changes = Math.min(
-											Number.MAX_SAFE_INTEGER,
-											dropped_changes + 1,
-										);
+									if (active) Queue.offerUnsafe(queue, change);
 								}),
 							catch: (cause) => make_error("watch", cause, path ?? "."),
 						});
@@ -475,23 +450,7 @@ function BuildNodeFilesystemCapabilities(options: {
 								watcher.close();
 							}).pipe(Effect.andThen(Queue.shutdown(queue))),
 						);
-						const take_raw_change = Effect.suspend<
-							RawFilesystemWatchChange,
-							FilesystemError,
-							never
-						>(() => {
-							if (dropped_changes > 0) {
-								const dropped = dropped_changes;
-								dropped_changes = 0;
-								return Effect.succeed<RawFilesystemWatchOverflow>({
-									_tag: "RawFilesystemWatchOverflow",
-									dropped,
-								});
-							}
-							return Queue.take(queue);
-						});
-
-						return Stream.fromEffectRepeat(take_raw_change).pipe(
+						return Stream.fromQueue(queue).pipe(
 							Stream.mapEffect(normalize_raw_change, { concurrency: 1 }),
 							Stream.filter(Option.isSome),
 							Stream.map((change) => change.value),
@@ -647,7 +606,6 @@ function BuildNodeFilesystemCapabilities(options: {
 /** Builds the ordinary Node filesystem adapter without exposing conditional mutation. */
 export function make_node_filesystem(options: {
 	readonly root: string;
-	readonly watch_capacity?: number;
 }): Effect.Effect<
 	typeof Filesystem.Service,
 	FilesystemError,
@@ -668,11 +626,8 @@ export function make_node_non_adversarial_bounded_regular_file_store(options: {
 	);
 }
 
-/** Builds a self-contained Node filesystem layer with explicit watch overflow events. */
-export function make_node_filesystem_layer(options: {
-	readonly root: string;
-	readonly watch_capacity?: number;
-}) {
+/** Builds a self-contained Node filesystem layer. */
+export function make_node_filesystem_layer(options: { readonly root: string }) {
 	return Layer.effect(Filesystem, make_node_filesystem(options)).pipe(
 		Layer.provideMerge(NodeFileSystem.layer),
 		Layer.provideMerge(NodePath.layer),

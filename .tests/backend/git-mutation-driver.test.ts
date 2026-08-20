@@ -37,6 +37,8 @@ function make_driver(run: (input: WorkspaceGitCommandInput) => Effect.Effect<Git
 		Authorize: () => Effect.succeed(capability),
 		Get: () => Effect.succeed(capability),
 		ListWorkspaceIds: Effect.succeed(["workspace_one"]),
+		Reconcile: () => Effect.succeed([]),
+		Register: () => Effect.succeed({ workspace_id: "workspace_one" }),
 	});
 
 	return GitMutationDriverLive.pipe(Layer.provide(registry));

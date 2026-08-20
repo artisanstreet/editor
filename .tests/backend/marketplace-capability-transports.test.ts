@@ -106,7 +106,6 @@ function make_layer(
 		command: "fake-mcp",
 		invocation_timeout_ms: 25,
 		max_message_bytes: 256,
-		max_pending_requests: 2,
 		max_stderr_bytes: 8,
 		startup_timeout_ms: 25,
 	}).pipe(
@@ -435,7 +434,7 @@ describe("Marketplace stdio MCP transport", () => {
 		}
 	});
 
-	it("bounds pending requests after initialization without emitting the saturated request", async () => {
+	it("allows every pending request after initialization", async () => {
 		let process: ReturnType<typeof make_process>;
 		const writes: Array<string> = [];
 		process = make_process({
@@ -464,6 +463,9 @@ describe("Marketplace stdio MCP transport", () => {
 						process.stdout.push(
 							encoder.encode('{"jsonrpc":"2.0","id":3,"result":{"content":[]}}\n'),
 						);
+						process.stdout.push(
+							encoder.encode('{"jsonrpc":"2.0","id":4,"result":{"content":[]}}\n'),
+						);
 					}, 5);
 					return yield* Effect.all(
 						["one", "two", "three"].map((name) =>
@@ -474,8 +476,8 @@ describe("Marketplace stdio MCP transport", () => {
 				}).pipe(Effect.provide(make_layer(process.handle, spawned))),
 			),
 		);
-		expect(exits.filter(Exit.isFailure)).toHaveLength(1);
-		expect(writes.filter((write) => write.includes('"tools/call"'))).toHaveLength(2);
+		expect(exits.filter(Exit.isFailure)).toHaveLength(0);
+		expect(writes.filter((write) => write.includes('"tools/call"'))).toHaveLength(3);
 	});
 
 	it("validates tool-call success, malformed results, and server-declared errors", async () => {
@@ -573,7 +575,6 @@ describe("Marketplace stdio MCP transport", () => {
 			command: "fake",
 			invocation_timeout_ms: 25,
 			max_message_bytes: 256,
-			max_pending_requests: 2,
 			max_stderr_bytes: 8,
 			startup_timeout_ms: 25,
 		}).pipe(Layer.provide(driver));

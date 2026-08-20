@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { NodeChildProcessSpawner, NodeFileSystem, NodePath } from "@effect/platform-node-shared";
+import { FileDescriptorOf } from "../filesystem/node/file-descriptor";
 import {
 	Cause,
 	Context,
@@ -189,7 +190,9 @@ function ReadSnapshot(file_system: FileSystem.FileSystem, path: string) {
 		Effect.gen(function* () {
 			const file = yield* file_system.open(path, { flag: "r" });
 			const stat = yield* file.stat;
-			const identity = yield* ReadPrivateFileIdentity(file.fd);
+			const identity = yield* ReadPrivateFileIdentity(
+				yield* FileDescriptorOf(file, "config file identity"),
+			);
 			const bytes =
 				stat.size === 0n
 					? new Uint8Array()
@@ -223,7 +226,9 @@ function WriteOwnedBytes(
 	return Effect.scoped(
 		Effect.gen(function* () {
 			const file = yield* file_system.open(path, { flag: "r+" });
-			const current_identity = yield* ReadPrivateFileIdentity(file.fd);
+			const current_identity = yield* ReadPrivateFileIdentity(
+				yield* FileDescriptorOf(file, "config file identity"),
+			);
 
 			if (!same_identity(current_identity, identity)) {
 				return false;
@@ -349,7 +354,9 @@ function EraseOwned(file_system: FileSystem.FileSystem, path: string, identity: 
 	return Effect.scoped(
 		Effect.gen(function* () {
 			const file = yield* file_system.open(path, { flag: "r+" });
-			const current_identity = yield* ReadPrivateFileIdentity(file.fd);
+			const current_identity = yield* ReadPrivateFileIdentity(
+				yield* FileDescriptorOf(file, "config file identity"),
+			);
 
 			if (!same_identity(current_identity, identity)) {
 				return false;
@@ -372,7 +379,9 @@ function OverwriteOwned(
 	return Effect.scoped(
 		Effect.gen(function* () {
 			const file = yield* file_system.open(path, { flag: "r+" });
-			const current_identity = yield* ReadPrivateFileIdentity(file.fd);
+			const current_identity = yield* ReadPrivateFileIdentity(
+				yield* FileDescriptorOf(file, "config file identity"),
+			);
 
 			if (!same_identity(current_identity, identity)) {
 				return false;

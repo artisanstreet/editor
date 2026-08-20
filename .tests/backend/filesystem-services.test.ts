@@ -18,11 +18,9 @@ async function make_root(prefix = "artisan filesystem ") {
 	return root;
 }
 
-async function make_filesystem(root: string, watch_capacity = 256) {
+async function make_filesystem(root: string) {
 	return Effect.runPromise(
-		Effect.service(Filesystem).pipe(
-			Effect.provide(make_node_filesystem_layer({ root, watch_capacity })),
-		),
+		Effect.service(Filesystem).pipe(Effect.provide(make_node_filesystem_layer({ root }))),
 	);
 }
 
@@ -185,7 +183,6 @@ describe("Filesystem", () => {
 			filesystem.Watch(".").pipe(
 				Stream.filter(
 					(change) =>
-						change.kind !== "overflow" &&
 						change.path === "watched.txt" &&
 						(change.kind === "created" || change.kind === "deleted"),
 				),
@@ -201,31 +198,5 @@ describe("Filesystem", () => {
 		await fs.rm(join(root, "watched.txt"));
 
 		expect((await changes).map((change) => change.kind)).toEqual(["created", "deleted"]);
-	});
-
-	it("reports dropped watch events when its bounded buffer fills", async () => {
-		const root = await make_root();
-		const filesystem = await make_filesystem(root, 1);
-		const overflow = Effect.runPromise(
-			filesystem.Watch(".").pipe(
-				Stream.tap(() => Effect.sleep("75 millis")),
-				Stream.filter((change) => change.kind === "overflow"),
-				Stream.take(1),
-				Stream.runCollect,
-				Effect.timeout("3 seconds"),
-			),
-		);
-
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		await Promise.all(
-			Array.from({ length: 40 }, (_, index) =>
-				fs.writeFile(join(root, `event-${index}.txt`), String(index)),
-			),
-		);
-
-		const [change] = await overflow;
-
-		expect(change).toMatchObject({ kind: "overflow" });
-		expect(change?.kind === "overflow" ? change.dropped : 0).toBeGreaterThan(0);
 	});
 });

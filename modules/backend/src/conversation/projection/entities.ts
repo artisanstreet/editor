@@ -54,8 +54,14 @@ const is_failure_enrichment = (prior: typeof ConversationItem.Type, item: Projec
 	item.lifecycle === "failed" &&
 	item.failure !== undefined;
 
-/** Patches bridge a live subscription after its snapshot; they are not history. */
-export const conversation_patch_retention_limit = 256;
+/**
+ * Patches bridge a live subscription after its snapshot; they are not history.
+ * The window must comfortably outlast a delivery stall during fast streaming:
+ * a subscriber that falls out of it can only recover by a full-snapshot
+ * resend, which on a large thread costs orders of magnitude more than the
+ * patches it replaces — and that resend can itself stall delivery further.
+ */
+export const conversation_patch_retention_limit = 2048;
 
 export const EnsureThread = (transaction: DatabaseClient, thread_id: string, updated_at: string) =>
 	transaction
@@ -286,6 +292,17 @@ export const UpsertItem = (
 		const failure_enrichment = is_failure_enrichment(prior, item);
 		if (["completed", "failed", "cancelled"].includes(prior.lifecycle) && !failure_enrichment)
 			return prior;
+		/**
+		 * A resume reattaches to the very run that was interrupted, so the settled
+		 * session reopens in place. Merging alone would keep the end recorded when
+		 * the host killed it, leaving a card that claims both to be working and to
+		 * have finished — so shed that end, and the offer to resume with it.
+		 */
+		const reopened =
+			prior.type === "work_session" &&
+			prior.lifecycle === "interrupted" &&
+			typeof item.lifecycle === "string" &&
+			!["interrupted", "completed", "failed", "cancelled"].includes(item.lifecycle);
 		const entity = yield* Decode(
 			ConversationItem,
 			{
@@ -293,6 +310,7 @@ export const UpsertItem = (
 					? { ...prior, failure: item.failure }
 					: {
 							...prior,
+							...(reopened ? { ended_at: undefined, resumable: false } : {}),
 							...item,
 							...(prior.type === "work_session" && item.type === "work_session"
 								? { started_at: prior.started_at }

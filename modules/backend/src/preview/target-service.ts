@@ -12,11 +12,6 @@ import {
 	type PreviewTargetState,
 } from "./target";
 
-/** Configures the bounded preview target status feed. */
-export interface PreviewTargetOptions {
-	readonly sliding_event_capacity?: number;
-}
-
 function target_error(target_id: string, code: PreviewTargetError["code"], cause: unknown) {
 	return new PreviewTargetError({ cause, code, target_id });
 }
@@ -67,27 +62,15 @@ function parse_local_preview_url(input: PreviewTargetRegistration) {
 }
 
 /** Builds an in-memory preview target read model with scoped health probes. */
-export function make_preview_target_layer(options: PreviewTargetOptions = {}) {
-	const sliding_event_capacity = options.sliding_event_capacity ?? 128;
-
+export function make_preview_target_layer() {
 	return Layer.effect(
 		PreviewTarget,
 		Effect.gen(function* () {
-			if (!Number.isSafeInteger(sliding_event_capacity) || sliding_event_capacity <= 0) {
-				return yield* Effect.fail(
-					target_error(
-						"",
-						"invalid_target",
-						new Error("sliding_event_capacity must be a positive safe integer"),
-					),
-				);
-			}
-
 			const clock = yield* PreviewTargetClock;
 			const health_probe = yield* PreviewHealthProbe;
 			const records = yield* Ref.make(new Map<string, PreviewTargetRecord>());
 			const events = yield* Effect.acquireRelease(
-				PubSub.sliding<PreviewTargetEvent>(sliding_event_capacity),
+				PubSub.unbounded<PreviewTargetEvent>(),
 				PubSub.shutdown,
 			);
 

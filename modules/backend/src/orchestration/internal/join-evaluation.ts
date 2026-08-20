@@ -1,5 +1,5 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
-import { Effect, Schema } from "effect";
+import { Effect, Exit, Schema } from "effect";
 
 import type { EventEnvelope, OrchestrationLifecycleState } from "@artisan/protocol";
 
@@ -44,19 +44,48 @@ export function make_join_evaluation(
 						eq(OrchestrationJoins.state, "joining"),
 					),
 				);
+			const decoded_joins: Array<{
+				readonly decoded: Exit.Exit<ReadonlyArray<string>, unknown>;
+				readonly join: (typeof joins)[number];
+			}> = [];
+			for (const join of joins) {
+				const decoded = yield* codecs
+					.decode_json(
+						Schema.NonEmptyArray(Schema.String),
+						join.upstream_assignment_ids_json,
+						`Join ${join.join_id} upstream assignments`,
+					)
+					.pipe(Effect.exit);
+				decoded_joins.push({ decoded, join });
+				if (Exit.isFailure(decoded)) break;
+			}
+			const upstream_assignment_ids = [
+				...new Set(
+					decoded_joins.flatMap(({ decoded }) =>
+						Exit.isSuccess(decoded) ? decoded.value : [],
+					),
+				),
+			];
+			const upstream_assignments =
+				upstream_assignment_ids.length === 0
+					? []
+					: yield* transaction
+							.select({
+								assignment_id: Assignments.assignment_id,
+								state: Assignments.state,
+							})
+							.from(Assignments)
+							.where(inArray(Assignments.assignment_id, upstream_assignment_ids))
+							.orderBy(asc(Assignments.assignment_id));
 			const events: Array<EventEnvelope> = [];
 
-			for (const join of joins) {
-				const upstream_ids = yield* codecs.decode_json(
-					Schema.NonEmptyArray(Schema.String),
-					join.upstream_assignment_ids_json,
-					`Join ${join.join_id} upstream assignments`,
+			for (const { decoded, join } of decoded_joins) {
+				if (Exit.isFailure(decoded)) return yield* Effect.failCause(decoded.cause);
+				const upstream_ids = decoded.value;
+				const upstream_id_set = new Set(upstream_ids);
+				const upstream = upstream_assignments.filter(({ assignment_id }) =>
+					upstream_id_set.has(assignment_id),
 				);
-				const upstream = yield* transaction
-					.select({ assignment_id: Assignments.assignment_id, state: Assignments.state })
-					.from(Assignments)
-					.where(inArray(Assignments.assignment_id, upstream_ids))
-					.orderBy(asc(Assignments.assignment_id));
 
 				if (upstream.length !== upstream_ids.length) {
 					return yield* new AgentGraphInvalid({

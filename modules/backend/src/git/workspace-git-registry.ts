@@ -1,5 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Context, Data, Effect, FileSystem, Layer, Option, Schema } from "effect";
+import { Context, Data, Effect, FileSystem, Layer, Option, Ref, Schema } from "effect";
 
 import {
 	GitCommandExecutor,
@@ -86,6 +86,26 @@ export class WorkspaceGitRegistry extends Context.Service<
 			workspace_id: string,
 		) => Effect.Effect<WorkspaceGitCapability, WorkspaceGitNotFoundError>;
 		readonly ListWorkspaceIds: Effect.Effect<ReadonlyArray<string>>;
+		/**
+		 * Adds one repository root after construction. Projects are attached while
+		 * Forge runs, so the set of workspaces cannot be known when this layer is
+		 * built — and a registry that only ever held its construction argument held
+		 * nothing at all in production, which is why no Git projection existed for
+		 * any workspace. Re-registering the same workspace at the same canonical
+		 * root is a no-op, so a startup replay may run over an already-bound
+		 * catalog. Every rule construction enforced is enforced here.
+		 */
+		readonly Register: (
+			registration: unknown,
+		) => Effect.Effect<{ readonly workspace_id: string }, WorkspaceGitRegistrationError>;
+		/**
+		 * Replaces the complete registry from an authoritative snapshot. Entries
+		 * that cannot be prepared are omitted, which also revokes any older
+		 * capability held under the same workspace id.
+		 */
+		readonly Reconcile: (
+			registrations: ReadonlyArray<unknown>,
+		) => Effect.Effect<ReadonlyArray<WorkspaceGitRegistration>, WorkspaceGitRegistrationError>;
 	}
 >()("Artisan/WorkspaceGitRegistry") {}
 
@@ -116,69 +136,149 @@ interface CanonicalRegistration {
 	readonly workspace_id: string;
 }
 
-/** Builds an immutable registry over the supplied Effect filesystem and Git executor. */
+/** Whether two prepared roots name the same directory, by inode where available. */
+function is_aliased_root(left: CanonicalRegistration, right: CanonicalRegistration) {
+	return left.root_inode === undefined || right.root_inode === undefined
+		? left.canonical_root === right.canonical_root
+		: left.root_device === right.root_device && left.root_inode === right.root_inode;
+}
+
+/** Builds a registry over the supplied Effect filesystem and Git executor. */
 export function make_workspace_git_registry_layer(registrations: ReadonlyArray<unknown>) {
 	return Layer.effect(
 		WorkspaceGitRegistry,
 		Effect.gen(function* () {
 			const file_system = yield* FileSystem.FileSystem;
 			const executor = yield* GitCommandExecutor;
-			const decoded = yield* Effect.forEach(registrations, (registration) =>
-				Schema.decodeUnknownEffect(WorkspaceGitRegistration, {
-					onExcessProperty: "error",
-				})(registration).pipe(
-					Effect.mapError((cause) => registration_error("invalid", cause)),
-				),
-			);
-			const workspace_ids = decoded.map((registration) => registration.workspace_id);
+			const state = yield* Ref.make<ReadonlyMap<string, CanonicalRegistration>>(new Map());
 
-			if (new Set(workspace_ids).size !== workspace_ids.length) {
-				return yield* Effect.fail(registration_error("duplicate_id"));
-			}
-
-			const canonical = yield* Effect.forEach(decoded, (registration) =>
+			/**
+			 * Validates one root and canonicalizes it. Every rule the eager builder
+			 * enforced lives here, so a root registered while Forge runs is held to
+			 * exactly the standard a composed one was.
+			 */
+			const Prepare = (registration: unknown) =>
 				Effect.gen(function* () {
-					const canonical_root = yield* file_system.realPath(registration.root);
-					const metadata = yield* file_system.stat(canonical_root);
+					const decoded = yield* Schema.decodeUnknownEffect(WorkspaceGitRegistration, {
+						onExcessProperty: "error",
+					})(registration).pipe(
+						Effect.mapError((cause) => registration_error("invalid", cause)),
+					);
 
-					if (metadata.type !== "Directory") {
+					return yield* Effect.gen(function* () {
+						const canonical_root = yield* file_system.realPath(decoded.root);
+						const metadata = yield* file_system.stat(canonical_root);
+
+						if (metadata.type !== "Directory") {
+							return yield* Effect.fail(
+								new Error("Workspace Git root is not a directory"),
+							);
+						}
+
+						return {
+							canonical_root,
+							configured_root: decoded.root,
+							root_device: metadata.dev,
+							root_inode: Option.getOrUndefined(metadata.ino),
+							workspace_id: decoded.workspace_id,
+						} satisfies CanonicalRegistration;
+					}).pipe(
+						Effect.mapError((cause) =>
+							registration_error("unavailable", cause, decoded.workspace_id),
+						),
+					);
+				});
+
+			/**
+			 * Two workspaces may not share a canonical root: the pair would be
+			 * indistinguishable to `Authorize`, which proves authority by comparing a
+			 * working directory against exactly one root.
+			 */
+			const Register = (registration: unknown) =>
+				Effect.gen(function* () {
+					const prepared = yield* Prepare(registration);
+					const current = yield* Ref.get(state);
+					const existing = current.get(prepared.workspace_id);
+
+					if (existing !== undefined) {
+						return is_aliased_root(existing, prepared)
+							? { workspace_id: prepared.workspace_id }
+							: yield* Effect.fail(
+									registration_error(
+										"duplicate_id",
+										undefined,
+										prepared.workspace_id,
+									),
+								);
+					}
+
+					if ([...current.values()].some((entry) => is_aliased_root(entry, prepared))) {
 						return yield* Effect.fail(
-							new Error("Workspace Git root is not a directory"),
+							registration_error("aliased_root", undefined, prepared.workspace_id),
 						);
 					}
 
-					return {
-						canonical_root,
-						configured_root: registration.root,
-						root_device: metadata.dev,
-						root_inode: Option.getOrUndefined(metadata.ino),
-						workspace_id: registration.workspace_id,
-					} satisfies CanonicalRegistration;
-				}).pipe(
-					Effect.mapError((cause) =>
-						registration_error("unavailable", cause, registration.workspace_id),
-					),
-				),
-			);
+					yield* Ref.update(state, (latest) =>
+						new Map(latest).set(prepared.workspace_id, prepared),
+					);
 
-			const has_aliased_root = canonical.some((registration, index) =>
-				canonical
-					.slice(index + 1)
-					.some((candidate) =>
-						registration.root_inode === undefined || candidate.root_inode === undefined
-							? registration.canonical_root === candidate.canonical_root
-							: registration.root_device === candidate.root_device &&
-								registration.root_inode === candidate.root_inode,
-					),
-			);
+					return { workspace_id: prepared.workspace_id };
+				});
 
-			if (has_aliased_root) {
-				return yield* Effect.fail(registration_error("aliased_root"));
-			}
+			/** Construction still fails closed: a composed registration must be valid. */
+			yield* Effect.forEach(registrations, Register, { discard: true });
 
-			const by_workspace_id = new Map(
-				canonical.map((registration) => [registration.workspace_id, registration] as const),
-			);
+			const Reconcile = (next_registrations: ReadonlyArray<unknown>) =>
+				Effect.gen(function* () {
+					const attempts = yield* Effect.forEach(
+						next_registrations,
+						(registration) => Prepare(registration).pipe(Effect.result),
+						{ concurrency: 1 },
+					);
+					yield* Effect.forEach(
+						attempts,
+						(attempt) =>
+							attempt._tag === "Failure"
+								? Effect.logWarning(
+										"Project workspace Git root could not be bound",
+										{
+											cause: attempt.failure,
+											reason: attempt.failure.reason,
+											workspace_id: attempt.failure.workspace_id,
+										},
+									)
+								: Effect.void,
+						{ discard: true },
+					);
+
+					const next = new Map<string, CanonicalRegistration>();
+					const accepted: Array<WorkspaceGitRegistration> = [];
+
+					for (const prepared of attempts.flatMap((attempt) =>
+						attempt._tag === "Success" ? [attempt.success] : [],
+					)) {
+						if (
+							next.has(prepared.workspace_id) ||
+							[...next.values()].some((entry) => is_aliased_root(entry, prepared))
+						) {
+							yield* Effect.logWarning(
+								"Duplicate project workspace Git authority was omitted from the snapshot",
+								{ workspace_id: prepared.workspace_id },
+							);
+							continue;
+						}
+						next.set(prepared.workspace_id, prepared);
+						accepted.push({
+							root: prepared.canonical_root,
+							workspace_id: prepared.workspace_id,
+						});
+					}
+
+					yield* Ref.set(state, next);
+
+					return accepted;
+				});
+
 			const ValidateRoot = (registration: CanonicalRegistration) =>
 				Effect.gen(function* () {
 					const current_root = yield* file_system.realPath(registration.configured_root);
@@ -203,13 +303,7 @@ export function make_workspace_git_registry_layer(registrations: ReadonlyArray<u
 							: root_changed(registration.workspace_id, cause),
 					),
 				);
-			const Get = (workspace_id: string) => {
-				const registration = by_workspace_id.get(workspace_id);
-
-				if (registration === undefined) {
-					return Effect.fail(new WorkspaceGitNotFoundError({ workspace_id }));
-				}
-
+			const CapabilityFor = (registration: CanonicalRegistration, workspace_id: string) => {
 				const git: WorkspaceGit = {
 					IsCurrentRoot: (path) =>
 						Effect.gen(function* () {
@@ -235,8 +329,20 @@ export function make_workspace_git_registry_layer(registrations: ReadonlyArray<u
 						),
 				};
 
-				return Effect.succeed({ git, workspace_id });
+				return { git, workspace_id } satisfies WorkspaceGitCapability;
 			};
+
+			/** Read per call: a capability must reflect the catalog as it stands now. */
+			const Get = (workspace_id: string) =>
+				Ref.get(state).pipe(
+					Effect.flatMap((current) => {
+						const registration = current.get(workspace_id);
+
+						return registration === undefined
+							? Effect.fail(new WorkspaceGitNotFoundError({ workspace_id }))
+							: Effect.succeed(CapabilityFor(registration, workspace_id));
+					}),
+				);
 			const Authorize = (input: WorkspaceGitAuthorization) =>
 				Schema.decodeUnknownEffect(WorkspaceGitAuthorization, {
 					onExcessProperty: "error",
@@ -273,9 +379,11 @@ export function make_workspace_git_registry_layer(registrations: ReadonlyArray<u
 						}),
 					),
 				);
-			const ListWorkspaceIds = Effect.succeed([...by_workspace_id.keys()].toSorted());
+			const ListWorkspaceIds = Ref.get(state).pipe(
+				Effect.map((current) => [...current.keys()].toSorted()),
+			);
 
-			return { Authorize, Get, ListWorkspaceIds };
+			return { Authorize, Get, ListWorkspaceIds, Reconcile, Register };
 		}),
 	);
 }

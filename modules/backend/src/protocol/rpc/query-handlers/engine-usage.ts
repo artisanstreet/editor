@@ -1,4 +1,4 @@
-import { Clock, Effect, Ref } from "effect";
+import { Cache, Clock, Effect, Ref } from "effect";
 
 import type {
 	EngineUsageQueryEnvelope,
@@ -13,6 +13,7 @@ import { RuntimeMetadata } from "../../../runtime/metadata";
 
 const max_windows_per_report = 64;
 const max_engines_per_snapshot = 16;
+const max_concurrent_usage_probes = 64;
 const usage_timeout = "15 seconds";
 
 /**
@@ -85,6 +86,18 @@ function FetchUsageOutcome(engine: Engine): Effect.Effect<UsageOutcome> {
 
 	return usage.pipe(
 		Effect.timeout(usage_timeout),
+		/**
+		 * The report below carries a short line for the reader; this carries the
+		 * whole cause for whoever has to diagnose it. Absorbing the failure into
+		 * the report shape without recording it first left no trace of a repeated
+		 * usage failure anywhere in the Forge log.
+		 */
+		Effect.tapError((cause) =>
+			Effect.logWarning(
+				`Engine usage lookup failed for ${engine.Descriptor.id}: ${describe_usage_failure(cause)}`,
+				cause,
+			),
+		),
 		Effect.match({
 			onFailure: (cause): UsageOutcome => ({
 				ok: false,
@@ -131,6 +144,7 @@ function FetchUsageOutcome(engine: Engine): Effect.Effect<UsageOutcome> {
 function ReportWithCache(
 	engine: Engine,
 	cache: Ref.Ref<UsageCache>,
+	usage_probes: Cache.Cache<string, UsageOutcome>,
 	now_ms: number,
 	force: boolean,
 ): Effect.Effect<EngineUsageReport> {
@@ -146,7 +160,7 @@ function ReportWithCache(
 			return cached.report;
 		}
 
-		const outcome = yield* FetchUsageOutcome(engine);
+		const outcome = yield* Cache.get(usage_probes, engine_id);
 
 		if (outcome.ok) {
 			yield* Ref.update(cache, (entries) =>
@@ -164,6 +178,27 @@ export const MakeEngineUsageQueryHandler = Effect.gen(function* () {
 	const registry = yield* EngineRegistry;
 	const metadata = yield* RuntimeMetadata;
 	const cache = yield* Ref.make<UsageCache>(new Map());
+	const usage_probes = yield* Cache.makeWith<string, UsageOutcome>(
+		(engine_id) =>
+			registry.List.pipe(
+				Effect.flatMap((engines) => {
+					const engine = engines.find(
+						(candidate) => candidate.Descriptor.id === engine_id,
+					);
+
+					return engine === undefined
+						? Effect.die(
+								`Engine usage probe requested for unknown engine ${engine_id}.`,
+							)
+						: FetchUsageOutcome(engine);
+				}),
+			),
+		{
+			capacity: max_concurrent_usage_probes,
+			/** Retain only an in-flight probe; last-good freshness is owned by `cache`. */
+			timeToLive: () => "0 millis",
+		},
+	);
 
 	const Envelope = <Kind extends EngineUsageQueryResultEnvelope["kind"], Payload>(
 		query: EngineUsageQueryEnvelope,
@@ -198,7 +233,13 @@ export const MakeEngineUsageQueryHandler = Effect.gen(function* () {
 				);
 				const reports = yield* Effect.all(
 					engines.map((engine) =>
-						ReportWithCache(engine, cache, now_ms, query.payload.force === true),
+						ReportWithCache(
+							engine,
+							cache,
+							usage_probes,
+							now_ms,
+							query.payload.force === true,
+						),
 					),
 					{ concurrency: "unbounded" },
 				);

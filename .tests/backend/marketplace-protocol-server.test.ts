@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,13 @@ const MetadataLive = Layer.succeed(RuntimeMetadata, {
 	MakeId: (prefix) => Effect.succeed(`${prefix}_marketplace_protocol`),
 	Now: Effect.succeed("2026-07-18T20:00:00.000Z"),
 });
+
+const capability_handler_path = fileURLToPath(
+	new URL(
+		"../../modules/backend/src/protocol/rpc/mutation-handlers/capabilities.ts",
+		import.meta.url,
+	),
+);
 
 const hello: HelloEnvelope = {
 	kind: "hello",
@@ -69,6 +76,21 @@ afterEach(async () => {
 });
 
 describe("Marketplace protocol server", () => {
+	it("delegates capability scope checks to the service without a handler detail read", async () => {
+		const source = await readFile(capability_handler_path, "utf8");
+		const invocation_actions = source.slice(
+			source.indexOf('case "marketplace.capability.start":'),
+			source.indexOf('case "marketplace.capability.drift.overwrite.request":'),
+		);
+		const lifecycle_actions = source.slice(
+			source.indexOf('case "marketplace.capability.enable":'),
+			source.indexOf('case "marketplace.capability.sync":'),
+		);
+		expect(invocation_actions).not.toContain("RequireScope(");
+		expect(invocation_actions).not.toContain("repository.ReadDetail(");
+		expect(lifecycle_actions).not.toContain("RequireScope(");
+		expect(lifecycle_actions).not.toContain("repository.ReadDetail(");
+	});
 	it("acquires the production Layer without discovering, installing, connecting, or synchronizing", async () => {
 		const calls = { discover: 0, install: 0, inspect: 0, rollback: 0, sync: 0 };
 		const runtime = make_backend_runtime({

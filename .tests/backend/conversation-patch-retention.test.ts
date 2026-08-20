@@ -69,7 +69,10 @@ describe("conversation patch retention", () => {
 					});
 					yield* database.client.transaction((transaction) =>
 						Effect.forEach(
-							Array.from({ length: 640 }, (_, index) => Delta(index + 1)),
+							Array.from(
+								{ length: conversation_patch_retention_limit + 384 },
+								(_, index) => Delta(index + 1),
+							),
 							(observation) =>
 								ApplyEngineObservation(transaction, observation, {
 									occurred_at: now,
@@ -85,7 +88,8 @@ describe("conversation patch retention", () => {
 
 			expect(patches.length).toBeLessThanOrEqual(conversation_patch_retention_limit);
 			expect(patches[0]?.sequence).toBeGreaterThan(1);
-			expect(patches.at(-1)?.sequence).toBe(641);
+			/** One turn_upsert patch precedes the appended deltas. */
+			expect(patches.at(-1)?.sequence).toBe(conversation_patch_retention_limit + 385);
 		} finally {
 			await runtime.dispose();
 		}

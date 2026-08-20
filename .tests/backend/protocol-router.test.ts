@@ -121,6 +121,7 @@ describe("protocol router", () => {
 			const output = await route(runtime, make_command());
 			const [receipt, event] = output;
 
+			/** A fresh journal's first durable fact is the guidance anchor at sequence 1. */
 			expect(receipt).toMatchObject({
 				kind: "command.receipt",
 				correlation_id: "message_1",
@@ -142,6 +143,49 @@ describe("protocol router", () => {
 					type: "thread.created",
 					title: "Backend foundation",
 				},
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("rejects an invalid initial policy before the thread is committed", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			const rejected = await route(runtime, {
+				...make_command("invalid_create_policy", "thread_policy_rejected"),
+				payload: {
+					policy: {
+						engine_id: "missing-engine",
+						permission_mode: "on_request",
+						reasoning_effort: "medium",
+						sandbox_mode: "workspace_write",
+						strict_clarification: false,
+						web_search_enabled: false,
+					},
+					title: "Rejected policy",
+					type: "thread.create" as const,
+				},
+			});
+			expect(rejected).toMatchObject([
+				{
+					kind: "command.receipt",
+					payload: {
+						error: { code: "thread.session_policy.engine_id.unavailable" },
+						status: "rejected",
+					},
+				},
+			]);
+
+			const accepted = await route(
+				runtime,
+				make_command("accepted_after_invalid_policy", "thread_policy_rejected"),
+			);
+			expect(accepted[0]).toMatchObject({
+				kind: "command.receipt",
+				payload: { status: "accepted" },
 			});
 		} finally {
 			await runtime.dispose();

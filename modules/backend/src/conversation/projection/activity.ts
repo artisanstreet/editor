@@ -22,6 +22,76 @@ type ActivityObservation = Extract<
 	}
 >;
 
+/** Skips a CSI sequence after its introducer without retaining its parameters. */
+const skip_csi_sequence = (value: string, index: number) => {
+	while (index < value.length) {
+		const code = value.charCodeAt(index);
+		index += 1;
+		if (code >= 0x40 && code <= 0x7e) break;
+	}
+
+	return index;
+};
+
+/** Skips a terminal control string through ST; OSC alone also accepts BEL. */
+const skip_string_sequence = (value: string, index: number, bell_terminated: boolean) => {
+	while (index < value.length) {
+		const code = value.charCodeAt(index);
+		if ((bell_terminated && code === 0x07) || code === 0x9c) return index + 1;
+		if (code === 0x1b && value[index + 1] === "\\") return index + 2;
+		index += 1;
+	}
+
+	return index;
+};
+
+/**
+ * Removes terminal control sequences from text that can enter the renderer.
+ *
+ * Provider diagnostics are ordinary Unicode prose, not a terminal surface.
+ * Preserve visible Unicode and useful line structure, but remove CSI/OSC and
+ * the remaining C0/C1 controls before the protocol's normal 4 KiB bound.
+ */
+const clean_public_diagnostic_text = (value: string | undefined) => {
+	if (value === undefined) return undefined;
+	let clean = "";
+	for (let index = 0; index < value.length; index += 1) {
+		const code = value.charCodeAt(index);
+		if (code === 0x1b) {
+			const introducer = value[index + 1];
+			if (introducer === "[") {
+				index = skip_csi_sequence(value, index + 2) - 1;
+				continue;
+			}
+			if (
+				introducer === "]" ||
+				introducer === "P" ||
+				introducer === "X" ||
+				introducer === "^" ||
+				introducer === "_"
+			) {
+				index = skip_string_sequence(value, index + 2, introducer === "]") - 1;
+				continue;
+			}
+			/** A two-byte escape has no renderer-safe meaning either. */
+			index += introducer === undefined ? 0 : 1;
+			continue;
+		}
+		if (code === 0x9b) {
+			index = skip_csi_sequence(value, index + 1) - 1;
+			continue;
+		}
+		if (code === 0x9d || code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+			index = skip_string_sequence(value, index + 1, code === 0x9d) - 1;
+			continue;
+		}
+		if (code === 0x09 || code === 0x0a || code >= 0x20) {
+			if (code !== 0x7f && (code < 0x80 || code > 0x9f)) clean += value[index];
+		}
+	}
+	return optional_text(clean);
+};
+
 export const ApplyActivityObservation = (
 	transaction: DatabaseClient,
 	observation: ActivityObservation,
@@ -172,6 +242,10 @@ export const ApplyActivityObservation = (
 					: observation._tag === "search"
 						? optional_text(observation.query)
 						: optional_text(observation.detail);
+			const activity_output =
+				observation._tag === "terminal_activity"
+					? clean_public_diagnostic_text(observation.output)
+					: undefined;
 
 			return UpsertItem(
 				transaction,
@@ -207,6 +281,7 @@ export const ApplyActivityObservation = (
 							? lifecycle(observation.action)
 							: lifecycle(observation.state),
 					...(activity_detail === undefined ? {} : { detail: activity_detail }),
+					...(activity_output === undefined ? {} : { output: activity_output }),
 				},
 				source,
 			);
@@ -233,8 +308,16 @@ export const ApplyActivityObservation = (
 				observation._tag === "native_action" || observation._tag === "process_diagnostic"
 					? observation.error_ref
 					: undefined;
-			const error_detail = optional_text(error_ref?.detail);
-			const error_provider_code = optional_text(error_ref?.provider_code);
+			const error_detail =
+				observation._tag === "native_action"
+					? undefined
+					: clean_public_diagnostic_text(error_ref?.detail);
+			const error_provider_code = clean_public_diagnostic_text(error_ref?.provider_code);
+			const error_limit_id = clean_public_diagnostic_text(error_ref?.limit_id);
+			const error_limit_label = clean_public_diagnostic_text(error_ref?.limit_label);
+			const error_affected_model_id = clean_public_diagnostic_text(
+				error_ref?.affected_model_id,
+			);
 			return UpsertItem(
 				transaction,
 				input.thread_id,
@@ -251,11 +334,23 @@ export const ApplyActivityObservation = (
 						? {}
 						: {
 								error: {
+									...(error_affected_model_id === undefined
+										? {}
+										: { affected_model_id: error_affected_model_id }),
 									code: error_ref.artisan_code,
 									...(error_detail === undefined ? {} : { detail: error_detail }),
 									...(error_provider_code === undefined
 										? {}
 										: { provider_code: error_provider_code }),
+									...(error_limit_id === undefined
+										? {}
+										: { limit_id: error_limit_id }),
+									...(error_limit_label === undefined
+										? {}
+										: { limit_label: error_limit_label }),
+									...(error_ref.limit_scope === undefined
+										? {}
+										: { limit_scope: error_ref.limit_scope }),
 									...(error_ref.resets_at === undefined
 										? {}
 										: { resets_at: error_ref.resets_at }),
@@ -275,11 +370,12 @@ export const ApplyActivityObservation = (
 								: "error",
 					summary:
 						observation._tag === "native_action"
-							? (optional_text(observation.detail) ??
-								(text(observation.action) || "Native engine action"))
+							? (clean_public_diagnostic_text(observation.action) ??
+								"Native engine action")
 							: observation._tag === "usage"
 								? "Usage update"
-								: text(observation.message) || "Engine diagnostic",
+								: (clean_public_diagnostic_text(observation.message) ??
+									"Engine diagnostic"),
 				},
 				source,
 			);

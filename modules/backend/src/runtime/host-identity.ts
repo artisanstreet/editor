@@ -109,7 +109,7 @@ export class HostIdentityService extends Context.Service<
 >()("Artisan/HostIdentity") {}
 
 /** Spawns a shell-free child process to capture one platform command's stdout. */
-const NodeHostIdentityCommandRunner: HostIdentityCommandRunnerShape = {
+export const NodeHostIdentityCommandRunner: HostIdentityCommandRunnerShape = {
 	Run: (command, args) =>
 		Effect.callback<string, Error>((resume) => {
 			let settled = false;

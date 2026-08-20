@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { Context, Effect, Schema } from "effect";
 
 import type { EventEnvelope, ThreadMessageRoutedEvent } from "@artisan/protocol";
@@ -81,6 +81,66 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 				.where(eq(OrchestrationCoordinators.thread_id, command.thread_id))
 				.limit(1);
 			const accepted_at = yield* metadata.Now;
+			if (payload.type === "thread.withdraw_message") {
+				/**
+				 * Withdrawal races engine dispatch, and the outbox row's status is
+				 * the arbiter: only a steer still `pending` can be recalled. A steer
+				 * journals nothing at acceptance, so a successful withdrawal has
+				 * nothing to unproject — the message simply never becomes canonical.
+				 * Once dispatch has claimed the row the steer belongs to the run and
+				 * the withdrawal is refused.
+				 */
+				const [withdrawn] = yield* transaction
+					.update(OrchestrationOutbox)
+					.set({ status: "withdrawn", updated_at: accepted_at })
+					.where(
+						and(
+							eq(OrchestrationOutbox.command_id, payload.command_id),
+							eq(OrchestrationOutbox.thread_id, command.thread_id),
+							eq(OrchestrationOutbox.kind, "steer"),
+							eq(OrchestrationOutbox.status, "pending"),
+						),
+					)
+					.returning();
+				if (!withdrawn) {
+					return yield* new OrchestrationNotFound({
+						id: payload.command_id,
+						resource: "run",
+					});
+				}
+				/** Retired so steering fallback and completion can never resurrect it. */
+				yield* transaction
+					.update(OrchestrationMessages)
+					.set({ delivery: "withdrawn" })
+					.where(
+						and(
+							eq(OrchestrationMessages.command_id, payload.command_id),
+							eq(OrchestrationMessages.thread_id, command.thread_id),
+						),
+					);
+				yield* transaction.insert(JournalCommands).values({
+					accepted_at,
+					agent_id: command.agent_id ?? null,
+					causation_id: command.causation_id ?? null,
+					message_id: command.message_id,
+					origin: command.origin,
+					payload_json,
+					payload_type: payload.type,
+					raw_origin_json,
+					assigned_run_id: withdrawn.run_id,
+					run_id: command.run_id ?? null,
+					schema_version: command.schema_version,
+					sent_at: command.sent_at,
+					status: "accepted",
+					thread_id: command.thread_id,
+				});
+				return {
+					events: [],
+					journal_sequence: yield* GetJournalSequence,
+					run_id: withdrawn.run_id,
+					status: "accepted" as const,
+				};
+			}
 			if (payload.type === "thread.auto_steer.update") {
 				if (!coordinator) {
 					return yield* new OrchestrationNotFound({
@@ -858,26 +918,45 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 			}
 
 			if (payload.type === "run.respond_question") {
-				for (const question_id of Object.keys(payload.answers)) {
-					const [interaction] = yield* transaction
-						.select()
-						.from(OrchestrationInteractions)
-						.where(
-							and(
-								eq(OrchestrationInteractions.interaction_id, question_id),
-								eq(OrchestrationInteractions.kind, "question"),
-								eq(OrchestrationInteractions.run_id, run_id),
-								eq(OrchestrationInteractions.state, "requested"),
-							),
-						)
-						.limit(1);
+				const question_ids = Object.keys(payload.answers);
+				const unique_question_ids = [...new Set(question_ids)];
+				const interactions =
+					unique_question_ids.length === 0
+						? []
+						: yield* transaction
+								.select({
+									interaction_id: OrchestrationInteractions.interaction_id,
+								})
+								.from(OrchestrationInteractions)
+								.where(
+									and(
+										inArray(
+											OrchestrationInteractions.interaction_id,
+											unique_question_ids,
+										),
+										eq(OrchestrationInteractions.kind, "question"),
+										eq(OrchestrationInteractions.run_id, run_id),
+										eq(OrchestrationInteractions.state, "requested"),
+									),
+								);
+				const found_question_ids = new Set(
+					interactions.map((interaction) => interaction.interaction_id),
+				);
 
-					if (!interaction) {
+				for (const question_id of question_ids) {
+					if (!found_question_ids.has(question_id)) {
 						return yield* new OrchestrationNotFound({
 							id: question_id,
 							resource: "run",
 						});
 					}
+				}
+				/** Reject corrupted duplicate rows even though the schema normally prevents them. */
+				if (interactions.length !== found_question_ids.size) {
+					return yield* new OrchestrationNotFound({
+						id: question_ids[0] ?? run_id,
+						resource: "run",
+					});
 				}
 			}
 

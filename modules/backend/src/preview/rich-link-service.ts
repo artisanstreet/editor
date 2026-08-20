@@ -1,4 +1,4 @@
-import { Cause, Effect, Layer, Option } from "effect";
+import { Cause, Deferred, Effect, Layer, Option, Ref } from "effect";
 
 import {
 	RichLinkAssetStore,
@@ -16,6 +16,7 @@ import {
 	type RichLinkHttpResponse,
 	type RichLinkMetadataDocument,
 	type RichLinkMetadataErrorCode,
+	type RichLinkMetadataResult,
 	type RichLinkResolvedAddress,
 } from "./rich-link-metadata";
 import { parse_rich_link_html } from "./rich-link-html";
@@ -55,6 +56,18 @@ interface FetchedRichLinkResource {
 interface ResolvedFaviconCandidate {
 	readonly source: RichLinkFavicon["source"];
 	readonly url: URL;
+}
+
+type ColdRichLinkMetadataResult = RichLinkMetadataResult & {
+	readonly cache: {
+		readonly expires_at_ms: number;
+		readonly status: "miss";
+	};
+};
+
+interface ColdResolutionClaim {
+	readonly deferred: Deferred.Deferred<ColdRichLinkMetadataResult, RichLinkMetadataError>;
+	readonly leader: boolean;
 }
 
 type RichLinkFaviconContentType =
@@ -513,6 +526,79 @@ export function make_rich_link_metadata_layer(options: RichLinkMetadataOptions =
 					} satisfies RichLinkMetadataDocument;
 				});
 
+			const service_scope = yield* Effect.scope;
+			const cold_resolutions = yield* Ref.make(
+				new Map<
+					string,
+					Deferred.Deferred<ColdRichLinkMetadataResult, RichLinkMetadataError>
+				>(),
+			);
+
+			const resolve_cold = (cache_key: string) =>
+				Effect.uninterruptibleMask((restore) =>
+					Effect.gen(function* () {
+						const deferred = Deferred.makeUnsafe<
+							ColdRichLinkMetadataResult,
+							RichLinkMetadataError
+						>();
+						const resolution = yield* Ref.modify<
+							Map<
+								string,
+								Deferred.Deferred<ColdRichLinkMetadataResult, RichLinkMetadataError>
+							>,
+							ColdResolutionClaim
+						>(cold_resolutions, (current) => {
+							const existing = current.get(cache_key);
+
+							if (existing !== undefined) {
+								return [{ deferred: existing, leader: false }, current] as const;
+							}
+
+							const next = new Map(current);
+							next.set(cache_key, deferred);
+
+							return [{ deferred, leader: true }, next] as const;
+						});
+
+						if (resolution.leader) {
+							const complete = Effect.gen(function* () {
+								const result = yield* Effect.exit(
+									Effect.gen(function* () {
+										const document = yield* fetch_document(new URL(cache_key));
+										const expires_at_ms =
+											document.fetched_at_ms + limits.cache_ttl_ms;
+
+										yield* cache.Put(cache_key, { document, expires_at_ms });
+
+										return {
+											...document,
+											cache: { expires_at_ms, status: "miss" as const },
+										};
+									}),
+								);
+
+								yield* Ref.update(cold_resolutions, (current) => {
+									if (current.get(cache_key) !== resolution.deferred) {
+										return current;
+									}
+
+									const next = new Map(current);
+									next.delete(cache_key);
+
+									return next;
+								});
+								return yield* Deferred.done(resolution.deferred, result);
+							});
+
+							yield* Effect.forkIn(complete, service_scope, {
+								uninterruptible: false,
+							});
+						}
+
+						return yield* restore(Deferred.await(resolution.deferred));
+					}),
+				);
+
 			const resolve = (input: string) =>
 				Effect.gen(function* () {
 					const requested_url = yield* parse_http_url(input);
@@ -537,15 +623,12 @@ export function make_rich_link_metadata_layer(options: RichLinkMetadataOptions =
 						}
 					}
 
-					const document = yield* fetch_document(requested_url);
-					const expires_at_ms = document.fetched_at_ms + limits.cache_ttl_ms;
-
-					yield* cache.Put(cache_key, { document, expires_at_ms });
-
-					return {
-						...document,
-						cache: { expires_at_ms, status: "miss" as const },
-					};
+					/**
+					 * The layer-owned Deferred shares only active misses. Its scoped worker
+					 * remains alive when an individual route stops waiting, while every DNS
+					 * and transport operation retains its existing deadline.
+					 */
+					return yield* resolve_cold(cache_key);
 				});
 
 			return { Resolve: resolve };

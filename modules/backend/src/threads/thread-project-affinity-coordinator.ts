@@ -1,4 +1,16 @@
-import { Context, Effect, Layer, Option, PubSub, Ref, Schedule, Semaphore } from "effect";
+import {
+	Context,
+	Deferred,
+	Effect,
+	Exit,
+	Layer,
+	Option,
+	PubSub,
+	Ref,
+	Schedule,
+	Scope,
+	Semaphore,
+} from "effect";
 
 import type { EventEnvelope, ProjectAffinityEvidenceKind, ProjectRef } from "@artisan/protocol";
 
@@ -147,9 +159,45 @@ export const ThreadProjectAffinityCoordinatorLive = Layer.effect(
 		const notifier = yield* JournalNotifier;
 		const read_model = yield* ThreadReadModel;
 		const repository = yield* ThreadProjectAffinityRepository;
+		/** Checkpoint loads outlive any one caller; they fork into the coordinator's own lifetime. */
+		const scope = yield* Scope.Scope;
 		const subscription = yield* notifier.Subscribe;
 		const lock = yield* Semaphore.make(1);
-		const journal_sequence = yield* Ref.make(0);
+		const consumer_id = "thread-project-affinity";
+		/** A tail is trusted only after this consumer has replay-validated and durably recorded its start. */
+		const trusted_journal_sequence = yield* Ref.make(Option.none<number>());
+		const checkpoint_loaded = yield* Ref.make(false);
+		type CheckpointLoad = Deferred.Deferred<Option.Option<number>, JournalStoreError>;
+		const checkpoint_load = yield* Ref.make<CheckpointLoad | undefined>(undefined);
+
+		const AwaitCheckpoint = Effect.suspend(() =>
+			Effect.gen(function* () {
+				if (yield* Ref.get(checkpoint_loaded)) return;
+				const candidate = yield* Deferred.make<Option.Option<number>, JournalStoreError>();
+				const flight = yield* Ref.modify(checkpoint_load, (current) =>
+					current === undefined
+						? ([candidate, candidate] as const)
+						: ([current, current] as const),
+				);
+				if (flight !== candidate) return yield* Deferred.await(flight);
+
+				yield* Effect.gen(function* () {
+					const exit = yield* journal
+						.ReadConsumerCheckpoint(consumer_id)
+						.pipe(Effect.exit);
+					if (Exit.isSuccess(exit)) {
+						yield* Ref.set(trusted_journal_sequence, exit.value);
+						yield* Ref.set(checkpoint_loaded, true);
+					}
+					yield* Ref.update(checkpoint_load, (current) =>
+						current === candidate ? undefined : current,
+					);
+					yield* Deferred.done(candidate, exit);
+				}).pipe((load) => Effect.forkIn(load, scope));
+
+				return yield* Deferred.await(candidate);
+			}),
+		);
 
 		const ObserveEvent = (event: EventEnvelope) =>
 			Effect.gen(function* () {
@@ -223,17 +271,32 @@ export const ThreadProjectAffinityCoordinatorLive = Layer.effect(
 			});
 
 		const CatchUpUnlocked = Effect.gen(function* () {
-			const cursor = yield* Ref.get(journal_sequence);
-			const events = yield* journal.ReadReplay({ after_journal_sequence: cursor });
+			yield* AwaitCheckpoint;
+			const cursor = yield* Ref.get(trusted_journal_sequence);
+			const events = Option.isNone(cursor)
+				? yield* journal.ReadReplay({ after_journal_sequence: 0 })
+				: yield* journal.ReadTrustedTail(cursor.value);
 
 			if (events.length === 0) {
+				if (Option.isNone(cursor)) {
+					yield* journal.WriteConsumerCheckpoint(consumer_id, 0);
+					yield* Ref.set(trusted_journal_sequence, Option.some(0));
+				}
+
 				return 0;
 			}
 
-			yield* Effect.forEach(events, ObserveEvent);
-			const latest_event = events.at(-1);
-			if (latest_event === undefined) return 0;
-			yield* Ref.set(journal_sequence, latest_event.journal_sequence);
+			for (const event of events) yield* ObserveEvent(event);
+
+			const latest_journal_sequence = events.at(-1)?.journal_sequence;
+			if (latest_journal_sequence === undefined) return 0;
+
+			/**
+			 * This is deliberately at-least-once: a crash before this single durable
+			 * write replays the fully idempotent observation batch on restart.
+			 */
+			yield* journal.WriteConsumerCheckpoint(consumer_id, latest_journal_sequence);
+			yield* Ref.set(trusted_journal_sequence, Option.some(latest_journal_sequence));
 
 			return events.length;
 		});
@@ -251,6 +314,7 @@ export const ThreadProjectAffinityCoordinatorLive = Layer.effect(
 			}
 		});
 
+		yield* AwaitCheckpoint.pipe(Effect.forkScoped);
 		yield* Watch.pipe(Effect.forkScoped);
 
 		return { CatchUp };

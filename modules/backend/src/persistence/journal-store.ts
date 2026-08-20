@@ -1,10 +1,12 @@
 import { asc, desc, eq, gt, lte } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 
 import {
 	EventEnvelope,
 	EventPayload,
 	JournalSequence,
+	SessionPolicyPermission,
 	StreamCursor,
 	type CommandEnvelope,
 	type RawOrigin,
@@ -12,7 +14,15 @@ import {
 } from "@artisan/protocol";
 
 import { Database, type DatabaseClient } from "./database";
-import { EventStreams, JournalCommands, JournalEvents, Projects, Threads } from "./tables";
+import {
+	EventStreams,
+	JournalConsumerCheckpoints,
+	JournalCommands,
+	JournalEvents,
+	OrchestrationCoordinators,
+	Projects,
+	Threads,
+} from "./tables";
 import { JournalNotifier } from "./journal-notifier";
 import { RuntimeMetadata } from "../runtime/metadata";
 import { ApplyJournalEvent } from "../conversation/index.ts";
@@ -181,6 +191,9 @@ export class JournalStore extends Context.Service<
 		readonly FindCommandThreadId: (
 			message_id: string,
 		) => Effect.Effect<Option.Option<string>, JournalStoreError>;
+		readonly ReadConsumerCheckpoint: (
+			consumer_id: string,
+		) => Effect.Effect<Option.Option<number>, JournalStoreError>;
 		readonly ReadCorrelatedEvents: (
 			correlation_id: string,
 		) => Effect.Effect<ReadonlyArray<EventEnvelope>, JournalStoreError>;
@@ -192,7 +205,27 @@ export class JournalStore extends Context.Service<
 		readonly ReadReplay: (
 			request: ReplayRequest,
 		) => Effect.Effect<ReadonlyArray<EventEnvelope>, JournalStoreError>;
+		/**
+		 * Validates an already-trusted reconnect boundary from its supplied cursors
+		 * and only decodes events after that boundary. First trust and manual replay
+		 * stay on ReadReplay's full-history validation path.
+		 */
+		readonly ReadResume: (
+			request: Required<ReplayRequest>,
+		) => Effect.Effect<ReadonlyArray<EventEnvelope>, JournalStoreError>;
+		/**
+		 * Reads a connection-owned tail after its already-delivered cursor. Unlike
+		 * reconnect replay, this deliberately does not revalidate historical stream
+		 * cursors on every notifier wake.
+		 */
+		readonly ReadTrustedTail: (
+			after_journal_sequence: number,
+		) => Effect.Effect<ReadonlyArray<EventEnvelope>, JournalStoreError>;
 		readonly ReadWatermark: () => Effect.Effect<number, JournalStoreError>;
+		readonly WriteConsumerCheckpoint: (
+			consumer_id: string,
+			journal_sequence: number,
+		) => Effect.Effect<void, JournalStoreError>;
 		readonly ValidateReplayPoint: (
 			request: Required<ReplayRequest>,
 		) => Effect.Effect<void, JournalStoreError>;
@@ -448,13 +481,6 @@ const ReadBaselineInTransaction = (transaction: DatabaseClient) =>
 			})
 			.from(EventStreams)
 			.orderBy(asc(EventStreams.stream_id));
-		const event_rows = yield* transaction
-			.select({
-				sequence: JournalEvents.stream_sequence,
-				stream_id: JournalEvents.stream_id,
-			})
-			.from(JournalEvents)
-			.orderBy(asc(JournalEvents.stream_id), asc(JournalEvents.stream_sequence));
 		const [watermark] = yield* transaction
 			.select({ journal_sequence: JournalEvents.sequence })
 			.from(JournalEvents)
@@ -463,9 +489,6 @@ const ReadBaselineInTransaction = (transaction: DatabaseClient) =>
 		const event_cursors = yield* Effect.forEach(current_cursor_rows, (row) =>
 			DecodeStreamCursor(row, "Current stream cursor"),
 		);
-		const expected_cursors = yield* DeriveStreamCursors(event_rows);
-
-		yield* AssertMatchingCursors(event_cursors, expected_cursors, "Current stream cursors");
 
 		return {
 			event_cursors,
@@ -528,6 +551,23 @@ export const JournalStoreLive = Layer.effect(
 				.orderBy(asc(JournalEvents.sequence))
 				.pipe(
 					Effect.flatMap((events) => Effect.forEach(events, ReconstructEventEnvelope)),
+					Effect.mapError(normalize_journal_error),
+				);
+		const ReadConsumerCheckpoint = (consumer_id: string) =>
+			database.client
+				.select({ journal_sequence: JournalConsumerCheckpoints.journal_sequence })
+				.from(JournalConsumerCheckpoints)
+				.where(eq(JournalConsumerCheckpoints.consumer_id, consumer_id))
+				.limit(1)
+				.pipe(
+					Effect.flatMap(([checkpoint]) =>
+						checkpoint === undefined
+							? Effect.succeed(Option.none<number>())
+							: DecodeJournalSequence(
+									checkpoint.journal_sequence,
+									`Journal consumer ${consumer_id} checkpoint`,
+								).pipe(Effect.map(Option.some)),
+					),
 					Effect.mapError(normalize_journal_error),
 				);
 
@@ -646,6 +686,140 @@ export const JournalStoreLive = Layer.effect(
 					}),
 				)
 				.pipe(Effect.mapError(normalize_journal_error));
+
+		const ReadResume = (request: Required<ReplayRequest>) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const after_journal_sequence = yield* DecodeJournalSequence(
+							request.after_journal_sequence,
+							"Resume journal sequence",
+						);
+						const stream_cursors = yield* Effect.forEach(
+							request.stream_cursors,
+							DecodeReplayCursor,
+						);
+						/** AssertMatchingCursors also rejects duplicate supplied stream identities. */
+						yield* AssertMatchingCursors(
+							stream_cursors,
+							stream_cursors,
+							"Resume stream cursors",
+						);
+						const current = yield* ReadBaselineInTransaction(transaction);
+
+						if (after_journal_sequence > current.journal_sequence) {
+							return yield* new JournalInvariantError({
+								message:
+									"Resume journal sequence is ahead of the journal watermark",
+							});
+						}
+
+						if (after_journal_sequence > 0) {
+							const [boundary] = yield* transaction
+								.select({ journal_sequence: JournalEvents.sequence })
+								.from(JournalEvents)
+								.where(eq(JournalEvents.sequence, after_journal_sequence))
+								.limit(1);
+							if (boundary === undefined) {
+								return yield* new JournalInvariantError({
+									message:
+										"Resume journal sequence does not identify a journal boundary",
+								});
+							}
+						}
+
+						const tail_rows = yield* transaction
+							.select({
+								agent_id: JournalEvents.agent_id,
+								causation_id: JournalEvents.causation_id,
+								correlation_id: JournalEvents.correlation_id,
+								event_id: JournalEvents.event_id,
+								event_type: JournalEvents.event_type,
+								journal_sequence: JournalEvents.sequence,
+								occurred_at: JournalEvents.occurred_at,
+								origin: JournalEvents.origin,
+								payload_json: JournalEvents.payload_json,
+								raw_origin_json: JournalEvents.raw_origin_json,
+								run_id: JournalEvents.run_id,
+								schema_version: JournalEvents.schema_version,
+								sequence: JournalEvents.stream_sequence,
+								stream_id: JournalEvents.stream_id,
+								thread_id: JournalEvents.thread_id,
+							})
+							.from(JournalEvents)
+							.where(gt(JournalEvents.sequence, after_journal_sequence))
+							.orderBy(asc(JournalEvents.sequence));
+						const events = yield* Effect.forEach(tail_rows, ReconstructEventEnvelope);
+						const resumed_cursors = yield* ContinueStreamCursors(
+							stream_cursors,
+							events,
+						);
+
+						yield* AssertMatchingCursors(
+							current.event_cursors,
+							resumed_cursors,
+							"Current stream cursors",
+						);
+
+						return events;
+					}),
+				)
+				.pipe(Effect.mapError(normalize_journal_error));
+
+		const ReadTrustedTail = (after_journal_sequence: number) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const after_sequence = yield* DecodeJournalSequence(
+							after_journal_sequence,
+							"Trusted tail journal sequence",
+						);
+						const tail_rows = yield* transaction
+							.select({
+								agent_id: JournalEvents.agent_id,
+								causation_id: JournalEvents.causation_id,
+								correlation_id: JournalEvents.correlation_id,
+								event_id: JournalEvents.event_id,
+								event_type: JournalEvents.event_type,
+								journal_sequence: JournalEvents.sequence,
+								occurred_at: JournalEvents.occurred_at,
+								origin: JournalEvents.origin,
+								payload_json: JournalEvents.payload_json,
+								raw_origin_json: JournalEvents.raw_origin_json,
+								run_id: JournalEvents.run_id,
+								schema_version: JournalEvents.schema_version,
+								sequence: JournalEvents.stream_sequence,
+								stream_id: JournalEvents.stream_id,
+								thread_id: JournalEvents.thread_id,
+							})
+							.from(JournalEvents)
+							.where(gt(JournalEvents.sequence, after_sequence))
+							.orderBy(asc(JournalEvents.sequence));
+
+						return yield* Effect.forEach(tail_rows, ReconstructEventEnvelope);
+					}),
+				)
+				.pipe(Effect.mapError(normalize_journal_error));
+		const WriteConsumerCheckpoint = (consumer_id: string, journal_sequence: number) =>
+			DecodeJournalSequence(
+				journal_sequence,
+				`Journal consumer ${consumer_id} checkpoint`,
+			).pipe(
+				Effect.flatMap((sequence) =>
+					database.client
+						.insert(JournalConsumerCheckpoints)
+						.values({ consumer_id, journal_sequence: sequence })
+						.onConflictDoUpdate({
+							target: JournalConsumerCheckpoints.consumer_id,
+							set: {
+								/** A delayed consumer must never move a durable checkpoint backward. */
+								journal_sequence: sql`max(${JournalConsumerCheckpoints.journal_sequence}, ${sequence})`,
+							},
+						})
+						.pipe(Effect.asVoid),
+				),
+				Effect.mapError(normalize_journal_error),
+			);
 
 		const AcceptThreadCreate = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
@@ -821,6 +995,32 @@ export const JournalStoreLive = Layer.effect(
 								updated_at: occurred_at,
 							});
 
+							if (payload.policy !== undefined) {
+								yield* transaction.insert(OrchestrationCoordinators).values({
+									active_run_id: null,
+									agent_id: yield* metadata.MakeId("agent"),
+									auto_steer_follow_ups: true,
+									created_at: occurred_at,
+									display_name: "Primary coordinator",
+									engine_id: payload.policy.engine_id,
+									native_resume_json: null,
+									native_thread_id: null,
+									policy_context_window: payload.policy.context_window ?? null,
+									policy_model: payload.policy.model ?? null,
+									policy_permission: SessionPolicyPermission(payload.policy),
+									policy_permission_mode: payload.policy.permission_mode,
+									policy_reasoning_effort: payload.policy.reasoning_effort,
+									policy_sandbox_mode: payload.policy.sandbox_mode,
+									policy_service_tier: payload.policy.service_tier ?? "standard",
+									policy_strict_clarification:
+										payload.policy.strict_clarification,
+									policy_web_search_enabled: payload.policy.web_search_enabled,
+									role: "primary",
+									thread_id: command.thread_id,
+									updated_at: occurred_at,
+								});
+							}
+
 							yield* transaction.insert(EventStreams).values({
 								last_sequence: 1,
 								stream_id,
@@ -895,11 +1095,15 @@ export const JournalStoreLive = Layer.effect(
 			AcceptThreadCreate,
 			AppendEvent,
 			FindCommandThreadId,
+			ReadConsumerCheckpoint,
 			ReadBaseline,
 			ReadCurrentCursors,
 			ReadCorrelatedEvents,
 			ReadReplay,
+			ReadResume,
+			ReadTrustedTail,
 			ReadWatermark,
+			WriteConsumerCheckpoint,
 			ValidateReplayPoint,
 		};
 	}),

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { Context, Data, Effect, Layer, Option } from "effect";
+import { Context, Data, Deferred, Effect, Exit, Layer, Option, Ref, Scope } from "effect";
 
 import {
 	type ModelBehaviourCapability,
@@ -83,16 +83,30 @@ export interface ModelBehaviourProviderAdapter {
 	readonly mapping: ModelBehaviourProviderMapping;
 }
 
+/** A complete immutable registry snapshot produced by capability discovery. */
+export interface ModelBehaviourProviderRegistrySnapshot {
+	readonly Capabilities: ReadonlyArray<ModelBehaviourCapability>;
+	readonly Find: (
+		provider_id: string,
+		setting_id: ModelBehaviourSettingId,
+	) => Option.Option<ModelBehaviourProviderAdapter>;
+	readonly Providers: ReadonlyArray<ModelBehaviourProviderAdapter>;
+}
+
+/** Reports discovery failure without exposing provider configuration content. */
+export class ModelBehaviourProviderRegistryError extends Data.TaggedError(
+	"ModelBehaviourProviderRegistryError",
+)<{ readonly cause: unknown }> {}
+
 /** Supplies the provider mappings and capability projection used by the service and UI. */
 export class ModelBehaviourProviderRegistry extends Context.Service<
 	ModelBehaviourProviderRegistry,
 	{
-		readonly Capabilities: ReadonlyArray<ModelBehaviourCapability>;
-		readonly Find: (
-			provider_id: string,
-			setting_id: ModelBehaviourSettingId,
-		) => Option.Option<ModelBehaviourProviderAdapter>;
-		readonly Providers: ReadonlyArray<ModelBehaviourProviderAdapter>;
+		/** Waits for the immutable registry discovery owned by this service scope. */
+		readonly Await: Effect.Effect<
+			ModelBehaviourProviderRegistrySnapshot,
+			ModelBehaviourProviderRegistryError
+		>;
 	}
 >()("Artisan/ModelBehaviourProviderRegistry") {}
 
@@ -281,13 +295,24 @@ function BuildProviderRegistry(providers: ReadonlyArray<ModelBehaviourProviderAd
 export function make_model_behaviour_provider_registry_layer(
 	providers: ReadonlyArray<ModelBehaviourProviderAdapter>,
 ) {
-	return Layer.effect(ModelBehaviourProviderRegistry, BuildProviderRegistry(providers));
+	return Layer.effect(
+		ModelBehaviourProviderRegistry,
+		BuildProviderRegistry(providers).pipe(
+			Effect.map((snapshot) =>
+				ModelBehaviourProviderRegistry.of({ Await: Effect.succeed(snapshot) }),
+			),
+		),
+	);
 }
 
 /** Provides the canonical control with no installed provider support. */
 export const EmptyModelBehaviourProviderRegistryLive = Layer.effect(
 	ModelBehaviourProviderRegistry,
-	BuildProviderRegistry([]),
+	BuildProviderRegistry([]).pipe(
+		Effect.map((snapshot) =>
+			ModelBehaviourProviderRegistry.of({ Await: Effect.succeed(snapshot) }),
+		),
+	),
 );
 
 function mapping_from_probe(probe: CodexModelBehaviourProbeResult) {
@@ -306,22 +331,65 @@ export function make_desktop_model_behaviour_provider_registry_layer(
 ) {
 	return Layer.effect(
 		ModelBehaviourProviderRegistry,
-		Effect.gen(function* () {
-			const probe = yield* CodexModelBehaviourProbe;
-			const files = yield* ModelBehaviourConfigFiles;
-			const codex_mapping = mapping_from_probe(yield* probe.Probe);
-			const providers = [
-				codex_mapping.state === "supported" || codex_mapping.state === "experimental"
-					? make_codex_model_behaviour_provider({
-							backups_directory: options.backups_directory,
-							files,
-							mapping: codex_mapping,
-							target_path: options.codex_config_path,
-						})
-					: make_inactive_model_behaviour_provider(codex_mapping),
-			];
+		Effect.uninterruptibleMask((restore) =>
+			Effect.gen(function* () {
+				const probe = yield* CodexModelBehaviourProbe;
+				const files = yield* ModelBehaviourConfigFiles;
+				const scope = yield* Scope.Scope;
+				const result = yield* Deferred.make<
+					ModelBehaviourProviderRegistrySnapshot,
+					ModelBehaviourProviderRegistryError
+				>();
+				const settled = yield* Ref.make(false);
+				const Complete = (
+					exit: Exit.Exit<
+						ModelBehaviourProviderRegistrySnapshot,
+						ModelBehaviourProviderRegistryError
+					>,
+				) =>
+					Ref.modify(settled, (complete) => [!complete, true] as const).pipe(
+						Effect.flatMap((owned) =>
+							owned
+								? Deferred.complete(result, exit).pipe(Effect.asVoid)
+								: Effect.void,
+						),
+						Effect.uninterruptible,
+					);
+				const Discover = Effect.gen(function* () {
+					const codex_mapping = mapping_from_probe(yield* restore(probe.Probe));
+					const providers = [
+						codex_mapping.state === "supported" ||
+						codex_mapping.state === "experimental"
+							? make_codex_model_behaviour_provider({
+									backups_directory: options.backups_directory,
+									files,
+									mapping: codex_mapping,
+									target_path: options.codex_config_path,
+								})
+							: make_inactive_model_behaviour_provider(codex_mapping),
+					];
 
-			return yield* BuildProviderRegistry(providers);
-		}),
+					return yield* BuildProviderRegistry(providers);
+				}).pipe(
+					Effect.mapError((cause) => new ModelBehaviourProviderRegistryError({ cause })),
+				);
+				const Drive = Effect.uninterruptibleMask((restore_owner) =>
+					Effect.gen(function* () {
+						const exit = yield* restore_owner(Discover).pipe(Effect.exit);
+						yield* Complete(exit);
+					}),
+				);
+
+				yield* Effect.addFinalizer(() =>
+					Effect.exit(Effect.interrupt).pipe(
+						Effect.flatMap(Complete),
+						Effect.uninterruptible,
+					),
+				);
+				yield* Effect.forkIn(Drive, scope);
+
+				return ModelBehaviourProviderRegistry.of({ Await: Deferred.await(result) });
+			}),
+		),
 	);
 }

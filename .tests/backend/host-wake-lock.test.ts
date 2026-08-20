@@ -47,7 +47,9 @@ const run_scenario = <A>(
 			const backend = Layer.succeed(SystemWakeLockBackend, {
 				Acquire: () =>
 					options.unavailable === true
-						? Effect.fail(new SystemWakeLockUnavailable({ message: "scripted refusal" }))
+						? Effect.fail(
+								new SystemWakeLockUnavailable({ message: "scripted refusal" }),
+							)
 						: Ref.update(events, (current) => [...current, "acquire"]).pipe(
 								Effect.as({
 									Release: Ref.update(events, (current) => [

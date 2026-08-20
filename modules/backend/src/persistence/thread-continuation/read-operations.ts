@@ -9,6 +9,7 @@ import {
 	ThreadErasureClaims,
 	ThreadTombstones,
 	Threads,
+	UsageInterruptions,
 } from "../tables";
 import { ThreadRunContinuationState } from "../thread-continuation-schema";
 import { DecodePersistedJson, DecodeResumeToken } from "./codec";
@@ -344,6 +345,21 @@ export const MakeReadOperations = Effect.gen(function* () {
 					const resume = DecodeResumeToken(
 						DecodePersistedJson(source?.native_resume_json).pipe(Option.getOrUndefined),
 					);
+					/** Mirrors exactly the authority PrepareLaunch demands for a failed source. */
+					const [usage_interruption_authority] =
+						source === undefined
+							? []
+							: yield* transaction
+									.select({ interruption_id: UsageInterruptions.interruption_id })
+									.from(UsageInterruptions)
+									.where(
+										and(
+											eq(UsageInterruptions.source_run_id, source.run_id),
+											eq(UsageInterruptions.target_run_id, target.run_id),
+											eq(UsageInterruptions.state, "launching"),
+										),
+									)
+									.limit(1);
 					return {
 						first_target_journal_sequence: first_target_event.sequence,
 						source_cut_journal_sequence,
@@ -370,6 +386,8 @@ export const MakeReadOperations = Effect.gen(function* () {
 									),
 									run_id: source.run_id,
 									status: source.status,
+									usage_interruption_resume:
+										usage_interruption_authority !== undefined,
 									working_directory: source.working_directory,
 								})
 							: Option.none(),

@@ -1,12 +1,7 @@
 import { and, asc, eq, inArray, isNull, lte, or } from "drizzle-orm";
 import { Effect, Layer, Schema } from "effect";
 
-import {
-	GitMutationProjection,
-	GitMutationUpdatedEvent,
-	Identifier,
-	git_workspace_maximum_pending_mutations,
-} from "@artisan/protocol";
+import { GitMutationProjection, GitMutationUpdatedEvent, Identifier } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
@@ -117,12 +112,9 @@ export const GitRepositoryLive = Layer.effect(
 								),
 							),
 							Effect.flatMap(
-								Schema.decodeUnknownEffect(
-									Schema.Array(GitMutationProjection).check(
-										Schema.isMaxLength(git_workspace_maximum_pending_mutations),
-									),
-									{ onExcessProperty: "error" },
-								),
+								Schema.decodeUnknownEffect(Schema.Array(GitMutationProjection), {
+									onExcessProperty: "error",
+								}),
 							),
 							Effect.mapError(() =>
 								invariant("Pending Git mutation list is invalid"),

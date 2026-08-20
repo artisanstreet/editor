@@ -71,13 +71,8 @@ export const MakeHostSuspendMonitorLayer = (options: HostSuspendMonitorOptions =
 				minimum_gap_ms: options.minimum_gap_ms ?? 30_000,
 				Now: options.Now ?? Clock.currentTimeMillis,
 			};
-			/**
-			 * Sliding, because a resume is a hint rather than a record: a slow
-			 * subscriber must never hold up the heartbeat, and only the newest
-			 * gap is worth acting on.
-			 */
 			const pubsub = yield* Effect.acquireRelease(
-				PubSub.sliding<HostResume>(8),
+				PubSub.unbounded<HostResume>(),
 				PubSub.shutdown,
 			);
 

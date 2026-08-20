@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect";
 
-import { model_manifest } from "@artisan/catalog";
+import { ComposeNativeModelId, model_manifest } from "@artisan/catalog";
 import { inherited_compaction_model } from "@artisan/protocol";
 import { EngineRegistry, type EngineObservation, type EngineRunMetadata } from "@artisan/engines";
 
@@ -173,7 +173,11 @@ export const ThreadContinuationCompactorLive = Layer.effect(
 						...(compactor.model_id === undefined
 							? {}
 							: {
-									model: `${compactor.model_id}${saved_defaults?.context_window ?? ""}`,
+									model: ComposeNativeModelId(
+										compactor.engine_id,
+										compactor.model_id,
+										saved_defaults?.context_window,
+									),
 								}),
 						...compactor_run_metadata(
 							compactor.engine_id,
@@ -215,6 +219,11 @@ export const ThreadContinuationCompactorLive = Layer.effect(
 
 		const Summarize = (request: ThreadCompactionRequest) =>
 			Effect.gen(function* () {
+				/**
+				 * An empty head is not a failure and must not be reported as one: the
+				 * checkpoint's verbatim tail already holds the whole conversation, so
+				 * there is nothing left for a summary to describe.
+				 */
 				if (request.head.length === 0) return Option.none<ThreadCompactionSummary>();
 				const transcript = serialize_compaction_transcript(request.head);
 				const prompt = render_compaction_prompt({
@@ -222,9 +231,27 @@ export const ThreadContinuationCompactorLive = Layer.effect(
 					transcript: transcript.text,
 				});
 
+				/**
+				 * Absence still selects the mechanical fallback rather than failing the
+				 * switch, but it is recorded. Swallowing every cause silently made a
+				 * genuinely broken compactor indistinguishable from one that had
+				 * nothing to do, and the difference decides how much context survives
+				 * every portable handoff.
+				 */
 				return yield* RunCompactionTurn(request, prompt).pipe(
 					Effect.timeout(compaction_timeout_ms),
-					Effect.catch(() => Effect.succeed(Option.none<ThreadCompactionSummary>())),
+					Effect.tap((summary) =>
+						Option.isSome(summary)
+							? Effect.void
+							: Effect.logWarning(
+									`Thread compaction for ${request.source.engine_id} returned no usable summary; the handoff falls back to the canonical transcript`,
+								),
+					),
+					Effect.catch((cause) =>
+						Effect.logWarning(
+							`Thread compaction for ${request.source.engine_id} failed; the handoff falls back to the canonical transcript: ${String(cause)}`,
+						).pipe(Effect.as(Option.none<ThreadCompactionSummary>())),
+					),
 				);
 			});
 

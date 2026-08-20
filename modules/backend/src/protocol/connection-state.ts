@@ -1,3 +1,6 @@
+import { Chunk } from "effect";
+import type { Deferred, Semaphore } from "effect";
+
 import type {
 	EventEnvelope,
 	MarketplaceScope,
@@ -6,10 +9,35 @@ import type {
 	SurfaceUsageAggregateQuery,
 } from "@artisan/protocol";
 
+/**
+ * The retransmission window: events delivered to a connection but not yet
+ * acknowledged, kept so a reconnect can replay exactly what was missed.
+ *
+ * A `Chunk` rather than an array because this is appended to on every single
+ * event delivery and drained only by an ACK. Rebuilding an immutable array per
+ * append is an O(n) copy each time, so a window of n events costs O(n²) bytes
+ * to fill — at roughly 600 bytes an event that is gigabytes of pure copying for
+ * a window of a few thousand, which is how Forge reached seventeen gigabytes of
+ * transient allocation and died against V8's heap ceiling. `Chunk.appendAll`
+ * shares structure instead, so filling the window costs what the events
+ * themselves cost and nothing more.
+ */
+export type UnacknowledgedEvents = Chunk.Chunk<EventEnvelope>;
+
 export interface PendingHeartbeat {
 	readonly deadline_ms: number;
 	readonly message_id: string;
 	readonly nonce: string;
+}
+
+/** One connection-owned admission that has claimed an id but has not completed publication. */
+export interface PendingSubscription {
+	readonly cancelled: Deferred.Deferred<void>;
+	/** Completes only after this generation's terminal envelope was accepted or the connection closed. */
+	readonly released: Deferred.Deferred<void>;
+	readonly message_id: string;
+	/** Serializes publication and cancellation for only this subscription generation. */
+	readonly publication: Semaphore.Semaphore;
 }
 
 export interface ThreadListProjectionSubscription {
@@ -116,8 +144,18 @@ export type ConnectionState =
 			readonly delivered_journal_sequence: number;
 			readonly last_activity_ms: number;
 			readonly pending_heartbeat?: PendingHeartbeat;
+			readonly pending_subscriptions?: Readonly<Record<string, PendingSubscription>>;
+			/** A cancelled generation retains its id until its terminal envelope is accepted. */
+			readonly stopping_subscriptions?: Readonly<Record<string, PendingSubscription>>;
+			/**
+			 * Owns the active registration generation. It deliberately survives pending
+			 * admission completion, so an old finalizer can never remove a reused id.
+			 */
+			readonly subscription_claims?: Readonly<Record<string, PendingSubscription>>;
 			readonly stream_ticket: string;
 			readonly subscriptions: Readonly<Record<string, ProjectionSubscription>>;
+			/** Already-validated events delivered after the durable acknowledged point. */
+			readonly unacknowledged_events?: UnacknowledgedEvents;
 	  }
 	| {
 			readonly _tag: "Rejected";
@@ -157,6 +195,76 @@ export const ApplyEventCursors = (
 		}),
 		cursors,
 	);
+
+/** Reconstructs one ACK boundary from its durable base and delivered in-flight events. */
+export const CursorsAtAcknowledgement = (
+	acknowledged_cursors: Readonly<Record<string, number>>,
+	unacknowledged_events: UnacknowledgedEvents,
+	journal_sequence: number,
+) =>
+	ApplyEventCursors(
+		acknowledged_cursors,
+		Chunk.toArray(
+			Chunk.filter(
+				unacknowledged_events,
+				(event) => event.journal_sequence <= journal_sequence,
+			),
+		),
+	);
+
+export const SameCursors = (
+	left: Readonly<Record<string, number>>,
+	right: Readonly<Record<string, number>>,
+) => {
+	const left_entries = Object.entries(left);
+	const right_entries = Object.entries(right);
+
+	return (
+		left_entries.length === right_entries.length &&
+		left_entries.every(([stream_id, sequence]) => right[stream_id] === sequence)
+	);
+};
+
+/**
+ * Applies only subscription entries derived from `baseline` that this fiber still owns.
+ * A delayed projection must not restore an entry that a concurrent unsubscribe removed,
+ * or overwrite a replacement registered under the same subscription id.
+ */
+export const MergeOwnedSubscriptionUpdates = (
+	latest: ReadyState,
+	baseline: Readonly<Record<string, ProjectionSubscription>>,
+	updated: Readonly<Record<string, ProjectionSubscription>>,
+) => {
+	let subscriptions = latest.subscriptions;
+
+	for (const [subscription_id, baseline_subscription] of Object.entries(baseline)) {
+		const updated_subscription = updated[subscription_id];
+		if (
+			updated_subscription === undefined ||
+			updated_subscription === baseline_subscription ||
+			latest.subscriptions[subscription_id] !== baseline_subscription
+		)
+			continue;
+		subscriptions = { ...subscriptions, [subscription_id]: updated_subscription };
+	}
+
+	return subscriptions;
+};
+
+/** Removes a subscription only when the caller still owns its registered generation. */
+export const RemoveOwnedSubscription = (
+	latest: ReadyState,
+	baseline: Readonly<Record<string, ProjectionSubscription>>,
+	subscription_id: string,
+) => {
+	if (
+		baseline[subscription_id] === undefined ||
+		latest.subscriptions[subscription_id] !== baseline[subscription_id]
+	)
+		return latest.subscriptions;
+	const { [subscription_id]: _removed, ...subscriptions } = latest.subscriptions;
+	return subscriptions;
+};
 
 export const LatestJournalSequence = (fallback: number, events: ReadonlyArray<EventEnvelope>) =>
 	events.reduce((sequence, event) => Math.max(sequence, event.journal_sequence), fallback);

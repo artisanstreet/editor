@@ -42,9 +42,7 @@ function make_target_test_layer(active_probes: { value: number }) {
 			),
 	});
 
-	return make_preview_target_layer({ sliding_event_capacity: 2 }).pipe(
-		Layer.provide(Layer.merge(clock, probe)),
-	);
+	return make_preview_target_layer().pipe(Layer.provide(Layer.merge(clock, probe)));
 }
 
 describe("PreviewTarget", () => {
@@ -101,7 +99,7 @@ describe("PreviewTarget", () => {
 		expect(transport_calls).toBe(0);
 	});
 
-	it("maintains a provider-neutral read model and bounded sliding status stream", async () => {
+	it("maintains a provider-neutral read model and lossless status stream", async () => {
 		const active_probes = { value: 0 };
 		const layer = make_target_test_layer(active_probes);
 		const result = await Effect.runPromise(
@@ -134,7 +132,7 @@ describe("PreviewTarget", () => {
 		expect(result.events.map((event) => event.kind)).toEqual(["registered", "state"]);
 	});
 
-	it("drops the oldest unread events when the sliding stream reaches capacity", async () => {
+	it("retains every unread event while a subscriber is delayed", async () => {
 		const active_probes = { value: 0 };
 		const layer = make_target_test_layer(active_probes);
 		const events = await Effect.runPromise(
@@ -155,7 +153,7 @@ describe("PreviewTarget", () => {
 							return event;
 						}),
 					),
-					Stream.take(3),
+					Stream.take(4),
 					Stream.runCollect,
 					Effect.forkChild,
 				);
@@ -177,9 +175,15 @@ describe("PreviewTarget", () => {
 			}).pipe(Effect.provide(layer)),
 		);
 
-		expect(events.map((event) => event.kind)).toEqual(["registered", "state", "state"]);
+		expect(events.map((event) => event.kind)).toEqual([
+			"registered",
+			"state",
+			"state",
+			"state",
+		]);
 		expect(events.map((event) => event.target.state)).toEqual([
 			"registered",
+			"stopped",
 			"registered",
 			"healthy",
 		]);

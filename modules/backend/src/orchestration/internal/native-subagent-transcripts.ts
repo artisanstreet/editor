@@ -12,6 +12,7 @@ import {
 	ConversationSources,
 	NativeSubagentBindings,
 	NativeSubagentTranscriptInbox,
+	OrchestrationGroups,
 	OrchestrationRuns,
 } from "../../persistence/tables";
 import { normalize_graph_error } from "../agent-graph-model";
@@ -105,7 +106,7 @@ export const make_native_subagent_transcripts = (context: GraphContext) => {
 							),
 						)
 						.limit(1);
-					if (pending === undefined) return;
+					if (pending === undefined) return undefined;
 					const [root] = yield* transaction
 						.select()
 						.from(OrchestrationRuns)
@@ -125,7 +126,7 @@ export const make_native_subagent_transcripts = (context: GraphContext) => {
 							),
 						)
 						.limit(1);
-					if (root === undefined || binding === undefined) return;
+					if (root === undefined || binding === undefined) return undefined;
 					const content = yield* DecodeContent(pending.content_json);
 					const occurred_at = yield* context.metadata.Now;
 					yield* ApplyEngineObservation(
@@ -161,9 +162,23 @@ export const make_native_subagent_transcripts = (context: GraphContext) => {
 								isNull(NativeSubagentTranscriptInbox.processed_at),
 							),
 						);
+					const [group] = yield* transaction
+						.select({ journal_sequence: OrchestrationGroups.journal_sequence })
+						.from(OrchestrationGroups)
+						.where(eq(OrchestrationGroups.group_id, binding.group_id))
+						.limit(1);
+					return group?.journal_sequence;
 				}),
 			)
-			.pipe(Effect.mapError(normalize_graph_error));
+			.pipe(
+				Effect.tap((journal_sequence) =>
+					journal_sequence === undefined
+						? Effect.void
+						: context.notifier.Publish(journal_sequence),
+				),
+				Effect.asVoid,
+				Effect.mapError(normalize_graph_error),
+			);
 	const DrainRoot = (root_run_id: string) =>
 		Effect.gen(function* () {
 			const pending = yield* context.database.client

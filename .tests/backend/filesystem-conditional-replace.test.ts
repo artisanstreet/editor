@@ -537,9 +537,7 @@ describe("BoundedRegularFileStore conditional replacement", () => {
 		await fs.writeFile(join(root, "document.txt"), "old");
 		const changes = Effect.runPromise(
 			observer.Watch(".").pipe(
-				Stream.takeUntil(
-					(change) => change.kind !== "overflow" && change.path === "watch-complete.txt",
-				),
+				Stream.takeUntil((change) => change.path === "watch-complete.txt"),
 				Stream.runCollect,
 				Effect.timeout("3 seconds"),
 			),
@@ -550,7 +548,6 @@ describe("BoundedRegularFileStore conditional replacement", () => {
 
 		expect(
 			(await changes)
-				.filter((change) => change.kind !== "overflow")
 				.map((change) => change.path)
 				.some((path) => path.startsWith(".artisan-conditional-")),
 		).toBe(false);

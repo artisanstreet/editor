@@ -109,6 +109,37 @@ export function title_case_role(role: string) {
 		: `${first_character.toUpperCase()}${role.slice(1)}`;
 }
 
+const native_role_aliases: Readonly<Record<string, string>> = {
+	default: "Handyman",
+	explore: "Explorer",
+	explorer: "Explorer",
+	general: "Handyman",
+	"general purpose": "Handyman",
+	generalist: "Handyman",
+	plan: "Planner",
+	planner: "Planner",
+	research: "Researcher",
+	researcher: "Researcher",
+	worker: "Handyman",
+};
+
+/** Presents provider-native agent types through one friendly Artisan vocabulary. */
+export function friendly_native_role(agent_path: string | null | undefined) {
+	const native_role = agent_path?.split(/[\\/]/).filter(Boolean).at(-1)?.trim();
+	if (native_role === undefined || native_role.length === 0) return "Handyman";
+
+	const words = native_role
+		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+		.replace(/[_-]+/g, " ")
+		.trim()
+		.toLowerCase();
+	const alias = native_role_aliases[words];
+	if (alias !== undefined) return alias;
+
+	const friendly_role = words.replace(/\b\w/g, (character) => character.toUpperCase());
+	return friendly_role.length <= visible_name_maximum ? friendly_role : "Specialist";
+}
+
 export const visible_name_maximum = 64;
 
 const has_control_character = (value: string) =>

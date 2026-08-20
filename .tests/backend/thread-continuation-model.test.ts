@@ -67,7 +67,14 @@ describe("thread continuation model", () => {
 		expect(utf8_byte_length(summary)).toBe(portable_checkpoint_summary_maximum_bytes);
 	});
 
-	it("builds a deterministic fallback with the first user objective and explicit omission", () => {
+	/**
+	 * Nothing omitted is nothing lost: the tail is the whole conversation and
+	 * there was never a head for a compaction model to summarize. Announcing a
+	 * "fallback" and restating the first objective over a complete transcript
+	 * described a degradation that had not happened, and the reader downstream
+	 * believed it — turns opened by talking about picking up a handoff.
+	 */
+	it("states a complete transcript rather than announcing a fallback when nothing was omitted", () => {
 		const entries = [
 			entry(1, "user", "Build the release artifact."),
 			entry(2, "assistant", "I will inspect the packaging pipeline."),
@@ -81,9 +88,25 @@ describe("thread continuation model", () => {
 
 		expect(first).toEqual(second);
 		expect(first.source).toBe("canonical_fallback");
-		expect(first.summary).toContain("Build the release artifact.");
-		expect(first.summary).toContain("Omission: 0 earlier transcript entries were");
+		expect(first.omitted_entries).toBe(0);
+		expect(first.summary).toContain("Complete canonical transcript.");
+		expect(first.summary).not.toContain("Canonical transcript fallback.");
+		expect(first.summary).not.toContain("Omission:");
 		expect(first.tail.map((value) => value.text)).toEqual(entries.map((value) => value.text));
+	});
+
+	/** A genuinely bounded handoff still says exactly what it dropped. */
+	it("keeps the fallback wording and objective when entries were actually omitted", () => {
+		const result = select_portable_checkpoint_content({
+			canonical_entries: [entry(9, "assistant", "Newest retained fact.")],
+			canonical_total_entries: 9,
+			first_user_objective: "Build the release artifact.",
+		});
+
+		expect(result.omitted_entries).toBe(8);
+		expect(result.summary).toContain("Canonical transcript fallback.");
+		expect(result.summary).toContain("Build the release artifact.");
+		expect(result.summary).toContain("Omission: 8 earlier transcript entries were");
 	});
 
 	it("uses the validated model summary while keeping the newest tail verbatim", () => {

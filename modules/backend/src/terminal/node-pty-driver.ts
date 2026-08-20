@@ -13,10 +13,9 @@ import {
 } from "./driver";
 import { ProcessEnvironment, ProcessEnvironmentLive } from "../runtime/process-environment";
 
-/** Configures the bounded native PTY adapter. */
+/** Configures the native PTY adapter. */
 export interface NodePtyTerminalDriverOptions {
 	readonly close_timeout_ms?: number;
-	readonly output_capacity?: number;
 	readonly output_chunk_bytes?: number;
 }
 
@@ -37,11 +36,10 @@ function validate_positive(option: string, value: number) {
 			);
 }
 
-function validate_open_input(input: TerminalDriverOpenInput, output_capacity: number) {
+function validate_open_input(input: TerminalDriverOpenInput) {
 	return Effect.gen(function* () {
 		yield* validate_positive("cols", input.cols);
 		yield* validate_positive("rows", input.rows);
-		yield* validate_positive("output_capacity", output_capacity);
 
 		if (input.executable.length === 0) {
 			return yield* Effect.fail(
@@ -67,11 +65,10 @@ function try_native(operation: TerminalDriverOperation, evaluate: () => void) {
 function make_handle(
 	pty: IPty,
 	close_timeout_ms: number,
-	output_capacity: number,
 	output_chunk_bytes: number,
 ): Effect.Effect<TerminalDriverHandle, never, Scope.Scope> {
 	return Effect.gen(function* () {
-		const output = yield* Queue.dropping<Uint8Array, Cause.Done<void>>(output_capacity);
+		const output = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
 		const exit = yield* Deferred.make<TerminalDriverExit>();
 		const state = yield* Ref.make<TerminalState>({});
 		const run_callback = yield* FiberSet.makeRuntime();
@@ -116,26 +113,7 @@ function make_handle(
 			const bytes = new TextEncoder().encode(data);
 
 			for (let offset = 0; offset < bytes.length; offset += output_chunk_bytes) {
-				const chunk = bytes.slice(offset, offset + output_chunk_bytes);
-
-				if (Queue.offerUnsafe(output, chunk)) {
-					continue;
-				}
-
-				const terminal_exit: TerminalDriverExit = {
-					exit_code: null,
-					reason: "output_overflow",
-					signal: null,
-				};
-
-				run_callback(
-					try_native("output", () => pty.kill()).pipe(
-						Effect.ignore,
-						Effect.andThen(Finish(terminal_exit)),
-					),
-				);
-
-				return;
+				Queue.offerUnsafe(output, bytes.slice(offset, offset + output_chunk_bytes));
 			}
 		});
 		exit_listener = pty.onExit(({ exitCode, signal }) => {
@@ -211,7 +189,6 @@ function make_handle(
 /** Builds the native node-pty implementation used by the desktop backend process. */
 export function make_node_pty_terminal_driver_layer(options: NodePtyTerminalDriverOptions = {}) {
 	const close_timeout_ms = options.close_timeout_ms ?? 1_000;
-	const output_capacity = options.output_capacity ?? 512;
 	const output_chunk_bytes = options.output_chunk_bytes ?? 16_384;
 
 	return Layer.effect(
@@ -223,7 +200,7 @@ export function make_node_pty_terminal_driver_layer(options: NodePtyTerminalDriv
 					Effect.gen(function* () {
 						const inherited_environment = yield* process_environment.Variables;
 						yield* validate_positive("close_timeout_ms", close_timeout_ms);
-						yield* validate_open_input(input, output_capacity);
+						yield* validate_open_input(input);
 						yield* validate_positive("output_chunk_bytes", output_chunk_bytes);
 
 						const pty = yield* Effect.try({
@@ -242,17 +219,12 @@ export function make_node_pty_terminal_driver_layer(options: NodePtyTerminalDriv
 							catch: (cause) => terminal_error("spawn", cause),
 						});
 
-						return yield* make_handle(
-							pty,
-							close_timeout_ms,
-							output_capacity,
-							output_chunk_bytes,
-						);
+						return yield* make_handle(pty, close_timeout_ms, output_chunk_bytes);
 					}),
 			};
 		}),
 	).pipe(Layer.provide(ProcessEnvironmentLive));
 }
 
-/** Provides the production node-pty driver with bounded output buffering. */
+/** Provides the production node-pty driver with lossless output buffering. */
 export const NodePtyTerminalDriverLive = make_node_pty_terminal_driver_layer();

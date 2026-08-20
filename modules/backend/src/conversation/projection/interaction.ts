@@ -67,6 +67,25 @@ export const CancelPendingInteractions = (
 		}
 	});
 
+/**
+ * Enumerated answers survive only intact. An option whose label does not
+ * survive text bounding cannot be selected, and offering the rest would quietly
+ * hide a choice the provider asked about, so the whole set is dropped and the
+ * question degrades to free text.
+ */
+const question_options = (
+	observation: Extract<EngineObservation, { _tag: "question" }>,
+): ReadonlyArray<{ readonly description?: string; readonly label: string }> | undefined => {
+	const offered = observation.options ?? [];
+	const options = offered.flatMap((option) => {
+		const label = optional_text(option.label);
+		if (label === undefined) return [];
+		const description = optional_text(option.description);
+		return [{ ...(description === undefined ? {} : { description }), label }];
+	});
+	return options.length === 0 || options.length !== offered.length ? undefined : options;
+};
+
 export const ApplyInteractionObservation = (
 	transaction: DatabaseClient,
 	observation: InteractionObservation,
@@ -175,7 +194,9 @@ export const ApplyInteractionObservation = (
 					source,
 				);
 			});
-		case "question":
+		case "question": {
+			const header = optional_text(observation.header);
+			const options = question_options(observation);
 			return UpsertItem(
 				transaction,
 				input.thread_id,
@@ -188,7 +209,12 @@ export const ApplyInteractionObservation = (
 						observation.observation_id,
 					),
 					type: "question",
+					...(header === undefined ? {} : { header }),
 					interaction_id: observation.question_id,
+					...(observation.multi_select === undefined
+						? {}
+						: { multi_select: observation.multi_select }),
+					...(options === undefined ? {} : { options }),
 					prompt: text(observation.text) || "Question",
 					requested_at: input.occurred_at,
 					state: observation.state === "requested" ? "requested" : "answered",
@@ -202,6 +228,7 @@ export const ApplyInteractionObservation = (
 				},
 				source,
 			);
+		}
 		case "compaction":
 			return UpsertItem(
 				transaction,
@@ -221,6 +248,9 @@ export const ApplyInteractionObservation = (
 					type: "compaction",
 					state: observation.state,
 					portability: "provider_bound",
+					...(observation.duration_ms === undefined
+						? {}
+						: { duration_ms: Math.round(observation.duration_ms) }),
 					...(observation.summary ? { summary: text(observation.summary) } : {}),
 				},
 				source,

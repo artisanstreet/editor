@@ -3,6 +3,7 @@ import { fchmod } from "node:fs";
 import { Context, Data, Effect, Layer, Option, PlatformError, Schema, Stream } from "effect";
 import { FileSystem } from "effect/FileSystem";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { FileDescriptorOf } from "../filesystem/node/file-descriptor";
 
 import {
 	ReadFileIdentity,
@@ -381,13 +382,15 @@ function ApplyPosixOwned(
 	return Effect.scoped(
 		Effect.gen(function* () {
 			const file = yield* file_system.open(path, { flag: "r+" });
-			const current_identity = yield* ReadPrivateFileIdentity(file.fd);
+			const descriptor = yield* FileDescriptorOf(file, "private file permissions");
+			const current_identity = yield* ReadPrivateFileIdentity(descriptor);
 
 			if (!same_file_identity(current_identity, identity)) {
 				return false;
 			}
 
-			yield* Fchmod(file.fd, mode);
+			/** Same descriptor the identity was proven on, so nothing can be swapped between. */
+			yield* Fchmod(descriptor, mode);
 
 			return true;
 		}),
@@ -472,7 +475,11 @@ export const make_private_file_permissions_layer = Layer.effect(
 									flag: "wx",
 									mode: 0o600,
 								});
-								return Option.some(yield* ReadPrivateFileIdentity(file.fd));
+								return Option.some(
+									yield* ReadPrivateFileIdentity(
+										yield* FileDescriptorOf(file, "private file identity"),
+									),
+								);
 							}),
 						).pipe(
 							Effect.catch((cause) =>

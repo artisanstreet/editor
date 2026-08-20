@@ -20,7 +20,6 @@ export interface StdioLaunch {
 	readonly invocation_timeout_ms: number;
 	readonly max_message_bytes: number;
 	readonly max_stderr_bytes: number;
-	readonly max_pending_requests: number;
 }
 
 /** Driver boundary deliberately takes argv arrays; implementations must never invoke a shell. */
@@ -187,8 +186,6 @@ function is_valid_launch(launch: StdioLaunch) {
 		launch.max_message_bytes > 0 &&
 		Number.isSafeInteger(launch.max_stderr_bytes) &&
 		launch.max_stderr_bytes > 0 &&
-		Number.isSafeInteger(launch.max_pending_requests) &&
-		launch.max_pending_requests > 0 &&
 		Number.isSafeInteger(launch.startup_timeout_ms) &&
 		launch.startup_timeout_ms > 0 &&
 		Number.isSafeInteger(launch.invocation_timeout_ms) &&
@@ -350,15 +347,11 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 								return yield* Effect.fail(transport_error(operation, health));
 							const waiter = yield* Deferred.make<unknown, McpTransportError>();
 							const id = yield* Ref.modify(requests, (current) => {
-								if (current.pending.size >= launch.max_pending_requests)
-									return [undefined, current] as const;
 								const id = current.next_id;
 								const pending = new Map(current.pending);
 								pending.set(id, { operation, waiter });
 								return [id, { ...current, next_id: id + 1, pending }] as const;
 							});
-							if (id === undefined)
-								return yield* Effect.fail(transport_error(operation, "unhealthy"));
 							const RemovePending = Ref.update(requests, (current) => {
 								if (!current.pending.has(id)) return current;
 								const pending = new Map(current.pending);

@@ -13,6 +13,7 @@ export const TerminalSessions = sqliteTable(
 		env_json: text("env_json"),
 		cols: integer("cols").notNull(),
 		generation: integer("generation").notNull(),
+		stop_requested_generation: integer("stop_requested_generation"),
 		rows: integer("rows").notNull(),
 		pid: integer("pid"),
 		owner_kind: text("owner_kind").notNull().default("user"),

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { Crypto, Effect, Layer, ManagedRuntime } from "effect";
+import { Crypto, Deferred, Effect, Layer, ManagedRuntime } from "effect";
 import { describe, expect, it } from "vitest";
 
 import type {
@@ -1129,7 +1129,7 @@ describe("GitService", () => {
 		}
 	});
 
-	it("never replays recovered dispatching work but dispatches recovered approved work", async () => {
+	it("replays recovered approved work after service acquisition without replaying dispatching work", async () => {
 		const dispatching = mutation("dispatching", {
 			kind: "stage",
 			mutation_id: "mutation_dispatching",
@@ -1148,11 +1148,23 @@ describe("GitService", () => {
 		const result_workspace = workspace(snapshot_b, { version: 4 });
 		const snapshots = [snapshot(), snapshot(snapshot_b)];
 		const durable_workspaces = [workspace(), result_workspace];
+		const dispatch_started = await Effect.runPromise(Deferred.make<void>());
+		const dispatch_release = await Effect.runPromise(Deferred.make<void>());
+		const dispatch_completed = await Effect.runPromise(Deferred.make<void>());
 		const harness = make_harness({
 			reads: { Refresh: () => Effect.succeed(snapshots.shift()!) },
+			driver: {
+				Unstage: () =>
+					Deferred.succeed(dispatch_started, undefined).pipe(
+						Effect.andThen(Deferred.await(dispatch_release)),
+					),
+			},
 			repository: {
 				ClaimApproved: () => Effect.succeed(mutation_acceptance(claimed)),
-				CommitSucceeded: () => Effect.succeed(success_commit(approved, result_workspace)),
+				CommitSucceeded: () =>
+					Deferred.succeed(dispatch_completed, undefined).pipe(
+						Effect.as(success_commit(approved, result_workspace)),
+					),
 				ReadWorkspace: () => Effect.succeed(durable_workspaces.shift()!),
 				RecoverDispatching: () =>
 					Effect.succeed({ ambiguous: [dispatching], approved: [approved] }),
@@ -1161,15 +1173,57 @@ describe("GitService", () => {
 
 		try {
 			await harness.runtime.runPromise(GitService);
+			await Effect.runPromise(Deferred.await(dispatch_started));
 
 			expect(harness.calls.claim_approved).toEqual([approved.mutation_id]);
 			expect(harness.calls.stage).toHaveLength(0);
 			expect(harness.calls.unstage).toEqual([
 				{ paths: ["run-once.ts"], workspace_id: "workspace_1" },
 			]);
+
+			await Effect.runPromise(Deferred.succeed(dispatch_release, undefined));
+			await Effect.runPromise(Deferred.await(dispatch_completed));
+
 			expect(harness.calls.commit_succeeded).toHaveLength(1);
 		} finally {
 			await harness.runtime.dispose();
 		}
+	});
+
+	it("interrupts blocked recovered dispatch work when the service runtime closes", async () => {
+		const approved = mutation("approved", {
+			kind: "stage",
+			mutation_id: "mutation_blocked_recovery",
+		});
+		const claimed = mutation("dispatching", {
+			kind: "stage",
+			mutation_id: approved.mutation_id,
+		});
+		const dispatch_started = await Effect.runPromise(Deferred.make<void>());
+		const dispatch_interrupted = await Effect.runPromise(Deferred.make<void>());
+		const harness = make_harness({
+			reads: { Refresh: () => Effect.succeed(snapshot()) },
+			driver: {
+				Stage: () =>
+					Deferred.succeed(dispatch_started, undefined).pipe(
+						Effect.andThen(Effect.never),
+						Effect.onInterrupt(() => Deferred.succeed(dispatch_interrupted, undefined)),
+					),
+			},
+			repository: {
+				ClaimApproved: () => Effect.succeed(mutation_acceptance(claimed)),
+				ReadWorkspace: () => Effect.succeed(workspace()),
+				RecoverDispatching: () => Effect.succeed({ ambiguous: [], approved: [approved] }),
+			},
+		});
+
+		await harness.runtime.runPromise(GitService);
+		await Effect.runPromise(Deferred.await(dispatch_started));
+
+		expect(harness.calls.claim_approved).toEqual([approved.mutation_id]);
+		expect(harness.calls.stage).toEqual([{ paths: ["stage.ts"], workspace_id: "workspace_1" }]);
+
+		await harness.runtime.dispose();
+		await Effect.runPromise(Deferred.await(dispatch_interrupted));
 	});
 });

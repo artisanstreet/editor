@@ -98,7 +98,6 @@ describe("Marketplace production capability transport registry", () => {
 		expect(captures.stdio[0]).toMatchObject({
 			invocation_timeout_ms: 30_000,
 			max_message_bytes: 4 * 1024 * 1024,
-			max_pending_requests: 64,
 			max_stderr_bytes: 1024 * 1024,
 			startup_timeout_ms: 123,
 		});
@@ -123,7 +122,6 @@ describe("Marketplace production capability transport registry", () => {
 							invocation_timeout_ms: 41,
 							kind: "stdio",
 							max_message_bytes: 42,
-							max_pending_requests: 43,
 							max_stderr_bytes: 44,
 							startup_timeout_ms: 45,
 						},
@@ -136,7 +134,6 @@ describe("Marketplace production capability transport registry", () => {
 			env: { MCP_TOKEN: "value-for-keychain:stdio" },
 			invocation_timeout_ms: 41,
 			max_message_bytes: 42,
-			max_pending_requests: 43,
 			max_stderr_bytes: 44,
 		});
 	});

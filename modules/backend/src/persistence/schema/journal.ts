@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { check, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const JournalCommands = sqliteTable(
 	"journal_commands",
@@ -32,6 +32,18 @@ export const EventStreams = sqliteTable("event_streams", {
 	stream_id: text("stream_id").primaryKey(),
 	last_sequence: integer("last_sequence").notNull(),
 });
+
+/** Durable cursors owned by consumers that have fully validated their initial replay. */
+export const JournalConsumerCheckpoints = sqliteTable(
+	"journal_consumer_checkpoints",
+	{
+		consumer_id: text("consumer_id").primaryKey(),
+		journal_sequence: integer("journal_sequence").notNull(),
+	},
+	(table) => [
+		check("journal_consumer_checkpoints_sequence_check", sql`${table.journal_sequence} >= 0`),
+	],
+);
 
 /** Singleton writer lease used only to serialize deterministic projection rebuilds. */
 export const ProjectionRebuildLocks = sqliteTable("projection_rebuild_locks", {
@@ -75,6 +87,17 @@ export const JournalEvents = sqliteTable(
 		),
 		index("journal_events_correlation_id_index").on(table.correlation_id),
 		index("journal_events_type_sequence_index").on(table.event_type, table.sequence),
+		index("journal_events_thread_sequence_index").on(table.thread_id, table.sequence),
+		index("journal_events_thread_run_sequence_index").on(
+			table.thread_id,
+			table.run_id,
+			table.sequence,
+		),
+		index("journal_events_thread_type_sequence_index").on(
+			table.thread_id,
+			table.event_type,
+			table.sequence,
+		),
 	],
 );
 

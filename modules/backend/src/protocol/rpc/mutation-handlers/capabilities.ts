@@ -116,57 +116,50 @@ export const MakeCapabilityMutationHandler = Effect.gen(function* () {
 			case "marketplace.capability.restart":
 				return Action(
 					envelope,
-					RequireScope(
-						envelope.payload.capability_id,
-						envelope.payload.scope,
-						capabilities.SessionAction({
-							action:
-								envelope.kind === "marketplace.capability.start"
-									? "start"
-									: envelope.kind === "marketplace.capability.restart"
-										? "restart"
-										: "reconnect",
-							capability_id: envelope.payload.capability_id,
-							operation_id: envelope.message_id,
-						}),
-					),
+					capabilities.SessionAction({
+						action:
+							envelope.kind === "marketplace.capability.start"
+								? "start"
+								: envelope.kind === "marketplace.capability.restart"
+									? "restart"
+									: "reconnect",
+						capability_id: envelope.payload.capability_id,
+						operation_id: envelope.message_id,
+						scope: envelope.payload.scope,
+					}),
 				);
 			case "marketplace.capability.invoke":
-				return RequireScope(
-					envelope.payload.capability_id,
-					envelope.payload.scope,
-					capabilities.Invoke({
+				return capabilities
+					.Invoke({
 						...envelope.payload,
 						operation_id: envelope.message_id,
-					}),
-				).pipe(
-					Effect.flatMap((payload) =>
-						response.Result(
-							envelope,
-							current,
-							"marketplace.capability.invoke.result",
-							Effect.succeed(payload),
+					})
+					.pipe(
+						Effect.flatMap((payload) =>
+							response.Result(
+								envelope,
+								current,
+								"marketplace.capability.invoke.result",
+								Effect.succeed(payload),
+							),
 						),
-					),
-					Effect.catch(() =>
-						response.Reject(
-							envelope,
-							current,
-							"The Marketplace action was rejected before completion.",
+						Effect.catch(() =>
+							response.Reject(
+								envelope,
+								current,
+								"The Marketplace action was rejected before completion.",
+							),
 						),
-					),
-				);
+					);
 			case "marketplace.capability.invoke.request":
 			case "marketplace.capability.invoke.decision":
-				return RequireScope(
-					envelope.payload.capability_id,
-					envelope.payload.scope,
+				return (
 					envelope.kind === "marketplace.capability.invoke.request"
 						? capabilities.RequestInvocation({
 								...envelope.payload,
 								operation_id: envelope.message_id,
 							})
-						: capabilities.DecideInvocation(envelope.payload),
+						: capabilities.DecideInvocation(envelope.payload)
 				).pipe(
 					Effect.flatMap((payload) =>
 						response.Result(
@@ -215,74 +208,56 @@ export const MakeCapabilityMutationHandler = Effect.gen(function* () {
 			case "marketplace.capability.enable":
 				return Action(
 					envelope,
-					RequireScope(
-						envelope.payload.id,
-						envelope.payload.scope,
-						capabilities.Enable({
-							capability_id: envelope.payload.id,
-							operation_id: envelope.message_id,
-						}),
-					),
+					capabilities.Enable({
+						capability_id: envelope.payload.id,
+						operation_id: envelope.message_id,
+						scope: envelope.payload.scope,
+					}),
 				);
 			case "marketplace.capability.disable":
 				return Action(
 					envelope,
-					RequireScope(
-						envelope.payload.id,
-						envelope.payload.scope,
-						capabilities.Disable({
-							capability_id: envelope.payload.id,
-							operation_id: envelope.message_id,
-						}),
-					),
+					capabilities.Disable({
+						capability_id: envelope.payload.id,
+						operation_id: envelope.message_id,
+						scope: envelope.payload.scope,
+					}),
 				);
 			case "marketplace.capability.remove":
 				return Action(
 					envelope,
-					RequireScope(
-						envelope.payload.id,
-						envelope.payload.scope,
-						capabilities.Remove({
-							capability_id: envelope.payload.id,
-							operation_id: envelope.message_id,
-						}),
-					),
+					capabilities.Remove({
+						capability_id: envelope.payload.id,
+						operation_id: envelope.message_id,
+						scope: envelope.payload.scope,
+					}),
 				);
 			case "marketplace.capability.disconnect":
 				return Action(
 					envelope,
-					RequireScope(
-						envelope.payload.capability_id,
-						envelope.payload.scope,
-						capabilities.Disconnect({
-							capability_id: envelope.payload.capability_id,
-							operation_id: envelope.message_id,
-						}),
-					),
+					capabilities.Disconnect({
+						capability_id: envelope.payload.capability_id,
+						operation_id: envelope.message_id,
+						scope: envelope.payload.scope,
+					}),
 				);
 			case "marketplace.capability.uninstall":
 				return Action(
 					envelope,
-					RequireScope(
-						envelope.payload.capability_id,
-						envelope.payload.scope,
-						capabilities.Uninstall({
-							capability_id: envelope.payload.capability_id,
-							operation_id: envelope.message_id,
-						}),
-					),
+					capabilities.Uninstall({
+						capability_id: envelope.payload.capability_id,
+						operation_id: envelope.message_id,
+						scope: envelope.payload.scope,
+					}),
 				);
 			case "marketplace.capability.health":
 				return Action(
 					envelope,
-					RequireScope(
-						envelope.payload.capability_id,
-						envelope.payload.scope,
-						capabilities.Health({
-							capability_id: envelope.payload.capability_id,
-							operation_id: envelope.message_id,
-						}),
-					),
+					capabilities.Health({
+						capability_id: envelope.payload.capability_id,
+						operation_id: envelope.message_id,
+						scope: envelope.payload.scope,
+					}),
 				);
 			case "marketplace.capability.sync":
 				return Action(

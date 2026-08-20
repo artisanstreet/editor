@@ -1,9 +1,14 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Fiber, Layer } from "effect";
+import { Deferred, Effect, Fiber, Layer } from "effect";
 import { TestClock } from "effect/testing";
 
 import type { EngineUsageQueryEnvelope, EngineUsageQueryResultEnvelope } from "@artisan/protocol";
-import { make_engine_registry_layer, type Engine, type EngineFailure } from "@artisan/engines";
+import {
+	EngineProcessError,
+	make_engine_registry_layer,
+	type Engine,
+	type EngineFailure,
+} from "@artisan/engines";
 
 import { MakeEngineUsageQueryHandler } from "../../modules/backend/src/protocol/rpc/query-handlers/engine-usage";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
@@ -143,6 +148,36 @@ describe("engine usage query handler", () => {
 		}),
 	);
 
+	/**
+	 * A process failure used to reach the reader as the bare tag
+	 * "Usage lookup failed (EngineProcessError)": the report falls back to the tag
+	 * when the failure has no message, and this one carried its operation and its
+	 * cause in fields nothing rendered. Naming both is the difference between a
+	 * report someone can act on and one that only says something went wrong.
+	 */
+	it.effect("names the operation and cause behind a process failure", () =>
+		Effect.gen(function* () {
+			const result = yield* run_handler([
+				make_test_engine({
+					display_name: "Claude",
+					id: "claude",
+					usage: Effect.fail(
+						new EngineProcessError({
+							cause: Object.assign(new Error("spawn claude ENOENT"), {
+								code: "ENOENT",
+							}),
+							operation: "spawn",
+						}) as unknown as EngineFailure,
+					),
+				}),
+			]);
+
+			expect(result.payload.engines[0]?.failure).toBe(
+				"Engine process spawn failed: ENOENT: spawn claude ENOENT",
+			);
+		}),
+	);
+
 	it.effect("serves the fresh cache without re-invoking Usage on a second query", () =>
 		Effect.gen(function* () {
 			let calls = 0;
@@ -162,6 +197,57 @@ describe("engine usage query handler", () => {
 			yield* Handle(query);
 
 			expect(calls).toBe(1);
+		}),
+	);
+
+	it.effect("coalesces overlapping forced probes for the same engine", () =>
+		Effect.gen(function* () {
+			const started = yield* Deferred.make<void>();
+			const release = yield* Deferred.make<void>();
+			let calls = 0;
+			const engine = make_test_engine({
+				display_name: "Claude",
+				id: "claude",
+				usage: Effect.sync(() => {
+					calls += 1;
+				}).pipe(
+					Effect.andThen(Deferred.succeed(started, undefined)),
+					Effect.andThen(Deferred.await(release)),
+					Effect.as({
+						authentication: { state: "authenticated" as const },
+						windows: [],
+					}),
+				),
+			});
+			const Handle = yield* make_handler([engine]);
+			const forced_query = { ...query, payload: { force: true } } as const;
+			const first = yield* Handle(forced_query).pipe(
+				Effect.forkChild({ startImmediately: true }),
+			);
+
+			yield* Deferred.await(started);
+			const second = yield* Handle(forced_query).pipe(
+				Effect.forkChild({ startImmediately: true }),
+			);
+			yield* Effect.yieldNow;
+
+			expect(calls).toBe(1);
+
+			yield* Deferred.succeed(release, undefined);
+			const [first_result, second_result] = yield* Effect.all([
+				Fiber.join(first),
+				Fiber.join(second),
+			]);
+
+			expect(first_result.payload.engines).toEqual(second_result.payload.engines);
+			expect(first_result.payload.engines).toEqual([
+				{
+					authentication: "authenticated",
+					display_name: "Claude",
+					engine_id: "claude",
+					windows: [],
+				},
+			]);
 		}),
 	);
 

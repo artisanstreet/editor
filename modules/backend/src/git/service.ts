@@ -180,6 +180,7 @@ export const GitServiceLive = Layer.effect(
 		const metadata = yield* RuntimeMetadata;
 		const reads = yield* GitReadService;
 		const repository = yield* GitRepository;
+		const service_scope = yield* Effect.scope;
 		const Hash = (value: string) =>
 			crypto
 				.digest("SHA-256", new TextEncoder().encode(value))
@@ -581,13 +582,21 @@ export const GitServiceLive = Layer.effect(
 		const recovery = yield* repository
 			.RecoverDispatching()
 			.pipe(Effect.mapError((cause) => normalize_service_error("recovery", cause)));
-		yield* Effect.forEach(
-			recovery.approved,
-			(mutation) => Dispatch(mutation).pipe(Effect.ignore),
-			{
-				concurrency: 1,
-				discard: true,
-			},
+		/**
+		 * Classifying durable recovery remains part of layer acquisition, but replaying
+		 * approved mutations may run Git subprocesses. Own that ordered work in the
+		 * service scope so Forge becomes available before external Git work completes.
+		 */
+		yield* Effect.forkIn(
+			Effect.forEach(
+				recovery.approved,
+				(mutation) => Dispatch(mutation).pipe(Effect.ignore),
+				{
+					concurrency: 1,
+					discard: true,
+				},
+			),
+			service_scope,
 		);
 
 		return { Diff, Query, Request, Resolve };

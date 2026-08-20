@@ -59,10 +59,10 @@ export const MarkStreamingAssistantSteeringBoundaries = (
 					"stored conversation item",
 				);
 				if (
-					prior.type !== "assistant_message" ||
+					(prior.type !== "assistant_message" && prior.type !== "reasoning_summary") ||
 					prior.run_id !== run_id ||
 					prior.lifecycle !== "streaming" ||
-					prior.phase === "commentary"
+					(prior.type === "assistant_message" && prior.phase === "commentary")
 				)
 					return;
 				const text_offset = prior.text.length;
@@ -186,6 +186,81 @@ export const AppendText = (
 	});
 
 /**
+ * Records how much reasoning a phase has done, for an engine that counts it but
+ * will not publish it.
+ *
+ * Kept apart from {@link AppendText} because nothing is being appended: the
+ * count is cumulative and replaces, where text accumulates. It opens the same
+ * item the deltas would have so a turn whose reasoning is encrypted still has
+ * one row saying the model is working, and it is a full re-decode rather than
+ * the streaming fast path because these frames arrive a handful of times per
+ * turn rather than per token.
+ */
+export const RecordThinkingProgress = (
+	transaction: DatabaseClient,
+	thread_id: string,
+	item_id: string,
+	turn_id: string,
+	input: ConversationObservationContext,
+	thinking_tokens: number,
+	source: { observed_at: string },
+) =>
+	Effect.gen(function* () {
+		const rows = yield* transaction
+			.select()
+			.from(ConversationItems)
+			.where(eq(ConversationItems.item_id, item_id))
+			.limit(1);
+		const existing = rows.at(0);
+		if (existing === undefined)
+			return yield* UpsertItem(
+				transaction,
+				thread_id,
+				{
+					id: item_id,
+					turn_id,
+					created_at: input.occurred_at,
+					updated_at: input.occurred_at,
+					lifecycle: "streaming",
+					references: [],
+					source_refs: [{ reference: item_id, provider: "engine" }],
+					...(input.agent_id === undefined ? {} : { agent_id: input.agent_id }),
+					run_id: input.run_id,
+					type: "reasoning_summary",
+					text: "",
+					thinking_tokens,
+				},
+				source,
+			);
+		const prior = yield* DecodeJson(
+			ConversationItem,
+			existing.entity_json,
+			"stored conversation item",
+		);
+		/** A settled phase keeps its final count; only a live one still climbs. */
+		if (
+			prior.type !== "reasoning_summary" ||
+			prior.lifecycle !== "streaming" ||
+			prior.thinking_tokens === thinking_tokens
+		)
+			return;
+		const revision = prior.revision + 1;
+		const entity = yield* Decode(
+			ConversationItem,
+			{ ...prior, revision, thinking_tokens, updated_at: input.occurred_at },
+			"thinking-progress conversation item",
+		);
+		yield* transaction
+			.update(ConversationItems)
+			.set({ entity_json: JSON.stringify(entity) })
+			.where(eq(ConversationItems.item_id, entity.id));
+		yield* Emit(transaction, thread_id, input.occurred_at, {
+			type: "item_upsert",
+			item: entity,
+		});
+	});
+
+/**
  * Settles a displayed reasoning summary. An authoritative final public summary
  * replaces streamed deltas and can create a completed item when no delta arrived.
  * A completion without text remains a no-op when display was suppressed.
@@ -265,7 +340,7 @@ export const SettleStreamingBodies = (
 	transaction: DatabaseClient,
 	thread_id: string,
 	turn_id: string,
-	terminal_state: "completed" | "cancelled" | "failed" | "closed",
+	terminal_state: "completed" | "cancelled" | "failed" | "interrupted" | "closed",
 	occurred_at: string,
 ) =>
 	Effect.gen(function* () {

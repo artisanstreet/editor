@@ -204,4 +204,46 @@ describe("session policy run metadata", () => {
 
 		expect(metadata.model).toBe("claude-opus-5");
 	});
+
+	/** Claude names its window in the model id, and that spelling must survive. */
+	it("composes Claude's extended window onto the model id", () => {
+		const metadata = MakeSessionPolicyRunMetadata(
+			policy_for({ context_window: "[1m]", engine_id: "claude", model: "claude-opus-5" }),
+		);
+
+		expect(metadata.model).toBe("claude-opus-5[1m]");
+	});
+
+	/**
+	 * Codex resolves every GPT-5 model to 272K and takes a larger window as
+	 * configuration, so its extended option must reach the run as a config value
+	 * and must not touch the model id — `gpt-5.6-sol1m` is not a model Codex can
+	 * resolve, and a run asking for one fails to start at all.
+	 */
+	it("sends Codex's extended window as configuration and leaves its model id alone", () => {
+		const metadata = MakeSessionPolicyRunMetadata(policy_for({ context_window: "1m" }));
+
+		expect(metadata.model).toBe("gpt-5.6-sol");
+		expect(metadata.provider_options?.["codex.model_context_window"]).toBe("1050000");
+	});
+
+	it("sends no window configuration for the standard Codex window", () => {
+		const metadata = MakeSessionPolicyRunMetadata(policy_for());
+
+		expect(metadata.model).toBe("gpt-5.6-sol");
+		expect(metadata.provider_options?.["codex.model_context_window"]).toBeUndefined();
+	});
+
+	/**
+	 * A token written before configurable windows existed can only have meant a
+	 * suffix, so an unrecognized one is still appended rather than dropped —
+	 * dropping it would quietly downgrade those threads to the base window.
+	 */
+	it("still appends a window token the catalog no longer publishes", () => {
+		const metadata = MakeSessionPolicyRunMetadata(
+			policy_for({ context_window: "[2m]", engine_id: "claude", model: "claude-opus-5" }),
+		);
+
+		expect(metadata.model).toBe("claude-opus-5[2m]");
+	});
 });

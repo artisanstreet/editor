@@ -1,7 +1,7 @@
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { and, desc, eq } from "drizzle-orm";
 
-import { ConversationSubscriptionCursor } from "@artisan/protocol";
+import { ConversationSubscriptionCursor, type ThreadListItem } from "@artisan/protocol";
 
 import type {
 	ConversationPatch,
@@ -44,6 +44,13 @@ export class ConversationReadModel extends Context.Service<
 		readonly ReadSnapshot: (
 			thread_id: string,
 		) => Effect.Effect<ConversationAvailability, ConversationReadModelFailure>;
+		/**
+		 * Fast path for `thread.open` after ThreadReadModel.Lookup resolved the
+		 * thread. None means the conversation projection has not been created yet.
+		 */
+		readonly ReadOpenSnapshot: (
+			thread: ThreadListItem,
+		) => Effect.Effect<Option.Option<ConversationSnapshot>, ConversationReadModelFailure>;
 		readonly ReadPatches: (
 			thread_id: string,
 			after_sequence: number,
@@ -106,6 +113,20 @@ export const ConversationReadModelLive = Layer.effect(
 							};
 						return { status: "available" as const, snapshot };
 					}),
+				)
+				.pipe(
+					Effect.mapError((cause) => new ConversationReadModelFailure({ cause })),
+				) as any;
+		const ReadOpenSnapshot = (
+			thread: ThreadListItem,
+		): Effect.Effect<Option.Option<ConversationSnapshot>, ConversationReadModelFailure> =>
+			database.client
+				.transaction((transaction) =>
+					ReadConversationSnapshot(transaction, thread.thread_id).pipe(
+						Effect.map((snapshot) =>
+							snapshot === undefined ? Option.none() : Option.some(snapshot),
+						),
+					),
 				)
 				.pipe(
 					Effect.mapError((cause) => new ConversationReadModelFailure({ cause })),
@@ -198,6 +219,6 @@ export const ConversationReadModelLive = Layer.effect(
 						),
 				)
 				.pipe(Effect.mapError((cause) => new ConversationReadModelFailure({ cause })));
-		return { ReadCursor, ReadImageAttachment, ReadPatches, ReadSnapshot };
+		return { ReadCursor, ReadImageAttachment, ReadOpenSnapshot, ReadPatches, ReadSnapshot };
 	}),
 );

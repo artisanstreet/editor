@@ -126,9 +126,17 @@ async function setup(
 	engines: ReadonlyArray<Engine>,
 	input_database_path?: string,
 	thread_id = "thread_steering",
+	steer_acknowledgement_timeout_ms?: number,
 ) {
 	const database_path = input_database_path ?? (await make_database_path());
-	const runtime = make_backend_runtime({ database_path, engines, migrations_path });
+	const runtime = make_backend_runtime({
+		database_path,
+		engines,
+		migrations_path,
+		...(steer_acknowledgement_timeout_ms === undefined
+			? {}
+			: { steer_acknowledgement_timeout_ms }),
+	});
 	const journal = await runtime.runPromise(JournalStore);
 	const orchestrator = await runtime.runPromise(AgentOrchestrator);
 	await runtime.runPromise(
@@ -393,6 +401,66 @@ describe("thread follow-up steering routing", () => {
 		}
 	});
 
+	it("keeps a stalled steer unprojected until its definitive delivery failure queues it", async () => {
+		const steer_gate = await Effect.runPromise(Deferred.make<"released">());
+		const capable = make_engine("capable", "supported", true, steer_gate);
+		const context = await setup([capable.engine], undefined, "thread_stalled_steer");
+		try {
+			await start(context, "capable");
+			await wait_for(() => capable.opened.length === 1);
+			const accepted = await follow_up(context, "capable", "stalled_steer");
+			expect(routed(accepted.events)).toBeUndefined();
+			await wait_for(() => capable.commands.length === 1);
+			const pending_events = await context.runtime.runPromise(
+				context.journal.ReadCorrelatedEvents("stalled_steer"),
+			);
+			expect(
+				pending_events.some((event) => event.payload.type === "thread.message_steering"),
+			).toBe(false);
+			expect(
+				pending_events.some((event) => event.payload.type === "thread.message_queued"),
+			).toBe(false);
+			expect(routed(pending_events)).toBeUndefined();
+			expect(capable.opened).toHaveLength(1);
+			expect(capable.commands).toHaveLength(1);
+
+			await Effect.runPromise(Deferred.succeed(steer_gate, "released"));
+			await wait_for(async () =>
+				(
+					await context.runtime.runPromise(
+						context.journal.ReadCorrelatedEvents("stalled_steer"),
+					)
+				).some(
+					(event) =>
+						event.payload.type === "thread.message_routed" &&
+						event.payload.outcome === "queued" &&
+						event.payload.reason === "delivery_failed",
+				),
+			);
+			const events = await context.runtime.runPromise(
+				context.journal.ReadCorrelatedEvents("stalled_steer"),
+			);
+			expect(routed(events)).toMatchObject({ outcome: "queued", reason: "delivery_failed" });
+			expect(
+				events.find((event) => event.payload.type === "thread.message_queued")?.payload,
+			).toMatchObject({
+				reason: "delivery_failed",
+				text: "Also include the verification evidence",
+				working_directory: "C:/work",
+			});
+			expect(events.some((event) => event.payload.type === "thread.message_steering")).toBe(
+				false,
+			);
+			expect(capable.opened).toHaveLength(1);
+			expect(capable.commands).toHaveLength(1);
+			const duplicate = await follow_up(context, "capable", "stalled_steer");
+			expect(duplicate.status).toBe("duplicate");
+			expect(capable.commands).toHaveLength(1);
+		} finally {
+			await context.runtime.dispose();
+		}
+	});
+
 	it("queues disabled, unsupported, and engine-mismatched follow-ups", async () => {
 		for (const scenario of [
 			{ state: "supported" as const, disable: true, requested: "active", reason: "disabled" },
@@ -597,7 +665,7 @@ describe("thread follow-up steering routing", () => {
 		}
 	});
 
-	it("recovers an uncertain dispatching steer as one queued fallback without redelivery", async () => {
+	it("recovers a stranded dispatching steer by queueing and dispatching its exact accepted payload", async () => {
 		const steer_gate = await Effect.runPromise(Deferred.make<"released">());
 		const capable = make_engine("capable", "supported", false, steer_gate);
 		const context = await setup([capable.engine]);
@@ -636,33 +704,40 @@ describe("thread follow-up steering routing", () => {
 				).some(
 					(event) =>
 						event.payload.type === "thread.message_routed" &&
+						event.payload.outcome === "queued" &&
 						event.payload.reason === "delivery_failed",
 				),
 			);
-			await wait_for(() => capable.opened.length === 2);
 			const recovered_events = await restarted.runPromise(
 				(await restarted.runPromise(JournalStore)).ReadCorrelatedEvents("crashed_steer"),
 			);
+			expect(routed(recovered_events)).toMatchObject({
+				outcome: "queued",
+				reason: "delivery_failed",
+				type: "thread.message_routed",
+			});
 			expect(
-				recovered_events.filter((event) => event.payload.type === "thread.message_queued"),
-			).toHaveLength(1);
+				recovered_events.find((event) => event.payload.type === "thread.message_queued")
+					?.payload,
+			).toMatchObject({
+				reason: "delivery_failed",
+				text: "Also include the verification evidence",
+				working_directory: "C:/work",
+			});
 			expect(
 				recovered_events.some((event) => event.payload.type === "thread.message_steering"),
 			).toBe(false);
-			expect(capable.opened).toHaveLength(2);
-			expect(capable.opened[1]).not.toBe(pre_crash_run_id);
+			await wait_for(() => capable.opened.length === 2);
 			expect(
 				capable.open_inputs.filter(
 					(input) => input._tag === "resume" && input.artisan_run_id === pre_crash_run_id,
 				),
 			).toHaveLength(0);
-			expect(
-				capable.open_inputs.filter(
-					(input) =>
-						input._tag === "start" &&
-						input.initial_text.includes("Also include the verification evidence"),
-				),
-			).toHaveLength(1);
+			expect(capable.open_inputs[1]).toMatchObject({
+				_tag: "start",
+				artisan_run_id: expect.any(String),
+				initial_text: expect.stringContaining("Also include the verification evidence"),
+			});
 			expect(capable.commands).toHaveLength(1);
 			const duplicate = await restarted.runPromise(
 				restarted_orchestrator.Handle(

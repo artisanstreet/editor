@@ -185,32 +185,42 @@ export const MakeThreadQueryHandler = Effect.gen(function* () {
 			),
 		"thread.open.query": (query: ThreadOpenQueryEnvelope) =>
 			Effect.gen(function* () {
-				const exact_thread = yield* thread_read_model.Lookup(query.payload.thread_id);
-				const thread = Option.isSome(exact_thread)
-					? exact_thread
-					: query.payload.thread_id.startsWith("thread_")
-						? Option.none()
-						: yield* thread_read_model.Lookup(`thread_${query.payload.thread_id}`);
+				const thread = yield* thread_read_model.Lookup(query.payload.thread_id);
 				if (Option.isNone(thread)) {
 					return yield* Effect.fail(
 						ProjectionUnavailable("The thread projection is unavailable."),
 					);
 				}
-				const [session, work, availability] = yield* Effect.all(
+				const [session, work, snapshot] = yield* Effect.all(
 					[
 						orchestration.GetSession(thread.value.thread_id),
 						orchestration.GetWork(thread.value.thread_id),
-						conversation_read_model.ReadSnapshot(thread.value.thread_id),
+						conversation_read_model.ReadOpenSnapshot(thread.value).pipe(
+							Effect.flatMap(
+								Option.match({
+									onNone: () =>
+										conversation_read_model
+											.ReadSnapshot(thread.value.thread_id)
+											.pipe(
+												Effect.flatMap((availability) =>
+													availability.status === "available"
+														? Effect.succeed(availability.snapshot)
+														: Effect.fail(
+																ProjectionUnavailable(
+																	"The thread projection is unavailable.",
+																),
+															),
+												),
+											),
+									onSome: Effect.succeed,
+								}),
+							),
+						),
 					],
 					{ concurrency: "unbounded" },
 				);
-				if (availability.status !== "available") {
-					return yield* Effect.fail(
-						ProjectionUnavailable("The thread projection is unavailable."),
-					);
-				}
 				return yield* Envelope(query, "thread.open.query.result", {
-					conversation: availability.snapshot,
+					conversation: snapshot,
 					session,
 					thread: thread.value,
 					...(work ? { work } : {}),

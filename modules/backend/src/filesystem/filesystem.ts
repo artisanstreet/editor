@@ -32,20 +32,13 @@ export interface FilesystemEntry {
 	readonly size: number;
 }
 
-/** Describes one normalized path change from a bounded filesystem watch. */
+/** Describes one normalized path change from a filesystem watch. */
 export interface FilesystemPathChange {
 	readonly kind: "created" | "modified" | "deleted" | "renamed";
 	readonly path: string;
 }
 
-/** Reports how many watch changes were dropped when the bounded buffer filled. */
-export interface FilesystemWatchOverflow {
-	readonly dropped: number;
-	readonly kind: "overflow";
-}
-
-/** Represents a normalized path change or explicit bounded-buffer overflow. */
-export type FilesystemChange = FilesystemPathChange | FilesystemWatchOverflow;
+export type FilesystemChange = FilesystemPathChange;
 
 /** Provides project-root-confined filesystem operations. */
 export class Filesystem extends Context.Service<

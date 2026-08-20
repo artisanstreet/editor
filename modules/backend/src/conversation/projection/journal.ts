@@ -123,12 +123,22 @@ export const ApplyJournalEvent = (transaction: DatabaseClient, event: EventEnvel
 				event.thread_id,
 				{
 					...item_base(`work:${turn_id}`, turn_id, context, state, event.message_id),
-					...(state === "completed" || state === "failed" || state === "cancelled"
+					...(state === "completed" ||
+					state === "failed" ||
+					state === "interrupted" ||
+					state === "cancelled"
 						? { ended_at: event.sent_at }
 						: {}),
 					...(state === "failed" && payload.failure !== undefined
 						? { failure: payload.failure }
 						: {}),
+					/**
+					 * A run the host ended can be picked back up: native resume when
+					 * the token survived, and a replay of the original message when it
+					 * did not. Stated on every transition rather than only when true,
+					 * so a resumed session clears the offer as it reopens.
+					 */
+					resumable: state === "interrupted",
 					started_at: event.sent_at,
 					status: state,
 					title: "Agent work",

@@ -60,7 +60,10 @@ export {
 	make_unsupported_guidance_adapter,
 } from "./guidance/provider-mirrors";
 export {
+	CodexModelBehaviourExecutable,
+	CodexModelBehaviourExecutableUnavailable,
 	CodexModelBehaviourProbe,
+	make_codex_model_behaviour_executable_layer,
 	make_codex_model_behaviour_probe_layer,
 	type CodexModelBehaviourProbeAvailable,
 	type CodexModelBehaviourProbeOptions,
@@ -201,7 +204,6 @@ export {
 	make_thread_metadata_refinement_worker_layer,
 	ThreadMetadataRefinementWorker,
 	type ThreadMetadataRefinementSubmission,
-	type ThreadMetadataRefinementWorkerOptions,
 } from "./threads/thread-metadata-refinement-worker";
 export {
 	bound_thread_metadata_refiner_input,
@@ -369,6 +371,12 @@ export {
 	type PrivateFilePermissionsSnapshot,
 } from "./model-behaviour/private-file-permissions";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
+export {
+	OrchestrationRecoveryCoordinator,
+	OrchestrationRecoveryCoordinatorLive,
+	OrchestrationRecoveryGate,
+	OrchestrationRecoveryGateLive,
+} from "./orchestration/recovery-gate";
 export { ProductInstructions, ProductInstructionsLive } from "./orchestration/product-instructions";
 export {
 	compaction_summary_template,
@@ -444,7 +452,6 @@ export {
 	type FilesystemEntryKind,
 	type FilesystemOperation,
 	type FilesystemPathChange,
-	type FilesystemWatchOverflow,
 } from "./filesystem/filesystem";
 export { make_node_filesystem_layer } from "./filesystem/node-filesystem";
 export {
@@ -569,11 +576,7 @@ export {
 	NodePreviewHealthProbeLive,
 	make_node_preview_health_probe_layer,
 } from "./preview/node-preview-health-probe";
-export {
-	make_preview_target_layer,
-	PreviewTargetClockLive,
-	type PreviewTargetOptions,
-} from "./preview/target-service";
+export { make_preview_target_layer, PreviewTargetClockLive } from "./preview/target-service";
 export {
 	RichLinkAssetStore,
 	RichLinkAssetStoreError,

@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Layer, Option } from "effect";
+import { Effect, Exit, Layer, Option } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CommandEnvelope, EventPayload, ProjectRef } from "@artisan/protocol";
@@ -19,7 +19,10 @@ import {
 import { Database } from "../../modules/backend/src/persistence/database";
 import { ProjectCatalog } from "../../modules/backend/src/projects/project-catalog";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
-import { ThreadProjectAffinityEvidence } from "../../modules/backend/src/persistence/tables";
+import {
+	JournalConsumerCheckpoints,
+	ThreadProjectAffinityEvidence,
+} from "../../modules/backend/src/persistence/tables";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
@@ -124,6 +127,198 @@ afterEach(async () => {
 });
 
 describe("thread project affinity coordinator", () => {
+	it("rejects a malformed historical stream before trusting notifier-driven tails", async () => {
+		const database_path = await make_database_path();
+		const preparation_runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			await preparation_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					yield* database.client.run(
+						"INSERT INTO event_streams (stream_id, last_sequence) VALUES ('gap_history', 3)",
+					);
+					yield* database.client.run(`
+						INSERT INTO journal_events (
+							stream_id, stream_sequence, schema_version, event_id, correlation_id,
+							causation_id, origin, event_type, thread_id, payload_json, occurred_at
+						) VALUES
+							('gap_history', 1, 1, 'gap-history-1', 'gap-correlation-1',
+								'gap-causation-1', 'backend', 'thread.created', 'thread_gap_history',
+								'{"title":"Gap history","type":"thread.created"}', '2026-08-15T00:00:00.000Z'),
+							('gap_history', 3, 1, 'gap-history-3', 'gap-correlation-3',
+								'gap-causation-3', 'backend', 'thread.created', 'thread_gap_history',
+								'{"title":"Gap history","type":"thread.created"}', '2026-08-15T00:00:00.000Z')
+					`);
+				}),
+			);
+		} finally {
+			await preparation_runtime.dispose();
+		}
+
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			project_locator: make_locator_layer(),
+		});
+
+		try {
+			const exits = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadProjectAffinityCoordinator;
+					const database = yield* Database;
+					const first = yield* coordinator.CatchUp.pipe(Effect.exit);
+					const second = yield* coordinator.CatchUp.pipe(Effect.exit);
+
+					return {
+						checkpoints: yield* database.client
+							.select()
+							.from(JournalConsumerCheckpoints),
+						first,
+						second,
+					};
+				}),
+			);
+
+			expect([exits.first, exits.second].every(Exit.isFailure)).toBe(true);
+			expect(exits.checkpoints).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("uses a persisted completed checkpoint after restart while still consuming later tails", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			project_locator: make_locator_layer(),
+		});
+
+		try {
+			await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadProjectAffinityCoordinator;
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+					yield* router.Route(
+						make_command("create_affinity_checkpoint", {
+							title: "Checkpointed affinity evidence",
+							type: "thread.create",
+						}),
+					);
+					yield* append_run(journal, ProjectAlpha, "checkpoint_initial");
+					yield* coordinator.CatchUp;
+					expect(
+						Option.isSome(
+							yield* journal.ReadConsumerCheckpoint("thread-project-affinity"),
+						),
+					).toBe(true);
+				}),
+			);
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const preparation_runtime = make_backend_runtime({ database_path, migrations_path });
+		try {
+			await preparation_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					yield* database.client.run(
+						"UPDATE journal_events SET payload_json = '{malformed history' WHERE sequence = 1",
+					);
+				}),
+			);
+		} finally {
+			await preparation_runtime.dispose();
+		}
+
+		const second_runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			project_locator: make_locator_layer(),
+		});
+		try {
+			const result = await second_runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadProjectAffinityCoordinator;
+					const database = yield* Database;
+					const journal = yield* JournalStore;
+					yield* append_run(journal, ProjectBeta, "checkpoint_tail");
+					yield* coordinator.CatchUp;
+					return {
+						evidence: yield* database.client
+							.select()
+							.from(ThreadProjectAffinityEvidence),
+					};
+				}).pipe(Effect.timeout("2 seconds")),
+			);
+			expect(
+				result.evidence.some((entry) => entry.project_id === ProjectBeta.project_id),
+			).toBe(true);
+		} finally {
+			await second_runtime.dispose();
+		}
+	});
+
+	it("commits one monotonic checkpoint after sequential batch observation", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const journal = yield* JournalStore;
+					yield* database.client.run(
+						"CREATE TABLE checkpoint_write_counts (count integer NOT NULL)",
+					);
+					yield* database.client.run(
+						"INSERT INTO checkpoint_write_counts (count) VALUES (0)",
+					);
+					yield* database.client.run(`
+						CREATE TRIGGER count_checkpoint_insert
+						AFTER INSERT ON journal_consumer_checkpoints
+						BEGIN
+							UPDATE checkpoint_write_counts SET count = count + 1;
+						END;
+					`);
+					yield* journal.WriteConsumerCheckpoint("checkpoint-batch-test", 3);
+					const write_rows = yield* database.client.all<{ readonly count: number }>(
+						"SELECT count FROM checkpoint_write_counts",
+					);
+					const checkpoint =
+						yield* journal.ReadConsumerCheckpoint("checkpoint-batch-test");
+					yield* journal.WriteConsumerCheckpoint("checkpoint-batch-test", 0);
+
+					return {
+						checkpoint,
+						checkpoint_after_stale_write:
+							yield* journal.ReadConsumerCheckpoint("checkpoint-batch-test"),
+						write_rows,
+					};
+				}),
+			);
+
+			const coordinator_source = await readFile(
+				new URL(
+					"../../modules/backend/src/threads/thread-project-affinity-coordinator.ts",
+					import.meta.url,
+				),
+				"utf8",
+			);
+
+			expect(result.write_rows).toEqual([{ count: 1 }]);
+			expect(Option.isSome(result.checkpoint)).toBe(true);
+			expect(result.checkpoint).toEqual(result.checkpoint_after_stale_write);
+			expect(coordinator_source).toMatch(
+				/for \(const event of events\) yield\* ObserveEvent\(event\);[\s\S]*?WriteConsumerCheckpoint\(consumer_id, latest_journal_sequence\)/,
+			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("moves through linked, suggested, and rehomed states as recent ownership shifts", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({

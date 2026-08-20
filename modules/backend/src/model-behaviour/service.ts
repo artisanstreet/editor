@@ -1,6 +1,18 @@
 import { createHash } from "node:crypto";
 
-import { Context, Data, Effect, Layer, Option, Schema, Semaphore } from "effect";
+import {
+	Context,
+	Data,
+	Deferred,
+	Effect,
+	Exit,
+	Layer,
+	Option,
+	Ref,
+	Schema,
+	Scope,
+	Semaphore,
+} from "effect";
 
 import {
 	ModelBehaviourSnapshot,
@@ -28,6 +40,7 @@ import {
 	type ModelBehaviourProviderApplyResult,
 	type ModelBehaviourProviderError,
 	type ModelBehaviourProviderObservation,
+	type ModelBehaviourProviderRegistrySnapshot,
 } from "./provider";
 import { hash_model_behaviour_value } from "./value";
 
@@ -347,372 +360,530 @@ function same_value(left: ModelBehaviourValue, right: ModelBehaviourValue) {
 	return hash_model_behaviour_value(left) === hash_model_behaviour_value(right);
 }
 
-/** Builds the canonical Model Behaviour service over repositories and provider adapters. */
-export const ModelBehaviourServiceLive = Layer.effect(
-	ModelBehaviourService,
-	Effect.gen(function* () {
-		const repository = yield* ModelBehaviourRepository;
-		const providers = yield* ModelBehaviourProviderRegistry;
-		const metadata = yield* RuntimeMetadata;
-		const lock = yield* Semaphore.make(1);
+type RefreshResult = Deferred.Deferred<
+	typeof ModelBehaviourSnapshot.Type,
+	ModelBehaviourServiceError
+>;
 
-		const Snapshot = (read: ModelBehaviourReadResult) =>
-			Schema.decodeUnknownEffect(ModelBehaviourSnapshot, {
-				onExcessProperty: "error",
-			})({
-				capabilities: providers.Capabilities,
-				providers: read.provider_states,
-				registry_version: 1,
-				settings: read.settings,
-			}).pipe(
+type RefreshState =
+	| { readonly _tag: "Closed" }
+	| { readonly _tag: "Open"; readonly flight: Option.Option<RefreshResult> };
+
+type RefreshAdmission =
+	| { readonly _tag: "Claimed"; readonly result: RefreshResult }
+	| { readonly _tag: "Closed" }
+	| { readonly _tag: "Existing"; readonly result: RefreshResult };
+
+export interface ModelBehaviourServiceOptions {
+	/** Deterministic lifecycle seam after ownership is published and before scope admission. */
+	readonly OnRefreshClaimed?: Effect.Effect<void>;
+	/** Deterministic lifecycle seam immediately before result publication. */
+	readonly OnRefreshPublishing?: Effect.Effect<void>;
+}
+
+/** Builds the canonical Model Behaviour service over repositories and provider adapters. */
+export const make_model_behaviour_service_layer = (options: ModelBehaviourServiceOptions = {}) =>
+	Layer.effect(
+		ModelBehaviourService,
+		Effect.gen(function* () {
+			const repository = yield* ModelBehaviourRepository;
+			const registry = yield* ModelBehaviourProviderRegistry;
+			const metadata = yield* RuntimeMetadata;
+			const scope = yield* Scope.Scope;
+			const lock = yield* Semaphore.make(1);
+			const refresh = yield* Ref.make<RefreshState>({ _tag: "Open", flight: Option.none() });
+			const AwaitRegistry = registry.Await.pipe(
 				Effect.mapError(
 					() =>
 						new ModelBehaviourInvariantError({
-							message: "The Model Behaviour snapshot is invalid",
+							message: "The Model Behaviour provider registry is unavailable",
 						}),
 				),
 			);
 
-		const ReadMutationResult = (
-			commit: Pick<ModelBehaviourCommitResult, "events" | "status">,
-		) =>
-			Effect.gen(function* () {
-				return {
-					events: commit.events,
-					snapshot: yield* Snapshot(yield* repository.Read),
-					status: commit.status,
-				};
-			});
-
-		const Duplicate = (events: ReadonlyArray<ModelBehaviourEvent>) =>
-			ReadMutationResult({ events, status: "duplicate" });
-
-		const ReconcileRead = Effect.gen(function* () {
-			const read = yield* repository.Read;
-			const next_states = yield* Effect.forEach(providers.Providers, (provider) => {
-				const setting = find_setting(read, provider.mapping.setting_id);
-
-				if (setting._tag === "None") {
-					return Effect.fail(
-						new ModelBehaviourInvariantError({
-							message: `Canonical setting ${provider.mapping.setting_id} is missing`,
-						}),
-					);
-				}
-
-				return ObserveProvider(
-					provider,
-					setting.value.value,
-					find_provider_state(read, provider),
-				);
-			});
-			const changed = next_states.filter((state) => {
-				const previous = read.provider_states.find(
-					(candidate) =>
-						candidate.provider_id === state.provider_id &&
-						candidate.setting_id === state.setting_id,
-				);
-
-				return state_changed(previous, state);
-			});
-
-			if (changed.length > 0) {
-				const message_id = yield* metadata.MakeId("message");
-				const sent_at = yield* metadata.Now;
-
-				yield* repository.Commit({
-					operation: operation(
-						{ message_id, origin: "backend", sent_at },
-						"model_behaviour.query.reconcile",
-						changed,
-					),
-					provider_states: changed,
-				});
-			}
-
-			return yield* Snapshot(yield* repository.Read);
-		});
-
-		const UpdateUnlocked = (input: ModelBehaviourUpdateRequest & ModelBehaviourMutationTrace) =>
-			Effect.gen(function* () {
-				const op = operation(input, "model_behaviour.update", {
-					setting_id: input.setting_id,
-					value: input.value,
-				});
-				const preflight = yield* repository.Preflight(op);
-
-				if (preflight._tag === "Duplicate") {
-					return yield* Duplicate(preflight.events);
-				}
-
-				const capable = providers.Providers.filter(
-					(provider) =>
-						provider.mapping.setting_id === input.setting_id && is_writeable(provider),
-				);
-
-				if (capable.length === 0) {
-					return yield* new ModelBehaviourConflict({
-						code: "no_supported_provider",
-						message: "No installed provider supports this Model Behaviour control",
-					});
-				}
-
-				const read = yield* repository.Read;
-				const setting = find_setting(read, input.setting_id);
-
-				if (setting._tag === "None") {
-					return yield* new ModelBehaviourInvariantError({
-						message: `Canonical setting ${input.setting_id} is missing`,
-					});
-				}
-
-				const provider_states = yield* Effect.forEach(
-					providers.Providers.filter(
-						(provider) => provider.mapping.setting_id === input.setting_id,
-					),
-					(provider) =>
-						ApplyProvider(
-							provider,
-							input.value,
-							input.message_id,
-							find_provider_state(read, provider),
-						),
-				);
-				const committed = yield* repository.Commit({
-					operation: op,
-					provider_states,
-					...(same_value(setting.value.value, input.value)
-						? {}
-						: {
-								setting_update: {
-									setting_id: input.setting_id,
-									value: input.value,
-								},
+			const Snapshot = (
+				providers: ModelBehaviourProviderRegistrySnapshot,
+				read: ModelBehaviourReadResult,
+			) =>
+				Schema.decodeUnknownEffect(ModelBehaviourSnapshot, {
+					onExcessProperty: "error",
+				})({
+					capabilities: providers.Capabilities,
+					providers: read.provider_states,
+					registry_version: 1,
+					settings: read.settings,
+				}).pipe(
+					Effect.mapError(
+						() =>
+							new ModelBehaviourInvariantError({
+								message: "The Model Behaviour snapshot is invalid",
 							}),
+					),
+				);
+
+			const ReadMutationResult = (
+				providers: ModelBehaviourProviderRegistrySnapshot,
+				commit: Pick<ModelBehaviourCommitResult, "events" | "status">,
+			) =>
+				Effect.gen(function* () {
+					return {
+						events: commit.events,
+						snapshot: yield* Snapshot(providers, yield* repository.Read),
+						status: commit.status,
+					};
 				});
 
-				return yield* ReadMutationResult(committed);
-			});
+			const Duplicate = (
+				providers: ModelBehaviourProviderRegistrySnapshot,
+				events: ReadonlyArray<ModelBehaviourEvent>,
+			) => ReadMutationResult(providers, { events, status: "duplicate" });
 
-		const ResolveDriftUnlocked = (
-			input: ModelBehaviourDriftResolutionRequest & ModelBehaviourMutationTrace,
-		) =>
-			Effect.gen(function* () {
-				const payload: ModelBehaviourDriftResolutionRequest = {
-					action: input.action,
-					observed_hash: input.observed_hash,
-					provider_id: input.provider_id,
-					setting_id: input.setting_id,
-				};
-				const op = operation(input, "model_behaviour.drift.resolve", payload);
-				const preflight = yield* repository.Preflight(op);
+			const ReconcileRead = (providers: ModelBehaviourProviderRegistrySnapshot) =>
+				Effect.gen(function* () {
+					const read = yield* repository.Read;
+					const next_states = yield* Effect.forEach(
+						providers.Providers,
+						(provider) => {
+							const setting = find_setting(read, provider.mapping.setting_id);
 
-				if (preflight._tag === "Duplicate") {
-					return yield* Duplicate(preflight.events);
-				}
+							if (setting._tag === "None") {
+								return Effect.fail(
+									new ModelBehaviourInvariantError({
+										message: `Canonical setting ${provider.mapping.setting_id} is missing`,
+									}),
+								);
+							}
 
-				const provider_option = providers.Find(input.provider_id, input.setting_id);
+							return ObserveProvider(
+								provider,
+								setting.value.value,
+								find_provider_state(read, provider),
+							);
+						},
+						{ concurrency: "unbounded" },
+					);
+					const changed = next_states.filter((state) => {
+						const previous = read.provider_states.find(
+							(candidate) =>
+								candidate.provider_id === state.provider_id &&
+								candidate.setting_id === state.setting_id,
+						);
 
-				if (provider_option._tag === "None") {
-					return yield* new ModelBehaviourConflict({
-						code: "provider_not_found",
-						message: `Provider ${input.provider_id} does not own this control`,
+						return state_changed(previous, state);
 					});
-				}
 
-				const provider = provider_option.value;
+					if (changed.length > 0) {
+						const message_id = yield* metadata.MakeId("message");
+						const sent_at = yield* metadata.Now;
 
-				if (!is_writeable(provider)) {
-					return yield* new ModelBehaviourConflict({
-						code: "provider_not_supported",
-						message: `Provider ${input.provider_id} cannot reconcile this control`,
+						yield* repository.Commit({
+							operation: operation(
+								{ message_id, origin: "backend", sent_at },
+								"model_behaviour.query.reconcile",
+								changed,
+							),
+							provider_states: changed,
+						});
+					}
+
+					return yield* Snapshot(providers, yield* repository.Read);
+				});
+
+			const UpdateUnlocked = (
+				providers: ModelBehaviourProviderRegistrySnapshot,
+				input: ModelBehaviourUpdateRequest & ModelBehaviourMutationTrace,
+			) =>
+				Effect.gen(function* () {
+					const op = operation(input, "model_behaviour.update", {
+						setting_id: input.setting_id,
+						value: input.value,
 					});
-				}
+					const preflight = yield* repository.Preflight(op);
 
-				const read = yield* repository.Read;
-				const setting = find_setting(read, input.setting_id);
+					if (preflight._tag === "Duplicate") {
+						return yield* Duplicate(providers, preflight.events);
+					}
 
-				if (setting._tag === "None") {
-					return yield* new ModelBehaviourInvariantError({
-						message: `Canonical setting ${input.setting_id} is missing`,
+					const capable = providers.Providers.filter(
+						(provider) =>
+							provider.mapping.setting_id === input.setting_id &&
+							is_writeable(provider),
+					);
+
+					if (capable.length === 0) {
+						return yield* new ModelBehaviourConflict({
+							code: "no_supported_provider",
+							message: "No installed provider supports this Model Behaviour control",
+						});
+					}
+
+					const read = yield* repository.Read;
+					const setting = find_setting(read, input.setting_id);
+
+					if (setting._tag === "None") {
+						return yield* new ModelBehaviourInvariantError({
+							message: `Canonical setting ${input.setting_id} is missing`,
+						});
+					}
+
+					const provider_states = yield* Effect.forEach(
+						providers.Providers.filter(
+							(provider) => provider.mapping.setting_id === input.setting_id,
+						),
+						(provider) =>
+							ApplyProvider(
+								provider,
+								input.value,
+								input.message_id,
+								find_provider_state(read, provider),
+							),
+					);
+					const committed = yield* repository.Commit({
+						operation: op,
+						provider_states,
+						...(same_value(setting.value.value, input.value)
+							? {}
+							: {
+									setting_update: {
+										setting_id: input.setting_id,
+										value: input.value,
+									},
+								}),
 					});
-				}
 
-				const inspected = yield* InspectProvider(provider);
+					return yield* ReadMutationResult(providers, committed);
+				});
 
-				if (inspected._tag === "Failed") {
-					return yield* new ModelBehaviourConflict({
-						code: "provider_unavailable",
-						message: `Provider ${input.provider_id} could not be inspected`,
+			const ResolveDriftUnlocked = (
+				providers: ModelBehaviourProviderRegistrySnapshot,
+				input: ModelBehaviourDriftResolutionRequest & ModelBehaviourMutationTrace,
+			) =>
+				Effect.gen(function* () {
+					const payload: ModelBehaviourDriftResolutionRequest = {
+						action: input.action,
+						observed_hash: input.observed_hash,
+						provider_id: input.provider_id,
+						setting_id: input.setting_id,
+					};
+					const op = operation(input, "model_behaviour.drift.resolve", payload);
+					const preflight = yield* repository.Preflight(op);
+
+					if (preflight._tag === "Duplicate") {
+						return yield* Duplicate(providers, preflight.events);
+					}
+
+					const provider_option = providers.Find(input.provider_id, input.setting_id);
+
+					if (provider_option._tag === "None") {
+						return yield* new ModelBehaviourConflict({
+							code: "provider_not_found",
+							message: `Provider ${input.provider_id} does not own this control`,
+						});
+					}
+
+					const provider = provider_option.value;
+
+					if (!is_writeable(provider)) {
+						return yield* new ModelBehaviourConflict({
+							code: "provider_not_supported",
+							message: `Provider ${input.provider_id} cannot reconcile this control`,
+						});
+					}
+
+					const read = yield* repository.Read;
+					const setting = find_setting(read, input.setting_id);
+
+					if (setting._tag === "None") {
+						return yield* new ModelBehaviourInvariantError({
+							message: `Canonical setting ${input.setting_id} is missing`,
+						});
+					}
+
+					const inspected = yield* InspectProvider(provider);
+
+					if (inspected._tag === "Failed") {
+						return yield* new ModelBehaviourConflict({
+							code: "provider_unavailable",
+							message: `Provider ${input.provider_id} could not be inspected`,
+						});
+					}
+
+					const observation = inspected.observation;
+
+					if (observation.observed_hash !== input.observed_hash) {
+						return yield* new ModelBehaviourConflict({
+							code: "stale_observation",
+							message: `Provider ${input.provider_id} changed after drift was shown`,
+						});
+					}
+
+					const previous = find_provider_state(read, provider);
+
+					if (input.action === "ignore") {
+						const committed = yield* repository.Commit({
+							operation: op,
+							provider_states: [
+								{
+									...(previous?.applied_hash === undefined
+										? {}
+										: { applied_hash: previous.applied_hash }),
+									...(previous?.backup_path === undefined
+										? {}
+										: { backup_path: previous.backup_path }),
+									ignored_drift_hash: observation.observed_hash,
+									...(provider.mapping.native_key === undefined
+										? {}
+										: { native_key: provider.mapping.native_key }),
+									observed_hash: observation.observed_hash,
+									provider_id: provider.mapping.provider_id,
+									setting_id: provider.mapping.setting_id,
+									status: "drift_ignored",
+									target_path: observation.target_path,
+								},
+							],
+						});
+
+						return yield* ReadMutationResult(providers, committed);
+					}
+
+					const desired =
+						input.action === "import" ? observation.value : setting.value.value;
+					const source_result = yield* provider
+						.Apply({
+							...(observation.document_hash === undefined
+								? {}
+								: { expected_document_hash: observation.document_hash }),
+							expected_observed_hash: observation.observed_hash,
+							operation_id: input.message_id,
+							value: desired,
+						})
+						.pipe(
+							Effect.map((result) => ({ _tag: "Applied" as const, result })),
+							Effect.catch((error) =>
+								Effect.succeed({ _tag: "Failed" as const, error }),
+							),
+						);
+
+					if (
+						source_result._tag === "Applied" &&
+						source_result.result._tag === "Changed"
+					) {
+						return yield* new ModelBehaviourConflict({
+							code: "stale_observation",
+							message: `Provider ${input.provider_id} changed during reconciliation`,
+						});
+					}
+
+					if (input.action === "import" && source_result._tag === "Failed") {
+						return yield* new ModelBehaviourConflict({
+							code: "provider_unavailable",
+							message: `Provider ${input.provider_id} could not be verified for import`,
+						});
+					}
+
+					const source_state =
+						source_result._tag === "Failed"
+							? failed_state(provider, source_result.error, previous, observation)
+							: synchronized_state(provider, desired, source_result.result, previous);
+					const other_states =
+						input.action === "import"
+							? yield* Effect.forEach(
+									providers.Providers.filter(
+										(candidate) =>
+											candidate !== provider &&
+											candidate.mapping.setting_id === input.setting_id,
+									),
+									(candidate) =>
+										ApplyProvider(
+											candidate,
+											desired,
+											input.message_id,
+											find_provider_state(read, candidate),
+										),
+								)
+							: [];
+					const committed = yield* repository.Commit({
+						operation: op,
+						provider_states: [source_state, ...other_states],
+						...(input.action === "import" && !same_value(setting.value.value, desired)
+							? {
+									setting_update: {
+										setting_id: input.setting_id,
+										value: desired,
+									},
+								}
+							: {}),
 					});
-				}
 
-				const observation = inspected.observation;
+					return yield* ReadMutationResult(providers, committed);
+				});
 
-				if (observation.observed_hash !== input.observed_hash) {
-					return yield* new ModelBehaviourConflict({
-						code: "stale_observation",
-						message: `Provider ${input.provider_id} changed after drift was shown`,
-					});
-				}
+			const RetrySyncUnlocked = (
+				providers: ModelBehaviourProviderRegistrySnapshot,
+				input: ModelBehaviourRetryRequest & ModelBehaviourMutationTrace,
+			) =>
+				Effect.gen(function* () {
+					const payload: ModelBehaviourRetryRequest = {
+						provider_id: input.provider_id,
+						setting_id: input.setting_id,
+					};
+					const op = operation(input, "model_behaviour.sync.retry", payload);
+					const preflight = yield* repository.Preflight(op);
 
-				const previous = find_provider_state(read, provider);
+					if (preflight._tag === "Duplicate") {
+						return yield* Duplicate(providers, preflight.events);
+					}
 
-				if (input.action === "ignore") {
+					const provider_option = providers.Find(input.provider_id, input.setting_id);
+
+					if (provider_option._tag === "None") {
+						return yield* new ModelBehaviourConflict({
+							code: "provider_not_found",
+							message: `Provider ${input.provider_id} does not own this control`,
+						});
+					}
+
+					const provider = provider_option.value;
+
+					if (!is_writeable(provider)) {
+						return yield* new ModelBehaviourConflict({
+							code: "provider_not_supported",
+							message: `Provider ${input.provider_id} cannot reconcile this control`,
+						});
+					}
+
+					const read = yield* repository.Read;
+					const setting = find_setting(read, input.setting_id);
+
+					if (setting._tag === "None") {
+						return yield* new ModelBehaviourInvariantError({
+							message: `Canonical setting ${input.setting_id} is missing`,
+						});
+					}
+
 					const committed = yield* repository.Commit({
 						operation: op,
 						provider_states: [
-							{
-								...(previous?.applied_hash === undefined
-									? {}
-									: { applied_hash: previous.applied_hash }),
-								...(previous?.backup_path === undefined
-									? {}
-									: { backup_path: previous.backup_path }),
-								ignored_drift_hash: observation.observed_hash,
-								...(provider.mapping.native_key === undefined
-									? {}
-									: { native_key: provider.mapping.native_key }),
-								observed_hash: observation.observed_hash,
-								provider_id: provider.mapping.provider_id,
-								setting_id: provider.mapping.setting_id,
-								status: "drift_ignored",
-								target_path: observation.target_path,
-							},
+							yield* ApplyProvider(
+								provider,
+								setting.value.value,
+								input.message_id,
+								find_provider_state(read, provider),
+							),
 						],
 					});
 
-					return yield* ReadMutationResult(committed);
-				}
+					return yield* ReadMutationResult(providers, committed);
+				});
 
-				const desired = input.action === "import" ? observation.value : setting.value.value;
-				const source_result = yield* provider
-					.Apply({
-						...(observation.document_hash === undefined
-							? {}
-							: { expected_document_hash: observation.document_hash }),
-						expected_observed_hash: observation.observed_hash,
-						operation_id: input.message_id,
-						value: desired,
-					})
-					.pipe(
-						Effect.map((result) => ({ _tag: "Applied" as const, result })),
-						Effect.catch((error) => Effect.succeed({ _tag: "Failed" as const, error })),
+			const CompleteRefresh = (
+				result: RefreshResult,
+				exit: Exit.Exit<typeof ModelBehaviourSnapshot.Type, ModelBehaviourServiceError>,
+			) =>
+				Effect.gen(function* () {
+					yield* options.OnRefreshPublishing ?? Effect.void;
+					yield* Effect.gen(function* () {
+						yield* Deferred.complete(result, exit);
+						yield* Ref.update(refresh, (current) =>
+							current._tag === "Open" &&
+							Option.isSome(current.flight) &&
+							current.flight.value === result
+								? ({ _tag: "Open", flight: Option.none() } satisfies RefreshState)
+								: current,
+						);
+					}).pipe(Effect.uninterruptible);
+				});
+			const CloseRefresh = Effect.uninterruptible(
+				Effect.gen(function* () {
+					const current = yield* Ref.modify(refresh, (state) =>
+						state._tag === "Closed"
+							? ([Option.none<RefreshResult>(), state] as const)
+							: ([state.flight, { _tag: "Closed" } as const] as const),
 					);
-
-				if (source_result._tag === "Applied" && source_result.result._tag === "Changed") {
-					return yield* new ModelBehaviourConflict({
-						code: "stale_observation",
-						message: `Provider ${input.provider_id} changed during reconciliation`,
-					});
-				}
-
-				if (input.action === "import" && source_result._tag === "Failed") {
-					return yield* new ModelBehaviourConflict({
-						code: "provider_unavailable",
-						message: `Provider ${input.provider_id} could not be verified for import`,
-					});
-				}
-
-				const source_state =
-					source_result._tag === "Failed"
-						? failed_state(provider, source_result.error, previous, observation)
-						: synchronized_state(provider, desired, source_result.result, previous);
-				const other_states =
-					input.action === "import"
-						? yield* Effect.forEach(
-								providers.Providers.filter(
-									(candidate) =>
-										candidate !== provider &&
-										candidate.mapping.setting_id === input.setting_id,
+					if (Option.isSome(current)) {
+						const interrupted = yield* Effect.exit(Effect.interrupt);
+						yield* Deferred.complete(current.value, interrupted);
+					}
+				}),
+			);
+			yield* Effect.addFinalizer(() => CloseRefresh);
+			const StartRefresh = (providers: ModelBehaviourProviderRegistrySnapshot) =>
+				Effect.uninterruptibleMask((restore) =>
+					Effect.gen(function* () {
+						const candidate = yield* Deferred.make<
+							typeof ModelBehaviourSnapshot.Type,
+							ModelBehaviourServiceError
+						>();
+						const admission = yield* Ref.modify<RefreshState, RefreshAdmission>(
+							refresh,
+							(current) => {
+								if (current._tag === "Closed") {
+									return [{ _tag: "Closed" } as const, current] as const;
+								}
+								if (Option.isSome(current.flight)) {
+									return [
+										{ _tag: "Existing", result: current.flight.value } as const,
+										current,
+									] as const;
+								}
+								return [
+									{ _tag: "Claimed", result: candidate } as const,
+									{ _tag: "Open", flight: Option.some(candidate) } as const,
+								] as const;
+							},
+						);
+						if (admission._tag === "Closed") {
+							return yield* restore(Effect.interrupt);
+						}
+						if (admission._tag === "Claimed") {
+							yield* options.OnRefreshClaimed ?? Effect.void;
+							const Drive = Effect.uninterruptibleMask((restore_owner) =>
+								Effect.gen(function* () {
+									const exit = yield* restore_owner(
+										Semaphore.withPermit(lock)(ReconcileRead(providers)),
+									).pipe(Effect.exit);
+									yield* restore_owner(CompleteRefresh(candidate, exit));
+								}),
+							);
+							const still_open = yield* Ref.get(refresh).pipe(
+								Effect.map(
+									(current) =>
+										current._tag === "Open" &&
+										Option.isSome(current.flight) &&
+										current.flight.value === candidate,
 								),
-								(candidate) =>
-									ApplyProvider(
-										candidate,
-										desired,
-										input.message_id,
-										find_provider_state(read, candidate),
-									),
-							)
-						: [];
-				const committed = yield* repository.Commit({
-					operation: op,
-					provider_states: [source_state, ...other_states],
-					...(input.action === "import" && !same_value(setting.value.value, desired)
-						? {
-								setting_update: {
-									setting_id: input.setting_id,
-									value: desired,
-								},
+							);
+							if (still_open) {
+								yield* Effect.forkIn(Drive, scope);
 							}
-						: {}),
-				});
+						}
 
-				return yield* ReadMutationResult(committed);
-			});
+						return yield* restore(Deferred.await(admission.result));
+					}),
+				);
 
-		const RetrySyncUnlocked = (
-			input: ModelBehaviourRetryRequest & ModelBehaviourMutationTrace,
-		) =>
-			Effect.gen(function* () {
-				const payload: ModelBehaviourRetryRequest = {
-					provider_id: input.provider_id,
-					setting_id: input.setting_id,
-				};
-				const op = operation(input, "model_behaviour.sync.retry", payload);
-				const preflight = yield* repository.Preflight(op);
-
-				if (preflight._tag === "Duplicate") {
-					return yield* Duplicate(preflight.events);
-				}
-
-				const provider_option = providers.Find(input.provider_id, input.setting_id);
-
-				if (provider_option._tag === "None") {
-					return yield* new ModelBehaviourConflict({
-						code: "provider_not_found",
-						message: `Provider ${input.provider_id} does not own this control`,
-					});
-				}
-
-				const provider = provider_option.value;
-
-				if (!is_writeable(provider)) {
-					return yield* new ModelBehaviourConflict({
-						code: "provider_not_supported",
-						message: `Provider ${input.provider_id} cannot reconcile this control`,
-					});
-				}
-
-				const read = yield* repository.Read;
-				const setting = find_setting(read, input.setting_id);
-
-				if (setting._tag === "None") {
-					return yield* new ModelBehaviourInvariantError({
-						message: `Canonical setting ${input.setting_id} is missing`,
-					});
-				}
-
-				const committed = yield* repository.Commit({
-					operation: op,
-					provider_states: [
-						yield* ApplyProvider(
-							provider,
-							setting.value.value,
-							input.message_id,
-							find_provider_state(read, provider),
+			return {
+				Get: AwaitRegistry.pipe(Effect.flatMap(StartRefresh)),
+				ResolveDrift: (input) =>
+					AwaitRegistry.pipe(
+						Effect.flatMap((providers) =>
+							Semaphore.withPermit(lock)(ResolveDriftUnlocked(providers, input)),
 						),
-					],
-				});
+					),
+				RetrySync: (input) =>
+					AwaitRegistry.pipe(
+						Effect.flatMap((providers) =>
+							Semaphore.withPermit(lock)(RetrySyncUnlocked(providers, input)),
+						),
+					),
+				Update: (input) =>
+					AwaitRegistry.pipe(
+						Effect.flatMap((providers) =>
+							Semaphore.withPermit(lock)(UpdateUnlocked(providers, input)),
+						),
+					),
+			};
+		}),
+	);
 
-				return yield* ReadMutationResult(committed);
-			});
-
-		return {
-			Get: Semaphore.withPermit(lock)(ReconcileRead),
-			ResolveDrift: (input) => Semaphore.withPermit(lock)(ResolveDriftUnlocked(input)),
-			RetrySync: (input) => Semaphore.withPermit(lock)(RetrySyncUnlocked(input)),
-			Update: (input) => Semaphore.withPermit(lock)(UpdateUnlocked(input)),
-		};
-	}),
-);
+export const ModelBehaviourServiceLive = make_model_behaviour_service_layer();

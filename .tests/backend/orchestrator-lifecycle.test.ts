@@ -44,6 +44,12 @@ interface EngineOptions {
 	readonly fail_open?: boolean;
 	readonly fail_resume?: boolean;
 	readonly fail_send?: boolean;
+	/** Fails every Open with this exact tagged error, as a classified adapter failure would. */
+	readonly open_failure?: {
+		readonly _tag: string;
+		readonly artisan_code?: string;
+		readonly message?: string;
+	};
 	readonly open_delay?: number;
 	readonly stall_resume?: boolean;
 }
@@ -90,6 +96,10 @@ function make_engine(options: EngineOptions = {}): {
 
 			if (opened <= (options.die_open_attempts ?? 0)) {
 				yield* Effect.die("synthetic engine startup defect");
+			}
+
+			if (options.open_failure !== undefined) {
+				yield* Effect.fail(options.open_failure as never);
 			}
 
 			if (options.fail_open || (options.fail_resume && input._tag === "resume")) {
@@ -332,11 +342,22 @@ describe("agent orchestrator lifecycle supervision", () => {
 			expect(failed_snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("failed");
 			expect(failed_snapshot.snapshot.items).toContainEqual(
 				expect.objectContaining({
-					severity: "error",
-					summary: "The engine failed before its native session became ready.",
-					type: "native_event",
+					failure: expect.objectContaining({
+						detail: "The engine failed before its native session became ready.",
+					}),
+					status: "failed",
+					type: "work_session",
 				}),
 			);
+			/**
+			 * One failure, stated once. Recording the same public wording as both a
+			 * diagnostic and the terminal projected one startup failure into the
+			 * transcript twice — the failure card and an identical copy beneath it
+			 * under Failures.
+			 */
+			expect(
+				failed_snapshot.snapshot.items.filter((item) => item.type === "native_event"),
+			).toHaveLength(0);
 
 			await runtime.runPromise(
 				connection.Receive(
@@ -355,6 +376,68 @@ describe("agent orchestrator lifecycle supervision", () => {
 			await expect
 				.poll(() => instrumented.instrumentation.events_consumed(), { timeout: 2_000 })
 				.toBe(1);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	/**
+	 * A spawn preflight that finds the thread's working directory gone fails
+	 * with its own classified code. That classification must survive to the
+	 * transcript as specific wording — the generic startup line turned this one
+	 * unfixable-by-retry failure into an unexplained loop the user replayed
+	 * forever (a deleted project folder bricked its thread with no reason shown).
+	 */
+	it("settles a classified missing-working-directory failure with its own wording", async () => {
+		const instrumented = make_engine({
+			open_failure: {
+				_tag: "EngineProcessError",
+				artisan_code: "AE-CLIENT_STATE-107",
+				message: "Engine process spawn failed: Working directory does not exist: C:/work",
+			},
+		});
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			engines: [instrumented.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(runtime);
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("missing_workspace", {
+						engine_id: "instrumented",
+						text: "first",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await expect
+				.poll(() => instrumented.instrumentation.opened(), { timeout: 2_000 })
+				.toBe(1);
+			const snapshot = await runtime.runPromise(
+				Effect.gen(function* () {
+					const conversations = yield* ConversationReadModel;
+
+					return yield* conversations.ReadSnapshot("thread_1");
+				}),
+			);
+			expect(snapshot.status).toBe("available");
+			if (snapshot.status !== "available") {
+				throw new Error("Expected a durable conversation snapshot");
+			}
+			expect(snapshot.snapshot.items).toContainEqual(
+				expect.objectContaining({
+					failure: expect.objectContaining({
+						code: "AE-CLIENT_STATE-107",
+						detail: "The thread's working directory no longer exists on this machine.",
+					}),
+					status: "failed",
+					type: "work_session",
+				}),
+			);
 		} finally {
 			await runtime.dispose();
 		}
@@ -622,7 +705,15 @@ describe("agent orchestrator lifecycle supervision", () => {
 				if (snapshot.status !== "available") {
 					throw new Error("Expected a recovered conversation snapshot");
 				}
-				expect(snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("failed");
+				/**
+				 * `interrupted`, not `failed`. A refused resume reconciles the run's
+				 * observed children and nothing else — the durable status stays
+				 * `interrupted`, which is the truth: the host ended this run and the
+				 * work never failed. The old expectation only read `failed` because
+				 * the projection collapsed the two, which also cost the reader the
+				 * one signal saying the turn can still be picked back up.
+				 */
+				expect(snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("interrupted");
 			} finally {
 				await rejected_runtime.dispose();
 			}
@@ -696,7 +787,13 @@ describe("agent orchestrator lifecycle supervision", () => {
 			if (snapshot.status !== "available") {
 				throw new Error("Expected a recovered conversation snapshot");
 			}
-			expect(snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("failed");
+			/**
+			 * A resume still in flight has failed at nothing. Boot stays fast because
+			 * the stalled handshake never blocks it, and the turn reads `interrupted`
+			 * — which is what it is — rather than borrowing the failed tone from a
+			 * collapse that no longer happens.
+			 */
+			expect(snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("interrupted");
 			await expect.poll(() => stalled.instrumentation.opened(), { timeout: 2_000 }).toBe(1);
 		} finally {
 			await recovery_runtime.dispose();

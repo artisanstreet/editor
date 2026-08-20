@@ -12,6 +12,7 @@ import { Database, make_database_layer } from "../../modules/backend/src/persist
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import {
 	JournalEvents,
+	MarketplaceCapabilities,
 	MarketplaceCapabilityArtifacts,
 	MarketplaceCapabilityOperations,
 } from "../../modules/backend/src/persistence/tables";
@@ -543,6 +544,80 @@ describe("CapabilityRepository connection admission", () => {
 						event.value.artifact_id === result.completed.result_artifact_id,
 				),
 			).toBe(true);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+});
+
+describe("CapabilityRepository registry browse", () => {
+	it("filters a many-row registry from summary columns without loading details or mirrors", async () => {
+		const runtime = MakeRuntime(await MakePath());
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const rows = Array.from({ length: 128 }, (_, index) => {
+						const matching = index % 2 === 0;
+						return {
+							auth_json: "not-json",
+							compatibility_json: JSON.stringify(
+								matching
+									? [{ engine_id: "engine_a", state: "native" }]
+									: [{ engine_id: "engine_b", state: "native" }],
+							),
+							created_at: "2026-07-18T12:00:00.000Z",
+							display_name: `${matching ? "Alpha" : "Beta"} Capability ${index}`,
+							enabled: matching,
+							health_json: JSON.stringify({ status: "unknown" }),
+							id: `capability_${index}`,
+							instructions: null,
+							lifecycle: "connected",
+							permissions_json: "not-json",
+							policy_json: "not-json",
+							raw_provider_metadata_json: null,
+							removed_at: null,
+							resources_json: "not-json",
+							scope_json: JSON.stringify(
+								matching
+									? { kind: "global" }
+									: { kind: "workspace", workspace_id: "workspace_b" },
+							),
+							source_json: "not-json",
+							status: matching ? "enabled" : "disabled",
+							tools_json: "not-json",
+							transport_json: JSON.stringify(
+								matching
+									? {
+											args: [],
+											command: "fake",
+											kind: "stdio",
+											startup_timeout_ms: 100,
+										}
+									: { kind: "streamable_http", url: "https://example.test/mcp" },
+							),
+							trust: "verified",
+							updated_at: "2026-07-18T12:00:00.000Z",
+						};
+					});
+					yield* database.client.insert(MarketplaceCapabilities).values(rows);
+					return yield* (yield* CapabilityRepository).Browse({
+						compatibility_engine_id: "engine_a",
+						enabled: true,
+						scope: { kind: "global" },
+						status: "enabled",
+						text: "alpha",
+					});
+				}),
+			);
+
+			expect(result).toHaveLength(64);
+			expect(result.every((capability) => capability.transport_kind === "stdio")).toBe(true);
+			expect(result.map((capability) => capability.id)).toEqual(
+				Array.from({ length: 64 }, (_, index) => `capability_${index * 2}`).sort(
+					(left, right) => left.localeCompare(right),
+				),
+			);
 		} finally {
 			await runtime.dispose();
 		}

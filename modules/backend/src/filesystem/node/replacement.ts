@@ -9,6 +9,7 @@ import {
 	type ReplaceRegularFileResult,
 } from "../bounded-regular-file-store";
 import { ReadFileIdentity, same_file_identity, type FileIdentity } from "../file-identity";
+import { FileDescriptorOf } from "./file-descriptor";
 import {
 	NodeReplacementContext,
 	type NodeReplacementContextService,
@@ -403,10 +404,15 @@ export const MakeNodeReplacementService = Effect.gen(function* () {
 									.pipe(
 										Effect.flatMap((file) =>
 											Effect.gen(function* () {
-												const identity = yield* ReadFileIdentity(file.fd);
+												const descriptor = yield* FileDescriptorOf(
+													file,
+													"staged file identity",
+												);
+												const identity =
+													yield* ReadFileIdentity(descriptor);
 
 												yield* file.writeAll(input.replacement);
-												yield* Fchmod(file.fd, current.value.mode);
+												yield* Fchmod(descriptor, current.value.mode);
 												yield* file.sync;
 
 												return Option.some(identity);

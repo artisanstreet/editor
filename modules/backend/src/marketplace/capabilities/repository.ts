@@ -7,6 +7,8 @@ import {
 	CapabilityInvocationMetadata,
 	CapabilitySummary,
 	MarketplaceLedgerEvent,
+	type MarketplaceBrowseQuery,
+	type MarketplaceScope,
 	ProviderSyncState,
 } from "@artisan/protocol";
 
@@ -37,6 +39,29 @@ import type { OAuthTokenStatus } from "./oauth";
 
 export const marketplace_capability_thread_id = settings_scope_id("marketplace-capabilities");
 const marketplace_capability_stream_id = settings_stream_id("marketplace-capabilities");
+
+const ScopeMatches = (left: MarketplaceScope, right: MarketplaceScope) =>
+	left.kind === right.kind &&
+	(left.kind === "global" ||
+		(left.kind === "workspace" &&
+			right.kind === "workspace" &&
+			left.workspace_id === right.workspace_id) ||
+		(left.kind === "project" &&
+			right.kind === "project" &&
+			left.project_id === right.project_id));
+
+type CapabilitySummaryRow = Pick<
+	typeof MarketplaceCapabilities.$inferSelect,
+	| "compatibility_json"
+	| "display_name"
+	| "enabled"
+	| "health_json"
+	| "id"
+	| "lifecycle"
+	| "scope_json"
+	| "status"
+	| "transport_json"
+>;
 
 export class CapabilityRepositoryError extends Data.TaggedError("CapabilityRepositoryError")<{
 	readonly code: "conflict" | "invariant" | "not_found";
@@ -207,6 +232,10 @@ export class CapabilityRepository extends Context.Service<
 				ReadonlyArray<CapabilitySummary>,
 				CapabilityRepositoryError
 			>;
+			/** Reads filtered registry rows without loading capability details or provider mirrors. */
+			readonly Browse: (
+				query: MarketplaceBrowseQuery,
+			) => Effect.Effect<ReadonlyArray<CapabilitySummary>, CapabilityRepositoryError>;
 			readonly Transition: (input: {
 				readonly capability_id: string;
 				readonly enabled?: boolean;
@@ -283,44 +312,57 @@ export const CapabilityRepositoryLive = Layer.effect(
 								}),
 				),
 			);
-		const ReadSummaries = database.client
-			.select()
+		const DecodeSummary = (row: CapabilitySummaryRow) =>
+			Effect.all({
+				compatibility: Parse(
+					CapabilityDetail.fields.compatibility,
+					row.compatibility_json,
+					"compatibility",
+				),
+				health: Parse(CapabilityHealth, row.health_json, "health"),
+				scope: Parse(CapabilityDetail.fields.scope, row.scope_json, "scope"),
+				transport: Parse(
+					CapabilityDetail.fields.transport,
+					row.transport_json,
+					"transport",
+				),
+			}).pipe(
+				Effect.flatMap(({ compatibility, health, scope, transport }) =>
+					Schema.decodeUnknownEffect(CapabilitySummary)({
+						display_name: row.display_name,
+						enabled: row.enabled,
+						health,
+						id: row.id,
+						lifecycle: row.lifecycle,
+						scope,
+						status: row.status,
+						transport_kind: transport.kind,
+					}).pipe(Effect.map((summary) => ({ compatibility, summary }))),
+				),
+				Effect.mapError(
+					() =>
+						new CapabilityRepositoryError({
+							code: "invariant",
+							message: "Capability summary is corrupt",
+						}),
+				),
+			);
+		const ReadSummaryRows = database.client
+			.select({
+				compatibility_json: MarketplaceCapabilities.compatibility_json,
+				display_name: MarketplaceCapabilities.display_name,
+				enabled: MarketplaceCapabilities.enabled,
+				health_json: MarketplaceCapabilities.health_json,
+				id: MarketplaceCapabilities.id,
+				lifecycle: MarketplaceCapabilities.lifecycle,
+				scope_json: MarketplaceCapabilities.scope_json,
+				status: MarketplaceCapabilities.status,
+				transport_json: MarketplaceCapabilities.transport_json,
+			})
 			.from(MarketplaceCapabilities)
 			.orderBy(asc(MarketplaceCapabilities.display_name))
 			.pipe(
-				Effect.flatMap((rows) =>
-					Effect.forEach(rows, (row) =>
-						Effect.all({
-							health: Parse(CapabilityHealth, row.health_json, "health"),
-							scope: Parse(CapabilityDetail.fields.scope, row.scope_json, "scope"),
-							transport: Parse(
-								CapabilityDetail.fields.transport,
-								row.transport_json,
-								"transport",
-							),
-						}).pipe(
-							Effect.flatMap(({ health, scope, transport }) =>
-								Schema.decodeUnknownEffect(CapabilitySummary)({
-									display_name: row.display_name,
-									enabled: row.enabled,
-									health,
-									id: row.id,
-									lifecycle: row.lifecycle,
-									scope,
-									status: row.status,
-									transport_kind: transport.kind,
-								}),
-							),
-							Effect.mapError(
-								() =>
-									new CapabilityRepositoryError({
-										code: "invariant",
-										message: "Capability summary is corrupt",
-									}),
-							),
-						),
-					),
-				),
+				Effect.flatMap((rows) => Effect.forEach(rows, DecodeSummary, { concurrency: 16 })),
 				Effect.mapError(
 					(error: unknown): CapabilityRepositoryError =>
 						error instanceof CapabilityRepositoryError
@@ -329,6 +371,34 @@ export const CapabilityRepositoryLive = Layer.effect(
 									code: "invariant",
 									message: "Capability summaries could not be read",
 								}),
+				),
+			);
+		const ReadSummaries = ReadSummaryRows.pipe(
+			Effect.map((rows) => rows.map(({ summary }) => summary)),
+		);
+		const Browse = (query: MarketplaceBrowseQuery) =>
+			ReadSummaryRows.pipe(
+				Effect.map((rows) =>
+					rows
+						.filter(
+							({ compatibility, summary }) =>
+								(query.compatibility_engine_id === undefined ||
+									compatibility.some(
+										(entry) =>
+											entry.engine_id === query.compatibility_engine_id,
+									)) &&
+								(query.category === undefined || query.category === "capability") &&
+								(query.enabled === undefined ||
+									summary.enabled === query.enabled) &&
+								(query.status === undefined || summary.status === query.status) &&
+								(query.scope === undefined ||
+									ScopeMatches(summary.scope, query.scope)) &&
+								(query.text === undefined ||
+									summary.display_name
+										.toLocaleLowerCase()
+										.includes(query.text.toLocaleLowerCase())),
+						)
+						.map(({ summary }) => summary),
 				),
 			);
 		const Append = (
@@ -953,6 +1023,7 @@ export const CapabilityRepositoryLive = Layer.effect(
 			ReadOAuthBeginResult,
 			CompleteOAuthOperation,
 			ReadDetail,
+			Browse,
 			ReadSummaries,
 			SetMirror: (input: {
 				readonly capability_id: string;

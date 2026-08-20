@@ -62,7 +62,6 @@ const request = (
 const make_test_layer = (
 	refine: (input: ThreadMetadataRefinerInput) => Effect.Effect<ThreadMetadataRefinement, unknown>,
 	accepted: Array<ThreadMetadataRefinementIntent>,
-	options?: { readonly max_pending?: number },
 ) => {
 	const repository = Layer.succeed(ThreadMetadataRepository, {
 		Accept: () => Effect.die("Frontend metadata commands are not used by this worker"),
@@ -74,7 +73,7 @@ const make_test_layer = (
 		WasRefined: () => Effect.succeed(false),
 	});
 
-	return make_thread_metadata_refinement_worker_layer(options).pipe(
+	return make_thread_metadata_refinement_worker_layer().pipe(
 		Layer.provideMerge(repository),
 		Layer.provideMerge(make_thread_metadata_refiner_test_layer(refine)),
 	);
@@ -155,6 +154,32 @@ describe("thread metadata refinement worker", () => {
 			basis_metadata_version: 4,
 			title: "run_completed",
 		});
+	});
+
+	it("retains every distinct-thread refinement in a burst", async () => {
+		const accepted: ThreadMetadataRefinementIntent[] = [];
+		const thread_ids = Array.from({ length: 128 }, (_, index) => `thread_${index}`);
+
+		await Effect.runPromise(
+			Effect.gen(function* () {
+				const service = yield* ThreadMetadataRefinementWorker;
+				const submissions = yield* Effect.forEach(
+					thread_ids,
+					(thread_id) => service.Submit(request(thread_id)),
+					{ concurrency: 1 },
+				);
+				expect(submissions).toEqual(Array.from({ length: 128 }, () => "queued"));
+				yield* service.WaitForIdle;
+			}).pipe(
+				Effect.provide(
+					make_test_layer(() => Effect.succeed({ title: "refined" }), accepted),
+				),
+			),
+		);
+
+		expect(accepted.map((intent) => intent.thread_id).toSorted()).toEqual(
+			thread_ids.toSorted(),
+		);
 	});
 
 	it("bounds context before invoking the provider", async () => {

@@ -32,8 +32,10 @@ import {
 	type AgentGraphControlClaim,
 	type AgentGraphError,
 	AgentGraphInvalid,
+	AgentGraphFailure,
 	type PendingAgentRun,
 } from "./agent-graph-repository";
+import { OrchestrationRecoveryGate } from "./recovery-gate";
 import {
 	IsSessionPolicyEngine,
 	MakeSessionPolicyRunMetadata,
@@ -70,6 +72,7 @@ export class AgentGraphOrchestrator extends Context.Service<
 		) => Effect.Effect<OrchestrationGroupListSnapshot, AgentGraphError>;
 		readonly DrainForShutdown: Effect.Effect<void>;
 		readonly Recover: Effect.Effect<void, AgentGraphError>;
+		readonly StartDispatching: Effect.Effect<void>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 	}
 >()("Artisan/AgentGraphOrchestrator") {}
@@ -87,6 +90,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		const metadata = yield* RuntimeMetadata;
 		const session_policies = yield* OrchestrationRepository;
 		const repository = yield* AgentGraphRepository;
+		const recovery_gate = yield* OrchestrationRecoveryGate;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveAgentRun>());
 		const shutdown_state = yield* Ref.make({
@@ -96,6 +100,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		const admission_gate = yield* Semaphore.make(1);
 		const drain_complete = yield* Deferred.make<void>();
 		const dispatch_state = yield* Ref.make<DispatchState>("idle");
+		const recovery_started = yield* Ref.make(false);
 		const dispatch_fence = yield* MakeThreadDispatchFence;
 		const IsDraining = Ref.get(shutdown_state).pipe(Effect.map((state) => state.draining));
 		const MakeOwnedScope = (run_id: string) =>
@@ -580,7 +585,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 
 			return handle_control(command);
 		};
-		const handle = (command: CommandEnvelope) =>
+		const handle_unfenced = (command: CommandEnvelope) =>
 			admission_gate.withPermits(1)(
 				IsDraining.pipe(
 					Effect.flatMap((draining) =>
@@ -594,12 +599,24 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 					),
 				),
 			);
+		const AwaitRecovery = recovery_gate.Await.pipe(
+			Effect.catchCause((cause) => Effect.fail(new AgentGraphFailure({ cause }))),
+		);
+		const AwaitRecoveryForQuiesce = recovery_gate.Await.pipe(
+			Effect.catchCause(() => Effect.void),
+		);
+		const handle = (command: CommandEnvelope) =>
+			AwaitRecovery.pipe(Effect.andThen(handle_unfenced(command)));
 
 		const recover = Effect.gen(function* () {
 			if (yield* IsDraining) return;
+			const first_recovery = yield* Ref.modify(recovery_started, (started) =>
+				started ? ([false, true] as const) : ([true, true] as const),
+			);
+			if (!first_recovery) return;
 			yield* repository.Recover(metadata.instance_id);
-			yield* wake_dispatcher();
 		});
+		const StartDispatching = wake_dispatcher();
 		const QuiesceLiveRuns = (thread_id: string) =>
 			Effect.gen(function* () {
 				const runs = yield* Ref.modify(live_runs, (current) => {
@@ -625,7 +642,9 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				});
 			});
 		const QuiesceThread = (thread_id: string) =>
-			dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id));
+			AwaitRecoveryForQuiesce.pipe(
+				Effect.andThen(dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id))),
+			);
 		const DrainOwnedScopes = Effect.gen(function* () {
 			while (true) {
 				const scopes = [...(yield* Ref.get(shutdown_state)).owned_scopes.values()];
@@ -694,16 +713,22 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				yield* Scope.close(service_scope, Exit.void);
 			}),
 		);
-		yield* recover;
-
 		return {
 			DrainForShutdown,
-			GetGraph: repository.GetGraph,
-			ListGroups: repository.ListGroups,
-			ListGroupsSnapshot: repository.ListGroupsSnapshot,
+			GetGraph: (group_id) =>
+				AwaitRecovery.pipe(Effect.andThen(repository.GetGraph(group_id))),
+			ListGroups: (thread_id, include_terminal) =>
+				AwaitRecovery.pipe(
+					Effect.andThen(repository.ListGroups(thread_id, include_terminal)),
+				),
+			ListGroupsSnapshot: (thread_id, include_terminal) =>
+				AwaitRecovery.pipe(
+					Effect.andThen(repository.ListGroupsSnapshot(thread_id, include_terminal)),
+				),
 			Handle: handle,
 			QuiesceThread,
 			Recover: recover,
+			StartDispatching,
 		};
 	}),
 );

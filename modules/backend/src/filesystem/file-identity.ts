@@ -18,7 +18,7 @@ function normalize_uint64(value: bigint) {
  *
  * @example
  * ```ts
- * const identity = yield* ReadFileIdentity(file.fd);
+ * const identity = yield* ReadFileIdentity(yield* FileDescriptorOf(file, "read"));
  * ```
  *
  * @since 0.1.0

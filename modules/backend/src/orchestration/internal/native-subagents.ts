@@ -31,7 +31,12 @@ import { MakeTerminalTranscriptConsumption } from "./native-subagent-terminal-tr
 import { ChooseAvailableAgentName } from "./agent-name-allocation";
 import { ApplyEngineObservation } from "../../conversation/index";
 import { normalize_graph_error } from "../agent-graph-model";
-import { compact_status_text, is_terminal_state, type GraphContext } from "./graph-context";
+import {
+	compact_status_text,
+	friendly_native_role,
+	is_terminal_state,
+	type GraphContext,
+} from "./graph-context";
 import type { GraphLedger } from "./graph-ledger";
 
 type PendingNativeSubagent = typeof NativeSubagentObservationInbox.$inferSelect;
@@ -147,7 +152,7 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 						input.observation_id,
 					),
 					kind: "subagent",
-					label: "Talked to subagent",
+					label: `Talked to ${input.display_name}`,
 					status: conversation_lifecycle_for(input.state),
 					subagent: { agent_id: input.agent_id, display_name: input.display_name },
 					type: "activity",
@@ -244,7 +249,7 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 						input.observation_id,
 					),
 					kind: "subagent",
-					label: "Talked to subagent",
+					label: `Talked to ${input.child_display_name}`,
 					status: conversation_lifecycle_for(input.state),
 					subagent: {
 						agent_id: input.child_agent_id,
@@ -489,6 +494,7 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 					const heartbeat = yield* heartbeat_for(observation.activity, now);
 					const raw_origin = raw_origin_for(observation);
 					const next_state = state_from_native(observation.state);
+					const friendly_role = friendly_native_role(observation.agent_path);
 					const MarkProcessed = transaction
 						.delete(NativeSubagentObservationInbox)
 						.where(
@@ -622,6 +628,7 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 								...(heartbeat === undefined
 									? {}
 									: { heartbeat_json: JSON.stringify(heartbeat) }),
+								role: friendly_role,
 								state: next_state,
 								updated_at: now,
 							})
@@ -818,7 +825,7 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 							write_access: false,
 						}),
 						profile: "provider-native",
-						role: "worker",
+						role: friendly_role,
 						scope_json: JSON.stringify({
 							kind: "custom",
 							value: "Provider-native delegated work",

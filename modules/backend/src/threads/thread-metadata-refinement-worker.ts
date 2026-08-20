@@ -11,13 +11,8 @@ import {
 	type ThreadMetadataRefinement,
 } from "./thread-metadata-refiner";
 
-/** Configures the bounded latest-wins metadata refinement worker. */
-export interface ThreadMetadataRefinementWorkerOptions {
-	readonly max_pending?: number;
-}
-
-/** Reports whether a refinement request was queued, coalesced, or rejected at capacity. */
-export type ThreadMetadataRefinementSubmission = "queued" | "coalesced" | "dropped";
+/** Reports whether a refinement request was queued or coalesced. */
+export type ThreadMetadataRefinementSubmission = "queued" | "coalesced";
 
 /** Schedules automatic metadata refinement without subscribing to its own emitted events. */
 export class ThreadMetadataRefinementWorker extends Context.Service<
@@ -65,17 +60,14 @@ const make_intent = (
 	};
 };
 
-/** Creates a scoped, bounded, latest-wins refinement worker. */
-export const make_thread_metadata_refinement_worker_layer = (
-	options: ThreadMetadataRefinementWorkerOptions = {},
-) =>
+/** Creates a scoped, latest-wins refinement worker. */
+export const make_thread_metadata_refinement_worker_layer = () =>
 	Layer.effect(
 		ThreadMetadataRefinementWorker,
 		Effect.gen(function* () {
 			const repository = yield* ThreadMetadataRepository;
 			const refiner = yield* ThreadMetadataRefiner;
-			const max_pending = Math.max(1, options.max_pending ?? 32);
-			const queue = yield* Queue.bounded<string>(max_pending);
+			const queue = yield* Queue.unbounded<string>();
 			const state = yield* Ref.make<WorkerState>({
 				active: new Set(),
 				pending: new Map(),
@@ -179,10 +171,6 @@ export const make_thread_metadata_refinement_worker_layer = (
 							const pending = new Map(current.pending);
 							pending.set(request.thread_id, bounded_request);
 							return ["coalesced" as const, { ...current, pending }];
-						}
-
-						if (current.pending.size >= max_pending) {
-							return ["dropped" as const, current];
 						}
 
 						const pending = new Map(current.pending);

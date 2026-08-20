@@ -1,4 +1,4 @@
-import { Clock, Context, Data, Effect, Exit, Layer, Scope } from "effect";
+import { Clock, Context, Data, Deferred, Effect, Exit, Layer, Ref, Scope } from "effect";
 
 import { ThreadErasure, type ThreadErasureFailure } from "./thread-erasure";
 import { ThreadRetentionPolicyService } from "./thread-retention-policy";
@@ -69,7 +69,10 @@ export const ThreadRetentionLive = Layer.effect(
 		const policy = yield* ThreadRetentionPolicyService;
 		const scheduler = yield* ThreadRetentionScheduler;
 		const service_scope = yield* Scope.make();
-		const RunCleanup = Effect.gen(function* () {
+		const flight = yield* Ref.make<
+			Deferred.Deferred<Exit.Exit<ReadonlyArray<string>, ThreadRetentionFailure>> | undefined
+		>(undefined);
+		const Cleanup = Effect.gen(function* () {
 			const now = yield* clock.Now;
 			const resumed = yield* erasure.ResumeClaimed(now);
 			const current_policy = yield* policy.Read;
@@ -83,9 +86,56 @@ export const ThreadRetentionLive = Layer.effect(
 
 			return [...new Set([...resumed, ...expired])];
 		}).pipe(Effect.mapError((cause) => new ThreadRetentionFailure({ cause })));
+		const AwaitFlight = (
+			current: Deferred.Deferred<Exit.Exit<ReadonlyArray<string>, ThreadRetentionFailure>>,
+		) =>
+			Deferred.await(current).pipe(
+				Effect.flatMap((exit) =>
+					Exit.isSuccess(exit)
+						? Effect.succeed(exit.value)
+						: Effect.failCause(exit.cause),
+				),
+			);
+		const RunCleanup = Effect.uninterruptibleMask((restore) =>
+			Effect.gen(function* () {
+				const next =
+					yield* Deferred.make<
+						Exit.Exit<ReadonlyArray<string>, ThreadRetentionFailure>
+					>();
+				const active = yield* Ref.modify(flight, (current) =>
+					current === undefined ? ([next, next] as const) : ([current, current] as const),
+				);
+				if (active !== next) return yield* restore(AwaitFlight(active));
 
-		yield* RunCleanup;
+				yield* Effect.forkIn(
+					restore(Cleanup).pipe(
+						Effect.onExit((exit) =>
+							Ref.modify(flight, (current) =>
+								current === next
+									? ([undefined, undefined] as const)
+									: ([undefined, current] as const),
+							).pipe(
+								Effect.andThen(Deferred.succeed(next, exit)),
+								Effect.uninterruptible,
+							),
+						),
+					),
+					service_scope,
+				);
+				return yield* restore(AwaitFlight(next));
+			}),
+		);
+
 		yield* Effect.addFinalizer(() => Scope.close(service_scope, Exit.void));
+		yield* Effect.forkIn(
+			RunCleanup.pipe(
+				Effect.asVoid,
+				Effect.catchCause((cause) =>
+					Effect.logWarning("Thread retention startup cleanup failed", { cause }),
+				),
+			),
+			service_scope,
+		);
 		yield* Effect.forkIn(
 			scheduler
 				.Schedule(

@@ -10,6 +10,7 @@ import {
 	type ThreadWorkItem,
 } from "@artisan/protocol";
 
+import { resume_without_progress_detail } from "../../conversation/projection/domain";
 import { Database } from "../database";
 import { AppendJournalEventInTransaction } from "../journal-store";
 import { make_observation_recording } from "./observation-recording";
@@ -517,7 +518,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							payload: {
 								failure: {
 									code: "AE-RUN-301",
-									detail: "The session resumed but made no provider progress before the recovery check expired.",
+									detail: resume_without_progress_detail,
 								},
 								state: "failed",
 								type: "run.lifecycle",

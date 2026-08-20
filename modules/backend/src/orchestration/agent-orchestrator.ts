@@ -44,12 +44,22 @@ import { GlobalGuidanceService } from "../guidance/service";
 import { HostSuspendMonitor } from "../host/suspend-monitor";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import { AgentGraphRepository } from "./agent-graph-repository";
+import { OrchestrationRecoveryGate } from "./recovery-gate";
 import {
 	start_failure_from_cause,
 	type StartFailure,
 } from "./internal/agent-orchestrator-start-failure";
 import { IntakePolicy } from "./intake-policy";
-import { CompactObservationBatch, MakeObservationPersistence } from "./observation-persistence";
+import { ObservedTerminalAdoption } from "../terminal/observed-adoption";
+import {
+	observation_persistence_abandoned_detail,
+	working_directory_missing_detail,
+} from "../conversation/projection/domain";
+import {
+	CompactObservationBatch,
+	MakeObservationPersistence,
+	observation_persistence_retry_schedule,
+} from "./observation-persistence";
 import { ProductInstructions } from "./product-instructions";
 import { UsageInterruptionService } from "../persistence/usage-interruption/service";
 import {
@@ -73,12 +83,6 @@ interface LiveRun {
 	readonly scope: Scope.Scope;
 	readonly thread_id: string;
 }
-
-/** Keeps a short, lossless cushion between stream compaction and SQLite persistence. */
-const observation_persistence_prefetch_capacity = 4;
-
-/** Prevents a failed durable write from turning into either data loss or a hot retry loop. */
-const observation_persistence_retry_schedule = Schedule.spaced("250 millis");
 
 type DispatchState = "idle" | "running" | "pending";
 
@@ -191,6 +195,7 @@ export class AgentOrchestrator extends Context.Service<
 		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
 		readonly DrainForShutdown: Effect.Effect<void>;
 		readonly Recover: Effect.Effect<void, OrchestrationError>;
+		readonly StartDispatching: Effect.Effect<void>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 	}
 >()("Artisan/AgentOrchestrator") {}
@@ -206,8 +211,10 @@ export const AgentOrchestratorLive = Layer.effect(
 		const graph_repository = yield* AgentGraphRepository;
 		const continuation = yield* ThreadContinuationService;
 		const continuation_repository = yield* ThreadContinuationRepository;
+		const observed_terminals = yield* ObservedTerminalAdoption;
 		const usage_interruptions = yield* UsageInterruptionService;
 		const suspend_monitor = yield* HostSuspendMonitor;
+		const recovery_gate = yield* OrchestrationRecoveryGate;
 		const host_resumes = yield* suspend_monitor.Subscribe;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveRun>());
@@ -220,6 +227,11 @@ export const AgentOrchestratorLive = Layer.effect(
 		const drain_complete = yield* Deferred.make<void>();
 		const dispatch_state = yield* Ref.make<DispatchState>("idle");
 		const recovery_started = yield* Ref.make(false);
+		/** Holds claimed native roots until graph repair establishes the startup boundary. */
+		const recovered_native_runs = yield* Ref.make({
+			pending: [] as ReadonlyArray<RecoverableNativeRun>,
+			started: false,
+		});
 		const dispatch_fence = yield* MakeThreadDispatchFence;
 
 		const RemoveLiveRun = (run_id: string, run_scope: Scope.Scope) =>
@@ -284,15 +296,22 @@ export const AgentOrchestratorLive = Layer.effect(
 				 * Startup causes can contain provider output and host paths. The durable
 				 * terminal keeps only Artisan-owned wording plus the adapter's stable code;
 				 * exact cause evidence remains in the private Forge log below.
+				 *
+				 * A classified missing working directory outranks the kind ladder: it is
+				 * the one startup failure retrying can never fix, and the generic wording
+				 * turned it into an unexplained loop the user replayed forever.
 				 */
 				const public_message =
-					failure.kind === "configuration"
-						? "Artisan could not finish preparing the engine run."
-						: failure.kind === "timeout"
-							? "The engine did not become ready before the startup deadline."
-							: failure.kind === "interrupted"
-								? "Engine startup was interrupted before the native session became ready."
-								: "The engine failed before its native session became ready.";
+					failure.error_ref?.artisan_code ===
+					artisan_error_codes.working_directory_missing
+						? working_directory_missing_detail
+						: failure.kind === "configuration"
+							? "Artisan could not finish preparing the engine run."
+							: failure.kind === "timeout"
+								? "The engine did not become ready before the startup deadline."
+								: failure.kind === "interrupted"
+									? "Engine startup was interrupted before the native session became ready."
+									: "The engine failed before its native session became ready.";
 				const terminal_error_ref = {
 					artisan_code:
 						failure.error_ref?.artisan_code ?? artisan_error_codes.engine_start_failed,
@@ -307,22 +326,14 @@ export const AgentOrchestratorLive = Layer.effect(
 				yield* continuation_repository
 					.FailLaunch(work.run_id, `engine_start_${failure.kind}`)
 					.pipe(Effect.catchCause(() => Effect.void));
-				yield* repository
-					.RecordObservation({
-						_tag: "process_diagnostic",
-						artisan_run_id: work.run_id,
-						error_ref: terminal_error_ref,
-						level: "error",
-						message: public_message,
-						observation_id: `open_diagnostic:${work.command_id}`,
-						raw: {
-							engine_id: work.engine_id,
-							frame: failure.kind,
-							transport: "backend",
-						},
-						sequence: 0,
-					})
-					.pipe(Effect.catchCause(() => Effect.succeed([])));
+				/**
+				 * One failure is recorded once. The terminal already carries this exact
+				 * wording in its `error_ref`, and recording the identical text again as
+				 * a diagnostic projected the same startup failure into the transcript
+				 * twice — a failure card and a second copy under Failures. The private
+				 * cause, which is the only thing the diagnostic could have added, is
+				 * never public and goes to the Forge log below instead.
+				 */
 				yield* repository
 					.RecordObservation({
 						_tag: "run_terminal",
@@ -334,7 +345,7 @@ export const AgentOrchestratorLive = Layer.effect(
 							frame: failure.kind,
 							transport: "backend",
 						},
-						sequence: 1,
+						sequence: 0,
 						state: "failed",
 					})
 					.pipe(Effect.catchCause(() => Effect.succeed([])));
@@ -362,7 +373,52 @@ export const AgentOrchestratorLive = Layer.effect(
 			repository,
 		});
 
-		const ObserveRun = (work: Pick<PendingWork, "run_id">, live: LiveRun) =>
+		/**
+		 * Ends a run whose evidence cannot be written. The engine is still alive
+		 * and still producing, so returning without a terminal observation would
+		 * leave the transcript thinking forever and the queue growing; the run
+		 * scope closes on the way out, which is what actually stops the provider.
+		 * The sequence clears the batch that failed, because the run watermark
+		 * rejects anything it has already passed.
+		 */
+		const AbandonObservationPersistence = (
+			work: Pick<PendingWork, "run_id">,
+			live: LiveRun,
+			sequence: number,
+			cause: Cause.Cause<unknown>,
+		) =>
+			Effect.gen(function* () {
+				yield* Effect.sync(() => {
+					console.error("Artisan observation persistence abandoned", {
+						cause: Cause.pretty(cause),
+						run_id: work.run_id,
+					});
+				});
+				yield* repository
+					.RecordObservation({
+						_tag: "run_terminal",
+						artisan_run_id: work.run_id,
+						error_ref: {
+							artisan_code: artisan_error_codes.run_failed,
+							detail: observation_persistence_abandoned_detail,
+						},
+						observation_id: `observation_persistence_abandoned:${work.run_id}`,
+						raw: {
+							engine_id: live.engine_id,
+							frame: "observation_persistence_abandoned",
+							transport: "backend",
+						},
+						sequence,
+						state: "failed",
+					})
+					.pipe(Effect.catchCause(() => Effect.succeed([])));
+				yield* Effect.suspend(() => WakeDispatcher);
+			});
+
+		const ObserveRun = (
+			work: Pick<PendingWork, "agent_id" | "run_id" | "thread_id" | "working_directory">,
+			live: LiveRun,
+		) =>
 			live.run.Events.pipe(
 				/**
 				 * Streaming engines emit per-token deltas far faster than one
@@ -373,27 +429,45 @@ export const AgentOrchestratorLive = Layer.effect(
 				Stream.groupedWithin(256, "100 millis"),
 				Stream.map(CompactObservationBatch),
 				Stream.filter((observations) => observations.length > 0),
-				/**
-				 * Preserve ordered, lossless persistence while allowing one small set of
-				 * already-compacted batches to drain the engine buffer during a SQLite
-				 * commit. A finite suspend queue retains backpressure under sustained
-				 * storage failure instead of converting it into unbounded memory growth.
-				 */
-				Stream.buffer({
-					capacity: observation_persistence_prefetch_capacity,
-					strategy: "suspend",
-				}),
 				Stream.runForEach((observations) =>
-					observation_persistence
-						.PersistCompactedBatch(work, observations.map(PublicObservation))
-						.pipe(
-							/**
-							 * Keep ownership of the same ordered batch until it is durable. The
-							 * finite stream buffer then propagates sustained storage pressure back
-							 * to the engine instead of silently advancing past missing evidence.
-							 */
-							Effect.retry({ schedule: observation_persistence_retry_schedule }),
-						),
+					Effect.gen(function* () {
+						const public_observations = observations.map(PublicObservation);
+						const persisted = yield* observation_persistence
+							.PersistCompactedBatch(work, public_observations)
+							.pipe(
+								/**
+								 * Keep ownership of the same ordered batch until it is durable. The
+								 * engine event stream retains ownership until the evidence is durable
+								 * or the budget proves it never will be.
+								 */
+								Effect.retry({ schedule: observation_persistence_retry_schedule }),
+								Effect.exit,
+							);
+						if (Exit.isFailure(persisted)) {
+							if (!Cause.hasInterruptsOnly(persisted.cause)) {
+								yield* AbandonObservationPersistence(
+									work,
+									live,
+									public_observations.reduce(
+										(highest, observation) =>
+											Math.max(highest, observation.sequence),
+										0,
+									) + 1,
+									persisted.cause,
+								);
+							}
+							return yield* Effect.failCause(persisted.cause);
+						}
+						/**
+						 * Artisan runs over another harness, so the shells this run opens
+						 * are the engine's own. They arrive here as observations and
+						 * nowhere else, which is why the Terminals card had nothing to
+						 * show. Adoption runs after the evidence is durable and never
+						 * fails the run: a terminal row is a view of work that already
+						 * happened.
+						 */
+						yield* observed_terminals.AdoptBatch(work, public_observations);
+					}),
 				),
 			).pipe(
 				Effect.andThen(live.run.Closed),
@@ -926,16 +1000,75 @@ export const AgentOrchestratorLive = Layer.effect(
 		const SendToLiveRun = (work: PendingWork) =>
 			dispatch_fence.Run(work.thread_id, SendToLiveRunUnfenced(work)).pipe(Effect.asVoid);
 
+		/**
+		 * Runs whose pending work is already being dispatched on a forked chain.
+		 * A later pass must skip them rather than dispatch the same rows twice.
+		 */
+		const dispatching_runs = yield* Ref.make(new Set<string>());
+
+		const DispatchRunChain = (chain: ReadonlyArray<PendingWork>) =>
+			Effect.forEach(
+				chain,
+				(work) => (work.kind === "start" ? StartRun(work) : SendToLiveRun(work)),
+				{ discard: true },
+			);
+
+		/**
+		 * Dispatches each run's pending work in order, and each run independently.
+		 *
+		 * Both properties are load-bearing, and neither held before. The loop was
+		 * a single sequential pass over every pending row, so one slow item stalled
+		 * every item behind it — and the only slow item is a start, which spawns
+		 * the engine and can spend its full authentication retry budget getting
+		 * there. Recorded cancels show exactly that shape: almost all deliver
+		 * within 10ms, while the tail reaches 97s and one expired into
+		 * `undeliverable` because the run it was stopping had died of its own
+		 * accord by the time the loop reached it.
+		 *
+		 * Per-run order is what keeps that from becoming a race: a cancel must
+		 * still arrive after the start it stops, or it would find no live run,
+		 * take the fallback terminal, and leave the start to launch a run the user
+		 * has already stopped. The chains are forked rather than awaited so a
+		 * start in flight cannot stall the cancel that follows it either.
+		 */
 		const DispatchPending = Effect.gen(function* () {
 			if (yield* IsDraining) return;
 			const pending = yield* repository.GetPending();
+			const chains = new Map<string, Array<PendingWork>>();
 
 			for (const work of pending) {
-				if (work.kind === "start") {
-					yield* StartRun(work);
-				} else {
-					yield* SendToLiveRun(work);
-				}
+				const chain = chains.get(work.run_id);
+				if (chain === undefined) chains.set(work.run_id, [work]);
+				else chain.push(work);
+			}
+
+			for (const [run_id, chain] of chains) {
+				const claimed = yield* Ref.modify(dispatching_runs, (current) =>
+					current.has(run_id)
+						? ([false, current] as const)
+						: ([true, new Set(current).add(run_id)] as const),
+				);
+				if (!claimed) continue;
+				yield* Effect.forkIn(
+					DispatchRunChain(chain).pipe(
+						Effect.ensuring(
+							Ref.update(dispatching_runs, (current) => {
+								const next = new Set(current);
+								next.delete(run_id);
+								return next;
+							}),
+						),
+						/**
+						 * A wake that arrived while this chain held the run was
+						 * skipped, so the rows it was announcing are still pending
+						 * with nothing left to notice them. Re-waking on release is
+						 * what closes that gap; it terminates because every claimed
+						 * row leaves the pending set whatever its outcome.
+						 */
+						Effect.ensuring(Effect.suspend(() => WakeDispatcher)),
+					),
+					service_scope,
+				);
 			}
 		});
 
@@ -1086,19 +1219,31 @@ export const AgentOrchestratorLive = Layer.effect(
 					return accepted;
 				}),
 			);
-		const Handle = (command: AuthoritativeCommandEnvelope) => HandleCommand(command, false);
-		const HandleInbound = (command: CommandEnvelope) => HandleCommand(command, true);
+		const AwaitRecovery = recovery_gate.Await.pipe(
+			Effect.catchCause((cause) => Effect.fail(new OrchestrationFailure({ cause }))),
+		);
+		const AwaitRecoveryForQuiesce = recovery_gate.Await.pipe(
+			Effect.catchCause(() => Effect.void),
+		);
+		const Handle = (command: AuthoritativeCommandEnvelope) =>
+			AwaitRecovery.pipe(Effect.andThen(HandleCommand(command, false)));
+		const HandleInbound = (command: CommandEnvelope) =>
+			AwaitRecovery.pipe(Effect.andThen(HandleCommand(command, true)));
 		const HandleUsageInterruption = (command: CommandEnvelope) =>
-			admission_gate.withPermits(1)(
-				Effect.gen(function* () {
-					if (yield* IsDraining)
-						return yield* new OrchestrationFailure({
-							cause: new Error("The orchestrator is draining for shutdown."),
-						});
-					const accepted = yield* usage_interruptions.Resolve(command);
-					yield* WakeDispatcher;
-					return accepted;
-				}),
+			AwaitRecovery.pipe(
+				Effect.andThen(
+					admission_gate.withPermits(1)(
+						Effect.gen(function* () {
+							if (yield* IsDraining)
+								return yield* new OrchestrationFailure({
+									cause: new Error("The orchestrator is draining for shutdown."),
+								});
+							const accepted = yield* usage_interruptions.Resolve(command);
+							yield* WakeDispatcher;
+							return accepted;
+						}),
+					),
+				),
 			);
 
 		const Recover = Effect.gen(function* () {
@@ -1112,8 +1257,6 @@ export const AgentOrchestratorLive = Layer.effect(
 				started ? ([false, true] as const) : ([true, true] as const),
 			);
 			if (!first_recovery) {
-				yield* WakeDispatcher;
-
 				return;
 			}
 
@@ -1140,15 +1283,33 @@ export const AgentOrchestratorLive = Layer.effect(
 			yield* graph_repository
 				.ReconcileObservedSubagentsExcept(new Set(recoverable.map((work) => work.run_id)))
 				.pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })));
-			yield* Effect.forkIn(
-				Effect.forEach(recoverable, ResumeRun, {
-					concurrency: "unbounded",
-					discard: true,
-				}).pipe(Effect.catchCause(() => Effect.void)),
-				service_scope,
-			);
-			yield* WakeDispatcher;
+			yield* Ref.set(recovered_native_runs, { pending: recoverable, started: false });
 		});
+		const StartDispatching = admission_gate.withPermits(1)(
+			Effect.gen(function* () {
+				if (yield* IsDraining) return;
+				const recoverable = yield* Ref.modify(recovered_native_runs, (state) =>
+					state.started
+						? ([[], state] as const)
+						: ([
+								state.pending,
+								{
+									pending: [] as ReadonlyArray<RecoverableNativeRun>,
+									started: true,
+								},
+							] as const),
+				);
+
+				yield* Effect.forkIn(
+					Effect.forEach(recoverable, ResumeRun, {
+						concurrency: "unbounded",
+						discard: true,
+					}).pipe(Effect.catchCause(() => Effect.void)),
+					service_scope,
+				);
+				yield* WakeDispatcher;
+			}),
+		);
 		const QuiesceLiveRuns = (thread_id: string) =>
 			Effect.gen(function* () {
 				const runs = yield* Ref.modify(live_runs, (current) => {
@@ -1178,7 +1339,9 @@ export const AgentOrchestratorLive = Layer.effect(
 				});
 			});
 		const QuiesceThread = (thread_id: string) =>
-			dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id));
+			AwaitRecoveryForQuiesce.pipe(
+				Effect.andThen(dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id))),
+			);
 		const DrainLiveRun = (live: LiveRun) =>
 			Effect.gen(function* () {
 				yield* live.run
@@ -1284,9 +1447,20 @@ export const AgentOrchestratorLive = Layer.effect(
 				yield* Scope.close(service_scope, Exit.succeed(undefined));
 			}),
 		);
-		yield* Effect.forkIn(WatchHostResumes, service_scope);
-		yield* Effect.forkIn(WatchUsageInterruptions, service_scope);
-		yield* Recover;
+		yield* Effect.forkIn(
+			AwaitRecovery.pipe(
+				Effect.andThen(WatchHostResumes),
+				Effect.catchCause(() => Effect.void),
+			),
+			service_scope,
+		);
+		yield* Effect.forkIn(
+			AwaitRecovery.pipe(
+				Effect.andThen(WatchUsageInterruptions),
+				Effect.catchCause(() => Effect.void),
+			),
+			service_scope,
+		);
 
 		return {
 			DrainForShutdown,
@@ -1295,6 +1469,7 @@ export const AgentOrchestratorLive = Layer.effect(
 			HandleUsageInterruption,
 			QuiesceThread,
 			Recover,
+			StartDispatching,
 		};
 	}),
 );

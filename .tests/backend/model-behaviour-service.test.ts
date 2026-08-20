@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Deferred, Effect, Fiber, Layer, ManagedRuntime } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ModelBehaviourProviderState } from "@artisan/protocol";
@@ -16,6 +16,9 @@ import {
 	make_codex_model_behaviour_provider,
 	make_inactive_model_behaviour_provider,
 	make_model_behaviour_provider_registry_layer,
+	ModelBehaviourProviderRegistry,
+	ModelBehaviourProviderRegistryError,
+	type ModelBehaviourProviderAdapter,
 } from "../../modules/backend/src/model-behaviour/provider";
 import {
 	make_codex_auto_compaction_mapping,
@@ -24,6 +27,8 @@ import {
 import {
 	ModelBehaviourService,
 	ModelBehaviourServiceLive,
+	make_model_behaviour_service_layer,
+	type ModelBehaviourServiceOptions,
 } from "../../modules/backend/src/model-behaviour/service";
 import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
@@ -59,8 +64,14 @@ function make_metadata_layer() {
 async function make_harness(
 	options: {
 		readonly codex_supported?: boolean;
+		readonly inspect?: (
+			Inspect: ModelBehaviourProviderAdapter["Inspect"],
+		) => ModelBehaviourProviderAdapter["Inspect"];
 		readonly fail_first_commit?: boolean;
+		readonly on_read?: () => void;
+		readonly registry?: Layer.Layer<ModelBehaviourProviderRegistry>;
 		readonly root?: string;
+		readonly service_options?: ModelBehaviourServiceOptions;
 	} = {},
 ) {
 	const root = options.root ?? (await make_root());
@@ -74,7 +85,7 @@ async function make_harness(
 		installed_version: "0.142.5",
 		mapping_available: options.codex_supported ?? true,
 	});
-	const codex =
+	const codex_base =
 		codex_mapping.state === "supported"
 			? make_codex_model_behaviour_provider({
 					backups_directory: join(root, "backups"),
@@ -83,6 +94,10 @@ async function make_harness(
 					target_path: config_path,
 				})
 			: make_inactive_model_behaviour_provider(codex_mapping);
+	const codex =
+		options.inspect === undefined
+			? codex_base
+			: { ...codex_base, Inspect: options.inspect(codex_base.Inspect) };
 	const claude = make_inactive_model_behaviour_provider(
 		make_unsupported_auto_compaction_mapping(
 			"claude",
@@ -96,7 +111,7 @@ async function make_harness(
 		JournalNotifierLive,
 	);
 	const live_repository = ModelBehaviourRepositoryLive.pipe(Layer.provideMerge(infrastructure));
-	const repository =
+	const failure_repository =
 		options.fail_first_commit === true
 			? Layer.effect(
 					ModelBehaviourRepository,
@@ -126,8 +141,27 @@ async function make_harness(
 					}),
 				).pipe(Layer.provideMerge(live_repository))
 			: live_repository;
-	const registry = make_model_behaviour_provider_registry_layer([codex, claude]);
-	const service = ModelBehaviourServiceLive.pipe(
+	const on_read = options.on_read;
+	const repository =
+		on_read === undefined
+			? failure_repository
+			: Layer.effect(
+					ModelBehaviourRepository,
+					Effect.gen(function* () {
+						const live = yield* ModelBehaviourRepository;
+						return {
+							...live,
+							Read: Effect.sync(on_read).pipe(Effect.andThen(live.Read)),
+						};
+					}),
+				).pipe(Layer.provideMerge(failure_repository));
+	const registry =
+		options.registry ?? make_model_behaviour_provider_registry_layer([codex, claude]);
+	const service = (
+		options.service_options === undefined
+			? ModelBehaviourServiceLive
+			: make_model_behaviour_service_layer(options.service_options)
+	).pipe(
 		Layer.provideMerge(repository),
 		Layer.provideMerge(registry),
 		Layer.provideMerge(metadata),
@@ -558,6 +592,121 @@ describe("ModelBehaviourService", () => {
 			);
 		} finally {
 			await restarted.runtime.dispose();
+		}
+	});
+
+	it("coalesces overlapping refreshes behind a service-owned flight and refreshes a later Get", async () => {
+		const entered = await Effect.runPromise(Deferred.make<void>());
+		const release = await Effect.runPromise(Deferred.make<void>());
+		let inspections = 0;
+		let reads = 0;
+		const harness = await make_harness({
+			inspect: (Inspect) =>
+				Effect.sync(() => {
+					inspections += 1;
+				}).pipe(
+					Effect.andThen(Deferred.succeed(entered, undefined)),
+					Effect.andThen(Deferred.await(release)),
+					Effect.andThen(Inspect),
+				),
+			on_read: () => {
+				reads += 1;
+			},
+		});
+
+		try {
+			const service = await harness.runtime.runPromise(Effect.service(ModelBehaviourService));
+			const interrupted = Effect.runFork(service.Get);
+			await Effect.runPromise(Deferred.await(entered));
+			await Effect.runPromise(Fiber.interrupt(interrupted));
+			const callers = Array.from({ length: 6 }, () => Effect.runPromise(service.Get));
+
+			expect(inspections).toBe(1);
+			await Effect.runPromise(Deferred.succeed(release, undefined));
+			const snapshots = await Promise.all(callers);
+			expect(snapshots.every((snapshot) => snapshot === snapshots[0])).toBe(true);
+			expect(inspections).toBe(1);
+			expect(reads).toBe(2);
+
+			await Effect.runPromise(service.Get);
+			expect(inspections).toBe(2);
+			expect(reads).toBe(4);
+		} finally {
+			await harness.runtime.dispose();
+		}
+	});
+
+	it("settles a claimed refresh on close before scope admission without late provider work", async () => {
+		const claimed = await Effect.runPromise(Deferred.make<void>());
+		const release_claim = await Effect.runPromise(Deferred.make<void>());
+		let inspections = 0;
+		let reads = 0;
+		const harness = await make_harness({
+			inspect: (Inspect) =>
+				Effect.sync(() => {
+					inspections += 1;
+				}).pipe(Effect.andThen(Inspect)),
+			on_read: () => {
+				reads += 1;
+			},
+			service_options: {
+				OnRefreshClaimed: Deferred.succeed(claimed, undefined).pipe(
+					Effect.andThen(Deferred.await(release_claim)),
+				),
+			},
+		});
+		const service = await harness.runtime.runPromise(Effect.service(ModelBehaviourService));
+		const waiter = Effect.runPromiseExit(service.Get);
+
+		await Effect.runPromise(Deferred.await(claimed));
+		await harness.runtime.dispose();
+		await Effect.runPromise(Deferred.succeed(release_claim, undefined));
+		expect((await waiter)._tag).toBe("Failure");
+		expect(inspections).toBe(0);
+		expect(reads).toBe(0);
+	});
+
+	it("settles external waiters when close interrupts completion publication", async () => {
+		const publishing = await Effect.runPromise(Deferred.make<void>());
+		const never_release = await Effect.runPromise(Deferred.make<void>());
+		const harness = await make_harness({
+			service_options: {
+				OnRefreshPublishing: Deferred.succeed(publishing, undefined).pipe(
+					Effect.andThen(Deferred.await(never_release)),
+				),
+			},
+		});
+		const service = await harness.runtime.runPromise(Effect.service(ModelBehaviourService));
+		const waiter = Effect.runPromiseExit(service.Get);
+
+		await Effect.runPromise(Deferred.await(publishing));
+		await harness.runtime.dispose();
+		expect((await waiter)._tag).toBe("Failure");
+	});
+
+	it("maps typed registry discovery failure to its renderer-safe invariant", async () => {
+		const registry_error = new ModelBehaviourProviderRegistryError({
+			cause: new Error("private discovery detail"),
+		});
+		const harness = await make_harness({
+			registry: Layer.succeed(ModelBehaviourProviderRegistry, {
+				Await: Effect.fail(registry_error),
+			}),
+		});
+
+		try {
+			const result = await harness.runtime.runPromise(
+				Effect.service(ModelBehaviourService).pipe(
+					Effect.flatMap((service) => service.Get),
+					Effect.exit,
+				),
+			);
+
+			expect(result._tag).toBe("Failure");
+			expect(JSON.stringify(result)).toContain("ModelBehaviourInvariantError");
+			expect(JSON.stringify(result)).not.toContain("private discovery detail");
+		} finally {
+			await harness.runtime.dispose();
 		}
 	});
 });

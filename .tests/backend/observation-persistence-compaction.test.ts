@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { Cause, Effect, Exit } from "effect";
+import { Cause, Effect, Exit, Fiber, Layer } from "effect";
+import { TestClock } from "effect/testing";
 
 import type { EngineObservation } from "@artisan/engines";
 
 import {
 	CompactObservationBatch,
 	MakeObservationPersistence,
+	observation_persistence_retry_schedule,
 } from "../../modules/backend/src/orchestration/observation-persistence";
 import { OrchestrationFailure } from "../../modules/backend/src/persistence/orchestration/contracts";
+import {
+	observation_persistence_abandoned_detail,
+	resume_without_progress_detail,
+	terminal_failure,
+	working_directory_missing_detail,
+} from "../../modules/backend/src/conversation/projection/domain";
 
 const Delta = (
 	sequence: number,
@@ -26,6 +34,56 @@ const Delta = (
 });
 
 describe("observation persistence compaction", () => {
+	/**
+	 * The engine feeds this write path over an unbounded queue and never waits
+	 * for it, so a batch that can never commit used to hold the stream open
+	 * while the provider filled memory behind it until Forge died of heap
+	 * exhaustion. What matters is that retrying ends, not how fast.
+	 */
+	it("gives up on a batch that can never commit instead of retrying forever", async () => {
+		const attempts = await Effect.runPromise(
+			Effect.gen(function* () {
+				let attempted = 0;
+				const fiber = yield* Effect.sync(() => {
+					attempted += 1;
+				}).pipe(
+					Effect.andThen(
+						Effect.fail(new OrchestrationFailure({ cause: new Error("run_missing") })),
+					),
+					Effect.retry({ schedule: observation_persistence_retry_schedule }),
+					Effect.exit,
+					Effect.forkChild,
+				);
+
+				yield* TestClock.adjust("10 minutes");
+
+				const exit = yield* Fiber.join(fiber);
+				expect(Exit.isFailure(exit)).toBe(true);
+				return attempted;
+			}).pipe(Effect.provide(Layer.mergeAll(TestClock.layer()))),
+		);
+
+		expect(attempts).toBeGreaterThan(1);
+		expect(attempts).toBeLessThan(200);
+	});
+
+	/**
+	 * Projection drops any terminal detail it does not recognise, so wording
+	 * that lives away from the allowlist degrades into a failure card with no
+	 * reason — which is exactly what "No detailed reason was recorded for this
+	 * failed run" is, and why it was the only thing a crashed run ever said.
+	 */
+	it.each([
+		["observation persistence abandoned", observation_persistence_abandoned_detail],
+		["resume made no progress", resume_without_progress_detail],
+		["working directory missing", working_directory_missing_detail],
+	])("lets the %s reason survive projection to the reader", (_name, detail) => {
+		expect(terminal_failure({ artisan_code: "AE-RUN-301", detail })).toEqual({
+			code: "AE-RUN-301",
+			detail,
+		});
+	});
+
 	it("preserves an interrupt-only batch failure", async () => {
 		const persistence = MakeObservationPersistence({
 			continuation_repository: {
@@ -163,6 +221,39 @@ describe("observation persistence compaction", () => {
 		]);
 
 		expect(compacted).toHaveLength(3);
+	});
+
+	it("keeps thinking-progress counts apart from reasoning text deltas", () => {
+		const Reasoning = (
+			sequence: number,
+			delta: string,
+			thinking_tokens?: number,
+		): Extract<EngineObservation, { readonly _tag: "reasoning_summary_delta" }> => ({
+			_tag: "reasoning_summary_delta",
+			artisan_run_id: "run_1",
+			delta,
+			item_id: "message_1:reasoning",
+			observation_id: `observation_${sequence}`,
+			raw: { engine_id: "claude", frame: {}, transport: "test" },
+			sequence,
+			summary_index: 0,
+			...(thinking_tokens === undefined ? {} : { thinking_tokens }),
+			turn_id: "turn_1",
+		});
+		const compacted = CompactObservationBatch([
+			Reasoning(1, "Weighing "),
+			Reasoning(2, "the options"),
+			Reasoning(3, "", 150),
+			Reasoning(4, "", 900),
+			Reasoning(5, " carefully"),
+		]);
+
+		expect(compacted).toEqual([
+			expect.objectContaining({ delta: "Weighing the options", sequence: 2 }),
+			expect.objectContaining({ delta: "", sequence: 3, thinking_tokens: 150 }),
+			expect.objectContaining({ delta: "", sequence: 4, thinking_tokens: 900 }),
+			expect.objectContaining({ delta: " carefully", sequence: 5 }),
+		]);
 	});
 
 	it("bounds interleaved telemetry without reordering durable observations", () => {

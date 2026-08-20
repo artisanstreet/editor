@@ -17,6 +17,7 @@ import type {
 import type {
 	CommandEnvelope,
 	HelloEnvelope,
+	OutboundControlEnvelope,
 	OrchestrationGraph,
 	OrchestrationGraphQueryEnvelope,
 	SubscribeEnvelope,
@@ -324,6 +325,17 @@ function thread_create_request(): ThreadCreateEnvelope {
 
 function take(connection: ProtocolConnection, count: number) {
 	return connection.Outbound.pipe(Stream.take(count), Stream.runCollect);
+}
+
+function take_through(
+	connection: ProtocolConnection,
+	predicate: (envelope: OutboundControlEnvelope) => boolean,
+) {
+	return connection.Outbound.pipe(
+		Stream.takeUntil(predicate),
+		Stream.runCollect,
+		Effect.timeout("2 seconds"),
+	);
 }
 
 afterEach(async () => {
@@ -697,7 +709,12 @@ describe("multi-agent graph lifecycle", () => {
 						};
 
 						yield* connection.Receive(query);
-						const query_result = yield* take(connection, 1);
+						const query_result = yield* take_through(
+							connection,
+							(envelope) =>
+								envelope.kind === "orchestration.graph.query.result" &&
+								envelope.payload.graph.group.group_id === query.payload.group_id,
+						);
 						const subscribe: SubscribeEnvelope = {
 							kind: "subscribe",
 							message_id: "subscribe_graph",
@@ -710,7 +727,12 @@ describe("multi-agent graph lifecycle", () => {
 						};
 
 						yield* connection.Receive(subscribe);
-						const subscription = yield* take(connection, 2);
+						const subscription = yield* take_through(
+							connection,
+							(envelope) =>
+								envelope.kind === "orchestration.graph.snapshot" &&
+								envelope.subscription_id === subscribe.subscription_id,
+						);
 						const snapshot = subscription.find(
 							(envelope) => envelope.kind === "orchestration.graph.snapshot",
 						);
@@ -733,23 +755,41 @@ describe("multi-agent graph lifecycle", () => {
 								thread_id,
 							),
 						);
-						const patched = yield* take(connection, 3);
+						const patched = yield* take_through(
+							connection,
+							(envelope) =>
+								envelope.kind === "orchestration.graph.patch" &&
+								envelope.subscription_id === subscribe.subscription_id &&
+								envelope.sequence === 1,
+						);
 
 						return { patched, query_result, subscription };
 					}),
 				),
 			);
 
-			expect(result.query_result).toMatchObject([
-				{
+			expect(result.query_result).toContainEqual(
+				expect.objectContaining({
 					kind: "orchestration.graph.query.result",
-					payload: { graph: { group: { group_id: "group_graph" } } },
-				},
-			]);
-			expect(result.subscription.map(({ kind }) => kind)).toEqual([
-				"subscription.started",
-				"orchestration.graph.snapshot",
-			]);
+					payload: expect.objectContaining({
+						graph: expect.objectContaining({
+							group: expect.objectContaining({ group_id: "group_graph" }),
+						}),
+					}),
+				}),
+			);
+			expect(result.subscription).toContainEqual(
+				expect.objectContaining({
+					kind: "subscription.started",
+					subscription_id: "graph_subscription",
+				}),
+			);
+			expect(result.subscription).toContainEqual(
+				expect.objectContaining({
+					kind: "orchestration.graph.snapshot",
+					subscription_id: "graph_subscription",
+				}),
+			);
 			expect(result.patched).toContainEqual(
 				expect.objectContaining({
 					kind: "orchestration.graph.patch",

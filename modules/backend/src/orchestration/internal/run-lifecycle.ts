@@ -563,23 +563,39 @@ export function make_run_lifecycle(
 							),
 						)
 						.orderBy(asc(AgentRuns.created_at), asc(AgentRuns.run_id));
+					/**
+					 * Recovery can inherit many runs after a process crash. Resolve their
+					 * group ownership once before preserving the stranded-run order below;
+					 * querying one group per run made backend readiness grow linearly with
+					 * the number of interrupted workers.
+					 */
+					const group_ids = [...new Set(stranded.map((run) => run.group_id))];
+					const groups =
+						group_ids.length === 0
+							? []
+							: yield* transaction
+									.select({
+										group_id: OrchestrationGroups.group_id,
+										thread_id: OrchestrationGroups.thread_id,
+									})
+									.from(OrchestrationGroups)
+									.where(inArray(OrchestrationGroups.group_id, group_ids));
+					const thread_ids_by_group = new Map(
+						groups.map((group) => [group.group_id, group.thread_id] as const),
+					);
 					const recovered: Array<EventEnvelope> = [];
 
 					for (const run of stranded) {
-						const [group] = yield* transaction
-							.select({ thread_id: OrchestrationGroups.thread_id })
-							.from(OrchestrationGroups)
-							.where(eq(OrchestrationGroups.group_id, run.group_id))
-							.limit(1);
+						const thread_id = thread_ids_by_group.get(run.group_id);
 
-						if (group) {
+						if (thread_id !== undefined) {
 							recovered.push(
 								...(yield* transitions.transition_terminal_run(transaction, {
 									causation_id: `recovered:${run.run_id}`,
 									correlation_id: run.run_id,
 									run,
 									state: "failed",
-									thread_id: group.thread_id,
+									thread_id,
 								})),
 							);
 						}

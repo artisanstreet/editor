@@ -7,6 +7,8 @@ import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import {
 	type Engine,
 	EngineProcessFactoryLive,
+	EngineToolchain,
+	EngineToolchainDisabled,
 	make_engine_registry_layer,
 } from "@artisan/engines";
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
@@ -22,6 +24,11 @@ import {
 } from "../host/wake-lock";
 import { make_platform_wake_lock_backend_layer } from "../host/wake-lock-platform";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
+import {
+	OrchestrationRecoveryCoordinatorLive,
+	OrchestrationRecoveryGate,
+	OrchestrationRecoveryGateLive,
+} from "../orchestration/recovery-gate";
 import { IntakePolicyLive } from "../orchestration/intake-policy";
 import { ProductInstructionsLive } from "../orchestration/product-instructions";
 import { ThreadContinuationCompactorLive } from "../orchestration/thread-continuation-compactor";
@@ -95,6 +102,11 @@ import {
 } from "../projects/project-identity-registry";
 import { ProjectWorkspaceBindingLive } from "../workspace/projects";
 import {
+	GatedWorkspaceBoundedRegularFileStoreRegistryLive,
+	GatedWorkspaceFilesystemRegistryLive,
+	GatedWorkspaceGitRegistryLive,
+} from "../workspace/gated-registry-projection";
+import {
 	ThreadProjectAffinityCoordinatorDisabled,
 	ThreadProjectAffinityCoordinatorLive,
 } from "../threads/thread-project-affinity-coordinator";
@@ -115,11 +127,13 @@ import {
 } from "../threads/thread-retention";
 import { NodePtyTerminalDriverLive } from "../terminal/node-pty-driver";
 import { TerminalDriver } from "../terminal/driver";
+import { ObservedTerminalAdoptionLive } from "../terminal/observed-adoption";
 import { TerminalRepositoryLive } from "../terminal/repository";
 import { TerminalSessionServiceLive } from "../terminal/sessions";
 import { RuntimeMetadata, RuntimeMetadataLive } from "./metadata";
 import { RuntimeCatalogLive } from "./catalog";
 import {
+	type BackendRuntimeConfiguration,
 	DesktopEngineConfigurationError,
 	ResolveBackendRuntimeConfiguration,
 } from "./backend-runtime-config";
@@ -141,7 +155,10 @@ import {
 	MakeHarnessConfigRegistryLayer,
 } from "../harness-config/keys";
 import { HarnessConfigLive } from "../harness-config/service";
-import { make_codex_model_behaviour_probe_layer } from "../model-behaviour/codex-probe";
+import {
+	CodexModelBehaviourExecutable,
+	make_codex_model_behaviour_probe_layer,
+} from "../model-behaviour/codex-probe";
 import { ModelBehaviourConfigFilesLive } from "../model-behaviour/config-files";
 import {
 	EmptyModelBehaviourProviderRegistryLive,
@@ -228,6 +245,8 @@ export interface BackendOptions {
 	/** Explicit, inert-until-connect transport selection for reviewed MCP capabilities. */
 	readonly capability_transport_registry?: Layer.Layer<CapabilityTransportRegistry>;
 	readonly database_path: string;
+	/** The Artisan-owned engine toolchain; absent, installs are unavailable. */
+	readonly engine_toolchain?: Layer.Layer<EngineToolchain>;
 	readonly engines?: ReadonlyArray<Engine>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
@@ -240,6 +259,11 @@ export interface BackendOptions {
 	>;
 	readonly npx_skills_adapter?: Layer.Layer<NpxSkillsAdapter>;
 	readonly oauth_adapter?: Layer.Layer<OAuthAdapter>;
+	/**
+	 * Test seam: substituting the gate also disables the startup-recovery
+	 * coordinator so the test owns gate completion timing exclusively.
+	 */
+	readonly orchestration_recovery_gate?: Layer.Layer<OrchestrationRecoveryGate>;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
 	readonly preview_external_browser?: Layer.Layer<PreviewExternalBrowser>;
 	readonly preview_health_probe?: Layer.Layer<PreviewHealthProbe>;
@@ -247,7 +271,12 @@ export interface BackendOptions {
 	readonly preview_rich_links?: Layer.Layer<RichLinkMetadata | RichLinkAssetStore>;
 	readonly project_locator?: Layer.Layer<ProjectLocator, never, ProjectIdentityRegistry>;
 	readonly project_directory_roots?: ReadonlyArray<string>;
-	readonly project_directory_service?: Layer.Layer<ProjectDirectoryService>;
+	/**
+	 * Carries the same unmet requirements the internal construction does. Typing
+	 * it as self-contained once let the desktop path inject a locator-less layer
+	 * that short-circuited the dependency wiring below and died at first use.
+	 */
+	readonly project_directory_service?: ReturnType<typeof make_project_directory_service_layer>;
 	readonly native_directory_picker?: Layer.Layer<NativeDirectoryPicker>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
 	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
@@ -282,6 +311,8 @@ export interface DesktopGuidanceOptions {
 export interface DesktopModelBehaviourOptions {
 	readonly backups_directory?: string;
 	readonly codex_command?: string;
+	/** Dynamic production resolver for the Artisan-owned Codex generation. */
+	readonly codex_executable?: Layer.Layer<CodexModelBehaviourExecutable>;
 	readonly codex_home?: string;
 	readonly home_directory?: string;
 }
@@ -355,8 +386,34 @@ export function make_backend_layer(options: BackendOptions) {
 	const workspace_bounded_filesystems =
 		options.workspace_bounded_regular_file_store_registry ??
 		NodeWorkspaceBoundedRegularFileStoreRegistryLive;
+	const project_catalog = ProjectCatalogLive.pipe(Layer.provideMerge(infrastructure));
+	/**
+	 * The binder owns the raw registry tags. All application consumers receive
+	 * only these same-tag projections, which wait for the current binding flight
+	 * without making backend construction wait for that flight.
+	 */
+	const workspace_binding = ProjectWorkspaceBindingLive.pipe(
+		Layer.provide(
+			Layer.mergeAll(
+				workspace_bounded_filesystems,
+				workspace_filesystems,
+				workspace_git_registry,
+				project_catalog,
+			),
+		),
+	);
+	const gated_workspace_filesystems = GatedWorkspaceFilesystemRegistryLive.pipe(
+		Layer.provide(Layer.mergeAll(workspace_binding, workspace_filesystems)),
+	);
+	const gated_workspace_bounded_filesystems =
+		GatedWorkspaceBoundedRegularFileStoreRegistryLive.pipe(
+			Layer.provide(Layer.mergeAll(workspace_binding, workspace_bounded_filesystems)),
+		);
+	const gated_workspace_git_registry = GatedWorkspaceGitRegistryLive.pipe(
+		Layer.provide(Layer.mergeAll(workspace_binding, workspace_git_registry)),
+	);
 	const workspace_authority = WorkspaceMutationAuthorityLive.pipe(
-		Layer.provideMerge(workspace_bounded_filesystems),
+		Layer.provideMerge(gated_workspace_bounded_filesystems),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(infrastructure),
 	);
@@ -365,7 +422,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.mergeAll(
 				NodeCrypto.layer,
 				workspace_authority,
-				workspace_bounded_filesystems,
+				gated_workspace_bounded_filesystems,
 				workspace_changes,
 				workspace_evidence,
 				workspace_diffs,
@@ -375,10 +432,12 @@ export function make_backend_layer(options: BackendOptions) {
 		),
 	);
 	const git_reads = GitReadServiceLive.pipe(
-		Layer.provideMerge(workspace_git_registry),
+		Layer.provideMerge(gated_workspace_git_registry),
 		Layer.provideMerge(NodeCrypto.layer),
 	);
-	const git_mutations = GitMutationDriverLive.pipe(Layer.provideMerge(workspace_git_registry));
+	const git_mutations = GitMutationDriverLive.pipe(
+		Layer.provideMerge(gated_workspace_git_registry),
+	);
 	const git_repository = GitRepositoryLive.pipe(
 		Layer.provideMerge(infrastructure),
 		Layer.provideMerge(NodeCrypto.layer),
@@ -453,7 +512,21 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(agent_name_catalog),
 		Layer.provideMerge(infrastructure),
 	);
+	const recovery_gate = options.orchestration_recovery_gate ?? OrchestrationRecoveryGateLive;
+	/**
+	 * Declared before orchestration because the orchestrator adopts the shells a
+	 * run's engine opens underneath, and both it and the terminal service must
+	 * share one repository rather than each building its own.
+	 */
+	const terminal_persistence = TerminalRepositoryLive.pipe(Layer.provideMerge(infrastructure));
+	const observed_terminals = ObservedTerminalAdoptionLive.pipe(
+		Layer.provide(terminal_persistence),
+		Layer.provide(persistence),
+		Layer.provide(infrastructure),
+	);
 	const orchestration = AgentOrchestratorLive.pipe(
+		Layer.provideMerge(observed_terminals),
+		Layer.provideMerge(recovery_gate),
 		Layer.provide(graph_persistence),
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(continuation),
@@ -465,6 +538,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(ProductInstructionsLive),
 	);
 	const graph = AgentGraphOrchestratorLive.pipe(
+		Layer.provideMerge(recovery_gate),
 		Layer.provideMerge(graph_persistence),
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(engine_registry),
@@ -472,6 +546,14 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(ProductInstructionsLive),
 	);
+	const recovery_coordinator =
+		options.orchestration_recovery_gate === undefined
+			? OrchestrationRecoveryCoordinatorLive.pipe(
+					Layer.provideMerge(orchestration),
+					Layer.provideMerge(graph),
+					Layer.provideMerge(recovery_gate),
+				)
+			: Layer.empty;
 	const thread_metadata = ThreadMetadataRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const metadata_refinement =
 		options.thread_metadata_refiner === undefined
@@ -490,7 +572,6 @@ export function make_backend_layer(options: BackendOptions) {
 	const project_affinity = ThreadProjectAffinityRepositoryLive.pipe(
 		Layer.provideMerge(infrastructure),
 	);
-	const project_catalog = ProjectCatalogLive.pipe(Layer.provideMerge(infrastructure));
 	/** Workspace ids are minted Snowflakes; the registry is the durable allocator. */
 	const project_identities = ProjectIdentityRegistryLive.pipe(Layer.provideMerge(infrastructure));
 	const project_locator = (
@@ -508,7 +589,12 @@ export function make_backend_layer(options: BackendOptions) {
 					Layer.provideMerge(persistence),
 					Layer.provideMerge(infrastructure),
 				);
-	const project_directories =
+	/**
+	 * The dependency wiring belongs to the composition, not to the branch that
+	 * chose the layer: an injected directory service needs the same locator,
+	 * picker, and platform services the internally built one does.
+	 */
+	const project_directories = (
 		options.project_directory_service ??
 		Layer.unwrap(
 			ResolveBackendRuntimeConfiguration().pipe(
@@ -524,13 +610,14 @@ export function make_backend_layer(options: BackendOptions) {
 				Effect.provide(NodeFileSystem.layer),
 				Effect.provide(NodePath.layer),
 			),
-		).pipe(
-			Layer.provideMerge(project_locator),
-			Layer.provideMerge(native_directory_picker),
-			Layer.provideMerge(NodeFileSystem.layer),
-			Layer.provideMerge(NodePath.layer),
-			Layer.provideMerge(infrastructure),
-		);
+		)
+	).pipe(
+		Layer.provideMerge(project_locator),
+		Layer.provideMerge(native_directory_picker),
+		Layer.provideMerge(NodeFileSystem.layer),
+		Layer.provideMerge(NodePath.layer),
+		Layer.provideMerge(infrastructure),
+	);
 	const retention_policy = ThreadRetentionPolicyServiceLive.pipe(Layer.provideMerge(persistence));
 	const model_favorites = ModelFavoritesServiceLive.pipe(Layer.provideMerge(persistence));
 	const threads = ThreadCommandsLive.pipe(
@@ -541,7 +628,6 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(model_favorites),
 		Layer.provideMerge(session_defaults),
 	);
-	const terminal_persistence = TerminalRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const terminal_driver = options.terminal_driver ?? NodePtyTerminalDriverLive;
 	const terminals = TerminalSessionServiceLive.pipe(
 		Layer.provideMerge(persistence),
@@ -550,11 +636,11 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(infrastructure),
 	);
 	const workspace_discovery = WorkspaceFileDiscoveryLive.pipe(
-		Layer.provideMerge(workspace_filesystems),
+		Layer.provideMerge(gated_workspace_filesystems),
 	);
 	const tool_capabilities = ArtisanBuiltInToolCapabilityStateLive.pipe(
-		Layer.provideMerge(workspace_bounded_filesystems),
-		Layer.provideMerge(workspace_filesystems),
+		Layer.provideMerge(gated_workspace_bounded_filesystems),
+		Layer.provideMerge(gated_workspace_filesystems),
 		Layer.provideMerge(workspace_git_registry),
 	);
 	const tool_registry = make_artisan_tool_registry_layer().pipe(
@@ -567,7 +653,7 @@ export function make_backend_layer(options: BackendOptions) {
 	);
 	const tool_handlers = ExecuteToolLive.pipe(
 		Layer.provideMerge(workspace_discovery),
-		Layer.provideMerge(workspace_filesystems),
+		Layer.provideMerge(gated_workspace_filesystems),
 		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(git),
@@ -707,6 +793,7 @@ export function make_backend_layer(options: BackendOptions) {
 	const surfaces = SurfaceServiceLive.pipe(Layer.provideMerge(infrastructure));
 
 	const protocol_foundation = make_protocol_server_layer(protocol_options).pipe(
+		Layer.provideMerge(options.engine_toolchain ?? EngineToolchainDisabled),
 		Layer.provideMerge(routing),
 		Layer.provideMerge(retention_policy),
 		Layer.provideMerge(graph),
@@ -736,6 +823,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(capability_repository),
 		Layer.provideMerge(capability_oauth),
 		Layer.provideMerge(capability_mirrors),
+		Layer.provideMerge(recovery_gate),
 	);
 
 	/**
@@ -744,27 +832,28 @@ export function make_backend_layer(options: BackendOptions) {
 	 * persistence, and the registries own capabilities, so the binding between
 	 * them is the composition's job.
 	 */
-	return Layer.mergeAll(protocol, projection_rebuild, ProjectWorkspaceBindingLive, wake_lock).pipe(
+	return Layer.mergeAll(
+		protocol,
+		recovery_coordinator,
+		projection_rebuild,
+		workspace_binding,
+		gated_workspace_filesystems,
+		gated_workspace_bounded_filesystems,
+		wake_lock,
+	).pipe(
 		Layer.provideMerge(options.preview_health_probe ?? NodePreviewHealthProbeLive),
 		Layer.provideMerge(workspace_evidence),
-		Layer.provideMerge(workspace_authority),
-		Layer.provideMerge(workspace_bounded_filesystems),
-		Layer.provideMerge(workspace_filesystems),
 		Layer.provideMerge(workspace_snapshots),
 		Layer.provideMerge(workspace_mutation_payloads),
 		Layer.provideMerge(project_catalog),
 	);
 }
 
-function make_desktop_guidance_registry(options: DesktopBackendOptions) {
-	return ResolveBackendRuntimeConfiguration(options.guidance_platform).pipe(
-		Effect.map((runtime_config) =>
-			make_platform_guidance_provider_registry_layer({
-				codex_agents_path: join(runtime_config.codex_home, "AGENTS.md"),
-				codex_override_path: join(runtime_config.codex_home, "AGENTS.override.md"),
-			}).pipe(Layer.provide(GuidanceFileStoreLive)),
-		),
-	);
+function make_desktop_guidance_registry(runtime_config: BackendRuntimeConfiguration) {
+	return make_platform_guidance_provider_registry_layer({
+		codex_agents_path: join(runtime_config.codex_home, "AGENTS.md"),
+		codex_override_path: join(runtime_config.codex_home, "AGENTS.override.md"),
+	}).pipe(Layer.provide(GuidanceFileStoreLive));
 }
 
 /**
@@ -774,53 +863,104 @@ function make_desktop_guidance_registry(options: DesktopBackendOptions) {
  * though no key currently maps to it, so adding one is a registry edit rather
  * than a path-resolution change.
  */
-function make_desktop_harness_config_registry(options: DesktopBackendOptions) {
+function make_desktop_harness_config_registry(
+	options: DesktopBackendOptions,
+	runtime_config: BackendRuntimeConfiguration,
+) {
 	const backups_directory =
 		options.harness_config_platform?.backups_directory ??
 		join(dirname(options.database_path), "harness-config", "backups");
 
-	return ResolveBackendRuntimeConfiguration(options.harness_config_platform).pipe(
-		Effect.map((runtime_config) =>
-			MakeHarnessConfigRegistryLayer({
-				targets: [
-					{
-						backups_directory,
-						format: "toml",
-						harness_id: "codex",
-						path: join(runtime_config.codex_home, "config.toml"),
-					},
-					{
-						backups_directory,
-						format: "json",
-						harness_id: "claude",
-						path: join(runtime_config.claude_home, "settings.json"),
-					},
-				],
-			}).pipe(Layer.orDie),
-		),
-	);
+	return MakeHarnessConfigRegistryLayer({
+		targets: [
+			{
+				backups_directory,
+				format: "toml",
+				harness_id: "codex",
+				path: join(runtime_config.codex_home, "config.toml"),
+			},
+			{
+				backups_directory,
+				format: "json",
+				harness_id: "claude",
+				path: join(runtime_config.claude_home, "settings.json"),
+			},
+		],
+	}).pipe(Layer.orDie);
 }
 
-function make_desktop_model_behaviour_registry(options: DesktopBackendOptions) {
+function make_desktop_model_behaviour_registry(
+	options: DesktopBackendOptions,
+	runtime_config: BackendRuntimeConfiguration,
+) {
 	const model_behaviour_directory = join(dirname(options.database_path), "model-behaviour");
 	const probe = make_codex_model_behaviour_probe_layer({
 		...(options.model_behaviour_platform?.codex_command === undefined
 			? {}
 			: { command: options.model_behaviour_platform.codex_command }),
 		cwd: dirname(options.database_path),
+		...(options.model_behaviour_platform?.codex_executable === undefined
+			? {}
+			: { executable: options.model_behaviour_platform.codex_executable }),
 	}).pipe(Layer.provide(NodeProcessRunnerLive));
 
-	return ResolveBackendRuntimeConfiguration(options.model_behaviour_platform).pipe(
-		Effect.map((runtime_config) =>
-			make_desktop_model_behaviour_provider_registry_layer({
-				backups_directory:
-					options.model_behaviour_platform?.backups_directory ??
-					join(model_behaviour_directory, "backups"),
-				codex_config_path: join(runtime_config.codex_home, "config.toml"),
-			}).pipe(Layer.provideMerge(ModelBehaviourConfigFilesLive), Layer.provideMerge(probe)),
-		),
-	);
+	return make_desktop_model_behaviour_provider_registry_layer({
+		backups_directory:
+			options.model_behaviour_platform?.backups_directory ??
+			join(model_behaviour_directory, "backups"),
+		codex_config_path: join(runtime_config.codex_home, "config.toml"),
+	}).pipe(Layer.provideMerge(ModelBehaviourConfigFilesLive), Layer.provideMerge(probe));
 }
+
+/**
+ * Resolves only desktop defaults that were not explicitly injected. The four
+ * independent platform reads share one bounded, interruption-safe startup phase.
+ */
+export const ResolveDesktopBackendRuntimeLayers = (
+	options: DesktopBackendOptions,
+	resolve_runtime_configuration: typeof ResolveBackendRuntimeConfiguration = ResolveBackendRuntimeConfiguration,
+) =>
+	Effect.all(
+		{
+			guidance_provider_registry:
+				options.guidance_provider_registry === undefined
+					? resolve_runtime_configuration(options.guidance_platform).pipe(
+							Effect.map(make_desktop_guidance_registry),
+						)
+					: Effect.succeed(options.guidance_provider_registry),
+			harness_config_registry:
+				options.harness_config_registry === undefined
+					? resolve_runtime_configuration(options.harness_config_platform).pipe(
+							Effect.map((runtime_config) =>
+								make_desktop_harness_config_registry(options, runtime_config),
+							),
+						)
+					: Effect.succeed(options.harness_config_registry),
+			model_behaviour_provider_registry:
+				options.model_behaviour_provider_registry === undefined
+					? resolve_runtime_configuration(options.model_behaviour_platform).pipe(
+							Effect.map((runtime_config) =>
+								make_desktop_model_behaviour_registry(options, runtime_config),
+							),
+						)
+					: Effect.succeed(options.model_behaviour_provider_registry),
+			project_directory_service:
+				options.project_directory_service === undefined
+					? resolve_runtime_configuration().pipe(
+							Effect.map((runtime_config) =>
+								make_project_directory_service_layer(
+									options.project_directory_roots ?? [
+										runtime_config.home_directory,
+										runtime_config.current_directory,
+									],
+									runtime_config.home_directory,
+								),
+							),
+						)
+					: Effect.succeed(options.project_directory_service),
+		},
+		{ concurrency: 4 },
+	);
 
 /**
  * Engines the desktop production composition may load. Anything else fails
@@ -850,22 +990,14 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 				});
 			}
 
-			const guidance_provider_registry =
-				options.guidance_provider_registry ??
-				(yield* make_desktop_guidance_registry(options));
-			const model_behaviour_provider_registry =
-				options.model_behaviour_provider_registry ??
-				(yield* make_desktop_model_behaviour_registry(options));
-			const harness_config_registry =
-				options.harness_config_registry ??
-				(yield* make_desktop_harness_config_registry(options));
+			const runtime_layers = yield* ResolveDesktopBackendRuntimeLayers(options);
 
 			return make_backend_layer({
 				...options,
 				native_directory_picker:
 					options.native_directory_picker ??
 					make_node_native_directory_picker_layer(process.platform),
-				harness_config_registry,
+				harness_config_registry: runtime_layers.harness_config_registry,
 				capability_transport_registry:
 					options.capability_transport_registry ?? production_capability_transports,
 				routine_source_inspector:
@@ -888,8 +1020,9 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 									options.npx_skills_process,
 								).pipe(Layer.provide(EngineProcessFactoryLive)),
 							}),
-				guidance_provider_registry,
-				model_behaviour_provider_registry,
+				guidance_provider_registry: runtime_layers.guidance_provider_registry,
+				model_behaviour_provider_registry: runtime_layers.model_behaviour_provider_registry,
+				project_directory_service: runtime_layers.project_directory_service,
 				project_locator:
 					options.project_locator ??
 					make_node_project_locator_layer().pipe(Layer.provide(NodeProcessRunnerLive)),

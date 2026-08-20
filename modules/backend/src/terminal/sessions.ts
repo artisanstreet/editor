@@ -5,6 +5,7 @@ import {
 	Effect,
 	Exit,
 	Layer,
+	Option,
 	Ref,
 	Scope,
 	Semaphore,
@@ -23,6 +24,14 @@ import {
 } from "./driver";
 import { TerminalRepository } from "./contract";
 import {
+	AppendScrollback,
+	FinishScrollback,
+	FollowScrollback,
+	MakeTerminalScrollback,
+	SnapshotScrollback,
+	type TerminalScrollback,
+} from "./scrollback";
+import {
 	TerminalInvariantError,
 	TerminalNotActive,
 	TerminalNotFound,
@@ -38,13 +47,32 @@ interface LiveTerminal {
 	readonly done: Deferred.Deferred<StoredTerminalSession, TerminalSessionError>;
 	readonly generation: number;
 	readonly handle: TerminalDriverHandle;
+	readonly retired: Deferred.Deferred<void>;
 	readonly scope: Scope.Closeable;
+	readonly terminal_id: string;
 	readonly thread_id: string;
 	readonly workspace_id: string;
 }
 
 /** Unions terminal persistence and canonical journal failures. */
 export type TerminalSessionError = JournalStoreError | TerminalRepositoryError;
+
+/**
+ * The recent-output window each terminal retains for replay. Sized for the
+ * postmortem read — "what did the dev server log before it died" — rather than
+ * a full transcript; older bytes are dropped silently.
+ */
+const SCROLLBACK_LIMIT_BYTES = 1_048_576;
+
+/** How many exited terminals keep their scrollback readable before the oldest is dropped. */
+const RETAINED_SCROLLBACK_TERMINALS = 16;
+
+/**
+ * A PTY close request is not proof that the host observed the process exit.
+ * Keep command admission moving when a driver loses that notification, while
+ * recording the lifecycle as ambiguous rather than inventing a clean close.
+ */
+const EXIT_SETTLEMENT_TIMEOUT = "1 second";
 
 /** Returns the durable outcome and canonical events for one terminal command. */
 export interface TerminalCommandAcceptance {
@@ -126,25 +154,127 @@ export const TerminalSessionServiceLive = Layer.effect(
 		const live_terminals = yield* Ref.make(new Map<string, LiveTerminal>());
 		const quiesced_threads = yield* Ref.make(new Set<string>());
 		const command_lock = yield* Semaphore.make(1);
+		const recovery = yield* Deferred.make<void, TerminalSessionError>();
+		/**
+		 * Scrollback outlives the live handle on purpose: the crash case — the
+		 * moment the output matters most — is exactly when the handle is gone.
+		 * Entries are replaced on restart and evicted oldest-finished-first.
+		 */
+		const scrollbacks = yield* Ref.make(new Map<string, TerminalScrollback>());
+		const retired_scrollbacks = yield* Ref.make<
+			ReadonlyArray<{
+				readonly generation: number;
+				readonly terminal_id: string;
+				readonly thread_id: string;
+			}>
+		>([]);
 
-		const RemoveLive = (terminal_id: string, generation: number) =>
-			Ref.update(live_terminals, (terminals) => {
+		const RetireScrollback = (terminal_id: string, scrollback: TerminalScrollback) =>
+			Effect.gen(function* () {
+				yield* FinishScrollback(scrollback);
+				const evictions = yield* Ref.modify(retired_scrollbacks, (order) => {
+					const appended = [
+						...order.filter(
+							(entry) =>
+								entry.terminal_id !== terminal_id ||
+								entry.generation !== scrollback.generation,
+						),
+						{
+							generation: scrollback.generation,
+							terminal_id,
+							thread_id: scrollback.thread_id,
+						},
+					];
+					const excess = appended.length - RETAINED_SCROLLBACK_TERMINALS;
+					const evicted = excess > 0 ? appended.slice(0, excess) : [];
+					const retained = excess > 0 ? appended.slice(excess) : appended;
+
+					return [evicted, retained] as const;
+				});
+
+				if (evictions.length === 0) {
+					return;
+				}
+
+				yield* Ref.update(scrollbacks, (current) => {
+					const next = new Map(current);
+
+					for (const eviction of evictions) {
+						const retained = next.get(eviction.terminal_id);
+
+						if (retained?.generation === eviction.generation) {
+							next.delete(eviction.terminal_id);
+						}
+					}
+
+					return next;
+				});
+			});
+
+		const PumpOutput = (
+			terminal_id: string,
+			scrollback: TerminalScrollback,
+			handle: TerminalDriverHandle,
+			retired: Deferred.Deferred<void>,
+		) =>
+			Effect.raceFirst(
+				handle.Output.pipe(
+					Stream.runForEach((chunk) =>
+						AppendScrollback(scrollback, chunk, SCROLLBACK_LIMIT_BYTES),
+					),
+				),
+				Deferred.await(retired),
+			).pipe(Effect.ensuring(RetireScrollback(terminal_id, scrollback)));
+
+		const ClaimLive = (terminal_id: string, generation: number) =>
+			Ref.modify(live_terminals, (terminals) => {
 				const current = terminals.get(terminal_id);
 
 				if (!current || current.generation !== generation) {
-					return terminals;
+					return [Option.none<LiveTerminal>(), terminals] as const;
 				}
 
 				const next = new Map(terminals);
 
 				next.delete(terminal_id);
 
-				return next;
+				return [Option.some(current), next] as const;
+			});
+
+		/** Releases an already claimed live generation after a lost exit notification. */
+		const RetireClaimed = (live: LiveTerminal, exact_scrollback?: TerminalScrollback) =>
+			Effect.gen(function* () {
+				yield* Deferred.succeed(live.retired, undefined);
+				yield* Deferred.interrupt(live.done);
+				const scrollback =
+					exact_scrollback ?? (yield* Ref.get(scrollbacks)).get(live.terminal_id);
+
+				if (scrollback?.generation === live.generation) {
+					yield* RetireScrollback(live.terminal_id, scrollback);
+				}
+
+				yield* Scope.close(live.scope, Exit.void).pipe(
+					Effect.timeoutOption(EXIT_SETTLEMENT_TIMEOUT),
+					Effect.ignore,
+				);
 			});
 
 		const ObserveExit = (terminal_id: string, live: LiveTerminal) =>
 			Effect.gen(function* () {
-				const exit = yield* live.handle.Exit;
+				const observed = yield* Effect.raceFirst(
+					live.handle.Exit.pipe(Effect.map(Option.some)),
+					Deferred.await(live.retired).pipe(Effect.as(Option.none())),
+				);
+
+				if (Option.isNone(observed)) {
+					return;
+				}
+				const exit = observed.value;
+				const claimed = yield* ClaimLive(terminal_id, live.generation);
+
+				if (Option.isNone(claimed) || claimed.value !== live) {
+					return;
+				}
 				const commit = yield* repository.CommitExit(
 					terminal_id,
 					live.generation,
@@ -157,7 +287,6 @@ export const TerminalSessionServiceLive = Layer.effect(
 				Effect.catch((error) => Deferred.fail(live.done, error)),
 				Effect.ensuring(
 					Effect.gen(function* () {
-						yield* RemoveLive(terminal_id, live.generation);
 						yield* Scope.close(live.scope, Exit.void);
 					}),
 				),
@@ -170,17 +299,55 @@ export const TerminalSessionServiceLive = Layer.effect(
 		) =>
 			Effect.gen(function* () {
 				const done = yield* Deferred.make<StoredTerminalSession, TerminalSessionError>();
+				const retired = yield* Deferred.make<void>();
 				const live = {
 					done,
 					generation: stored.terminal.generation,
 					handle,
+					retired,
 					scope,
+					terminal_id: stored.terminal.terminal_id,
 					thread_id: stored.terminal.thread_id,
 					workspace_id: stored.terminal.workspace_id,
 				} satisfies LiveTerminal;
+				const scrollback = yield* MakeTerminalScrollback({
+					generation: stored.terminal.generation,
+					thread_id: stored.terminal.thread_id,
+					workspace_id: stored.terminal.workspace_id,
+				});
 
-				yield* Ref.update(live_terminals, (terminals) =>
-					new Map(terminals).set(stored.terminal.terminal_id, live),
+				const displaced_live = yield* Ref.modify(live_terminals, (terminals) => {
+					const next = new Map(terminals);
+					const displaced = next.get(stored.terminal.terminal_id);
+
+					next.set(stored.terminal.terminal_id, live);
+
+					return [displaced, next] as const;
+				});
+				const displaced_scrollback = yield* Ref.modify(scrollbacks, (current) => {
+					const next = new Map(current);
+					const displaced = next.get(stored.terminal.terminal_id);
+
+					next.set(stored.terminal.terminal_id, scrollback);
+
+					return [displaced, next] as const;
+				});
+
+				if (displaced_live && displaced_live.generation !== live.generation) {
+					yield* Effect.forkIn(
+						RetireClaimed(
+							displaced_live,
+							displaced_scrollback?.generation === displaced_live.generation
+								? displaced_scrollback
+								: undefined,
+						),
+						service_scope,
+						{ startImmediately: true },
+					);
+				}
+				yield* Effect.forkIn(
+					PumpOutput(stored.terminal.terminal_id, scrollback, handle, retired),
+					service_scope,
 				);
 				yield* Effect.forkIn(ObserveExit(stored.terminal.terminal_id, live), service_scope);
 
@@ -249,7 +416,10 @@ export const TerminalSessionServiceLive = Layer.effect(
 							command,
 							claim.generation,
 							"failed",
-							{ _tag: "failed", failure },
+							{
+								_tag: "failed",
+								failure,
+							},
 						);
 
 						return acceptance(commit, "accepted");
@@ -262,7 +432,10 @@ export const TerminalSessionServiceLive = Layer.effect(
 							command,
 							claim.generation,
 							action,
-							{ _tag: "active", pid: handle.pid },
+							{
+								_tag: "active",
+								pid: handle.pid,
+							},
 						);
 
 						yield* RegisterLive(commit.stored, handle, scope);
@@ -279,14 +452,27 @@ export const TerminalSessionServiceLive = Layer.effect(
 				);
 			});
 
-		const RecoverAmbiguous = (command: CommandEnvelope, claim: TerminalCommandClaim) =>
+		const RecoverAmbiguous = (
+			command: CommandEnvelope,
+			claim: TerminalCommandClaim,
+			stop_already_requested = false,
+			retire_unsettled = false,
+		) =>
 			Effect.gen(function* () {
 				const terminal = claim.stored.terminal;
 				const live = (yield* Ref.get(live_terminals)).get(terminal.terminal_id);
 
 				if (live?.thread_id === command.thread_id && live.generation === claim.generation) {
-					yield* live.handle.Close.pipe(Effect.ignore);
-					yield* Deferred.await(live.done).pipe(Effect.ignore);
+					if (!stop_already_requested) {
+						yield* live.handle.Close.pipe(Effect.ignore);
+						const settled = yield* AwaitExit(live).pipe(Effect.option);
+
+						if (Option.isNone(settled) || Option.isNone(settled.value)) {
+							yield* RetireIfCurrent(live);
+						}
+					} else if (retire_unsettled) {
+						yield* RetireIfCurrent(live);
+					}
 				}
 
 				const commit = yield* repository.CommitAmbiguous(
@@ -297,6 +483,56 @@ export const TerminalSessionServiceLive = Layer.effect(
 
 				return acceptance(commit, claim.status);
 			});
+
+		const AwaitExit = (live: LiveTerminal) =>
+			Deferred.await(live.done).pipe(Effect.timeoutOption(EXIT_SETTLEMENT_TIMEOUT));
+
+		const RetireIfCurrent = (live: LiveTerminal) =>
+			ClaimLive(live.terminal_id, live.generation).pipe(
+				Effect.flatMap((claimed) =>
+					Option.isSome(claimed) && claimed.value === live
+						? RetireClaimed(live)
+						: Effect.void,
+				),
+			);
+
+		const WatchExit = (live: LiveTerminal) =>
+			Effect.gen(function* () {
+				const settled = yield* AwaitExit(live).pipe(Effect.exit);
+
+				if (Exit.isFailure(settled) || Option.isSome(settled.value)) {
+					return;
+				}
+				const claimed = yield* ClaimLive(live.terminal_id, live.generation);
+
+				if (Option.isNone(claimed) || claimed.value !== live) {
+					return;
+				}
+				const recovery = yield* repository
+					.CommitRecovery(
+						live.terminal_id,
+						live.generation,
+						"The terminal driver did not publish an exit after a stop request.",
+					)
+					.pipe(Effect.exit);
+
+				if (Exit.isFailure(recovery)) {
+					yield* Deferred.failCause(live.done, recovery.cause);
+				} else {
+					yield* Deferred.succeed(live.done, recovery.value.stored);
+				}
+				yield* RetireClaimed(live);
+			});
+
+		const CloseLive = (live: LiveTerminal) =>
+			live.handle.Close.pipe(
+				Effect.ignore,
+				Effect.andThen(AwaitExit(live)),
+				Effect.flatMap((settled) =>
+					Option.isNone(settled) ? RetireIfCurrent(live) : Effect.void,
+				),
+				Effect.catch(() => RetireIfCurrent(live)),
+			);
 
 		const Dispatch = (
 			command: CommandEnvelope,
@@ -374,25 +610,33 @@ export const TerminalSessionServiceLive = Layer.effect(
 
 				if (payload.type === "terminal.kill") {
 					yield* live.handle.Kill(payload.signal);
-					yield* Deferred.await(live.done);
-
-					return acceptance(
-						yield* repository.CommitCommand(command, claim.generation, "killed", {
-							_tag: "current",
-						}),
-						"accepted",
+					const commit = yield* repository.CommitCommand(
+						command,
+						claim.generation,
+						"killed",
+						{ _tag: "current" },
 					);
+
+					yield* Effect.forkIn(WatchExit(live), service_scope, {
+						startImmediately: true,
+					});
+
+					return acceptance(commit, "accepted");
 				}
 
 				yield* live.handle.Close;
-				yield* Deferred.await(live.done);
-
-				return acceptance(
-					yield* repository.CommitCommand(command, claim.generation, "closed", {
+				const commit = yield* repository.CommitCommand(
+					command,
+					claim.generation,
+					"closed",
+					{
 						_tag: "current",
-					}),
-					"accepted",
+					},
 				);
+
+				yield* Effect.forkIn(WatchExit(live), service_scope, { startImmediately: true });
+
+				return acceptance(commit, "accepted");
 			}).pipe(
 				Effect.catch((error) =>
 					error instanceof TerminalDriverError
@@ -433,89 +677,100 @@ export const TerminalSessionServiceLive = Layer.effect(
 			return user_command;
 		};
 		const Handle = (command: CommandEnvelope) =>
-			Semaphore.withPermit(command_lock)(HandleUnlocked(UserCommand(command)));
+			Deferred.await(recovery).pipe(
+				Effect.andThen(
+					Semaphore.withPermit(command_lock)(HandleUnlocked(UserCommand(command))),
+				),
+			);
 		const HandleAsAgent = (
 			command: CommandEnvelope,
 			authority: { readonly agent_id: string; readonly run_id: string },
 		) =>
-			Semaphore.withPermit(command_lock)(
-				HandleUnlocked({ ...UserCommand(command), ...authority }),
+			Deferred.await(recovery).pipe(
+				Effect.andThen(
+					Semaphore.withPermit(command_lock)(
+						HandleUnlocked({ ...UserCommand(command), ...authority }),
+					),
+				),
 			);
 
-		const Recover = Effect.gen(function* () {
-			const stale = yield* repository.ReadStale(metadata.instance_id);
-
-			for (const stored of stale) {
-				yield* repository.CommitRecovery(
-					stored.terminal.terminal_id,
-					stored.terminal.generation,
-					"The backend stopped before this terminal lifecycle completed.",
-				);
-			}
-		});
+		const Recover = repository.RecoverStale(
+			metadata.instance_id,
+			"The backend stopped before this terminal lifecycle completed.",
+		);
 		const QuiesceThread = (thread_id: string) =>
-			Semaphore.withPermit(command_lock)(
-				Effect.gen(function* () {
-					yield* Ref.update(quiesced_threads, (current) =>
-						new Set(current).add(thread_id),
-					);
-					const terminals = [...(yield* Ref.get(live_terminals)).values()].filter(
-						(live) => live.thread_id === thread_id,
-					);
+			Deferred.await(recovery).pipe(
+				Effect.andThen(
+					Semaphore.withPermit(command_lock)(
+						Effect.gen(function* () {
+							yield* Ref.update(quiesced_threads, (current) =>
+								new Set(current).add(thread_id),
+							);
+							const terminals = [...(yield* Ref.get(live_terminals)).values()].filter(
+								(live) => live.thread_id === thread_id,
+							);
 
-					yield* Effect.forEach(
-						terminals,
-						(live) => live.handle.Close.pipe(Effect.ignore),
-						{ concurrency: "unbounded", discard: true },
-					);
-					yield* Effect.forEach(
-						terminals,
-						(live) => Deferred.await(live.done).pipe(Effect.ignore),
-						{ concurrency: "unbounded", discard: true },
-					);
-				}),
+							yield* Effect.forEach(terminals, CloseLive, {
+								concurrency: "unbounded",
+								discard: true,
+							});
+							yield* Ref.update(
+								scrollbacks,
+								(current) =>
+									new Map(
+										[...current].filter(
+											([, scrollback]) => scrollback.thread_id !== thread_id,
+										),
+									),
+							);
+							yield* Ref.update(retired_scrollbacks, (order) =>
+								order.filter((entry) => entry.thread_id !== thread_id),
+							);
+						}),
+					),
+				),
 			);
 
 		const Shutdown = Effect.gen(function* () {
 			const terminals = [...(yield* Ref.get(live_terminals)).values()];
 
-			yield* Effect.forEach(terminals, (live) => live.handle.Close.pipe(Effect.ignore), {
+			yield* Effect.forEach(terminals, CloseLive, {
+				concurrency: "unbounded",
 				discard: true,
 			});
-			yield* Effect.forEach(
-				terminals,
-				(live) => Deferred.await(live.done).pipe(Effect.ignore),
-				{ discard: true },
-			);
 			yield* Scope.close(service_scope, Exit.void);
 		});
 
-		yield* Effect.addFinalizer(() => Shutdown);
-		yield* Recover;
+		yield* Effect.addFinalizer(() =>
+			Deferred.interrupt(recovery).pipe(Effect.andThen(Shutdown)),
+		);
+		yield* Effect.forkIn(Deferred.complete(recovery, Recover), service_scope, {
+			startImmediately: true,
+		});
 
 		return {
 			Handle,
 			HandleAsAgent,
 			List: repository.List,
 			Output: (input) =>
-				Ref.get(live_terminals).pipe(
-					Effect.flatMap((terminals) => {
-						const live = terminals.get(input.terminal_id);
-						return live &&
-							live.thread_id === input.thread_id &&
-							live.workspace_id === input.workspace_id
-							? Effect.succeed(live.handle.Output)
+				Ref.get(scrollbacks).pipe(
+					Effect.flatMap((entries) => {
+						const scrollback = entries.get(input.terminal_id);
+						return scrollback &&
+							scrollback.thread_id === input.thread_id &&
+							scrollback.workspace_id === input.workspace_id
+							? Effect.succeed(FollowScrollback(scrollback))
 							: Effect.fail(
 									new TerminalNotActive({ terminal_id: input.terminal_id }),
 								);
 					}),
 				),
 			ReadOutput: (terminal_id) =>
-				Ref.get(live_terminals).pipe(
-					Effect.flatMap((terminals) => {
-						const live = terminals.get(terminal_id);
-						return live
-							? Effect.succeed(live.handle.Output)
+				Ref.get(scrollbacks).pipe(
+					Effect.flatMap((entries) => {
+						const scrollback = entries.get(terminal_id);
+						return scrollback
+							? SnapshotScrollback(scrollback)
 							: Effect.fail(new TerminalNotActive({ terminal_id }));
 					}),
 				),

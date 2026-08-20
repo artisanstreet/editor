@@ -105,32 +105,43 @@ describe("TerminalDriver node-pty adapter", () => {
 		expect(result.exit.reason).toBe("closed");
 	});
 
-	it("fails closed when an unconsumed output buffer overflows", async () => {
-		const exit = await Effect.runPromise(
+	it("keeps an unconsumed high-output process alive and retains its output", async () => {
+		const result = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
 					const terminal = yield* open_node_terminal(
-						`process.stdout.write("x".repeat(65_536)); setInterval(() => {}, 1_000);`,
+						`process.stdout.write("x".repeat(65_536) + "TAIL"); setInterval(() => {}, 1_000);`,
 					);
 
-					return yield* terminal.Exit.pipe(
-						Effect.timeoutOrElse({
-							duration: 5_000,
-							orElse: () => Effect.die("terminal overflow did not stop the PTY"),
-						}),
+					/**
+					 * Nothing consumes the queue while the process writes. The driver
+					 * retains output without killing the PTY.
+					 */
+					yield* Effect.sleep("500 millis");
+
+					const alive = is_process_alive(terminal.pid);
+
+					yield* terminal.Close;
+
+					const chunks = yield* terminal.Output.pipe(Stream.runCollect);
+					const output = new TextDecoder().decode(
+						Uint8Array.from([...chunks].flatMap((chunk) => [...chunk])),
 					);
+
+					return { alive, exit: yield* terminal.Exit, output };
 				}),
 			).pipe(
-				Effect.provide(
-					make_node_pty_terminal_driver_layer({
-						output_capacity: 1,
-						output_chunk_bytes: 1_024,
-					}),
-				),
+				Effect.provide(make_node_pty_terminal_driver_layer({ output_chunk_bytes: 1_024 })),
 			),
 		);
 
-		expect(exit.reason).toBe("output_overflow");
+		expect(result.alive).toBe(true);
+		expect(result.exit.reason).toBe("closed");
+		/**
+		 * Content is not asserted exactly because conpty appends its own teardown
+		 * sequences on close.
+		 */
+		expect(result.output.length).toBeGreaterThan(0);
 	});
 
 	it("waits for the native process to exit when its owner scope closes", async () => {

@@ -1,10 +1,24 @@
-import { Cause, Effect } from "effect";
+import { Cause, Effect, Schedule } from "effect";
 
 import type { EngineObservation } from "@artisan/engines";
 
 import { OrchestrationRepository, type PendingWork } from "../persistence/orchestration/repository";
 import { ThreadContinuationRepository } from "../persistence/thread-continuation/repository";
 import { AgentGraphRepository } from "./agent-graph-repository";
+
+/**
+ * Prevents a failed durable write from turning into either data loss or a hot
+ * retry loop. The bound matters as much as the spacing. Observations arrive on
+ * an unbounded queue and the engine never waits for the writer, so a batch that
+ * can never commit — a run row that is gone, an erased thread, a metadata
+ * conflict — holds the stream open while the provider keeps filling memory
+ * behind it. Forge has died of heap exhaustion doing exactly that. The low
+ * level write path already absorbs lock contention on its own, so anything
+ * still failing at this budget is a condition retrying cannot clear.
+ */
+export const observation_persistence_retry_schedule = Schedule.spaced("250 millis").pipe(
+	Schedule.upTo({ duration: "15 seconds" }),
+);
 
 const AddOptional = (left: number | undefined, right: number | undefined) =>
 	left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0);
@@ -47,9 +61,17 @@ const MergeObservation = (
 	) {
 		return { ...current, delta: prior.delta + current.delta };
 	}
+	/**
+	 * A thinking-progress frame is a cumulative count, not text: folding it into
+	 * a neighbouring text delta would either drop that text behind the count or
+	 * hand the count to a delta that then appends nothing. Each stays its own
+	 * observation.
+	 */
 	if (
 		prior._tag === "reasoning_summary_delta" &&
 		current._tag === "reasoning_summary_delta" &&
+		prior.thinking_tokens === undefined &&
+		current.thinking_tokens === undefined &&
 		prior.artisan_run_id === current.artisan_run_id &&
 		prior.item_id === current.item_id &&
 		prior.turn_id === current.turn_id
@@ -201,10 +223,17 @@ export const MakeObservationPersistence = (input: ObservationPersistenceDependen
 					Effect.asVoid,
 					Effect.catchCause((cause) =>
 						Effect.sync(() => {
+							const interrupted = Cause.hasInterruptsOnly(cause);
 							console.error("Artisan continuation observation metadata failed", {
-								failure_kind: Cause.hasInterruptsOnly(cause)
-									? "interrupted"
-									: "persistence",
+								/**
+								 * Without the cause this line says only that something
+								 * failed, which is how a run once retried a permanently
+								 * poisoned batch twenty thousand times with nothing in
+								 * the log to name it.
+								 */
+								...(interrupted ? {} : { cause: Cause.pretty(cause) }),
+								failure_kind: interrupted ? "interrupted" : "persistence",
+								observation: observation._tag,
 								run_id: work.run_id,
 							});
 						}).pipe(Effect.andThen(Effect.failCause(cause))),
@@ -241,6 +270,7 @@ export const MakeObservationPersistence = (input: ObservationPersistenceDependen
 					yield* Effect.sync(() => {
 						console.error("Artisan observation batch persistence failed", {
 							batch_size: compacted.length,
+							...(interrupted ? {} : { cause: Cause.pretty(cause) }),
 							failure_kind: interrupted ? "interrupted" : "persistence",
 							run_id: work.run_id,
 						});

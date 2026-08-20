@@ -18,7 +18,7 @@ import { make_native_subagents } from "./internal/native-subagents";
 import { make_persisted_graph_codecs } from "./internal/persisted-graph-codecs";
 import { make_run_lifecycle } from "./internal/run-lifecycle";
 import { make_run_transitions } from "./internal/run-transitions";
-import type { AgentGraphRepositoryShape } from "./agent-graph-model";
+import { normalize_graph_error, type AgentGraphRepositoryShape } from "./agent-graph-model";
 
 export {
 	AgentGraphCommandConflict,
@@ -102,7 +102,8 @@ export const AgentGraphRepositoryLive = Layer.effect(
 								{ discard: true },
 							),
 						),
-					),
+					)
+					.pipe(Effect.mapError(normalize_graph_error)),
 			Recover: run_lifecycle.recover,
 			RenameAgent: assignment_commands.rename_agent,
 			RetryAssignment: assignment_commands.retry_assignment,

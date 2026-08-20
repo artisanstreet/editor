@@ -9,12 +9,8 @@ import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { GitWorkspaceQueryEnvelope } from "@artisan/protocol";
-import {
-	GitService,
-	make_backend_runtime,
-	make_node_workspace_git_registry_layer,
-	ProtocolServer,
-} from "@artisan/backend";
+import { GitService, make_backend_runtime, ProtocolServer } from "@artisan/backend";
+import { ProjectCatalog } from "../../modules/backend/src/projects/project-catalog";
 
 import { make_transport_test_harness_with_protocol_server } from "../transport/message-channel-harness";
 
@@ -68,14 +64,23 @@ afterEach(async () => {
 describe("production Git backend integration", () => {
 	it("stages through the Git CLI once and preserves the durable projection across restart", async () => {
 		const fixture = await make_fixture();
+		/**
+		 * Attached rather than pre-registered: the project catalog is the authority
+		 * the workspace binding reconciles every registry from, so a registration
+		 * composed into the layer is superseded the moment that binding runs — which
+		 * is exactly what production does, and exactly what left the real registry
+		 * empty while this test passed against a seeded one.
+		 */
 		const make_runtime = () =>
-			make_backend_runtime({
-				database_path: fixture.database_path,
-				migrations_path,
-				workspace_git_registry: make_node_workspace_git_registry_layer([
-					{ root: fixture.root, workspace_id: "workspace_git" },
-				]),
+			make_backend_runtime({ database_path: fixture.database_path, migrations_path });
+		const AttachFixtureProject = Effect.gen(function* () {
+			const catalog = yield* ProjectCatalog;
+			yield* catalog.Attach({
+				display_name: "Git integration",
+				project_id: "workspace_git",
+				root_path: fixture.root,
 			});
+		});
 		const first_runtime = make_runtime();
 		let transport:
 			| Awaited<ReturnType<typeof make_transport_test_harness_with_protocol_server>>
@@ -83,6 +88,7 @@ describe("production Git backend integration", () => {
 		let thread_id = "";
 
 		try {
+			await first_runtime.runPromise(AttachFixtureProject);
 			const protocol_server = await first_runtime.runPromise(ProtocolServer);
 			transport = await make_transport_test_harness_with_protocol_server(protocol_server);
 			const result = await Effect.runPromise(

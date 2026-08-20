@@ -77,7 +77,18 @@ const native_compatible = (
 	target_model: string | undefined,
 ) =>
 	Effect.gen(function* () {
+		/**
+		 * This must admit exactly what PrepareLaunch admits. Choosing native for a
+		 * source it will reject does not degrade to a summarized handoff — it
+		 * fails the run at startup, and the user pays for it by sending the
+		 * message a second time.
+		 */
+		const source_session_intact =
+			source.status === "completed" ||
+			source.status === "cancelled" ||
+			(source.status === "failed" && source.usage_interruption_resume);
 		if (
+			!source_session_intact ||
 			source.engine_id !== context.target.engine_id ||
 			target_model === undefined ||
 			Option.isNone(source.resume_token) ||

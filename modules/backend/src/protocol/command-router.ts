@@ -32,6 +32,31 @@ export class CommandRouter extends Context.Service<
 	}
 >()("Artisan/CommandRouter") {}
 
+/** Mirrors the router's durable ownership split for protocol admission. */
+export const IsOrchestrationCommand = (command: CommandEnvelope) =>
+	[
+		"thread.send_message",
+		"thread.withdraw_message",
+		"thread.auto_steer.update",
+		"thread.session_policy.update",
+		"intake.respond_question",
+		"usage.interruption.resolve",
+		"orchestration.group.start",
+		"agent_instance.rename",
+		"assignment.heartbeat",
+		"assignment.steer",
+		"assignment.stop",
+		"assignment.pause",
+		"assignment.resume",
+		"assignment.retry",
+		"run.steer",
+		"run.retry",
+		"run.cancel",
+		"run.close",
+		"run.respond_approval",
+		"run.respond_question",
+	].includes(command.payload.type);
+
 export const CommandRouterLive = Layer.effect(
 	CommandRouter,
 	Effect.gen(function* () {
@@ -98,7 +123,10 @@ export const CommandRouterLive = Layer.effect(
 			}
 
 			return command.payload.type === "thread.create"
-				? thread_commands.HandleCreate(command)
+				? (command.payload.policy === undefined
+						? Effect.void
+						: runtime_catalog.ValidateThreadSessionPolicy(command.payload.policy)
+					).pipe(Effect.andThen(thread_commands.HandleCreate(command)))
 				: command.payload.type === "thread.retention.update"
 					? thread_commands.HandleRetentionPolicy(command)
 					: command.payload.type === "model.favorite.update"
@@ -110,6 +138,7 @@ export const CommandRouterLive = Layer.effect(
 								? thread_commands.HandleProjectAffinity(command)
 								: command.payload.type.startsWith("thread.") &&
 									  command.payload.type !== "thread.send_message" &&
+									  command.payload.type !== "thread.withdraw_message" &&
 									  command.payload.type !== "thread.auto_steer.update" &&
 									  command.payload.type !== "thread.session_policy.update"
 									? thread_commands.HandleMetadata(command)

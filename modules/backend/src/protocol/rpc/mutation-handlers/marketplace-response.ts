@@ -6,7 +6,7 @@ import { marketplace_capability_thread_id } from "../../../marketplace/capabilit
 import { marketplace_routine_thread_id } from "../../../marketplace/routines/repository";
 import { JournalStore } from "../../../persistence/journal-store";
 import { RuntimeMetadata } from "../../../runtime/metadata";
-import { LatestJournalSequence, type ReadyState } from "../../connection-state";
+import type { ReadyState } from "../../connection-state";
 import { ConnectionResponseSink } from "../query-handlers/project";
 
 type MarketplaceEnvelope = Extract<
@@ -59,8 +59,8 @@ export const MakeMarketplaceResponse = Effect.gen(function* () {
 
 	const Action = (envelope: MarketplaceEnvelope, program: Effect.Effect<unknown, unknown>) =>
 		program.pipe(
-			Effect.andThen(journal.ReadReplay({ after_journal_sequence: 0 })),
-			Effect.flatMap((events) =>
+			Effect.andThen(journal.ReadWatermark()),
+			Effect.flatMap((journal_sequence) =>
 				Effect.gen(function* () {
 					yield* sink.Enqueue({
 						causation_id: envelope.message_id,
@@ -69,7 +69,7 @@ export const MakeMarketplaceResponse = Effect.gen(function* () {
 						message_id: yield* metadata.MakeId("message"),
 						origin: "backend",
 						payload: {
-							journal_sequence: LatestJournalSequence(0, events),
+							journal_sequence,
 							status: "accepted",
 						},
 						protocol_version: 1,

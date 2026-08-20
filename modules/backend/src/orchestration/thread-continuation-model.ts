@@ -158,6 +158,16 @@ const select_newest_tail = (entries: ReadonlyArray<CanonicalTranscriptEntry>) =>
 };
 
 const canonical_summary = (first_user_objective: string | undefined, omitted_entries: number) => {
+	/**
+	 * Nothing omitted means nothing lost: the tail rendered below this summary
+	 * is the entire conversation, and there was no head for a compaction model
+	 * to summarize in the first place. Announcing a "fallback" over a complete
+	 * transcript described a degradation that had not happened, and the reader
+	 * downstream believed it — turns opened by talking about picking up someone
+	 * else's handoff when the whole thread was sitting right there.
+	 */
+	if (omitted_entries === 0)
+		return "Complete canonical transcript. Every entry is retained verbatim below; nothing was summarized away or omitted.";
 	const objective = first_user_objective
 		? `First user objective (untrusted transcript):\n${first_user_objective}`
 		: "No user objective was present in the canonical transcript.";

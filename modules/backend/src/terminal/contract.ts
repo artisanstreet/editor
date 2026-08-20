@@ -15,6 +15,19 @@ import type {
 export class TerminalRepository extends Context.Service<
 	TerminalRepository,
 	{
+		/**
+		 * Records a shell the engine ran inside its own harness.
+		 *
+		 * No claim, no generation bump, no driver: the command has already run
+		 * somewhere this process does not own, so there is nothing to dispatch and
+		 * nothing to write to. Upserted on the observed terminal's own id so the
+		 * start, output, and completion frames of one command converge on one row
+		 * and a replayed observation stays idempotent.
+		 */
+		readonly AdoptObserved: (
+			session: TerminalSession,
+			instance_id: string,
+		) => Effect.Effect<void, TerminalRepositoryError>;
 		readonly Claim: (
 			command: CommandEnvelope,
 			instance_id: string,
@@ -63,5 +76,9 @@ export class TerminalRepository extends Context.Service<
 		readonly ReadStale: (
 			instance_id: string,
 		) => Effect.Effect<ReadonlyArray<StoredTerminalSession>, TerminalRepositoryError>;
+		readonly RecoverStale: (
+			instance_id: string,
+			failure: string,
+		) => Effect.Effect<number, TerminalRepositoryError>;
 	}
 >()("Artisan/TerminalRepository") {}

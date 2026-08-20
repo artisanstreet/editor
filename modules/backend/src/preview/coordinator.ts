@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { Clock, Context, Effect, Layer, Option, Ref } from "effect";
+import { Clock, Context, Deferred, Effect, Exit, Layer, Option, Ref } from "effect";
 
 import type {
 	PreviewBrowserLaunch,
@@ -158,41 +158,66 @@ export const PreviewCoordinatorLive = Layer.effect(
 								),
 					),
 				);
-		/** Runtime handles are intentionally reconstructed only as local target records. Durable
-		 * browser launches and connector sessions are never replayed after a backend restart. */
-		const persisted_targets = yield* service.List();
-		yield* Effect.forEach(
-			persisted_targets.filter((target) => target.state !== "removed"),
-			(target) =>
-				runtime_targets
-					.Register({
-						id: target.target_id,
-						project_id: target.project_id,
-						url: target.url,
-						workspace_id: target.workspace_id,
-					})
-					.pipe(Effect.ignore),
-			{ discard: true },
+		/** Runtime handles are reconstructed in the service scope. Browser launches and connector
+		 * sessions are durable facts only, and are never replayed after a backend restart. */
+		const recovery = yield* Deferred.make<Exit.Exit<void, PreviewRepositoryError>>();
+		const AwaitRecovery = Deferred.await(recovery).pipe(
+			Effect.flatMap((exit) =>
+				Exit.isSuccess(exit) ? Effect.void : Effect.failCause(exit.cause),
+			),
 		);
-		const stale_dispatches = yield* service.RecoverDispatchLeases();
-		yield* Effect.forEach(
-			stale_dispatches,
-			(lease) =>
-				lease.kind === "launch" && lease.target_id !== null
-					? service
-							.UpdateTarget({
-								action: "launch",
-								last_error: "dispatch_lease_expired",
-								launch_state: "error",
-								message_id: `preview:recovery:launch:${lease.lease_id}`,
-								target_id: lease.target_id,
-								thread_id: lease.thread_id,
-							})
-							.pipe(Effect.ignore)
-					: Effect.void,
-			{ discard: true },
+		yield* Effect.forkScoped(
+			Effect.gen(function* () {
+				const result = yield* Effect.gen(function* () {
+					const persisted_targets = yield* service.List();
+					yield* Effect.forEach(
+						persisted_targets.filter((target) => target.state !== "removed"),
+						(target) =>
+							runtime_targets
+								.Register({
+									id: target.target_id,
+									project_id: target.project_id,
+									url: target.url,
+									workspace_id: target.workspace_id,
+								})
+								.pipe(Effect.ignore),
+						{ discard: true },
+					);
+					const stale_dispatches = yield* service.RecoverDispatchLeases();
+					yield* Effect.forEach(
+						stale_dispatches,
+						(lease) =>
+							lease.kind === "launch" && lease.target_id !== null
+								? service
+										.UpdateTarget({
+											action: "launch",
+											last_error: "dispatch_lease_expired",
+											launch_state: "error",
+											message_id: `preview:recovery:launch:${lease.lease_id}`,
+											target_id: lease.target_id,
+											thread_id: lease.thread_id,
+										})
+										.pipe(Effect.ignore)
+								: Effect.void,
+						{ discard: true },
+					);
+					yield* service.RecoverInspections();
+				}).pipe(Effect.exit);
+				yield* Deferred.succeed(recovery, result);
+			}).pipe(
+				Effect.onExit((exit) =>
+					Exit.isFailure(exit)
+						? Deferred.succeed(recovery, exit).pipe(
+								Effect.asVoid,
+								Effect.uninterruptible,
+							)
+						: Effect.void,
+				),
+			),
 		);
-		yield* service.RecoverInspections();
+		const AwaitRuntimeRecovery = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+			AwaitRecovery.pipe(Effect.andThen(effect));
+		const AwaitRecoveryForQuiesce = AwaitRecovery.pipe(Effect.catchCause(() => Effect.void));
 
 		const Get = (target_id: string) => service.Get(target_id).pipe(Effect.map(to_target));
 		const List = (workspace_id?: string) =>
@@ -713,16 +738,17 @@ export const PreviewCoordinatorLive = Layer.effect(
 							: undefined,
 					),
 				),
-			CloseInspection,
+			CloseInspection: (input) => AwaitRuntimeRecovery(CloseInspection(input)),
 			Get,
-			Inspect,
-			Launch,
+			Inspect: (input) => AwaitRuntimeRecovery(Inspect(input)),
+			Launch: (input) => AwaitRuntimeRecovery(Launch(input)),
 			List,
-			OpenInspection,
-			Probe,
-			QuiesceThread,
-			Register,
-			Remove,
+			OpenInspection: (input) => AwaitRuntimeRecovery(OpenInspection(input)),
+			Probe: (input) => AwaitRuntimeRecovery(Probe(input)),
+			QuiesceThread: (thread_id) =>
+				AwaitRecoveryForQuiesce.pipe(Effect.andThen(QuiesceThread(thread_id))),
+			Register: (input) => AwaitRuntimeRecovery(Register(input)),
+			Remove: (input) => AwaitRuntimeRecovery(Remove(input)),
 			ResolveRichLink: (url) =>
 				metadata.Resolve(url).pipe(
 					Effect.map((result) => ({
@@ -739,7 +765,7 @@ export const PreviewCoordinatorLive = Layer.effect(
 						title: Option.getOrUndefined(result.title),
 					})),
 				),
-			SetState,
+			SetState: (input) => AwaitRuntimeRecovery(SetState(input)),
 		};
 	}),
 );

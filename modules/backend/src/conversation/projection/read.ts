@@ -1,12 +1,7 @@
 import { Effect } from "effect";
 import { and, asc, eq, gt } from "drizzle-orm";
 
-import {
-	ConversationItem,
-	ConversationPatch,
-	ConversationSnapshot,
-	ConversationTurn,
-} from "@artisan/protocol";
+import { ConversationPatch, ConversationSnapshot } from "@artisan/protocol";
 
 import type { DatabaseClient } from "../../persistence/database";
 import {
@@ -15,10 +10,20 @@ import {
 	ConversationThreads,
 	ConversationTurns,
 } from "../../persistence/tables";
+import { ConversationProjectionError } from "./domain";
 import { Decode, DecodeJson } from "./entities";
 
 /** Caps every replay query and its corresponding transport envelope. */
 export const conversation_patch_replay_batch_size = 64;
+
+const ParseStoredEntities = (
+	rows: ReadonlyArray<{ readonly entity_json: string }>,
+	context: string,
+) =>
+	Effect.try({
+		try: () => rows.map((row) => JSON.parse(row.entity_json)),
+		catch: () => new ConversationProjectionError(`Invalid ${context}`),
+	});
 
 /** Decodes a complete durable conversation snapshot. */
 export const ReadConversationSnapshot = (transaction: DatabaseClient, thread_id: string) =>
@@ -30,16 +35,31 @@ export const ReadConversationSnapshot = (transaction: DatabaseClient, thread_id:
 			.limit(1);
 		const thread = thread_rows.at(0);
 		if (thread === undefined) return;
-		const turns = yield* transaction
-			.select()
-			.from(ConversationTurns)
-			.where(eq(ConversationTurns.thread_id, thread_id))
-			.orderBy(asc(ConversationTurns.ordinal));
-		const items = yield* transaction
-			.select()
-			.from(ConversationItems)
-			.where(eq(ConversationItems.thread_id, thread_id))
-			.orderBy(asc(ConversationItems.ordinal));
+		const [turns, items] = yield* Effect.all(
+			[
+				transaction
+					.select()
+					.from(ConversationTurns)
+					.where(eq(ConversationTurns.thread_id, thread_id))
+					.orderBy(asc(ConversationTurns.ordinal)),
+				transaction
+					.select()
+					.from(ConversationItems)
+					.where(eq(ConversationItems.thread_id, thread_id))
+					.orderBy(asc(ConversationItems.ordinal)),
+			],
+			{ concurrency: "unbounded" },
+		);
+		/*
+		 * Stored entities are validated when written and the final snapshot decode
+		 * validates them once on read. This custom bulk JSON boundary is necessary
+		 * because Effect has no bulk JSON parse that avoids per-row Effect/schema
+		 * overhead while preserving typed corruption failures.
+		 */
+		const [decoded_turns, decoded_items] = yield* Effect.all([
+			ParseStoredEntities(turns, "stored conversation turns"),
+			ParseStoredEntities(items, "stored conversation items"),
+		]);
 		return yield* Decode(
 			ConversationSnapshot,
 			{
@@ -49,12 +69,8 @@ export const ReadConversationSnapshot = (transaction: DatabaseClient, thread_id:
 				journal_sequence: thread.journal_sequence,
 				last_patch_sequence: thread.last_patch_sequence,
 				updated_at: thread.updated_at,
-				turns: yield* Effect.forEach(turns, (row) =>
-					DecodeJson(ConversationTurn, row.entity_json, "stored conversation turn"),
-				),
-				items: yield* Effect.forEach(items, (row) =>
-					DecodeJson(ConversationItem, row.entity_json, "stored conversation item"),
-				),
+				turns: decoded_turns,
+				items: decoded_items,
 			},
 			"conversation snapshot",
 		);

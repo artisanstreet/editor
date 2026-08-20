@@ -27,7 +27,6 @@ const temporary_directories: Array<string> = [];
 const heartbeat_options: ProtocolConnectionOptions = {
 	heartbeat_interval_ms: 10,
 	heartbeat_timeout_ms: 20,
-	outbound_capacity: 256,
 };
 
 type HeartbeatPingEnvelope = Extract<OutboundControlEnvelope, { readonly kind: "heartbeat.ping" }>;
@@ -241,6 +240,7 @@ describe("protocol connection lifecycle", () => {
 			),
 		);
 
+		/** The guidance anchor occupies journal sequence 1; the refused command adds nothing. */
 		expect(query).toMatchObject([
 			{
 				correlation_id: "query_reconnect",

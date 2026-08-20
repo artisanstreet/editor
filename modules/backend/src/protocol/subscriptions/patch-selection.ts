@@ -47,3 +47,75 @@ export const GraphGroupId = (event: EventEnvelope) =>
 	event.payload.type === "artifact.recorded"
 		? event.payload.group_id
 		: undefined;
+
+/** Must match the durable allowlist in TranscriptReadModel plus terminal erasure. */
+const transcript_event_types = new Set([
+	"thread.message_queued",
+	"thread.message_steering",
+	"assistant.message_completed",
+	"interaction.approval",
+	"interaction.question",
+	"intake.assessed",
+	"intake.assumption_recorded",
+	"thread.erased",
+]);
+
+/** These are the notifier-visible event forms emitted beside PersistSurfaceProjection. */
+const surface_event_types = new Set([
+	"assistant.message_completed",
+	"interaction.approval",
+	"interaction.question",
+	"run.lifecycle",
+	"usage.interruption.updated",
+	"thread.erased",
+]);
+
+/** Workspace reconciliation writes only conflict updates; erasure clears the projection. */
+const workspace_conflict_event_types = new Set(["workspace.conflict.updated", "thread.erased"]);
+
+/** These durable events are the notifier-visible writers of conversation patches. */
+const conversation_event_types = new Set([
+	"usage.interruption.updated",
+	"thread.model_transition",
+	"run.lifecycle",
+	"thread.message_queued",
+	"thread.message_steering",
+	"assistant.message_completed",
+	"interaction.approval",
+	"interaction.question",
+	"thread.erased",
+]);
+
+/**
+ * `RunLifecycle.record_observation` writes the conversation and surface
+ * projections before it publishes these provider-attributed graph forms. They
+ * are deliberately narrower than every graph event: command-side graph
+ * changes do not mutate either projection and must remain a zero-read wake.
+ */
+const provider_projection_graph_actions = new Set([
+	"attempt_finished",
+	"finished",
+	"provider_state",
+	"summary_recorded",
+]);
+
+const IsProviderProjectionEvent = (event: EventEnvelope) => {
+	if (event.raw_origin === undefined) return false;
+	if (event.payload.type === "artifact.recorded") return true;
+	return (
+		event.payload.type === "orchestration.graph.lifecycle" &&
+		provider_projection_graph_actions.has(event.payload.action)
+	);
+};
+
+export const EventAffectsConversation = (event: EventEnvelope) =>
+	conversation_event_types.has(event.payload.type) || IsProviderProjectionEvent(event);
+
+export const EventAffectsTranscript = (event: EventEnvelope) =>
+	transcript_event_types.has(event.payload.type);
+
+export const EventAffectsSurface = (event: EventEnvelope) =>
+	surface_event_types.has(event.payload.type) || IsProviderProjectionEvent(event);
+
+export const EventAffectsWorkspaceConflicts = (event: EventEnvelope) =>
+	workspace_conflict_event_types.has(event.payload.type);

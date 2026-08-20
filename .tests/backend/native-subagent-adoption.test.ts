@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect } from "effect";
+import { Effect, Fiber, PubSub } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -14,7 +14,9 @@ import type {
 import { AgentGraphRepository, make_backend_runtime } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
+import british_names from "../../modules/data/names/british-females.json" with { type: "json" };
 import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration/repository";
+import { JournalNotifier } from "../../modules/backend/src/persistence/journal-notifier";
 import {
 	AgentInstances,
 	AgentRuns,
@@ -132,6 +134,52 @@ afterEach(async () => {
 });
 
 describe("provider-native subagent adoption", () => {
+	it("wakes existing conversation subscriptions for live child transcript patches", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			engines: [],
+			migrations_path,
+		});
+		try {
+			await runtime.runPromise(InsertRoot);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+					const graph = yield* AgentGraphRepository;
+					const lifecycle = Native(
+						"live-child-running",
+						1,
+						"native-child",
+						"native-root",
+						"running",
+					);
+					yield* repository.RecordObservation(lifecycle);
+					yield* graph.RecordObservedSubagent(lifecycle);
+				}),
+			);
+
+			const wake = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const notifier = yield* JournalNotifier;
+						const subscription = yield* notifier.Subscribe;
+						const published = yield* PubSub.take(subscription).pipe(Effect.forkScoped);
+						const repository = yield* OrchestrationRepository;
+						const graph = yield* AgentGraphRepository;
+						const transcript = Transcript("live-child-prose", 2);
+						yield* repository.RecordObservation(transcript);
+						yield* graph.RecordObservedSubagent(transcript);
+						return yield* Fiber.join(published).pipe(Effect.timeout("2 seconds"));
+					}),
+				),
+			);
+
+			expect(wake).toBeGreaterThan(0);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("replays pending child prose beneath its adopted child turn exactly once", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
@@ -411,10 +459,10 @@ describe("provider-native subagent adoption", () => {
 					const settings = yield* SessionDefaultsService;
 					yield* settings.Update({
 						kind: "command",
-						message_id: "select-playful-agent-names",
+						message_id: "select-british-agent-names",
 						origin: "frontend",
 						payload: {
-							agent_name_dataset: "playful",
+							agent_name_dataset: "british",
 							type: "session.defaults.update",
 						},
 						protocol_version: 1,
@@ -476,16 +524,7 @@ describe("provider-native subagent adoption", () => {
 			expect(first_child_name).toEqual(expect.any(String));
 			expect(second_child_name).toEqual(expect.any(String));
 			expect(first_child_name).not.toBe(second_child_name);
-			expect(third_child_name).toBeOneOf([
-				"Sprocket",
-				"Biscuit",
-				"Noodle",
-				"Widget",
-				"Marmalade",
-				"Button",
-				"Doodle",
-				"Pip",
-			]);
+			expect(british_names).toContain(third_child_name);
 			const worker_names = persisted.agents
 				.filter((agent) => agent.role === "worker")
 				.map((agent) => agent.display_name);

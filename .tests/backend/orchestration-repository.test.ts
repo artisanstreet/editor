@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect } from "effect";
+import { Cause, Effect, Option } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { EngineObservation } from "@artisan/engines";
@@ -23,6 +23,7 @@ import {
 	OrchestrationOutbox,
 	OrchestrationIntake,
 	OrchestrationInteractions,
+	OrchestrationCoordinators,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
 	Projects,
@@ -41,6 +42,43 @@ async function make_database_path() {
 
 	return join(directory, "artisan.db");
 }
+
+const SetupRequestedQuestions = (question_ids: ReadonlyArray<string>) =>
+	Effect.gen(function* () {
+		const database = yield* Database;
+		const now = "2026-07-10T10:00:00.000Z";
+		yield* database.client.insert(OrchestrationCoordinators).values({
+			active_run_id: "run_questions",
+			agent_id: "agent_1",
+			created_at: now,
+			display_name: "Agent",
+			engine_id: "engine_1",
+			role: "coordinator",
+			thread_id: "thread_1",
+			updated_at: now,
+		});
+		yield* database.client.insert(OrchestrationRuns).values({
+			agent_id: "agent_1",
+			created_at: now,
+			engine_id: "engine_1",
+			run_id: "run_questions",
+			status: "waiting",
+			thread_id: "thread_1",
+			updated_at: now,
+			working_directory: "C:/work",
+		});
+		yield* database.client.insert(OrchestrationInteractions).values(
+			question_ids.map((interaction_id) => ({
+				created_at: now,
+				description: interaction_id,
+				interaction_id,
+				kind: "question",
+				run_id: "run_questions",
+				state: "requested",
+				updated_at: now,
+			})),
+		);
+	});
 
 function make_command(
 	message_id: string,
@@ -119,6 +157,48 @@ afterEach(async () => {
 });
 
 describe("orchestration repository hardening", () => {
+	it("accepts a batch of requested run questions and rejects the first missing answer key", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			await runtime.runPromise(SetupRequestedQuestions(["question_1", "question_2"]));
+			const accepted = await runtime.runPromise(
+				Accept(
+					make_command("answer_batch", "thread_1", {
+						answers: { question_1: ["yes"], question_2: ["no"] },
+						type: "run.respond_question",
+					}),
+				),
+			);
+			const rejected = await runtime.runPromiseExit(
+				Accept(
+					make_command("answer_mixed", "thread_1", {
+						answers: {
+							missing_first: ["no"],
+							question_1: ["yes"],
+							missing_later: ["no"],
+						},
+						type: "run.respond_question",
+					}),
+				),
+			);
+
+			expect(accepted.status).toBe("accepted");
+			expect(rejected._tag).toBe("Failure");
+			if (rejected._tag === "Failure") {
+				expect(Option.getOrUndefined(Cause.findErrorOption(rejected.cause))).toMatchObject({
+					id: "missing_first",
+				});
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("accepts an ordinary text message with an empty attachment list", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),

@@ -1,5 +1,7 @@
 import { Context, Effect, Layer, Option } from "effect";
 
+import type { GlobalGuidanceProviderMetadata } from "@artisan/protocol";
+
 import { SnowflakeId } from "@artisan/protocol";
 
 import {
@@ -34,6 +36,12 @@ import {
 
 type ProviderReconciliation = Omit<GlobalGuidanceReconciliationInput, "operation_id">;
 
+/** Couples the durable acceptance with the exact private projection written for it. */
+export interface GuidanceProviderSyncOutcome {
+	readonly acceptance: GlobalGuidanceAcceptance;
+	readonly metadata: GlobalGuidanceProviderMetadata;
+}
+
 export class GuidanceProviderSync extends Context.Service<
 	GuidanceProviderSync,
 	{
@@ -50,18 +58,18 @@ export class GuidanceProviderSync extends Context.Service<
 			discovery: Extract<GuidanceDiscovery, { readonly _tag: "ReadFailed" }>,
 			exact_operation_id?: boolean,
 			request_fingerprint?: string,
-		) => Effect.Effect<GlobalGuidanceAcceptance, GlobalGuidanceServiceError>;
+		) => Effect.Effect<GuidanceProviderSyncOutcome, GlobalGuidanceServiceError>;
 		readonly RecordProvider: (
 			base: string,
 			input: ProviderReconciliation,
 			exact_operation_id?: boolean,
-		) => Effect.Effect<GlobalGuidanceAcceptance, GlobalGuidanceServiceError>;
+		) => Effect.Effect<GuidanceProviderSyncOutcome, GlobalGuidanceServiceError>;
 		readonly SyncAll: (
 			canonical: CanonicalContent,
 			base: string,
 			force: boolean,
 			expectations?: ProviderExpectations,
-		) => Effect.Effect<void, GlobalGuidanceServiceError>;
+		) => Effect.Effect<ReadonlyArray<GuidanceProviderSyncOutcome>, GlobalGuidanceServiceError>;
 		readonly SyncNative: (
 			adapter: NativeGuidanceProviderAdapter,
 			canonical: CanonicalContent,
@@ -71,7 +79,7 @@ export class GuidanceProviderSync extends Context.Service<
 			request_fingerprint?: string,
 			expected_observed_hash?: string,
 			expected_state?: ExpectedProviderState,
-		) => Effect.Effect<GlobalGuidanceAcceptance, GlobalGuidanceServiceError>;
+		) => Effect.Effect<GuidanceProviderSyncOutcome, GlobalGuidanceServiceError>;
 	}
 >()("Artisan/GuidanceProviderSync") {}
 
@@ -89,13 +97,26 @@ export const make_guidance_provider_sync_layer = (options: GlobalGuidanceService
 				base: string,
 				input: ProviderReconciliation,
 				exact_operation_id = false,
-			) =>
-				repository.RecordProviderReconciliation({
-					...input,
-					operation_id: exact_operation_id
-						? base
-						: reconciliation_operation_id(base, input.provider, input),
-				});
+			) => {
+				const { request_fingerprint: _, ...reconciliation } = input;
+
+				return repository
+					.RecordProviderReconciliation({
+						...input,
+						operation_id: exact_operation_id
+							? base
+							: reconciliation_operation_id(base, input.provider, input),
+					})
+					.pipe(
+						Effect.map((acceptance) => ({
+							acceptance,
+							metadata: {
+								...reconciliation,
+								updated_at: acceptance.event.sent_at,
+							} satisfies GlobalGuidanceProviderMetadata,
+						})),
+					);
+			};
 
 			const RecordDiscoveryFailure = (
 				base: string,
@@ -137,7 +158,7 @@ export const make_guidance_provider_sync_layer = (options: GlobalGuidanceService
 							status:
 								adapter.mode === "runtime" ? "applied_at_run_time" : "unsupported",
 						}),
-					{ concurrency: "unbounded", discard: true },
+					{ concurrency: "unbounded" },
 				);
 
 			const SyncNative = (
@@ -422,9 +443,9 @@ export const make_guidance_provider_sync_layer = (options: GlobalGuidanceService
 				expectations?: ProviderExpectations,
 			) =>
 				Effect.gen(function* () {
-					yield* RecordNonNative(base);
+					const non_native = yield* RecordNonNative(base);
 
-					yield* Effect.forEach(
+					const native = yield* Effect.forEach(
 						providers.Providers.filter(
 							(adapter): adapter is NativeGuidanceProviderAdapter =>
 								adapter.mode === "native_file",
@@ -440,8 +461,10 @@ export const make_guidance_provider_sync_layer = (options: GlobalGuidanceService
 								undefined,
 								expectations?.get(adapter.provider),
 							),
-						{ concurrency: "unbounded", discard: true },
+						{ concurrency: "unbounded" },
 					);
+
+					return [...non_native, ...native];
 				});
 
 			return {

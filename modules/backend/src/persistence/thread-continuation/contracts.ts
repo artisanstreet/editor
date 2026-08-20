@@ -44,6 +44,13 @@ export type ThreadContinuationContext = {
 		readonly native_thread_id: string | null;
 		readonly resume_token: Option.Option<EngineResumeToken>;
 		readonly status: string;
+		/**
+		 * Whether a usage interruption already claimed this failed source as the
+		 * one it is resuming from. It is the only authority that makes a failed
+		 * run's native session trustworthy, so the strategy chooser needs it to
+		 * agree with what PrepareLaunch will accept.
+		 */
+		readonly usage_interruption_resume: boolean;
 		readonly working_directory: string;
 		readonly run_id: string;
 	}>;
@@ -57,11 +64,25 @@ export type ThreadContinuationContext = {
 
 export class ThreadContinuationFailure extends Data.TaggedError("ThreadContinuationFailure")<{
 	readonly code: string;
-}> {}
+}> {
+	/**
+	 * The code is the only thing this error knows and it is the whole reason it
+	 * exists, so it belongs in the message rather than behind a field a logger
+	 * has to know to reach for. Without this an engine startup diagnostic
+	 * printed `ThreadContinuationFailure:` and nothing else.
+	 */
+	override get message() {
+		return this.code;
+	}
+}
 
 export class ThreadContinuationConflict extends Data.TaggedError("ThreadContinuationConflict")<{
 	readonly target_run_id: string;
-}> {}
+}> {
+	override get message() {
+		return `Another run already owns this thread's continuation: ${this.target_run_id}`;
+	}
+}
 
 export type ContinuationError = ThreadContinuationFailure | ThreadContinuationConflict;
 export type ThreadContinuationLaunchState = "prepared" | "opening" | "bound" | "failed";

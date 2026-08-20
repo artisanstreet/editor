@@ -2,11 +2,10 @@ import { Data, Effect, Schema, Stream } from "effect";
 
 import { PositiveInt, type OutboundControlEnvelope } from "@artisan/protocol";
 
-/** Validates bounded queue and heartbeat settings before a connection can open. */
+/** Validates heartbeat settings before a connection can open. */
 export const ProtocolConnectionOptionsSchema = Schema.Struct({
 	heartbeat_interval_ms: PositiveInt,
 	heartbeat_timeout_ms: PositiveInt,
-	outbound_capacity: PositiveInt,
 }).check(
 	Schema.makeFilter((options) =>
 		options.heartbeat_timeout_ms < options.heartbeat_interval_ms
@@ -40,5 +39,4 @@ export interface ProtocolConnection {
 export const DefaultProtocolConnectionOptions: ProtocolConnectionOptions = {
 	heartbeat_interval_ms: 15_000,
 	heartbeat_timeout_ms: 45_000,
-	outbound_capacity: 256,
 };

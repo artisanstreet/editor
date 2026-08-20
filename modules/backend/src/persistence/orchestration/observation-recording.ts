@@ -22,14 +22,19 @@ import {
 	OrchestrationRuns,
 } from "../tables";
 import { RuntimeMetadata } from "../../runtime/metadata";
-import { ApplyEngineObservation } from "../../conversation/index.ts";
+import { ApplyEngineObservationWithChange } from "../../conversation/projection/observation";
 import { terminal_failure } from "../../conversation/projection/domain";
-import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
+import { PersistSurfaceProjectionWithChange } from "../../surfaces/surface-projection";
 import { ReconcileRootThreadLiveStatus } from "./thread-lifecycle-status";
 import { RecordUsageInterruptionInTransaction } from "../usage-interruption/record";
 
 interface JournalNotifier {
 	readonly Publish: (journal_sequence: number) => Effect.Effect<void>;
+}
+
+interface RecordedObservation {
+	readonly events: ReadonlyArray<EventEnvelope>;
+	readonly projection_changed: boolean;
 }
 
 function normalize_error(error: unknown): OrchestrationError {
@@ -87,7 +92,7 @@ export function make_observation_recording(
 	) =>
 		Effect.gen(function* () {
 			if (observation._tag === "compaction" && observation.summary !== undefined) {
-				return [];
+				return { events: [], projection_changed: false } satisfies RecordedObservation;
 			}
 
 			const [run] = yield* transaction
@@ -95,9 +100,8 @@ export function make_observation_recording(
 				.from(OrchestrationRuns)
 				.where(eq(OrchestrationRuns.run_id, observation.artisan_run_id))
 				.limit(1);
-			if (!run) {
-				return [];
-			}
+			if (!run)
+				return { events: [], projection_changed: false } satisfies RecordedObservation;
 			const is_native_child_evidence =
 				observation._tag === "subagent" || observation._tag === "subagent_transcript";
 			if (
@@ -105,7 +109,7 @@ export function make_observation_recording(
 				observation.agent_native_thread_id === run.native_thread_id
 			) {
 				/** A root-native identity is never a provider-native child, even if malformed data says so. */
-				return [];
+				return { events: [], projection_changed: false } satisfies RecordedObservation;
 			}
 			const [existing_native_binding] = is_native_child_evidence
 				? yield* transaction
@@ -129,7 +133,7 @@ export function make_observation_recording(
 			 * evidence; a terminal root still rejects unknown child discovery.
 			 */
 			if (!is_projectable_status(run.status) && existing_native_binding === undefined) {
-				return [];
+				return { events: [], projection_changed: false } satisfies RecordedObservation;
 			}
 
 			/**
@@ -148,7 +152,8 @@ export function make_observation_recording(
 					),
 				)
 				.returning({ run_id: OrchestrationRuns.run_id });
-			if (advanced.length === 0) return [];
+			if (advanced.length === 0)
+				return { events: [], projection_changed: false } satisfies RecordedObservation;
 
 			if (observation._tag === "subagent") {
 				yield* transaction.insert(NativeSubagentObservationInbox).values({
@@ -183,7 +188,7 @@ export function make_observation_recording(
 					sequence: observation.sequence,
 				});
 				/** Child content is replayed only with its resolved child run context. */
-				return [];
+				return { events: [], projection_changed: false } satisfies RecordedObservation;
 			}
 
 			const projected_at = yield* metadata.Now;
@@ -198,18 +203,27 @@ export function make_observation_recording(
 							observation.error_ref,
 						)
 					: undefined;
-			yield* PersistSurfaceProjection(transaction, observation, {
-				agent_id: run.agent_id,
-				occurred_at: projected_at,
-				run_id: run.run_id,
-				thread_id: run.thread_id,
-			});
-			yield* ApplyEngineObservation(transaction, observation, {
-				agent_id: run.agent_id,
-				occurred_at: projected_at,
-				run_id: run.run_id,
-				thread_id: run.thread_id,
-			}) as Effect.Effect<unknown, unknown, never>;
+			const surface_changed = yield* PersistSurfaceProjectionWithChange(
+				transaction,
+				observation,
+				{
+					agent_id: run.agent_id,
+					occurred_at: projected_at,
+					run_id: run.run_id,
+					thread_id: run.thread_id,
+				},
+			);
+			const conversation_changed = yield* ApplyEngineObservationWithChange(
+				transaction,
+				observation,
+				{
+					agent_id: run.agent_id,
+					occurred_at: projected_at,
+					run_id: run.run_id,
+					thread_id: run.thread_id,
+				},
+			);
+			const projection_changed = surface_changed || conversation_changed;
 			yield* transaction
 				.delete(ConversationSources)
 				.where(
@@ -264,7 +278,11 @@ export function make_observation_recording(
 									: undefined;
 
 			if (!payload) {
-				return usage_interruption_event === undefined ? [] : [usage_interruption_event];
+				return {
+					events:
+						usage_interruption_event === undefined ? [] : [usage_interruption_event],
+					projection_changed,
+				} satisfies RecordedObservation;
 			}
 
 			const status = payload.type === "run.lifecycle" ? payload.state : undefined;
@@ -357,26 +375,31 @@ export function make_observation_recording(
 						});
 
 					if (resolved.length === 0) {
-						return [];
+						return { events: [], projection_changed } satisfies RecordedObservation;
 					}
 				}
 			}
 
-			return [
-				...(usage_interruption_event === undefined ? [] : [usage_interruption_event]),
-				yield* AppendEvent(transaction, {
-					agent_id: run.agent_id,
-					causation_id: observation.observation_id,
-					correlation_id: run.run_id,
-					payload,
-					raw_origin: {
-						provider: observation.raw.engine_id,
-						reference: String(observation.raw.native_id ?? observation.observation_id),
-					},
-					run_id: run.run_id,
-					thread_id: run.thread_id,
-				}),
-			];
+			return {
+				events: [
+					...(usage_interruption_event === undefined ? [] : [usage_interruption_event]),
+					yield* AppendEvent(transaction, {
+						agent_id: run.agent_id,
+						causation_id: observation.observation_id,
+						correlation_id: run.run_id,
+						payload,
+						raw_origin: {
+							provider: observation.raw.engine_id,
+							reference: String(
+								observation.raw.native_id ?? observation.observation_id,
+							),
+						},
+						run_id: run.run_id,
+						thread_id: run.thread_id,
+					}),
+				],
+				projection_changed,
+			} satisfies RecordedObservation;
 		});
 
 	const RecordObservations = (observations: ReadonlyArray<EngineObservation>) =>
@@ -388,22 +411,27 @@ export function make_observation_recording(
 			const result = yield* client.transaction((transaction) =>
 				Effect.gen(function* () {
 					const events: Array<EventEnvelope> = [];
+					let projection_changed = false;
 
 					for (const observation of observations) {
-						events.push(
-							...(yield* PersistRecordedObservation(transaction, observation)),
+						const recorded = yield* PersistRecordedObservation(
+							transaction,
+							observation,
 						);
+						events.push(...recorded.events);
+						projection_changed ||= recorded.projection_changed;
 					}
 
-					return events;
+					return { events, projection_changed };
 				}),
 			);
 
 			/** Delta-only batches commit no journal event; nothing woke up. */
-			const latest_event = result.at(-1);
+			const latest_event = result.events.at(-1);
 			if (latest_event !== undefined) yield* notifier.Publish(latest_event.journal_sequence);
+			else if (result.projection_changed) yield* notifier.Publish(0);
 
-			return result;
+			return result.events;
 		}).pipe(Effect.mapError(normalize_error));
 
 	const RecordObservation = (observation: EngineObservation) => RecordObservations([observation]);

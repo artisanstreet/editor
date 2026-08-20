@@ -1,0 +1,52 @@
+{
+	"phases": [
+		{
+			"phase": "start",
+			"rss_mb": 298,
+			"heap_mb": 93,
+			"peak_mb": 298
+		},
+		{
+			"phase": "runtime+guidance ready",
+			"rss_mb": 303,
+			"heap_mb": 99,
+			"peak_mb": 303
+		},
+		{
+			"phase": "largest threads queried",
+			"rss_mb": 303,
+			"heap_mb": 99,
+			"peak_mb": 303
+		},
+		{
+			"phase": "replay-from-origin drained (2)",
+			"rss_mb": 303,
+			"heap_mb": 101,
+			"peak_mb": 303
+		},
+		{
+			"phase": "thread.list snapshot",
+			"rss_mb": 304,
+			"heap_mb": 108,
+			"peak_mb": 304
+		},
+		{
+			"phase": "conversation snapshot (20433915793641472, 28MB/16932 items)",
+			"rss_mb": 401,
+			"heap_mb": 223,
+			"peak_mb": 401
+		},
+		{
+			"phase": "connection closed",
+			"rss_mb": 401,
+			"heap_mb": 223,
+			"peak_mb": 401
+		},
+		{
+			"phase": "settled",
+			"rss_mb": 401,
+			"heap_mb": 223,
+			"peak_mb": 401
+		}
+	]
+}

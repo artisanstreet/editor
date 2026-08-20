@@ -27,7 +27,11 @@ export interface TerminalDriverOpenInput {
 	readonly rows: number;
 }
 
-/** Reports why a native pseudoterminal stopped producing output. */
+/**
+ * Reports why a native pseudoterminal stopped producing output. The native
+ * driver no longer emits `output_overflow`, but sessions persisted by older
+ * backends still carry it.
+ */
 export interface TerminalDriverExit {
 	readonly exit_code: number | null;
 	readonly reason: "closed" | "exited" | "killed" | "output_overflow";

@@ -1,4 +1,4 @@
-import { Effect, Layer, Schema, Scope } from "effect";
+import { Deferred, Effect, Exit, Layer, Schema, Scope } from "effect";
 import {
 	CapabilityDetail,
 	CapabilityInvocationApprovalDecision,
@@ -9,7 +9,7 @@ import {
 } from "@artisan/protocol";
 
 import { CapabilityTransportRegistry, type McpClientSession } from "./mcp-transport";
-import { CapabilityRepository } from "./repository";
+import { CapabilityRepository, CapabilityRepositoryError } from "./repository";
 import { CapabilityService, CapabilityServiceError } from "./contracts";
 import { Fingerprint, Preview } from "./preview";
 
@@ -26,8 +26,34 @@ export const CapabilityServiceLive = Layer.effect(
 		const transports = yield* CapabilityTransportRegistry;
 		const scope = yield* Scope.Scope;
 		const sessions = new Map<string, McpClientSession>();
-		const RequireMutable = (capability_id: string) =>
+		/**
+		 * A fresh backend cannot own a persisted MCP connection. Reconcile those
+		 * durable facts in the service scope without holding up durable reads or
+		 * Forge construction; runtime/session operations wait for the result.
+		 */
+		const recovery = yield* Deferred.make<Exit.Exit<void, CapabilityRepositoryError>>();
+		const AwaitRecovery = Deferred.await(recovery).pipe(
+			Effect.flatMap((exit) =>
+				Exit.isSuccess(exit) ? Effect.void : Effect.failCause(exit.cause),
+			),
+		);
+		const AfterRecovery = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+			AwaitRecovery.pipe(Effect.andThen(effect));
+		const RequireScopedDetail = (capability_id: string, requested_scope?: MarketplaceScope) =>
 			repository.ReadDetail(capability_id).pipe(
+				Effect.filterOrFail(
+					(detail) =>
+						requested_scope === undefined ||
+						ScopeMatches(detail.scope, requested_scope),
+					() =>
+						new CapabilityServiceError({
+							code: "policy_denied",
+							message: "Capability is outside the requested Marketplace scope",
+						}),
+				),
+			);
+		const RequireMutable = (capability_id: string, requested_scope?: MarketplaceScope) =>
+			RequireScopedDetail(capability_id, requested_scope).pipe(
 				Effect.filterOrFail(
 					(detail) => detail.lifecycle !== "removed" && detail.status !== "removed",
 					() =>
@@ -244,9 +270,10 @@ export const CapabilityServiceLive = Layer.effect(
 			readonly action: "start" | "reconnect" | "restart";
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) =>
 			Effect.gen(function* () {
-				const detail = yield* RequireMutable(input.capability_id);
+				const detail = yield* RequireMutable(input.capability_id, input.scope);
 				const approved = yield* repository.ReadApprovedConnect(input.capability_id);
 				const authority_fingerprint = Fingerprint({
 					auth: detail.auth,
@@ -348,9 +375,8 @@ export const CapabilityServiceLive = Layer.effect(
 					}),
 				),
 			);
-		const InvocationPolicy = (input: CapabilityInvocationRequest) =>
+		const InvocationPolicy = (input: CapabilityInvocationRequest, detail: CapabilityDetail) =>
 			Effect.gen(function* () {
-				const detail = yield* repository.ReadDetail(input.capability_id);
 				if (!ScopeMatches(detail.scope, input.scope))
 					return yield* new CapabilityServiceError({
 						code: "policy_denied",
@@ -370,6 +396,10 @@ export const CapabilityServiceLive = Layer.effect(
 					(policy.approval === "sensitive_only" && policy.sensitive_label !== undefined);
 				return { detail, required } as const;
 			});
+		const ReadInvocationPolicy = (input: CapabilityInvocationRequest) =>
+			RequireScopedDetail(input.capability_id, input.scope).pipe(
+				Effect.flatMap((detail) => InvocationPolicy(input, detail)),
+			);
 		const ExecuteInvocation = (
 			input: CapabilityInvocationRequest & {
 				readonly approval_required: boolean;
@@ -377,7 +407,8 @@ export const CapabilityServiceLive = Layer.effect(
 			},
 		) =>
 			Effect.gen(function* () {
-				const { detail } = yield* InvocationPolicy(input);
+				/** Re-read at the execution fence so a policy mutation cannot race a tool call. */
+				const { detail } = yield* ReadInvocationPolicy(input);
 				const result_artifact_id = `artifact_${Fingerprint({
 					capability_id: input.capability_id,
 					invocation_id: input.operation_id,
@@ -468,7 +499,8 @@ export const CapabilityServiceLive = Layer.effect(
 			});
 		const Invoke = (input: CapabilityInvocationRequest & { readonly operation_id: string }) =>
 			Effect.gen(function* () {
-				const { required } = yield* InvocationPolicy(input);
+				const reviewed = yield* ReadInvocationPolicy(input);
+				const { required } = reviewed;
 				if (required)
 					return {
 						approval_required: true,
@@ -487,13 +519,13 @@ export const CapabilityServiceLive = Layer.effect(
 					capability_id: input.capability_id,
 					operation_id: input.operation_id,
 					request_fingerprint,
-					status: (yield* repository.ReadDetail(input.capability_id)).status,
+					status: reviewed.detail.status,
 					tool_name: input.tool_name,
 				});
 				yield* repository.DecideInvocation({
 					approved: true,
 					operation_id: input.operation_id,
-					status: (yield* repository.ReadDetail(input.capability_id)).status,
+					status: reviewed.detail.status,
 				});
 				return yield* ExecuteInvocation({ ...input, approval_required: false });
 			});
@@ -501,7 +533,8 @@ export const CapabilityServiceLive = Layer.effect(
 			input: CapabilityInvocationApprovalRequest & { readonly operation_id: string },
 		) =>
 			Effect.gen(function* () {
-				const { required } = yield* InvocationPolicy(input);
+				const reviewed = yield* ReadInvocationPolicy(input);
+				const { required } = reviewed;
 				if (!required)
 					return yield* new CapabilityServiceError({
 						code: "policy_denied",
@@ -525,7 +558,7 @@ export const CapabilityServiceLive = Layer.effect(
 					capability_id: input.capability_id,
 					operation_id: input.operation_id,
 					request_fingerprint,
-					status: (yield* repository.ReadDetail(input.capability_id)).status,
+					status: reviewed.detail.status,
 					tool_name: input.tool_name,
 				});
 				return {
@@ -538,7 +571,7 @@ export const CapabilityServiceLive = Layer.effect(
 			});
 		const DecideInvocation = (input: CapabilityInvocationApprovalDecision) =>
 			Effect.gen(function* () {
-				const reviewed = yield* repository.ReadInvocationApproval(input.approval_id);
+				const approval = yield* repository.ReadInvocationApproval(input.approval_id);
 				const request_fingerprint = Fingerprint({
 					arguments_json: input.arguments_json,
 					capability_id: input.capability_id,
@@ -546,16 +579,17 @@ export const CapabilityServiceLive = Layer.effect(
 					tool_name: input.tool_name,
 				});
 				if (
-					input.intent_fingerprint !== reviewed.approval_fingerprint ||
-					request_fingerprint !== reviewed.request_fingerprint ||
-					reviewed.capability_id !== input.capability_id ||
-					reviewed.tool_name !== input.tool_name
+					input.intent_fingerprint !== approval.approval_fingerprint ||
+					request_fingerprint !== approval.request_fingerprint ||
+					approval.capability_id !== input.capability_id ||
+					approval.tool_name !== input.tool_name
 				)
 					return yield* new CapabilityServiceError({
 						code: "preview_changed",
 						message: "Invocation decision does not match the durable reviewed intent",
 					});
-				const { required } = yield* InvocationPolicy(input);
+				const reviewed = yield* ReadInvocationPolicy(input);
+				const { required } = reviewed;
 				if (!required)
 					return yield* new CapabilityServiceError({
 						code: "policy_denied",
@@ -565,26 +599,30 @@ export const CapabilityServiceLive = Layer.effect(
 					approval_fingerprint: input.intent_fingerprint,
 					approval_id: input.approval_id,
 					approved: input.approved,
-					operation_id: reviewed.operation_id,
-					status: (yield* repository.ReadDetail(input.capability_id)).status,
+					operation_id: approval.operation_id,
+					status: reviewed.detail.status,
 				});
 				if (!input.approved || decision === "denied")
 					return {
 						approval_required: true,
 						capability_id: input.capability_id,
-						invocation_id: reviewed.operation_id,
+						invocation_id: approval.operation_id,
 						status: "denied",
 						tool_name: input.tool_name,
 					} satisfies CapabilityInvocationMetadata;
 				return yield* ExecuteInvocation({
 					...input,
 					approval_required: true,
-					operation_id: reviewed.operation_id,
+					operation_id: approval.operation_id,
 				});
 			});
-		const Health = (input: { readonly capability_id: string; readonly operation_id: string }) =>
+		const Health = (input: {
+			readonly capability_id: string;
+			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
+		}) =>
 			Effect.gen(function* () {
-				const detail = yield* RequireMutable(input.capability_id);
+				const detail = yield* RequireMutable(input.capability_id, input.scope);
 				const session = sessions.get(input.capability_id);
 				const health = session ? yield* session.Health : "closed";
 				const next =
@@ -610,12 +648,17 @@ export const CapabilityServiceLive = Layer.effect(
 				});
 				return yield* repository.ReadDetail(input.capability_id);
 			});
-		const Disconnect = (input: {
-			readonly capability_id: string;
-			readonly operation_id: string;
-		}) =>
+		const Disconnect = (
+			input: {
+				readonly capability_id: string;
+				readonly operation_id: string;
+				readonly scope?: MarketplaceScope;
+			},
+			validated_detail?: CapabilityDetail,
+		) =>
 			Effect.gen(function* () {
-				const detail = yield* RequireMutable(input.capability_id);
+				const detail =
+					validated_detail ?? (yield* RequireMutable(input.capability_id, input.scope));
 				const session = sessions.get(input.capability_id);
 				if (session) {
 					yield* session.Close.pipe(Effect.ignore);
@@ -630,8 +673,12 @@ export const CapabilityServiceLive = Layer.effect(
 					status: detail.enabled ? "disconnect_available" : "disabled",
 				});
 			});
-		const Enable = (input: { readonly capability_id: string; readonly operation_id: string }) =>
-			RequireMutable(input.capability_id).pipe(
+		const Enable = (input: {
+			readonly capability_id: string;
+			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
+		}) =>
+			RequireMutable(input.capability_id, input.scope).pipe(
 				Effect.andThen(
 					repository.Transition({
 						capability_id: input.capability_id,
@@ -645,9 +692,10 @@ export const CapabilityServiceLive = Layer.effect(
 		const Disable = (input: {
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) =>
 			Effect.gen(function* () {
-				yield* RequireMutable(input.capability_id);
+				yield* RequireMutable(input.capability_id, input.scope);
 				const active = sessions.get(input.capability_id);
 				if (active) {
 					yield* active.Close;
@@ -663,36 +711,41 @@ export const CapabilityServiceLive = Layer.effect(
 					status: "disabled",
 				});
 			});
-		const Remove = (input: { readonly capability_id: string; readonly operation_id: string }) =>
-			RequireMutable(input.capability_id).pipe(
-				Effect.andThen(
-					Disconnect({
+		const Remove = (input: {
+			readonly capability_id: string;
+			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
+		}) =>
+			Effect.gen(function* () {
+				const detail = yield* RequireMutable(input.capability_id, input.scope);
+				yield* Disconnect(
+					{
 						capability_id: input.capability_id,
 						operation_id: `${input.operation_id}:disconnect`,
-					}),
-				),
-				Effect.andThen(
-					repository.Transition({
-						capability_id: input.capability_id,
-						enabled: false,
-						lifecycle: "removed",
-						operation: "removed",
-						operation_id: input.operation_id,
-						status: "removed",
-					}),
-				),
-			);
+					},
+					detail,
+				);
+				yield* repository.Transition({
+					capability_id: input.capability_id,
+					enabled: false,
+					lifecycle: "removed",
+					operation: "removed",
+					operation_id: input.operation_id,
+					status: "removed",
+				});
+			});
 		const Uninstall = (input: {
 			readonly capability_id: string;
 			readonly operation_id: string;
+			readonly scope?: MarketplaceScope;
 		}) =>
 			Effect.gen(function* () {
+				const detail = yield* RequireScopedDetail(input.capability_id, input.scope);
 				yield* repository.RecordUninstall(input);
 				const claim = yield* repository.ClaimUninstall(input.operation_id);
 				if (claim === "uninstalled") return;
 				if (claim === "closing") {
 					/** A persisted removal proves the close returned before a crash; only finalization is replayed. */
-					const detail = yield* repository.ReadDetail(input.capability_id);
 					if (detail.lifecycle === "removed" && detail.status === "removed")
 						return yield* repository.CompleteUninstall(input.operation_id);
 					return yield* new CapabilityServiceError({
@@ -711,38 +764,71 @@ export const CapabilityServiceLive = Layer.effect(
 		/**
 		 * A new backend process owns no live MCP sessions. Reconcile persisted live or
 		 * ambiguous states without invoking a connector; reconnect remains explicit.
+		 * The default sequential traversal preserves the durable summary order.
 		 */
-		const persisted = yield* repository.ReadSummaries;
-		yield* Effect.forEach(
-			persisted.filter(
-				(summary) =>
-					summary.lifecycle === "connecting" || summary.lifecycle === "connected",
+		yield* Effect.forkIn(
+			Effect.gen(function* () {
+				const result = yield* Effect.gen(function* () {
+					const persisted = yield* repository.ReadSummaries;
+					yield* Effect.forEach(
+						persisted.filter(
+							(summary) =>
+								summary.lifecycle === "connecting" ||
+								summary.lifecycle === "connected",
+						),
+						(summary) =>
+							repository.Transition({
+								capability_id: summary.id,
+								health: {
+									status:
+										summary.lifecycle === "connecting" ? "crashed" : "offline",
+								},
+								lifecycle:
+									summary.lifecycle === "connecting" ? "crashed" : "stopped",
+								operation: "health_checked",
+								operation_id: `startup_recovery_${Fingerprint({ id: summary.id, lifecycle: summary.lifecycle }).slice(0, 24)}`,
+								status: summary.status,
+							}),
+						{ discard: true },
+					);
+				}).pipe(
+					Effect.mapError(
+						(error): CapabilityRepositoryError =>
+							error instanceof CapabilityRepositoryError
+								? error
+								: new CapabilityRepositoryError({
+										code: "invariant",
+										message:
+											"Capability startup recovery could not be persisted",
+									}),
+					),
+					Effect.exit,
+				);
+				yield* Deferred.succeed(recovery, result);
+			}).pipe(
+				Effect.onExit((exit) =>
+					Exit.isFailure(exit)
+						? Deferred.interrupt(recovery).pipe(Effect.asVoid, Effect.uninterruptible)
+						: Effect.void,
+				),
 			),
-			(summary) =>
-				repository.Transition({
-					capability_id: summary.id,
-					health: { status: summary.lifecycle === "connecting" ? "crashed" : "offline" },
-					lifecycle: summary.lifecycle === "connecting" ? "crashed" : "stopped",
-					operation: "health_checked",
-					operation_id: `startup_recovery_${Fingerprint({ id: summary.id, lifecycle: summary.lifecycle }).slice(0, 24)}`,
-					status: summary.status,
-				}),
-			{ discard: true },
+			scope,
+			{ startImmediately: true },
 		);
 		return {
-			DecideConnect,
-			DecideInvocation,
-			Disable,
-			Disconnect,
-			Enable,
-			Health,
-			Invoke,
+			DecideConnect: (input) => AfterRecovery(DecideConnect(input)),
+			DecideInvocation: (input) => AfterRecovery(DecideInvocation(input)),
+			Disable: (input) => AfterRecovery(Disable(input)),
+			Disconnect: (input) => AfterRecovery(Disconnect(input)),
+			Enable: (input) => AfterRecovery(Enable(input)),
+			Health: (input) => AfterRecovery(Health(input)),
+			Invoke: (input) => AfterRecovery(Invoke(input)),
 			Preview,
 			RequestConnect,
 			RequestInvocation,
-			Remove,
-			SessionAction,
-			Uninstall,
+			Remove: (input) => AfterRecovery(Remove(input)),
+			SessionAction: (input) => AfterRecovery(SessionAction(input)),
+			Uninstall: (input) => AfterRecovery(Uninstall(input)),
 		};
 	}),
 );

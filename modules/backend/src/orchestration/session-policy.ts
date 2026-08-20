@@ -1,4 +1,4 @@
-import { model_manifest } from "@artisan/catalog";
+import { ComposeNativeModelId, ContextWindowNativeConfig, model_manifest } from "@artisan/catalog";
 import type { EnginePermissionPolicy, EngineRunMetadata } from "@artisan/engines";
 import { SessionPolicyPermission, type ThreadSessionPolicy } from "@artisan/protocol";
 
@@ -143,13 +143,22 @@ export const MakeSessionPolicyRunMetadata = (
 				: "never";
 	/**
 	 * The context-window choice travels as a native model-id suffix (for
-	 * example Claude Code's `[1m]`), so the engine sees one composed id.
+	 * example Claude Code's `[1m]`), so the engine sees one composed id — except
+	 * where the harness treats the window as configuration, which the catalog
+	 * knows and this composition defers to. Codex is that case: appending to its
+	 * model id would name a model its own catalog cannot resolve.
 	 */
 	const resolved_model = SessionPolicyResolvedModel(policy, requested.model);
 	const model_metadata: Pick<EngineRunMetadata, "model"> =
 		resolved_model === undefined
 			? {}
-			: { model: `${resolved_model}${policy.context_window ?? ""}` };
+			: {
+					model: ComposeNativeModelId(
+						policy.engine_id,
+						resolved_model,
+						policy.context_window,
+					),
+				};
 
 	/**
 	 * The Claude adapter has no native mapping for a canonical permission
@@ -179,6 +188,19 @@ export const MakeSessionPolicyRunMetadata = (
 		};
 	}
 
+	/**
+	 * Codex resolves every GPT-5 model to 272K and compacts at nine tenths of
+	 * whatever it resolved, so the extended window is a config override rather
+	 * than a different model. Sent as a string because provider options are the
+	 * engine-neutral string channel; the adapter parses it back at the boundary
+	 * that owns Codex's own config shape.
+	 */
+	const native_config = ContextWindowNativeConfig(
+		policy.engine_id,
+		resolved_model,
+		policy.context_window,
+	);
+
 	return {
 		...model_metadata,
 		permission_policy: {
@@ -188,6 +210,11 @@ export const MakeSessionPolicyRunMetadata = (
 			write_access,
 		},
 		provider_options: {
+			...(native_config === undefined
+				? {}
+				: {
+						"codex.model_context_window": String(native_config.model_context_window),
+					}),
 			"codex.reasoning_effort": policy.reasoning_effort,
 			"codex.service_tier": policy.service_tier ?? "standard",
 		},

@@ -1,4 +1,4 @@
-import { Context, Effect, Ref } from "effect";
+import { Context, Effect } from "effect";
 
 import type {
 	HelloEnvelope,
@@ -7,15 +7,17 @@ import type {
 	ProtocolErrorDetail,
 } from "@artisan/protocol";
 
-import type { ReadyState } from "../connection-state";
+import type { PendingSubscription, ReadyState } from "../connection-state";
 import { MakeCapabilityMutationHandler } from "./mutation-handlers/capabilities";
 import { MakePreviewMutationHandlers } from "./mutation-handlers/preview";
 import { MakeRoutineMutationHandler } from "./mutation-handlers/routines";
 import { MakeSettingsMutationHandler } from "./mutation-handlers/settings";
 import { MakeToolMutationHandlers } from "./mutation-handlers/tools";
 import { MakeControlPlaneHandlers } from "./query-handlers/control-plane";
+import { MakeEngineInstallationHandler } from "./query-handlers/engine-installation";
 import { MakeEngineUsageQueryHandler } from "./query-handlers/engine-usage";
 import { MakeHostIdentityQueryHandler } from "./query-handlers/host-identity";
+import { MakeHostMachinesQueryHandler } from "./query-handlers/host-machines";
 import { MakeMarketplaceQueryHandler } from "./query-handlers/marketplace";
 import { MakeProjectQueryHandler } from "./query-handlers/project";
 import { MakeThreadQueryHandler } from "./query-handlers/thread";
@@ -23,13 +25,16 @@ import { MakeWorkspaceInspectionQueryHandler } from "./query-handlers/workspace-
 import { MakeReadyMutations, ReadyConnectionRuntime } from "./ready-mutations";
 import { MakeSubscriptionControlHandlers } from "../subscriptions/control";
 import { MakeProjectionSubscriptionHandlers } from "../subscriptions/projections";
+import { IsOrchestrationCommand } from "../command-router";
 
 export class ReadyHandlerFactory extends Context.Service<
 	ReadyHandlerFactory,
 	{
 		readonly Make: Effect.Effect<{
+			readonly engine_installation: Effect.Success<typeof MakeEngineInstallationHandler>;
 			readonly engine_usage: Effect.Success<typeof MakeEngineUsageQueryHandler>;
 			readonly host_identity: Effect.Success<typeof MakeHostIdentityQueryHandler>;
+			readonly host_machines: Effect.Success<typeof MakeHostMachinesQueryHandler>;
 			readonly marketplace: Effect.Success<typeof MakeMarketplaceQueryHandler>;
 			readonly settings: Effect.Success<typeof MakeSettingsMutationHandler>;
 			readonly thread: Effect.Success<typeof MakeThreadQueryHandler>;
@@ -40,12 +45,130 @@ export class ReadyHandlerFactory extends Context.Service<
 	}
 >()("Artisan/ReadyHandlerFactory") {}
 
+/**
+ * These frames mutate or depend on the connection's cursor and subscription
+ * state. They stay on ProtocolServer's serialized control plane; every other
+ * negotiated frame is domain work that can proceed independently.
+ */
+export const IsReadyConnectionControlEnvelope = (
+	envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
+) =>
+	envelope.kind === "subscribe" ||
+	envelope.kind === "unsubscribe" ||
+	envelope.kind === "ack" ||
+	envelope.kind === "replay" ||
+	envelope.kind === "heartbeat.pong";
+
+/**
+ * Read requests do not publish journal events or change connection cursors and
+ * may therefore share a negotiated connection. Every other domain envelope is
+ * held behind the event-delivery sequence gate until its receipt and journal
+ * effects are ordered.
+ */
+export const IsReadyConnectionReadEnvelope = (
+	envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
+) => {
+	switch (envelope.kind) {
+		case "thread.list.query":
+		case "model.favorites.query":
+		case "thread.retention.query":
+		case "thread.work.query":
+		case "thread.open.query":
+		case "thread.transcript.query":
+		case "conversation.query":
+		case "message.image_attachment.query":
+		case "thread.session.query":
+		case "project.directory.list.query":
+		case "project.directory.pick":
+		case "project.list.query":
+		case "project.repository.query":
+		case "project.diff.query":
+		case "session.defaults.query":
+		case "runtime.catalog.query":
+		case "workspace.file.read.query":
+		case "workspace.change.list.query":
+		case "workspace.conflict.list.query":
+		case "workspace.change.diff.query":
+		case "git.workspace.query":
+		case "git.diff.query":
+		case "preview.target.list.query":
+		case "preview.target.get.query":
+		case "preview.rich_link.resolve.query":
+		case "preview.asset.metadata.query":
+		case "workspace.file.discovery.query":
+		case "workspace.language.capabilities.query":
+		case "guidance.query":
+		case "model_behaviour.query":
+		case "marketplace.routine.list.query":
+		case "marketplace.routine.detail.query":
+		case "marketplace.routine.install.preview":
+		case "marketplace.npx_skills.discover":
+		case "marketplace.capability.list.query":
+		case "marketplace.capability.detail.query":
+		case "marketplace.capability.connect.preview":
+		case "marketplace.capability.oauth.status.query":
+		case "terminal.list.query":
+		case "orchestration.graph.query":
+		case "orchestration.group.list.query":
+		case "artisan.tool.registry.list.query":
+		case "artisan.tool.invocation.list.query":
+		case "artisan.approval.list.query":
+		case "surface.list.query":
+		case "surface.usage.aggregate.query":
+		case "thread.usage.series.query":
+		case "surface.usage.daily.query":
+		case "host.identity.query":
+		case "host.machines.query":
+		case "engine.usage.query":
+		case "engine.installation.query":
+			return true;
+		default:
+			return false;
+	}
+};
+
+/** Work whose snapshot or mutation cannot precede durable orchestration repair. */
+export const RequiresOrchestrationRecovery = (
+	envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
+) => {
+	if (envelope.kind === "command") return IsOrchestrationCommand(envelope);
+	if (envelope.kind === "subscribe")
+		return [
+			"thread.list",
+			"conversation",
+			"thread.transcript",
+			"surface.list",
+			"surface.usage.aggregate",
+			"orchestration.graph",
+			"orchestration.group.list",
+		].includes(envelope.payload.type);
+	switch (envelope.kind) {
+		case "thread.list.query":
+		case "thread.work.query":
+		case "thread.open.query":
+		case "thread.transcript.query":
+		case "conversation.query":
+		case "thread.session.query":
+		case "surface.list.query":
+		case "surface.usage.aggregate.query":
+		case "thread.usage.series.query":
+		case "surface.usage.daily.query":
+		case "orchestration.graph.query":
+		case "orchestration.group.list.query":
+			return true;
+		default:
+			return false;
+	}
+};
+
 export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
-	const { DeliverLiveEvents, Enqueue, EnqueueError, state } = yield* ReadyConnectionRuntime;
+	const { DeliverCommittedTail, Enqueue, EnqueueError } = yield* ReadyConnectionRuntime;
 	const handlers = yield* (yield* ReadyHandlerFactory).Make;
 	const HandleSettingsMutation = handlers.settings;
+	const HandleEngineInstallation = handlers.engine_installation;
 	const HandleEngineUsageQuery = handlers.engine_usage;
 	const HandleHostIdentityQuery = handlers.host_identity;
+	const HandleHostMachinesQuery = handlers.host_machines;
 	const HandleMarketplaceQuery = handlers.marketplace;
 	const HandleProjectQuery = yield* MakeProjectQueryHandler;
 	const HandleThreadQuery = handlers.thread;
@@ -77,7 +200,8 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 	const { HandleToolApprovalResolve, HandleToolExecute } = yield* MakeToolMutationHandlers;
 	const ready_mutations = yield* MakeReadyMutations;
 	const subscription_control = yield* MakeSubscriptionControlHandlers;
-	const projection_subscriptions = yield* MakeProjectionSubscriptionHandlers;
+	const projection_subscriptions =
+		yield* MakeProjectionSubscriptionHandlers(subscription_control);
 
 	const AdaptRpcHandler =
 		<Query extends { readonly message_id: string }, Result extends OutboundEnvelope>(
@@ -102,19 +226,14 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 	const HandleWorkspaceInspectionReadQuery = AdaptRpcHandler(HandleWorkspaceInspectionQuery);
 	const HandleMarketplaceReadQuery = AdaptRpcHandler(HandleMarketplaceQuery);
 	const HandleHostIdentityReadQuery = AdaptRpcHandler(HandleHostIdentityQuery);
+	const HandleHostMachinesReadQuery = AdaptRpcHandler(HandleHostMachinesQuery);
 	const HandleEngineUsageReadQuery = AdaptRpcHandler(HandleEngineUsageQuery);
+	const HandleEngineInstallationRequest = AdaptRpcHandler(HandleEngineInstallation);
 	const HandleSettingsMutationResult = (envelope: Parameters<typeof HandleSettingsMutation>[0]) =>
 		Effect.gen(function* () {
 			const result = yield* HandleSettingsMutation(envelope);
 			yield* Enqueue(result.receipt);
-			const latest = yield* Ref.get(state);
-			const undelivered =
-				latest._tag === "Ready"
-					? result.events.filter(
-							(event) => event.journal_sequence > latest.delivered_journal_sequence,
-						)
-					: [];
-			if (undelivered.length > 0) yield* DeliverLiveEvents(undelivered);
+			yield* DeliverCommittedTail(envelope.message_id);
 		});
 
 	const Handle = (
@@ -272,12 +391,22 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 				return HandleSurfaceUsageDailyQuery(envelope, current);
 			case "host.identity.query":
 				return HandleHostIdentityReadQuery(envelope, current);
+			case "host.machines.query":
+			case "host.machines.connect.request":
+				return HandleHostMachinesReadQuery(envelope, current);
 			case "engine.usage.query":
 				return HandleEngineUsageReadQuery(envelope, current);
+			case "engine.installation.query":
+			case "engine.install.request":
+			case "engine.authentication.request":
+			case "engine.rollback.request":
+				return HandleEngineInstallationRequest(envelope, current);
 			case "subscribe":
-				return projection_subscriptions.HandleSubscribe(envelope, current);
+				return Effect.die("Subscribe admission must install its claim before dispatch.");
 			case "unsubscribe":
-				return projection_subscriptions.HandleUnsubscribe(envelope, current);
+				return Effect.die(
+					"Unsubscribe admission must capture its exact claim before dispatch.",
+				);
 			case "ack":
 				return subscription_control.HandleAck(envelope, current);
 			case "replay":
@@ -292,7 +421,25 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 	};
 
 	return {
+		ClaimSubscribe: projection_subscriptions.ClaimSubscribe,
+		ClaimUnsubscribe: projection_subscriptions.ClaimUnsubscribe,
 		Handle,
+		HandleClaimedSubscribe: (
+			envelope: Extract<
+				Exclude<InboundControlEnvelope, HelloEnvelope>,
+				{ readonly kind: "subscribe" }
+			>,
+			current: ReadyState,
+			claim: PendingSubscription | undefined,
+		) => projection_subscriptions.HandleClaimedSubscribe(envelope, current, claim),
+		HandleClaimedUnsubscribe: (
+			envelope: Extract<
+				Exclude<InboundControlEnvelope, HelloEnvelope>,
+				{ readonly kind: "unsubscribe" }
+			>,
+			current: ReadyState,
+			claim: PendingSubscription | undefined,
+		) => projection_subscriptions.HandleClaimedUnsubscribe(envelope, current, claim),
 		ProjectCatalogTail: projection_subscriptions.ProjectCatalogTail,
 	} as const;
 });

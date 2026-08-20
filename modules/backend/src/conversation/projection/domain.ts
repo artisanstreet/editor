@@ -17,20 +17,29 @@ export interface ConversationObservationContext {
 	readonly thread_id: string;
 }
 
+/**
+ * `interrupted` keeps its own identity here rather than folding into `failed`.
+ * The durable record has always distinguished them — startup recovery writes
+ * `interrupted` for a run the host ended out from under — but collapsing the
+ * two presented a reboot as an error and discarded the only signal that says
+ * the turn is resumable.
+ */
 export const lifecycle = (state: string) =>
 	state === "completed" || state === "closed"
 		? "completed"
 		: state === "cancelled"
 			? "cancelled"
-			: state === "failed" || state === "interrupted"
-				? "failed"
-				: state === "waiting"
-					? "waiting"
-					: state === "pending"
-						? "pending"
-						: state === "streaming"
-							? "streaming"
-							: "active";
+			: state === "interrupted"
+				? "interrupted"
+				: state === "failed"
+					? "failed"
+					: state === "waiting"
+						? "waiting"
+						: state === "pending"
+							? "pending"
+							: state === "streaming"
+								? "streaming"
+								: "active";
 
 export const source_refs = (
 	reference: string,
@@ -61,6 +70,28 @@ export const optional_text = (value: string | undefined) => {
 	return normalized ? text(normalized) : undefined;
 };
 
+/**
+ * Reads as the truth for a reader: the work happened, recording it did not.
+ * Declared here rather than at the call site because the allowlist below is
+ * what decides whether a detail survives to the reader at all — wording that
+ * lives anywhere else silently degrades to a failure card with no reason.
+ */
+export const observation_persistence_abandoned_detail =
+	"Artisan could not durably record this run's activity, so the run was stopped. The work it had already done is unaffected.";
+
+/** Written durably by FailRecoveredRun, and until now dropped by the allowlist. */
+export const resume_without_progress_detail =
+	"The session resumed but made no provider progress before the recovery check expired.";
+
+/**
+ * The one startup failure a retry can never fix: the spawn preflight found the
+ * thread's working directory gone. Without its own wording every launch died
+ * as the generic startup failure, and the thread read as permanently broken
+ * with nothing naming the folder as the fault.
+ */
+export const working_directory_missing_detail =
+	"The thread's working directory no longer exists on this machine.";
+
 const renderer_safe_terminal_details = new Set([
 	"Artisan could not finish preparing the engine run.",
 	"Engine startup was interrupted before the native session became ready.",
@@ -68,6 +99,9 @@ const renderer_safe_terminal_details = new Set([
 	"The engine failed before its native session became ready.",
 	"The engine stopped before the run could finish.",
 	"The engine could not deliver observations fast enough to continue safely.",
+	observation_persistence_abandoned_detail,
+	resume_without_progress_detail,
+	working_directory_missing_detail,
 ]);
 
 /**

@@ -231,13 +231,23 @@ export const MakePreparationOperations = Effect.gen(function* () {
 										),
 									)
 									.limit(1);
+					/**
+					 * A native resume needs the provider session behind the source run to
+					 * still be intact. Completing leaves one. So does stopping: cancelling
+					 * ends Artisan's turn, not the provider's session, so the user who
+					 * interrupts a run keeps its real context window instead of paying for
+					 * a summarized rebuild. A failed run is trusted only under an explicit
+					 * usage-interruption authority, which proves the failure was a rate
+					 * limit rather than a session that died mid-turn.
+					 */
 					if (
 						launch._tag === "native" &&
-						((source?.status !== "completed" &&
-							!(
-								source?.status === "failed" &&
-								usage_interruption_authority !== undefined
-							)) ||
+						(!(
+							source?.status === "completed" ||
+							source?.status === "cancelled" ||
+							(source?.status === "failed" &&
+								usage_interruption_authority !== undefined)
+						) ||
 							source.engine_id !== target.engine_id ||
 							Option.isNone(source_resume))
 					)

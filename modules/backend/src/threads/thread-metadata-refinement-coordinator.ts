@@ -424,17 +424,7 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 			);
 
 		const SubmitUntilAccepted = (request: ThreadMetadataRefinementRequest) =>
-			Effect.gen(function* () {
-				while (true) {
-					const result = yield* worker.Submit(request);
-
-					if (result !== "dropped") {
-						return;
-					}
-
-					yield* worker.WaitForIdle;
-				}
-			});
+			worker.Submit(request).pipe(Effect.asVoid);
 
 		const VerifyRefined = (trigger: RefinementTrigger) =>
 			Effect.gen(function* () {

@@ -419,6 +419,55 @@ describe("thread continuation repository", () => {
 			);
 		}));
 
+	it("accepts a native launch from a source run the user stopped", () =>
+		with_runtime(async (runtime) => {
+			await runtime.runPromise(
+				Seed({
+					source_native_resume_json: JSON.stringify({
+						native_thread_id: "source-native",
+					}),
+					source_native_thread_id: "source-native",
+					source_status: "cancelled",
+				}),
+			);
+			const repository = await repository_from(runtime);
+
+			await expect(
+				runtime.runPromise(
+					repository.PrepareLaunch("run-2", {
+						_tag: "native",
+						request_id: "command-2",
+						source_run_id: "run-1",
+					}),
+				),
+			).resolves.toBe("prepared");
+		}));
+
+	it("rejects a native launch from a failed source with no usage-interruption authority", () =>
+		with_runtime(async (runtime) => {
+			await runtime.runPromise(
+				Seed({
+					source_native_resume_json: JSON.stringify({
+						native_thread_id: "source-native",
+					}),
+					source_native_thread_id: "source-native",
+					source_status: "failed",
+				}),
+			);
+			const repository = await repository_from(runtime);
+
+			await expect_failure_code(
+				runtime.runPromise(
+					repository.PrepareLaunch("run-2", {
+						_tag: "native",
+						request_id: "command-2",
+						source_run_id: "run-1",
+					}),
+				),
+				"native_launch_invalid",
+			);
+		}));
+
 	it("binds atomically, supports identical replay, and rejects conflicting replay", () =>
 		with_runtime(async (runtime) => {
 			await runtime.runPromise(

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
-import { Deferred, Effect, Fiber, Layer, Stream } from "effect";
+import { Cause, Deferred, Effect, Fiber, Layer, ManagedRuntime, Queue, Stream } from "effect";
 
 import type {
 	CommandEnvelope,
@@ -22,12 +22,14 @@ import {
 	TerminalDriverError,
 	TerminalRepository,
 	TerminalSessionService,
+	TerminalSessionServiceLive,
 	type ProtocolConnection,
 	type TerminalDriverExit,
 } from "@artisan/backend";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 import { Database } from "../../modules/backend/src/persistence/database";
 import { OrchestrationRuns } from "../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const crash_fixture_path = fileURLToPath(new URL("./terminal-crash-fixture.ts", import.meta.url));
@@ -36,6 +38,7 @@ const temporary_directories: Array<string> = [];
 
 interface FakeTerminal {
 	readonly exit: Deferred.Deferred<TerminalDriverExit>;
+	readonly output: Queue.Queue<Uint8Array, Cause.Done<void>>;
 	closed: boolean;
 }
 
@@ -68,7 +71,9 @@ function make_fake_terminal_driver() {
 				}
 
 				const exit = yield* Deferred.make<TerminalDriverExit>();
-				const terminal: FakeTerminal = { closed: false, exit };
+				const output = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
+				const terminal: FakeTerminal = { closed: false, exit, output };
+				const withhold_exit = input.executable === "withhold-exit";
 
 				terminals.push(terminal);
 
@@ -79,6 +84,7 @@ function make_fake_terminal_driver() {
 						}
 
 						terminal.closed = true;
+						yield* Queue.end(output);
 						yield* Deferred.succeed(exit, terminal_exit);
 					});
 				const Close = Effect.gen(function* () {
@@ -87,6 +93,9 @@ function make_fake_terminal_driver() {
 					}
 
 					stats.closes += 1;
+					if (withhold_exit) {
+						return;
+					}
 					yield* Finish({ exit_code: null, reason: "closed", signal: null });
 				});
 
@@ -99,9 +108,12 @@ function make_fake_terminal_driver() {
 					Kill: () =>
 						Effect.gen(function* () {
 							stats.kills += 1;
+							if (withhold_exit) {
+								return;
+							}
 							yield* Finish({ exit_code: null, reason: "killed", signal: null });
 						}),
-					Output: Stream.empty,
+					Output: Stream.fromQueue(output),
 					Resize: (cols, rows) =>
 						Effect.sync(() => {
 							stats.resizes.push({ cols, rows });
@@ -116,6 +128,12 @@ function make_fake_terminal_driver() {
 	});
 
 	return {
+		Emit: (index: number, text: string) =>
+			Effect.runPromise(
+				Queue.offer(terminals[index]!.output, new TextEncoder().encode(text)).pipe(
+					Effect.asVoid,
+				),
+			),
 		Exit: (index: number, exit: TerminalDriverExit) =>
 			Effect.runPromise(Deferred.succeed(terminals[index]!.exit, exit)),
 		layer,
@@ -390,7 +408,10 @@ describe("terminal session orchestration", () => {
 					const terminals = yield* TerminalSessionService;
 					yield* terminals.HandleAsAgent(
 						open_command("valid_agent_open", "terminal_valid"),
-						{ agent_id: "agent_valid", run_id: "run_valid" },
+						{
+							agent_id: "agent_valid",
+							run_id: "run_valid",
+						},
 					);
 				}),
 			);
@@ -560,9 +581,18 @@ describe("terminal session orchestration", () => {
 				{ payload: { status: "accepted" } },
 				{ payload: { action: "opened", type: "terminal.lifecycle" } },
 			]);
-			expect(accepted[0]!.payload).toHaveProperty("journal_sequence", 3);
+			const accepted_journal_sequence =
+				"journal_sequence" in accepted[0]!.payload
+					? accepted[0]!.payload.journal_sequence
+					: undefined;
+			expect(accepted_journal_sequence).toBeTypeOf("number");
 			expect(duplicate).toMatchObject([
-				{ payload: { journal_sequence: 3, status: "duplicate" } },
+				{
+					payload: {
+						journal_sequence: accepted_journal_sequence,
+						status: "duplicate",
+					},
+				},
 				{ payload: { action: "opened", type: "terminal.lifecycle" } },
 			]);
 			expect(lifecycle_event(duplicate)).toEqual(lifecycle_event(accepted));
@@ -662,6 +692,7 @@ describe("terminal session orchestration", () => {
 					type: "terminal.kill",
 				}),
 			);
+			await wait_for_terminal(runtime, (terminal) => terminal.state === "closed");
 			await route(
 				runtime,
 				command("restart_generation_2", {
@@ -737,6 +768,7 @@ describe("terminal session orchestration", () => {
 					command("kill_ops", { terminal_id: "terminal_ops", type: "terminal.kill" }),
 				),
 			);
+			await wait_for_terminal(runtime, (terminal) => terminal.state === "closed");
 
 			expect(await list(runtime)).toMatchObject([{ state: "closed" }]);
 			expect(fake.stats.kills).toBe(1);
@@ -762,6 +794,7 @@ describe("terminal session orchestration", () => {
 					command("close_ops", { terminal_id: "terminal_ops", type: "terminal.close" }),
 				),
 			);
+			await wait_for_terminal(runtime, (terminal) => terminal.state === "closed");
 
 			expect(await list(runtime)).toMatchObject([{ generation: 2, state: "closed" }]);
 
@@ -784,6 +817,320 @@ describe("terminal session orchestration", () => {
 			expect(sequences).toEqual([...sequences].sort((left, right) => left - right));
 		} finally {
 			await runtime.dispose();
+		}
+	});
+
+	it("bounds a missing kill exit, records ambiguity, and releases the command lane", async () => {
+		const database_path = await make_database_path();
+		const fake = make_fake_terminal_driver();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			terminal_driver: fake.layer,
+		});
+
+		try {
+			await create_thread(runtime);
+			await route(
+				runtime,
+				open_command("open_withheld_exit", "terminal_withheld_exit", "withhold-exit"),
+			);
+
+			const kill = route(
+				runtime,
+				command("kill_withheld_exit", {
+					terminal_id: "terminal_withheld_exit",
+					type: "terminal.kill",
+				}),
+			);
+			for (let attempt = 0; fake.stats.kills === 0 && attempt < 100; attempt += 1) {
+				await new Promise<void>((resolve) => setTimeout(resolve, 10));
+			}
+			expect(fake.stats.kills).toBe(1);
+
+			const killed = await kill;
+			const second = await Promise.race([
+				route(
+					runtime,
+					open_command("open_after_withheld_exit", "terminal_after_withheld_exit"),
+				),
+				new Promise<never>((_, reject) =>
+					setTimeout(
+						() => reject(new Error("terminal command lane remained blocked")),
+						400,
+					),
+				),
+			]);
+
+			expect(killed.at(-1)).toMatchObject({
+				payload: {
+					action: "killed",
+					terminal: { state: "active", terminal_id: "terminal_withheld_exit" },
+				},
+			});
+			expect(
+				await route(
+					runtime,
+					command("write_after_kill_receipt", {
+						data: "must-not-reach-a-stopping-terminal",
+						terminal_id: "terminal_withheld_exit",
+						type: "terminal.write",
+					}),
+				),
+			).toMatchObject([
+				{ payload: { error: { code: "terminal.not_active" }, status: "rejected" } },
+			]);
+			expect(second.at(-1)).toMatchObject({
+				payload: { action: "opened", terminal: { state: "active" } },
+			});
+			for (let attempt = 0; attempt < 100; attempt += 1) {
+				const recovered = (await list(runtime)).find(
+					(terminal) => terminal.terminal_id === "terminal_withheld_exit",
+				);
+
+				if (recovered?.state === "failed") {
+					break;
+				}
+				await new Promise<void>((resolve) => setTimeout(resolve, 10));
+			}
+			expect(
+				(await list(runtime)).find(
+					(terminal) => terminal.terminal_id === "terminal_withheld_exit",
+				),
+			).toMatchObject({ state: "failed" });
+			expect(fake.stats.scope_finalizers).toBe(1);
+
+			await route(
+				runtime,
+				command("restart_after_withheld_exit", {
+					terminal_id: "terminal_withheld_exit",
+					type: "terminal.restart",
+				}),
+			);
+			await fake.Exit(0, { exit_code: 1, reason: "exited", signal: null });
+			expect(
+				(await list(runtime)).find(
+					(terminal) => terminal.terminal_id === "terminal_withheld_exit",
+				),
+			).toMatchObject({ generation: 2, state: "active" });
+			await fake.Exit(2, { exit_code: 0, reason: "exited", signal: null });
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("settles lost exits concurrently during shutdown", async () => {
+		const database_path = await make_database_path();
+		const fake = make_fake_terminal_driver();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			terminal_driver: fake.layer,
+		});
+
+		await create_thread(runtime);
+		await Promise.all(
+			["alpha", "bravo", "charlie"].map((terminal_id) =>
+				route(
+					runtime,
+					open_command(`open_shutdown_${terminal_id}`, terminal_id, "withhold-exit"),
+				),
+			),
+		);
+
+		const started_at = performance.now();
+		await runtime.dispose();
+		const elapsed = performance.now() - started_at;
+
+		expect(elapsed).toBeLessThan(2_500);
+		expect(fake.stats.scope_finalizers).toBe(3);
+	});
+
+	it("retires a displaced stopped generation when restart wins before its watchdog", async () => {
+		const database_path = await make_database_path();
+		const fake = make_fake_terminal_driver();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			terminal_driver: fake.layer,
+		});
+
+		try {
+			await create_thread(runtime);
+			await route(
+				runtime,
+				open_command("open_displaced", "terminal_displaced", "withhold-exit"),
+			);
+			await route(
+				runtime,
+				command("kill_displaced", {
+					terminal_id: "terminal_displaced",
+					type: "terminal.kill",
+				}),
+			);
+			await route(
+				runtime,
+				command("restart_displaced", {
+					terminal_id: "terminal_displaced",
+					type: "terminal.restart",
+				}),
+			);
+
+			for (
+				let attempt = 0;
+				fake.stats.scope_finalizers === 0 && attempt < 100;
+				attempt += 1
+			) {
+				await new Promise<void>((resolve) => setTimeout(resolve, 10));
+			}
+			expect(fake.stats.scope_finalizers).toBe(1);
+			await Effect.runPromise(Effect.sleep("1100 millis"));
+			await fake.Exit(0, { exit_code: 1, reason: "exited", signal: null });
+			expect(await list(runtime)).toMatchObject([
+				{ generation: 2, state: "active", terminal_id: "terminal_displaced" },
+			]);
+			await fake.Exit(1, { exit_code: 0, reason: "exited", signal: null });
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("constructs before stale recovery settles and admits a waiting terminal command after recovery", async () => {
+		const recovery_started = await Effect.runPromise(Deferred.make<void>());
+		const release_recovery = await Effect.runPromise(Deferred.make<void>());
+		const fake = make_fake_terminal_driver();
+		let admitted = false;
+		const stored = { terminal: {} } as never;
+		const repository = TerminalRepository.of({
+			AdoptObserved: () => Effect.void,
+			Claim: () =>
+				Effect.sync(() => {
+					admitted = true;
+					return {
+						command_status: "dispatching",
+						generation: 1,
+						status: "accepted",
+						stored,
+					} as never;
+				}),
+			CommitAmbiguous: () => Effect.die("unreachable"),
+			CommitCommand: () =>
+				Effect.succeed({ event: { journal_sequence: 1 }, stored } as never),
+			CommitExit: () => Effect.die("unreachable"),
+			CommitRecovery: () => Effect.die("unreachable"),
+			CompleteCommand: () => Effect.die("unreachable"),
+			List: () => Effect.succeed([]),
+			ReadOwned: () => Effect.die("unreachable"),
+			ReadStale: () => Effect.succeed([]),
+			RecoverStale: () =>
+				Deferred.succeed(recovery_started, undefined).pipe(
+					Effect.andThen(Deferred.await(release_recovery)),
+					Effect.as(0),
+				),
+		});
+		const runtime = ManagedRuntime.make(
+			TerminalSessionServiceLive.pipe(
+				Layer.provideMerge(fake.layer),
+				Layer.provideMerge(Layer.succeed(TerminalRepository, repository)),
+				Layer.provideMerge(Layer.succeed(JournalStore, {} as never)),
+				Layer.provideMerge(
+					Layer.succeed(
+						RuntimeMetadata,
+						RuntimeMetadata.of({
+							instance_id: "stalled-recovery-instance",
+							MakeId: () => Effect.succeed("unused"),
+							Now: Effect.succeed("2026-08-15T00:00:00.000Z"),
+						}),
+					),
+				),
+			),
+		);
+
+		try {
+			const service = await runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* TerminalSessionService;
+				}),
+			);
+			await Effect.runPromise(Deferred.await(recovery_started));
+			expect(
+				await runtime.runPromise(service.List("thread_terminal", "workspace_1")),
+			).toEqual([]);
+
+			const pending = runtime.runPromise(
+				service.Handle(
+					command("gated_during_recovery", {
+						pinned: true,
+						terminal_id: "terminal_gated",
+						type: "terminal.pin",
+					}),
+				),
+			);
+			await new Promise<void>((resolve) => setTimeout(resolve, 30));
+			expect(admitted).toBe(false);
+
+			await Effect.runPromise(Deferred.succeed(release_recovery, undefined));
+			await expect(pending).resolves.toMatchObject({ status: "accepted" });
+			expect(admitted).toBe(true);
+		} finally {
+			await runtime.dispose().catch(() => undefined);
+		}
+	});
+
+	it("interrupts recovery-gated terminal waiters when the service closes", async () => {
+		const recovery_started = await Effect.runPromise(Deferred.make<void>());
+		const release_recovery = await Effect.runPromise(Deferred.make<void>());
+		const fake = make_fake_terminal_driver();
+		const repository = TerminalRepository.of({
+			AdoptObserved: () => Effect.void,
+			Claim: () => Effect.die("terminal command passed a closed recovery gate"),
+			CommitAmbiguous: () => Effect.die("unreachable"),
+			CommitCommand: () => Effect.die("unreachable"),
+			CommitExit: () => Effect.die("unreachable"),
+			CommitRecovery: () => Effect.die("unreachable"),
+			CompleteCommand: () => Effect.die("unreachable"),
+			List: () => Effect.succeed([]),
+			ReadOwned: () => Effect.die("unreachable"),
+			ReadStale: () => Effect.succeed([]),
+			RecoverStale: () =>
+				Deferred.succeed(recovery_started, undefined).pipe(
+					Effect.andThen(Deferred.await(release_recovery)),
+					Effect.as(0),
+				),
+		});
+		const runtime = ManagedRuntime.make(
+			TerminalSessionServiceLive.pipe(
+				Layer.provideMerge(fake.layer),
+				Layer.provideMerge(Layer.succeed(TerminalRepository, repository)),
+				Layer.provideMerge(Layer.succeed(JournalStore, {} as never)),
+				Layer.provideMerge(
+					Layer.succeed(
+						RuntimeMetadata,
+						RuntimeMetadata.of({
+							instance_id: "stalled-recovery-close-instance",
+							MakeId: () => Effect.succeed("unused"),
+							Now: Effect.succeed("2026-08-15T00:00:00.000Z"),
+						}),
+					),
+				),
+			),
+		);
+
+		try {
+			const service = await runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* TerminalSessionService;
+				}),
+			);
+			await Effect.runPromise(Deferred.await(recovery_started));
+			const pending = runtime.runPromise(
+				service.Handle(open_command("gated_during_close", "terminal_gated_close")),
+			);
+
+			await runtime.dispose();
+			await expect(pending).rejects.toBeDefined();
+		} finally {
+			await runtime.dispose().catch(() => undefined);
 		}
 	});
 
@@ -944,4 +1291,189 @@ describe("terminal session orchestration", () => {
 			await runtime.dispose();
 		}
 	}, 30_000);
+
+	it("replays scrollback to late, repeated, and post-exit readers", async () => {
+		const database_path = await make_database_path();
+		const fake = make_fake_terminal_driver();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			terminal_driver: fake.layer,
+		});
+		const scope = {
+			terminal_id: "terminal_scrollback",
+			thread_id: "thread_terminal",
+			workspace_id: "workspace_1",
+		};
+		const read_all = () =>
+			runtime.runPromise(
+				Effect.gen(function* () {
+					const terminals = yield* TerminalSessionService;
+					const stream = yield* terminals.Output(scope);
+					const chunks = yield* stream.pipe(Stream.runCollect);
+
+					return new TextDecoder().decode(
+						Uint8Array.from([...chunks].flatMap((chunk) => [...chunk])),
+					);
+				}),
+			);
+
+		try {
+			await create_thread(runtime);
+			await route(runtime, open_command("open_scrollback", "terminal_scrollback"));
+			await fake.Emit(0, "alpha");
+
+			const late_reader = await runtime.runPromise(
+				Effect.gen(function* () {
+					const terminals = yield* TerminalSessionService;
+					const stream = yield* terminals.Output(scope);
+					const chunks = yield* stream.pipe(Stream.take(1), Stream.runCollect);
+
+					return new TextDecoder().decode(
+						Uint8Array.from([...chunks].flatMap((chunk) => [...chunk])),
+					);
+				}),
+			);
+
+			expect(late_reader).toContain("alpha");
+
+			await fake.Emit(0, "beta");
+			await route(
+				runtime,
+				command("kill_scrollback", {
+					terminal_id: "terminal_scrollback",
+					type: "terminal.kill",
+				}),
+			);
+
+			/** The postmortem read is the headline: full output, twice, after exit. */
+			expect(await read_all()).toBe("alphabeta");
+			expect(await read_all()).toBe("alphabeta");
+
+			const snapshot = await runtime.runPromise(
+				Effect.gen(function* () {
+					const terminals = yield* TerminalSessionService;
+					const stream = yield* terminals.ReadOutput("terminal_scrollback");
+					const chunks = yield* stream.pipe(Stream.runCollect);
+
+					return new TextDecoder().decode(
+						Uint8Array.from([...chunks].flatMap((chunk) => [...chunk])),
+					);
+				}),
+			);
+
+			expect(snapshot).toBe("alphabeta");
+
+			const quiesced = await runtime.runPromise(
+				Effect.gen(function* () {
+					const terminals = yield* TerminalSessionService;
+
+					yield* terminals.QuiesceThread("thread_terminal");
+
+					return yield* terminals.Output(scope).pipe(Effect.exit);
+				}),
+			);
+
+			expect(quiesced._tag).toBe("Failure");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("bounds scrollback by dropping the oldest output without stopping the terminal", async () => {
+		const database_path = await make_database_path();
+		const fake = make_fake_terminal_driver();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			terminal_driver: fake.layer,
+		});
+		const big = "a".repeat(512 * 1024);
+
+		try {
+			await create_thread(runtime);
+			await route(runtime, open_command("open_bounded", "terminal_bounded"));
+			await fake.Emit(0, big);
+			await fake.Emit(0, big);
+			await fake.Emit(0, "OMEGA");
+
+			expect(await list(runtime)).toMatchObject([{ state: "active" }]);
+
+			await route(
+				runtime,
+				command("kill_bounded", { terminal_id: "terminal_bounded", type: "terminal.kill" }),
+			);
+			await wait_for_terminal(runtime, (terminal) => terminal.state === "closed");
+
+			const text = await runtime.runPromise(
+				Effect.gen(function* () {
+					const terminals = yield* TerminalSessionService;
+					const stream = yield* terminals.Output({
+						terminal_id: "terminal_bounded",
+						thread_id: "thread_terminal",
+						workspace_id: "workspace_1",
+					});
+					const chunks = yield* stream.pipe(Stream.runCollect);
+
+					return new TextDecoder().decode(
+						Uint8Array.from([...chunks].flatMap((chunk) => [...chunk])),
+					);
+				}),
+			);
+
+			expect(text.length).toBe(big.length + "OMEGA".length);
+			expect(text.endsWith("OMEGA")).toBe(true);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("resets scrollback for a restarted generation", async () => {
+		const database_path = await make_database_path();
+		const fake = make_fake_terminal_driver();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			terminal_driver: fake.layer,
+		});
+
+		try {
+			await create_thread(runtime);
+			await route(runtime, open_command("open_reset", "terminal_reset"));
+			await fake.Emit(0, "old-generation");
+			await route(
+				runtime,
+				command("kill_reset", { terminal_id: "terminal_reset", type: "terminal.kill" }),
+			);
+			await wait_for_terminal(runtime, (terminal) => terminal.state === "closed");
+			await route(
+				runtime,
+				command("restart_reset", {
+					terminal_id: "terminal_reset",
+					type: "terminal.restart",
+				}),
+			);
+			await fake.Emit(1, "new-generation");
+
+			const text = await runtime.runPromise(
+				Effect.gen(function* () {
+					const terminals = yield* TerminalSessionService;
+					const stream = yield* terminals.Output({
+						terminal_id: "terminal_reset",
+						thread_id: "thread_terminal",
+						workspace_id: "workspace_1",
+					});
+					const chunks = yield* stream.pipe(Stream.take(1), Stream.runCollect);
+
+					return new TextDecoder().decode(
+						Uint8Array.from([...chunks].flatMap((chunk) => [...chunk])),
+					);
+				}),
+			);
+
+			expect(text).toBe("new-generation");
+		} finally {
+			await runtime.dispose();
+		}
+	});
 });

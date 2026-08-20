@@ -186,38 +186,9 @@ export const MakeMarketplaceQueryHandler = Effect.gen(function* () {
 				Effect.mapError(() => MarketplaceUnavailable),
 			),
 		"marketplace.capability.list.query": (query: CapabilityRegistryQueryEnvelope) =>
-			capability_repository.ReadSummaries.pipe(
-				Effect.flatMap((capabilities) =>
-					Effect.forEach(capabilities, (summary) =>
-						capability_repository
-							.ReadDetail(summary.id)
-							.pipe(Effect.map((detail) => ({ detail, summary }))),
-					),
-				),
+			capability_repository.Browse(query.payload).pipe(
 				Effect.map((records) => ({
-					capabilities: records
-						.filter(
-							({ detail, summary: capability }) =>
-								(query.payload.compatibility_engine_id === undefined ||
-									detail.compatibility.some(
-										(entry) =>
-											entry.engine_id ===
-											query.payload.compatibility_engine_id,
-									)) &&
-								(query.payload.category === undefined ||
-									query.payload.category === "capability") &&
-								(query.payload.enabled === undefined ||
-									capability.enabled === query.payload.enabled) &&
-								(query.payload.status === undefined ||
-									capability.status === query.payload.status) &&
-								(query.payload.scope === undefined ||
-									ScopeMatches(capability.scope, query.payload.scope)) &&
-								(query.payload.text === undefined ||
-									capability.display_name
-										.toLocaleLowerCase()
-										.includes(query.payload.text.toLocaleLowerCase())),
-						)
-						.map(({ summary }) => summary),
+					capabilities: records,
 					registry_version,
 				})),
 				Effect.flatMap((payload) =>

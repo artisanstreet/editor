@@ -8,10 +8,15 @@ import type { ConversationObservationContext } from "./domain";
 import { body_text, item_base, lifecycle, terminal_failure, turn_base } from "./domain";
 import { Admit, EnsureThread, EnsureTurn, UpsertItem, UpsertTurn } from "./entities";
 import { ApplyInteractionObservation, CancelPendingInteractions } from "./interaction";
-import { AppendText, CompleteReasoningSummary, SettleStreamingBodies } from "./messages";
+import {
+	AppendText,
+	CompleteReasoningSummary,
+	RecordThinkingProgress,
+	SettleStreamingBodies,
+} from "./messages";
 
 /** Applies one normalized engine observation in the caller's transaction. */
-export const ApplyEngineObservation = (
+export const ApplyEngineObservationWithChange = (
 	transaction: DatabaseClient,
 	observation: EngineObservation,
 	input: ConversationObservationContext,
@@ -22,14 +27,15 @@ export const ApplyEngineObservation = (
 		 * root conversation transcript. In particular, a child completion must not
 		 * settle or otherwise manufacture the parent renderer turn.
 		 */
-		if (observation._tag === "subagent" || observation._tag === "subagent_transcript") return;
+		if (observation._tag === "subagent" || observation._tag === "subagent_transcript")
+			return false;
 		if (
 			observation._tag === "usage" ||
 			(observation._tag === "terminal_activity" && observation.state === "output") ||
 			(observation._tag === "tool" && observation.action === "progress") ||
 			(observation._tag === "native_action" && observation.error_ref === undefined)
 		)
-			return;
+			return false;
 
 		yield* EnsureThread(transaction, input.thread_id, input.occurred_at);
 		const admitted = yield* Admit(
@@ -38,7 +44,7 @@ export const ApplyEngineObservation = (
 			input.thread_id,
 			input.occurred_at,
 		);
-		if (!admitted) return;
+		if (!admitted) return false;
 
 		/** One Artisan run is exactly one renderer turn. */
 		const turn_id = `run:${input.run_id}`;
@@ -56,7 +62,7 @@ export const ApplyEngineObservation = (
 
 		switch (observation._tag) {
 			case "agent_message_delta":
-				return yield* AppendText(
+				yield* AppendText(
 					transaction,
 					input.thread_id,
 					observation.item_id,
@@ -67,8 +73,9 @@ export const ApplyEngineObservation = (
 					source,
 					observation.phase,
 				);
+				break;
 			case "agent_message_completed":
-				return yield* UpsertItem(
+				yield* UpsertItem(
 					transaction,
 					input.thread_id,
 					{
@@ -85,8 +92,21 @@ export const ApplyEngineObservation = (
 					},
 					source,
 				);
+				break;
 			case "reasoning_summary_delta":
-				return yield* AppendText(
+				if (observation.thinking_tokens !== undefined) {
+					yield* RecordThinkingProgress(
+						transaction,
+						input.thread_id,
+						observation.item_id,
+						turn_id,
+						input,
+						observation.thinking_tokens,
+						source,
+					);
+					break;
+				}
+				yield* AppendText(
 					transaction,
 					input.thread_id,
 					observation.item_id,
@@ -96,8 +116,9 @@ export const ApplyEngineObservation = (
 					"reasoning_summary",
 					source,
 				);
+				break;
 			case "reasoning_summary_completed":
-				return yield* CompleteReasoningSummary(
+				yield* CompleteReasoningSummary(
 					transaction,
 					input.thread_id,
 					observation.item_id,
@@ -106,6 +127,7 @@ export const ApplyEngineObservation = (
 					observation.observation_id,
 					observation.text,
 				);
+				break;
 			case "turn_state":
 				yield* UpsertTurn(
 					transaction,
@@ -113,7 +135,7 @@ export const ApplyEngineObservation = (
 					turn_base(turn_id, input, observation.state, observation.observation_id),
 					source,
 				);
-				return yield* UpsertItem(
+				yield* UpsertItem(
 					transaction,
 					input.thread_id,
 					{
@@ -139,13 +161,15 @@ export const ApplyEngineObservation = (
 					},
 					source,
 				);
+				break;
 			case "run_state":
-				return yield* UpsertTurn(
+				yield* UpsertTurn(
 					transaction,
 					input.thread_id,
 					turn_base(turn_id, input, observation.state, observation.observation_id),
 					source,
 				);
+				break;
 			case "run_terminal":
 				yield* CancelPendingInteractions(
 					transaction,
@@ -166,7 +190,7 @@ export const ApplyEngineObservation = (
 					turn_base(turn_id, input, observation.state, observation.observation_id),
 					source,
 				);
-				return yield* UpsertItem(
+				yield* UpsertItem(
 					transaction,
 					input.thread_id,
 					{
@@ -192,12 +216,14 @@ export const ApplyEngineObservation = (
 					},
 					source,
 				);
+				break;
 			case "approval":
 			case "compaction":
 			case "plan":
 			case "question":
 			case "retry":
-				return yield* ApplyInteractionObservation(transaction, observation, input, turn_id);
+				yield* ApplyInteractionObservation(transaction, observation, input, turn_id);
+				break;
 			case "file":
 			case "native_action":
 			case "process_diagnostic":
@@ -205,6 +231,15 @@ export const ApplyEngineObservation = (
 			case "search":
 			case "terminal_activity":
 			case "tool":
-				return yield* ApplyActivityObservation(transaction, observation, input, turn_id);
+				yield* ApplyActivityObservation(transaction, observation, input, turn_id);
+				break;
 		}
+		return true;
 	});
+
+/** Preserves the public void projection boundary for ordinary observation callers. */
+export const ApplyEngineObservation = (
+	transaction: DatabaseClient,
+	observation: EngineObservation,
+	input: ConversationObservationContext,
+) => ApplyEngineObservationWithChange(transaction, observation, input).pipe(Effect.asVoid);
