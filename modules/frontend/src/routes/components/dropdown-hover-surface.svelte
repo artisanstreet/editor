@@ -7,7 +7,12 @@
 		flat = false,
 		hold = false,
 	}: {
-		children: Snippet<[{ move_hover: (event: Event) => void }]>;
+		children: Snippet<
+			[{
+				clear_hover: () => void;
+				move_hover: (event: Event) => void;
+			}]
+		>;
 		class?: string;
 		/**
 		 * Skips the content wrapper's stacking context so the pill can travel
@@ -148,6 +153,6 @@
 		style={`--docs-sidebar-hover-x: ${left}px; --docs-sidebar-hover-y: ${top}px; --docs-sidebar-hover-width: ${width}px; --docs-sidebar-hover-height: ${height}px;`}
 	></div>
 	<div class={flat ? "" : "relative z-1"}>
-		{@render children({ move_hover })}
+		{@render children({ clear_hover, move_hover })}
 	</div>
 </div>

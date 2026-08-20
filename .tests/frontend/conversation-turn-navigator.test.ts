@@ -136,7 +136,17 @@ describe("conversation turn navigator surface", () => {
 		}
 		expect(navigator).toContain("group-hover:w-(--inspector-width)");
 		expect(navigator).toContain("<DropdownHoverSurface");
-		expect(navigator).toContain("onpointerenter={move_hover}");
+		expect(navigator).toContain("{#snippet children({ clear_hover, move_hover })}");
+	});
+
+	it("uses the collapsed tick strip only to reveal the card", () => {
+		expect(navigator).toContain("data-conversation-range-trigger-zone");
+		expect(navigator).toContain("event.clientX >= trigger_zone.getBoundingClientRect().left");
+		expect(navigator).toContain("clear_hover();");
+		expect(navigator).toContain(
+			"onpointerenter={MoveExpandedRowHover(move_hover, clear_hover)}",
+		);
+		expect(navigator).not.toContain("onpointerenter={move_hover}");
 	});
 
 	it("opens and closes with the model picker's dropdown motion", () => {

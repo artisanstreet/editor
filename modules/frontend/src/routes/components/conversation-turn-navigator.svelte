@@ -28,6 +28,24 @@
 		readonly markers: ReadonlyArray<ConversationTurnMarker>;
 		readonly onselect: (marker: ConversationTurnMarker) => Effect.Effect<void>;
 	} = $props();
+
+	/**
+	 * The compact tick strip only reveals the card. A row pill belongs to the
+	 * expanded label area, so pointer movement over the same right-edge strip
+	 * clears it instead of making a tick look like a hoverable row of its own.
+	 */
+	const MoveExpandedRowHover =
+		(move_hover: (event: Event) => void, clear_hover: () => void) => (event: PointerEvent) => {
+			if (!(event.currentTarget instanceof HTMLElement)) return;
+			const trigger_zone = event.currentTarget.querySelector<HTMLElement>(
+				"[data-conversation-range-trigger-zone]",
+			);
+			if (trigger_zone !== null && event.clientX >= trigger_zone.getBoundingClientRect().left) {
+				clear_hover();
+				return;
+			}
+			move_hover(event);
+		};
 </script>
 
 {#if markers.length > 0}
@@ -83,7 +101,7 @@
 				<DropdownHoverSurface
 					class="flex max-w-full [--docs-sidebar-hover-radius:var(--radius-lg)]"
 				>
-				{#snippet children({ move_hover })}
+				{#snippet children({ clear_hover, move_hover })}
 					<!--
 						Expanded, the map is the inspector's width — the card facing it
 						across the transcript — and scrolls once a long thread outgrows the
@@ -101,10 +119,15 @@
 									class="relative flex w-full items-center justify-end gap-3 rounded-lg text-left outline-none group-hover:px-3 group-hover:py-1.5 group-focus-within:px-3 group-focus-within:py-1.5 focus-visible:ring-2 focus-visible:ring-ring/50"
 									aria-current={active ? "true" : undefined}
 									onclick={yield* onselect(marker)}
-									onpointerenter={move_hover}
-									onpointermove={move_hover}
+									onpointerenter={MoveExpandedRowHover(move_hover, clear_hover)}
+									onpointermove={MoveExpandedRowHover(move_hover, clear_hover)}
 									onfocusin={move_hover}
 								>
+									<span
+										aria-hidden="true"
+										data-conversation-range-trigger-zone
+										class="pointer-events-none absolute inset-y-0 right-0 w-10"
+									></span>
 									<!--
 										The label carries the accessible name at every width, so the
 										collapsed column is never a row of unnamed buttons. It ends
