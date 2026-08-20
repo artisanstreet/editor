@@ -1,6 +1,6 @@
 <script lang="ts" effect>
 	import { page } from "$app/state";
-	import { Effect, Option, Schedule } from "effect";
+	import { Effect, Option, Ref, Schedule } from "effect";
 	import { ArtisanClient } from "@artisan/transport/client";
 	import { Skeleton } from "$lib/components/ui/skeleton";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
@@ -27,7 +27,10 @@
 	let tree = $state.raw<ReadonlyMap<string, ReadonlyArray<WorkspaceTreeEntry>>>(new Map());
 	let expanded = $state.raw<ReadonlySet<string>>(new Set());
 	let failure = $state<string | undefined>(undefined);
-	let directory_requests = $state.raw<ReadonlyArray<string>>([workspace_tree_root]);
+	/** Internal reconciliation cursor; it is not rendered and must not invalidate its own Effect. */
+	let loaded_workspace_id: string | undefined;
+	const workspace_generation = yield* Ref.make(0);
+	const active_directory_requests = yield* Ref.make<ReadonlySet<string>>(new Set());
 
 	const active_file = $derived(page.url.searchParams.get("file") ?? undefined);
 	const workspace_id = $derived(page.params.workspace);
@@ -43,30 +46,20 @@
 		Schedule.upTo({ duration: "5 seconds" }),
 	);
 
-	const LoadDirectory = (parent: string) =>
+	const LoadDirectory = (parent: string, expected_workspace_id: string, generation: number) =>
 		Effect.gen(function* () {
-			if (workspace_id === undefined) {
-				failure = "Open a workspace to browse its files.";
-				return;
-			}
-			/**
-			 * Bounded, because this effect runs at the component's top level: a
-			 * Forge that never answers would otherwise leave a fiber pending for
-			 * the life of the route, and the async renderer refuses to navigate
-			 * away from work it still considers unfinished — one dropped reply
-			 * froze every later route change until the page was reloaded.
-			 */
 			const discovered = yield* client
 				.ListWorkspaceFiles({
 					depth: 1,
 					limit: 1_000,
-					workspace_id,
+					workspace_id: expected_workspace_id,
 					...(parent === workspace_tree_root ? {} : { prefix: parent }),
 				})
 				.pipe(
 					Effect.retry({ schedule: ColdStartRetrySchedule }),
 					Effect.timeoutOption("10 seconds"),
 				);
+			if (generation !== (yield* Ref.get(workspace_generation))) return;
 			if (Option.isNone(discovered)) {
 				failure = "The file listing did not answer. Retry once Forge is reachable.";
 				return;
@@ -80,21 +73,44 @@
 		}).pipe(
 			Effect.catch((error) =>
 				Effect.gen(function* () {
+					if (generation !== (yield* Ref.get(workspace_generation))) return;
 					failure = error.message;
 				}),
 			),
 		);
 
-	/**
-	 * The queue is a reactive input of this yield site, so it must only be
-	 * written after the load completes: popping it first invalidates the site
-	 * mid-flight, SER interrupts the request, and the rerun sees an empty queue
-	 * — the tree then never loads.
-	 */
-	if (directory_requests.length > 0) {
-		const [parent, ...remaining] = directory_requests;
-		yield* LoadDirectory(parent);
-		directory_requests = remaining;
+	const RequestDirectory = (parent: string, expected_workspace_id = workspace_id) =>
+		Effect.gen(function* () {
+			if (expected_workspace_id === undefined) {
+				failure = "Open a workspace to browse its files.";
+				return;
+			}
+			const generation = yield* Ref.get(workspace_generation);
+			const request_key = `${generation}:${parent}`;
+			const claimed = yield* Ref.modify(active_directory_requests, (current) => {
+				if (current.has(request_key)) return [false, current] as const;
+				return [true, new Set([...current, request_key])] as const;
+			});
+			if (!claimed) return;
+			yield* LoadDirectory(parent, expected_workspace_id, generation).pipe(
+				Effect.ensuring(
+					Ref.update(active_directory_requests, (current) => {
+						const next = new Set(current);
+						next.delete(request_key);
+						return next;
+					}),
+				),
+				Effect.forkScoped,
+			);
+		});
+
+	if (workspace_id !== loaded_workspace_id) {
+		loaded_workspace_id = workspace_id;
+		tree = new Map();
+		expanded = new Set();
+		failure = undefined;
+		yield* Ref.update(workspace_generation, (current) => current + 1);
+		yield* RequestDirectory(workspace_tree_root, workspace_id);
 	}
 
 	const ToggleDirectory = (path: string) =>
@@ -103,7 +119,7 @@
 			if (next.has(path)) next.delete(path);
 			else {
 				next.add(path);
-				if (!tree.has(path)) directory_requests = [...directory_requests, path];
+				if (!tree.has(path)) yield* RequestDirectory(path);
 			}
 			expanded = next;
 		});

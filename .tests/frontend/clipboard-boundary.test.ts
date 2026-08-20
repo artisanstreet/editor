@@ -45,14 +45,12 @@ describe("browser clipboard boundary", () => {
 		expect(Read(Components[3])).toContain("Could not copy emulator step");
 	});
 
-	it("keeps the footer clock as a named yielded generator worker", () => {
+	it("refreshes the footer age only when its actions are revealed or focused", () => {
 		const source = Read(Components[1]);
 
-		expect(source).toContain("const KeepClockCurrent = Effect.gen(function* ()");
-		expect(source).toContain("while (true)");
-		expect(source).toContain('yield* Effect.sleep("1 second")');
+		expect(source).toContain("const RefreshAge = Effect.gen(function* ()");
 		expect(source).toContain("now = yield* Clock.currentTimeMillis");
-		expect(source).toContain("yield* KeepClockCurrent;");
-		expect(source).not.toContain("Effect.forever(");
+		expect(source).toContain("onmouseenter={yield* RefreshAge}");
+		expect(source).toContain("onfocusin={yield* RefreshAge}");
 	});
 });

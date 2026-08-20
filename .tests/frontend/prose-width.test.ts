@@ -9,6 +9,8 @@ import {
 	DefaultAppearanceState,
 } from "../../modules/frontend/src/lib/runtime/appearance-preferences";
 
+import { ReadStylesheets } from "./stylesheet-source";
+
 const ReadSource = (path: string) =>
 	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");
 
@@ -24,7 +26,7 @@ describe("prose width", () => {
 	});
 
 	it("defines the column tokens once and sizes every prose surface from them", () => {
-		const tokens = ReadSource("modules/frontend/src/lib/styles/global.css");
+		const tokens = ReadStylesheets();
 		expect(tokens).toContain("--prose-width: 48rem;");
 		expect(tokens).toContain("--prose-body-width: calc(var(--prose-width) - 6rem);");
 		expect(tokens).toContain('[data-prose-width="tight"]');

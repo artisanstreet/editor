@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import { parse_conversation_markdown } from "../../modules/frontend/src/lib/components/markdown/test-parsing";
 
+import { ReadStylesheets } from "./stylesheet-source";
+
 const ReadSource = (path: string) =>
 	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");
 
@@ -36,12 +38,10 @@ describe("conversation code-fence info strings", () => {
 
 	it("maps highlighted pre nodes into the Barekey code-snippet presentation", () => {
 		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.svelte");
-		const styles = ReadSource(
-			"modules/frontend/src/lib/styles/markdown/components/code-snippet.css",
-		);
+		const styles = ReadStylesheets();
 
 		expect(content).toContain("ProsePre: CodeSnippet");
-		expect(content).toContain("plugins={active_plugins}");
+		expect(content).toContain("tree={rendered_tree}");
 		expect(styles).toContain(".docs-code-snippet-body .line.highlight");
 		expect(styles).toContain("display: inline-block !important");
 		expect(styles).toContain("color: var(--shiki-dark) !important");

@@ -1,14 +1,18 @@
 <script lang="ts" effect>
 	import type { RichLinkFavicon } from "@artisan/protocol";
-	import { ArtisanClient } from "@artisan/transport/client";
 	import World from "@tabler/icons-svelte/icons/world";
-	import { Effect, Option, Stream } from "effect";
+	import { Effect, Option } from "effect";
 	import type { Snippet } from "svelte";
 	import {
 		CreateBrowserObjectUrl,
 		ReleaseBrowserObjectUrl,
 	} from "$lib/browser/object-url";
 	import { rich_link_metadata_url } from "./link-url";
+	import {
+	type RichLinkAsset,
+	RichLinkAssetController,
+	} from "./rich-link-asset-controller";
+	import { RichLinkMetadataController } from "./rich-link-metadata-controller";
 
 	let {
 		children,
@@ -37,23 +41,13 @@
 
 	const rich_link_href = $derived(Option.getOrUndefined(rich_link_metadata_url(safe_href)));
 
-	const append_asset_chunk = (bytes: Uint8Array, chunk: Uint8Array): Uint8Array => {
-		const combined = new Uint8Array(bytes.byteLength + chunk.byteLength);
-		combined.set(bytes);
-		combined.set(chunk, bytes.byteLength);
-		return combined;
-	};
-
-	const client = yield* ArtisanClient;
+	const rich_link_assets = yield* RichLinkAssetController;
+	const rich_link_metadata = yield* RichLinkMetadataController;
 	let favicon_source = $state(Option.none<string>());
 	let resolved_title = $state(Option.none<string>());
 	let show_web_fallback = $state(false);
 	let owned_favicon_source: string | undefined;
 	let rich_link_generation = 0;
-	type FaviconAsset = {
-		readonly bytes: Uint8Array;
-		readonly content_type: string;
-	};
 
 	const ReleaseOwnedFavicon = Effect.gen(function* () {
 		const source = owned_favicon_source;
@@ -70,25 +64,13 @@
 		}),
 	);
 
-	const ResolveFaviconAsset = (favicon: RichLinkFavicon) =>
-		Effect.gen(function* () {
-			const asset = yield* client.OpenAsset(favicon.asset_id);
-			const bytes = yield* asset.pipe(
-				Stream.runFold(() => new Uint8Array(), append_asset_chunk),
-			);
-			if (bytes.byteLength !== favicon.bytes) return Option.none<FaviconAsset>();
-
-			return Option.some({ bytes, content_type: favicon.content_type });
-		});
 	const ResolveFaviconAssetForPresentation = (favicon: RichLinkFavicon) =>
-		Effect.gen(function* () {
-			const result = yield* ResolveFaviconAsset(favicon).pipe(
-				Effect.timeoutOption("2 seconds"),
-			);
-			return Option.flatten(result);
-		});
+		rich_link_assets.Load(favicon).pipe(
+			Effect.timeoutOption("2 seconds"),
+			Effect.map(Option.getOrUndefined),
+		);
 
-	const PublishFaviconAsset = (url: string, generation: number, asset: FaviconAsset) =>
+	const PublishFaviconAsset = (url: string, generation: number, asset: RichLinkAsset) =>
 		Effect.gen(function* () {
 			yield* Effect.uninterruptible(
 				Effect.gen(function* () {
@@ -112,7 +94,7 @@
 			show_web_fallback = url !== undefined;
 			if (url === undefined) return;
 
-			const resolution = yield* client.ResolveRichLink({ url }).pipe(Effect.option);
+			const resolution = yield* rich_link_metadata.Load(url).pipe(Effect.option);
 			if (generation !== rich_link_generation || rich_link_href !== url) return;
 			if (Option.isNone(resolution)) {
 				show_web_fallback = true;
@@ -128,12 +110,12 @@
 
 			const asset = yield* ResolveFaviconAssetForPresentation(favicon);
 			if (generation !== rich_link_generation || rich_link_href !== url) return;
-			if (Option.isNone(asset)) {
+			if (asset === undefined) {
 				show_web_fallback = true;
 				return;
 			}
 
-			yield* PublishFaviconAsset(url, generation, asset.value);
+			yield* PublishFaviconAsset(url, generation, asset);
 		});
 
 	const HideFailedFavicon = (source: string) =>
@@ -180,8 +162,20 @@
 {/if}
 
 <style>
+	/**
+	 * Conversation prose gives ordinary images block layout and vertical
+	 * margins. Keep link metadata in the surrounding inline formatting context
+	 * with component-scoped specificity so its icon cannot split from its text.
+	 *
+	 * The anchor aligns its items on the link text's baseline so the link sits
+	 * in the surrounding line, which would otherwise hang both icons off that
+	 * baseline. Centring them against the line box instead lands them on the
+	 * text's optical centre.
+	 */
 	.conversation-link-favicon {
-		display: inline-block;
+		display: block;
+		flex: none;
+		align-self: center;
 		width: 0.875em;
 		height: 0.875em;
 		max-width: none;
@@ -189,7 +183,6 @@
 		margin-inline: 0;
 		border-radius: 0.125rem;
 		object-fit: contain;
-		vertical-align: -0.075em;
 	}
 
 	.conversation-link-web-fallback {
@@ -199,7 +192,8 @@
 		margin-block: 0;
 		margin-inline: 0;
 		align-items: center;
+		align-self: center;
 		justify-content: center;
-		vertical-align: -0.075em;
+		flex: none;
 	}
 </style>

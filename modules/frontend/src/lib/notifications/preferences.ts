@@ -35,6 +35,7 @@ export const NotificationPreferencesStorageKey = "artisan.notifications";
 export class NotificationPreferences extends Context.Service<
 	NotificationPreferences,
 	{
+		readonly Default: NotificationState;
 		readonly Load: Effect.Effect<NotificationState>;
 		readonly Save: (state: NotificationState) => Effect.Effect<void>;
 	}
@@ -90,7 +91,7 @@ export const MakeNotificationPreferencesLive = (surface: RuntimeSurface) =>
 						.pipe(Effect.result);
 				});
 
-			return NotificationPreferences.of({ Load, Save });
+			return NotificationPreferences.of({ Default: default_state, Load, Save });
 		}),
 	);
 

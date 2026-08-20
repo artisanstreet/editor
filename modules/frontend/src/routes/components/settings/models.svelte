@@ -2,25 +2,20 @@
 	import StarFilled from "@tabler/icons-svelte/icons/star-filled";
 	import X from "@tabler/icons-svelte/icons/x";
 	import { Effect, Stream } from "effect";
-	import { BannerService } from "$lib/banner/service";
 	import { EngineMarkClass, ProviderMarkFor } from "$lib/engine/presentation";
 	import { ModelsFromCatalog } from "$lib/engine/model-selection";
+	import { Button } from "$lib/components/ui/button";
 	import {
 		SessionDefaultsController,
 		type SessionDefaultsState,
 	} from "$lib/settings/session-defaults-controller";
+	import Card from "./card.svelte";
 	import CompactionModel from "./compaction-model.svelte";
+	import Header from "./header.svelte";
+	import Section from "./section.svelte";
 
-	const banner = yield* BannerService;
 	const defaults_controller = yield* SessionDefaultsController;
-	const initial = yield* defaults_controller.Refresh.pipe(
-		Effect.catch((error) =>
-			Effect.gen(function* () {
-				yield* banner.error("Could not load model defaults", { description: error.message });
-				return yield* defaults_controller.Current;
-			}),
-		),
-	);
+	const initial = yield* defaults_controller.Current;
 	let defaults_state = $state.raw<SessionDefaultsState>(initial);
 	const ApplyDefaults = (next: SessionDefaultsState) =>
 		Effect.gen(function* () {
@@ -47,11 +42,8 @@
 			const next = yield* defaults_controller.SetFavorite(model_id, false);
 			yield* ApplyDefaults(next);
 		}).pipe(
-			Effect.catch((error) =>
+			Effect.catch(() =>
 				Effect.gen(function* () {
-					yield* banner.error("Could not update model favorites", {
-						description: error.message,
-					});
 					const current = yield* defaults_controller.Current;
 					yield* ApplyDefaults(current);
 				}),
@@ -59,56 +51,48 @@
 		);
 </script>
 
-<h1 class="text-lg font-semibold text-foreground">Models</h1>
-<p class="mt-1 text-sm text-muted-foreground">
-	Forge-owned model defaults shared by every paired client.
-</p>
+<Header title="Models" description="Forge-owned model defaults shared by every paired client." />
 
-<section class="mt-10" aria-labelledby="compaction">
-	<h2 id="compaction" class="scroll-mt-6 text-sm font-medium text-foreground">Compaction</h2>
+<Section id="compaction" title="Compaction">
 	<div class="mt-3">
 		<CompactionModel />
 	</div>
-</section>
+</Section>
 
-<section class="mt-10" aria-labelledby="favorites">
-	<h2 id="favorites" class="scroll-mt-6 text-sm font-medium text-foreground">Favorites</h2>
-	<div
-		class="card mt-3 rounded-xl bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925"
-	>
+<Section id="favorites" title="Favorites">
+	<Card class="mt-3">
 		{#if favorites.length === 0}
-			<p class="px-4 py-3.5 text-xs text-muted-foreground">
+			<p class="max-w-sm self-center px-4 py-7 text-center text-xs leading-relaxed text-muted-foreground">
 				No favorites yet. Starred models float to the top of every model picker; star
 				one from the composer's picker or an engine page.
 			</p>
 		{:else}
-			<div class="flex flex-col divide-y divide-border/40">
-				{#each favorites as model (model.id)}
-					{@const lab_mark = ProviderMarkFor(model.definition.provider)}
-					{@const LabIcon = lab_mark.icon}
-					<div class="flex items-center justify-between gap-4 px-4 py-2.5">
-						<span class="flex min-w-0 items-center gap-2.5">
-							<LabIcon class={EngineMarkClass(lab_mark, "size-4 shrink-0")} />
-							<span class="flex min-w-0 flex-col">
-								<span class="flex items-center gap-1.5 truncate text-sm text-foreground">
-									<StarFilled class="size-3 shrink-0 text-favorite" aria-hidden="true" />
-									{model.name}
-								</span>
-								<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
+			{#each favorites as model (model.id)}
+				{@const lab_mark = ProviderMarkFor(model.definition.provider)}
+				{@const LabIcon = lab_mark.icon}
+				<div class="flex items-center justify-between gap-4 px-4 py-2.5">
+					<span class="flex min-w-0 items-center gap-2.5">
+						<LabIcon class={EngineMarkClass(lab_mark, "size-4 shrink-0")} />
+						<span class="flex min-w-0 flex-col">
+							<span class="flex items-center gap-1.5 truncate text-sm text-foreground">
+								<StarFilled class="size-3 shrink-0 text-favorite" aria-hidden="true" />
+								{model.name}
 							</span>
+							<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
 						</span>
-						<button
-							type="button"
-							disabled={!forge_available}
-							aria-label={`Unfavorite ${model.name}`}
-							class="grid size-7 shrink-0 place-items-center rounded-full text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
-							onclick={yield* Unstar(model.id)}
-						>
-							<X class="size-4" aria-hidden="true" />
-						</button>
-					</div>
-				{/each}
-			</div>
+					</span>
+					<Button
+						variant="ghost"
+						size="icon-sm"
+						disabled={!forge_available}
+						aria-label={`Unfavorite ${model.name}`}
+						class="rounded-full text-muted-foreground"
+						onclick={yield* Unstar(model.id)}
+					>
+						<X class="size-4" aria-hidden="true" />
+					</Button>
+				</div>
+			{/each}
 		{/if}
-	</div>
-</section>
+	</Card>
+</Section>

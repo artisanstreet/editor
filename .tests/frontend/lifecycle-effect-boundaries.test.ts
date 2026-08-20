@@ -5,12 +5,13 @@ const ReadSource = (path: string) => readFile(new URL(`../../${path}`, import.me
 
 const ComponentPaths = [
 	"modules/frontend/src/routes/components/conversation-message.svelte",
-	"modules/frontend/src/routes/components/shader-dev-panel.svelte",
 	"modules/frontend/src/routes/components/paper-god-rays.svelte",
 ] as const;
 
 const DropdownCallerPaths = [
-	"modules/frontend/src/routes/components/panel/project-selector.svelte",
+	"modules/frontend/src/routes/components/model-selector/policy-controls.svelte",
+	"modules/frontend/src/routes/components/settings/compaction-model.svelte",
+	"modules/frontend/src/routes/components/sidebar-identity.svelte",
 ] as const;
 
 describe("frontend browser lifecycle ownership", () => {
@@ -66,7 +67,11 @@ describe("frontend browser lifecycle ownership", () => {
 		expect(surface).toContain("Effect.ensuring(editor.Detach)");
 		expect(surface).not.toContain("onMount(");
 		expect(surface).not.toMatch(/\bEffect\.runFork\b|\brunFork\b/);
-		expect(route).toContain("yield* OpenPath(active_path);");
+		expect(route).toContain(
+			"yield* ReconcileOpenPath(active_path, workspace_id, retained_file);",
+		);
+		expect(route).toContain(".pipe(Effect.forkScoped);");
+		expect(route).toContain("open_requests.IsCurrent(generation)");
 		expect(route).not.toContain("Queue.offerUnsafe");
 		expect(hooks).toContain("BrowserHttpClient.layerFetch");
 		expect(hooks).toContain("ClientRuntime.make(");

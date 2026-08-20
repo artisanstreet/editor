@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 const ReadSource = (path: string) => readFile(new URL(`../../${path}`, import.meta.url), "utf8");
 
 const RouteConsumers = [
-	"modules/frontend/src/routes/+page.svelte",
+	"modules/frontend/src/routes/components/new-thread-route.svelte",
 	"modules/frontend/src/routes/components/thread-route.svelte",
 	"modules/frontend/src/routes/components/sectioned-panel.svelte",
 	"modules/frontend/src/routes/components/editor-file-panel.svelte",

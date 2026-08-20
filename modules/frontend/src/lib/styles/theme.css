@@ -1,0 +1,395 @@
+/**
+ * Every design token in one place. Nothing here paints anything: these are the
+ * values Tailwind's theme is built from and the values utilities read. The
+ * colour and surface scales are the Barekey foundation verbatim; the motion,
+ * prose, and shadow tokens below them are ours.
+ */
+
+:root {
+	--background: var(--surface-0);
+	--foreground-base: var(--surface-950);
+	--foreground: color-mix(in oklch, var(--foreground-base) 90%, var(--background));
+	--foreground-extra: var(--foreground-base);
+	--highlight: var(--surface-950);
+	--card: var(--surface-0);
+	--card-foreground: var(--surface-950);
+	--popover: var(--surface-0);
+	--popover-foreground: var(--surface-950);
+	--primary: var(--surface-900);
+	--primary-foreground: var(--surface-50);
+	--secondary: var(--surface-100);
+	--secondary-foreground: var(--surface-900);
+	--muted: var(--surface-100);
+	--muted-foreground: var(--surface-500);
+	--accent: var(--surface-100);
+	--accent-foreground: var(--surface-900);
+	--destructive: oklch(0.577 0.245 27.325);
+	--banner-info: oklch(0.623 0.214 259.815);
+	--banner-error: oklch(0.577 0.245 27.325);
+	--banner-warning: oklch(0.681 0.162 75.834);
+	--banner-success: oklch(0.527 0.154 150.069);
+	/**
+	 * A star reads as gold, not as a warning. It is deeper on light surfaces so
+	 * the fill keeps its weight against white.
+	 */
+	--favorite: oklch(0.706 0.153 78.5);
+	/** A settled thread nobody has opened yet. Sky, so it reads as new, not as alarm. */
+	--unread: oklch(0.685 0.145 230.318);
+	/** A thread that stopped to ask. Purple reads as "your turn", not as failure. */
+	--question-from: oklch(0.558 0.288 302.321);
+	--question-to: oklch(0.714 0.203 305.504);
+	--border: var(--surface-200);
+	--input: var(--surface-200);
+	--ring: var(--surface-400);
+	--chart-1: var(--surface-300);
+	--chart-2: var(--surface-500);
+	--chart-3: var(--surface-600);
+	--chart-4: var(--surface-700);
+	--chart-5: var(--surface-800);
+	--surface-0: oklch(1 0 0);
+	--surface-25: oklch(0.9925 0 0);
+	--surface-50: oklch(0.985 0 0);
+	--surface-75: oklch(0.976 0.0005 286.375);
+	--surface-100: oklch(0.967 0.001 286.375);
+	--surface-125: oklch(0.9552 0.0018 286.361);
+	--surface-150: oklch(0.9435 0.0025 286.347);
+	--surface-175: oklch(0.9318 0.0033 286.334);
+	--surface-200: oklch(0.92 0.004 286.32);
+	--surface-225: oklch(0.9078 0.0045 286.312);
+	--surface-250: oklch(0.8955 0.005 286.303);
+	--surface-275: oklch(0.8832 0.0055 286.294);
+	--surface-300: oklch(0.871 0.006 286.286);
+	--surface-325: oklch(0.8295 0.0083 286.231);
+	--surface-350: oklch(0.788 0.0105 286.177);
+	--surface-375: oklch(0.7465 0.0127 286.122);
+	--surface-400: oklch(0.705 0.015 286.067);
+	--surface-425: oklch(0.6667 0.0152 286.035);
+	--surface-450: oklch(0.6285 0.0155 286.002);
+	--surface-475: oklch(0.5903 0.0158 285.97);
+	--surface-500: oklch(0.552 0.016 285.938);
+	--surface-525: oklch(0.5245 0.0163 285.9);
+	--surface-550: oklch(0.497 0.0165 285.862);
+	--surface-575: oklch(0.4695 0.0168 285.824);
+	--surface-600: oklch(0.442 0.017 285.786);
+	--surface-625: oklch(0.424 0.016 285.791);
+	--surface-650: oklch(0.406 0.015 285.796);
+	--surface-675: oklch(0.388 0.014 285.8);
+	--surface-700: oklch(0.37 0.013 285.805);
+	--surface-725: oklch(0.346 0.0112 285.862);
+	--surface-750: oklch(0.322 0.0095 285.919);
+	--surface-775: oklch(0.298 0.0077 285.976);
+	--surface-800: oklch(0.274 0.006 286.033);
+	--surface-825: oklch(0.258 0.006 285.996);
+	--surface-850: oklch(0.242 0.006 285.959);
+	--surface-875: oklch(0.226 0.006 285.922);
+	--surface-900: oklch(0.21 0.006 285.885);
+	--surface-925: oklch(0.1755 0.0055 285.854);
+	--surface-950: oklch(0.141 0.005 285.823);
+	--surface-975: oklch(0.0705 0.0025 285.823);
+	--surface-1000: oklch(0 0 0);
+	--radius: 0.625rem;
+	--duration-quick: 150ms;
+	--duration-fast: 250ms;
+	--duration-medium: 350ms;
+	--ease-in-out: ease-in-out;
+	--ease-smooth-out: cubic-bezier(0.22, 1, 0.36, 1);
+	/** A label replacing itself: rise, sharpen, fade. Shared by every text swap. */
+	--text-swap-dur: 150ms;
+	--text-swap-translate-y: 4px;
+	--text-swap-blur: 2px;
+	/**
+	 * A streamed word's own entrance, kept under the sidebar stagger it used to
+	 * borrow. This one runs per word rather than per list item, so its duration
+	 * decides how much of the message tail is in motion at once.
+	 */
+	--stream-word-dur: 320ms;
+	--stream-word-rise: 0.3em;
+	--stream-word-blur: 3px;
+	--acc-expand: 250ms;
+	--acc-collapse: 250ms;
+	--acc-chevron: 250ms;
+	--acc-ease: cubic-bezier(0.22, 1, 0.36, 1);
+	--icon-swap-dur: 250ms;
+	--icon-swap-blur: 2px;
+	--icon-swap-start-scale: 0.25;
+	--icon-swap-ease: ease-in-out;
+	--favorite-rustle: 350ms;
+	--favorite-rustle-ease: cubic-bezier(0.34, 1.96, 0.64, 1);
+	--favorite-rustle-tilt: 10deg;
+	--favorite-rustle-pop: 1.18;
+	/* transitions.dev — menu dropdown */
+	--dropdown-open-dur: 250ms;
+	--dropdown-close-dur: 150ms;
+	--dropdown-pre-scale: 0.97;
+	--dropdown-closing-scale: 0.99;
+	--dropdown-ease: cubic-bezier(0.22, 1, 0.36, 1);
+	/* transitions.dev — tooltip, the entrance every hover card shares */
+	--tt-in-dur: 150ms;
+	--tt-out-dur: 50ms;
+	--tt-scale: 0.98;
+	--tt-in-ease: ease-out;
+	--tt-out-ease: ease-out;
+}
+
+/**
+ * The reading column. Balanced is the width the transcript was designed at —
+ * the old hardcoded max-w-3xl — and message bodies keep their 6rem inset from
+ * the column at every width, so the ratio of text to margin holds as the
+ * column moves. The shell sets the attribute from the appearance preference.
+ */
+:root {
+	--prose-width: 48rem;
+	--prose-body-width: calc(var(--prose-width) - 6rem);
+	/** Breathing room right of the column, and nothing more: no surface lives there. */
+	--prose-gutter: 2rem;
+	/**
+	 * Clear space between the thread rail's band and the column. The transcript
+	 * insets its own text and would hide an overlap, but the composer is a card
+	 * whose edge is exactly the column's, and a band that reached under it cut
+	 * every row short.
+	 */
+	--prose-rail-gap: 1rem;
+	/**
+	 * The inspector column, and the width the thread rail's cards answer to.
+	 *
+	 * Named rather than repeated because the two sit on opposite margins of the
+	 * same reading column and are read as a pair: a card that is nearly the
+	 * inspector's width reads as a mistake, where an exact match reads as
+	 * structure.
+	 */
+	--inspector-width: clamp(16rem, 25vw, 350px);
+	/**
+	 * The band's own left and right padding, added together. Held here because
+	 * the margin below has to account for it, and a number the margin guesses at
+	 * is a card that misses the inspector's width by exactly that guess.
+	 */
+	--prose-rail-inset: 2rem;
+	/**
+	 * The widest the left margin grows before surplus width has to go somewhere,
+	 * derived from what has to fit inside it rather than chosen.
+	 *
+	 * It was a round 21rem, which left the band 18rem of usable room — 4rem
+	 * short of the inspector, so the rail's cards could never match it however
+	 * they were sized. The margin exists to hold those cards, so it follows
+	 * them: the column gives up the difference on a window wide enough to have
+	 * it, and on any narrower one the clamp above was already deciding this.
+	 */
+	--prose-rail-margin: calc(
+		var(--inspector-width) + var(--prose-rail-gap) + var(--prose-rail-inset)
+	);
+}
+
+[data-prose-width="tight"] {
+	--prose-width: 42rem;
+}
+
+[data-prose-width="loose"] {
+	--prose-width: 56rem;
+}
+
+:root {
+	--shadow-inset:
+		inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.06), inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.06),
+		inset 0px 6px 6px -3px rgba(0, 0, 0, 0.06), inset 0 -0.5px rgba(255, 255, 255, 0.08),
+		inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 8%);
+}
+
+/**
+ * The `inset-shadow` layers are tuned for dark chrome and vanish over bright
+ * artwork. Same shadow shape, artwork strength — for surfaces that carry their
+ * own image or gradient (the composer's send button, seeded avatars). The
+ * shadow lists also live in variables: a child layer always paints over its
+ * parent's inset shadow, so surfaces that stack layers inside the element
+ * (the send button's arming reveal) repaint them on an overlay above.
+ */
+:root {
+	--shadow-inset-artwork:
+		inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.3), inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.26),
+		inset 0px 6px 6px -3px rgba(0, 0, 0, 0.22), inset 0 -0.5px rgba(255, 255, 255, 0.5),
+		inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 35%);
+}
+
+/**
+ * Motion shared by more than one surface. Panel reveal and card resize are
+ * transitions.dev primitives; the hover pill's face is named so a surface that
+ * wants the same fill at rest paints from this definition rather than a copy
+ * that drifts out of step.
+ */
+:root {
+	--resize-dur: 300ms;
+	--resize-ease: var(--ease-smooth-out);
+	--blur-small: 2px;
+	--panel-open-dur: 400ms;
+	--panel-close-dur: 350ms;
+	--panel-translate-y: 100px;
+	--panel-translate-x: calc(-100% - 0.5rem);
+	--panel-blur: 2px;
+	--panel-ease: var(--ease-smooth-out);
+	--hover-surface-fill: linear-gradient(
+		to bottom,
+		oklch(from var(--foreground) l c h / 16%),
+		oklch(from var(--foreground) l c h / 7%)
+	);
+	/** The one Barekey alias the editor domain still reads. */
+	--selection: oklch(0.48 0.13 250 / 42%);
+}
+
+/** Sidebar palette, carried by shadcn's own components. */
+:root {
+	--sidebar: oklch(0.985 0 0);
+	--sidebar-foreground: oklch(0.141 0.005 285.823);
+	--sidebar-primary: oklch(0.21 0.006 285.885);
+	--sidebar-primary-foreground: oklch(0.985 0 0);
+	--sidebar-accent: oklch(0.967 0.001 286.375);
+	--sidebar-accent-foreground: oklch(0.21 0.006 285.885);
+	--sidebar-border: oklch(0.92 0.004 286.32);
+	--sidebar-ring: oklch(0.705 0.015 286.067);
+}
+
+.dark {
+	--background: var(--surface-950);
+	--foreground-base: var(--surface-50);
+	--foreground: color-mix(in oklch, var(--foreground-base) 90%, var(--background));
+	--foreground-extra: var(--foreground-base);
+	--highlight: var(--surface-50);
+	--card: var(--surface-900);
+	--card-foreground: var(--surface-50);
+	--popover: var(--surface-900);
+	--popover-foreground: var(--surface-50);
+	--primary: var(--surface-200);
+	--primary-foreground: var(--surface-900);
+	--secondary: var(--surface-800);
+	--secondary-foreground: var(--surface-50);
+	--muted: var(--surface-800);
+	--muted-foreground: var(--surface-400);
+	--accent: var(--surface-800);
+	--accent-foreground: var(--surface-50);
+	--destructive: oklch(0.704 0.191 22.216);
+	--banner-info: oklch(0.707 0.165 254.624);
+	--banner-error: oklch(0.704 0.191 22.216);
+	--banner-warning: oklch(0.795 0.184 86.047);
+	--banner-success: oklch(0.723 0.219 149.579);
+	--favorite: oklch(0.823 0.158 82.5);
+	--unread: oklch(0.828 0.111 230.318);
+	--question-from: oklch(0.627 0.265 303.9);
+	--question-to: oklch(0.827 0.119 306.383);
+	--border: oklch(1 0 0 / 10%);
+	--input: oklch(1 0 0 / 15%);
+	--ring: var(--surface-500);
+	--chart-1: var(--surface-300);
+	--chart-2: var(--surface-500);
+	--chart-3: var(--surface-600);
+	--chart-4: var(--surface-700);
+	--chart-5: var(--surface-800);
+}
+
+.dark {
+	--sidebar: oklch(0.21 0.006 285.885);
+	--sidebar-foreground: oklch(0.985 0 0);
+	--sidebar-primary: oklch(0.488 0.243 264.376);
+	--sidebar-primary-foreground: oklch(0.985 0 0);
+	--sidebar-accent: oklch(0.274 0.006 286.033);
+	--sidebar-accent-foreground: oklch(0.985 0 0);
+	--sidebar-border: oklch(1 0 0 / 10%);
+	--sidebar-ring: oklch(0.552 0.016 285.938);
+}
+
+@theme inline {
+	--font-sans: "Artisan Neo", sans-serif;
+	--font-mono: "JetBrains Mono", monospace;
+	--color-chart-5: var(--chart-5);
+	--color-chart-4: var(--chart-4);
+	--color-chart-3: var(--chart-3);
+	--color-chart-2: var(--chart-2);
+	--color-chart-1: var(--chart-1);
+	--color-ring: var(--ring);
+	--color-input: var(--input);
+	--color-border: var(--border);
+	--color-destructive: var(--destructive);
+	--color-warning: var(--banner-warning);
+	--color-favorite: var(--favorite);
+	--color-unread: var(--unread);
+	--color-question-from: var(--question-from);
+	--color-question-to: var(--question-to);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-accent: var(--accent);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-muted: var(--muted);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-secondary: var(--secondary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-primary: var(--primary);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-popover: var(--popover);
+	--color-card-foreground: var(--card-foreground);
+	--color-card: var(--card);
+	--color-surface-0: var(--surface-0);
+	--color-surface-25: var(--surface-25);
+	--color-surface-50: var(--surface-50);
+	--color-surface-75: var(--surface-75);
+	--color-surface-100: var(--surface-100);
+	--color-surface-125: var(--surface-125);
+	--color-surface-150: var(--surface-150);
+	--color-surface-175: var(--surface-175);
+	--color-surface-200: var(--surface-200);
+	--color-surface-225: var(--surface-225);
+	--color-surface-250: var(--surface-250);
+	--color-surface-275: var(--surface-275);
+	--color-surface-300: var(--surface-300);
+	--color-surface-325: var(--surface-325);
+	--color-surface-350: var(--surface-350);
+	--color-surface-375: var(--surface-375);
+	--color-surface-400: var(--surface-400);
+	--color-surface-425: var(--surface-425);
+	--color-surface-450: var(--surface-450);
+	--color-surface-475: var(--surface-475);
+	--color-surface-500: var(--surface-500);
+	--color-surface-525: var(--surface-525);
+	--color-surface-550: var(--surface-550);
+	--color-surface-575: var(--surface-575);
+	--color-surface-600: var(--surface-600);
+	--color-surface-625: var(--surface-625);
+	--color-surface-650: var(--surface-650);
+	--color-surface-675: var(--surface-675);
+	--color-surface-700: var(--surface-700);
+	--color-surface-725: var(--surface-725);
+	--color-surface-750: var(--surface-750);
+	--color-surface-775: var(--surface-775);
+	--color-surface-800: var(--surface-800);
+	--color-surface-825: var(--surface-825);
+	--color-surface-850: var(--surface-850);
+	--color-surface-875: var(--surface-875);
+	--color-surface-900: var(--surface-900);
+	--color-surface-925: var(--surface-925);
+	--color-surface-950: var(--surface-950);
+	--color-surface-975: var(--surface-975);
+	--color-surface-1000: var(--surface-1000);
+	--color-foreground-extra: var(--foreground-extra);
+	--color-foreground: var(--foreground);
+	--color-background: var(--background);
+	/**
+	 * One regular ramp off the base radius — 0.4, 0.6, 0.8, 1, 1.4, 1.8, 2.2,
+	 * 2.6 — which lands on 4, 6, 8, 10, 14, 18, 22, 26px. Every corner in the
+	 * app is one of these. A radius written as a literal, or as another step
+	 * minus some number, is a corner that has drifted off the ramp.
+	 */
+	--radius-xs: calc(var(--radius) * 0.4);
+	--radius-sm: calc(var(--radius) * 0.6);
+	--radius-md: calc(var(--radius) * 0.8);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) * 1.4);
+	--radius-2xl: calc(var(--radius) * 1.8);
+	--radius-3xl: calc(var(--radius) * 2.2);
+	--radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@theme inline {
+	--color-sidebar-ring: var(--sidebar-ring);
+	--color-sidebar-border: var(--sidebar-border);
+	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+	--color-sidebar-accent: var(--sidebar-accent);
+	--color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+	--color-sidebar-primary: var(--sidebar-primary);
+	--color-sidebar-foreground: var(--sidebar-foreground);
+	--color-sidebar: var(--sidebar);
+}

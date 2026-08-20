@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { globSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -31,10 +31,23 @@ const development_only_surfaces = [
 	"modules/frontend/src/routes/debug/components/+page.svelte",
 	"modules/frontend/src/routes/debug/emulator/+page.svelte",
 	"modules/frontend/src/routes/debug/overlay/+page.svelte",
+	"modules/frontend/src/routes/drafts/starting/+page.svelte",
 ];
 
+/**
+ * The starting-surface route is stubbed as one production module, but its
+ * gallery imports its variants only in development. Parse those transitive
+ * components too, so an invalid draft is found before somebody opens it.
+ */
+const development_svelte_sources = [
+	...new Set([
+		...development_only_surfaces,
+		...globSync("modules/frontend/src/routes/drafts/starting/**/*.svelte", { cwd: workspace }),
+	]),
+].sort();
+
 describe("development-only surface compilation", () => {
-	for (const path of development_only_surfaces) {
+	for (const path of development_svelte_sources) {
 		it(`parses ${path}`, () => {
 			const source = readFileSync(resolve(workspace, path), "utf8");
 			const transformed = transform_svelte_effect(source, path);

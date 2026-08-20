@@ -1,4 +1,4 @@
-import { Data, Duration, Effect, Option, Ref, Schedule } from "effect";
+import { Data, Effect, Option, Ref, Schedule } from "effect";
 
 import type {
 	ThreadListItem,
@@ -33,6 +33,14 @@ export type ThreadMessageCommandResult =
 
 export interface ThreadMessageSubmissionOutcome {
 	readonly expects_user_message: boolean;
+	/**
+	 * Resolves when Artisan projects the steer's canonical user message — the
+	 * moment the send stops being a queued draft and becomes part of the
+	 * transcript. The composer holds its queued lip exactly this long.
+	 */
+	readonly steering_echo?: Effect.Effect<void>;
+	/** Present only for a live-run steer; component scope admits it after receipt. */
+	readonly steering_settlement?: Effect.Effect<void>;
 	readonly user_message_reference?: string;
 }
 
@@ -58,14 +66,6 @@ const AcceptedProjectionRetrySchedule = Schedule.spaced("50 millis").pipe(
 	Schedule.upTo({ duration: "1 second", times: 8 }),
 );
 
-const AwaitAcceptedProjectionRetrySchedule = Schedule.exponential("50 millis").pipe(
-	Schedule.modifyDelay(({ duration }) =>
-		Effect.gen(function* () {
-			return Duration.min(duration, Duration.seconds(1));
-		}),
-	),
-);
-
 /**
  * Polls the authoritative query after a durable receipt until it contains the
  * accepted projection. Query failures and projection lag share one short,
@@ -89,28 +89,6 @@ export const ObserveAcceptedProjection = <Projection, QueryError, QueryRequireme
 			Effect.option,
 			Effect.timeoutOption("1 second"),
 			Effect.map(Option.flatten),
-		);
-	});
-
-/**
- * Holds an already accepted submission until its canonical user turn appears.
- * A steer is projected only after Forge delivers it to the live engine; bounded
- * capped backoff limits polling pressure while component scope owns interruption.
- */
-export const AwaitAcceptedProjection = <Projection, QueryError, QueryRequirements>(
-	query: Effect.Effect<Projection, QueryError, QueryRequirements>,
-	is_observed: (projection: Projection) => boolean,
-) =>
-	Effect.gen(function* () {
-		return yield* query.pipe(
-			Effect.filterOrFail(
-				is_observed,
-				() =>
-					new AcceptedProjectionPending({
-						message: "The accepted command is not projected yet.",
-					}),
-			),
-			Effect.retry({ schedule: AwaitAcceptedProjectionRetrySchedule }),
 		);
 	});
 

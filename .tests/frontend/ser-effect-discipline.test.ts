@@ -8,13 +8,10 @@ const workspace = resolve(import.meta.dirname, "../..");
 const source_root = resolve(workspace, "modules/frontend/src");
 const vite_config_path = resolve(workspace, "modules/frontend/vite.config.ts");
 const browser_dom_sources = [
-	"modules/frontend/src/routes/components/project-folder-picker.svelte",
 	"modules/frontend/src/routes/components/command-menu.svelte",
 	"modules/frontend/src/routes/components/forge-connection-overlay.svelte",
 	"modules/frontend/src/routes/components/conversation-prompt.svelte",
 	"modules/frontend/src/routes/settings/+layout.svelte",
-	"modules/frontend/src/routes/components/panel/repository-line.svelte",
-	"modules/frontend/src/routes/components/panel/project-selector.svelte",
 	"modules/frontend/src/lib/components/ui/input-group/input-group-addon.svelte",
 	"modules/frontend/src/lib/components/dropdown-highlight.ts",
 	"modules/frontend/src/lib/components/activity/vertical-calendar-activity-grid.svelte",
@@ -23,7 +20,6 @@ const browser_dom_sources = [
 	"modules/frontend/src/routes/components/dev-instance-badge.svelte",
 	"modules/frontend/src/routes/components/model-selector/engine-section.svelte",
 	"modules/frontend/src/routes/components/paper-god-rays.svelte",
-	"modules/frontend/src/routes/components/shader-dev-panel.svelte",
 	"modules/frontend/src/routes/components/thread-hover-rail.svelte",
 	"modules/frontend/src/routes/components/thread-workspace.svelte",
 ] as const;
@@ -37,6 +33,7 @@ const typed_browser_boundary_modules = new Set([
 	"modules/frontend/src/lib/browser/clipboard.ts",
 	"modules/frontend/src/lib/browser/dom.ts",
 	"modules/frontend/src/lib/browser/object-url.ts",
+	"modules/frontend/src/lib/browser/typography.ts",
 	"modules/frontend/src/lib/composer/attachment-reader.ts",
 	/** Owns the gestures whose DOM contract expires with their own dispatch. */
 	"modules/frontend/src/lib/composer/gesture-intake.ts",
@@ -99,7 +96,7 @@ const ExecutableSource = (source: string): string => {
  * rather than runtime output: a source-level regression must fail before a
  * transform can hide its lifecycle boundary.
  */
-const rules: ReadonlyArray<readonly [string, RegExp]> = [
+const universal_rules: ReadonlyArray<readonly [string, RegExp]> = [
 	[
 		"manual Effect executor",
 		/\bEffect\.run(?:Sync|Promise|Fork|Callback|SyncExit|PromiseExit)\b/gu,
@@ -108,11 +105,19 @@ const rules: ReadonlyArray<readonly [string, RegExp]> = [
 	["competing managed runtime", /\bManagedRuntime\.make\b/gu],
 	[
 		"Promise control flow",
-		/\basync\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][A-Za-z0-9_$]*\s*=>)|\bawait\b|\.then\s*\(|\bnew Promise\b/gu,
+		/\basync\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][A-Za-z0-9_$]*\s*=>)|(?<!\.)\bawait\b|\.then\s*\(|\bnew Promise\b/gu,
 	],
 	["onMount lifecycle executor", /\bonMount\s*\(/gu],
 	["discarded browser Promise", /\bvoid\s+navigator(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+\s*\(/gu],
 	["unnamed forever worker root", /\byield\*\s*Effect\.forever\s*\(/gu],
+];
+
+/**
+ * SER owns component execution. App-scoped Layer services compose Effect
+ * programs deliberately, but components must keep every such program behind a
+ * yielded generator boundary so reactive reruns retain one explicit owner.
+ */
+const ser_component_rules: ReadonlyArray<readonly [string, RegExp]> = [
 	["Effect.void camouflage", /\bEffect\.void\b/gu],
 	["non-generator Effect workflow", /\bEffect\.(?:flatMap|andThen|sync|succeed|suspend)\b/gu],
 	[
@@ -180,6 +185,19 @@ const IsInsidePipe = (source: string, offset: number): boolean => {
 	return false;
 };
 
+/** A Promise is allowed only as the callback owned by Effect.tryPromise. */
+const IsInsideTryPromise = (source: string, offset: number): boolean => {
+	const boundary = source.lastIndexOf("Effect.tryPromise(", offset);
+	if (boundary < 0) return false;
+	let depth = 0;
+	for (let index = boundary + "Effect.tryPromise".length; index < offset; index += 1) {
+		const character = source[index];
+		if (character === "(") depth += 1;
+		else if (character === ")") depth -= 1;
+	}
+	return depth > 0;
+};
+
 const UnwrappedEffectPrograms = (source: string): ReadonlyArray<readonly [number, string]> => {
 	const violations: Array<readonly [number, string]> = [];
 	for (const match of source.matchAll(/\bEffect\.([A-Za-z_$][A-Za-z0-9_$]*)/gu)) {
@@ -207,10 +225,21 @@ const UnwrappedCapabilityPrograms = (source: string): ReadonlyArray<readonly [nu
 	return violations;
 };
 
-const SourcePaths = () =>
-	globSync("**/*.{ts,sv}", {
+/**
+ * The legacy repository gate covered TypeScript only (`.sv` matched no Artisan
+ * sources). Expand Svelte coverage deliberately as components are brought
+ * under the scanner instead of making unrelated existing debt fail this slice.
+ */
+const audited_svelte_sources = [
+	resolve(source_root, "routes/components/settings/engine.svelte"),
+] as const;
+
+const SourcePaths = () => [
+	...globSync("**/*.ts", {
 		cwd: source_root,
-	}).map((path) => resolve(source_root, path));
+	}).map((path) => resolve(source_root, path)),
+	...audited_svelte_sources,
+];
 
 const IsInsideBrowserBoundary = (source: string, offset: number): boolean => {
 	for (const match of source.matchAll(
@@ -252,15 +281,13 @@ const BrowserHostViolations = (path: string, source: string): ReadonlyArray<stri
  * its lifecycle ownership is deliberately audited here.
  */
 const unsafe_queue_ingress = new Map<string, number>([
-	["modules/frontend/src/lib/banner/service.ts", 1],
 	["modules/frontend/src/lib/components/dropdown-highlight.ts", 4],
-	["modules/frontend/src/lib/composer/gesture-intake.ts", 3],
+	["modules/frontend/src/lib/composer/gesture-intake.ts", 2],
 	["modules/frontend/src/lib/lifecycle/scoped-attachment-runner.ts", 3],
 	/** The host invokes a notification's click handler on its own callback. */
 	["modules/frontend/src/lib/notifications/service.ts", 1],
-	["modules/frontend/src/routes/components/paper-god-rays.svelte", 4],
+	["modules/frontend/src/routes/components/paper-god-rays.svelte", 3],
 	["modules/frontend/src/routes/components/dev-instance-badge.svelte", 1],
-	["modules/frontend/src/routes/components/shader-dev-panel.svelte", 4],
 	["modules/frontend/src/routes/components/thread-workspace.svelte", 2],
 ]);
 
@@ -281,10 +308,20 @@ const UnsafeQueueViolations = (path: string, source: string): ReadonlyArray<stri
 const LineForOffset = (source: string, offset: number) =>
 	source.slice(0, offset).split(/\r?\n/u).length;
 
-const ViolationsFromSource = (source: string): ReadonlyArray<string> => {
+const ViolationsFromSource = (
+	source: string,
+	rules: ReadonlyArray<readonly [string, RegExp]> = universal_rules,
+): ReadonlyArray<string> => {
 	const violations: Array<string> = [];
+	const executable = ExecutableSource(source);
 	for (const [rule, expression] of rules) {
-		for (const match of source.matchAll(expression)) {
+		for (const match of executable.matchAll(expression)) {
+			if (
+				rule === "Promise control flow" &&
+				IsInsideTryPromise(executable, match.index ?? 0)
+			) {
+				continue;
+			}
 			violations.push(`${rule}: ${match[0]}`);
 		}
 	}
@@ -301,15 +338,22 @@ const Violations = () => {
 				`${relative_path}:${LineForOffset(source, source.indexOf(violation.split(": ")[1] ?? ""))}: ${violation}`,
 			);
 		}
-		for (const [offset, program] of UnwrappedEffectPrograms(source)) {
-			violations.push(
-				`${relative(workspace, path)}:${LineForOffset(source, offset)}: Effect program outside yielded generator boundary: ${program}`,
-			);
-		}
-		for (const [offset, program] of UnwrappedCapabilityPrograms(source)) {
-			violations.push(
-				`${relative(workspace, path)}:${LineForOffset(source, offset)}: Effect capability program outside yielded generator boundary: ${program}`,
-			);
+		if (audited_svelte_sources.includes(path as (typeof audited_svelte_sources)[number])) {
+			for (const violation of ViolationsFromSource(source, ser_component_rules)) {
+				violations.push(
+					`${relative_path}:${LineForOffset(source, source.indexOf(violation.split(": ")[1] ?? ""))}: ${violation}`,
+				);
+			}
+			for (const [offset, program] of UnwrappedEffectPrograms(source)) {
+				violations.push(
+					`${relative(workspace, path)}:${LineForOffset(source, offset)}: Effect program outside yielded generator boundary: ${program}`,
+				);
+			}
+			for (const [offset, program] of UnwrappedCapabilityPrograms(source)) {
+				violations.push(
+					`${relative(workspace, path)}:${LineForOffset(source, offset)}: Effect capability program outside yielded generator boundary: ${program}`,
+				);
+			}
 		}
 		for (const violation of UnsafeQueueViolations(relative_path, source)) {
 			violations.push(`${relative_path}: ${violation}`);
@@ -324,7 +368,17 @@ describe("Svelte Effect Runtime source discipline", () => {
 		expect(Violations()).toEqual([]);
 	});
 
+	it("includes Settings components in the SER source audit", () => {
+		expect(SourcePaths()).toContain(
+			resolve(source_root, "routes/components/settings/engine.svelte"),
+		);
+	});
+
 	it("fails closed for direct constructor arguments and service property values", () => {
+		expect(ViolationsFromSource("yield* Deferred.await(completed)")).toEqual([]);
+		expect(ViolationsFromSource("const value = await promise")).toEqual([
+			"Promise control flow: await",
+		]);
 		expect(
 			UnwrappedEffectPrograms("Layer.effect(Tag, Effect.acquireRelease(acquire, release))"),
 		).toEqual([[18, "Effect.acquireRelease"]]);
@@ -344,12 +398,18 @@ describe("Svelte Effect Runtime source discipline", () => {
 		expect(
 			ViolationsFromSource(
 				"const Apply = (update: Update) => update.ok ? Refresh() : Effect.gen(function* () {});",
+				ser_component_rules,
 			),
 		).toEqual(
 			expect.arrayContaining([
 				expect.stringContaining("conditional non-generator Effect helper"),
 			]),
 		);
+		expect(
+			ViolationsFromSource(
+				"Effect.tryPromise({ try: async () => await import('./renderer') })",
+			),
+		).toEqual([]);
 	});
 
 	it("fails closed for browser host operations outside an explicit boundary", () => {

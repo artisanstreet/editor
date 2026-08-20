@@ -21,7 +21,7 @@ describe("persisted conversation image attachments", () => {
 			"modules/frontend/src/routes/components/conversation-message.svelte",
 		);
 
-		expect(source).toContain('class="card conversation-image-thumbnail"');
+		expect(source).toContain("card size-24 cursor-pointer overflow-hidden rounded-xl");
 		expect(source).toContain("aria-label={`View ${image.attachment.name}`}");
 		expect(source).toContain("source={viewed_image?.source}");
 		expect(source).toContain("IntersectionObserver");
@@ -30,13 +30,14 @@ describe("persisted conversation image attachments", () => {
 		expect(source).toContain(
 			"if ((work.visible || !image_viewer_open) && onimagevisibilitychange !== undefined)",
 		);
-		expect(source).toContain("if (\n\t\t\t\t!image_group_visible");
+		/** Source shape, not line endings: the working copy is CRLF. */
+		expect(source).toMatch(/if \(\s*!image_group_visible/u);
 		expect(source).toContain("yield* onimagevisibilitychange(item.attachments ?? [], false)");
 		expect(source).toContain("MakeScopedAttachmentRunner(RunImageVisibility)");
 		expect(source).not.toContain("/api/attachments/");
 		expect(source).not.toContain("border: 1px");
 		expect(source.indexOf('aria-label="Attached images"')).toBeLessThan(
-			source.indexOf('class="user-message max-w-full rounded-2xl px-4 py-3"'),
+			source.indexOf("max-w-full rounded-2xl bg-linear-to-t"),
 		);
 	});
 

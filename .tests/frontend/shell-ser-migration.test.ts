@@ -6,8 +6,6 @@ const root = resolve(import.meta.dirname, "../..");
 const Read = (path: string) => readFileSync(resolve(root, path), "utf8");
 
 const shell_sources = [
-	"modules/frontend/src/lib/banner/service.ts",
-	"modules/frontend/src/lib/banner/sonner-presenter.ts",
 	"modules/frontend/src/lib/forge/discovery.ts",
 	"modules/frontend/src/routes/components/forge-connection-overlay.svelte",
 	"modules/frontend/src/routes/components/dev-instance-badge.svelte",
@@ -25,10 +23,11 @@ describe("shell SER migration", () => {
 		}
 	});
 
-	it("documents the sole foreign callback queue as a serialized presentation boundary", () => {
-		const service = Read("modules/frontend/src/lib/banner/service.ts");
-		expect(service).toContain("foreign UI ingress");
-		expect(service).toContain("serializes only banner actions");
+	it("does not revive the retired banner bridge", () => {
+		for (const source of shell_sources) {
+			expect(source).not.toContain("banner/service");
+			expect(source).not.toContain("sonner-presenter");
+		}
 	});
 
 	it("uses native navigation and top-level SER discovery", () => {

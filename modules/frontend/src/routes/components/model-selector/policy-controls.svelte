@@ -6,8 +6,15 @@
 	import { Effect } from "effect";
 	import type { ThreadSessionPolicy } from "@artisan/protocol";
 	import { MakeFollowHighlight } from "$lib/components/dropdown-highlight";
-	import { Select, SelectContent, SelectItem, SelectTrigger } from "$lib/components/ui/select";
-	import { Tooltip, TooltipContent, TooltipTrigger } from "$lib/components/ui/tooltip";
+	import {
+		Select,
+		SelectContent,
+		SelectGroup,
+		SelectGroupHeading,
+		SelectItem,
+		SelectSeparator,
+		SelectTrigger,
+	} from "$lib/components/ui/select";
 	import {
 		thinking_level_labels,
 		type ContextWindowChoice,
@@ -18,6 +25,7 @@
 	} from "$lib/engine/model-selection";
 	import DropdownHoverSurface from "../dropdown-hover-surface.svelte";
 	import ShaderGlassSurface from "../shader-glass-surface.svelte";
+	import OptionTooltip from "./option-tooltip.svelte";
 
 	const FollowHighlight = yield* MakeFollowHighlight;
 
@@ -52,6 +60,16 @@
 	} = $props();
 
 	const thinking = $derived(model.definition.capabilities.thinking);
+	const base_thinking_options = $derived(
+		thinking.availability === "supported"
+			? thinking.options.filter((option) => option.presentation_group === "base")
+			: [],
+	);
+	const special_thinking_options = $derived(
+		thinking.availability === "supported"
+			? thinking.options.filter((option) => option.presentation_group === "special")
+			: [],
+	);
 	const speeds = $derived(
 		model.definition.capabilities.speed_options.filter((option) => option.disabled === undefined),
 	);
@@ -144,15 +162,58 @@
 				<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
 					<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
 						{#snippet children({ move_hover })}
-							{#each thinking.options as option (option.id)}
-								<SelectItem
-									value={option.id}
-									class="focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
-									{@attach FollowHighlight(move_hover)}
+							<SelectGroup class="p-0">
+								<SelectGroupHeading
+									class="px-3 pt-1.5 pb-1 text-[10px] font-medium text-muted-foreground/75"
 								>
-									{thinking_level_labels[option.id]}
-								</SelectItem>
-							{/each}
+									Efforts
+								</SelectGroupHeading>
+								{#each base_thinking_options as option (option.id)}
+									<SelectItem
+										value={option.id}
+										class="focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+										{@attach FollowHighlight(move_hover)}
+									>
+										{thinking_level_labels[option.id]}
+									</SelectItem>
+								{/each}
+							</SelectGroup>
+							{#if special_thinking_options.length > 0}
+								<SelectSeparator
+									class="mx-2 my-1 bg-border/40 data-[orientation=horizontal]:w-auto"
+								/>
+								<SelectGroup class="p-0">
+									<SelectGroupHeading
+										class="px-3 pt-1.5 pb-1 text-[10px] font-medium text-muted-foreground/75"
+									>
+										Special Efforts
+									</SelectGroupHeading>
+									{#each special_thinking_options as option (option.id)}
+										{#if option.description !== undefined}
+											<OptionTooltip
+												advisory={option.advisory}
+												description={option.description}
+											>
+												<SelectItem
+													value={option.id}
+													class="w-full focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+													{@attach FollowHighlight(move_hover)}
+												>
+													{thinking_level_labels[option.id]}
+												</SelectItem>
+											</OptionTooltip>
+										{:else}
+											<SelectItem
+												value={option.id}
+												class="focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+												{@attach FollowHighlight(move_hover)}
+											>
+												{thinking_level_labels[option.id]}
+											</SelectItem>
+										{/if}
+									{/each}
+								</SelectGroup>
+							{/if}
 						{/snippet}
 					</DropdownHoverSurface>
 				</ShaderGlassSurface>
@@ -181,24 +242,15 @@
 					<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
 						{#snippet children({ move_hover })}
 							{#each speeds as speed (speed.id)}
-								<Tooltip>
-									<TooltipTrigger>
-										{#snippet child({ props: tooltip_props })}
-											<span {...tooltip_props} class="flex">
-												<SelectItem
-													value={speed.id}
-													class="w-full focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
-													{@attach FollowHighlight(move_hover)}
-												>
-													{speed.label}
-												</SelectItem>
-											</span>
-										{/snippet}
-									</TooltipTrigger>
-									<TooltipContent side="right" class="max-w-56">
-										{speed.description}
-									</TooltipContent>
-								</Tooltip>
+								<OptionTooltip description={speed.description}>
+									<SelectItem
+										value={speed.id}
+										class="w-full focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+										{@attach FollowHighlight(move_hover)}
+									>
+										{speed.label}
+									</SelectItem>
+								</OptionTooltip>
 							{/each}
 						{/snippet}
 					</DropdownHoverSurface>
@@ -228,24 +280,18 @@
 					<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
 						{#snippet children({ move_hover })}
 							{#each context.options as option (option.id)}
-								<Tooltip>
-									<TooltipTrigger>
-										{#snippet child({ props: tooltip_props })}
-											<span {...tooltip_props} class="flex">
-												<SelectItem
-													value={option.id}
-													class="w-full focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
-													{@attach FollowHighlight(move_hover)}
-												>
-													{option.label}
-												</SelectItem>
-											</span>
-										{/snippet}
-									</TooltipTrigger>
-									<TooltipContent side="right" class="max-w-56">
-										{option.description}
-									</TooltipContent>
-								</Tooltip>
+								<OptionTooltip
+									advisory={option.advisory}
+									description={option.description}
+								>
+									<SelectItem
+										value={option.id}
+										class="w-full focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+										{@attach FollowHighlight(move_hover)}
+									>
+										{option.label}
+									</SelectItem>
+								</OptionTooltip>
 							{/each}
 						{/snippet}
 					</DropdownHoverSurface>
@@ -275,24 +321,15 @@
 					<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
 						{#snippet children({ move_hover })}
 							{#each permission_options as option (option.id)}
-								<Tooltip>
-									<TooltipTrigger>
-										{#snippet child({ props: tooltip_props })}
-											<span {...tooltip_props} class="flex">
-												<SelectItem
-													value={option.id}
-													class="w-full focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
-													{@attach FollowHighlight(move_hover)}
-												>
-													{option.label}
-												</SelectItem>
-											</span>
-										{/snippet}
-									</TooltipTrigger>
-									<TooltipContent side="right" class="max-w-56">
-										{option.description}
-									</TooltipContent>
-								</Tooltip>
+								<OptionTooltip description={option.description}>
+									<SelectItem
+										value={option.id}
+										class="w-full focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+										{@attach FollowHighlight(move_hover)}
+									>
+										{option.label}
+									</SelectItem>
+								</OptionTooltip>
 							{/each}
 						{/snippet}
 					</DropdownHoverSurface>

@@ -36,7 +36,9 @@ export const MakeEngineUsageRefreshController = Effect.gen(function* () {
 	const EngineIds = (state: EngineUsageRefreshState): ReadonlySet<string> =>
 		new Set(state.claims.keys());
 
-	const Current = SubscriptionRef.get(refreshing).pipe(Effect.map(EngineIds));
+	const Current = Effect.gen(function* () {
+		return EngineIds(yield* SubscriptionRef.get(refreshing));
+	});
 	const Claim = (requested_engine_ids: ReadonlyArray<string>) =>
 		SubscriptionRef.modify(refreshing, (current) => {
 			const claims = new Map(current.claims);
@@ -63,7 +65,9 @@ export const MakeEngineUsageRefreshController = Effect.gen(function* () {
 			return [undefined, { ...current, claims }] as const;
 		});
 	const ReleaseAll = (claims: ReadonlyArray<EngineUsageRefreshClaim>) =>
-		Effect.forEach(claims, Release, { discard: true });
+		Effect.gen(function* () {
+			yield* Effect.forEach(claims, Release, { discard: true });
+		});
 	const Refresh = <A, E, R, B, E2, R2>(
 		requested_engine_ids: ReadonlyArray<string>,
 		refresh: (engine_id: string) => Effect.Effect<A, E, R>,

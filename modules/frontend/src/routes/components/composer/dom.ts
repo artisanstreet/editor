@@ -116,22 +116,6 @@ export const InsertComposerAttachmentMarkers = (
 		});
 	});
 
-/** Shakes the inline markers whose attachment answered a re-paste. */
-export const MarkComposerAttachmentBumps = (
-	editor: HTMLDivElement | null,
-	attachment_ids: ReadonlyArray<string>,
-) =>
-	Effect.gen(function* () {
-		yield* RunBrowserDom(() => {
-			for (const marker of editor?.querySelectorAll<HTMLElement>("[data-attachment-id]") ??
-				[]) {
-				const id = marker.dataset.attachmentId ?? "";
-				if (attachment_ids.includes(id)) marker.dataset.bump = "true";
-				else delete marker.dataset.bump;
-			}
-		});
-	});
-
 export const RemoveComposerAttachmentMarkers = (
 	editor: HTMLDivElement | null,
 	attachment_id: string,

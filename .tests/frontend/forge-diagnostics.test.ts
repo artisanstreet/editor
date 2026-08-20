@@ -77,8 +77,8 @@ describe("forge transport diagnostics presentation", () => {
 	it("carries the UTC time of day and a full-timestamp dump", () => {
 		expect(FormatTransportEventTime(ended)).toBe("09:17:44.902");
 
-		const dump = FormatTransportDiagnosticsDump({ dropped: 3, events: [ended] });
-		expect(dump).toContain("Artisan transport journal (3 older events evicted)");
+		const dump = FormatTransportDiagnosticsDump({ dropped: 0, events: [ended] });
+		expect(dump).toContain("Artisan transport journal\n");
 		expect(dump).toContain("2026-08-06T09:17:44.902Z session ended (stream_gap/journal_gap)");
 	});
 });

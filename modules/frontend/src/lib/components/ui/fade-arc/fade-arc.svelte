@@ -23,7 +23,7 @@
 	fill="none"
 	xmlns="http://www.w3.org/2000/svg"
 	role="status"
-	class={cn("fade-arc", class_name)}
+	class={cn("animate-[fade-arc-spin_var(--duration,1s)_linear_infinite]", class_name)}
 	{...rest}
 >
 	<defs>
@@ -50,20 +50,3 @@
 	</g>
 </svg>
 
-<style>
-	.fade-arc {
-		animation: fade-arc-spin var(--duration, 1s) linear infinite;
-	}
-
-	@keyframes fade-arc-spin {
-		to {
-			transform: rotate(360deg);
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.fade-arc {
-			animation: none !important;
-		}
-	}
-</style>

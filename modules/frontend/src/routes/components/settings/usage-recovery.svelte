@@ -5,7 +5,9 @@
 		SessionDefaultsController,
 		type SessionDefaultsState,
 	} from "$lib/settings/session-defaults-controller";
+	import Card from "./card.svelte";
 	import Row from "./row.svelte";
+	import Section from "./section.svelte";
 
 	const defaults_controller = yield* SessionDefaultsController;
 	let defaults_state = $state.raw<SessionDefaultsState>(yield* defaults_controller.Current);
@@ -27,7 +29,6 @@
 				Effect.catch(() =>
 					Effect.gen(function* () {
 						message = "Couldn't verify the new default. Forge did not confirm the change.";
-						yield* defaults_controller.Refresh.pipe(Effect.ignore);
 					}),
 				),
 				Effect.ensuring(
@@ -39,13 +40,8 @@
 		});
 </script>
 
-<section class="mt-10" aria-labelledby="usage-recovery">
-	<h2 id="usage-recovery" class="scroll-mt-6 text-sm font-medium text-foreground">
-		Usage recovery
-	</h2>
-	<div
-		class="card mt-3 rounded-xl bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925"
-	>
+<Section id="usage-recovery" title="Usage recovery">
+	<Card class="mt-3">
 		<Row
 			title="Automatically continue after usage resets"
 			description="New turns interrupted by a provider limit continue once Forge verifies the usage window has reset. You can still change this on each interruption card."
@@ -62,7 +58,7 @@
 			{/snippet}
 		</Row>
 		{#if message.length > 0}
-			<p class="px-3 pb-3 text-sm text-destructive" role="status">{message}</p>
+			<p class="px-4 py-3 text-sm text-destructive" role="status">{message}</p>
 		{/if}
-	</div>
-</section>
+	</Card>
+</Section>

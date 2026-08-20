@@ -267,11 +267,10 @@
 		let current_config: ShaderConfig | undefined;
 		let pending_config: ShaderConfig | undefined;
 		/**
-		 * Rendering is a latest-state concern: a backgrounded window or a busy GPU
-		 * must never accumulate a frame backlog. Every ingress overwrites the stale
-		 * signal, while `pending_config` preserves the newest slider state.
+		 * Every render request is retained until the scoped worker observes it;
+		 * `pending_config` still supplies the configuration current at render time.
 		 */
-		const renders = yield* Queue.sliding<{ readonly immediate: boolean; readonly now: number }>(1);
+		const renders = yield* Queue.unbounded<{ readonly immediate: boolean; readonly now: number }>();
 		const ApplyConfig = (config: ShaderConfig) =>
 			Effect.gen(function* () {
 			current_config = config;
@@ -302,37 +301,59 @@
 
 		const reduced_motion = yield* RunBrowserDom(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
 		let document_visible = yield* RunBrowserDom(() => !document.hidden);
+		let window_focused = yield* RunBrowserDom(() => document.hasFocus());
 		let canvas_visible = false;
-		const CanRender = () => document_visible && canvas_visible && !context_lost;
+		const CanRender = () => document_visible && window_focused && canvas_visible && !context_lost;
 		const observer = yield* RunBrowserDom(() => {
-			const OnVisibilityChange = () => {
-				document_visible = !document.hidden;
+			/**
+			 * Every render gate reacts the same way: a closing gate cancels the
+			 * pending frame, an opening gate renders immediately instead of waiting
+			 * for the next scheduled one.
+			 */
+			const OnGateChange = () => {
 				if (!CanRender() && frame_id !== undefined) {
 					cancelAnimationFrame(frame_id);
 					frame_id = undefined;
 				}
 				if (CanRender()) Queue.offerUnsafe(renders, { immediate: true, now: performance.now() });
 			};
+			const OnVisibilityChange = () => {
+				document_visible = !document.hidden;
+				OnGateChange();
+			};
+			/**
+			 * The rays are decoration, so they must not keep spending frames while
+			 * the user works in another window. Occlusion gating only stops a
+			 * hidden window; blur also stops a visible but unfocused one.
+			 */
+			const OnWindowBlur = () => {
+				window_focused = false;
+				OnGateChange();
+			};
+			const OnWindowFocus = () => {
+				window_focused = true;
+				OnGateChange();
+			};
 			document.addEventListener("visibilitychange", OnVisibilityChange);
+			window.addEventListener("blur", OnWindowBlur);
+			window.addEventListener("focus", OnWindowFocus);
 			if (!("IntersectionObserver" in globalThis)) {
 				canvas_visible = true;
-				return { OnVisibilityChange };
+				return { OnVisibilityChange, OnWindowBlur, OnWindowFocus };
 			}
 			const observer = new IntersectionObserver((entries) => {
 				canvas_visible = entries.some((entry) => entry.isIntersecting);
-				if (!CanRender() && frame_id !== undefined) {
-					cancelAnimationFrame(frame_id);
-					frame_id = undefined;
-				}
-				if (CanRender()) Queue.offerUnsafe(renders, { immediate: true, now: performance.now() });
+				OnGateChange();
 			});
 			observer.observe(canvas);
-			return { OnVisibilityChange, observer };
+			return { OnVisibilityChange, OnWindowBlur, OnWindowFocus, observer };
 		});
 		releases.push(
 			Effect.gen(function* () {
 				yield* RunBrowserDom(() => {
 					document.removeEventListener("visibilitychange", observer.OnVisibilityChange);
+					window.removeEventListener("blur", observer.OnWindowBlur);
+					window.removeEventListener("focus", observer.OnWindowFocus);
 					observer.observer?.disconnect();
 					if (frame_id !== undefined) cancelAnimationFrame(frame_id);
 				});
@@ -404,7 +425,7 @@
 
 	const RunPaperRays = (canvas: HTMLCanvasElement) =>
 		Effect.gen(function* () {
-			const restorations = yield* Queue.sliding<void>(1);
+			const restorations = yield* Queue.unbounded<void>();
 			const RestorePaperRays = () => Queue.offerUnsafe(restorations, undefined);
 			while (true) {
 				yield* Effect.scoped(

@@ -4,6 +4,7 @@
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
+	import InlineCodeText from "$lib/components/inline-code-text.svelte";
 	import { user_message_style_config } from "$lib/conversation-style-config";
 	import type { ConversationItem, ImageAttachmentReference } from "@artisan/protocol";
 	import type { Snippet } from "svelte";
@@ -191,11 +192,11 @@
 				{#each item.attachments ?? [] as attachment (attachment.id)}
 					{@const image = resolved_images.find((candidate) => candidate.attachment.id === attachment.id)}
 					{#if image === undefined}
-						<div class="card conversation-image-thumbnail animate-pulse bg-muted/60" aria-hidden="true"></div>
+						<div class="card size-24 overflow-hidden rounded-xl bg-muted/60 p-0 animate-pulse" aria-hidden="true"></div>
 					{:else}
 						<button
 							type="button"
-							class="card conversation-image-thumbnail"
+							class="card size-24 cursor-pointer overflow-hidden rounded-xl bg-transparent p-0 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&>img]:size-full [&>img]:object-cover"
 							aria-label={`View ${image.attachment.name}`}
 							onclick={yield* ViewImage(image)}
 						>
@@ -206,7 +207,7 @@
 			</div>
 		{/if}
 		<div
-			class="user-message max-w-full rounded-2xl px-4 py-3"
+			class="max-w-full rounded-2xl bg-linear-to-t from-(--user-message-from) to-(--user-message-to) px-4 py-3"
 			class:card={$user_message_style_config.use_card}
 			style:--user-message-from={`var(--${$user_message_style_config.from})`}
 			style:--user-message-to={`var(--${$user_message_style_config.to})`}
@@ -226,7 +227,8 @@
 				delay={0}
 				duration={2}
 			>
-				{item.text}
+				<!-- Same backtick handling the live thinking line gets, for the settled copy of it. -->
+				<InlineCodeText text={item.text} />
 			</ShimmerText>
 		{:else}
 			<MarkdownContent streaming={item.lifecycle === "streaming"} text={item.text} />
@@ -241,34 +243,3 @@
 	name={viewed_image?.attachment.name}
 	onclose={CloseImageViewer}
 />
-
-<style>
-	.user-message {
-		background-image: linear-gradient(
-			to top,
-			var(--user-message-from),
-			var(--user-message-to)
-		);
-	}
-
-	.conversation-image-thumbnail {
-		width: 6rem;
-		height: 6rem;
-		padding: 0;
-		overflow: hidden;
-		border-radius: .75rem;
-		background: transparent;
-		cursor: pointer;
-	}
-
-	.conversation-image-thumbnail:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.conversation-image-thumbnail img {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-	}
-</style>

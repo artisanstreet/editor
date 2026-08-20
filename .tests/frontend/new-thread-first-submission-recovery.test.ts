@@ -75,6 +75,13 @@ describe("new-thread first submission recovery", () => {
 					yield* controller.Initialize(fixture_project, policy);
 					const created = yield* controller.Submit(submission);
 
+					/**
+					 * The route scope closes around an in-flight send: the claim's
+					 * release finalizer runs first, and the delivery — forked into the
+					 * component-lifetime scope — completes afterwards. The completed
+					 * delivery must still clear the retained state, or every later
+					 * new thread stays locked behind a submission that already landed.
+					 */
 					const route_scope = yield* Scope.make();
 					const claim = yield* controller
 						.AwaitPendingSubmissionClaim(created.thread_id)
@@ -82,7 +89,9 @@ describe("new-thread first submission recovery", () => {
 					yield* Scope.close(route_scope, Exit.void);
 					if (claim !== undefined) yield* claim.Complete;
 
-					return { claim, settled: yield* controller.Current };
+					const settled = yield* controller.Current;
+					yield* controller.Reset(Effect.void);
+					return { claim, settled };
 				}).pipe(
 					Effect.provide(DraftThreadControllerLive),
 					Effect.provide(MakeSnowflakeIdLive(29).pipe(Layer.orDie)),

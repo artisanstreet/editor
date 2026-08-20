@@ -6,7 +6,7 @@
 		ThreadSessionPolicy,
 		ThreadWorkItem,
 	} from "@artisan/protocol";
-	import { Effect, Option, Queue } from "effect";
+	import { Effect, Exit, Option, Queue, Scope, Stream } from "effect";
 	import { tick, untrack } from "svelte";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
@@ -15,16 +15,28 @@
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Button } from "$lib/components/ui/button";
 	import {
+		conversation_background_agent_names,
 		conversation_reply_is_live,
 		conversation_waiting_for_activity,
-		work_session_run_authority,
+		work_session_is_settled,
 	} from "$lib/conversation/activity-status";
 	import {
-		conversation_latest_reasoning_item_ids,
-		filter_conversation_trace_reasoning,
+		conversation_live_reasoning_summary,
 		group_conversation_trace_blocks,
+		strip_conversation_trace_reasoning,
 		type ConversationTraceRenderBlock,
 	} from "$lib/conversation/trace";
+	import {
+		ActiveConversationTurn,
+		ConversationTurnMarkers,
+		type ConversationTurnMarker,
+	} from "$lib/conversation/turn-navigator";
+	import { policy_reasoning_display } from "$lib/engine/reasoning-display";
+	import {
+		ThreadScrollMemory,
+		conversation_content_stamp,
+		thread_scroll_position_is_current,
+	} from "$lib/conversation/scroll-memory";
 	import {
 		ConversationAlignedScrollTop,
 		ConversationBaseEndSpacePixels,
@@ -34,16 +46,23 @@
 		ConversationUserMessageWithSourceReference,
 	} from "$lib/conversation/scroll-position";
 	import {
-		MakeConversationRenderWindow,
+		MakeParticipantConversationRenderWindow,
 		type ConversationRenderBlock,
 		type ConversationViewState,
 	} from "$lib/conversation/store";
 	import ConversationChangesCard from "./conversation-changes-card.svelte";
 	import ConversationItem from "./conversation-item.svelte";
+	import ConversationTurnNavigator from "./conversation-turn-navigator.svelte";
 	import ConversationTrace from "./conversation-trace.svelte";
 	import ConversationTurnFooter from "./conversation-turn-footer.svelte";
 	import ConversationWorkSession from "./conversation-work-session.svelte";
 	import ThreadComposer from "./thread-composer.svelte";
+	import { ComposerContextWindowTokens } from "$lib/composer/send-readiness";
+	import { ContextCompactionIsImminent } from "$lib/context-usage/auto-compaction";
+	import {
+		SessionDefaultsController,
+		type SessionDefaultsState,
+	} from "$lib/settings/session-defaults-controller";
 
 	let {
 		active_run_id,
@@ -51,7 +70,10 @@
 		context_usage,
 		conversation_view_state,
 		disabled = false,
+		first_submission_reference,
 		image_sources,
+		inspection,
+		onreturntoroot,
 		onabort,
 		onapproval,
 		onnewthread,
@@ -61,6 +83,7 @@
 		onusageinterruptionresolve,
 		onimagevisibilitychange,
 		onsubmit,
+		onwithdraw,
 		policy,
 		project_root_path,
 		run_active = false,
@@ -72,7 +95,17 @@
 		context_usage?: SurfaceUsageAggregate;
 		conversation_view_state?: ConversationViewState;
 		disabled?: boolean;
+		/**
+		 * The command id of a first message claimed from the draft route. That
+		 * send never passes through this workspace's own submit path, so the
+		 * anchor that places a sent turn at the top must be seeded from outside
+		 * or a thread's very first turn is the one send that never anchors.
+		 */
+		first_submission_reference?: string;
 		image_sources?: ReadonlyMap<string, string>;
+		inspection?: { readonly agent_id: string; readonly display_name: string };
+		/** The roster owns this Effect; the workspace only yields it at navigation events. */
+		onreturntoroot?: Effect.Effect<void>;
 		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
 		onapproval?: (
 			approval_id: string,
@@ -80,13 +113,13 @@
 		) => Effect.Effect<void, { readonly message: string }>;
 		onnewthread?: (
 			submission: ComposerSubmission,
-		) => Effect.Effect<unknown, { readonly message: string }>;
+		) => Effect.Effect<void, { readonly message: string }>;
 		onpolicychange?: (
 			policy: ThreadSessionPolicy,
 		) => Effect.Effect<ThreadSessionPolicy, { readonly message: string }>;
 		onquestion?: (
 			question_id: string,
-			answer: string,
+			answers: ReadonlyArray<string>,
 		) => Effect.Effect<void, { readonly message: string }>;
 		onretry?: (
 			run_id: string,
@@ -113,6 +146,8 @@
 			ThreadMessageSubmissionOutcome,
 			{ readonly message: string }
 		>;
+		/** Recalls one queued steer by the send's own command id, while Forge still holds it. */
+		onwithdraw?: (command_id: string) => Effect.Effect<void, { readonly message: string }>;
 		policy?: ThreadSessionPolicy;
 		project_root_path?: string;
 		run_active?: boolean;
@@ -120,6 +155,36 @@
 	} = $props();
 	/** A settled thread may switch engines; only an in-flight run owns the current engine. */
 	const engine_locked = $derived(run_active);
+
+	/**
+	 * The catalog is read here, and not left to the composer that also reads it,
+	 * because the window size answers a question about the transcript: whether
+	 * the quiet run above is compacting. Fewer than half of recorded runs report
+	 * `context_window_tokens` themselves, so the catalog fallback is what keeps
+	 * that answer from being unavailable most of the time.
+	 */
+	const defaults_controller = yield* SessionDefaultsController;
+	let defaults_state = $state.raw<SessionDefaultsState>(yield* defaults_controller.Current);
+	/**
+	 * Bound to a const rather than written inline: an inline handler makes this
+	 * yield site read the very state it writes, which is the reactive loop that
+	 * has taken the renderer down before.
+	 */
+	const ApplyDefaults = (next: SessionDefaultsState) =>
+		Effect.gen(function* () {
+			defaults_state = next;
+		});
+	yield* defaults_controller.Changes.pipe(
+		Stream.runForEach(ApplyDefaults),
+		Effect.forkScoped,
+	);
+	const awaiting_compaction = $derived(
+		run_active === true &&
+			ContextCompactionIsImminent(
+				context_usage,
+				ComposerContextWindowTokens(defaults_state.catalog, policy, context_usage),
+			),
+	);
 	type ConversationItemBlock = Extract<ConversationRenderBlock, { type: "item" }>;
 
 	const block_is_resolved_approval = (
@@ -171,8 +236,9 @@
 	const render_window = $derived(
 		conversation_view_state === undefined
 			? { blocks: [], hidden_group_count: 0 }
-			: MakeConversationRenderWindow(
+			: MakeParticipantConversationRenderWindow(
 					conversation_view_state,
+					inspection?.agent_id,
 					ConversationTurnPageSize,
 					older_render_group_count,
 				),
@@ -182,8 +248,15 @@
 			fold_resolved_approvals_into_work(render_window.blocks),
 		),
 	);
-	const visible_reasoning_item_ids = $derived(
-		conversation_latest_reasoning_item_ids(render_blocks, active_run_id, run_active),
+	/**
+	 * What the active run's thinking line says. A model that streams raw
+	 * chain-of-thought publishes no summary to say, so its turns keep the
+	 * thinking verb throughout.
+	 */
+	const live_reasoning_summary = $derived(
+		policy_reasoning_display(policy) === "trace"
+			? undefined
+			: conversation_live_reasoning_summary(render_blocks, active_run_id, run_active),
 	);
 	/**
 	 * The transcript's freshest session, which the durable work item may not
@@ -195,24 +268,40 @@
 	);
 
 	const visible_render_groups = $derived.by(() => {
-		const groups = new Map<
-			string,
-			{ blocks: Array<ConversationTraceRenderBlock>; turn_id: string }
-		>();
+		const groups: Array<{
+			blocks: Array<ConversationTraceRenderBlock>;
+			segment_id: string;
+			turn_id: string;
+		}> = [];
 
 		for (const block of render_blocks) {
 			const { turn_id } = block;
-			const group = groups.get(turn_id);
-			if (group === undefined) {
-				groups.set(turn_id, { blocks: [block], turn_id });
-			} else {
-				group.blocks.push(block);
-			}
+			const group = groups.at(-1);
+			if (group?.turn_id === turn_id) group.blocks.push(block);
+			else
+				groups.push({
+					blocks: [block],
+					/** A turn may legitimately reappear after an acknowledged steer. */
+					segment_id: JSON.stringify([turn_id, block.id]),
+					turn_id,
+				});
 		}
 
-		return [...groups.values()];
+		return groups;
 	});
 	const hidden_render_group_count = $derived(render_window.hidden_group_count);
+	const inspecting_agent = $derived(inspection !== undefined);
+	let steering_pending = $state(false);
+	const SetSteeringPending = (pending: boolean) => {
+		steering_pending = pending;
+	};
+	const ReturnToRoot = Effect.gen(function* () {
+		if (onreturntoroot !== undefined) yield* onreturntoroot;
+	});
+	const ReturnToRootOnEscape = (event: KeyboardEvent) =>
+		Effect.gen(function* () {
+			if (event.key === "Escape" && inspecting_agent) yield* ReturnToRoot;
+		});
 
 	const ShowEarlierTurns = Effect.gen(function* () {
 		if (loading_older_turns) return;
@@ -242,15 +331,18 @@
 	let transcript_content = $state<HTMLElement | null>(null);
 	let end_space = $state<HTMLElement | null>(null);
 	let end_space_height = $state(ConversationBaseEndSpacePixels);
-	let pending_user_message_reference = $state<string | undefined>();
+	/** Seeded with a claimed first submission so a new thread's opening turn anchors like any other send. */
+	let pending_user_message_reference = $state<string | undefined>(first_submission_reference);
 	let anchored_user_item_id = $state<string | undefined>();
 	/**
 	 * Whether new content should pull the viewport down with it. Derived from
 	 * scroll position on every scroll, so the reader is never in a mode they did
 	 * not put themselves in — scrolling away turns it off, returning to the
-	 * bottom turns it back on.
+	 * bottom turns it back on. A seeded first submission starts it off, exactly
+	 * as an ordinary send switches it off at acceptance, so the tail cannot pull
+	 * the reader while that turn's anchor is still on its way.
 	 */
-	let following = $state(true);
+	let following = $state(first_submission_reference === undefined);
 	/**
 	 * Set while the anchor animates a submitted turn into place. A smooth scroll
 	 * emits scroll events the whole way down, and reading follow state out of
@@ -261,19 +353,66 @@
 	let anchor_scroll_active = $state(false);
 	let anchor_scroll_generation = 0;
 	let anchor_layout_frame = 0;
-	let smooth_anchor_pending = false;
+	let anchor_layout_pending = false;
+	let anchor_layout_pending_smooth = false;
 	let anchor_layout_revision = $state(0);
 	let anchor_layout_smooth = $state(false);
 	/**
-	 * Named rather than written inline at the yield site: the SER transform
-	 * collects the identifiers of a type argument as reactive dependencies, and
-	 * the property keys of an inline object type have no runtime binding to
-	 * collect. A type reference resolves to nothing and is correctly ignored.
+	 * Geometry state lives out of band, while every request retains a wake token
+	 * until the layout worker observes it. A pending rAF cannot erase a later
+	 * request because its pending state and wake are both preserved.
 	 */
-	type AnchorLayoutRequest =
-		| { readonly _tag: "request"; readonly smooth: boolean }
-		| { readonly _tag: "flush"; readonly smooth: boolean };
-	const anchor_layout_requests = yield* Queue.unbounded<AnchorLayoutRequest>();
+	const anchor_layout_wake = yield* Queue.unbounded<void>();
+	/**
+	 * A component-lifetime home for the anchor's own scroll work. A reactive
+	 * statement's scope closes on every rerun, and the statement that anchors a
+	 * sent turn reruns the moment the anchor writes state — so work forked with
+	 * `forkScoped` from inside it lands in that run scope and is interrupted
+	 * before it can scroll. Anything the anchor must finish outlives its
+	 * originating rerun only by being forked in here.
+	 */
+	const anchor_scope = yield* Scope.make();
+	yield* Effect.addFinalizer(() => Scope.close(anchor_scope, Exit.void));
+
+	const MarkAnchorLayoutPending = (smooth: boolean) => {
+		anchor_layout_pending = true;
+		anchor_layout_pending_smooth ||= smooth;
+	};
+
+	const RequestAnchorLayout = (smooth: boolean) =>
+		Effect.gen(function* () {
+			if (anchored_user_item_id === undefined) return;
+			MarkAnchorLayoutPending(smooth);
+			yield* Queue.offer(anchor_layout_wake, undefined);
+		});
+
+	/** ResizeObserver is synchronous browser ingress, so it cannot yield. */
+	const RequestAnchorLayoutUnsafe = (smooth: boolean) => {
+		if (anchored_user_item_id === undefined) return;
+		MarkAnchorLayoutPending(smooth);
+		Queue.offerUnsafe(anchor_layout_wake, undefined);
+	};
+
+	const scroll_memory = yield* ThreadScrollMemory;
+	/**
+	 * The content the reader is currently positioned against. Derived so the
+	 * scroll handler reads a cached value instead of walking the items on every
+	 * scroll event.
+	 */
+	const content_stamp = $derived(conversation_content_stamp(snapshot.items));
+	/**
+	 * Records the reading position from the scroll handler, which is a DOM
+	 * callback rather than an Effect site — so the write is forked into the
+	 * component's own scope instead of being yielded from a listener.
+	 */
+	const RememberScrollPosition = (scroll_top: number) => {
+		Effect.runFork(
+			scroll_memory.Remember(snapshot.thread_id, {
+				content_stamp,
+				scroll_top,
+			}),
+		);
+	};
 
 	/** Reads follow state back from wherever the viewport actually settled. */
 	const SyncFollowing = (element: HTMLElement) => {
@@ -340,12 +479,55 @@
 	const ArmAnchorScroll = (element: HTMLElement, next_following: boolean) =>
 		Effect.gen(function* () {
 			const generation = (anchor_scroll_generation += 1);
+			/** Forked into the component scope: the fallback must outlive the statement rerun that armed it. */
 			yield* Effect.gen(function* () {
 				yield* Effect.sleep("1 second");
 				if (generation === anchor_scroll_generation) release_anchor_scroll(element);
-			}).pipe(Effect.forkScoped);
+			}).pipe(Effect.forkIn(anchor_scope));
 			following = next_following;
 			anchor_scroll_active = true;
+		});
+
+	/**
+	 * The transcript's own map, down the right edge of the card.
+	 *
+	 * Position is read from where the turns actually sit rather than tracked as
+	 * the reader moves: scrolling is the only thing that changes it, the marks
+	 * are few, and a measurement taken on the spot cannot drift out of step with
+	 * a transcript that grows and reflows underneath it.
+	 */
+	const turn_markers = $derived(ConversationTurnMarkers(snapshot.items));
+	let active_turn_id = $state<string | undefined>(undefined);
+
+	/** Synchronous scroll ingress, so it measures and assigns without yielding. */
+	const SyncActiveTurn = () => {
+		const current_viewport = viewport;
+		if (current_viewport === null || turn_markers.length === 0) return;
+		const viewport_top = current_viewport.getBoundingClientRect().top;
+		const offsets = turn_markers.flatMap((marker) => {
+			const element = current_viewport.querySelector<HTMLElement>(
+				`[data-conversation-item-id="${CSS.escape(marker.id)}"]`,
+			);
+			return element === null
+				? []
+				: [{ id: marker.id, top: element.getBoundingClientRect().top - viewport_top }];
+		});
+		active_turn_id = ActiveConversationTurn(offsets);
+	};
+
+	const SelectTurn = (marker: ConversationTurnMarker) =>
+		Effect.gen(function* () {
+			const item = yield* FindConversationItem(marker.id);
+			if (item === undefined) return;
+			/**
+			 * Jumping is the reader taking control of where they are, so it also
+			 * stops the tail from pulling them back off the turn they asked for.
+			 */
+			following = false;
+			yield* RunBrowserDom(() => {
+				item.scrollIntoView({ behavior: "smooth", block: "start" });
+			});
+			active_turn_id = marker.id;
 		});
 
 	const FindConversationItem = (item_id: string) =>
@@ -425,25 +607,18 @@
 
 	const ScheduleAnchorLayout = Effect.gen(function* () {
 		while (true) {
-			const request = yield* Queue.take(anchor_layout_requests);
-			if (request._tag === "flush") {
-				anchor_layout_smooth = request.smooth;
-				anchor_layout_revision += 1;
-				continue;
-			}
-			if (anchored_user_item_id === undefined) continue;
-			smooth_anchor_pending ||= request.smooth;
+			yield* Queue.take(anchor_layout_wake);
 			yield* RunBrowserDom(() => {
 				cancelAnimationFrame(anchor_layout_frame);
-				/**
-					 * The flush alone publishes the revision. Bumping it here too ran
-					 * a pass against the previous flush's `smooth`, so a coalesced
-					 * batch could perform its layout under a stale flag and leave the
-					 * real one racing an in-flight run.
-					 */
-					anchor_layout_frame = requestAnimationFrame(() => {
-					Queue.offerUnsafe(anchor_layout_requests, { _tag: "flush", smooth: smooth_anchor_pending });
-					smooth_anchor_pending = false;
+				anchor_layout_frame = requestAnimationFrame(() => {
+					anchor_layout_frame = 0;
+					if (!anchor_layout_pending) return;
+					/** Snapshot before publishing: a later request leaves fresh pending state and its own wake token. */
+					const smooth = anchor_layout_pending_smooth;
+					anchor_layout_pending = false;
+					anchor_layout_pending_smooth = false;
+					anchor_layout_smooth = smooth;
+					anchor_layout_revision += 1;
 				});
 			});
 		}
@@ -461,7 +636,13 @@
 			pending_user_message_reference = undefined;
 		});
 
-		yield* submit(submission).pipe(
+		/**
+		 * Returned, not just awaited: the composer stages its queued lip and the
+		 * "Steering" label from the outcome's settlement effects, and a swallowed
+		 * outcome left both to guesswork — the label rose at submit and nothing
+		 * ever confirmed the steer.
+		 */
+		return yield* submit(submission).pipe(
 			Effect.tap((outcome) =>
 				Effect.gen(function* () {
 					pending_user_message_reference = outcome.user_message_reference;
@@ -503,11 +684,28 @@
 		yield* ArmAnchorScroll(current_viewport, true);
 	});
 
+	/**
+	 * Opens the thread where the reader left it, or at the latest when the
+	 * transcript has moved on since.
+	 *
+	 * Both destinations are assignments rather than scrolls: a thread being
+	 * entered has no position to animate away from, and animating one would
+	 * show the reader a journey through history they did not ask to take.
+	 */
 	const PositionLoadedThread = Effect.gen(function* () {
 		yield* Effect.promise(() => tick());
 		if (viewport === null) return;
+		const remembered = yield* scroll_memory.Recall(snapshot.thread_id);
+		const restore = thread_scroll_position_is_current(remembered, content_stamp)
+			? remembered.scroll_top
+			: undefined;
 		yield* RunBrowserDom(() => {
-			viewport.scrollTop = ConversationBottomScrollTop(viewport.scrollHeight, viewport.clientHeight);
+			const bottom = ConversationBottomScrollTop(
+				viewport.scrollHeight,
+				viewport.clientHeight,
+			);
+			/** A remembered offset can outlive the height that made it reachable. */
+			viewport.scrollTop = restore === undefined ? bottom : Math.min(restore, bottom);
 		});
 	});
 	if (viewport !== null) yield* PositionLoadedThread;
@@ -540,25 +738,27 @@
 				if (anchored_user_item_id === item_id) return;
 				anchored_user_item_id = item_id;
 				/**
-				 * Forked to the component scope rather than run inline, and the
-				 * pending reference cleared only after.
+				 * Forked into `anchor_scope` rather than run inline or `forkScoped`,
+				 * and the pending reference cleared only after.
 				 *
 				 * That reference is a dependency of this very statement, so writing
 				 * it re-runs this program and interrupts whatever it was doing. An
 				 * inline anchor pass yields for a tick before it can measure
 				 * anything, which is a wide enough window to be interrupted every
 				 * time — and the re-run, now carrying no reference, falls through to
-				 * the relayout branch, which by design never scrolls. The send
-				 * therefore resolved, anchored, and then quietly did nothing, on
-				 * every thread long enough for the move to be visible at all.
+				 * the relayout branch, which by design never scrolls. `forkScoped`
+				 * has the same fate spelled differently: it forks into this run's
+				 * scope, which the rerun closes. The send then resolved, anchored,
+				 * grew the end space through the relayout branch, and quietly never
+				 * scrolled. Only a component-lifetime scope survives the rerun.
 				 */
-				yield* UpdateAnchorLayout(true).pipe(Effect.forkScoped);
+				yield* UpdateAnchorLayout(true).pipe(Effect.forkIn(anchor_scope));
 				pending_user_message_reference = undefined;
 				return;
 			}
 		}
 		if (anchored_user_item_id !== undefined) {
-			yield* Queue.offer(anchor_layout_requests, { _tag: "request", smooth: false });
+			yield* RequestAnchorLayout(false);
 		}
 	});
 	if (viewport !== null) {
@@ -572,7 +772,7 @@
 					Effect.gen(function* () {
 						return yield* RunBrowserDom(() => {
 							const observer = new ResizeObserver(() => {
-								Queue.offerUnsafe(anchor_layout_requests, { _tag: "request", smooth: false });
+								RequestAnchorLayoutUnsafe(false);
 								/**
 								 * Applied here rather than through the queue: the queue
 								 * settles a frame later, which is long enough for growing
@@ -654,7 +854,16 @@
 			Effect.gen(function* () {
 				yield* Effect.acquireRelease(
 					RunBrowserDom(() => {
-						const on_scroll = () => SyncFollowing(current_viewport);
+						const on_scroll = () => {
+							SyncFollowing(current_viewport);
+							SyncActiveTurn();
+							/**
+							 * Stamped with the content the reader was looking at, so
+							 * reopening can tell a thread that sat still from one that
+							 * moved on while they were away.
+							 */
+							RememberScrollPosition(current_viewport.scrollTop);
+						};
 						/** `scrollend` is what releases the anchor guard once its animation settles. */
 						const on_scroll_end = () => release_anchor_scroll(current_viewport);
 						current_viewport.addEventListener("scroll", on_scroll, { passive: true });
@@ -683,15 +892,36 @@
 	yield* SyncFollowListeners;
 </script>
 
+<svelte:window onkeydown={yield* ReturnToRootOnEscape(event)} />
 
-<main class="relative h-full min-h-0 overflow-hidden" aria-label="Thread workspace">
+<main class="relative h-full min-h-0 overflow-hidden" aria-label={inspecting_agent ? "Agent conversation" : "Thread workspace"}>
+	<ConversationTurnNavigator
+		active_id={active_turn_id}
+		markers={turn_markers}
+		onselect={SelectTurn}
+	/>
+	<!--
+		The fade belongs to the frame, not to the element that scrolls. On the
+		viewport it masked the scroller itself, and a masked scroller is composited
+		on its own layer whose hit region no longer matches the box the wheel is
+		tested against — the transcript stopped taking wheel input while every
+		unmasked scroller in the shell kept working. The root paints the same
+		gradient over the same box without touching what scrolls underneath it.
+	-->
 	<ScrollArea
 		bind:viewportRef={viewport}
-		class="thread-transcript h-full min-h-0"
+		class="transcript-fade h-full min-h-0"
 		scrollbarYClasses="hidden"
+		viewportClasses="overscroll-contain"
 	>
-		<div bind:this={transcript_content} class="mx-auto w-full max-w-(--prose-width) px-6 pt-10">
+		<div bind:this={transcript_content} class="prose-column w-full max-w-(--prose-width) px-6 pt-10">
 			<div class="flex flex-col gap-8">
+				{#if inspection !== undefined}
+					<header class="flex items-center gap-2 text-sm text-muted-foreground">
+						<button type="button" class="text-foreground hover:underline" onclick={yield* ReturnToRoot}>Back</button>
+						<span>Viewing {inspection.display_name}'s conversation</span>
+					</header>
+				{/if}
 				{#if conversation_view_state !== undefined}
 					{#if hidden_render_group_count > 0}
 						<div class="flex justify-center pb-2">
@@ -705,13 +935,18 @@
 							</Button>
 						</div>
 					{/if}
-					{#each visible_render_groups as render_group (render_group.turn_id)}
-						<section class="turn-hover-region group/turn relative flex flex-col gap-8">
+					{#if visible_render_groups.length === 0 && inspection !== undefined}
+						<p class="text-sm text-muted-foreground">No conversation has been exposed yet.</p>
+					{/if}
+					{#each visible_render_groups as render_group (render_group.segment_id)}
+						<!-- The pad below each turn keeps its hover alive across the gap to the next. -->
+						<section
+							class="group/turn relative flex flex-col gap-[1lh] after:absolute after:top-full after:left-0 after:h-8 after:w-full after:content-['']"
+						>
 							{#each render_group.blocks as block (block.id)}
 								{#if block.type === "trace_group"}
-									{@const visible_trace_items = filter_conversation_trace_reasoning(
+									{@const visible_trace_items = strip_conversation_trace_reasoning(
 										block.items,
-										visible_reasoning_item_ids,
 									)}
 									<!--
 										Post-steer trace material keeps the same policy boundary: activity
@@ -733,39 +968,40 @@
 										{onusageinterruptionresolve}
 									/>
 								{:else if block.type === "work_group"}
-									{@const session_authority = work_session_run_authority({
-										active_run_id,
-										active_run_status,
-										newest_session_run_id,
-										session_run_id: block.session.run_id,
-									})}
-									{@const visible_details = filter_conversation_trace_reasoning(
-										block.details,
-										visible_reasoning_item_ids,
-									)}
+									{@const session_settled = work_session_is_settled(block.session.status)}
+									{@const visible_details = strip_conversation_trace_reasoning(block.details)}
 									<ConversationWorkSession
+										awaiting_compaction={awaiting_compaction &&
+											block.session.run_id === active_run_id}
+										background_agent_names={conversation_background_agent_names(
+											block.details,
+										)}
 										duration_kind={block.duration_kind}
 										engine_id={policy?.engine_id}
 										has_details={visible_details.length > 0}
 										has_live_reply={conversation_reply_is_live(block.details)}
 										item={block.session}
-										run_authority={session_authority}
-										onretry={active_run_status === "failed" &&
-										active_run_id === block.session.run_id
-											? onretry
+										onretry={block.session.status === "failed" ? onretry : undefined}
+										reasoning_summary={block.session.run_id === active_run_id
+											? live_reasoning_summary
 											: undefined}
+										steering_pending={steering_pending &&
+											!session_settled &&
+											active_run_id !== undefined &&
+											block.session.run_id === active_run_id}
+										superseded={block.superseded === true}
 										transition={block.transition}
 										waiting_for_activity={conversation_waiting_for_activity(block.details)}
 									>
-										{#snippet details(session_failed: boolean)}
-											<!-- Stopping is the user's own act, not a failure the trace must explain. -->
-											<ConversationTrace
-												failed={session_failed}
-												items={visible_details}
-												work_active={block.session.ended_at === undefined &&
-													session_authority === "active"}
-											/>
-										{/snippet}
+									{#snippet details(session_failed: boolean)}
+										<!-- Stopping is the user's own act, not a failure the trace must explain. -->
+										<ConversationTrace
+											failed={session_failed}
+											items={visible_details}
+											work_active={!session_settled &&
+												block.session.ended_at === undefined}
+										/>
+									{/snippet}
 									</ConversationWorkSession>
 								{:else if block.type === "changes"}
 									<ConversationChangesCard
@@ -796,49 +1032,24 @@
 		</div>
 	</ScrollArea>
 
-	<ThreadComposer
-		{context_usage}
-		{disabled}
-		draft_key={snapshot.thread_id}
-		{engine_locked}
-		{onabort}
-		onjumptolatest={JumpToLatest}
-		{onnewthread}
-		{onpolicychange}
-		onsubmit={onsubmit === undefined || active_run_status === "queued"
-			? undefined
-			: SubmitMessage}
-		{policy}
-		{run_active}
-		show_jump_to_latest={!following && !anchor_scroll_active}
-	/>
+	{#if !inspecting_agent}
+		<ThreadComposer
+			{context_usage}
+			{disabled}
+			draft_key={snapshot.thread_id}
+			{engine_locked}
+			{onabort}
+			onjumptolatest={JumpToLatest}
+			{onnewthread}
+			{onpolicychange}
+			onsteeringchange={SetSteeringPending}
+			onsubmit={onsubmit === undefined || active_run_status === "queued"
+				? undefined
+				: SubmitMessage}
+			{onwithdraw}
+			{policy}
+			{run_active}
+			show_jump_to_latest={!following && !anchor_scroll_active}
+		/>
+	{/if}
 </main>
-
-<style>
-	.turn-hover-region::after {
-		position: absolute;
-		top: 100%;
-		left: 0;
-		width: 100%;
-		height: 2rem;
-		content: "";
-	}
-
-	:global(.thread-transcript [data-slot="scroll-area-viewport"]) {
-		-webkit-mask-image: linear-gradient(
-			to bottom,
-			transparent,
-			black 16px,
-			black calc(100% - 16px),
-			transparent
-		);
-		mask-image: linear-gradient(
-			to bottom,
-			transparent,
-			black 16px,
-			black calc(100% - 16px),
-			transparent
-		);
-		overscroll-behavior: contain;
-	}
-</style>

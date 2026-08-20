@@ -43,7 +43,7 @@
 			<button
 				type="button"
 				{...preview_props}
-				class="context-gauge-trigger flex size-6 shrink-0 cursor-default items-center justify-center rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
+				class="flex size-6 shrink-0 cursor-default items-center justify-center rounded-md bg-transparent outline-none transition-colors duration-(--duration-fast) ease-in-out hover:bg-[color-mix(in_oklch,var(--foreground)_6%,transparent)] focus-visible:bg-[color-mix(in_oklch,var(--foreground)_6%,transparent)] focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
 				aria-label={`Context window ${Math.round(percent)}% full`}
 				aria-describedby="context-usage-details"
 			>
@@ -59,14 +59,17 @@
 	<!--
 		The same glass the account menu wears, so every floating surface in the
 		app is one material. The primitive's own fill, padding and ring are
-		stripped so the surface is the only thing painted.
+		stripped so the surface is the only thing painted. It enters with the
+		tooltip's fade-and-scale, growing from the corner the positioning
+		middleware names, so it arrives from its trigger like every other
+		floating surface on this row.
 	-->
 	<LinkPreview.Portal>
 		<LinkPreview.Content
 			side="top"
 			align="start"
 			sideOffset={8}
-			class="z-50 block w-72 max-w-[min(20rem,calc(100vw-2rem))] rounded-2xl bg-transparent p-0 text-foreground shadow-none outline-none"
+			class="t-tt-presence z-50 block w-72 max-w-[min(20rem,calc(100vw-2rem))] origin-(--bits-link-preview-content-transform-origin) rounded-2xl bg-transparent p-0 text-foreground shadow-none outline-none"
 		>
 			<ShaderGlassSurface class="w-full rounded-2xl">
 				<ContextUsageDetails {model_name} {percent} {window_tokens} />
@@ -75,31 +78,3 @@
 	</LinkPreview.Portal>
 </LinkPreview.Root>
 
-<style>
-	/**
-	 * The housing responds to hover, the mark does not: the arc's colour is the
-	 * reading, so tinting it would say the window changed when only the pointer
-	 * did.
-	 *
-	 * Sized close to the mark rather than to the row: the picker already carries
-	 * its own inset, so a full-height well here stacked two paddings and a gap
-	 * into a gulf between the two. The well stays a rounded square like every
-	 * other control on this row — the dial is the only circle, and a circular
-	 * housing around it would make the row read as two vocabularies.
-	 */
-	.context-gauge-trigger {
-		background-color: transparent;
-		transition: background-color var(--duration-fast) var(--ease-in-out);
-	}
-
-	.context-gauge-trigger:hover,
-	.context-gauge-trigger:focus-visible {
-		background-color: color-mix(in oklch, var(--foreground) 6%, transparent);
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.context-gauge-trigger {
-			transition: none;
-		}
-	}
-</style>

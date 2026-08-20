@@ -1,6 +1,8 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+
+import { ReadStylesheets } from "./stylesheet-source";
 
 const ReadSource = (path: string) =>
 	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");
@@ -19,12 +21,12 @@ describe("composer image viewer", () => {
 			"modules/frontend/src/routes/components/thread-composer.svelte",
 		);
 		const composer_dom = ReadSource("modules/frontend/src/routes/components/composer/dom.ts");
-		const styles = ReadSource("modules/frontend/src/lib/styles/global.css");
+		const styles = ReadStylesheets();
 		const tray = ReadSource(
 			"modules/frontend/src/routes/components/composer/attachment-tray.svelte",
 		);
 
-		expect(tray).toContain('class="composer-attachment-preview card"');
+		expect(tray).toContain('class="card relative size-18 flex-none');
 		expect(composer_dom).toContain('marker.className = "composer-image-marker card"');
 		for (const source of [composer, styles]) {
 			expect(source).not.toContain("border: 1px solid rgb(255 255 255 / .16)");
@@ -44,7 +46,7 @@ describe("composer image viewer", () => {
 		const tray = ReadSource(
 			"modules/frontend/src/routes/components/composer/attachment-tray.svelte",
 		);
-		const styles = ReadSource("modules/frontend/src/lib/styles/global.css");
+		const styles = ReadStylesheets();
 
 		expect(composer).toContain("if (!attachments_ready) return;");
 		/** Arming must not depend on readiness, or the button would flicker. */
@@ -55,26 +57,32 @@ describe("composer image viewer", () => {
 		expect(tray).not.toContain("aria-busy");
 	});
 
-	/** A re-paste is refused before it is shown, and answers by shaking the original. */
-	it("shakes the attached image instead of adding a duplicate", () => {
+	/** A duplicate remains refused, but paste never shakes the composer or either image. */
+	it("keeps pasted images still while discarding duplicates", () => {
 		const composer = ReadSource(
 			"modules/frontend/src/routes/components/thread-composer.svelte",
 		);
 		const tray = ReadSource(
 			"modules/frontend/src/routes/components/composer/attachment-tray.svelte",
 		);
-		const styles = ReadSource("modules/frontend/src/lib/styles/global.css");
-
+		const styles = ReadStylesheets();
 		const intake = ReadSource("modules/frontend/src/lib/composer/attachment-intake.ts");
+		const composer_dom = ReadSource("modules/frontend/src/routes/components/composer/dom.ts");
+		const motion_path = resolve(
+			import.meta.dirname,
+			"../../modules/frontend/src/routes/components/composer/motion.ts",
+		);
 
 		expect(intake).toContain("const attached = FindDuplicateImageAttachment(");
-		expect(intake).toContain("yield* surface.Bump(repasted)");
-		/** The re-paste is refused before anything is presented. */
-		expect(intake.indexOf("repasted.push")).toBeLessThan(intake.indexOf("surface.Present("));
-		expect(composer).toContain("Bump: motion.BumpAttachments,");
-		expect(tray).toContain("data-bump={bumped.has(attachment.id)}");
-		expect(tray).toContain('.composer-attachment-preview[data-bump="true"]');
-		expect(styles).toContain('.composer-image-marker[data-bump="true"]');
+		expect(intake).toContain("yield* surface.Revoke(attachment);");
+		expect(intake).not.toContain("Bump");
+		expect(composer).not.toContain("MakeComposerMotion");
+		expect(composer).not.toContain("data-rustle");
+		expect(tray).not.toContain("t-rustle");
+		expect(tray).not.toContain("data-bump");
+		expect(composer_dom).not.toContain("MarkComposerAttachmentBumps");
+		expect(styles).not.toContain('.composer-image-marker[data-bump="true"]');
+		expect(existsSync(motion_path)).toBe(false);
 	});
 
 	/** Everything except the image dismisses the viewer, and the rail stands down. */
@@ -88,7 +96,7 @@ describe("composer image viewer", () => {
 		expect(viewer).toContain("const DismissViewer = () => {");
 		/** The image paints above the dismiss layer, so clicking it keeps the viewer open. */
 		expect(viewer).toContain(
-			"relative z-10 h-auto w-auto max-h-full max-w-full object-contain",
+			'class="group/image relative z-10 inline-flex max-h-full max-w-full"',
 		);
 		expect(viewer).toContain("yield* inspection.Retain");
 		expect(panel).toContain("suppressed={account_open || inspecting_image}");
@@ -117,6 +125,13 @@ describe("composer image viewer", () => {
 		expect(viewer).toContain("p-8");
 		expect(viewer).toContain("h-auto w-auto max-h-full max-w-full object-contain");
 		expect(viewer).toContain("DialogPrimitive.Close");
+		expect(viewer).toContain('class="group/image relative z-10');
+		expect(viewer).toContain("group-hover/image:opacity-100");
+		expect(viewer).toContain("focus-within:opacity-100");
+		expect(viewer).toContain("<ShaderGlassSurface");
+		expect(viewer).toContain('variant="ghost"');
+		expect(viewer).toContain('size="icon-sm"');
+		expect(viewer).not.toContain('variant="secondary"');
 
 		expect(viewer).toContain("const titlebar_overlay_height");
 		expect(viewer).toContain('globalThis.navigator?.userAgent.includes("Electron/")');

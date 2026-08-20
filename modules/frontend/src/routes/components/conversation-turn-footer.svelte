@@ -17,11 +17,9 @@
 	let copy_message = $state("");
 	const age = $derived(format_relative_age(now, settled_at));
 
-	const KeepClockCurrent = Effect.gen(function* () {
-		while (true) {
-			yield* Effect.sleep("1 second");
-			now = yield* Clock.currentTimeMillis;
-		}
+	/** Settled history has no reason to wake the renderer until its actions are shown. */
+	const RefreshAge = Effect.gen(function* () {
+		now = yield* Clock.currentTimeMillis;
 	});
 
 	const CopyResponse = Effect.gen(function* () {
@@ -35,12 +33,13 @@
 		);
 	});
 
-	yield* KeepClockCurrent;
 </script>
 
 <footer
 	class="pointer-events-none absolute top-[calc(100%+0.25rem)] left-0 z-10 flex items-center gap-1 text-sm text-muted-foreground opacity-0 transition-opacity duration-(--duration-quick) ease-out group-hover/turn:pointer-events-auto group-hover/turn:opacity-100 group-focus-within/turn:pointer-events-auto group-focus-within/turn:opacity-100 motion-reduce:transition-none"
 	aria-label="Turn actions"
+	onmouseenter={yield* RefreshAge}
+	onfocusin={yield* RefreshAge}
 >
 	<Button
 		variant="ghost"

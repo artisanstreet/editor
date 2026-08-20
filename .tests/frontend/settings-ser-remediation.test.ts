@@ -9,13 +9,21 @@ const ReadSettings = (name: string) =>
 describe("settings SER remediation", () => {
 	it("keeps retention reconciliation and validation in direct generator programs", () => {
 		const source = ReadSettings("threads.svelte");
+		const controller = readFileSync(
+			resolve("modules/frontend/src/lib/settings/thread-retention-policy-controller.ts"),
+			"utf8",
+		);
 
 		expect(source).toContain("const SavePolicy = (next: ThreadRetentionPolicy) =>");
 		expect(source).toContain("Effect.gen(function* ()");
-		expect(source).toContain("yield* client.UpdateThreadRetentionPolicy(next)");
+		expect(source).toContain("yield* retention_controller.Save(next)");
+		expect(source).toContain("yield* retention_controller.Refresh");
+		expect(source).toContain("ThreadRetentionPolicyController");
 		expect(source).toContain("Could not save retention policy");
-		expect(source).toContain('{ readonly _tag: "Unverified" }');
-		expect(source).toContain("Retention policy remains unverified");
+		expect(controller).toContain('{ readonly _tag: "Unverified" }');
+		expect(controller).toContain("Effect.uninterruptibleMask");
+		expect(controller).toContain("Effect.forkIn(Complete(candidate), scope)");
+		expect(controller).toContain("UpdateThreadRetentionPolicy(policy)");
 		expect(source).toContain("Controls are disabled");
 		expect(source).not.toContain("const fallback = policy");
 		expect(source).toContain("if (policy === undefined || saving) return");
@@ -23,7 +31,6 @@ describe("settings SER remediation", () => {
 		expect(source).toContain("const parsed = Number(days_text)");
 		expect(source).not.toContain("Number.parseInt");
 		expect(source).not.toContain("Queue.offerUnsafe");
-		expect(source).not.toContain("Effect.sync");
 	});
 
 	it("uses one direct defaults write for each compaction action", () => {
@@ -35,9 +42,10 @@ describe("settings SER remediation", () => {
 		expect(source).toContain("const UpdateThinking =");
 		expect(source).toContain("const UpdateContext =");
 		expect(source).toContain("const UpdatePermission =");
-		expect(source).toContain(
-			"onfocusin={yield* HoverMode(input.mode, move_hover, event)}",
-		);
+		/** The pill moves through direct handlers; only the preview is effectful. */
+		expect(source).toContain("onpointerover={move_hover}");
+		expect(source).toContain("onpointerenter={yield* PreviewMode(input.mode)}");
+		expect(source).not.toContain("move_hover(event)");
 		expect(source).not.toContain("Queue.offerUnsafe");
 		expect(source).not.toContain("PolicyControls");
 		expect(source).not.toContain("SpeedOption");

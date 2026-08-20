@@ -57,6 +57,13 @@ export const component_gallery_entries = [
 		label: "Active work session",
 	},
 	{
+		description:
+			"A live turn's newest thinking paragraph, whole, replaced as the next one opens.",
+		group: "Work",
+		id: "thinking-summary",
+		label: "Thinking summary",
+	},
+	{
 		description: "A naturally completed turn rendered as settled history.",
 		group: "Work",
 		id: "completed-work",

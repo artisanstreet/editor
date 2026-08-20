@@ -1,7 +1,8 @@
 <script lang="ts" effect>
 	import {
 		GetConversationActivityCategory,
-		GetConversationActivityCountLabel,
+		GetConversationActivityCategoryLabel,
+		GetConversationActivityGroupPresentation,
 		GetConversationActivityPresentation,
 		type ConversationActivityCategory,
 		type ConversationItem,
@@ -9,6 +10,7 @@
 	import AlertTriangle from "@tabler/icons-svelte/icons/alert-triangle";
 	import Bug from "@tabler/icons-svelte/icons/bug";
 	import CircleX from "@tabler/icons-svelte/icons/circle-x";
+	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
 	import FilePencil from "@tabler/icons-svelte/icons/file-pencil";
 	import FileSearch from "@tabler/icons-svelte/icons/file-search";
 	import FileText from "@tabler/icons-svelte/icons/file-text";
@@ -17,7 +19,6 @@
 	import Terminal2 from "@tabler/icons-svelte/icons/terminal-2";
 	import Tool from "@tabler/icons-svelte/icons/tool";
 	import WorldSearch from "@tabler/icons-svelte/icons/world-search";
-	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
 	import { Effect } from "effect";
 	import { conversation_activity_is_live } from "$lib/conversation/activity-status";
 	import { conversation_diagnostics_enabled } from "$lib/conversation/diagnostics";
@@ -29,7 +30,6 @@
 	} from "$lib/conversation/trace";
 	import ConversationErrorCard from "./conversation-error-card.svelte";
 	import ConversationItemView from "./conversation-item.svelte";
-	import ConversationReasoningSummary from "./conversation-reasoning-summary.svelte";
 
 	let {
 		failed = false,
@@ -40,8 +40,8 @@
 		failed?: boolean;
 		items: ReadonlyArray<ConversationItem>;
 		/**
-		 * Owning work controls the live presentation only. The workspace removes
-		 * retired reasoning before this trace is grouped.
+		 * Owning work's liveness, which alone may let a group keep shimmering: a
+		 * provider can leave a settled run's last activity looking open forever.
 		 */
 		work_active?: boolean;
 	} = $props();
@@ -58,12 +58,14 @@
 	 * account of the same seven.
 	 */
 	const GroupComposition = (activities: ReadonlyArray<ConversationActivityItem>) => {
-		const counts = new Map<ConversationActivityCategory, number>();
+		const members = new Map<ConversationActivityCategory, Array<ConversationActivityItem>>();
 		for (const activity of activities) {
 			const category = GetConversationActivityCategory(activity.kind);
-			counts.set(category, (counts.get(category) ?? 0) + 1);
+			const current = members.get(category) ?? [];
+			current.push(activity);
+			members.set(category, current);
 		}
-		return [...counts];
+		return [...members];
 	};
 
 	/**
@@ -198,35 +200,24 @@
 		const composition = GroupComposition(activities);
 		const categories = composition.map(([category]) => category);
 
-		return composition.map(([category, count], index) => {
-			const clause = GetConversationActivityCountLabel(category, count);
-			/** Only the opening clause is a sentence start; the rest read on from it. */
+		return composition.map(([category, members], index) => {
+			const presentation = GetConversationActivityGroupPresentation(category, members);
+			const clause = presentation.label;
 			const text =
 				index === 0 ? clause.charAt(0).toUpperCase() + clause.slice(1) : `, ${clause}`;
 
 			return {
 				category,
 				entering: ClauseIsNew(group_id, categories, category),
-				parts: ClauseParts(`${group_id}:${category}`, text, count),
+				live: work_active && members.some(conversation_activity_is_live),
+				parts: ClauseParts(`${group_id}:${category}`, text, presentation.count),
 			};
 		});
 	};
 
-	/** Counted in the header so the size of a collapsed group is readable without expanding it. */
-	const GroupLabel = (activities: ReadonlyArray<ConversationActivityItem>) =>
-		GroupComposition(activities)
-			.map(([category, count], index) => {
-				const clause = GetConversationActivityCountLabel(category, count);
-
-				return index === 0 ? clause.charAt(0).toUpperCase() + clause.slice(1) : `, ${clause}`;
-			})
-			.join("");
-
 	/**
-	 * The head icon names the work when the chain did one kind of thing, and
-	 * falls back to a list when it did more — the one case where no single tool
-	 * icon would be honest about what is collapsed underneath it. A list is what
-	 * the header is at that point: several counted things behind one line.
+	 * A homogeneous chain is represented by its tool category. Mixed work uses
+	 * the group glyph because no single category can honestly name its contents.
 	 */
 	const CategoryIcon = (category: ConversationActivityCategory) => {
 		if (category === "command" || category === "test" || category === "typecheck")
@@ -245,17 +236,6 @@
 
 		return only === undefined ? ListDetails : CategoryIcon(only[0]);
 	};
-
-	/**
-	 * Whether anything in this chain is still running. It decides how the header
-	 * is painted, never what it says: the header used to front the running
-	 * command, which meant a line that rewrote itself wholesale on every call and
-	 * read as a different subject each time. What the chain has done so far is the
-	 * one thing that stays true across the whole run, so the summary always holds
-	 * and the shimmer alone carries that it is still going.
-	 */
-	const GroupIsLive = (activities: ReadonlyArray<ConversationActivityItem>) =>
-		work_active && activities.some(conversation_activity_is_live);
 
 	const ToggleGroup = (id: string) =>
 		Effect.gen(function* () {
@@ -303,10 +283,10 @@
 		style={`--trace-count-width: ${part.width}ch`}
 		>{#each part.cells as cell (cell.place)}<span class="trace-count-digit"
 				>{#key cell.char}<span
-						class={`trace-count-char ${cell.entering ? "trace-count-char-entering" : ""}`}
+						class="trace-count-char" data-entering={cell.entering ? "true" : undefined}
 						>{cell.char}</span
 					>{#if cell.outgoing !== undefined}<span
-							class="trace-count-char trace-count-char-outgoing"
+							class="trace-count-char" data-outgoing="true"
 							aria-hidden="true">{cell.outgoing}</span
 						>{/if}{/key}</span
 			>{/each}</span
@@ -318,21 +298,18 @@
 		{#each segments as segment (segment.id)}
 			{#if segment.type === "item"}
 				<ConversationItemView item={segment.item} />
-			{:else if segment.type === "reasoning_group"}
-				<ConversationReasoningSummary items={segment.items} live={work_active} />
 			{:else if segment.type === "activity_group"}
 				{@const open = open_groups[segment.id] ?? false}
-				{@const live = GroupIsLive(segment.items)}
 				{@const clauses = GroupClauses(segment.id, segment.items)}
 				{@const HeadIcon = GroupIcon(segment.items)}
 				<div
-					class="trace-acc flex flex-col"
+					class="t-acc group/trace-acc flex flex-col"
 					data-open={open}
 					data-state={open ? "open" : "closed"}
 				>
 					<button
 						type="button"
-						class="trace-acc-head flex w-fit max-w-full cursor-pointer items-center gap-2 py-0.5 text-base text-muted-foreground transition-colors duration-150 hover:text-foreground motion-reduce:transition-none"
+						class="trace-acc-head flex w-fit max-w-full cursor-pointer items-center gap-2 py-0.5 text-base text-muted-foreground transition-colors duration-150 hover:text-foreground group-data-[open=true]/trace-acc:text-foreground motion-reduce:transition-none"
 						aria-expanded={open}
 						onclick={yield* ToggleGroup(segment.id)}
 					>
@@ -344,7 +321,14 @@
 							is the one change that earns an entrance.
 						-->
 						<!--
-							One element whether or not the chain is live. Branching to a plain
+							The shimmer is per clause, not per chain. Liveness decides how a
+							clause is painted, never what the header says — and a clause only
+							claims the work it names: while a backgrounded subagent runs,
+							"talked to Maja" carries the sweep alone instead of lending it to
+							the settled commands sharing its sentence.
+						-->
+						<!--
+							One element whether or not its clause is live. Branching to a plain
 							span when it settles replaced the subtree, and a chain goes quiet
 							between every call — so each gap remounted the clauses and replayed
 							their grow-from-nothing, which is the label reading "Read 2 files,"
@@ -357,52 +341,52 @@
 							keeps the whole header muted at rest and lifts it as one word on
 							hover.
 						-->
-						<ShimmerText
-							active={live}
-							class="trace-head-label min-w-0 flex-1 truncate text-inherit"
-						>
+						<span class="min-w-0 flex-1 truncate text-inherit tabular-nums">
 							{#each clauses as clause (clause.category)}
 								<span
-									class={`trace-clause ${clause.entering ? "trace-clause-entering" : ""}`}
-									><span class="trace-clause-text"
+									class="trace-clause" data-entering={clause.entering ? "true" : undefined}
+									><ShimmerText
+										active={clause.live}
+										class="overflow-hidden whitespace-nowrap text-inherit"
 										>{#each clause.parts as part, part_index (part_index)}{#if part.type === "count"}{@render clause_count(
 													part,
-												)}{:else}{part.text}{/if}{/each}</span
-									></span
-								>
+												)}{:else}{part.text}{/if}{/each}</ShimmerText></span
+							>
 							{/each}
-						</ShimmerText>
+						</span>
 						<!-- The chevron belongs to the label: gap-1 from it, like the work-session header. -->
-						<span class="trace-acc-chevron -ml-1 flex shrink-0">
+						<span class="-ml-1 flex shrink-0 origin-center transition-transform duration-(--acc-chevron) ease-(--acc-ease) group-data-[open=true]/trace-acc:rotate-90">
 							<ChevronRight class="size-3.5" aria-hidden="true" />
 						</span>
 					</button>
 
-					<div class="trace-acc-panel">
-						<div class="trace-acc-panel-inner pt-1">
+					<div class="t-acc-panel">
+						<div class="t-acc-panel-inner pt-1">
 							<div class="relative flex flex-col gap-1 pl-6">
 								<div
 									aria-hidden="true"
 									class="pointer-events-none absolute inset-y-0 left-0 w-4 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] after:-translate-x-1/2 after:bg-border/60"
 								></div>
 							{#each segment.items as activity (activity.id)}
-								{@const ActivityIcon = CategoryIcon(
-									GetConversationActivityCategory(activity.kind),
-								)}
-								<div class="flex w-full min-w-0 flex-row items-center gap-2 py-0.5 text-base text-muted-foreground">
-									<ActivityIcon class="size-4 shrink-0" aria-hidden="true" />
-									{#if activity.kind === "terminal_activity" && activity.detail !== undefined}
-										<!-- The monospace face already says "shell"; a prompt glyph is noise. -->
-										<span class="trace-command-label min-w-0 flex-1 font-mono text-sm">
-											{PresentShellCommand(activity.detail)}
+								{@const activity_category = GetConversationActivityCategory(activity.kind)}
+								<div class="w-full min-w-0 py-0.5 text-base text-muted-foreground">
+									<span class="flex min-w-0 flex-row items-center gap-2">
+										<span class="shrink-0 text-foreground">
+											{GetConversationActivityCategoryLabel(activity_category)}
 										</span>
-									{:else}
-										<!-- A row without its own detail still reads as normalized work, not a raw provider label. -->
-										<span class="min-w-0 truncate">
-											{activity.detail ??
-												GetConversationActivityPresentation(activity).label}
-										</span>
-									{/if}
+										{#if activity.kind === "terminal_activity" && activity.detail !== undefined}
+											<!-- The monospace face already says "shell"; a prompt glyph is noise. -->
+											<span class="trace-command-label min-w-0 flex-1 font-mono text-sm text-muted-foreground">
+												{PresentShellCommand(activity.detail)}
+											</span>
+										{:else}
+											<!-- A row without its own detail still reads as normalized work, not a raw provider label. -->
+											<span class="min-w-0 truncate text-muted-foreground">
+												{activity.detail ??
+													GetConversationActivityPresentation(activity).label}
+											</span>
+										{/if}
+									</span>
 								</div>
 							{/each}
 							</div>
@@ -416,7 +400,7 @@
 				<!-- Only failures of a failed run open themselves; every other tier waits to be asked. -->
 				{@const open = open_groups[segment.id] ?? alerting}
 				<div
-					class="trace-acc flex flex-col"
+					class="t-acc group/trace-acc flex flex-col"
 					data-open={open}
 					data-state={open ? "open" : "closed"}
 					role={alerting ? "alert" : undefined}
@@ -429,13 +413,13 @@
 					>
 						<SeverityIcon class="size-4" aria-hidden="true" />
 						<span>{presentation.label}</span>
-						<span class="trace-acc-chevron -ml-1 flex">
+						<span class="-ml-1 flex origin-center transition-transform duration-(--acc-chevron) ease-(--acc-ease) group-data-[open=true]/trace-acc:rotate-90">
 							<ChevronRight class="size-3.5" aria-hidden="true" />
 						</span>
 					</button>
 
-					<div class="trace-acc-panel">
-						<div class="trace-acc-panel-inner flex flex-col gap-1 pt-1">
+					<div class="t-acc-panel">
+						<div class="t-acc-panel-inner flex flex-col gap-1 pt-1">
 							{#each segment.items as diagnostic (diagnostic.id)}
 								{#if diagnostic.error !== undefined}
 									<!--
@@ -445,13 +429,14 @@
 									-->
 									<ConversationErrorCard
 										error={diagnostic.error}
-										detail={diagnostic.summary}
 									/>
 								{:else}
-									<div
-										class={`flex min-w-0 items-start gap-2 py-0.5 text-sm ${presentation.row}`}
-									>
-										<SeverityIcon class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+									<!--
+										The header icon already names the tier for the whole group;
+										rows indent under its label instead of repeating it down
+										the list.
+									-->
+									<div class={`min-w-0 py-0.5 pl-6 text-sm ${presentation.row}`}>
 										<span class="min-w-0 break-words">{diagnostic.summary}</span>
 									</div>
 								{/if}
@@ -463,213 +448,3 @@
 		{/each}
 	</div>
 {/if}
-
-<style>
-	/**
-	 * Digits hold one width, so a count going 3 → 4 rewrites the glyph and moves
-	 * nothing after it. Proportional figures would nudge the rest of the sentence
-	 * sideways on a change that is meant to be invisible.
-	 */
-	.trace-head-label {
-		font-variant-numeric: tabular-nums;
-	}
-
-	/**
-	 * A new clause grows the label open rather than appearing at full width.
-	 *
-	 * `width` cannot tween to `auto`, so the clause is a one-column grid and the
-	 * track carries the motion from `0fr` to its content — the horizontal twin of
-	 * the disclosure panel below. It is a mount animation rather than a
-	 * transition because a clause has no previous state to leave: it did not
-	 * exist until the chain did that kind of work for the first time.
-	 *
-	 * Only clauses added to a chain already on screen animate. A chain's opening
-	 * clauses arrive already open, or the header would mount as an icon and a
-	 * chevron either side of nothing for the length of its own entrance.
-	 */
-	.trace-clause {
-		display: inline-grid;
-		grid-template-columns: 1fr;
-	}
-
-	.trace-clause-entering {
-		animation: trace-clause-in var(--duration-fast) var(--ease-smooth-out) both;
-	}
-
-	.trace-clause-text {
-		overflow: hidden;
-		white-space: nowrap;
-	}
-
-	@keyframes trace-clause-in {
-		from {
-			grid-template-columns: 0fr;
-			opacity: 0;
-			filter: blur(var(--text-swap-blur, 2px));
-		}
-	}
-
-	/**
-	 * A count ticks over like an odometer. Each digit is its own column, keyed
-	 * by decimal place, so 25 → 26 rolls one glyph while the rest hold still:
-	 * the incoming digit rises from below on an increment — up means higher —
-	 * and the whole motion mirrors for a decrement.
-	 *
-	 * The window is a mask rather than `overflow` so the inline box keeps its
-	 * text baseline (a scroll container synthesises one from its bottom edge),
-	 * and because the mask tracks the box through the width tween — 9 → 10
-	 * reveals its new column as the cell grows, clipped until there is room.
-	 */
-	.trace-count {
-		--trace-count-shift: 1;
-		--trace-count-rise: 8px;
-		/** The number pop-in's bounce: the landing digit overshoots a hair and settles. */
-		--trace-count-ease: cubic-bezier(0.34, 1.45, 0.64, 1);
-		display: inline-flex;
-		width: var(--trace-count-width);
-		transition: width var(--duration-fast) var(--ease-smooth-out);
-		-webkit-mask-image: linear-gradient(#000, #000);
-		mask-image: linear-gradient(#000, #000);
-		-webkit-mask-repeat: no-repeat;
-		mask-repeat: no-repeat;
-	}
-
-	.trace-count[data-direction="down"] {
-		--trace-count-shift: -1;
-	}
-
-	/** Tabular figures make every column exactly one `ch`, so width is arithmetic. */
-	.trace-count-digit {
-		display: inline-grid;
-		justify-items: center;
-		width: 1ch;
-	}
-
-	.trace-count-char {
-		grid-area: 1 / 1;
-		will-change: transform, opacity, filter;
-	}
-
-	.trace-count-char-entering {
-		animation: trace-count-in var(--duration-fast) var(--trace-count-ease) both;
-	}
-
-	/**
-	 * Resting styles are the exit's end state. A busy chain can re-render
-	 * mid-roll, and stripping an animation snaps the element to its own styles —
-	 * which for the outgoing glyph must mean gone, never back on top of the
-	 * digit that replaced it.
-	 */
-	.trace-count-char-outgoing {
-		opacity: 0;
-		transform: translateY(calc(var(--trace-count-rise) * -1 * var(--trace-count-shift)));
-		filter: blur(var(--text-swap-blur, 2px));
-		animation: trace-count-out var(--duration-fast) var(--ease-smooth-out) both;
-	}
-
-	@keyframes trace-count-in {
-		from {
-			opacity: 0;
-			transform: translateY(calc(var(--trace-count-rise) * var(--trace-count-shift)));
-			filter: blur(var(--text-swap-blur, 2px));
-		}
-	}
-
-	@keyframes trace-count-out {
-		from {
-			opacity: 1;
-			transform: translateY(0);
-			filter: blur(0);
-		}
-	}
-
-	.trace-acc-panel {
-		display: grid;
-		grid-template-rows: 0fr;
-		transition: grid-template-rows 250ms cubic-bezier(0.22, 1, 0.36, 1);
-	}
-
-	.trace-acc[data-open="true"] .trace-acc-panel {
-		grid-template-rows: 1fr;
-	}
-
-	.trace-acc-panel-inner {
-		overflow: hidden;
-		opacity: 0;
-		filter: blur(2px);
-		transition:
-			opacity 250ms cubic-bezier(0.22, 1, 0.36, 1),
-			filter 250ms cubic-bezier(0.22, 1, 0.36, 1);
-	}
-
-	.trace-acc[data-open="true"] .trace-acc-panel-inner {
-		opacity: 1;
-		filter: blur(0);
-	}
-
-	@property --trace-command-fade-end {
-		syntax: "<length>";
-		inherits: false;
-		initial-value: 0px;
-	}
-
-	/** The mask belongs only to clipped command text; icons and disclosure stay crisp. */
-	.trace-command-label {
-		--trace-command-fade-size: 1.5rem;
-		overflow: hidden;
-		white-space: nowrap;
-		-webkit-mask-image: linear-gradient(
-			to right,
-			black calc(100% - var(--trace-command-fade-end)),
-			transparent
-		);
-		mask-image: linear-gradient(
-			to right,
-			black calc(100% - var(--trace-command-fade-end)),
-			transparent
-		);
-	}
-
-	/** The existing scroll-fade technique keeps a fitting command fully opaque. */
-	@supports (animation-timeline: scroll()) {
-		.trace-command-label {
-			animation: trace-command-fade-end linear both;
-			animation-timeline: scroll(self inline);
-			animation-range: 0 100%;
-		}
-	}
-
-	@keyframes trace-command-fade-end {
-		from {
-			--trace-command-fade-end: var(--trace-command-fade-size);
-		}
-		to {
-			--trace-command-fade-end: 0px;
-		}
-	}
-
-	.trace-acc-chevron {
-		transform: rotate(0deg);
-		transform-origin: center;
-		transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1);
-	}
-
-	.trace-acc[data-open="true"] .trace-acc-chevron {
-		transform: rotate(90deg);
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.trace-acc-panel,
-		.trace-acc-panel-inner,
-		.trace-acc-chevron,
-		.trace-count {
-			transition: none !important;
-		}
-
-		.trace-clause-entering,
-		.trace-count-char-entering,
-		.trace-count-char-outgoing {
-			animation: none !important;
-		}
-	}
-</style>

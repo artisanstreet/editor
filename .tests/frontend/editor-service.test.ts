@@ -370,7 +370,7 @@ describe("editor service", () => {
 		expect(outcome.state.open_file_keys).toHaveLength(8);
 	});
 
-	it("retains dirty inactive documents even when protected documents exceed the resident limit", async () => {
+	it("retains dirty inactive content while compacting its oldest hot model", async () => {
 		const fake = new FakeSurfaceAdapter();
 		const files = Array.from({ length: 9 }, (_, index) => MakeFile(index));
 		const outcome = await Scoped(
@@ -390,7 +390,9 @@ describe("editor service", () => {
 
 		expect(outcome.state.open_file_keys).toHaveLength(9);
 		expect(outcome.state.dirty_file_keys).toEqual(new Set(files.map(EditorFileKeyForFile)));
-		expect(outcome.disposed.every((disposed) => !disposed)).toBe(true);
+		expect(outcome.disposed).toHaveLength(10);
+		expect(outcome.disposed[0]).toBe(true);
+		expect(outcome.disposed.slice(1).every((disposed) => !disposed)).toBe(true);
 	});
 
 	it("refreshes a reactivated document's LRU position before the next eviction", async () => {

@@ -1,0 +1,121 @@
+/**
+ * Reach-ins to markup we do not render.
+ *
+ * Every rule here is keyed on an attribute a dependency sets on its own
+ * elements — bits-ui slots, Sonner's toaster host. There is no class list to
+ * add to and no component to edit, so these are the one category that has to be
+ * a stylesheet. Keeping them together also keeps them auditable: this file is
+ * the complete list of places the app styles something it does not own.
+ */
+
+/** Sonner sizes its toasts from a variable on the host. */
+[data-sonner-toaster] {
+	--width: min(calc(100vw - 2rem), 24rem);
+}
+
+/** Bits UI otherwise paints its own scrollbar above the hidden native one. */
+[data-slot="scroll-area-scrollbar"] {
+	display: none;
+}
+
+/**
+ * Menu dropdown (transitions.dev), driven by the popover primitive's own
+ * `data-state` rather than by our own is-open / is-closing classes: bits-ui
+ * already owns mount, unmount, and the transform origin, and duplicating that
+ * in JS would fight it.
+ *
+ * Qualified by the popover attribute because `.t-dropdown` is also worn by the
+ * shader panel, which orchestrates the same motion through its own classes. Two
+ * elements, two mechanisms, one name — the qualifier keeps this block off the
+ * one it does not drive.
+ */
+.t-dropdown[data-popover-content] {
+	transform: scale(var(--dropdown-pre-scale));
+	opacity: 0;
+	transition:
+		transform var(--dropdown-open-dur) var(--dropdown-ease),
+		opacity var(--dropdown-open-dur) var(--dropdown-ease);
+	/**
+	 * The wrapper bits-ui positions the card with publishes the middleware's
+	 * origin as a variable but never applies it; picked up here so the growth
+	 * starts from the trigger's corner instead of the card's centre.
+	 */
+	transform-origin: var(--bits-floating-transform-origin);
+}
+
+/**
+ * Open is scaleless and hint-free on purpose. A transform — `scale(1)` counts —
+ * or a `will-change` naming one makes this element a backdrop root, and the
+ * glass inside it then has nothing behind it to sample and paints flat. The
+ * card only carries a transform while it is actually moving, exactly as the
+ * primitive's own keyframes did.
+ */
+.t-dropdown[data-popover-content][data-state="open"] {
+	transform: none;
+	opacity: 1;
+}
+
+.t-dropdown[data-popover-content][data-state="closed"] {
+	transform: scale(var(--dropdown-closing-scale));
+	opacity: 0;
+	transition:
+		transform var(--dropdown-close-dur) var(--dropdown-ease),
+		opacity var(--dropdown-close-dur) var(--dropdown-ease);
+}
+
+/**
+ * The first painted frame wears `data-starting-style`; the presence manager
+ * removes it a frame later. Without this rule the open rule above won that
+ * frame, so the close animated while the open popped in fully formed. It sits
+ * after the open rule on purpose: the two tie on specificity, and this one has
+ * to take the opening frame.
+ */
+.t-dropdown[data-popover-content][data-starting-style] {
+	transform: scale(var(--dropdown-pre-scale));
+	opacity: 0;
+}
+
+/**
+ * Inline image markers in the composer are built imperatively into a
+ * contenteditable, so they never pass through a Svelte template and have no
+ * class list to extend.
+ */
+.composer-image-marker {
+	display: inline-flex;
+	width: 1rem;
+	height: 1rem;
+	margin: 0 0.12rem;
+	padding: 0;
+	overflow: hidden;
+	vertical-align: -0.12rem;
+	border: 0;
+	border-radius: var(--radius-xs);
+	cursor: pointer;
+	background: var(--surface-800);
+}
+
+.composer-image-marker:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+.composer-image-marker img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	pointer-events: none;
+}
+
+/**
+ * CodeMirror's own scroller. The document fades into the card's edges the way
+ * the transcript and the sidebar do, and the mask has to sit on this element
+ * because the fade is driven by its scroll position — but the editor renders
+ * its whole DOM itself, so there is no class list to put it on.
+ */
+.cm-editor {
+	height: 100%;
+}
+
+.cm-scroller {
+	@apply docs-scroll-fade;
+}

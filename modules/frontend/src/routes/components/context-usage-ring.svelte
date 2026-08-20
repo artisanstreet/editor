@@ -39,9 +39,9 @@
 	style={`--gauge-warn: ${tone.warn}%; --gauge-danger: ${tone.danger}%`}
 	aria-hidden="true"
 >
-	<circle class="context-gauge-track" cx="8" cy="8" r={ring_radius} fill="none" stroke-width="2" />
+	<circle class="[stroke:color-mix(in_oklch,var(--foreground)_16%,transparent)]" cx="8" cy="8" r={ring_radius} fill="none" stroke-width="2" />
 	<circle
-		class="context-gauge-arc"
+		class="[transition-property:stroke-dasharray,stroke] duration-(--duration-quick) ease-(--ease-smooth-out) [stroke:color-mix(in_oklch,var(--banner-error)_var(--gauge-danger,0%),color-mix(in_oklch,var(--banner-warning)_var(--gauge-warn,0%),var(--banner-info)))]"
 		cx="8"
 		cy="8"
 		r={ring_radius}
@@ -52,30 +52,3 @@
 	/>
 </svg>
 
-<style>
-	.context-gauge-track {
-		stroke: color-mix(in oklch, var(--foreground) 16%, transparent);
-	}
-
-	/**
-	 * One continuous ramp, composed rather than branched: the inner mix carries
-	 * calm into warning, the outer one carries that result into danger. At rest
-	 * both mix percentages are zero, which leaves the calm tone exactly.
-	 */
-	.context-gauge-arc {
-		stroke: color-mix(
-			in oklch,
-			var(--banner-error) var(--gauge-danger, 0%),
-			color-mix(in oklch, var(--banner-warning) var(--gauge-warn, 0%), var(--banner-info))
-		);
-		transition:
-			stroke-dasharray var(--duration-quick) var(--ease-smooth-out),
-			stroke var(--duration-quick) var(--ease-in-out);
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.context-gauge-arc {
-			transition: none;
-		}
-	}
-</style>

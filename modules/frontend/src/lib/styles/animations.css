@@ -1,0 +1,335 @@
+/**
+ * Keyframes, registered properties, and the one reduced-motion authority.
+ *
+ * Keyframes and `@property` are the two things markup genuinely cannot express:
+ * a class can name an animation but not declare one, and an animatable custom
+ * property has to be registered with a type before anything can tween it.
+ * Everything that plays these lives in `utilities.css` or on the element.
+ */
+
+/**
+ * Lengths the scroll-fade mask interpolates. Untyped custom properties are
+ * strings and do not animate; registering them as `<length>` is what lets a
+ * scroll timeline drive the mask.
+ */
+@property --docs-scroll-fade-start {
+	syntax: "<length>";
+	inherits: false;
+	initial-value: 0px;
+}
+
+@property --docs-scroll-fade-end {
+	syntax: "<length>";
+	inherits: false;
+	/** An inactive scroll timeline means nothing is hidden past this edge. */
+	initial-value: 0px;
+}
+
+@keyframes docs-scroll-fade-start {
+	from {
+		--docs-scroll-fade-start: 0px;
+	}
+	to {
+		--docs-scroll-fade-start: var(--docs-scroll-fade-size);
+	}
+}
+
+@keyframes docs-scroll-fade-end {
+	from {
+		--docs-scroll-fade-end: var(--docs-scroll-fade-size);
+	}
+	to {
+		--docs-scroll-fade-end: 0px;
+	}
+}
+
+/**
+ * The favourite rustle, shared. Tilt and pop are tokens so a surface larger
+ * than an icon can dial the motion down to its own scale instead of redefining
+ * it — the timing, easing, and shape stay identical everywhere it appears. The
+ * defaults reproduce the favourite star exactly (1.18 → 1.06 → 1.02).
+ */
+@keyframes t-rustle {
+	0% {
+		transform: rotate(0deg) scale(1);
+	}
+
+	25% {
+		transform: rotate(calc(var(--favorite-rustle-tilt) * -1)) scale(var(--favorite-rustle-pop));
+	}
+
+	55% {
+		transform: rotate(var(--favorite-rustle-tilt))
+			scale(calc(1 + (var(--favorite-rustle-pop) - 1) * 0.33));
+	}
+
+	80% {
+		transform: rotate(calc(var(--favorite-rustle-tilt) * -0.4))
+			scale(calc(1 + (var(--favorite-rustle-pop) - 1) * 0.11));
+	}
+
+	100% {
+		transform: rotate(0deg) scale(1);
+	}
+}
+
+/**
+ * One reduced-motion authority for the whole app.
+ *
+ * Zeroing the duration tokens is the part that matters: every transition and
+ * animation in the codebase reads its timing from them, so they settle
+ * instantly at the right value rather than being cancelled mid-flight. The
+ * blanket rule underneath catches anything that hardcoded a duration.
+ *
+ * Per-rule `transition: none` overrides used to be repeated beside almost every
+ * animated class. They were all redundant with this, and each one was a place
+ * the guard could be forgotten.
+ */
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--duration-quick: 1ms;
+		--duration-fast: 1ms;
+		--duration-medium: 1ms;
+		--panel-open-dur: 1ms;
+		--panel-close-dur: 1ms;
+		--panel-translate-y: 0;
+		--panel-translate-x: 0;
+		--panel-blur: 0;
+		--resize-dur: 1ms;
+		--acc-expand: 1ms;
+		--acc-collapse: 1ms;
+		--acc-chevron: 1ms;
+		--icon-swap-dur: 1ms;
+		--dropdown-open-dur: 1ms;
+		--dropdown-close-dur: 1ms;
+		--tt-in-dur: 1ms;
+		--tt-out-dur: 1ms;
+		--stream-word-dur: 1ms;
+	}
+
+	*,
+	*::before,
+	*::after {
+		scroll-behavior: auto !important;
+		animation-duration: 1ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 1ms !important;
+	}
+}
+
+/** A hover card entering: the from-frame the `t-tt` utility animates out of. */
+@keyframes t-tt-in {
+	from {
+		opacity: 0;
+		transform: scale(var(--tt-scale));
+	}
+}
+
+/** The indeterminate arc spinner. */
+@keyframes fade-arc-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@keyframes shimmer-text {
+	from {
+		background-position-x: 250%;
+	}
+	to {
+		background-position-x: -100%;
+	}
+}
+
+/** A settings page arriving: one quiet rise for the whole column, no blur. */
+@keyframes settings-page-enter {
+	from {
+		opacity: 0;
+		transform: translateY(0.375rem);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+/** Anchor links cascading in under a freshly active settings section. */
+@keyframes settings-anchor-enter {
+	from {
+		opacity: 0;
+		transform: translateY(0.125rem);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+/** Content replacing a skeleton in place: a short rise so the swap is not a pop. */
+@keyframes settings-usage-enter {
+	from {
+		opacity: 0;
+		transform: translateY(0.25rem);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+/** The composer placeholder revealing one character at a time. */
+@keyframes placeholder-reveal-in {
+	from {
+		opacity: 0;
+		transform: translateY(2px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+/** One shimmer pass across the account avatar, per hover. */
+@keyframes account-shimmer {
+	from {
+		transform: translate(100%, -100%);
+	}
+	to {
+		transform: translate(-100%, 100%);
+	}
+}
+
+/** A sweep across a wordmark, painted through its own letterforms. */
+@keyframes t-shimmer {
+	0% {
+		background-position: 100% 0;
+	}
+	100% {
+		background-position: 0% 0;
+	}
+}
+
+/** The reassurance line rising in after its intent delay. */
+@keyframes reassurance-in {
+	from {
+		opacity: 0;
+		transform: translateY(0.25rem);
+		filter: blur(2px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+		filter: blur(0);
+	}
+}
+
+/**
+ * The text swap as a mount animation. Transition directives stall the async
+ * renderer, so entrances play on mount and exits stay instant.
+ */
+@keyframes status-swap-enter {
+	from {
+		opacity: 0;
+		transform: translateY(var(--text-swap-translate-y));
+		filter: blur(var(--text-swap-blur));
+	}
+}
+
+/** The settled divider growing from the label's measured width out to the edge. */
+@keyframes settle-underline-grow {
+	from {
+		width: var(--settle-underline-from, 0px);
+	}
+}
+
+/**
+ * A queued-steer row entering the lip stack: its grid track grows from nothing
+ * so the lip's height tweens instead of jumping when a newer steer lands on
+ * top of the ones still waiting.
+ */
+@keyframes lip-row-grow {
+	from {
+		grid-template-rows: 0fr;
+	}
+}
+
+/**
+ * A clause grows the trace label open rather than appearing at full width.
+ * `width` cannot tween to `auto`, so the clause is a one-column grid and the
+ * track carries the motion from `0fr` to its content.
+ */
+@keyframes trace-clause-in {
+	from {
+		grid-template-columns: 0fr;
+		opacity: 0;
+		filter: blur(var(--text-swap-blur));
+	}
+}
+
+/**
+ * A count ticks over like an odometer: the incoming digit rises from below on
+ * an increment — up means higher — and the whole motion mirrors for a decrement
+ * by way of `--trace-count-shift`.
+ */
+@keyframes trace-count-in {
+	from {
+		opacity: 0;
+		transform: translateY(calc(var(--trace-count-rise) * var(--trace-count-shift)));
+		filter: blur(var(--text-swap-blur));
+	}
+}
+
+@keyframes trace-count-out {
+	from {
+		opacity: 1;
+		visibility: visible;
+		transform: translateY(0);
+		filter: blur(0);
+	}
+
+	to {
+		visibility: hidden;
+	}
+}
+
+/** How far a clipped command's trailing fade reaches, driven by its own scroll. */
+@property --trace-command-fade-end {
+	syntax: "<length>";
+	inherits: false;
+	initial-value: 0px;
+}
+
+@keyframes trace-command-fade-end {
+	from {
+		--trace-command-fade-end: var(--trace-command-fade-size);
+	}
+	to {
+		--trace-command-fade-end: 0px;
+	}
+}
+
+/**
+ * A sentence arriving out of focus, one word at a time. Only opacity and blur
+ * move: the words are inline so the line wraps as prose, and a transform on a
+ * non-replaced inline box does nothing at all.
+ */
+@keyframes sentence-word-in {
+	from {
+		opacity: 0;
+		filter: blur(6px);
+	}
+	to {
+		opacity: 1;
+		filter: blur(0);
+	}
+}
+
+/** The same reveal with the blur taken out, for a reader who asked for less. */
+@keyframes sentence-word-fade-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}

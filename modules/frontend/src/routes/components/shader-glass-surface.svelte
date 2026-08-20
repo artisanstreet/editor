@@ -9,6 +9,7 @@
 		ref = $bindable(null),
 		class: class_name,
 		children,
+		content_column = false,
 		strength = "quiet",
 		use_card = true,
 		use_rays = true,
@@ -16,6 +17,13 @@
 		...rest_props
 	}: WithElementRef<HTMLAttributes<HTMLDivElement>> & {
 		children: Snippet;
+		/**
+		 * Makes the content wrapper a shrinkable flex column so a height bound on
+		 * the card actually reaches a scroll box inside it. The default block
+		 * wrapper swallows `min-h-0`, which lets tall content grow past the card
+		 * and clip against its overflow instead of scrolling.
+		 */
+		content_column?: boolean;
 		strength?: "quiet" | "strong";
 		use_card?: boolean;
 		use_rays?: boolean;
@@ -51,57 +59,8 @@
 		<div aria-hidden="true" class="shader-glass-material"></div>
 		<div aria-hidden="true" class="shader-glass-highlight"></div>
 	{/if}
-	<div class="relative z-10 size-full">
+	<div class={content_column ? "relative z-10 flex size-full min-h-0 flex-col" : "relative z-10 size-full"}>
 		{@render children()}
 	</div>
 </div>
 
-<style>
-	.shader-glass-material {
-		position: absolute;
-		inset: 0;
-		z-index: 1;
-		pointer-events: none;
-		/**
-		 * Chromium composites backdrop-filter without honoring the ancestor's
-		 * rounded overflow clip; the layer must carry the radius itself or the
-		 * blurred square corners bleed past the surface.
-		 */
-		border-radius: inherit;
-		background: linear-gradient(145deg, rgb(82 82 91 / 0.2), rgb(39 39 42 / 0.14));
-		-webkit-backdrop-filter: blur(12px) saturate(115%) brightness(102%);
-		backdrop-filter: blur(12px) saturate(115%) brightness(102%);
-	}
-
-	.shader-glass-highlight {
-		position: absolute;
-		inset: 0;
-		z-index: 2;
-		pointer-events: none;
-		background: linear-gradient(180deg, rgb(255 255 255 / 0.05), transparent 42%);
-	}
-
-	.shader-glass-surface[data-strength="strong"] .shader-glass-material {
-		background: linear-gradient(145deg, rgb(82 82 91 / 0.28), rgb(39 39 42 / 0.2));
-		-webkit-backdrop-filter: blur(20px) saturate(120%) brightness(103%);
-		backdrop-filter: blur(20px) saturate(120%) brightness(103%);
-	}
-
-	.shader-glass-surface[data-strength="strong"] .shader-glass-highlight {
-		background: linear-gradient(180deg, rgb(255 255 255 / 0.08), transparent 44%);
-	}
-
-	@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-		.shader-glass-material {
-			background: var(--surface-825);
-		}
-	}
-
-	@media (prefers-reduced-transparency: reduce) {
-		.shader-glass-material {
-			background: var(--surface-825);
-			-webkit-backdrop-filter: none;
-			backdrop-filter: none;
-		}
-	}
-</style>

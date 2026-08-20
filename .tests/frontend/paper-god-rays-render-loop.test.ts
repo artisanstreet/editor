@@ -10,21 +10,23 @@ const source = readFileSync(
 );
 
 describe("Paper God Rays render loop", () => {
-	it("coalesces render signals instead of retaining a frame backlog", () => {
+	it("retains render signals until the scoped worker observes them", () => {
 		expect(source).toContain(
-			"Queue.sliding<{ readonly immediate: boolean; readonly now: number }>(1)",
+			"Queue.unbounded<{ readonly immediate: boolean; readonly now: number }>()",
 		);
-		expect(source).not.toContain("Queue.unbounded");
+		expect(source).toContain("const restorations = yield* Queue.unbounded<void>()");
 		expect(source).toContain("let pending_config: ShaderConfig | undefined;");
 	});
 
-	it("renders only while the document and canvas are visible", () => {
+	it("renders only while the document and canvas are visible and the window is focused", () => {
 		expect(source).toContain(
 			'document.addEventListener("visibilitychange", OnVisibilityChange)',
 		);
+		expect(source).toContain('window.addEventListener("blur", OnWindowBlur)');
+		expect(source).toContain('window.addEventListener("focus", OnWindowFocus)');
 		expect(source).toContain("new IntersectionObserver");
 		expect(source).toContain(
-			"const CanRender = () => document_visible && canvas_visible && !context_lost;",
+			"const CanRender = () => document_visible && window_focused && canvas_visible && !context_lost;",
 		);
 		expect(source).toContain("if (!CanRender() || context_is_lost) return;");
 		expect(source).toContain("now - last_animation_frame < 1_000 / 30");
@@ -38,6 +40,8 @@ describe("Paper God Rays render loop", () => {
 		expect(source).toContain(
 			'document.removeEventListener("visibilitychange", observer.OnVisibilityChange)',
 		);
+		expect(source).toContain('window.removeEventListener("blur", observer.OnWindowBlur)');
+		expect(source).toContain('window.removeEventListener("focus", observer.OnWindowFocus)');
 		expect(source).toContain("observer.observer?.disconnect()");
 		expect(source).toContain("if (frame_id !== undefined) cancelAnimationFrame(frame_id)");
 		expect(source).toContain("yield* Effect.acquireRelease(");

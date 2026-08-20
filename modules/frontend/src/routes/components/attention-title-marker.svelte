@@ -6,9 +6,21 @@
 	import { RuntimeSurfaceFor } from "$lib/browser/runtime-surface";
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { AttentionMarkedTitle } from "$lib/root/attention-title";
+	import { forge_repair_request } from "$lib/root/forge-repair-request.svelte";
 	import { ThreadNeedsAttention } from "$lib/root/thread-navigation";
 
-	let { threads }: { readonly threads: ReadonlyArray<ThreadListItem> } = $props();
+	let {
+		threads,
+		forge_unreachable = false,
+	}: {
+		readonly threads: ReadonlyArray<ThreadListItem>;
+		/**
+		 * True once the renderer has given up on the Forge it was paired with and
+		 * proved the origin is gone. Only the shell can obtain a new endpoint, so
+		 * this is the ask travelling over the one channel the shell can observe.
+		 */
+		readonly forge_unreachable?: boolean;
+	} = $props();
 
 	const desktop = yield* RunBrowserDom(
 		() => RuntimeSurfaceFor(globalThis.navigator?.userAgent ?? "") === "desktop",
@@ -26,10 +38,17 @@
 	 */
 	const marker_count = $derived(desktop || attention_count > 0 ? attention_count : undefined);
 
-	const MarkTitle = (count: number | undefined) =>
+	/**
+	 * Repair can be proven (the poll gave up on the paired Forge) or requested
+	 * (a surface wants the shell's own Forge back, e.g. the Machine select
+	 * returning from a peer). Both ride the same marker.
+	 */
+	const repair_wanted = $derived(forge_unreachable || forge_repair_request.requested);
+
+	const MarkTitle = (count: number | undefined, requests_repair: boolean) =>
 		Effect.gen(function* () {
 			yield* RunBrowserDom(() => {
-				const marked = AttentionMarkedTitle(document.title, count);
+				const marked = AttentionMarkedTitle(document.title, count, requests_repair);
 				if (document.title !== marked) document.title = marked;
 			});
 		});
@@ -48,7 +67,7 @@
 			yield* Effect.gen(function* () {
 				while (true) {
 					yield* Queue.take(marks);
-					yield* MarkTitle(marker_count).pipe(Effect.ignore);
+					yield* MarkTitle(marker_count, repair_wanted).pipe(Effect.ignore);
 				}
 			}).pipe(Effect.forkScoped);
 			yield* Queue.offer(marks, undefined);
@@ -77,5 +96,5 @@
 	 * server rendering there is no document, and a marker that cannot be
 	 * written is a marker the next rewrite catches up on.
 	 */
-	yield* MarkTitle(marker_count).pipe(Effect.ignore);
+	yield* MarkTitle(marker_count, repair_wanted).pipe(Effect.ignore);
 </script>

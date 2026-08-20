@@ -18,25 +18,11 @@
 {:else}
 	<!-- Above the Forge connection gate (z-50): this page needs no Forge at all. -->
 	<div
-		class="fixed inset-0 z-[60] flex flex-wrap items-center justify-center gap-24 overflow-auto p-8"
+		class="fixed inset-0 z-[60] flex items-center justify-center overflow-auto p-8"
 		style:background-color={canvas_color}
 	>
-		<div class="h-40 text-neutral-50">
+		<div class="h-40 text-surface-50">
 			<ArtisanLogo {size} />
-		</div>
-
-		<div class="flex w-fit flex-col overflow-hidden rounded-xl border-2 border-muted-foreground">
-			<!--
-				The mark's box is the cutout: the canvas shows through the panel
-				while the letters keep the tile's own color. The window carries its
-				own padding because the interlocked rows overshoot their line boxes
-				— without it the ascenders paint tile-on-tile and vanish.
-			-->
-			<div class="p-4 text-muted-foreground" style:background-color={canvas_color}>
-				<ArtisanLogo {size} />
-			</div>
-			<!-- Half the mark's h-40 below the window. -->
-			<div class="h-20 w-full bg-muted-foreground"></div>
 		</div>
 	</div>
 {/if}

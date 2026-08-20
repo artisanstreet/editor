@@ -28,6 +28,16 @@ export const ThreadRoutePath = (workspace_id: string | undefined, thread_id: str
 		ThreadRouteId(thread_id),
 	)}`;
 
+/**
+ * The workspace's own route: a project entered, with no thread chosen in it yet.
+ *
+ * The same `/t/` space as a conversation on purpose — you are in the project
+ * either way, and the thread segment is what says which conversation. Its
+ * absence is the next one.
+ */
+export const WorkspaceRoutePath = (workspace_id: string | undefined) =>
+	`/t/${encodeURIComponent(ThreadWorkspaceRouteId(workspace_id))}`;
+
 /** Builds a canonical URL directly from the authoritative thread-list projection. */
 export const ThreadRoutePathFor = (thread: Pick<ThreadListItem, "primary_project" | "thread_id">) =>
 	ThreadRoutePath(thread.primary_project?.project_id, thread.thread_id);
@@ -177,6 +187,11 @@ export const IsFailedStatus = (status: string) =>
 
 export const ThreadFailed = (thread: ThreadListItem) => IsFailedStatus(thread.live_status);
 
+/** The status a run reports after finishing cleanly. */
+export const CompleteStatus = "Complete";
+
+export const ThreadCompleted = (thread: ThreadListItem) => thread.live_status === CompleteStatus;
+
 /** A running or waiting Forge-owned run cannot be dismissed by local rail state. */
 export const ThreadHasActiveWork = (thread: ThreadListItem) =>
 	ThreadIsWorking(thread) && !ThreadFailed(thread);
@@ -188,29 +203,53 @@ export const ThreadHasActiveWork = (thread: ThreadListItem) =>
 export const WorkingThreads = (threads: ReadonlyArray<ThreadListItem>) =>
 	SortRecentThreads(threads).filter(ThreadIsWorking);
 
-export type ThreadRailDisplayEntry = {
-	readonly render_id: string;
-	readonly thread: ThreadListItem;
+export type ThreadRailTimeGroup = {
+	readonly id: "today" | "yesterday" | "last_3_days" | "last_7_days" | "past_month";
+	readonly label: string | undefined;
+	readonly threads: ReadonlyArray<ThreadListItem>;
 };
 
-/**
- * Gives the development stress controls stable render identities without
- * inventing navigable thread identities or mutating the authoritative list.
- */
-export const ThreadRailDisplayEntries = (
-	threads: ReadonlyArray<ThreadListItem>,
-	multiplier: number,
-): ReadonlyArray<ThreadRailDisplayEntry> => {
-	const copy_count = Number.isFinite(multiplier)
-		? Math.min(20, Math.max(1, Math.trunc(multiplier)))
-		: 1;
+const MillisecondsPerDay = 24 * 60 * 60 * 1_000;
 
-	return threads.flatMap((thread) =>
-		Array.from({ length: copy_count }, (_, copy_index) => ({
-			render_id: `${thread.thread_id}:${copy_index}`,
-			thread,
-		})),
-	);
+/**
+ * Partitions the settled rail chronologically, preserving the authoritative
+ * newest-first order inside every section. Past month is the final historical
+ * section: records older than thirty days stay reachable there rather than
+ * being silently omitted from navigation or gaining an extra visual label.
+ */
+export const ThreadRailTimeGroups = (
+	threads: ReadonlyArray<ThreadListItem>,
+	now_ms: number,
+): ReadonlyArray<ThreadRailTimeGroup> => {
+	const groups: Array<{
+		id: ThreadRailTimeGroup["id"];
+		label: string | undefined;
+		threads: Array<ThreadListItem>;
+	}> = [
+		{ id: "today", label: undefined, threads: [] },
+		{ id: "yesterday", label: "Yesterday", threads: [] },
+		{ id: "last_3_days", label: "Last 3 days", threads: [] },
+		{ id: "last_7_days", label: "Last 7 days", threads: [] },
+		{ id: "past_month", label: "Past month", threads: [] },
+	];
+
+	for (const thread of SortRecentThreads(threads)) {
+		const elapsed_ms = now_ms - Date.parse(thread.last_activity_at);
+		const group_index =
+			Number.isFinite(elapsed_ms) && elapsed_ms < MillisecondsPerDay
+				? 0
+				: elapsed_ms < 2 * MillisecondsPerDay
+					? 1
+					: elapsed_ms < 3 * MillisecondsPerDay
+						? 2
+						: elapsed_ms < 7 * MillisecondsPerDay
+							? 3
+							: 4;
+
+		groups[group_index]?.threads.push(thread);
+	}
+
+	return groups.filter((group) => group.threads.length > 0);
 };
 
 /**
@@ -232,48 +271,26 @@ export const SortUnreadFirst = (
 		: [...pending, ...ordered.filter((thread) => !unread.has(thread.thread_id))];
 };
 
-/**
- * The threads the reader has already dealt with, keyed by the activity stamp
- * each carried when that happened — sent down to the list by hand, or simply
- * opened and read.
- *
- * Stamped rather than flagged so the dismissal expires by itself: new activity
- * on a settled thread is a new reason to look at it, and it should climb back
- * into the pinned group without the reader having to undo anything. It is also
- * why this is a map and not a set — the identity alone would mute the thread
- * for good.
- */
-export type SettledThreadStamps = ReadonlyMap<string, string>;
-
-export const NoSettledThreads: SettledThreadStamps = new Map<string, string>();
-
-export const ThreadSettled = (thread: ThreadListItem, settled: SettledThreadStamps) =>
-	settled.get(thread.thread_id) === thread.last_activity_at;
+/** Legacy projections predate the root/worker activity boundary. */
+export const ThreadReaderActivityAt = (thread: ThreadListItem): string =>
+	thread.reader_activity_at ?? thread.last_activity_at;
 
 /**
- * The stamped entry that settles one thread until it next has something to say.
- *
- * Returns the map it was handed when that stamp is already recorded: the open
- * thread re-settles itself against every activity it reports, and minting a
- * fresh map each time would rebuild both rail groups for a decision that has
- * not changed.
+ * Forge owns acknowledgement. It is stamped against root-visible activity so
+ * a later root response repins the thread, while hidden worker activity does
+ * not invalidate a read the reader already made.
  */
-export const SettleThreadStamp = (
-	settled: SettledThreadStamps,
-	thread_id: string,
-	last_activity_at: string,
-): SettledThreadStamps =>
-	settled.get(thread_id) === last_activity_at
-		? settled
-		: new Map(settled).set(thread_id, last_activity_at);
+export const ThreadSettled = (thread: ThreadListItem) =>
+	thread.reader_acknowledged_activity_at === ThreadReaderActivityAt(thread);
 
-export const SettleThread = (
-	settled: SettledThreadStamps,
-	thread: ThreadListItem,
-): SettledThreadStamps =>
-	ThreadHasActiveWork(thread)
-		? settled
-		: SettleThreadStamp(settled, thread.thread_id, thread.last_activity_at);
+/** Durable attention remains unread until Forge records the reader acknowledgement. */
+export const ThreadUnread = (thread: ThreadListItem) => !ThreadSettled(thread);
+
+/** Only an inactive unread thread reports an outcome that needs reader attention. */
+export const ThreadNeedsAttention = (thread: ThreadListItem) =>
+	!ThreadHasActiveWork(thread) &&
+	ThreadUnread(thread) &&
+	(ThreadCompleted(thread) || ThreadFailed(thread));
 
 /**
  * What the pinned group holds: anything running, plus anything that finished
@@ -285,30 +302,17 @@ export const SettleThread = (
  * It stays until it has been read, and anything it says afterwards puts it
  * back by outrunning the stamp that settled it.
  */
-export const PinnedThreads = (
-	threads: ReadonlyArray<ThreadListItem>,
-	unread: ReadonlySet<string>,
-	settled: SettledThreadStamps = NoSettledThreads,
-) =>
+export const PinnedThreads = (threads: ReadonlyArray<ThreadListItem>) =>
 	SortRecentThreads(threads).filter(
 		(thread) =>
-			/** A local read/dismissal stamp never outranks Forge's live run authority. */
-			ThreadHasActiveWork(thread) ||
-			(!ThreadSettled(thread, settled) &&
-				(unread.has(thread.thread_id) || ThreadFailed(thread))),
+			/** A durable acknowledgement never outranks Forge's live run authority. */
+			ThreadHasActiveWork(thread) || ThreadNeedsAttention(thread),
 	);
 
 /** Everything the pinned group is not already showing. */
-export const SettledThreads = (
-	threads: ReadonlyArray<ThreadListItem>,
-	unread: ReadonlySet<string>,
-	settled: SettledThreadStamps = NoSettledThreads,
-) =>
+export const SettledThreads = (threads: ReadonlyArray<ThreadListItem>) =>
 	SortRecentThreads(threads).filter(
-		(thread) =>
-			!ThreadHasActiveWork(thread) &&
-			(ThreadSettled(thread, settled) ||
-				(!unread.has(thread.thread_id) && !ThreadFailed(thread))),
+		(thread) => !ThreadHasActiveWork(thread) && !ThreadNeedsAttention(thread),
 	);
 
 /**
@@ -324,8 +328,3 @@ export const AwaitingAnswerStatus = "Waiting for answer";
 
 export const ThreadIsAwaitingAnswer = (thread: ThreadListItem) =>
 	thread.live_status === AwaitingAnswerStatus;
-
-/** The status a run reports after finishing cleanly. */
-export const CompleteStatus = "Complete";
-
-export const ThreadCompleted = (thread: ThreadListItem) => thread.live_status === CompleteStatus;

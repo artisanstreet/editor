@@ -1,10 +1,9 @@
 <script lang="ts" effect>
-	import { BannerService } from "$lib/banner/service";
-	import { Badge } from "$lib/components/ui/badge";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import { Separator } from "$lib/components/ui/separator";
 	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import { model_transition_presentation } from "$lib/conversation/presentation";
+	import { FormatElapsed } from "$lib/conversation/duration";
 	import { model_manifest } from "@artisan/catalog";
 	import type { ConversationItem } from "@artisan/protocol";
 	import type { Snippet } from "svelte";
@@ -16,17 +15,12 @@
 	}: {
 		item: Extract<
 			ConversationItem,
-			{ type: "error" | "compaction" | "model_transition" | "native_event" }
+			{ type: "error" | "compaction" | "model_transition" }
 		>;
 		trailing?: Snippet;
 		/** "base" matches host text (the work-session header); timeline rows stay "sm". */
 		size?: "sm" | "base";
 	} = $props();
-
-	const banner = yield* BannerService;
-	if (item.type === "error") {
-		yield* banner.error("Thread error", { description: item.message });
-	}
 
 	const timeline_status_class = $derived(
 		`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 py-0.5 ${size === "base" ? "text-base" : "text-sm"} text-muted-foreground`,
@@ -118,14 +112,17 @@
 						? "Compaction failed"
 						: "Compacted"}
 			</ShimmerText>
+			<!--
+				A compaction is the one event that can hold a transcript silent for
+				minutes, and an engine that announces only the finished boundary
+				leaves that silence unexplained. Naming the span is the whole
+				answer to "why did nothing happen just now".
+			-->
+			{#if item.state !== "started" && item.duration_ms !== undefined}
+				<span class="shrink-0 tabular-nums">· {FormatElapsed(item.duration_ms)}</span>
+			{/if}
 			{#if trailing !== undefined}{@render trailing()}{/if}
 		</span>
 		<Separator class="min-w-0 flex-1" aria-hidden="true" />
-	</div>
-{:else if item.type === "native_event"}
-	<div class={timeline_status_class}>
-		<Badge variant="outline">Native</Badge>
-		<span>{item.summary}</span>
-		{#if trailing !== undefined}{@render trailing()}{/if}
 	</div>
 {/if}

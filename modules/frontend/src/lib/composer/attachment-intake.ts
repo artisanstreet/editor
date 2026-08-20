@@ -11,15 +11,13 @@ import {
 
 /**
  * What intake needs from the composer to place an image. The component owns the
- * editor, the attachment map, and the motion; this owns the order those happen
+ * editor and attachment map; this owns the order those happen
  * in — validate, recognise a re-paste, show, encode, settle.
  */
 export interface ComposerAttachmentSurface {
 	readonly Attachments: () => ReadonlyMap<string, ComposerImageAttachment>;
 	/** True while the composer cannot take an image at all. */
 	readonly Blocked: () => boolean;
-	/** Shakes the attachments a re-paste was answered by. */
-	readonly Bump: (attachment_ids: ReadonlyArray<string>) => Effect.Effect<void>;
 	readonly EngineId: () => string | undefined;
 	/** Adds the images to the composer and shows them where the caret is. */
 	readonly Present: (
@@ -47,11 +45,6 @@ export const MakeComposerAttachmentIntake = (surface: ComposerAttachmentSurface)
 			);
 			if (IsDuplicateImageAttachment(others, settled)) {
 				yield* surface.Remove(attachment);
-				yield* surface.Bump([
-					others.find(
-						(item) => item.ready && item.content_base64 === settled.content_base64,
-					)?.id ?? "",
-				]);
 				return;
 			}
 			const fit = ValidateImageAttachmentBatch(
@@ -76,8 +69,7 @@ export const MakeComposerAttachmentIntake = (surface: ComposerAttachmentSurface)
 	/**
 	 * Shows every pasted image at once and encodes them behind the previews. A
 	 * re-paste never becomes an attachment: it is recognised from the pasted
-	 * file's own digest before anything is shown, and the image already there
-	 * answers for it.
+	 * file's own digest and discarded before anything is shown.
 	 */
 	const AddFiles = (files: ReadonlyArray<File>, range?: Range) =>
 		Effect.gen(function* () {
@@ -91,7 +83,6 @@ export const MakeComposerAttachmentIntake = (surface: ComposerAttachmentSurface)
 			}
 
 			const opened: Array<{ attachment: ComposerImageAttachment; file: File }> = [];
-			const repasted: Array<string> = [];
 			yield* Effect.gen(function* () {
 				for (const file of files) {
 					const attachment = yield* OpenComposerImageFile(file);
@@ -103,7 +94,6 @@ export const MakeComposerAttachmentIntake = (surface: ComposerAttachmentSurface)
 						attachment,
 					);
 					if (attached !== undefined) {
-						repasted.push(attached.id);
 						yield* surface.Revoke(attachment);
 						continue;
 					}
@@ -117,7 +107,6 @@ export const MakeComposerAttachmentIntake = (surface: ComposerAttachmentSurface)
 				),
 			);
 
-			if (repasted.length > 0) yield* surface.Bump(repasted);
 			if (opened.length === 0) return;
 
 			const fit = ValidateImageAttachmentBatch(

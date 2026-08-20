@@ -32,7 +32,7 @@
 		) => Effect.Effect<void>;
 		onquestion?: (
 			question_id: string,
-			answer: string,
+			answers: ReadonlyArray<string>,
 		) => Effect.Effect<void, { readonly message: string }>;
 		onusageinterruptionresolve?: (
 			interruption_id: string,
@@ -60,7 +60,11 @@
 	<ConversationChange {item} />
 {:else if item.type === "approval"}
 	<ConversationApproval {item} {onapproval} />
-{:else if item.type === "plan" || item.type === "question"}
+{:else if item.type === "plan"}
+	<!-- Plans are projected into the shell-owned Checklist, never the transcript. -->
+{:else if item.type === "native_event"}
+	<!-- Native diagnostics render only through ConversationTrace's visibility policy. -->
+{:else if item.type === "question"}
 	<ConversationPrompt {item} {onquestion} />
 {:else if item.type === "usage_interruption"}
 	<ConversationUsageInterruptionCard

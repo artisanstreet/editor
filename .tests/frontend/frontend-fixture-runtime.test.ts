@@ -81,8 +81,10 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"Errors",
 						"Events",
 						"BeginCapabilityOAuth",
+						"AuthenticateEngine",
 						"CheckCapabilityHealth",
 						"CompleteCapabilityOAuth",
+						"ConnectHostMachine",
 						"DecideCapabilityConnect",
 						"DecideCapabilityDriftOverwrite",
 						"DecideCapabilityInvocation",
@@ -95,10 +97,12 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"EnableCapability",
 						"EnableRoutine",
 						"GetEngineUsage",
+						"GetEngineInstallations",
 						"GetGlobalGuidance",
 						"GetGitDiff",
 						"GetGitWorkspace",
 						"GetHostIdentity",
+						"GetHostMachines",
 						"GetMessageImageAttachment",
 						"GetModelBehaviour",
 						"GetModelFavorites",
@@ -140,6 +144,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"ListRoutines",
 						"ListCapabilities",
 						"ImportNpxSkills",
+						"InstallEngine",
 						"InvokeCapability",
 						"InvokeRoutine",
 						"ListWorkspaceChanges",
@@ -177,6 +182,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"RetryGlobalGuidanceSync",
 						"RetryModelBehaviourSync",
 						"RetryConnection",
+						"RollbackEngine",
 						"ProbePreviewTarget",
 						"RegisterPreviewTarget",
 						"RemovePreviewTarget",
@@ -271,13 +277,12 @@ describe("frontend ArtisanClient fixture runtime", () => {
 			}),
 		);
 
-		it.effect("uses an explicit Layer.succeed fixture with Effect-native behavior", () =>
+		it.effect("uses an explicit stateful fixture Layer with Effect-native behavior", () =>
 			Effect.gen(function* () {
 				const { fixture_source } = yield* FixtureRuntimeSources;
 
-				expect(fixture_source).toContain(
-					"Layer.succeed(ArtisanClient, FixtureArtisanClientService)",
-				);
+				expect(fixture_source).toContain("Layer.effect(");
+				expect(fixture_source).toContain("Ref.make(FixtureInteractiveInstallationReports)");
 				expect(fixture_source).not.toMatch(/Effect\.run[A-Z]/);
 				expect(fixture_source.match(/Effect\.gen\(/g)?.length ?? 0).toBeGreaterThanOrEqual(
 					25,

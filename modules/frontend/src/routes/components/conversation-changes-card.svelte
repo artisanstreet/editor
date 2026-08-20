@@ -84,7 +84,7 @@
 {/snippet}
 
 <section
-	class="changed-files-card flex w-full flex-col gap-1.5 overflow-hidden rounded-2xl p-4"
+	class="flex w-full flex-col gap-1.5 overflow-hidden rounded-2xl bg-linear-to-t from-(--changed-files-from) to-(--changed-files-to) p-4"
 	class:card={$changed_files_style_config.use_card}
 	style:--changed-files-from={`var(--${$changed_files_style_config.from})`}
 	style:--changed-files-to={`var(--${$changed_files_style_config.to})`}
@@ -118,7 +118,7 @@
 									class="size-4 shrink-0"
 								/>
 								<span class="min-w-0 truncate text-sm">
-									<span class="file-row-directory text-muted-foreground"
+									<span class="text-muted-foreground transition-colors duration-(--duration-quick) ease-in-out group-hover/file-row:text-foreground group-focus-visible/file-row:text-foreground"
 										>{parts.directory}</span
 									><span class="text-foreground">{parts.filename}</span>
 								</span>
@@ -161,38 +161,3 @@
 		<p class="text-sm text-destructive" role="status">Couldn't copy the path. Try again.</p>
 	{/if}
 </section>
-
-<style>
-	.changed-files-card {
-		background-image: linear-gradient(
-			to top,
-			var(--changed-files-from),
-			var(--changed-files-to)
-		);
-	}
-
-	/**
-	 * Every row reads the same, whatever the operation was.
-	 *
-	 * A created file used to wear a filled, ringed, shadowed card in the diff
-	 * green. At the scale of one row that stopped reading as "this file is new"
-	 * and read as a coloured slab laid over the path — the loudest thing in a card
-	 * whose subject is the paths. The operation is already carried by the counts
-	 * beside each row, which is enough.
-	 */
-
-	.file-row-directory {
-		transition: color var(--duration-quick) var(--ease-in-out);
-	}
-
-	:global(.group\/file-row:hover) .file-row-directory,
-	:global(.group\/file-row:focus-visible) .file-row-directory {
-		color: var(--foreground);
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.file-row-directory {
-			transition: none;
-		}
-	}
-</style>

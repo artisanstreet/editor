@@ -2,9 +2,9 @@
 	import ChevronDown from "@tabler/icons-svelte/icons/chevron-down";
 	import { Effect, Stream } from "effect";
 	import type { SurfaceUsageAggregate, ThreadSessionPolicy } from "@artisan/protocol";
-	import { BannerService } from "$lib/banner/service";
 	import { ReleaseBrowserObjectUrl } from "$lib/browser/object-url";
 	import { Button } from "$lib/components/ui/button";
+	import { LipCard } from "$lib/components/ui/lip-card";
 	import {
 		MakeComposerGestureIntake,
 		type ComposerGesture,
@@ -13,6 +13,8 @@
 		MakeSubmitGate,
 		type SubmitGate,
 	} from "$lib/thread-interaction/commands";
+	import type { SteeringPendingLipState } from "$lib/thread-interaction/steering-pending-lip";
+	import { MakeSteeringStages } from "$lib/thread-interaction/steering-stages";
 	import {
 		ComposerPlaceholderCharacterDelay,
 		MakeComposerPlaceholderState,
@@ -24,6 +26,8 @@
 		type ComposerSubmission,
 		type ComposerSubmissionHandler,
 	} from "$lib/composer/image-attachments";
+	import type { ThreadMessageSubmissionOutcome } from "$lib/thread-interaction/commands";
+	import type { ComposerActionFailure } from "$lib/composer/action-failure";
 	import { MakeComposerAttachmentIntake } from "$lib/composer/attachment-intake";
 	import {
 		ComposerContextWindowTokens,
@@ -41,18 +45,19 @@
 		RemoveComposerAttachmentMarkers,
 		type ComposerEditorDocument,
 	} from "./composer/dom";
+	import { MakeQueuedSteerActions } from "./composer/queued-steer";
 	import { MakeComposerDraftSession } from "./composer/draft-session";
-	import { MakeComposerMotion } from "./composer/motion";
 	import {
 		SessionDefaultsController,
 		type SessionDefaultsState,
 	} from "$lib/settings/session-defaults-controller";
 	import ImageViewer from "./image-viewer.svelte";
 	import ShaderGlassSurface from "./shader-glass-surface.svelte";
+	import ActionFailureAlert from "./composer/action-failure.svelte";
 	import AttachmentTray from "./composer/attachment-tray.svelte";
 	import ComposerControls from "./composer/controls.svelte";
+	import SteeringLip from "./composer/steering-lip.svelte";
 
-	const banner = yield* BannerService;
 	const defaults_controller = yield* SessionDefaultsController;
 	let defaults_state = $state.raw<SessionDefaultsState>(yield* defaults_controller.Current);
 	const ApplyDefaults = (next: SessionDefaultsState) =>
@@ -74,7 +79,9 @@
 		onjumptolatest,
 		onnewthread,
 		onpolicychange,
+		onsteeringchange,
 		onsubmit,
+		onwithdraw,
 		policy,
 		run_active = false,
 		show_jump_to_latest = false,
@@ -89,7 +96,10 @@
 		onpolicychange?: (
 			policy: ThreadSessionPolicy,
 		) => Effect.Effect<ThreadSessionPolicy, { readonly message: string }>;
+		onsteeringchange?: (pending: boolean) => void;
 		onsubmit?: ComposerSubmissionHandler;
+		/** Recalls one queued steer by the send's own command id, while Forge still holds it. */
+		onwithdraw?: (command_id: string) => Effect.Effect<void, { readonly message: string }>;
 		policy?: ThreadSessionPolicy;
 		run_active?: boolean;
 		show_jump_to_latest?: boolean;
@@ -114,15 +124,38 @@
 
 	let editor = $state<HTMLDivElement | null>(null);
 	let attachments = $state<ReadonlyMap<string, ComposerImageAttachment>>(new Map());
-	let rustling = $state(false);
-	let bumped = $state.raw<ReadonlySet<string>>(new Set());
 	let cancelling = $state(false);
 	let draft = $state("");
 	let image_viewer_open = $state(false);
 	let submitting = $state(false);
 	let viewed_attachment = $state<ComposerImageAttachment | undefined>();
 	let placeholder = $state(MakeComposerPlaceholderState());
+	let pending_lip_state = $state.raw<SteeringPendingLipState<ComposerSubmission>>({
+		next_generation: 0,
+		pending: [],
+	});
+	/** The stages borrow the reactive lip through accessors; the template renders component-owned state. */
+	const steering = MakeSteeringStages<ComposerSubmission>({
+		Lip: () => pending_lip_state,
+		ReplaceLip: (next) => {
+			pending_lip_state = next;
+		},
+		SteeringChanged: (pending) => onsteeringchange?.(pending),
+		Withdraw: (command_id) =>
+			onwithdraw === undefined
+				? Effect.fail({ message: "This surface cannot recall a queued message." })
+				: onwithdraw(command_id),
+	});
 	const submit_gate: SubmitGate = yield* MakeSubmitGate;
+	/** What the last send or attachment refused; the surface itself explains why. */
+	let action_failure = $state.raw<ComposerActionFailure | undefined>(undefined);
+	const ReportActionFailure = (title: string, description: string) =>
+		Effect.gen(function* () {
+			action_failure = { description, title };
+		});
+	const DismissActionFailure = Effect.gen(function* () {
+		action_failure = undefined;
+	});
 
 	/**
 	 * An image has no bytes for the few milliseconds it is being encoded. That is
@@ -144,16 +177,6 @@
 			(draft.trim().length > 0 || attachments.size > 0) &&
 			onsubmit !== undefined,
 	);
-
-	const motion = MakeComposerMotion({
-		Editor: () => editor,
-		SetBumped: (ids) => {
-			bumped = ids;
-		},
-		SetRustling: (value) => {
-			rustling = value;
-		},
-	});
 
 	const UpdateDraft = (value: string, has_attachments = attachments.size > 0) =>
 		Effect.gen(function* () {
@@ -264,12 +287,11 @@
 	/**
 	 * Placing an image is its own ordered job — validate, recognise a re-paste,
 	 * show, encode, settle — so it lives beside the other composer intake. What
-	 * stays here is the part only the component can do: its state and its motion.
+	 * stays here is the part only the component can do: its state and editor placement.
 	 */
 	const intake = MakeComposerAttachmentIntake({
 		Attachments: () => attachments,
 		Blocked: () => disabled || submitting,
-		Bump: motion.BumpAttachments,
 		EngineId: () => policy?.engine_id,
 		Present: (added, range) =>
 			Effect.gen(function* () {
@@ -278,17 +300,21 @@
 					...added.map((attachment) => [attachment.id, attachment] as const),
 				]);
 				yield* InsertAttachments(added, range ?? (yield* ComposerSelectedRange(editor)));
-				yield* motion.StartRustle;
 			}),
 		Remove: DropAttachment,
-		Report: (description) =>
-			Effect.gen(function* () {
-				yield* banner.error("Could not attach image", { description });
-			}),
+		Report: (description) => ReportActionFailure("Could not attach image", description),
 		Revoke: RevokeAttachment,
 		Settle: SettleAttachment,
 	});
 	const AddFiles = intake.AddFiles;
+
+	const queued_steer = MakeQueuedSteerActions({
+		AddFiles,
+		Editor: () => editor,
+		Report: ReportActionFailure,
+		SyncEditor: () => SyncEditor(),
+		Withdraw: steering.Withdraw,
+	});
 
 	const CompleteSubmission = Effect.gen(function* () {
 		for (const attachment of attachments.values()) yield* RevokeAttachment(attachment);
@@ -297,10 +323,16 @@
 		yield* UpdateDraft("");
 		yield* drafts.Clear;
 	});
-	const ReleaseSubmission = Effect.gen(function* () {
-		yield* submit_gate.Release;
-		submitting = false;
-	});
+	const ReleaseSubmission = (
+		retain_pending_lip: boolean,
+		pending_lip_generation: number | undefined,
+	) =>
+		Effect.gen(function* () {
+			yield* submit_gate.Release;
+			submitting = false;
+			if (!retain_pending_lip && pending_lip_generation !== undefined)
+				yield* steering.ReleaseLip(pending_lip_generation);
+		});
 
 	/**
 	 * The one path a composed document leaves through, whatever receives it.
@@ -310,38 +342,97 @@
 	 */
 	const DeliverSubmission = (
 		receiver: () =>
-			| ((submission: ComposerSubmission) => Effect.Effect<unknown, { readonly message: string }>)
+			| ((
+					submission: ComposerSubmission,
+				) => Effect.Effect<ThreadMessageSubmissionOutcome | void, { readonly message: string }>)
 			| undefined,
 		failure_title: string,
+		show_pending_lip = false,
 	) =>
 		Effect.gen(function* () {
 			const deliver = receiver();
 			if (deliver === undefined) return;
 			const editor_document = yield* SyncEditor();
 			const attachment_parts = MakeImageAttachmentParts(attachments, editor_document.tokens);
+			const submission: ComposerSubmission = {
+				attachments: attachment_parts,
+				text: editor_document.text,
+			};
 			if (!attachments_ready) return;
-			if (
-				disabled ||
-				submitting ||
-				(editor_document.text.length === 0 && attachment_parts.length === 0)
-			)
+			if (editor_document.text.length === 0 && attachment_parts.length === 0) return;
+			if (submitting) return;
+			/**
+			 * Enter still lands here while the send button is disarmed; a composed
+			 * message that cannot leave must say so, not silently go nowhere.
+			 */
+			if (disabled || send_blocked_reason !== undefined) {
+				yield* ReportActionFailure(
+					failure_title,
+					send_blocked_reason ??
+						"This surface is still preparing to send. Your message is kept in the composer.",
+				);
 				return;
+			}
 			if (!(yield* submit_gate.Acquire)) return;
 			submitting = true;
+			/** A refusal describes the attempt that produced it, never the next one. */
+			action_failure = undefined;
+			/** The lip alone marks a queued steer; the label waits for the echo. */
+			let pending_lip_generation: number | undefined;
+			if (show_pending_lip && run_active) {
+				pending_lip_generation = steering.Begin(submission, Date.now());
+			}
 
-			yield* deliver({ attachments: attachment_parts, text: editor_document.text }).pipe(
+			let retain_pending_lip = false;
+			yield* deliver(submission).pipe(
 				Effect.matchEffect({
-					onFailure: (error) =>
-						Effect.gen(function* () {
-							yield* banner.error(failure_title, { description: error.message });
-						}),
-					onSuccess: () => CompleteSubmission,
-				}),
-				Effect.ensuring(ReleaseSubmission),
+					onFailure: (error) => ReportActionFailure(failure_title, error.message),
+						onSuccess: (outcome) =>
+							Effect.gen(function* () {
+								yield* CompleteSubmission;
+								const steering_echo = outcome?.steering_echo;
+								const steering_settlement = outcome?.steering_settlement;
+								if (
+									steering_echo === undefined ||
+									steering_settlement === undefined ||
+									pending_lip_generation === undefined
+								)
+									return;
+								retain_pending_lip = true;
+								const steer_generation = pending_lip_generation;
+								const reference = outcome?.user_message_reference;
+								/** A discard asked for while the send was nameless completes here. */
+								if (
+									reference !== undefined &&
+									steering.Bind(steer_generation, reference) &&
+									(yield* queued_steer.TryWithdraw(steer_generation))
+								)
+									return;
+								/**
+								 * Two settlements, in order: the echo moves the message out of
+								 * the queued lip and raises the label, the acknowledgement
+								 * lowers it. An unconfirmed stage must say so rather than
+								 * leave the lip or the label standing.
+								 */
+								const settlement = yield* steering_echo.pipe(
+									Effect.andThen(steering.TakeUp(steer_generation)),
+									Effect.andThen(steering_settlement),
+									Effect.catch((error) =>
+										ReportActionFailure("Could not confirm the steer", error.message),
+									),
+									Effect.ensuring(steering.Settle(steer_generation)),
+									Effect.forkScoped,
+								);
+								steering.Adopt(steer_generation, settlement);
+							}),
+					}),
+				Effect.ensuring(
+					Effect.suspend(() => ReleaseSubmission(retain_pending_lip, pending_lip_generation)),
+				),
 			);
 		});
 
-	const Submit = DeliverSubmission(() => onsubmit, "Could not send message");
+	const Submit = DeliverSubmission(() => onsubmit, "Could not send message", true);
 
 	/**
 	 * The escape hatch while a run holds the primary button: carry the typed
@@ -367,10 +458,9 @@
 		cancelling = true;
 
 		yield* onabort().pipe(
-			Effect.catch((error) =>
+			Effect.catch(() =>
 				Effect.gen(function* () {
 					cancelling = false;
-					yield* banner.error("Could not stop run", { description: error.message });
 				}),
 			),
 		);
@@ -434,80 +524,107 @@
 	yield* drafts.Restore(editor);
 </script>
 
-<div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 px-4 pb-4 sm:px-6 sm:pb-6">
+<div class="prose-column-frame pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 pb-4 sm:pb-6">
 	{#if show_jump_to_latest && onjumptolatest !== undefined}
-		<Button
-			variant="outline"
-			size="icon-sm"
-			class="pointer-events-auto rounded-full bg-surface-100/90 text-muted-foreground shadow-lg backdrop-blur-xl hover:text-foreground"
-			aria-label="Jump to latest"
-			title="Jump to latest"
-			onclick={yield* JumpToLatest}
-		>
-			<ChevronDown class="size-4" aria-hidden="true" />
-		</Button>
-	{/if}
-	<ShaderGlassSurface
-		class="t-resize thread-composer pointer-events-auto mx-auto w-full max-w-(--prose-width) rounded-(--composer-radius)"
-		data-has-attachments={attachments.size > 0}
-		data-rustle={rustling}
-		onanimationend={yield* motion.EndRustle}
-	>
-		<div class="relative z-10 flex min-h-32 flex-col p-2">
-			<AttachmentTray {attachments} {bumped} onremove={RemoveAttachment} onview={ViewAttachment} />
-
-			<div class="relative min-h-16 flex-1">
-				{#if placeholder.visible}
-					{#key placeholder.generation}
-						{@const characters = Array.from(placeholder.phrase)}
-						<div aria-hidden="true" class="placeholder-reveal pointer-events-none absolute inset-x-3 top-2 text-base text-muted-foreground">
-							<span class="placeholder-reveal-line">
-								{#each characters as character, index}
-									<span class="placeholder-character" style={`--placeholder-delay: ${ComposerPlaceholderCharacterDelay(index, characters.length)}ms`}>{character}</span>
-								{/each}
-							</span>
-						</div>
-					{/key}
-				{/if}
-				<div
-					bind:this={editor}
-					class="composer-editor size-full min-h-16 px-3 py-2 text-base outline-none"
-					contenteditable={disabled || submitting ? "false" : "plaintext-only"}
-					role="textbox"
-					tabindex="0"
-					aria-label="Message thread"
-					aria-multiline="true"
-					aria-disabled={disabled || submitting}
-					oninput={yield* SyncEditor()}
-					onkeydown={gestures.SubmitKey}
-					onkeyup={yield* QueueEditorSync}
-					onpaste={gestures.Paste}
-					ondragover={gestures.AcceptFileDrag}
-					ondrop={gestures.Drop}
-					onclick={yield* HandleEditorClick(event)}
-				></div>
-			</div>
-
-			<ComposerControls
-				abort_available={onabort !== undefined}
-				{cancelling}
-				{context_percent}
-				{context_usage}
-				{context_window_tokens}
-				{disabled}
-				{engine_locked}
-				{new_thread_ready}
-				{onpolicychange}
-				onprimaryaction={ActivatePrimaryAction}
-				onstartnewthread={StartNewThread}
-				{policy}
-				{run_active}
-				{runtime_catalog}
-				{send_blocked_reason}
-				{send_ready}
-			/>
+		<div class="prose-column flex w-full max-w-(--prose-width) justify-center">
+			<ShaderGlassSurface class="pointer-events-auto size-8 rounded-full shadow-lg">
+				<Button
+					variant="ghost"
+					size="icon-sm"
+					class="size-full rounded-full bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground"
+					aria-label="Jump to latest"
+					title="Jump to latest"
+					onclick={yield* JumpToLatest}
+				>
+					<ChevronDown class="size-4" aria-hidden="true" />
+				</Button>
+			</ShaderGlassSurface>
 		</div>
-	</ShaderGlassSurface>
+	{/if}
+	<ActionFailureAlert failure={action_failure} ondismiss={DismissActionFailure} />
+	<LipCard
+		class="group/lip prose-column pointer-events-auto w-full max-w-(--prose-width) flex-col-reverse radius-surface data-[open=false]:overflow-visible [--radius-surface:var(--radius-2xl)] [--radius-gap:calc(var(--spacing)*2)]"
+			open={pending_lip_state.pending.length > 0}
+			variant={pending_lip_state.pending.length === 0 ? "glass" : "solid"}
+	>
+		<ShaderGlassSurface
+			class="t-resize thread-composer group/composer w-full radius-surface [--radius-surface:var(--radius-2xl)] [--radius-gap:calc(var(--spacing)*2)] group-data-[open=true]/lip:rounded-t-none [--composer-resize-dur:var(--resize-dur)] [--composer-resize-ease:var(--resize-ease)]"
+			data-has-attachments={attachments.size > 0}
+		>
+			<div class="relative z-10 flex min-h-32 flex-col p-2">
+				<!-- The editor stays live under the stack: queued steers must not block composing the next one. -->
+				<div class="flex flex-1 flex-col">
+					<AttachmentTray {attachments} onremove={RemoveAttachment} onview={ViewAttachment} />
+
+					<div class="relative min-h-16 flex-1">
+						{#if placeholder.visible}
+							{#key placeholder.generation}
+								{@const characters = Array.from(placeholder.phrase)}
+								<div aria-hidden="true" class="placeholder-reveal pointer-events-none absolute inset-x-3 top-2 text-base text-muted-foreground">
+									<span class="placeholder-reveal-line">
+										{#each characters as character, index}
+											<span class="placeholder-character" style={`--placeholder-delay: ${ComposerPlaceholderCharacterDelay(index, characters.length)}ms`}>{character}</span>
+										{/each}
+									</span>
+								</div>
+							{/key}
+						{/if}
+						<div
+							bind:this={editor}
+							class="composer-editor size-full min-h-16 cursor-text px-3 py-2 text-base whitespace-pre-wrap [overflow-wrap:anywhere] outline-none empty:before:content-['']"
+							contenteditable={disabled || submitting ? "false" : "plaintext-only"}
+							role="textbox"
+							tabindex="0"
+							aria-label="Message thread"
+							aria-multiline="true"
+							aria-disabled={disabled || submitting}
+							oninput={yield* SyncEditor()}
+							onkeydown={gestures.SubmitKey}
+							onkeyup={yield* QueueEditorSync}
+							onpaste={gestures.Paste}
+							ondragover={gestures.AcceptFileDrag}
+							ondrop={gestures.Drop}
+							onclick={yield* HandleEditorClick(event)}
+						></div>
+					</div>
+				</div>
+
+				<ComposerControls
+					abort_available={onabort !== undefined}
+					{cancelling}
+					{context_percent}
+					{context_usage}
+					{context_window_tokens}
+					{disabled}
+					{engine_locked}
+					{new_thread_ready}
+					{onpolicychange}
+					onprimaryaction={ActivatePrimaryAction}
+					onstartnewthread={StartNewThread}
+					{policy}
+					{run_active}
+					{runtime_catalog}
+					{send_blocked_reason}
+					{send_ready}
+				/>
+			</div>
+		</ShaderGlassSurface>
+
+		{#snippet lip()}
+			{#each pending_lip_state.pending as pending_steer (pending_steer.generation)}
+				<div class="t-lip-row">
+					<div class="t-lip-row-inner">
+						<SteeringLip
+							editable={onwithdraw !== undefined}
+							ondiscard={queued_steer.Discard(pending_steer)}
+							onedit={queued_steer.Edit(pending_steer)}
+							text={pending_steer.submission.text.trim() || "Attached image"}
+						/>
+					</div>
+				</div>
+			{/each}
+		{/snippet}
+	</LipCard>
 </div>
 
 <ImageViewer
@@ -516,42 +633,3 @@
 	name={viewed_attachment?.name}
 	onclose={ClearViewedAttachment}
 />
-
-<style>
-	.composer-editor {
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
-		cursor: text;
-	}
-	.composer-editor:empty::before {
-		content: "";
-	}
-	.placeholder-reveal-line {
-		display: block;
-		white-space: pre;
-	}
-	.placeholder-character {
-		display: inline-block;
-		animation: placeholder-reveal-in 280ms cubic-bezier(0.34, 1.56, 0.64, 1)
-			var(--placeholder-delay) both;
-		will-change: opacity, transform;
-	}
-
-	@keyframes placeholder-reveal-in {
-		from {
-			opacity: 0;
-			transform: translateY(2px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.placeholder-character {
-			transition: none !important;
-			will-change: auto;
-		}
-	}
-</style>

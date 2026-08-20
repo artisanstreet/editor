@@ -79,12 +79,10 @@ const client_error_codes: Readonly<Record<ArtisanClientErrorCode, ArtisanVisible
 	event_overflow: ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED,
 	malformed: ArtisanErrorCode.TRANSPORT_MALFORMED,
 	protocol: ArtisanErrorCode.PROTOCOL_FAILURE,
-	request_overflow: ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED,
 	stream_closed: ArtisanErrorCode.CLIENT_STATE_FAILURE,
 	stream_gap: ArtisanErrorCode.CLIENT_STATE_FAILURE,
 	stream_not_found: ArtisanErrorCode.CLIENT_STATE_FAILURE,
 	stream_overflow: ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED,
-	subscription_overflow: ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED,
 };
 
 const pairing_protocol_codes = new Set(["invalid_pairing_code", "pairing_required"]);

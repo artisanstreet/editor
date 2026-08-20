@@ -115,25 +115,33 @@
 			}),
 		),
 	);
-	const LoadDiscovery = Effect.gen(function* () {
-		const { health, others } = yield* DiscoverForge;
-		const reachable_health = Option.getOrUndefined(health);
-		origin_reachable = reachable_health !== undefined;
-		origin_development = reachable_health?.development === true;
-		other_instances = others;
-	}).pipe(
-		Effect.catch(() =>
-			Effect.gen(function* () {
+	let failure_load_generation = 0;
+	const LoadFailureContext = (generation: number) =>
+		Effect.gen(function* () {
+			const [discovery, next_journal] = yield* Effect.all(
+				[DiscoverForge.pipe(Effect.option), read_diagnostics],
+				{ concurrency: "unbounded" },
+			);
+			if (generation !== failure_load_generation) return;
+			if (Option.isSome(discovery)) {
+				const reachable_health = Option.getOrUndefined(discovery.value.health);
+				origin_reachable = reachable_health !== undefined;
+				origin_development = reachable_health?.development === true;
+				other_instances = discovery.value.others;
+			} else {
 				yield* ClearDiscovery;
-			}),
-		),
-	);
+			}
+			journal = next_journal;
+		});
 
 	// Top-level SER work re-runs when the gate's reactive visibility changes.
 	if (is_visible && presentation.tone === "error") {
-		yield* LoadDiscovery;
-		journal = yield* read_diagnostics;
+		const generation = ++failure_load_generation;
+		yield* ClearDiscovery;
+		journal = { dropped: 0, events: [] };
+		yield* LoadFailureContext(generation).pipe(Effect.forkScoped);
 	} else {
+		failure_load_generation += 1;
 		yield* ClearDiscovery;
 	}
 	let previous_focus: HTMLElement | null = null;
@@ -268,7 +276,7 @@
 					highlight band onto the same letters, so contrast never drops.
 					Pure CSS because transition directives deadlock the async renderer.
 				-->
-				<div class="logo-progress relative text-muted-foreground select-none">
+				<div class="relative text-muted-foreground select-none motion-reduce:text-foreground">
 					<ArtisanLogo />
 					<div class="banner-shimmer absolute inset-0" aria-hidden="true">
 						<ArtisanLogo />
@@ -407,7 +415,7 @@
 			{:else}
 				<!-- Keyed so re-entering a progress phase restarts the 5s intent delay. -->
 				{#key model.state.phase}
-					<p class="late-reassurance text-sm text-muted-foreground">
+					<p class="text-sm text-muted-foreground opacity-0 animate-[reassurance-in_500ms_var(--ease-in-out)_5s_forwards]">
 						<span class="font-medium">This is taking more time than expected…</span>
 						{progress_detail}
 					</p>
@@ -416,79 +424,3 @@
 		</section>
 	</div>
 {/if}
-
-<style>
-	/*
-	 * The sweeping highlight, painted only through the clone's own letterforms:
-	 * the gradient is the clone's background, clipped to its text, while the
-	 * glyph color itself stays transparent.
-	 */
-	.banner-shimmer {
-		pointer-events: none;
-		background-image: linear-gradient(
-			90deg,
-			transparent 0%,
-			transparent 40%,
-			var(--foreground) 50%,
-			transparent 60%,
-			transparent 100%
-		);
-		background-size: 400% 100%;
-		background-repeat: no-repeat;
-		-webkit-background-clip: text;
-		background-clip: text;
-		color: transparent;
-		-webkit-text-fill-color: transparent;
-		animation: t-shimmer 2000ms linear infinite;
-	}
-
-	@keyframes t-shimmer {
-		0% {
-			background-position: 100% 0;
-		}
-
-		100% {
-			background-position: 0% 0;
-		}
-	}
-
-	/*
-	 * The reassurance line holds off for 5s of intent delay, then rises in
-	 * with the texts-reveal treatment (fade + rise + blur settle).
-	 */
-	.late-reassurance {
-		opacity: 0;
-		animation: reassurance-in var(--duration-very-slow, 500ms) var(--ease-in-out, ease-in-out)
-			5s forwards;
-	}
-
-	@keyframes reassurance-in {
-		from {
-			opacity: 0;
-			transform: translateY(0.25rem);
-			filter: blur(2px);
-		}
-
-		to {
-			opacity: 1;
-			transform: translateY(0);
-			filter: blur(0);
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		/* The sweep goes; the base mark lifts to full contrast in its place. */
-		.banner-shimmer {
-			display: none;
-		}
-
-		.logo-progress {
-			color: var(--foreground);
-		}
-
-		/* The intent delay stays; only the motion goes. */
-		.late-reassurance {
-			animation: reassurance-in 0s linear 5s forwards;
-		}
-	}
-</style>

@@ -5,14 +5,14 @@ import type { ThreadListItem } from "@artisan/protocol";
 import {
 	ApplyRootThreadListUpdate,
 	FormatRecentThreadTime,
-	NoSettledThreads,
 	PinnedThreads,
 	ProjectScopedThreadGroups,
 	ResolveThreadRoute,
 	SettledThreads,
-	SettleThread,
-	SettleThreadStamp,
-	ThreadRailDisplayEntries,
+	ThreadNeedsAttention,
+	ThreadSettled,
+	ThreadRailTimeGroups,
+	ThreadUnread,
 	ThreadRouteId,
 	ThreadRouteHasWorkspace,
 	ThreadRouteOwnsTarget,
@@ -30,6 +30,8 @@ const MakeThread = (
 	created_at: "2026-07-25T10:00:00.000Z",
 	current_goal: undefined,
 	last_activity_at,
+	reader_activity_at: last_activity_at,
+	reader_acknowledged_activity_at: undefined,
 	live_status: "Idle",
 	metadata_version: 1,
 	pinned: false,
@@ -159,6 +161,33 @@ describe("root thread navigation", () => {
 		expect(FormatRecentThreadTime("2026-07-24T12:00:00.000Z", now)).toBe("Yesterday");
 	});
 
+	it("sorts settled rows newest-first into the requested elapsed-time groups", () => {
+		const now = Date.parse("2026-08-10T12:00:00.000Z");
+		const groups = ThreadRailTimeGroups(
+			[
+				MakeThread("older", "2026-07-01T12:00:00.000Z"),
+				MakeThread("seven-days-minus-ms", "2026-08-03T12:00:00.001Z"),
+				MakeThread("seven-days", "2026-08-03T12:00:00.000Z"),
+				MakeThread("three-days", "2026-08-07T12:00:00.000Z"),
+				MakeThread("two-days", "2026-08-08T12:00:00.000Z"),
+				MakeThread("one-day", "2026-08-09T12:00:00.000Z"),
+				MakeThread("today-newer", "2026-08-10T11:00:00.000Z"),
+				MakeThread("today-older", "2026-08-10T10:00:00.000Z"),
+			],
+			now,
+		);
+
+		expect(
+			groups.map((group) => [group.label, group.threads.map((thread) => thread.thread_id)]),
+		).toEqual([
+			[undefined, ["today-newer", "today-older"]],
+			["Yesterday", ["one-day"]],
+			["Last 3 days", ["two-days"]],
+			["Last 7 days", ["three-days", "seven-days-minus-ms"]],
+			["Past month", ["seven-days", "older"]],
+		]);
+	});
+
 	it("keeps non-resting threads in the pinned rail freshest first", () => {
 		const threads = [
 			{ ...MakeThread("resting", "2026-07-25T14:00:00.000Z"), live_status: "Idle" },
@@ -183,97 +212,119 @@ describe("root thread navigation", () => {
 		]);
 	});
 
-	it("keeps an active thread pinned even if a stale local stamp exists", () => {
+	it("does not interpret assistant preview prose as lifecycle state", () => {
+		for (const last_assistant_message of [
+			"Complete",
+			"Waiting for answer",
+			"Failed to complete",
+		]) {
+			const thread = {
+				...MakeThread(last_assistant_message, "2026-07-25T18:00:00.000Z"),
+				last_assistant_message,
+				live_status: "Working",
+			};
+
+			expect(WorkingThreads([thread])).toEqual([thread]);
+		}
+	});
+
+	it("keeps an active thread pinned even when Forge records an acknowledgement", () => {
 		const working = {
 			...MakeThread("working", "2026-07-25T12:00:00.000Z"),
 			live_status: "Streaming",
 		};
-		const unread = MakeThread("unread", "2026-07-25T11:00:00.000Z");
-		const threads = [working, unread];
-		const unread_ids = new Set([unread.thread_id]);
+		const idle = MakeThread("idle", "2026-07-25T11:00:00.000Z");
+		const threads = [working, idle];
+		expect(ThreadUnread(working)).toBe(true);
+		expect(ThreadNeedsAttention(working)).toBe(false);
+		expect(ThreadUnread(idle)).toBe(true);
+		expect(ThreadNeedsAttention(idle)).toBe(false);
 
-		expect(PinnedThreads(threads, unread_ids).map((thread) => thread.thread_id)).toEqual([
+		expect(PinnedThreads(threads).map((thread) => thread.thread_id)).toEqual(["working"]);
+
+		const acknowledged = {
+			...working,
+			reader_acknowledged_activity_at: working.reader_activity_at,
+		};
+		expect(PinnedThreads([acknowledged, idle]).map((thread) => thread.thread_id)).toEqual([
 			"working",
-			"unread",
 		]);
-
-		const settled = SettleThread(NoSettledThreads, working);
-		expect(settled).toBe(NoSettledThreads);
-		expect(
-			PinnedThreads(threads, unread_ids, settled).map((thread) => thread.thread_id),
-		).toEqual(["working", "unread"]);
-		/** A live run never lands in the settled list because the stamp is only local UI state. */
-		expect(
-			SettledThreads(threads, unread_ids, settled).map((thread) => thread.thread_id),
-		).toEqual([]);
+		/** A live run never lands in the settled list despite its durable acknowledgement. */
+		expect(SettledThreads([acknowledged, idle]).map((thread) => thread.thread_id)).toEqual([
+			"idle",
+		]);
 
 		/** New activity is a new reason to look, so the dismissal expires with it. */
-		const spoke_again = [{ ...working, last_activity_at: "2026-07-25T13:00:00.000Z" }, unread];
-		expect(
-			PinnedThreads(spoke_again, unread_ids, settled).map((thread) => thread.thread_id),
-		).toEqual(["working", "unread"]);
+		const spoke_again = [
+			{
+				...acknowledged,
+				last_activity_at: "2026-07-25T13:00:00.000Z",
+				reader_activity_at: "2026-07-25T13:00:00.000Z",
+			},
+			idle,
+		];
+		expect(PinnedThreads(spoke_again).map((thread) => thread.thread_id)).toEqual(["working"]);
 	});
 
-	it("settles a thread the reader opened until it speaks again after they left", () => {
-		const attention = {
-			...MakeThread("attention", "2026-07-25T12:00:00.000Z"),
+	it("keeps unattended completion and failure pinned until Forge records them as read", () => {
+		const complete = {
+			...MakeThread("complete", "2026-07-25T12:00:00.000Z"),
+			live_status: "Complete",
+		};
+		const failed = {
+			...MakeThread("failed", "2026-07-25T13:00:00.000Z"),
 			live_status: "Failed to complete",
 		};
-		const unread_ids = new Set<string>();
 
-		expect(PinnedThreads([attention], unread_ids).map((thread) => thread.thread_id)).toEqual([
-			"attention",
+		expect(PinnedThreads([complete, failed]).map((thread) => thread.thread_id)).toEqual([
+			"failed",
+			"complete",
+		]);
+		expect(ThreadNeedsAttention(complete)).toBe(true);
+		expect(ThreadNeedsAttention(failed)).toBe(true);
+
+		const read = [complete, failed].map((thread) => ({
+			...thread,
+			reader_acknowledged_activity_at: thread.reader_activity_at,
+		}));
+		expect(read.every(ThreadSettled)).toBe(true);
+		expect(PinnedThreads(read)).toEqual([]);
+		expect(SettledThreads(read).map((thread) => thread.thread_id)).toEqual([
+			"failed",
+			"complete",
 		]);
 
-		/** Reading it is what the pinned group was asking for, so it drops to the list. */
-		const read = SettleThreadStamp(
-			NoSettledThreads,
-			attention.thread_id,
-			attention.last_activity_at,
-		);
-		expect(PinnedThreads([attention], unread_ids, read)).toEqual([]);
-		expect(
-			SettledThreads([attention], unread_ids, read).map((thread) => thread.thread_id),
-		).toEqual(["attention"]);
-
-		/**
-		 * The open thread re-settles against every activity it reports, so the
-		 * same stamp must not mint a new map and rebuild both rail groups.
-		 */
-		expect(SettleThreadStamp(read, attention.thread_id, attention.last_activity_at)).toBe(read);
-
-		/** A follow-up needs no special case: the run it triggers pins the thread again. */
-		const replied = [{ ...attention, last_activity_at: "2026-07-25T13:00:00.000Z" }];
-		expect(PinnedThreads(replied, unread_ids, read).map((thread) => thread.thread_id)).toEqual([
-			"attention",
-		]);
-
-		/** Watching that activity arrive counts as reading it too. */
-		const kept_up = SettleThreadStamp(read, attention.thread_id, "2026-07-25T13:00:00.000Z");
-		expect(PinnedThreads(replied, unread_ids, kept_up)).toEqual([]);
+		/** A newer root-visible activity makes the thread unread again. */
+		const replied = {
+			...read[0]!,
+			last_activity_at: "2026-07-25T14:00:00.000Z",
+			reader_activity_at: "2026-07-25T14:00:00.000Z",
+		};
+		expect(PinnedThreads([replied])).toEqual([replied]);
 	});
 
-	it("bounds rail stress copies without changing navigable source identities", () => {
-		const threads = [
-			MakeThread("thread-one", "2026-07-25T12:00:00.000Z"),
-			MakeThread("thread-two", "2026-07-25T11:00:00.000Z"),
-		];
+	it("does not move the root read cursor for hidden worker-only activity", () => {
+		const root_activity_at = "2026-07-25T12:00:00.000Z";
+		const thread = {
+			...MakeThread("worker-finished", "2026-07-25T13:00:00.000Z"),
+			live_status: "Working",
+			reader_activity_at: root_activity_at,
+		};
+		const read = { ...thread, reader_acknowledged_activity_at: root_activity_at };
 
-		for (const multiplier of [Number.NaN, Number.NEGATIVE_INFINITY, -3, 0, 0.9]) {
-			expect(ThreadRailDisplayEntries(threads, multiplier)).toHaveLength(2);
-		}
-		expect(ThreadRailDisplayEntries(threads, 99)).toHaveLength(40);
-
-		const entries = ThreadRailDisplayEntries(threads, 3);
-		expect(entries.map((entry) => entry.thread.thread_id)).toEqual([
-			"thread-one",
-			"thread-one",
-			"thread-one",
-			"thread-two",
-			"thread-two",
-			"thread-two",
+		/** Hidden worker recency cannot expire the root-visible acknowledgement. */
+		expect(ThreadSettled({ ...read, live_status: "Complete" })).toBe(true);
+		expect(SettledThreads([{ ...read, live_status: "Complete" }])).toEqual([
+			{ ...read, live_status: "Complete" },
 		]);
-		expect(new Set(entries.map((entry) => entry.render_id)).size).toBe(entries.length);
+
+		/** The aggregate/root lifecycle does advance it and therefore needs a new read. */
+		const root_completed = {
+			...thread,
+			live_status: "Complete",
+			reader_activity_at: thread.last_activity_at,
+		};
+		expect(PinnedThreads([root_completed])).toEqual([root_completed]);
 	});
 });
 

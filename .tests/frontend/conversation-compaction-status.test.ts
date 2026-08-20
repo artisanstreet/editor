@@ -22,10 +22,7 @@ describe("conversation compaction status", () => {
 	});
 
 	it("keeps one label mounted and stops its shimmer after compaction", () => {
-		const compaction = status.slice(
-			status.indexOf('{:else if item.type === "compaction"}'),
-			status.indexOf('{:else if item.type === "native_event"}'),
-		);
+		const compaction = status.slice(status.indexOf('{:else if item.type === "compaction"}'));
 
 		expect(compaction.match(/<ShimmerText/gu)).toHaveLength(1);
 		expect(compaction).toContain('active={item.state === "started"}');

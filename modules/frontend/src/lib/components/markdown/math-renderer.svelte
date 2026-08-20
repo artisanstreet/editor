@@ -1,9 +1,9 @@
 <script lang="ts" effect>
-	import { Data, Effect } from "effect";
-
-	class MathRendererLoadFailure extends Data.TaggedError("MathRendererLoadFailure")<{
-		readonly cause: unknown;
-	}> {}
+	import { Effect, Stream } from "effect";
+	import {
+		MathRendererController,
+		type MathRendererState,
+	} from "./math-renderer-controller";
 
 	let {
 		content,
@@ -13,15 +13,21 @@
 		class?: string;
 	} = $props();
 	const is_inline = $derived(class_name.split(" ").includes("inline"));
-	yield* Effect.tryPromise({
-		catch: (cause) => new MathRendererLoadFailure({ cause }),
-		try: () => import("katex/dist/katex.min.css"),
-	});
-	const { render_conversation_math } = yield* Effect.tryPromise({
-		catch: (cause) => new MathRendererLoadFailure({ cause }),
-		try: () => import("./math-rendering"),
-	});
-	const rendered = $derived(render_conversation_math(content, !is_inline));
+	const renderer_controller = yield* MathRendererController;
+	let renderer_state = $state.raw<MathRendererState>(yield* renderer_controller.Current);
+	const ApplyRendererState = (next: MathRendererState) =>
+		Effect.gen(function* () {
+			renderer_state = next;
+		});
+	yield* renderer_controller.Changes.pipe(Stream.runForEach(ApplyRendererState), Effect.forkScoped);
+	if (renderer_state._tag === "Loading") {
+		yield* renderer_controller.Refresh.pipe(Effect.forkScoped);
+	}
+	const rendered = $derived(
+		renderer_state._tag === "Ready"
+			? renderer_state.render(content, !is_inline)
+			: { status: "invalid" } as const,
+	);
 </script>
 
 {#if rendered.status === "rendered"}

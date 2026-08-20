@@ -10,6 +10,8 @@ import {
 	ConversationIsFollowing,
 } from "../../modules/frontend/src/lib/conversation/scroll-position";
 
+import { ReadStylesheets } from "./stylesheet-source";
+
 const read = (path: string) => readFileSync(resolve(path), "utf8");
 
 describe("transcript auto-follow", () => {
@@ -63,7 +65,7 @@ describe("turn settlement", () => {
 		expect(route).toContain("let view_state = $state.raw<ConversationViewState | undefined>()");
 		expect(route).toContain("conversation_view_state={view_state}");
 		expect(workspace).toContain("conversation_view_state?: ConversationViewState");
-		expect(workspace).toContain("MakeConversationRenderWindow(");
+		expect(workspace).toContain("MakeParticipantConversationRenderWindow(");
 		expect(workspace).not.toContain("MakeConversationViewState(snapshot)");
 	});
 
@@ -76,9 +78,9 @@ describe("turn settlement", () => {
 		expect(workspace).toContain("if (loading_older_turns) return;");
 		expect(workspace).toContain("disabled={loading_older_turns}");
 		expect(workspace).toContain("Effect.ensuring(");
-		expect(workspace).toContain("MakeConversationRenderWindow(");
+		expect(workspace).toContain("MakeParticipantConversationRenderWindow(");
 		expect(workspace).toContain(
-			"{#each visible_render_groups as render_group (render_group.turn_id)}",
+			"{#each visible_render_groups as render_group (render_group.segment_id)}",
 		);
 		expect(workspace).toContain("Show earlier turns ({hidden_render_group_count})");
 		expect(workspace).toContain(
@@ -98,8 +100,13 @@ describe("turn settlement", () => {
 		expect(route).toContain(
 			"if (applicable.some(PatchSettlesTurn)) yield* RefreshInteractionContext;",
 		);
+		/**
+		 * `interrupted` settles too: nothing further arrives on its own, so the
+		 * work item must be re-read rather than left mid-turn until a resume that
+		 * may never come.
+		 */
 		expect(route).toContain(
-			'settled_lifecycles = new Set(["completed", "failed", "cancelled"])',
+			'settled_lifecycles = new Set(["completed", "failed", "interrupted", "cancelled"])',
 		);
 	});
 
@@ -133,11 +140,23 @@ describe("turn settlement", () => {
 		expect(trace).not.toContain("$ {PresentShellCommand");
 	});
 
-	it("settles trace shimmer with the same reconciled session authority as its header", () => {
+	/**
+	 * The nested trace's shimmer is the same liveness question the header
+	 * answers, so it reads the same settled fact. It named a deleted
+	 * `session_authority` binding for a while, which is not a stale value but an
+	 * undeclared identifier: rendering the details of a live work session threw
+	 * a ReferenceError, took the transcript down with it, and left the composer
+	 * holding a run that had already ended.
+	 */
+	it("settles trace shimmer on the same session status as its header", () => {
 		const workspace = read("modules/frontend/src/routes/components/thread-workspace.svelte");
 
-		expect(workspace).toContain("work_active={block.session.ended_at === undefined &&");
-		expect(workspace).toContain('session_authority === "active"');
+		expect(workspace).toContain(
+			"{@const session_settled = work_session_is_settled(block.session.status)}",
+		);
+		expect(workspace).toContain("work_active={!session_settled &&");
+		expect(workspace).toContain("block.session.ended_at === undefined}");
+		expect(workspace).not.toContain("session_authority");
 	});
 });
 
@@ -151,16 +170,23 @@ describe("activity group header", () => {
 	it("summarises the chain rather than following its running command", () => {
 		const trace = read("modules/frontend/src/routes/components/conversation-trace.svelte");
 
-		expect(trace).toContain("const GroupIsLive = (");
 		expect(trace).toContain("{@const clauses = GroupClauses(segment.id, segment.items)}");
 		/**
-		 * One element whether or not the chain is live. Branching to a plain span
+		 * The shimmer belongs to the clause whose work is live, not the chain. A
+		 * group-wide sweep meant a backgrounded subagent kept "Ran a command,
+		 * talked to Maja" shimmering as one sentence, implying the settled command
+		 * was also still running.
+		 */
+		expect(trace).toContain("live: work_active && members.some(conversation_activity_is_live)");
+		expect(trace).toContain("active={clause.live}");
+		expect(trace).not.toContain("const GroupIsLive = (");
+		/**
+		 * One element whether or not its clause is live. Branching to a plain span
 		 * on settle replaced the subtree, and a chain goes quiet between every
 		 * call — so each gap remounted the clauses and replayed their entrance,
 		 * leaving the label reading "Read 2 files," with nothing after it.
 		 */
-		expect(trace).toContain("active={live}");
-		expect(trace).toContain("trace-head-label min-w-0 flex-1 truncate");
+		expect(trace).toContain("min-w-0 flex-1 truncate text-inherit tabular-nums");
 		expect(trace).not.toContain("{@render summary()}");
 		expect(trace).not.toContain("const HeadLabel = (");
 		/** Neither the last command nor the running one may replace the summary. */
@@ -176,25 +202,43 @@ describe("activity group header", () => {
 	 */
 	it("edits counts in place and animates only a newly added clause", () => {
 		const trace = read("modules/frontend/src/routes/components/conversation-trace.svelte");
+		const styles = ReadStylesheets();
 
 		expect(trace).toContain("{#each clauses as clause (clause.category)}");
-		expect(trace).toContain("font-variant-numeric: tabular-nums;");
-		expect(trace).toContain("@keyframes trace-clause-in");
+		expect(trace).toContain("truncate text-inherit tabular-nums");
+		expect(styles).toContain("@keyframes trace-clause-in");
 		/** `width` has no tween to `auto`; the track carries the growth instead. */
-		expect(trace).toContain("grid-template-columns: 0fr;");
-		expect(trace).toContain("animation: trace-clause-in var(--duration-fast)");
+		expect(styles).toContain("grid-template-columns: 0fr;");
+		expect(styles).toContain("animation: trace-clause-in var(--duration-fast)");
 		/**
 		 * Only a clause added to a chain already on screen animates. Animating the
 		 * ones a chain arrives with mounted the header as an icon and a chevron
 		 * either side of nothing for the length of its own entrance.
 		 */
 		expect(trace).toContain("const painted_clauses = new Map<");
-		expect(trace).toContain('clause.entering ? "trace-clause-entering" : ""');
+		expect(trace).toContain('data-entering={clause.entering ? "true" : undefined}');
 		/** Remounting the whole label on every count is what the parts replaced. */
 		expect(trace).not.toContain("{#key head}");
 		expect(trace).not.toContain("t-text-swap-in");
 		/** Directives take an identifier straight after the colon; CSS puts a space there. */
 		expect(trace).not.toMatch(/\s(?:in|out|transition):[a-z]/);
+	});
+
+	it("retires an outgoing odometer glyph after its roll, even beneath shimmer text", () => {
+		const styles = ReadStylesheets();
+		const outgoing = styles.slice(
+			styles.indexOf('& .trace-count-char[data-outgoing="true"]'),
+			styles.indexOf("\n\t}", styles.indexOf('& .trace-count-char[data-outgoing="true"]')),
+		);
+		const exit = styles.slice(
+			styles.indexOf("@keyframes trace-count-out"),
+			styles.indexOf("\n}", styles.indexOf("@keyframes trace-count-out")),
+		);
+
+		/** The exit keeps its glyph visible for the roll, then makes its filled state non-painting. */
+		expect(outgoing).toContain("visibility: hidden;");
+		expect(exit).toContain("visibility: visible;");
+		expect(exit).toContain("to {\n\t\tvisibility: hidden;");
 	});
 
 	/** A started handoff must not make a target-only claim until its source is durable. */
@@ -208,16 +252,28 @@ describe("activity group header", () => {
 
 	it("fades only overflowing command text, leaving its icon and chevron outside the mask", () => {
 		const trace = read("modules/frontend/src/routes/components/conversation-trace.svelte");
+		const styles = ReadStylesheets();
 
 		expect(trace).toContain("trace-command-label min-w-0 flex-1 font-mono text-sm");
-		expect(trace).toContain('class="trace-acc-chevron -ml-1 flex shrink-0"');
+		expect(trace).toContain("group-data-[open=true]/trace-acc:rotate-90");
+		expect(trace).toContain('class="t-acc group/trace-acc flex flex-col"');
+		/**
+		 * A live work-session is itself an open disclosure. Its state must not
+		 * cascade into a nested command/tool disclosure and make that group look
+		 * permanently open regardless of its own button state.
+		 */
+		expect(styles).toContain("& > .t-acc-panel {");
+		expect(styles).toContain('&[data-open="true"] > .t-acc-panel {');
+		expect(styles).toContain("& > .t-acc-panel > .t-acc-panel-inner {");
+		expect(styles).toContain('&[data-open="true"] > .t-acc-panel > .t-acc-panel-inner {');
+		expect(styles).not.toContain('&[data-open="true"] .t-acc-panel {');
 		expect(trace).toContain('class="trace-acc-head flex w-fit max-w-full');
-		expect(trace).toContain("-webkit-mask-image: linear-gradient(");
-		expect(trace).toContain("mask-image: linear-gradient(");
-		expect(trace).toContain("to right");
-		expect(trace).toContain("animation-timeline: scroll(self inline)");
-		expect(trace).toContain("animation-range: 0 100%");
-		expect(trace).toContain("--trace-command-fade-end: 0px");
+		expect(styles).toContain("-webkit-mask-image: linear-gradient(");
+		expect(styles).toContain("mask-image: linear-gradient(");
+		expect(styles).toContain("to right");
+		expect(styles).toContain("animation-timeline: scroll(self inline)");
+		expect(styles).toContain("animation-range: 0 100%");
+		expect(styles).toContain("--trace-command-fade-end: 0px");
 	});
 
 	it("carries the failed tone onto the chevron, not just the label", () => {
@@ -233,15 +289,17 @@ describe("activity group header", () => {
 describe("orphaned work sessions", () => {
 	/**
 	 * A run can die without emitting its terminal lifecycle event — a Forge
-	 * restart takes the engine process with it — leaving the session with no
-	 * `ended_at` and the transcript thinking forever while the composer, which
-	 * reads the durable work item, correctly shows the run as over. The settle
-	 * must flow through `work_session_settlement`, which keeps the send gap —
-	 * session on screen before the durable work item catches up — waiting
-	 * rather than flashing a fabricated header, and settles a run that died
-	 * unanswered as the failure it is instead of waiting forever.
+	 * restart takes the engine process with it. That used to be repaired in the
+	 * renderer by settling against the separately fetched durable work item,
+	 * which put the header's liveness on a different transport from the
+	 * transcript it describes: when nothing refreshed that item, a finished run
+	 * left the header thinking while the thread list lit its attention dot.
+	 *
+	 * Settlement now reads the session's own projected status, which arrives in
+	 * sequence with the transcript, and the orphan is closed where it belongs —
+	 * startup recovery journals the interruption and it lands as a patch.
 	 */
-	it("settles a session the durable work item says is no longer running", () => {
+	it("settles a session from its own projected status rather than a second source", () => {
 		const session = read(
 			"modules/frontend/src/routes/components/conversation-work-session.svelte",
 		);
@@ -249,17 +307,41 @@ describe("orphaned work sessions", () => {
 
 		expect(session).toContain("work_session_settlement({");
 		expect(session).toContain("ended_at: item.ended_at,");
-		expect(session).toContain("provider_responded,");
+		expect(session).toContain("status: item.status,");
 		expect(session).toContain("updated_at: item.updated_at,");
 		/** The raw fallback would resurrect the send-gap "Thought for 0s" flash. */
 		expect(session).not.toContain("run_active ? undefined : item.updated_at");
 		expect(session).toContain("const is_working = $derived(ended_at === undefined);");
-		/** A dead unanswered run reads as the failure it is, in the failed tone. */
-		expect(session).toContain("settlement?.presumed_failed === true");
 		/** The label must read the reconciled end, not the raw item field. */
 		expect(session).not.toContain("FormatDuration(item.started_at, item.ended_at)");
-		/** Forwarded, wherever it sits in the prop list. */
-		expect(workspace).toContain("run_authority={session_authority}");
+		/**
+		 * No cross-stream authority may return: the work item reaches the
+		 * renderer on its own transport, so reinstating it here reinstates the
+		 * disagreement.
+		 */
+		expect(session).not.toContain("run_authority");
+		expect(session).not.toContain("presumed_failed");
+		expect(workspace).not.toContain("run_authority=");
+	});
+
+	/**
+	 * A host restart is not an error, and red only means anything while it is
+	 * reserved for work that actually went wrong. An interrupted run therefore
+	 * reads as a stop. The status names the outcome directly now, so there is no
+	 * heuristic left that could mistake being killed mid-turn for a failure.
+	 */
+	it("presents an interrupted run as stopped rather than failed", () => {
+		const session = read(
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
+		);
+
+		expect(session).toContain(
+			'const is_stopped = $derived(item.status === "cancelled" || item.status === "interrupted");',
+		);
+		expect(session).toContain('const is_failed = $derived(item.status === "failed");');
+		/** The failed tone is what drives every destructive class on the card. */
+		expect(session).toContain('${is_failed ? "text-destructive" : ""}');
+		expect(session).toContain("`Stopped after ${FormatDuration(item.started_at, ended_at)}`");
 	});
 
 	/**
@@ -282,16 +364,20 @@ describe("orphaned work sessions", () => {
 	 * The pending reference is a dependency of the statement that anchors a sent
 	 * turn, so clearing it re-runs that statement and interrupts it. Run inline,
 	 * the anchor pass yields for a tick before it can measure and was cut every
-	 * time — the re-run carries no reference and falls through to the relayout
-	 * branch, which never scrolls.
+	 * time. `forkScoped` was cut the same way: it forks into the reactive run's
+	 * scope, which the rerun closes. Only a fork into a component-lifetime scope
+	 * survives long enough to scroll.
 	 */
 	it("anchors a sent turn outside the statement its own bookkeeping restarts", () => {
 		const workspace = read("modules/frontend/src/routes/components/thread-workspace.svelte");
 
-		expect(workspace).toContain("UpdateAnchorLayout(true).pipe(Effect.forkScoped)");
+		expect(workspace).toContain("const anchor_scope = yield* Scope.make();");
+		expect(workspace).toContain("Scope.close(anchor_scope, Exit.void)");
+		expect(workspace).toContain("UpdateAnchorLayout(true).pipe(Effect.forkIn(anchor_scope))");
+		expect(workspace).not.toContain("UpdateAnchorLayout(true).pipe(Effect.forkScoped)");
 		/** The clear has to follow the fork, or it cancels what it just started. */
 		const anchor = workspace.slice(workspace.indexOf("anchored_user_item_id = item_id;"));
-		expect(anchor.indexOf("Effect.forkScoped")).toBeLessThan(
+		expect(anchor.indexOf("Effect.forkIn(anchor_scope)")).toBeLessThan(
 			anchor.indexOf("pending_user_message_reference = undefined;"),
 		);
 		/** Resolving the same send twice must not scroll the reader twice. */

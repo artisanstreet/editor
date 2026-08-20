@@ -6,6 +6,7 @@ import {
 	CanReplaceConversationSnapshot,
 	MakeConversationRenderBlocks,
 	MakeConversationRenderWindow,
+	MakeParticipantConversationRenderWindow,
 	MakeConversationViewState,
 } from "../../modules/frontend/src/lib/conversation/store";
 import { MakeMockConversation } from "../../modules/frontend/src/lib/conversation/mock";
@@ -51,6 +52,89 @@ const snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
 const patch = (value: unknown) => Schema.decodeUnknownSync(ConversationPatch)(value);
 
 describe("conversation view store", () => {
+	it("isolates root and adopted child turns while preserving child parent references", () => {
+		const participant_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+			...snapshot,
+			items: [
+				{
+					...snapshot.items[0],
+					id: "root-message",
+					lifecycle: "completed",
+					phase: "final",
+					turn_id: "turn-a",
+				},
+				{
+					...snapshot.items[0],
+					id: "child-message",
+					lifecycle: "completed",
+					ordinal: 3,
+					phase: "final",
+					text: "Child",
+					turn_id: "turn-child",
+				},
+			],
+			turns: [
+				{ ...snapshot.turns[0], lifecycle: "completed" },
+				{
+					...snapshot.turns[0],
+					agent_id: "agent-noodle",
+					id: "turn-child",
+					lifecycle: "completed",
+					ordinal: 2,
+					parent_id: "turn-a",
+				},
+			],
+		});
+		const initialized = MakeConversationViewState(participant_snapshot);
+		if (initialized._tag !== "applied") throw new Error("fixture must initialize");
+
+		expect([
+			...new Set(
+				MakeParticipantConversationRenderWindow(
+					initialized.state,
+					undefined,
+					24,
+				).blocks.map((block) => block.turn_id),
+			),
+		]).toEqual(["turn-a"]);
+		expect([
+			...new Set(
+				MakeParticipantConversationRenderWindow(
+					initialized.state,
+					"agent-noodle",
+					24,
+				).blocks.map((block) => block.turn_id),
+			),
+		]).toEqual(["turn-child"]);
+	});
+
+	it("keeps plan items in canonical state but out of transcript render blocks", () => {
+		const plan_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+			...snapshot,
+			items: [
+				{
+					created_at: "2026-07-24T12:00:00.000Z",
+					entries: [{ id: "task-a", state: "active", text: "Move the plan" }],
+					id: "plan-a",
+					lifecycle: "streaming",
+					ordinal: 1,
+					references: [],
+					revision: 0,
+					source_refs: [],
+					state: "active",
+					turn_id: "turn-a",
+					type: "plan",
+					updated_at: "2026-07-24T12:00:00.000Z",
+				},
+			],
+		});
+		const initialized = MakeConversationViewState(plan_snapshot);
+		if (initialized._tag !== "applied") throw new Error("fixture must initialize");
+
+		expect(initialized.state.items_by_id.get("plan-a")?.type).toBe("plan");
+		expect(MakeConversationRenderBlocks(initialized.state)).toEqual([]);
+	});
+
 	it("projects an exact, bounded newest-group window from large history", () => {
 		const large_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
 			conversation_id: "conversation-window",

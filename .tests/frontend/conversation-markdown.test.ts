@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import { parse_conversation_markdown } from "../../modules/frontend/src/lib/components/markdown/test-parsing";
 
+import { ReadStylesheets } from "./stylesheet-source";
+
 const ReadSource = (path: string) =>
 	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");
 
@@ -74,14 +76,12 @@ describe("conversation markdown rendering", () => {
 		const stream_word = ReadSource(
 			"modules/frontend/src/lib/components/markdown/stream-word.svelte",
 		);
-		const stream_word_styles = ReadSource(
-			"modules/frontend/src/lib/styles/markdown/components/streaming-word.css",
-		);
+		const stream_word_styles = ReadStylesheets();
 
 		expect(content).toContain('import { conversation_parse_options } from "./parsing"');
-		expect(content).toContain("options={conversation_parse_options}");
+		expect(content).toContain("...conversation_parse_options,");
 		expect(content).toContain("prose conversation-markdown ");
-		expect(content).toContain("Queue.sliding<StreamingWordsTarget>(1)");
+		expect(content).toContain("Queue.unbounded<StreamingWordsTarget>()");
 		expect(content).toContain('getPropertyValue("--stagger-dur")');
 		/**
 		 * The word cadence commits before it paces. Racing the tier delay against
@@ -90,8 +90,16 @@ describe("conversation markdown rendering", () => {
 		 * the post-settle hold still races.
 		 */
 		expect(content.match(/yield\* wait_for_streaming_word_delay_or_target/gu)).toHaveLength(1);
-		expect(content).toContain("yield* Effect.sleep(get_streaming_word_delay(backlog))");
-		expect(content).toContain("markdown={revealed_text}");
+		expect(content).toContain("yield* Effect.sleep(pacing.delay_ms)");
+		/**
+		 * Streaming reveals parse incrementally: the component owns one parser
+		 * whose previous output lets an append-only tick re-parse only the
+		 * message tail. A per-tick full reparse is what made long answers lag
+		 * quadratically with their own length.
+		 */
+		expect(content).toContain("createParse");
+		expect(content).toContain("{ streaming: true }");
+		expect(content).toContain("tree={rendered_tree}");
 		expect(content).toContain("ProseStreamWord: StreamWord");
 		/** A blinking pipe is not part of the reveal; the incoming word is the cue. */
 		expect(content).not.toMatch(/^\s*caret\s*$/mu);
@@ -100,7 +108,7 @@ describe("conversation markdown rendering", () => {
 		 * landed words between lines while the newest one animates.
 		 */
 		expect(content).toContain("conversation-markdown-streaming");
-		expect(content).toContain("text-wrap: wrap;");
+		expect(ReadStylesheets()).toContain("text-wrap: wrap;");
 		expect(content).toContain("ProseA: Anchor");
 		expect(content).toContain("ProseImg: Image");
 		expect(content).not.toMatch(/setInterval|setTimeout|requestAnimationFrame/u);
@@ -116,7 +124,8 @@ describe("conversation markdown rendering", () => {
 		 */
 		expect(stream_word_styles).toContain("var(--stream-word-dur, 320ms)");
 		expect(stream_word_styles).not.toContain("--stagger-dur");
-		expect(stream_word_styles).not.toContain("will-change");
+		/** Scoped to the streaming-word section: the core has other, legitimate hints. */
+		expect(stream_word_styles).not.toMatch(/streaming-word\.css[^─]*?will-change/u);
 	});
 
 	it("hardens links and never auto-fetches images from assistant markdown", () => {

@@ -5,6 +5,7 @@
 	import { Button } from "$lib/components/ui/button";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { ImageInspectionStore } from "$lib/images/inspection-store";
+	import ShaderGlassSurface from "./shader-glass-surface.svelte";
 
 	let {
 		open = $bindable(false),
@@ -64,7 +65,7 @@
 <DialogPrimitive.Root bind:open>
 	<DialogPrimitive.Portal>
 		<DialogPrimitive.Overlay
-			class="fixed inset-0 z-50 bg-black/70 supports-backdrop-filter:backdrop-blur-md"
+			class="fixed inset-0 z-50 bg-surface-1000/70 supports-backdrop-filter:backdrop-blur-md"
 		/>
 		<DialogPrimitive.Content
 			class="fixed inset-0 z-[51] flex size-full items-center justify-center p-8 pt-[calc(2rem+var(--titlebar-overlay-height,0px))] outline-none"
@@ -82,26 +83,32 @@
 				onclick={DismissViewer}
 			></button>
 			{#if source !== undefined}
-				<img
-					src={source}
-					alt={name ?? "Attached image"}
-					class="relative z-10 h-auto w-auto max-h-full max-w-full object-contain"
-					draggable="false"
-				/>
+				<div class="group/image relative z-10 inline-flex max-h-full max-w-full">
+					<img
+						src={source}
+						alt={name ?? "Attached image"}
+						class="h-auto w-auto max-h-full max-w-full object-contain"
+						draggable="false"
+					/>
+					<DialogPrimitive.Close>
+						{#snippet child({ props })}
+							<ShaderGlassSurface
+								class="pointer-events-none absolute right-2 top-2 size-8 rounded-full opacity-0 shadow-lg transition-opacity duration-150 group-hover/image:pointer-events-auto group-hover/image:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100 motion-reduce:transition-none"
+							>
+								<Button
+									{...props}
+									variant="ghost"
+									size="icon-sm"
+									class="size-full rounded-full bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground"
+									aria-label="Close image preview"
+								>
+									<X class="size-4" aria-hidden="true" />
+								</Button>
+							</ShaderGlassSurface>
+						{/snippet}
+					</DialogPrimitive.Close>
+				</div>
 			{/if}
-			<DialogPrimitive.Close>
-				{#snippet child({ props })}
-					<Button
-						{...props}
-						variant="secondary"
-						size="icon"
-						class="absolute right-8 top-[calc(2rem+var(--titlebar-overlay-height,0px))]"
-						aria-label="Close image preview"
-					>
-						<X />
-					</Button>
-				{/snippet}
-			</DialogPrimitive.Close>
 		</DialogPrimitive.Content>
 	</DialogPrimitive.Portal>
 </DialogPrimitive.Root>

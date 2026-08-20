@@ -1,5 +1,5 @@
 import type { EventEnvelope } from "@artisan/protocol";
-import { Context, Effect, Layer, Queue, Stream, SubscriptionRef } from "effect";
+import { Context, Effect, Layer, Queue, Ref, Stream, SubscriptionRef } from "effect";
 
 import { RouteNavigation } from "../browser/route-navigation";
 import { RunBrowserDom } from "../browser/dom";
@@ -71,11 +71,27 @@ export const SystemNotificationsLive = Layer.effect(
 		const navigation = yield* RouteNavigation;
 		const service_scope = yield* Effect.scope;
 
-		const stored = yield* preferences.Load;
 		const state = yield* SubscriptionRef.make<SystemNotificationSettings>({
-			enabled: stored.enabled,
-			permission: yield* presenter.Permission,
+			enabled: preferences.Default.enabled,
+			permission: "default",
 		});
+		const enabled_revision = yield* Ref.make(0);
+		const Current = SubscriptionRef.get(state);
+		const HydrateOnce = Effect.gen(function* () {
+			const request_revision = yield* Ref.get(enabled_revision);
+			const [stored, permission] = yield* Effect.all(
+				[preferences.Load, presenter.Permission],
+				{ concurrency: "unbounded" },
+			);
+			const current_revision = yield* Ref.get(enabled_revision);
+			yield* SubscriptionRef.update(state, (current) => ({
+				...current,
+				...(request_revision === current_revision ? { enabled: stored.enabled } : {}),
+				permission,
+			}));
+			return yield* Current;
+		});
+		const EnsureHydrated = yield* Effect.cached(HydrateOnce);
 
 		/**
 		 * Notification clicks are a foreign ingress: the host invokes them on its
@@ -100,11 +116,8 @@ export const SystemNotificationsLive = Layer.effect(
 		});
 		yield* Effect.forkIn(ConsumeActivations, service_scope);
 
-		const Current = Effect.gen(function* () {
-			return yield* SubscriptionRef.get(state);
-		});
-
 		const Refresh = Effect.gen(function* () {
+			yield* EnsureHydrated;
 			const permission = yield* presenter.Permission;
 			yield* SubscriptionRef.update(state, (current) => ({ ...current, permission }));
 			return yield* Current;
@@ -112,8 +125,9 @@ export const SystemNotificationsLive = Layer.effect(
 
 		const SetEnabled = (enabled: boolean) =>
 			Effect.gen(function* () {
-				yield* preferences.Save({ version: 1, enabled });
+				yield* Ref.update(enabled_revision, (current) => current + 1);
 				yield* SubscriptionRef.update(state, (current) => ({ ...current, enabled }));
+				yield* preferences.Save({ version: 1, enabled });
 			});
 
 		/**
@@ -148,6 +162,7 @@ export const SystemNotificationsLive = Layer.effect(
 					return;
 				}
 
+				yield* EnsureHydrated;
 				const settings = yield* Current;
 				if (!SystemNotificationsAreActive(settings)) return;
 
@@ -162,6 +177,8 @@ export const SystemNotificationsLive = Layer.effect(
 					service_scope,
 				);
 			});
+
+		yield* Effect.forkIn(EnsureHydrated, service_scope);
 
 		return SystemNotifications.of({
 			Changes: SubscriptionRef.changes(state),

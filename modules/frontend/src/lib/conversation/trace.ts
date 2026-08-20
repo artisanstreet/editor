@@ -30,11 +30,6 @@ export type ConversationTraceSegment =
 	  }
 	| {
 			readonly id: string;
-			readonly items: ReadonlyArray<ConversationReasoningItem>;
-			readonly type: "reasoning_group";
-	  }
-	| {
-			readonly id: string;
 			readonly item: ConversationItem;
 			readonly type: "item";
 	  };
@@ -101,22 +96,83 @@ export const group_conversation_trace_blocks = (
 	return grouped;
 };
 
+const summary_headline = /^\*\*(.+?)\*\*/u;
+const first_sentence = /^.*?[.!?](?=\s|$)/su;
+
 /**
- * Finds the one reasoning run that is still useful at the transcript tail.
+ * Reduces one reasoning item's accumulated summary to the single line the
+ * thinking line says right now.
  *
- * Reasoning is presentation-only progress, not durable transcript content. Walk
- * the same block order the workspace renders and retain only consecutive,
- * non-empty summaries at the visible tail of the active run. Native diagnostics
- * are metadata rather than transcript prose, so they neither become the latest
- * item nor split an otherwise consecutive reasoning run.
+ * A model's summary streams into one item per reasoning phase and keeps
+ * growing — a headline, then paragraphs, then the next headline — while the
+ * line is meant to say only the newest thought and let the previous one go.
+ * Codex opens every section with a bold headline, and that headline is the
+ * whole thought as its own client shows it, so the latest one wins over any
+ * paragraph streaming under it. Claude publishes headline-less paragraphs, so
+ * the newest paragraph's first sentence stands in. Whitespace collapses
+ * because the line is one row: what does not fit is clipped, not wrapped.
+ *
+ * Only a finished sentence may take the line. A sentence used to grow into it
+ * a word at a time, so the line rewrote itself continuously and then jumped
+ * again when the terminator finally landed — an unreadable line that never
+ * held still long enough to be read. While the newest paragraph is still
+ * arriving the line keeps the last thought that did finish, and says nothing
+ * at all only until the phase completes its first sentence.
  */
-export const conversation_latest_reasoning_item_ids = (
+export const conversation_summary_line = (text: string): string | undefined => {
+	const sections = text
+		.split(/\n[ \t]*\n/u)
+		.map((section) => section.trim())
+		.filter((section) => section.length > 0);
+	for (let index = sections.length - 1; index >= 0; index -= 1) {
+		const headline = summary_headline.exec(sections[index] ?? "");
+		if (headline?.[1] !== undefined) return headline[1].trim() || undefined;
+	}
+	for (let index = sections.length - 1; index >= 0; index -= 1) {
+		const section = sections[index]?.replaceAll("**", "");
+		const sentence = section === undefined ? undefined : first_sentence.exec(section)?.[0];
+		if (sentence === undefined) continue;
+		const line = sentence.replaceAll(/\s+/gu, " ").trim();
+		if (line.length > 0) return line;
+	}
+	return undefined;
+};
+
+/**
+ * Reads what the live thinking line should say, or nothing when the verb should
+ * keep it.
+ *
+ * Reasoning is presentation-only progress, not durable transcript content: the
+ * turn says what the model is thinking *now*, so exactly one line is ever on
+ * screen and every earlier thought retires the moment it is superseded. Walk
+ * the same block order the workspace renders, take the newest non-empty summary
+ * of the active run provided nothing else visible has landed after it, and say
+ * only its newest thought. Native diagnostics are metadata rather than
+ * transcript prose, so they neither become the latest item nor cut the line
+ * short.
+ */
+export const conversation_live_reasoning_summary = (
 	blocks: ReadonlyArray<ConversationTraceRenderBlock>,
 	active_run_id: string | undefined,
 	run_active: boolean,
-): ReadonlySet<string> => {
-	const visible_ids = new Set<string>();
-	if (!run_active || active_run_id === undefined) return visible_ids;
+): string | undefined => {
+	const text = conversation_live_reasoning_text(blocks, active_run_id, run_active);
+	return text === undefined ? undefined : conversation_summary_line(text);
+};
+
+/**
+ * Reads the full accumulated text of the reasoning phase the live thinking
+ * line speaks for, or nothing when the verb should keep it. Same walk and same
+ * eligibility as the one-line summary: the newest non-empty summary of the
+ * active run, provided nothing else visible has landed after it — the line
+ * then says only that phase's newest finished thought.
+ */
+export const conversation_live_reasoning_text = (
+	blocks: ReadonlyArray<ConversationTraceRenderBlock>,
+	active_run_id: string | undefined,
+	run_active: boolean,
+): string | undefined => {
+	if (!run_active || active_run_id === undefined) return undefined;
 
 	const display_order: Array<ConversationItem | null> = [];
 	for (const block of blocks) {
@@ -137,33 +193,81 @@ export const conversation_latest_reasoning_item_ids = (
 		display_order.push(null);
 	}
 
+	/**
+	 * The newest summary this run has produced, whatever has landed since.
+	 *
+	 * This used to require the summary to be the newest visible item, which
+	 * meant a tool call arriving after it took the line back to the thinking
+	 * verb, and the next summary took it forward again — the same thought
+	 * announced twice with an unrelated word in between. Nothing about the run
+	 * changed at those moments; only what happened to be last in the list did.
+	 *
+	 * Run identity is what keeps this honest: a previous turn's thinking can
+	 * never reappear, because only summaries belonging to the live run qualify.
+	 */
 	for (let index = display_order.length - 1; index >= 0; index -= 1) {
 		const item = display_order[index];
-		if (item === null || item === undefined) break;
-		if (item.type === "native_event") continue;
-		if (
-			(item.type === "assistant_message" || item.type === "reasoning_summary") &&
-			item.text.trim().length === 0
-		)
-			continue;
-		if (item.type !== "reasoning_summary" || item.run_id !== active_run_id) break;
-		visible_ids.add(item.id);
+		if (item === null || item === undefined) continue;
+		if (item.type !== "reasoning_summary" || item.run_id !== active_run_id) continue;
+		if (item.text.trim().length === 0) continue;
+		return item.text;
 	}
 
-	return visible_ids;
+	return undefined;
+};
+
+/** One run of a summary body: prose, or a backticked identifier within it. */
+export interface ReasoningSummaryFragment {
+	readonly code: boolean;
+	readonly text: string;
+}
+
+const inline_code = /`([^`\n]+)`/gu;
+
+/**
+ * Splits one line of summary prose into plain and code runs on its backticks,
+ * so a model naming a file or a symbol has it set in the face that says so
+ * rather than in prose wearing two stray marks.
+ *
+ * A span whose closing backtick has not arrived yet is treated as code from
+ * its opening mark. Rendering it literally instead would show a bare backtick
+ * for as long as the sentence takes to finish and then reflow the line when it
+ * closed — the same churn the one-line summary was just taught to avoid.
+ */
+export const conversation_summary_fragments = (
+	text: string,
+): ReadonlyArray<ReasoningSummaryFragment> => {
+	const fragments: Array<ReasoningSummaryFragment> = [];
+	let consumed = 0;
+	for (const match of text.matchAll(inline_code)) {
+		const start = match.index;
+		const body = match[1];
+		if (body === undefined) continue;
+		if (start > consumed) fragments.push({ code: false, text: text.slice(consumed, start) });
+		fragments.push({ code: true, text: body });
+		consumed = start + match[0].length;
+	}
+
+	const tail = text.slice(consumed);
+	const opened = tail.indexOf("`");
+	if (opened === -1) {
+		if (tail.length > 0) fragments.push({ code: false, text: tail });
+		return fragments;
+	}
+	if (opened > 0) fragments.push({ code: false, text: tail.slice(0, opened) });
+	const arriving = tail.slice(opened + 1);
+	if (arriving.length > 0) fragments.push({ code: true, text: arriving });
+	return fragments;
 };
 
 /**
- * Removes transcript-noise reasoning before segment grouping. Filtering here
- * lets activities on either side of a retired summary form one honest chain.
+ * Removes reasoning before segment grouping. The thinking line says the one
+ * summary that still matters, so the trace carries none of them; dropping them
+ * here also lets activities on either side of a summary form one honest chain.
  */
-export const filter_conversation_trace_reasoning = (
+export const strip_conversation_trace_reasoning = (
 	items: ReadonlyArray<ConversationItem>,
-	visible_reasoning_item_ids: ReadonlySet<string>,
-): ReadonlyArray<ConversationItem> =>
-	items.filter(
-		(item) => item.type !== "reasoning_summary" || visible_reasoning_item_ids.has(item.id),
-	);
+): ReadonlyArray<ConversationItem> => items.filter((item) => item.type !== "reasoning_summary");
 
 /**
  * Activity groups are assembled privately before becoming readonly trace
@@ -176,16 +280,9 @@ type ConversationTraceActivityGroupBuilder = {
 	readonly type: "activity_group";
 };
 
-type ConversationTraceReasoningGroupBuilder = {
-	readonly id: string;
-	readonly items: Array<ConversationReasoningItem>;
-	readonly type: "reasoning_group";
-};
-
 type ConversationTraceSegmentBuilder =
 	| ConversationTraceActivityGroupBuilder
-	| ConversationTraceReasoningGroupBuilder
-	| Exclude<ConversationTraceSegment, { readonly type: "activity_group" | "reasoning_group" }>;
+	| Exclude<ConversationTraceSegment, { readonly type: "activity_group" }>;
 
 /**
  * Whether a text item has anything for the reader to see.
@@ -200,9 +297,9 @@ const item_renders_nothing = (item: ConversationItem): boolean =>
 	item.text.trim().length === 0;
 
 /**
- * Builds one deterministic work trace. Diagnostics never decide whether reasoning
- * is visible and collapse into one disclosure per severity — failures, then
- * warnings, then quiet diagnostics — at their first observed position.
+ * Builds one deterministic work trace. Diagnostics collapse into one disclosure
+ * per severity — failures, then warnings, then quiet diagnostics — at their
+ * first observed position.
  *
  * `failure_visible` overrides the diagnostics preference: when the surrounding
  * work failed, its diagnostics are the explanation and must never be silenced
@@ -264,19 +361,6 @@ export const make_conversation_trace_segments = (
 			continue;
 		}
 		if (item_renders_nothing(item)) {
-			continue;
-		}
-		if (item.type === "reasoning_summary") {
-			const previous = segments.at(-1);
-			if (previous?.type === "reasoning_group") {
-				previous.items.push(item);
-				continue;
-			}
-			segments.push({
-				id: `reasoning:${item.id}`,
-				items: [item],
-				type: "reasoning_group",
-			});
 			continue;
 		}
 		if (item.type !== "activity") {

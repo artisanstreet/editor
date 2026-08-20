@@ -1,4 +1,5 @@
-import { Effect } from "effect";
+import { Effect, Ref } from "effect";
+import type { EngineInstallationReport } from "@artisan/protocol";
 import { ArtisanClient } from "@artisan/transport/client";
 
 import {
@@ -103,6 +104,38 @@ export const FixtureProjectIdentityQueries = {
 			username: "sander",
 		};
 	}),
+	GetHostMachines: Effect.gen(function* () {
+		return {
+			machines: [
+				{
+					detail: "DESKTOP-FIXTURE",
+					id: "local",
+					kind: "local" as const,
+					label: "This computer",
+				},
+				{
+					detail: "Ubuntu",
+					id: "wsl:Ubuntu",
+					kind: "wsl" as const,
+					label: "This computer on WSL2",
+				},
+			],
+		};
+	}),
+	ConnectHostMachine: (input) =>
+		Effect.gen(function* () {
+			return input.machine_id === "wsl:Ubuntu"
+				? {
+						endpoint: "http://127.0.0.1:45870/",
+						pair_code: "FIXTURE-PAIR",
+						status: "connected" as const,
+					}
+				: {
+						message: "Fixture machines cannot start this machine.",
+						reason: "unknown_machine" as const,
+						status: "failed" as const,
+					};
+		}),
 	GetEngineUsage: (input) =>
 		Effect.gen(function* () {
 			return {
@@ -160,6 +193,79 @@ export const FixtureProjectIdentityQueries = {
 						input?.engine_id === undefined || report.engine_id === input.engine_id,
 				),
 				fetched_at: fixture_timestamp,
+			};
+		}),
+	GetEngineInstallations: (input = {}) =>
+		Effect.gen(function* () {
+			return {
+				engines: [
+					{
+						active_version: "0.142.5",
+						activity: "idle" as const,
+						credentials_present: true,
+						display_name: "Codex",
+						engine_id: "codex",
+						latest_version: "0.143.0",
+						managed: true,
+						previous_version: "0.142.4",
+						recommended_version: "0.142.5",
+						update_available: true,
+					},
+					{
+						activity: "idle" as const,
+						credentials_present: false,
+						display_name: "Claude",
+						engine_id: "claude",
+						managed: false,
+						recommended_version: "2.1.220",
+					},
+				].filter(
+					(report) =>
+						input.engine_id === undefined || report.engine_id === input.engine_id,
+				),
+				fetched_at: fixture_timestamp,
+			};
+		}),
+	InstallEngine: (input) =>
+		Effect.gen(function* () {
+			return {
+				report: {
+					activity: "installing" as const,
+					activity_phase: "downloading" as const,
+					credentials_present: false,
+					display_name: input.engine_id === "claude" ? "Claude" : "Codex",
+					engine_id: input.engine_id,
+					managed: false,
+					...(input.version === undefined ? {} : { active_version: input.version }),
+				},
+				status: "accepted" as const,
+			};
+		}),
+	RollbackEngine: (input) =>
+		Effect.gen(function* () {
+			return {
+				report: {
+					activity: "idle" as const,
+					credentials_present: true,
+					display_name: input.engine_id === "claude" ? "Claude" : "Codex",
+					engine_id: input.engine_id,
+					managed: true,
+					previous_version: "0.142.5",
+				},
+				status: "accepted" as const,
+			};
+		}),
+	AuthenticateEngine: (input) =>
+		Effect.gen(function* () {
+			return {
+				report: {
+					activity: "authenticating" as const,
+					credentials_present: true,
+					display_name: input.engine_id === "claude" ? "Claude" : "Codex",
+					engine_id: input.engine_id,
+					managed: true,
+				},
+				status: "accepted" as const,
 			};
 		}),
 	GetThreadUsageSeries: (input) =>
@@ -222,6 +328,162 @@ export const FixtureProjectIdentityQueries = {
 	| "GetProjectRepositories"
 	| "GetProjectDiffs"
 	| "GetHostIdentity"
+	| "GetHostMachines"
+	| "ConnectHostMachine"
 	| "GetEngineUsage"
+	| "GetEngineInstallations"
+	| "InstallEngine"
+	| "RollbackEngine"
+	| "AuthenticateEngine"
 	| "GetThreadUsageSeries"
 >;
+
+/**
+ * The interactive fixture layer owns this Ref, so visual flows progress without
+ * allowing one fixture runtime to leak installation state into another.
+ */
+export const MakeFixtureProjectIdentityQueries = (
+	installation_reports: Ref.Ref<Readonly<Record<string, EngineInstallationReport>>>,
+): Pick<
+	typeof ArtisanClient.Service,
+	| "GetEngineUsage"
+	| "GetEngineInstallations"
+	| "InstallEngine"
+	| "AuthenticateEngine"
+	| "RollbackEngine"
+> => ({
+	GetEngineUsage: (input) =>
+		Effect.gen(function* () {
+			const installations = yield* Ref.get(installation_reports);
+			const codex = installations.codex;
+			const authenticated = codex?.credentials_present === true;
+			return {
+				engines: [
+					{
+						authentication: authenticated
+							? ("authenticated" as const)
+							: ("unauthenticated" as const),
+						display_name: "Codex",
+						engine_id: "codex",
+						...(authenticated
+							? {
+									windows: [
+										{
+											id: "codex",
+											kind: "weekly" as const,
+											percent_used: 12,
+										},
+									],
+								}
+							: { windows: [] }),
+					},
+				].filter(
+					(report) =>
+						input?.engine_id === undefined || report.engine_id === input.engine_id,
+				),
+				fetched_at: fixture_timestamp,
+			};
+		}),
+	GetEngineInstallations: (input = {}) =>
+		Effect.gen(function* () {
+			const installations = yield* Ref.get(installation_reports);
+			const report = installations.codex;
+			if (report?.activity === "installing") {
+				yield* Ref.update(installation_reports, (current) => ({
+					...current,
+					codex: {
+						...report,
+						activity: "idle" as const,
+						activity_phase: undefined,
+						active_version: report.active_version ?? "0.142.5",
+						managed: true,
+					},
+				}));
+			} else if (report?.activity === "authenticating") {
+				yield* Ref.update(installation_reports, (current) => ({
+					...current,
+					codex: {
+						...report,
+						activity: "idle" as const,
+						credentials_present: true,
+					},
+				}));
+			}
+
+			return {
+				engines:
+					report === undefined
+						? []
+						: [report].filter(
+								(candidate) =>
+									input.engine_id === undefined ||
+									candidate.engine_id === input.engine_id,
+							),
+				fetched_at: fixture_timestamp,
+			};
+		}),
+	InstallEngine: (input) =>
+		Effect.gen(function* () {
+			const report: EngineInstallationReport = {
+				activity: "installing",
+				activity_phase: "downloading",
+				credentials_present: false,
+				display_name: "Codex",
+				engine_id: input.engine_id,
+				managed: false,
+				...(input.version === undefined ? {} : { active_version: input.version }),
+			};
+			yield* Ref.update(installation_reports, (current) => ({ ...current, codex: report }));
+			return { report, status: "accepted" as const };
+		}),
+	AuthenticateEngine: (input) =>
+		Effect.gen(function* () {
+			const current = yield* Ref.get(installation_reports);
+			const report: EngineInstallationReport = {
+				...(current.codex ?? {
+					active_version: "0.142.5",
+					credentials_present: false,
+					display_name: "Codex",
+					engine_id: input.engine_id,
+					managed: true,
+				}),
+				activity: "authenticating",
+				credentials_present: false,
+			};
+			yield* Ref.update(installation_reports, (current) => ({ ...current, codex: report }));
+			return { report, status: "accepted" as const };
+		}),
+	RollbackEngine: (input) =>
+		Effect.gen(function* () {
+			const current = yield* Ref.get(installation_reports);
+			const report: EngineInstallationReport = {
+				...(current.codex ?? {
+					credentials_present: false,
+					display_name: "Codex",
+					engine_id: input.engine_id,
+					managed: true,
+				}),
+				activity: "idle",
+				previous_version: "0.142.4",
+			};
+			yield* Ref.update(installation_reports, (current) => ({ ...current, codex: report }));
+			return { report, status: "accepted" as const };
+		}),
+});
+
+export const FixtureInteractiveInstallationReports: Readonly<
+	Record<string, EngineInstallationReport>
+> = {
+	codex: {
+		active_version: "0.142.5",
+		activity: "idle",
+		credentials_present: false,
+		display_name: "Codex",
+		engine_id: "codex",
+		latest_version: "0.143.0",
+		managed: true,
+		previous_version: "0.142.4",
+		recommended_version: "0.142.5",
+		update_available: true,
+	},
+};

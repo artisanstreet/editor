@@ -410,6 +410,7 @@ export const fixture_artisan_client_data = {
 			created_at: fixture_timestamp,
 			current_goal: "Shape the three-pane editor shell",
 			last_activity_at: fixture_timestamp,
+			reader_activity_at: fixture_timestamp,
 			linked_projects: [fixture_project],
 			live_status: "Building frontend fixtures",
 			metadata_version: 5,

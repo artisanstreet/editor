@@ -80,11 +80,7 @@ export const LogTransportDiagnostic = (event: TransportDiagnosticEvent) =>
 
 /** The plaintext journal dump offered by the connection overlay's copy action. */
 export const FormatTransportDiagnosticsDump = (snapshot: TransportDiagnosticsSnapshot): string => {
-	const header =
-		snapshot.dropped === 0
-			? "Artisan transport journal"
-			: `Artisan transport journal (${snapshot.dropped} older events evicted)`;
 	const lines = snapshot.events.map((event) => `${event.at} ${FormatTransportDiagnostic(event)}`);
 
-	return [header, ...lines].join("\n");
+	return ["Artisan transport journal", ...lines].join("\n");
 };

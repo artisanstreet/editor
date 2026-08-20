@@ -248,7 +248,9 @@ describe("sidebar engine usage refresh", () => {
 		expect(identity).toContain(
 			"const RefreshEngineUsage = (engine_id: string) => RefreshUsage(true, [engine_id]);",
 		);
-		expect(identity).toContain("SettleUsage,");
+		expect(identity).toContain("usage_controller.Load(engine_id, { force })");
+		expect(identity).toContain("EngineUsageController");
+		expect(identity).not.toContain("client.GetEngineUsage");
 		expect(identity).toContain("onrefresh={RefreshEngineUsage}");
 		expect(usage).toContain("readonly onrefresh: (engine_id: string) => Effect.Effect<void>;");
 		expect(usage).toContain("onclick={yield* onrefresh(engine.engine_id)}");

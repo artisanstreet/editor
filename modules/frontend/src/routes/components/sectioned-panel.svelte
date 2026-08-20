@@ -7,12 +7,18 @@
 	import MessagePlus from "@tabler/icons-svelte/icons/message-plus";
 	import ShoppingBag from "@tabler/icons-svelte/icons/shopping-bag";
 
-	import barekey_logo from "$lib/assets/barekey/logo-40.png";
+	import artisan_star from "$lib/assets/barekey/artisan-star.svg";
 	import logo_gradient from "$lib/assets/barekey/logo-gradient.svg";
-	import { EditorRoutePath } from "$lib/editor/workspace-identity";
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
+	import { EditorRoutePath } from "$lib/editor/workspace-identity";
 	import { ImageInspectionStore } from "$lib/images/inspection-store";
-	import { ThreadRoutePath } from "$lib/root/thread-navigation";
+	import {
+		PrepareNewThreadDraft,
+		is_unmodified_primary_activation,
+		new_thread_draft_key,
+	} from "$lib/root/new-thread-draft";
+	import { ThreadRoutePath, WorkspaceRoutePath } from "$lib/root/thread-navigation";
 	import CommandMenu from "./command-menu.svelte";
 	import DropdownHoverSurface from "./dropdown-hover-surface.svelte";
 	import SidebarIdentity from "./sidebar-identity.svelte";
@@ -37,8 +43,8 @@
 	let command_open = $state(false);
 	/**
 	 * The account menu opens upward across the transcript's left margin, which is
-	 * exactly the band the thread rail reads proximity from. Held here because
-	 * the two live on opposite sides of the layout and neither owns the other.
+	 * exactly the band that hosts working threads. Held here because the two live
+	 * on opposite sides of the layout and neither owns the other.
 	 */
 	let account_open = $state(false);
 
@@ -46,10 +52,11 @@
 		header,
 		primary,
 		secondary,
-		show_thread_hover_rail,
 		surface,
+		thread_rail,
 		thread_id,
 		threads,
+		threads_loaded,
 		workspace_id,
 	}: {
 		/**
@@ -60,20 +67,67 @@
 		header?: Snippet;
 		primary: Snippet;
 		secondary?: Snippet;
-		/** Whether the canonical conversation route owns the transcript proximity rail. */
-		show_thread_hover_rail: boolean;
 		/** Which workspace surface is on screen, owned by the layout. */
 		surface: "editor" | "threads";
+		/**
+		 * How the left margin carries the thread list on this route, decided by the
+		 * layout: proximity-revealed on thread surfaces and absent elsewhere.
+		 */
+		thread_rail: "hidden" | "proximity";
 		/** The durable thread shared by both workspace surfaces. */
 		thread_id: string | undefined;
 		/** The live thread list, owned by the layout and shared with the command menu. */
 		threads: ReadonlyArray<ThreadListItem>;
+		/**
+		 * Whether the thread list has actually arrived. An empty array means two
+		 * different things before and after it does, and the rail must not treat
+		 * them alike.
+		 */
+		threads_loaded: boolean;
 		/** The workspace the current route is inside, resolved by the layout. */
 		workspace_id: string | undefined;
 	} = $props();
 
 	const workspace_open = $derived(workspace_id !== undefined && thread_id !== undefined);
+	/**
+	 * A new thread belongs to the project you are already in. Outside one there is
+	 * no project to start it in, so the action is the picker — which is the same
+	 * question asked one step earlier rather than a different destination.
+	 */
+	const new_thread_path = $derived(
+		workspace_id === undefined ? "/" : WorkspaceRoutePath(workspace_id),
+	);
+	const new_thread_key = $derived(new_thread_draft_key(workspace_id));
+	/**
+	 * Whether the transcript's left margin is actually carrying the thread list.
+	 * It decides both that the rail mounts and that the reading column shifts
+	 * right to feed it, so the two can never disagree about which side is doing
+	 * work.
+	 */
+	/**
+	 * An unloaded list holds the rail open rather than closing it. Closing on an
+	 * empty array collapsed the margin whenever the list had not arrived yet,
+	 * which drew "we do not know your threads" exactly like "you have none" and
+	 * took both groups down with it — the reachable case being a subscribe the
+	 * backend never answered. Absence is now only ever claimed once it is known.
+	 */
+	const rail_open = $derived(thread_rail !== "hidden" && (!threads_loaded || threads.length > 0));
 	const navigation = yield* RouteNavigation;
+	const StartNewThread = (event: MouseEvent) =>
+		Effect.gen(function* () {
+			if (!is_unmodified_primary_activation(event)) return;
+			yield* RunBrowserDom(() => event.preventDefault());
+			/**
+			 * A retained first message refuses the reset and keeps its recovery
+			 * state — but the navigation is still the user's intent, and the new
+			 * thread surface is where that retained message is explained and
+			 * retried. Failing here instead made this action silently do nothing.
+			 */
+			yield* PrepareNewThreadDraft(new_thread_key).pipe(
+				Effect.catchTag("DraftThreadLocked", () => Effect.void),
+			);
+			yield* navigation.Navigate(new_thread_path);
+		});
 
 	/** The rail must not creep in over a full-screen image. */
 	const inspection = yield* ImageInspectionStore;
@@ -105,7 +159,7 @@
 		there is no drawer now, so hiding it took the home link, the command menu,
 		and the account with it and left the app with no navigation at all.
 	-->
-	<div class="relative block h-[calc(100%-1rem)] w-14 shrink-0">
+	<div class="relative block h-full w-14 shrink-0">
 		<div class="absolute inset-x-0 top-2 flex flex-col items-center">
 			<!--
 				One flat hover surface spans both housings, so the pill is shared:
@@ -128,21 +182,18 @@
 								<a
 									href="/"
 									aria-label="Artisan Editor home"
-									class="docs-sidebar-logo relative flex size-8 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+									class="group/artisan-logo relative isolate flex size-8 items-center justify-center overflow-hidden rounded-full outline-none card-plastic focus-visible:ring-2 focus-visible:ring-ring/50"
+									style={`--artisan-logo-gradient: url(${logo_gradient});`}
 									onpointerenter={move_hover}
 									onpointermove={move_hover}
 									onfocusin={move_hover}
 								>
-									<!--
-										The mark is a cutout: it rests as a plain foreground glyph,
-										and hovering paints the brand gradient up through the logo's
-										own alpha.
-									-->
 									<span
 										aria-hidden="true"
-										class="docs-sidebar-logo-mark size-5 shrink-0"
-										style={`--docs-sidebar-logo-cutout: url(${barekey_logo}); --docs-sidebar-logo-gradient: url(${logo_gradient});`}
+										class="absolute inset-0 -z-10 bg-cover bg-center opacity-0 transition-opacity duration-(--duration-quick) ease-in-out group-hover/artisan-logo:opacity-100 group-focus-visible/artisan-logo:opacity-100 motion-reduce:transition-none"
+										style="background-image: var(--artisan-logo-gradient);"
 									></span>
+									<img alt="" src={artisan_star} class="size-5 shrink-0" />
 								</a>
 
 								<!--
@@ -157,9 +208,10 @@
 							></span>
 
 								<a
-									href="/"
+									href={new_thread_path}
 									aria-label="New thread"
 									class="group/new-thread relative flex size-8 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+									onclick={yield* StartNewThread(event)}
 									onpointerenter={move_hover}
 									onpointermove={move_hover}
 									onfocusin={move_hover}
@@ -242,7 +294,7 @@
 	</div>
 
 	<main
-		class="h-[calc(100%-1rem)] min-h-0 max-h-[calc(100%-1rem)] min-w-0 w-0 flex-1 p-2 pl-0"
+		class="h-full min-h-0 max-h-full min-w-0 w-0 flex-1 p-2 pl-0"
 		style="padding-bottom: max(0.5rem, env(safe-area-inset-bottom));"
 	>
 		<div
@@ -250,6 +302,7 @@
 		>
 			<section
 				class="relative flex min-h-0 min-w-0 flex-1 flex-col rounded-3xl bg-linear-to-b from-surface-125 to-surface-75 p-1 card dark:from-surface-900 dark:to-surface-925"
+				data-thread-rail={rail_open}
 			>
 				{#if header}
 					<!-- Web only, so the band sits inside the rounded card and needs its own
@@ -264,19 +317,19 @@
 				<div class="min-h-0 flex-1">
 					{@render primary()}
 				</div>
-				<!--
-					The transcript's dead left margin doubles as a proximity reveal
-					for every thread; it only exists on the threads surface, where
-					that margin is real.
-				-->
-				{#if show_thread_hover_rail && threads.length > 0}
-					<ThreadHoverRail suppressed={account_open || inspecting_image} {threads} />
+				<!-- The left margin reveals complete history on proximity on every thread surface. -->
+				{#if rail_open}
+					<ThreadHoverRail
+						header_inset={header !== undefined}
+						suppressed={account_open || inspecting_image}
+						{threads}
+					/>
 				{/if}
 			</section>
 
 			{#if secondary}
 				<section
-					class="min-h-0 w-[clamp(16rem,25vw,350px)] shrink-0 rounded-3xl bg-linear-to-b from-surface-125 to-surface-75 p-1 card dark:from-surface-900 dark:to-surface-925"
+					class="min-h-0 w-(--inspector-width) shrink-0 rounded-3xl bg-linear-to-b from-surface-125 to-surface-75 p-1 card dark:from-surface-900 dark:to-surface-925"
 				>
 					{@render secondary()}
 				</section>

@@ -5,11 +5,18 @@ import { ConversationItem } from "@artisan/protocol";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
-	conversation_latest_reasoning_item_ids,
-	filter_conversation_trace_reasoning,
+	active_work_label_for,
+	artisan_thinking_words,
+} from "../../modules/frontend/src/lib/conversation/activity-status";
+import {
+	conversation_live_reasoning_summary,
+	conversation_live_reasoning_text,
+	conversation_summary_line,
 	group_conversation_trace_blocks,
 	make_conversation_trace_segments,
+	strip_conversation_trace_reasoning,
 } from "../../modules/frontend/src/lib/conversation/trace";
+import { policy_reasoning_display } from "../../modules/frontend/src/lib/engine/reasoning-display";
 
 const ReadSource = (path: string) =>
 	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");
@@ -57,81 +64,20 @@ const as_block = (entry: ReturnType<typeof item>) => ({
 	type: "item" as const,
 });
 
-describe("conversation thinking trace presentation", () => {
-	it("shows a lone trace item directly, but replaces the first of a multi-item trace", () => {
-		const source = ReadSource(
-			"modules/frontend/src/routes/components/conversation-reasoning-summary.svelte",
-		);
+const policy = (engine_id: string, model: string) => ({
+	engine_id,
+	model,
+	permission: "supervised",
+	permission_mode: "on_request" as const,
+	reasoning_effort: "high" as const,
+	sandbox_mode: "workspace_write" as const,
+	service_tier: "standard",
+	strict_clarification: false,
+	web_search_enabled: false,
+});
 
-		expect(source).toContain(
-			"const single_item = $derived(items.length === 1 ? items[0] : undefined);",
-		);
-		expect(source).toContain("const trace_items = $derived(items.slice(1));");
-		expect(source).toContain("{#if single_item !== undefined}");
-		expect(source).toContain("markdown={single_item.text}");
-		expect(source.match(/use:reveal/gu)).toHaveLength(3);
-		expect(source).toContain("{:else if items.length > 1}");
-		expect(source).toContain("{thinking_word}");
-		expect(source).toContain("{#each trace_items as summary, index (summary.id)}");
-		expect(source).not.toContain("{#each items as summary");
-	});
-
-	it("renders reasoning through the safe shared Comark parsing boundary", () => {
-		const source = ReadSource(
-			"modules/frontend/src/routes/components/conversation-reasoning-summary.svelte",
-		);
-
-		expect(source).toContain('import { Comark } from "@comark/svelte"');
-		expect(source).toContain(
-			'import { conversation_parse_options } from "$lib/components/markdown/parsing"',
-		);
-		expect(source.match(/options=\{conversation_parse_options\}/gu)).toHaveLength(2);
-		expect(source).not.toMatch(/\.replace\(|\.replaceAll\(/u);
-		expect(source).not.toContain("MarkdownContent");
-		expect(source).not.toContain("StreamWord");
-	});
-
-	it("has no disclosure controls and keeps the rail visual-only", () => {
-		const source = ReadSource(
-			"modules/frontend/src/routes/components/conversation-reasoning-summary.svelte",
-		);
-
-		expect(source).not.toContain("ontoggle");
-		expect(source).not.toContain("aria-expanded");
-		expect(source).not.toContain("<button");
-		expect(source).not.toContain("ChevronRight");
-		expect(source).not.toContain("reasoning-acc");
-		expect(source).toContain("pointer-events-none absolute inset-y-0 left-0 w-4");
-		expect(source).toContain('aria-hidden="true"');
-	});
-
-	it("uses the texts-reveal hooks, variables, action orchestration, and motion fallback", () => {
-		const source = ReadSource(
-			"modules/frontend/src/routes/components/conversation-reasoning-summary.svelte",
-		);
-
-		expect(source).toContain(":global(:root)");
-		for (const variable of [
-			"--stagger-dur",
-			"--stagger-distance",
-			"--stagger-stagger",
-			"--stagger-blur",
-			"--stagger-ease",
-		]) {
-			expect(source).toContain(variable);
-		}
-		expect(source).toContain('class="t-stagger" use:reveal');
-		expect(source).toContain("t-stagger-line");
-		expect(source).toContain("transition-delay: calc(var(--stagger-stagger) * ${index + 1});");
-		expect(source).toContain('node.classList.remove("is-shown")');
-		expect(source).toContain("void node.offsetHeight");
-		expect(source).toContain('node.classList.add("is-shown")');
-		expect(source).toContain("will-change: transform, opacity, filter;");
-		expect(source).toContain("@media (prefers-reduced-motion: reduce)");
-		expect(source).not.toMatch(/setTimeout|Effect\./u);
-	});
-
-	it("keeps only the active run's consecutive reasoning at the visible transcript tail", () => {
+describe("live thinking line", () => {
+	it("says the active run's newest summary, without its markdown emphasis", () => {
 		const blocks = group_conversation_trace_blocks([
 			as_block(reasoning("reasoning_old", 1, "Old thought", "run_old")),
 			as_block(activity("activity_boundary", 2)),
@@ -147,17 +93,115 @@ describe("conversation thinking trace presentation", () => {
 				}),
 			),
 			as_block(reasoning("reasoning_blank", 5, "   ")),
-			as_block(reasoning("reasoning_3", 6, "Preparing the answer")),
+			as_block(reasoning("reasoning_3", 6, "**Preparing the answer**\n\nOne pass remains. ")),
 		]);
 
-		expect([...conversation_latest_reasoning_item_ids(blocks, "run_1", true)].sort()).toEqual([
-			"reasoning_2",
-			"reasoning_3",
-		]);
-		expect(conversation_latest_reasoning_item_ids(blocks, "run_1", false).size).toBe(0);
+		expect(conversation_live_reasoning_summary(blocks, "run_1", true)).toBe(
+			"Preparing the answer",
+		);
+		expect(conversation_live_reasoning_summary(blocks, "run_1", false)).toBeUndefined();
+		expect(conversation_live_reasoning_summary(blocks, "run_other", true)).toBeUndefined();
 	});
 
-	it("retires reasoning once later visible transcript content arrives", () => {
+	it("says only the newest thought, one line, replaced as the next one arrives", () => {
+		/** Codex: every section opens with a headline, and the latest headline is the thought. */
+		expect(conversation_summary_line("**Considering the options**")).toBe(
+			"Considering the options",
+		);
+		expect(
+			conversation_summary_line(
+				"**Considering the options**\n\nTwo of them fit. One is cheaper.\n\n**Checking the cheaper one**\n\nIt reads the manif",
+			),
+		).toBe("Checking the cheaper one");
+		/** Claude: headline-less paragraphs, so the newest paragraph's first sentence stands in. */
+		const claude =
+			"My three edits to wire.ts all landed correctly — the import/re-export block and both unions. Now I'm moving to the backend.\n\n" +
+			"I'm deciding to get the hostname directly via node:os instead of adding a dependency, and I'm sketching a parser. For the service itself, I'm defining a HostMachinesService.";
+		expect(conversation_summary_line(claude)).toBe(
+			"I'm deciding to get the hostname directly via node:os instead of adding a dependency, and I'm sketching a parser.",
+		);
+		/**
+		 * A sentence still arriving does not take the line. Letting it in rewrote
+		 * the line on every streamed word and then jumped again at the full stop,
+		 * so the reader never had a thought that held still long enough to read.
+		 * The last finished thought keeps the line until the next one finishes.
+		 */
+		expect(conversation_summary_line("Done with the parser.\n\nNext I'm loo")).toBe(
+			"Done with the parser.",
+		);
+		/** Nothing to say yet is the one case that still yields to the verb. */
+		expect(conversation_summary_line("Next I'm loo")).toBeUndefined();
+		expect(conversation_summary_line("Line one\nof the same paragraph.")).toBe(
+			"Line one of the same paragraph.",
+		);
+		expect(conversation_summary_line("   \n\n  ")).toBeUndefined();
+
+		const session = ReadSource(
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
+		);
+		expect(session).toContain('class="trace-command-label min-w-0 truncate"');
+		expect(session).not.toContain("whitespace-pre-wrap text-base leading-7");
+	});
+
+	it("falls back to the thinking verb before the model has summarized anything", () => {
+		const inputs = {
+			engine_name: "Claude",
+			provider_responded: true,
+			seed: "work:run:run_1",
+			waiting_for_activity: false,
+		};
+
+		expect(artisan_thinking_words).toContain(active_work_label_for(inputs));
+		expect(
+			active_work_label_for({ ...inputs, reasoning_summary: "Reading the manifest" }),
+		).toBe("Reading the manifest");
+		/** Facts about the run outrank whatever the model last said about itself. */
+		expect(
+			active_work_label_for({
+				...inputs,
+				reasoning_summary: "Reading the manifest",
+				waiting_for_activity: true,
+			}),
+		).toBe("Waiting");
+		expect(
+			active_work_label_for({
+				...inputs,
+				background_agent_names: ["Explore"],
+				reasoning_summary: "Reading the manifest",
+			}),
+		).toBe("Waiting for Explore to finish…");
+		expect(
+			active_work_label_for({
+				...inputs,
+				provider_responded: false,
+				reasoning_summary: "Reading the manifest",
+			}),
+		).toBe("Waiting for Claude to respond…");
+	});
+
+	it("never rides a thinking count on the verb, even for the engine that estimates one", () => {
+		/**
+		 * The engine still reports its encrypted-reasoning estimate and the
+		 * protocol still carries it, but no status line spends it: "Pondering"
+		 * never becomes "Pondering · 1.2k" anywhere in the render path.
+		 */
+		const status = ReadSource("modules/frontend/src/lib/conversation/activity-status.ts");
+		const trace = ReadSource("modules/frontend/src/lib/conversation/trace.ts");
+		const session = ReadSource(
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
+		);
+		const workspace = ReadSource(
+			"modules/frontend/src/routes/components/thread-workspace.svelte",
+		);
+
+		expect(status).not.toContain("thinking_tokens");
+		expect(status).not.toContain("thinking_label_for");
+		expect(trace).not.toContain("thinking_tokens");
+		expect(session).not.toContain("thinking_tokens");
+		expect(workspace).not.toContain("thinking_tokens");
+	});
+
+	it("retires the line once later visible transcript content arrives", () => {
 		const summary = reasoning("reasoning_1", 1, "Checking the request");
 		const assistant = item({
 			...base,
@@ -169,21 +213,20 @@ describe("conversation thinking trace presentation", () => {
 		});
 		const blocks = group_conversation_trace_blocks([as_block(summary), as_block(assistant)]);
 
-		expect(conversation_latest_reasoning_item_ids(blocks, "run_1", true).size).toBe(0);
-		expect(filter_conversation_trace_reasoning([summary], new Set())).toEqual([]);
+		expect(conversation_live_reasoning_summary(blocks, "run_1", true)).toBeUndefined();
 	});
 
-	it("filters retired reasoning before regrouping adjacent activities", () => {
-		const first_activity = activity("activity_1", 1);
-		const retired = reasoning("reasoning_1", 2, "First pass");
-		const second_activity = activity("activity_2", 3);
-		const latest = reasoning("reasoning_2", 4, "Second pass");
-		const visible = filter_conversation_trace_reasoning(
-			[first_activity, retired, second_activity, latest],
-			new Set([latest.id]),
-		);
+	it("keeps reasoning out of the trace so adjacent activities stay one chain", () => {
+		const items = [
+			activity("activity_1", 1),
+			reasoning("reasoning_1", 2, "First pass"),
+			activity("activity_2", 3),
+			reasoning("reasoning_2", 4, "Second pass"),
+		];
 
-		expect(make_conversation_trace_segments(visible, false)).toEqual([
+		expect(
+			make_conversation_trace_segments(strip_conversation_trace_reasoning(items), false),
+		).toEqual([
 			expect.objectContaining({
 				items: [
 					expect.objectContaining({ id: "activity_1" }),
@@ -191,25 +234,66 @@ describe("conversation thinking trace presentation", () => {
 				],
 				type: "activity_group",
 			}),
-			expect.objectContaining({
-				items: [expect.objectContaining({ id: "reasoning_2" })],
-				type: "reasoning_group",
-			}),
 		]);
 	});
 
-	it("wires post-steer liveness by item run ID and removes empty settled detail", () => {
-		const source = ReadSource("modules/frontend/src/routes/components/thread-workspace.svelte");
+	it("says a summary only for models that publish them", () => {
+		expect(policy_reasoning_display(policy("claude", "claude-opus-5"))).toBe("summary");
+		expect(policy_reasoning_display(policy("codex", "gpt-6-codex"))).toBe("summary");
+		/** Open-weight models stream raw thought, which is never a public summary. */
+		expect(policy_reasoning_display(policy("cursor", "kimi-k3"))).toBe("trace");
+		expect(policy_reasoning_display(policy("cursor", "glm-5.2"))).toBe("trace");
+		/** An unknown or absent model must not silence a line it could say. */
+		expect(policy_reasoning_display(policy("claude", "some-unlisted-model"))).toBe("summary");
+		expect(policy_reasoning_display(undefined)).toBe("summary");
+	});
 
-		expect(source).toContain(
-			"conversation_latest_reasoning_item_ids(render_blocks, active_run_id, run_active)",
+	it("renders one shimmering muted line and no reasoning block of its own", () => {
+		const session = ReadSource(
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
 		);
-		expect(source).toContain("block.items.some((item) => item.run_id === active_run_id)");
-		expect(source).not.toContain(
-			"work_active={run_active && block.turn_id === `run:${active_run_id}`}",
+		const trace = ReadSource(
+			"modules/frontend/src/routes/components/conversation-trace.svelte",
 		);
-		expect(source).toContain("items={visible_trace_items}");
-		expect(source).toContain("items={visible_details}");
-		expect(source).toContain("has_details={visible_details.length > 0}");
+		const workspace = ReadSource(
+			"modules/frontend/src/routes/components/thread-workspace.svelte",
+		);
+
+		expect(session).toContain("reasoning_summary,");
+		expect(session).toContain('class="trace-command-label min-w-0 truncate"');
+		expect(session).toContain("max-w-(--prose-body-width)");
+		expect(session).toContain("{#if renders_status_line}");
+		/**
+		 * The summary is one line, full stop: a thought that outruns the row
+		 * truncates into the trace's clipped-command fade rather than opening
+		 * the phase's prose downward behind a disclosure.
+		 */
+		expect(session).not.toContain("thinking_expanded");
+		expect(session).not.toContain("summary_sections");
+		expect(session).not.toContain("reasoning_summary_text");
+		/** The rail and its disclosure were their own block; there is no second line. */
+		expect(trace).not.toContain("ConversationReasoningSummary");
+		expect(trace).not.toContain("reasoning_group");
+		expect(workspace).not.toContain("ConversationReasoningSummary");
+		expect(workspace).toContain('policy_reasoning_display(policy) === "trace"');
+		expect(workspace).toContain(
+			"conversation_live_reasoning_summary(render_blocks, active_run_id, run_active)",
+		);
+		expect(workspace).toContain("block.session.run_id === active_run_id");
+		expect(workspace).toContain("strip_conversation_trace_reasoning(block.details)");
+		expect(workspace).toContain("has_details={visible_details.length > 0}");
+	});
+});
+
+describe("full reasoning text behind the line", () => {
+	it("returns the whole phase text where the line says only its newest finished thought", () => {
+		const text = "First paragraph of thought.\n\nSecond thought still arriving";
+		const blocks = [as_block(reasoning("summary_full", 1, text))];
+		/** The phase whole, including the paragraph still landing. */
+		expect(conversation_live_reasoning_text(blocks, "run_1", true)).toBe(text);
+		/** The one-line status waits for that paragraph to finish its sentence. */
+		expect(conversation_live_reasoning_summary(blocks, "run_1", true)).toBe(
+			"First paragraph of thought.",
+		);
 	});
 });

@@ -12,6 +12,7 @@
 	import ConversationWorkSession from "$/components/conversation-work-session.svelte";
 	import ContextUsageGauge from "$/components/context-usage-gauge.svelte";
 	import ThreadWorkspace from "$/components/thread-workspace.svelte";
+	import { conversation_summary_line } from "$lib/conversation/trace";
 	import type { ComponentGalleryId } from "./catalog";
 	import {
 		gallery_active_activity,
@@ -33,6 +34,7 @@
 		gallery_question,
 		gallery_reasoning_summary,
 		gallery_streaming_message,
+		gallery_thinking_summary_text,
 		gallery_thread_snapshot,
 		gallery_trace_items,
 		gallery_turn_settled_at,
@@ -70,12 +72,17 @@
 					engine_id="codex"
 					has_details
 					item={gallery_active_work}
-					run_authority="active"
 				>
 					{#snippet details()}
 						<ConversationTrace items={gallery_trace_items} work_active />
 					{/snippet}
 				</ConversationWorkSession>
+			{:else if id === "thinking-summary"}
+				<ConversationWorkSession
+					engine_id="claude"
+					item={gallery_active_work}
+					reasoning_summary={conversation_summary_line(gallery_thinking_summary_text)}
+				/>
 			{:else if id === "completed-work"}
 				<ConversationWorkSession
 					duration_kind="worked"

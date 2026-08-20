@@ -20,10 +20,34 @@ export const ComposerSendBlockedReason = (
 };
 
 /**
+ * Reports whether a context reading describes what the thread would launch now.
+ *
+ * A reading is telemetry from one immutable run, and a thread outlives the
+ * engine and model that produced it. Nothing scopes the stored gauge to its
+ * reporter — the surface projection carries the newest non-null window forward
+ * across every run in the thread — so a Codex run's reported window survived
+ * onto Claude threads, where the gauge read 252K beside a picker saying 1M.
+ *
+ * A run whose model was never recorded still matches on its engine alone.
+ * Requiring the model would drop the gauge for every such run, which is a
+ * wider silence than the mismatch it guards against.
+ */
+export const ComposerContextUsageIsCurrent = (
+	policy: ThreadSessionPolicy | undefined,
+	context_usage: SurfaceUsageAggregate | undefined,
+): boolean => {
+	const origin = context_usage?.context_origin;
+	if (origin === undefined || policy === undefined) return false;
+	if (origin.engine_id !== policy.engine_id) return false;
+	return origin.model_id === undefined || origin.model_id === policy.model;
+};
+
+/**
  * The context-window denominator. A provider that discloses its usable window
- * on the wire (Codex) wins; otherwise the catalog's configured context-window
- * option for the thread's model stands in (Claude never reports a window
- * size). Models without the capability show no gauge.
+ * on the wire (Codex) wins for as long as the thread is still on the run that
+ * disclosed it; otherwise the catalog's configured context-window option for
+ * the thread's model stands in (Claude never reports a window size). Models
+ * without the capability show no gauge.
  *
  * A policy without a context-window choice resolves to the capability's
  * default option, never the suffix-less one. The launcher composes the model
@@ -37,7 +61,10 @@ export const ComposerContextWindowTokens = (
 	policy: ThreadSessionPolicy | undefined,
 	context_usage: SurfaceUsageAggregate | undefined,
 ): number | undefined => {
-	if (context_usage?.context_window_tokens !== undefined) {
+	if (
+		context_usage?.context_window_tokens !== undefined &&
+		ComposerContextUsageIsCurrent(policy, context_usage)
+	) {
 		return context_usage.context_window_tokens;
 	}
 	const capability = catalog.manifest.models.find(

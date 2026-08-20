@@ -13,11 +13,12 @@ describe("frontend font assets", () => {
 		);
 
 		expect(fonts).toContain('font-family: "Artisan Neo";');
-		expect(fonts).toContain('font-family: "Geist";');
 		expect(fonts).toContain('font-family: "JetBrains Mono";');
 		expect(fonts).toContain('font-family: "Cal Sans";');
 		expect(fonts).toContain('font-family: "Sigurd Variable";');
 		expect(fonts).not.toContain("PP Neue Montreal");
+		expect(fonts).not.toContain('font-family: "Geist";');
+		expect(fonts).not.toContain("Instrument Serif");
 		expect(fonts).not.toMatch(/font-family: "Artisan Neo (?:Edge|Soft|Round|Grotesk|Wink)"/u);
 		expect(
 			existsSync(

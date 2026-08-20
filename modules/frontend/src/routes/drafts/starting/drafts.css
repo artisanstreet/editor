@@ -1,0 +1,362 @@
+/**
+ * Motion and a handful of surfaces the drafts share. This file is loaded by
+ * the gallery page alone and never reaches the app: it exists so twelve
+ * variants can spend the same entrance, the same press feedback, and the same
+ * hover face without each one re-deriving them, and so that what is being
+ * compared between variants is layout rather than timing.
+ *
+ * Plain CSS on purpose. Tailwind's `@utility` only exists inside the app's
+ * stylesheet entry, and a draft has no business editing that.
+ */
+
+/* ── Motion ───────────────────────────────────────────────────── */
+
+/**
+ * The entrance every draft uses. Rise, sharpen, settle — the app's own text
+ * swap at a larger amplitude. Nothing starts from `scale(0)` or from nowhere;
+ * an element that has to appear appears from just beside where it belongs.
+ */
+@keyframes dz-enter {
+	from {
+		opacity: 0;
+		transform: translateY(var(--dz-rise, 10px));
+		filter: blur(var(--dz-blur, 3px));
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+		filter: blur(0);
+	}
+}
+
+.dz-enter {
+	opacity: 0;
+	animation: dz-enter 420ms var(--ease-smooth-out) forwards;
+	animation-delay: var(--dz-delay, 0ms);
+}
+
+/** The horizontal cousin, for rails and columns that arrive from their edge. */
+@keyframes dz-enter-x {
+	from {
+		opacity: 0;
+		transform: translateX(var(--dz-shift, -8px));
+		filter: blur(2px);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0);
+		filter: blur(0);
+	}
+}
+
+.dz-enter-x {
+	opacity: 0;
+	animation: dz-enter-x 380ms var(--ease-smooth-out) forwards;
+	animation-delay: var(--dz-delay, 0ms);
+}
+
+/**
+ * Gallery chrome swapping one variant for the next. Opacity and blur only:
+ * the variants underneath choreograph their own arrival, and a translate here
+ * would fight it.
+ */
+@keyframes dz-swap {
+	from {
+		opacity: 0;
+		filter: blur(4px);
+	}
+	to {
+		opacity: 1;
+		filter: blur(0);
+	}
+}
+
+.dz-swap {
+	animation: dz-swap 200ms var(--ease-smooth-out) both;
+}
+
+/**
+ * A layer standing aside for the one replacing it. Opacity and blur only, and
+ * no travel: the incoming layer is already choreographing an arrival, and two
+ * translations crossing each other read as a collision rather than a swap.
+ */
+@keyframes dz-leave {
+	to {
+		opacity: 0;
+		filter: blur(3px);
+	}
+}
+
+.dz-leave {
+	animation: dz-leave 200ms var(--ease-smooth-out) forwards;
+	pointer-events: none;
+}
+
+/**
+ * The swap for something switched tens of times a day. No stagger, no rise, no
+ * blur — just enough of a dissolve that the content is not seen to teleport.
+ * Anything more ornamental than this becomes a tax the moment it is habitual.
+ */
+@keyframes dz-quiet {
+	from {
+		opacity: 0;
+	}
+}
+
+.dz-quiet {
+	animation: dz-quiet 120ms ease forwards;
+}
+
+/* ── Interaction ──────────────────────────────────────────────── */
+
+/**
+ * Press feedback. Every pressable surface in the drafts wears this, because a
+ * control that does not move under the pointer reads as a picture of a
+ * control.
+ */
+.dz-press {
+	transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.dz-press:active {
+	transform: scale(0.97);
+}
+
+/** Rows are wide; the same 0.97 across 700px reads as a glitch rather than a press. */
+.dz-press-row:active {
+	transform: scale(0.995);
+}
+
+.dz-focus:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+/**
+ * The hover face shared by every list row and tile: the app's own hover fill,
+ * plus a hairline that only exists on hover so a resting list stays quiet.
+ */
+.dz-row {
+	transition:
+		background-color 150ms ease,
+		box-shadow 150ms ease,
+		color 150ms ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.dz-row:hover {
+		background: var(--hover-surface-fill);
+		box-shadow: inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 10%);
+	}
+}
+
+/**
+ * The same face, worn because the keyboard is there rather than the pointer.
+ * A list that can be walked with the arrow keys has to be able to say where it
+ * is standing, and it should say it the way hovering already does.
+ */
+.dz-row-on {
+	background: var(--hover-surface-fill);
+	box-shadow: inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 10%);
+}
+
+/**
+ * Rows drawing in towards the one that was picked. Each row carries how far it
+ * has to travel; the class only says to go. Transform alone, so seven rows
+ * moving at once is still seven composited layers and no layout.
+ */
+.dz-converge {
+	transition: transform 220ms var(--ease-smooth-out);
+}
+
+.dz-converged {
+	transform: translateY(var(--dz-converge, 0px));
+}
+
+/**
+ * A name that exists only while the pointer is on its tile. It grows from the
+ * tile's edge rather than from its own middle, because that edge is where it
+ * came from.
+ */
+.dz-flyout {
+	opacity: 0;
+	transform: translateX(-4px) scale(0.97);
+	transform-origin: left center;
+	transition:
+		opacity 125ms var(--ease-smooth-out),
+		transform 125ms var(--ease-smooth-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.dz-flyout-host:hover .dz-flyout {
+		opacity: 1;
+		transform: translateX(0) scale(1);
+	}
+}
+
+.dz-flyout-host:focus-visible .dz-flyout {
+	opacity: 1;
+	transform: translateX(0) scale(1);
+}
+
+/**
+ * The hover lift on an element whose own transform is already being driven a
+ * frame at a time. The two cannot share a property, so they do not share an
+ * element: the spring owns the parent, this owns the child.
+ */
+.dz-lift {
+	transition: transform 200ms var(--ease-smooth-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.dz-lift-host:hover .dz-lift {
+		transform: translateY(-8px) scale(1.05);
+	}
+}
+
+/* ── Surfaces ─────────────────────────────────────────────────── */
+
+/**
+ * A project's own colour, mixed far enough into the surface to identify it and
+ * no further. `--dz-hue` is set per project; nothing here names a colour.
+ */
+.dz-tint {
+	background:
+		linear-gradient(
+			160deg,
+			oklch(0.7 0.14 var(--dz-hue) / 22%),
+			oklch(0.5 0.1 var(--dz-hue) / 6%)
+		),
+		var(--surface-875);
+	box-shadow: inset 0 0 0 0.5px oklch(0.8 0.12 var(--dz-hue) / 22%);
+}
+
+.dz-tint-strong {
+	background: linear-gradient(
+		160deg,
+		oklch(0.72 0.15 var(--dz-hue) / 90%),
+		oklch(0.52 0.12 var(--dz-hue) / 75%)
+	);
+}
+
+/**
+ * The well every control on glass sits in. Opaque, because a translucent tint
+ * over a blurred backdrop turns muddy the moment anything colourful passes
+ * behind it.
+ */
+.dz-well {
+	background: linear-gradient(to bottom, var(--surface-875), var(--surface-900));
+	box-shadow:
+		inset 0 1px 0 oklch(from var(--highlight) l c h / 8%),
+		0 1px 2px oklch(0 0 0 / 40%);
+}
+
+/**
+ * A page-scale wash so a centred layout is not a rectangle floating in flat
+ * black. The `z-index: 0` opens a stacking context the wash can sit behind at
+ * `-1`: an absolutely positioned pseudo element otherwise paints over the
+ * in-flow content it is meant to sit under.
+ */
+.dz-vignette {
+	position: relative;
+	z-index: 0;
+}
+
+.dz-vignette::before {
+	content: "";
+	position: absolute;
+	z-index: -1;
+	inset: 0;
+	pointer-events: none;
+	background:
+		radial-gradient(
+			120% 70% at 50% 0%,
+			oklch(from var(--highlight) l c h / 5%),
+			transparent 60%
+		),
+		radial-gradient(80% 50% at 50% 100%, oklch(0 0 0 / 35%), transparent 70%);
+}
+
+/** The caret a console prompt needs; it blinks because that is what a prompt does. */
+@keyframes dz-caret {
+	0%,
+	45% {
+		opacity: 1;
+	}
+	55%,
+	100% {
+		opacity: 0;
+	}
+}
+
+.dz-caret {
+	animation: dz-caret 1.1s steps(1, end) infinite;
+}
+
+/* ── Reduced motion ───────────────────────────────────────────── */
+
+/**
+ * Fewer and gentler, not none: the fade still explains that something arrived,
+ * the movement that could make someone ill is what goes.
+ */
+@media (prefers-reduced-motion: reduce) {
+	.dz-enter,
+	.dz-enter-x {
+		animation-duration: 200ms;
+		animation-name: dz-swap;
+	}
+
+	.dz-press,
+	.dz-row,
+	.dz-converge,
+	.dz-flyout,
+	.dz-lift {
+		transition: none;
+	}
+
+	.dz-press:active,
+	.dz-press-row:active {
+		transform: none;
+	}
+
+	.dz-converged,
+	.dz-lift-host:hover .dz-lift {
+		transform: none;
+	}
+
+	.dz-leave {
+		animation-duration: 120ms;
+	}
+
+	.dz-caret {
+		animation: none;
+	}
+}
+
+/* ── Popovers ─────────────────────────────────────────────────── */
+
+/**
+ * A menu grows out of the control that opened it, not out of the middle of the
+ * screen. The origin is set on the element; the scale starts at 0.97 because
+ * nothing in the world resumes from zero size.
+ */
+@keyframes dz-pop {
+	from {
+		opacity: 0;
+		transform: scale(0.97);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+
+.dz-pop {
+	animation: dz-pop 170ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.dz-pop {
+		animation: dz-swap 150ms ease both;
+	}
+}

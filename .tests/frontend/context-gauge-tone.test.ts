@@ -129,7 +129,6 @@ describe("auto-compaction point", () => {
 describe("context gauge rendering", () => {
 	it("carries a semantic tone of its own rather than the trigger's currentColor", () => {
 		const ring = read("modules/frontend/src/routes/components/context-usage-ring.svelte");
-		const selector_css = read("modules/frontend/src/routes/components/model-selector.css");
 
 		expect(ring).toContain("--gauge-warn");
 		expect(ring).toContain("--gauge-danger");
@@ -140,7 +139,9 @@ describe("context gauge rendering", () => {
 		expect(ring).not.toContain('stroke="currentColor"');
 		expect(ring).not.toContain('stroke="var(--muted)"');
 		/** Hover must not retint the gauge, or it would report a change that never happened. */
-		expect(selector_css).not.toContain("model-context-gauge");
+		expect(
+			read("modules/frontend/src/routes/components/model-selector/view.svelte"),
+		).not.toContain("model-context-gauge");
 	});
 
 	/**

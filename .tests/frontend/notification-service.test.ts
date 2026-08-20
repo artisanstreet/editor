@@ -113,6 +113,7 @@ const Run = <Value>(
 		Layer.succeed(
 			NotificationPreferences,
 			NotificationPreferences.of({
+				Default: stored,
 				Load: Effect.sync(() => stored),
 				Save: (state) =>
 					Effect.sync(() => {

@@ -5,9 +5,8 @@
 	import type { Component } from "svelte";
 	import { Effect, Stream } from "effect";
 	import type { SessionDefaults } from "@artisan/protocol";
-	import { BannerService } from "$lib/banner/service";
 	import { MakeFollowHighlight } from "$lib/components/dropdown-highlight";
-	import barekey_logo from "$lib/assets/barekey/logo-40.png";
+	import artisan_star from "$lib/assets/barekey/artisan-star.svg";
 	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import {
 		CompactionSelectionFromDefaults,
@@ -37,19 +36,9 @@
 	} from "../model-selector/presentation";
 	import ShaderGlassSurface from "../shader-glass-surface.svelte";
 
-	const banner = yield* BannerService;
 	const FollowHighlight = yield* MakeFollowHighlight;
 	const defaults_controller = yield* SessionDefaultsController;
-	const initial = yield* defaults_controller.Refresh.pipe(
-		Effect.catch((error) =>
-			Effect.gen(function* () {
-				yield* banner.error("Could not load compaction defaults", {
-					description: error.message,
-				});
-				return yield* defaults_controller.Current;
-			}),
-		),
-	);
+	const initial = yield* defaults_controller.Current;
 	let defaults_state = $state.raw<SessionDefaultsState>(initial);
 	const runtime_catalog = $derived(defaults_state.catalog);
 	const model_manifest = $derived(runtime_catalog.manifest);
@@ -77,11 +66,11 @@
 	);
 	const barekey_mark_style = [
 		"background-color: var(--foreground)",
-		`mask-image: url(${barekey_logo})`,
+		`mask-image: url(${artisan_star})`,
 		"mask-size: contain",
 		"mask-repeat: no-repeat",
 		"mask-position: center",
-		`-webkit-mask-image: url(${barekey_logo})`,
+		`-webkit-mask-image: url(${artisan_star})`,
 		"-webkit-mask-size: contain",
 		"-webkit-mask-repeat: no-repeat",
 		"-webkit-mask-position: center",
@@ -117,11 +106,8 @@
 		Effect.gen(function* () {
 			if (!forge_available) return;
 			yield* defaults_controller.SetFavorite(model_id, favorite).pipe(
-				Effect.catch((error) =>
+				Effect.catch(() =>
 					Effect.gen(function* () {
-						yield* banner.error("Could not update model favorite", {
-							description: error.message,
-						});
 					}),
 				),
 			);
@@ -183,11 +169,6 @@
 			if (next_engine !== undefined) active_engine = next_engine;
 		});
 
-	const LoadDefaults = Effect.gen(function* () {
-		const next = yield* defaults_controller.Refresh;
-		yield* ApplyDefaults(next);
-	});
-
 	const SaveDefaults = (
 		selection: CompactionSelection,
 		options: {
@@ -202,17 +183,9 @@
 			});
 			yield* ApplyDefaults(next);
 		}).pipe(
-			Effect.catch((error) =>
+			Effect.catch(() =>
 				Effect.gen(function* () {
-					yield* banner.error("Could not save compaction defaults", {
-						description: error.message,
-					});
-					yield* LoadDefaults.pipe(
-						Effect.catch(() =>
-							Effect.gen(function* () {
-							}),
-						),
-					);
+					yield* ApplyDefaults(yield* defaults_controller.Current);
 				}),
 			),
 		);
@@ -234,26 +207,6 @@
 		Effect.gen(function* () {
 			previewed_model_id = model.id;
 			previewed_mode = undefined;
-		});
-
-	/**
-	 * The highlight is a single pill that travels between rows, so every row
-	 * hands the pointer to it before doing its own work — the same contract the
-	 * composer's model list uses.
-	 */
-	const MoveHover = (move_hover: (event: Event) => void, event: Event) =>
-		Effect.gen(function* () {
-			move_hover(event);
-		});
-
-	const HoverMode = (
-		mode: "curated" | "inherited",
-		move_hover: (event: Event) => void,
-		event: Event,
-	) =>
-		Effect.gen(function* () {
-			move_hover(event);
-			yield* PreviewMode(mode);
 		});
 
 	const PreviewMode = (mode: "curated" | "inherited") =>
@@ -325,21 +278,29 @@
 {/snippet}
 
 {#snippet mode_row(input, move_hover)}
+	<!--
+		The pill handlers are direct references and the preview is a separate
+		effectful handler: an effectful handler runs after its event finished
+		dispatching, when `currentTarget` is already null, so routing
+		`move_hover` through one leaves the pill parked forever.
+	-->
 	<div
 		role="presentation"
-		class="mr-2 flex min-w-0 items-center gap-1"
-		onpointerenter={yield* HoverMode(input.mode, move_hover, event)}
-		onpointermove={yield* MoveHover(move_hover, event)}
-		onfocusin={yield* HoverMode(input.mode, move_hover, event)}
+		class="flex min-w-0 items-center gap-1"
+		onpointerover={move_hover}
+		onpointermove={move_hover}
+		onfocusin={move_hover}
+		onpointerenter={yield* PreviewMode(input.mode)}
 	>
 		<button
 			type="button"
 			disabled={!forge_available}
 			aria-current={input.active ? "true" : undefined}
-			class="flex min-w-0 grow items-center gap-2 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
+			class="flex min-w-0 grow items-center gap-2 rounded-xl px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
 			onclick={yield* SelectSelection(
 				input.mode === "curated" ? { _tag: "Curated" } : { _tag: "Inherited" },
 			)}
+			onfocus={yield* PreviewMode(input.mode)}
 		>
 			{@render barekey_mark("size-5")}
 			<span class="flex min-w-0 flex-col space-y-0">
@@ -396,7 +357,7 @@
 		<PopoverTrigger
 			aria-label="Cross-transfer compaction model"
 			disabled={!forge_available}
-			class="card flex h-7 shrink-0 items-center gap-2 rounded-md bg-linear-to-b from-surface-225 to-surface-200 px-2.5 text-left text-xs text-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none disabled:opacity-45 dark:from-surface-800 dark:to-surface-925"
+			class="card flex h-7 w-full max-w-full shrink-0 items-center gap-2 rounded-md bg-linear-to-b from-surface-225 to-surface-200 px-2.5 text-left text-xs text-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none disabled:opacity-45 sm:w-auto sm:max-w-72 dark:from-surface-800 dark:to-surface-925"
 		>
 			{#if TriggerIcon === undefined}
 				{@render barekey_mark("size-3.5")}
@@ -406,13 +367,19 @@
 			<span class="truncate">{trigger_label}</span>
 			<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
 		</PopoverTrigger>
-		<PopoverContent variant="bare" align="end" side="bottom" sideOffset={8} class="w-[min(30rem,calc(100vw-2rem))] rounded-3xl">
+		<PopoverContent
+			variant="bare"
+			align="end"
+			side="bottom"
+			sideOffset={8}
+			class="w-[min(30rem,calc(100vw-2rem))] rounded-3xl"
+		>
 			<ShaderGlassSurface strength="strong" class="w-full rounded-3xl">
 				<Tabs bind:value={active_engine} class="min-h-0 gap-2 p-2">
 					<EngineSection {active_engine} disabled={!forge_available} engine_locked={false} {engines} selected_engine={active_engine_choice} />
-					<div class="flex min-w-0 gap-2">
+					<div class="flex min-w-0 flex-col gap-2 sm:flex-row">
 						<div
-							class="model-scroll docs-scroll-fade h-48 min-w-0 grow overflow-y-auto rounded-xl [scrollbar-width:thin]"
+							class="docs-scroll-fade h-48 min-w-0 w-full grow overflow-y-auto rounded-xl"
 						>
 							<ModelList
 								disabled={!forge_available}
@@ -441,7 +408,7 @@
 								{/snippet}
 							</ModelList>
 						</div>
-						<div class="h-48 w-56 shrink-0">
+						<div class="min-h-28 w-full shrink-0 border-t border-border/40 sm:h-48 sm:w-56 sm:border-t-0">
 							<div class="flex h-full flex-col justify-between gap-2 overflow-y-auto p-2.5">
 							{#if previewed_pane === "curated"}
 								<div class="flex min-w-0 flex-col gap-3">
@@ -519,7 +486,7 @@
 {/snippet}
 
 <div class="card rounded-xl bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925">
-	<div class="flex items-center justify-between gap-6 px-4 py-3.5">
+	<div class="flex flex-col items-stretch justify-between gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:gap-6">
 		<div class="flex min-w-0 flex-col gap-0.5">
 			<span class="flex items-center gap-1.5 text-sm text-foreground"><ArrowsMinimize class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />Cross-transfer compaction model</span>
 			<span class="text-pretty text-xs text-muted-foreground">Choose who writes a hand-off summary when a thread moves to another engine or model.</span>

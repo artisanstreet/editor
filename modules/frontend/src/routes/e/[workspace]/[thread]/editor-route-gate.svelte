@@ -1,18 +1,19 @@
 <script lang="ts" effect>
 	import { navigating, page } from "$app/state";
 	import { untrack } from "svelte";
-	import { Effect, Option } from "effect";
+	import { Effect, Option, Stream } from "effect";
 	import type { ThreadListItem } from "@artisan/protocol";
-	import { ArtisanClient, type ThreadListUpdate } from "@artisan/transport/client";
-	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
 	import { EditorRouteTargetForThread } from "$lib/editor/workspace-identity";
 	import {
-		ApplyRootThreadListUpdate,
 		ResolveThreadRoute,
 		ThreadRouteHasWorkspace,
 		ThreadRouteOwnsTarget,
 	} from "$lib/root/thread-navigation";
+	import {
+		WorkspaceCatalogController,
+		type WorkspaceCatalogState,
+	} from "$lib/root/workspace-catalog-controller";
 	import EditorRoute from "../../../components/editor-route.svelte";
 
 	let {
@@ -25,9 +26,10 @@
 	const route_id = untrack(() => route_thread_id);
 	const workspace_id = untrack(() => route_workspace_id);
 
-	const client = yield* ArtisanClient;
 	const navigation = yield* RouteNavigation;
-	let threads = $state.raw<ReadonlyArray<ThreadListItem>>(yield* client.ListThreads);
+	const workspace_catalog = yield* WorkspaceCatalogController;
+	let catalog_state = $state.raw<WorkspaceCatalogState>(yield* workspace_catalog.Current);
+	const threads = $derived(catalog_state.threads);
 	let active_thread = $state.raw<ThreadListItem | undefined>();
 
 	/**
@@ -58,6 +60,7 @@
 	 */
 	const ReconcileRoute = Effect.gen(function* () {
 		if (!route_owns_thread()) return;
+		if (!catalog_state.threads_loaded) return;
 		const thread = Option.getOrUndefined(ResolveThreadRoute(threads, route_id));
 		if (thread === undefined) {
 			active_thread = undefined;
@@ -90,27 +93,17 @@
 		active_thread = thread;
 	});
 
-	const ApplyThreadListUpdate = (update: ThreadListUpdate) =>
+	const ApplyCatalogState = (next: WorkspaceCatalogState) =>
 		Effect.gen(function* () {
-			threads = ApplyRootThreadListUpdate(threads, update);
+			catalog_state = next;
 			yield* ReconcileRoute;
 		});
 
-	const RefreshThreads = Effect.gen(function* () {
-		const next_threads = yield* client.ListThreads;
-		yield* ApplyThreadListUpdate({
-			journal_sequence: 0,
-			threads: next_threads,
-			type: "snapshot" as const,
-		});
-	});
-
 	yield* ReconcileRoute;
-	yield* RunAuthoritativeSubscription(
-		client.SubscribeThreadList,
-		ApplyThreadListUpdate,
-		RefreshThreads,
-	).pipe(Effect.forkScoped);
+	yield* workspace_catalog.Changes.pipe(
+		Stream.runForEach(ApplyCatalogState),
+		Effect.forkScoped,
+	);
 </script>
 
 {#if active_thread?.primary_project !== undefined}
@@ -118,4 +111,8 @@
 		thread_id={active_thread.thread_id}
 		workspace_id={active_thread.primary_project.project_id}
 	/>
+{:else if !catalog_state.threads_loaded}
+	<div class="flex h-full min-h-0 items-center justify-center" role="status">
+		<p class="text-sm text-muted-foreground">Loading thread…</p>
+	</div>
 {/if}

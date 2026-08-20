@@ -1,5 +1,7 @@
 import { Effect, Layer } from "effect";
 
+import notification_icon from "$lib/assets/barekey/artisan-app-icon.svg";
+
 import { RunBrowserDom } from "../browser/dom";
 import {
 	SystemNotificationPresenter,
@@ -38,9 +40,6 @@ const ReadPermission = (): SystemNotificationPermission => {
 	const api = NotificationApi();
 	return api === undefined ? "unsupported" : NormalizePermission(api.permission);
 };
-
-/** Served from the frontend root under both the app scheme and a paired origin. */
-const notification_icon = "/barekey-logo.png";
 
 /**
  * The one adapter both surfaces use.

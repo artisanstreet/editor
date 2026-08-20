@@ -6,19 +6,25 @@ import { describe, expect, it } from "vitest";
 
 import { rich_link_metadata_url } from "../../modules/frontend/src/lib/components/markdown/link-url";
 
+import { ReadStylesheets } from "./stylesheet-source";
+
 const ReadSource = (path: string) => readFileSync(resolve(path), "utf8");
 
 describe("conversation link presentation", () => {
 	it("renders resolved page titles with retained favicon assets", () => {
 		const anchor = ReadSource("modules/frontend/src/lib/components/markdown/anchor.svelte");
-		const links = ReadSource("modules/frontend/src/lib/styles/prose/links.css");
+		const runtime = ReadSource("modules/frontend/src/lib/runtime/browser-frontend-runtime.ts");
+		const links = ReadStylesheets();
 
 		expect(anchor).toContain('<script lang="ts" effect>');
-		expect(anchor).toContain("client.ResolveRichLink({ url })");
+		expect(anchor).toContain("RichLinkMetadataController");
+		expect(anchor).toContain("rich_link_metadata.Load(url)");
+		expect(anchor).not.toContain("client.ResolveRichLink");
+		expect(runtime).toContain("RichLinkMetadataControllerLive");
 		expect(anchor).toContain("resolved_title = Option.some(resolution.value.page_name)");
 		expect(anchor).toContain("{resolved_title.value}");
 		expect(anchor).toContain("{@render children?.()}");
-		expect(anchor).toContain("client.OpenAsset(favicon.asset_id)");
+		expect(anchor).toContain("rich_link_assets.Load(favicon)");
 		expect(anchor).toContain('Effect.timeoutOption("2 seconds")');
 		expect(anchor).toContain("CreateBrowserObjectUrl(asset.bytes, asset.content_type)");
 		expect(anchor).toContain("ReleaseBrowserObjectUrl(source)");
@@ -26,17 +32,29 @@ describe("conversation link presentation", () => {
 		expect(anchor).toContain("generation !== rich_link_generation");
 		expect(anchor).toContain("Effect.uninterruptible");
 		expect(anchor).toContain('class="conversation-link-favicon"');
+		expect(anchor).toContain(".conversation-link-favicon {");
+		expect(anchor).toContain("display: block;");
+		expect(anchor).toContain("flex: none;");
 		expect(anchor).toContain('World from "@tabler/icons-svelte/icons/world"');
 		expect(anchor).toContain('class="conversation-link-web-fallback"');
+		expect(anchor).toContain(".conversation-link-web-fallback {");
+		expect(anchor).toContain("display: inline-flex;");
 		expect(anchor).toContain("show_web_fallback = url !== undefined");
 		expect(anchor).toContain("show_web_fallback = true");
-		expect(anchor).toContain("margin-block: 0");
-		expect(anchor).toContain("margin-inline: 0");
+		/** Both metadata icons stay in-flow and do not inherit prose image margins. */
+		expect(anchor).toContain("margin-block: 0;");
+		expect(anchor).toContain("margin-inline: 0;");
 		expect(anchor).toContain('alt=""');
 		expect(anchor).toContain("onerror={yield* HideFailedFavicon(favicon_source.value)}");
 		expect(anchor).toContain("title={safe_href}");
 		expect(anchor).not.toContain("rich_link_debug_status");
 		expect(links).toContain("a.conversation-link");
+		expect(links).toContain("display: inline-flex;");
+		/** Icons seat on the line box, the link itself on the prose baseline. */
+		expect(anchor).toContain("align-self: center;");
+		expect(links).toContain("align-items: baseline;");
+		expect(links).toContain("gap: 0.375em;");
+		expect(links).toContain("vertical-align: baseline;");
 		expect(links).toContain("text-blue-500 no-underline");
 		expect(links).toContain("dark:text-blue-400");
 	});

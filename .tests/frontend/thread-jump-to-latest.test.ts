@@ -17,6 +17,13 @@ describe("thread jump-to-latest affordance", () => {
 		expect(workspace).toContain("release_anchor_scroll(current_viewport)");
 		expect(composer).toContain('aria-label="Jump to latest"');
 		expect(composer).toContain("<ChevronDown");
+		expect(composer).toContain(
+			'<ShaderGlassSurface class="pointer-events-auto size-8 rounded-full shadow-lg">',
+		);
+		expect(composer).toContain('class="size-full rounded-full bg-transparent');
+		expect(composer).toContain(
+			'<div class="prose-column flex w-full max-w-(--prose-width) justify-center">',
+		);
 	});
 
 	it("keeps accepted sends on the existing top-alignment path", () => {

@@ -1,4 +1,4 @@
-import { AttentionTitleMarkerFor } from "@artisan/protocol";
+import { AttentionTitleMarkerFor, forge_repair_title_marker } from "@artisan/protocol";
 
 import { dev_title_marker } from "./dev-instance";
 
@@ -19,12 +19,25 @@ const dev_prefix = `${dev_title_marker} `;
  * start of the title, and a count planted in front of it would make the two
  * observers rewrite each other's work forever instead of converging.
  */
-export const AttentionMarkedTitle = (title: string, count: number | undefined): string => {
+export const AttentionMarkedTitle = (
+	title: string,
+	count: number | undefined,
+	/**
+	 * Rides the same rewrite rather than a second writer, because both markers
+	 * live in one string and two observers racing over it would each keep
+	 * erasing the other's work.
+	 */
+	requests_forge_repair = false,
+): string => {
 	const marked_for_development = title.startsWith(dev_prefix);
 	const prefix = marked_for_development ? dev_prefix : "";
-	const bare = title.slice(prefix.length).replace(attention_marker_prefix, "");
+	const bare = title
+		.slice(prefix.length)
+		.replace(attention_marker_prefix, "")
+		.replaceAll(forge_repair_title_marker, "");
+	const suffix = requests_forge_repair ? forge_repair_title_marker : "";
 
 	return count === undefined
-		? `${prefix}${bare}`
-		: `${prefix}${AttentionTitleMarkerFor(count)} ${bare}`;
+		? `${prefix}${bare}${suffix}`
+		: `${prefix}${AttentionTitleMarkerFor(count)} ${bare}${suffix}`;
 };

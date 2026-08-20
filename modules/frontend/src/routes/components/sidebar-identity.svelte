@@ -2,7 +2,6 @@
 	import Settings from "@tabler/icons-svelte/icons/settings";
 	import { Clock, Effect, Option, Stream } from "effect";
 	import type { EngineUsageSnapshot, HostIdentitySnapshot } from "@artisan/protocol";
-	import { ArtisanClient } from "@artisan/transport/client";
 	import { Avatar, AvatarFallback } from "$lib/components/ui/avatar";
 	import {
 		DropdownMenu,
@@ -16,16 +15,23 @@
 	import ShaderGlassSurface from "./shader-glass-surface.svelte";
 	import SidebarEngineUsage, { type SidebarUsageState } from "./sidebar-engine-usage.svelte";
 	import { GradientAvatarSvg } from "$lib/identity/gradient-avatar";
-	import { SessionDefaultsController } from "$lib/settings/session-defaults-controller";
+	import {
+		SessionDefaultsController,
+		type SessionDefaultsState,
+	} from "$lib/settings/session-defaults-controller";
 	import { model_manifest } from "@artisan/catalog";
 	import {
 		EngineUsageCache,
 		EngineUsageCacheBrowserLive,
 		engine_usage_refresh_is_due,
 	} from "$lib/identity/usage-cache";
-	import { MakeEngineUsageRefreshController } from "$lib/identity/usage-refresh-controller";
+	import {
+		EngineUsageController,
+		type EngineUsageEntry,
+		type EngineUsageState,
+	} from "$lib/identity/engine-usage-controller";
+	import { HostIdentityController } from "$lib/identity/host-identity-controller";
 
-	const client = yield* ArtisanClient;
 	const usage_cache = yield* EngineUsageCache.pipe(Effect.provide(EngineUsageCacheBrowserLive));
 	const FollowHighlight = yield* MakeFollowHighlight;
 
@@ -39,7 +45,8 @@
 		open?: boolean;
 	} = $props();
 
-	let identity = $state<HostIdentitySnapshot | undefined>(undefined);
+	const identity_controller = yield* HostIdentityController;
+	let identity = $state<HostIdentitySnapshot | undefined>(yield* identity_controller.Current);
 	let usage_state = $state<SidebarUsageState>({ status: "idle" });
 
 	const profile_name = $derived(identity?.display_name ?? identity?.username ?? identity?.hostname);
@@ -52,28 +59,66 @@
 	const show_hostname = $derived(
 		identity !== undefined && profile_name !== undefined && identity.hostname !== profile_name,
 	);
+	const usage_controller = yield* EngineUsageController;
 	/** Engines with a fetch in flight; each header shows its own arc while listed here. */
-	const refresh_controller = yield* MakeEngineUsageRefreshController;
-	let refreshing_engines = $state.raw<ReadonlySet<string>>(yield* refresh_controller.Current);
-	yield* refresh_controller.Changes.pipe(
-		Stream.runForEach((next) =>
-			Effect.gen(function* () {
-				refreshing_engines = next;
-			}),
-		),
+	let refreshing_engines = $state.raw<ReadonlySet<string>>(
+		(yield* usage_controller.Current).refreshing_engine_ids,
+	);
+	/**
+	 * Hoisted so the yield site never names the state it writes. An inline arrow
+	 * puts `refreshing_engines` in the site's reactive inputs, and because these
+	 * `Changes` streams replay their current value on subscribe, the write would
+	 * re-invalidate the site, resubscribe, and replay again — an unbounded loop
+	 * that leaks a subscription and a scoped fiber per turn.
+	 */
+	/** Every engine's own reading, handed to the menu unaggregated. */
+	let usage_entries = $state.raw<ReadonlyMap<string, EngineUsageEntry>>(
+		(yield* usage_controller.Current).entries,
+	);
+	const ApplyUsageState = (next: EngineUsageState) =>
+		Effect.gen(function* () {
+			refreshing_engines = next.refreshing_engine_ids;
+			usage_entries = next.entries;
+			const entries = [...next.entries.values()];
+			if (entries.length === 0) return;
+			const reports = entries
+				.map((entry) => entry.report)
+				.filter((report): report is NonNullable<typeof report> => report !== undefined);
+			/**
+			 * The aggregate survives only as the cache's own shape, which is one
+			 * document with one stamp. Nothing on screen reads it: each row takes
+			 * its reading and its timestamp from its own entry above.
+			 */
+			usage_state = {
+				status: "loaded",
+				snapshot: {
+					engines: reports,
+					fetched_at: new Date(
+						Math.max(...entries.map((entry) => entry.fetched_at_ms)),
+					).toISOString(),
+				},
+			};
+		});
+	yield* usage_controller.Changes.pipe(
+		Stream.runForEach(ApplyUsageState),
 		Effect.forkScoped,
 	);
+	const ApplyIdentity = (next: HostIdentitySnapshot | undefined) =>
+		Effect.gen(function* () {
+			identity = next;
+		});
+	yield* identity_controller.Changes.pipe(Stream.runForEach(ApplyIdentity), Effect.forkScoped);
 
 	const defaults_controller = yield* SessionDefaultsController;
 	let disabled_engine_ids = $state.raw<ReadonlyArray<string>>(
 		(yield* defaults_controller.Current).defaults.disabled_engines ?? [],
 	);
+	const ApplyDisabledEngineIds = (next: SessionDefaultsState) =>
+		Effect.gen(function* () {
+			disabled_engine_ids = next.defaults.disabled_engines ?? [];
+		});
 	yield* defaults_controller.Changes.pipe(
-		Stream.runForEach((next) =>
-			Effect.gen(function* () {
-				disabled_engine_ids = next.defaults.disabled_engines ?? [];
-			}),
-		),
+		Stream.runForEach(ApplyDisabledEngineIds),
 		Effect.forkScoped,
 	);
 
@@ -90,43 +135,21 @@
 			.filter((engine_id) => !disabled_engine_ids.includes(engine_id)),
 	);
 
-	/** Upserts one engine's reports so each provider paints as soon as it answers. */
-	const MergeReports = (incoming: EngineUsageSnapshot) =>
-		Effect.gen(function* () {
-		const prior = usage_state.status === "loaded" ? usage_state.snapshot.engines : [];
-		const by_id = new Map(prior.map((report) => [report.engine_id, report] as const));
-		for (const report of incoming.engines) by_id.set(report.engine_id, report);
-		usage_state = {
-			snapshot: { engines: [...by_id.values()], fetched_at: incoming.fetched_at },
-			status: "loaded",
-		};
-		});
-
-	const FetchEngineUsage = (engine_id: string, force: boolean) =>
-		Effect.gen(function* () {
-			const snapshot = yield* client.GetEngineUsage({
-				engine_id,
-				...(force ? { force: true } : {}),
-			});
-			if (snapshot.engines.length > 0) yield* MergeReports(snapshot);
-		}).pipe(
+	/**
+	 * Persists whatever has answered so far.
+	 *
+	 * Run per engine rather than once after the slowest, so a provider that never
+	 * returns cannot keep the engines that did out of the cache — and no longer
+	 * flips a shared status the rows would all have obeyed.
+	 */
+	const SettleUsage = Effect.gen(function* () {
+		if (usage_state.status !== "loaded") return;
+		yield* usage_cache.Save(usage_state.snapshot).pipe(
 			Effect.catch(() =>
 				Effect.gen(function* () {
 				}),
 			),
 		);
-	/** Runs once after the last overlapping provider refresh has released its claim. */
-	const SettleUsage = Effect.gen(function* () {
-		if (usage_state.status === "loaded") {
-			yield* usage_cache.Save(usage_state.snapshot).pipe(
-				Effect.catch(() =>
-					Effect.gen(function* () {
-					}),
-				),
-			);
-		} else if (usage_state.status === "loading") {
-			usage_state = { status: "error" };
-		}
 	});
 
 	/**
@@ -139,13 +162,20 @@
 	 */
 	const RefreshUsage = (force: boolean, requested_engine_ids = usage_engine_ids) =>
 		Effect.gen(function* () {
-		if (requested_engine_ids.every((engine_id) => refreshing_engines.has(engine_id))) return;
-
 		if (usage_state.status !== "loaded") usage_state = { status: "loading" };
-		yield* refresh_controller.Refresh(
+		/**
+		 * Each engine settles the moment it answers. Waiting for the whole
+		 * fan-out to persist meant one slow provider withheld every other
+		 * engine's reading from the cache the next session opens on.
+		 */
+		yield* Effect.forEach(
 			requested_engine_ids,
-			(engine_id) => FetchEngineUsage(engine_id, force),
-			SettleUsage,
+			(engine_id) =>
+				Effect.gen(function* () {
+					yield* usage_controller.Load(engine_id, { force }).pipe(Effect.ignore);
+					yield* SettleUsage;
+				}),
+			{ concurrency: "unbounded", discard: true },
 		);
 		});
 	/** A row refresh is deliberately scoped to its provider; background freshness still fans out. */
@@ -172,48 +202,28 @@
 	});
 	yield* TickCheckedAt.pipe(Effect.forkScoped);
 
-	const FormatCheckedLabel = (fetched_at: string, at_ms: number): string => {
-		const minutes = Math.floor((at_ms - Date.parse(fetched_at)) / 60_000);
-		if (minutes < 1) return "last checked now";
-		if (minutes < 60) return `last checked ${minutes} min ago`;
-		const hours = Math.floor(minutes / 60);
-		if (hours < 24) return `last checked ${hours} hr ago`;
-		return `last checked ${Math.floor(hours / 24)} d ago`;
-	};
-
-	const checked_label = $derived(
-		usage_state.status === "loaded"
-			? FormatCheckedLabel(usage_state.snapshot.fetched_at, checked_at_ms)
-			: undefined,
-	);
-
-	const LoadIdentity = Effect.gen(function* () {
-		identity = yield* client.GetHostIdentity;
-	}).pipe(
-		Effect.catch(() =>
-			Effect.gen(function* () {
-			}),
-		),
-	);
 	const LoadCachedUsage = Effect.gen(function* () {
 		const cached_usage = yield* usage_cache.Load;
 		if (Option.isSome(cached_usage)) {
 			usage_state = { status: "loaded", snapshot: cached_usage.value };
+			yield* usage_controller.Seed(cached_usage.value);
 		}
 	});
-	yield* LoadIdentity;
-	yield* LoadCachedUsage;
+	yield* identity_controller.Refresh.pipe(Effect.forkScoped);
 	/**
 	 * The fan-out starts at mount, not at first open: the enabled set is
 	 * already known from the catalog, so by the time the menu opens the
 	 * readings are usually fetched and paint immediately instead of the
 	 * whole menu waiting on the slowest provider's first answer.
 	 */
-	yield* RequestUsage();
+	yield* Effect.gen(function* () {
+		yield* LoadCachedUsage;
+		yield* RequestUsage();
+	}).pipe(Effect.forkScoped);
 
 	// Top-level SER work follows the reactive menu state without a Svelte effect bridge.
 	if (open) {
-		yield* RequestUsage();
+		yield* RequestUsage().pipe(Effect.forkScoped);
 	}
 </script>
 
@@ -271,7 +281,7 @@
 
 		<SidebarEngineUsage
 			{checked_at_ms}
-			{checked_label}
+			entries={usage_entries}
 			engine_ids={usage_engine_ids}
 			hidden_engine_ids={disabled_engine_ids}
 			onrefresh={RefreshEngineUsage}
@@ -304,56 +314,3 @@
 		</ShaderGlassSurface>
 	</DropdownMenuContent>
 </DropdownMenu>
-
-<style>
-	/**
-	 * Hover feedback is a shimmer across the avatar artwork rather than an
-	 * accent fill — shimmer-text's sweeping band, painted on an overlay that
-	 * ramps from transparent instead of clipping to glyphs. The band travels
-	 * by transform rather than background-position so its resting point can
-	 * sit exactly off the top-right edge: the sweep is visible from the first
-	 * frame of the hover instead of spending part of the cycle off-canvas.
-	 * The avatar's overflow clips the pass to the circle.
-	 */
-	:global(.account-avatar)::after {
-		--account-shimmer-contrast: rgb(255 255 255 / 40%);
-		content: "";
-		position: absolute;
-		inset: 0;
-		pointer-events: none;
-		background-image: linear-gradient(
-			to bottom left,
-			transparent 35%,
-			var(--account-shimmer-contrast) 45%,
-			var(--account-shimmer-contrast) 55%,
-			transparent 65%
-		);
-		transform: translate(100%, -100%);
-		will-change: transform;
-	}
-	/**
-	 * One pass per hover, not a loop: the keyframes end off the bottom-left
-	 * edge and the resting transform is off the top-right, so after the pass
-	 * the overlay is invisible either way. Leaving and re-entering re-applies
-	 * the animation and replays it.
-	 */
-	:global(.account-trigger:hover .account-avatar)::after {
-		animation: account-shimmer 600ms var(--ease-smooth-out);
-	}
-
-	@keyframes -global-account-shimmer {
-		from {
-			transform: translate(100%, -100%);
-		}
-		to {
-			transform: translate(-100%, 100%);
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		:global(.account-trigger:hover .account-avatar)::after {
-			animation: none !important;
-		}
-	}
-
-</style>

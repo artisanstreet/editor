@@ -100,12 +100,10 @@ describe("ForgeGate", () => {
 		["event_overflow", ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED],
 		["malformed", ArtisanErrorCode.TRANSPORT_MALFORMED],
 		["protocol", ArtisanErrorCode.PROTOCOL_FAILURE],
-		["request_overflow", ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED],
 		["stream_closed", ArtisanErrorCode.CLIENT_STATE_FAILURE],
 		["stream_gap", ArtisanErrorCode.CLIENT_STATE_FAILURE],
 		["stream_not_found", ArtisanErrorCode.CLIENT_STATE_FAILURE],
 		["stream_overflow", ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED],
-		["subscription_overflow", ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED],
 	] as const)("maps %s to %s", (code, expected) => {
 		const error = new ArtisanClientError({
 			cause: new Error("private transport cause"),

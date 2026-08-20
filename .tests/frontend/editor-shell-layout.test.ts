@@ -22,23 +22,27 @@ describe("editor shell", () => {
 		expect(panel).toContain('id: "threads"');
 		expect(panel).toContain('id: "editor"');
 		expect(files).toContain("<WorkspaceFileTree");
-		expect(files).toContain("client.ListWorkspaceFiles");
+		expect(files).toContain("const discovered = yield* client\n\t\t\t\t.ListWorkspaceFiles({");
 	});
 
 	/**
 	 * One inspector column serves whatever workspace is open: the file tree for
-	 * the editor, the thread inspector for a concrete thread, and nothing for the
-	 * routes that own neither.
+	 * the editor and the persistent environment inspector for a concrete thread.
 	 */
 	it("gives the inspector column to the editor's files and to thread routes", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.svelte");
 
-		expect(layout).toContain(
-			'secondary={surface === "editor" ? editor_files : is_thread ? secondary : undefined}',
-		);
+		/**
+		 * The editor's tree and the thread inspector both keep the column at every width.
+		 */
+		expect(layout).toContain('secondary={surface === "editor"');
+		expect(layout).toContain("? editor_files");
+		expect(layout).toContain('secondary={surface === "editor" ? editor_files : secondary}');
+		expect(layout).toContain('const thread_inspector_open = $derived(surface === "threads")');
 		expect(layout).toContain("{#snippet editor_files()}");
 		expect(layout).toContain("<EditorFilePanel />");
 		expect(layout).toContain("/^\\/t\\/[^/]+\\/[^/]+\\/?$/");
+		expect(layout).toContain("/^\\/t\\/[^/]+\\/?$/");
 	});
 
 	it("drives the editor session from the URL so a deep link restores it", () => {
@@ -51,11 +55,14 @@ describe("editor shell", () => {
 		expect(route).toContain("page.params.thread");
 		expect(gate).toContain('page.url.searchParams.get("file")');
 		expect(gate).toContain("EditorRouteTargetForThread(");
-		expect(gate).toContain("client.SubscribeThreadList");
+		expect(gate).toContain("yield* WorkspaceCatalogController");
+		expect(gate).toContain("workspace_catalog.Changes");
+		expect(gate).not.toContain("client.ListThreads");
+		expect(gate).not.toContain("client.SubscribeThreadList");
 		expect(gate).toContain("ThreadRouteHasWorkspace(thread, workspace_id)");
 		expect(gate).toContain("active_thread = undefined");
 		expect(gate).toContain(
-			"EditorRoute workspace_id={active_thread.primary_project.project_id}",
+			"<EditorRoute\n\t\tthread_id={active_thread.thread_id}\n\t\tworkspace_id={active_thread.primary_project.project_id}\n\t/>",
 		);
 		/** Saving and the strip that carried it are gone for now, not merely hidden. */
 		expect(route).not.toContain("ReplaceWorkspaceFile({");
@@ -89,6 +96,17 @@ describe("editor shell", () => {
 		expect(route).toContain("This file can&rsquo;t be displayed");
 		expect(route).toContain("{active_failure}");
 		expect(route).toMatch(/\{:else if active_failure !== undefined\}[\s\S]*<EditorSurface/);
+	});
+
+	it("paints a file skeleton while a latest-only read runs outside route mounting", () => {
+		const route = Read("modules/frontend/src/routes/components/editor-route.svelte");
+
+		expect(route).toContain("yield* MakeLatestRequestGate");
+		expect(route).toContain("OpenPath(path, target_workspace_id, generation)");
+		expect(route).toContain(".pipe(Effect.forkScoped);");
+		expect(route).toContain("{:else if opening_path === active_path}");
+		expect(route).toContain("retained_files.get(active_path)");
+		expect(route).not.toContain("yield* OpenPath(active_path)");
 	});
 
 	it("keeps every editor implementation behind the adapter seam", () => {

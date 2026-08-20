@@ -11,6 +11,6 @@
 	<div
 		class="min-h-0 min-w-0 flex-1 rounded-3xl bg-linear-to-b from-surface-125 to-surface-75 p-1 card dark:from-surface-900 dark:to-surface-925"
 	>
-		<div class="h-full rounded-[calc(1.5rem-0.25rem)] bg-background/55"></div>
+		<div class="h-full rounded-2xl bg-background/55"></div>
 	</div>
 </div>

@@ -28,7 +28,55 @@ const base = {
 const item = (value: unknown) => Schema.decodeUnknownSync(ConversationItem)(value);
 
 describe("conversation trace", () => {
+	it("restores the historical aggregate header without changing category-aware rows", () => {
+		const trace = ReadSource(
+			"modules/frontend/src/routes/components/conversation-trace.svelte",
+		);
+		const workspace = ReadSource(
+			"modules/frontend/src/routes/components/thread-workspace.svelte",
+		);
+
+		expect(trace).toContain("GetConversationActivityCategoryLabel(activity_category)");
+		expect(trace).toContain('class="shrink-0 text-foreground"');
+		expect(trace).toContain("const CategoryIcon");
+		expect(trace).toContain(
+			'category === "command" || category === "test" || category === "typecheck"',
+		);
+		expect(trace).toContain('if (category === "file_read") return FileText');
+		expect(trace).toContain('if (category === "file_edit") return FilePencil');
+		expect(trace).toContain('if (category === "file_delete") return FileX');
+		expect(trace).toContain('if (category === "file_search") return FileSearch');
+		expect(trace).toContain('if (category === "web_search") return WorldSearch');
+		expect(trace).toContain("const GroupIcon");
+		expect(trace).toContain("return only === undefined ? ListDetails : CategoryIcon(only[0])");
+		expect(trace).toContain('<HeadIcon class="size-4 shrink-0" aria-hidden="true" />');
+		expect(trace).toContain(
+			"index === 0 ? clause.charAt(0).toUpperCase() + clause.slice(1) : `, ${clause}`",
+		);
+		expect(trace).toContain(
+			"text-muted-foreground transition-colors duration-150 hover:text-foreground group-data-[open=true]/trace-acc:text-foreground motion-reduce:transition-none",
+		);
+		const group_header = trace.match(/<ShimmerText[\s\S]*?<\/ShimmerText>/u)?.[0];
+		expect(group_header).toBeDefined();
+		expect(group_header).not.toContain("GetConversationActivityCategoryLabel");
+		expect(group_header).not.toContain('class="text-foreground"');
+		expect(group_header).not.toContain('class="text-muted-foreground"');
+		expect(workspace).toContain("group_conversation_trace_blocks(");
+		expect(workspace).toContain(
+			"conversation_live_reasoning_summary(render_blocks, active_run_id, run_active)",
+		);
+		expect(workspace).not.toContain("<ConversationTrace items={[block.item]}");
+	});
+
 	it("keeps contiguous post-steer trace blocks in one tool chain", () => {
+		const steering = item({
+			...base,
+			id: "message_steer",
+			ordinal: 1,
+			text: "Keep checking the remaining commands.",
+			turn_id: "turn:user:steer",
+			type: "user_message",
+		});
 		const activity = (id: string, ordinal: number) =>
 			item({
 				...base,
@@ -39,20 +87,14 @@ describe("conversation trace", () => {
 				status: "completed",
 				type: "activity",
 			});
-		const boundary = (
-			id: string,
-			ordinal: number,
-			type: "assistant_message" | "user_message",
-		) =>
-			item({
-				...base,
-				id,
-				ordinal,
-				...(type === "assistant_message" ? { phase: "commentary" as const } : {}),
-				text: id,
-				turn_id: type === "user_message" ? "turn:user:steer" : base.turn_id,
-				type,
-			});
+		const assistant = item({
+			...base,
+			id: "assistant_boundary",
+			ordinal: 4,
+			phase: "commentary",
+			text: "I checked the first result.",
+			type: "assistant_message",
+		});
 		const as_block = (entry: ConversationItem) => ({
 			id: entry.id,
 			item: entry,
@@ -60,39 +102,122 @@ describe("conversation trace", () => {
 			type: "item" as const,
 		});
 		const grouped = group_conversation_trace_blocks([
-			as_block(boundary("message_steer", 1, "user_message")),
+			as_block(steering),
 			as_block(activity("activity_1", 2)),
 			as_block(activity("activity_2", 3)),
-			as_block(boundary("assistant_boundary", 4, "assistant_message")),
+			as_block(assistant),
 			as_block(activity("activity_3", 5)),
 			as_block(activity("activity_4", 6)),
 		]);
 
-		expect(grouped.map((block) => block.type)).toEqual([
-			"item",
-			"trace_group",
-			"item",
-			"trace_group",
+		expect(grouped).toEqual([
+			expect.objectContaining({ id: "message_steer", type: "item" }),
+			expect.objectContaining({
+				items: [
+					expect.objectContaining({ id: "activity_1" }),
+					expect.objectContaining({ id: "activity_2" }),
+				],
+				type: "trace_group",
+			}),
+			expect.objectContaining({ id: "assistant_boundary", type: "item" }),
+			expect.objectContaining({
+				items: [
+					expect.objectContaining({ id: "activity_3" }),
+					expect.objectContaining({ id: "activity_4" }),
+				],
+				type: "trace_group",
+			}),
 		]);
-		expect(
-			grouped.flatMap((block) =>
-				block.type === "trace_group" ? [block.items.map((entry) => entry.id)] : [],
-			),
-		).toEqual([
-			["activity_1", "activity_2"],
-			["activity_3", "activity_4"],
-		]);
-		const workspace = ReadSource(
-			"modules/frontend/src/routes/components/thread-workspace.svelte",
-		);
-		expect(workspace).toContain("group_conversation_trace_blocks(");
-		expect(workspace).toContain(
-			"conversation_latest_reasoning_item_ids(render_blocks, active_run_id, run_active)",
-		);
-		expect(workspace).not.toContain("<ConversationTrace items={[block.item]}");
 	});
 
-	it("hides diagnostics by default without suppressing active reasoning", () => {
+	it("routes post-steer reasoning through the same trace group as adjacent work", () => {
+		const activity = (id: string, ordinal: number) =>
+			item({
+				...base,
+				id,
+				kind: "terminal_activity",
+				label: "Ran a command",
+				ordinal,
+				status: "completed",
+				type: "activity",
+			});
+		const reasoning = item({
+			...base,
+			id: "reasoning_after_steer",
+			ordinal: 2,
+			text: "Checking the steered request",
+			type: "reasoning_summary",
+		});
+		const as_block = (entry: ConversationItem) => ({
+			id: entry.id,
+			item: entry,
+			turn_id: entry.turn_id,
+			type: "item" as const,
+		});
+
+		expect(
+			group_conversation_trace_blocks([
+				as_block(activity("activity_before_reasoning", 1)),
+				as_block(reasoning),
+				as_block(activity("activity_after_reasoning", 3)),
+			]),
+		).toEqual([
+			expect.objectContaining({
+				items: [
+					expect.objectContaining({ id: "activity_before_reasoning" }),
+					expect.objectContaining({ id: "reasoning_after_steer" }),
+					expect.objectContaining({ id: "activity_after_reasoning" }),
+				],
+				type: "trace_group",
+			}),
+		]);
+	});
+
+	it("places a visual-only rail beside expanded activity children", () => {
+		const trace = ReadSource(
+			"modules/frontend/src/routes/components/conversation-trace.svelte",
+		);
+
+		expect(trace).toContain('class="relative flex flex-col gap-1 pl-6"');
+		expect(trace).toContain("pointer-events-none absolute inset-y-0 left-0 w-4");
+		expect(trace).toContain("after:left-1/2 after:w-[2px]");
+		expect(trace).toContain('aria-hidden="true"');
+		expect(trace).not.toContain('aria-label="Collapse activity group"');
+		expect(trace).not.toContain('title="Collapse activity group"');
+		expect(trace).not.toContain("hover:after:bg-foreground/50");
+		/** The native header button remains the sole accessible disclosure control. */
+		expect(trace).toContain("aria-expanded={open}");
+		expect(trace).toContain("onclick={yield* ToggleGroup(segment.id)}");
+	});
+
+	it("never lets native diagnostics bypass the trace visibility policy", () => {
+		const item_view = ReadSource(
+			"modules/frontend/src/routes/components/conversation-item.svelte",
+		);
+		const status = ReadSource(
+			"modules/frontend/src/routes/components/conversation-status.svelte",
+		);
+
+		expect(item_view).toContain('{:else if item.type === "native_event"}');
+		expect(item_view).toContain("Native diagnostics render only through ConversationTrace");
+		expect(status).not.toContain('{:else if item.type === "native_event"}');
+		expect(status).not.toContain('<Badge variant="outline">Native</Badge>');
+	});
+
+	it("keeps tool-chain rows free of output hover previews", () => {
+		const source = readFileSync(
+			"modules/frontend/src/routes/components/conversation-trace.svelte",
+			"utf8",
+		);
+
+		expect(source).not.toContain("LinkPreview");
+		expect(source).not.toContain("ShaderGlassSurface");
+		expect(source).not.toContain("openDelay={0}");
+		expect(source).not.toContain("tabindex={activity.output");
+		expect(source).not.toContain("preview_props");
+	});
+
+	it("hides diagnostics by default without suppressing what the agent said", () => {
 		const segments = make_conversation_trace_segments(
 			[
 				item({
@@ -103,76 +228,21 @@ describe("conversation trace", () => {
 				}),
 				item({
 					...base,
-					id: "reasoning_1",
+					id: "assistant_1",
 					lifecycle: "active",
 					ordinal: 2,
+					phase: "commentary",
 					text: "Checking the provider",
-					type: "reasoning_summary",
+					type: "assistant_message",
 				}),
 			],
 			false,
 		);
 
-		expect(segments).toEqual([
-			expect.objectContaining({
-				id: "reasoning:reasoning_1",
-				type: "reasoning_group",
-			}),
-		]);
+		expect(segments).toEqual([expect.objectContaining({ id: "assistant_1", type: "item" })]);
 	});
 
-	it("keeps reasoning grouping lifecycle-neutral before presentation filtering", () => {
-		const activity = item({
-			...base,
-			id: "activity_1",
-			kind: "tool_activity",
-			label: "Read a file",
-			ordinal: 2,
-			status: "completed",
-			type: "activity",
-		});
-		const reasoning = (lifecycle: string) =>
-			item({
-				...base,
-				id: "reasoning_1",
-				lifecycle,
-				ordinal: 3,
-				text: "Reading the skill reference",
-				type: "reasoning_summary",
-			});
-
-		const streaming = make_conversation_trace_segments(
-			[activity, reasoning("streaming")],
-			false,
-		);
-		expect(streaming).toEqual([
-			expect.objectContaining({ type: "activity_group" }),
-			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
-		]);
-
-		/** Lifecycle does not alter grouping; the workspace's rendered-order
-		 * projection decides whether a grouped summary is still the visible tail. */
-		const completed_mid_run = make_conversation_trace_segments(
-			[activity, reasoning("completed")],
-			false,
-			false,
-		);
-		expect(completed_mid_run).toEqual([
-			expect.objectContaining({ type: "activity_group" }),
-			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
-		]);
-
-		const grouped = make_conversation_trace_segments([activity, reasoning("completed")], false);
-		expect(grouped).toEqual([
-			expect.objectContaining({ type: "activity_group" }),
-			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
-		]);
-	});
-
-	it("renders only live tail reasoning without a nested disclosure", () => {
-		const reasoning = ReadSource(
-			"modules/frontend/src/routes/components/conversation-reasoning-summary.svelte",
-		);
+	it("leaves the trace with no reasoning surface of its own", () => {
 		const trace = ReadSource(
 			"modules/frontend/src/routes/components/conversation-trace.svelte",
 		);
@@ -180,49 +250,14 @@ describe("conversation trace", () => {
 			"modules/frontend/src/routes/components/thread-workspace.svelte",
 		);
 
-		expect(reasoning).toContain("const trace_items = $derived(items.slice(1));");
-		expect(reasoning).toContain("markdown={single_item.text}");
-		expect(reasoning).toContain("{#each trace_items as summary, index (summary.id)}");
-		expect(reasoning).toContain("<ShimmerText active={live}");
-		expect(reasoning).not.toContain("aria-expanded");
-		expect(reasoning).not.toContain("ontoggle");
-		expect(reasoning).toContain("@media (prefers-reduced-motion: reduce)");
+		/** The rail, its disclosure, and the whole reasoning block are gone. */
+		expect(trace).not.toContain("ConversationReasoningSummary");
+		expect(trace).not.toContain("reasoning_group");
 		expect(trace).not.toContain("open_groups[segment.id] ?? work_active");
-		expect(trace).toContain("live={work_active}");
 		expect(workspace).toContain(
-			"conversation_latest_reasoning_item_ids(render_blocks, active_run_id, run_active)",
+			"conversation_live_reasoning_summary(render_blocks, active_run_id, run_active)",
 		);
 		expect(workspace).toContain("has_details={visible_details.length > 0}");
-	});
-
-	it("groups adjacent reasoning summaries into one stable trace", () => {
-		const summary = (id: string, ordinal: number, text: string) =>
-			item({
-				...base,
-				id,
-				lifecycle: "streaming",
-				ordinal,
-				text,
-				type: "reasoning_summary",
-			});
-		const segments = make_conversation_trace_segments(
-			[
-				summary("reasoning_1", 1, "Checking the request"),
-				summary("reasoning_2", 2, "Comparing the result"),
-			],
-			false,
-		);
-
-		expect(segments).toEqual([
-			expect.objectContaining({
-				id: "reasoning:reasoning_1",
-				items: [
-					expect.objectContaining({ id: "reasoning_1" }),
-					expect.objectContaining({ id: "reasoning_2" }),
-				],
-				type: "reasoning_group",
-			}),
-		]);
 	});
 
 	/**
@@ -278,19 +313,20 @@ describe("conversation trace", () => {
 				status: "completed",
 				type: "activity",
 			});
-		const reasoning = item({
+		const spoken = item({
 			...base,
-			id: "reasoning_1",
+			id: "assistant_1",
 			lifecycle: "streaming",
 			ordinal: 2,
+			phase: "commentary",
 			text: "Deciding what to read next",
-			type: "reasoning_summary",
+			type: "assistant_message",
 		});
 
 		const segments = make_conversation_trace_segments(
 			[
 				activity("activity_1", "terminal_activity", 1),
-				reasoning,
+				spoken,
 				activity("activity_2", "terminal_activity", 3),
 				activity("activity_3", "search", 4),
 			],
@@ -299,13 +335,38 @@ describe("conversation trace", () => {
 
 		expect(segments.map((segment) => segment.type)).toEqual([
 			"activity_group",
-			"reasoning_group",
+			"item",
 			"activity_group",
 		]);
 		const chains = segments.flatMap((segment) =>
 			segment.type === "activity_group" ? [segment.items.map((entry) => entry.id)] : [],
 		);
 		expect(chains).toEqual([["activity_1"], ["activity_2", "activity_3"]]);
+	});
+
+	it("projects a long adjacent activity chain without rebuilding prior groups", () => {
+		const activities = Array.from({ length: 4_096 }, (_, index) =>
+			item({
+				...base,
+				id: `activity_${index}`,
+				kind: "terminal_activity",
+				label: "Ran a command",
+				ordinal: index + 1,
+				status: "completed",
+				type: "activity",
+			}),
+		);
+
+		const segments = make_conversation_trace_segments(activities, false);
+
+		expect(segments).toHaveLength(1);
+		expect(segments[0]).toMatchObject({
+			id: "activities:activity_0",
+			type: "activity_group",
+		});
+		expect(segments[0]?.type === "activity_group" ? segments[0].items : []).toEqual(activities);
+		const source = ReadSource("modules/frontend/src/lib/conversation/trace.ts");
+		expect(source).not.toContain("items: [...previous.items, item]");
 	});
 
 	it("groups diagnostics by severity when enabled, loudest disclosure first", () => {
@@ -421,8 +482,9 @@ describe("conversation trace", () => {
 
 		expect(work_session).toContain("`Failed after ${FormatDuration(");
 		expect(work_session).toContain("`Stopped after ${FormatDuration(");
-		expect(work_session).toContain(
-			'previous_status === "running" && (status === "failed" || status === "cancelled")',
+		/** An interrupted run earns the same disclosure: the reader did not ask for it. */
+		expect(work_session).toMatch(
+			/previous_status\s*===\s*"running"\s*&&\s*\(\s*status\s*===\s*"failed"\s*\|\|\s*status\s*===\s*"cancelled"\s*\|\|\s*status\s*===\s*"interrupted"\s*\)/,
 		);
 		expect(work_session).toContain(
 			"if (became_unsuccessful && !user_chose_disclosure) open = true;",

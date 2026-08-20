@@ -1,4 +1,763 @@
-@import "./prose/base.css";
-@import "./prose/headings.css";
-@import "./prose/links.css";
-@import "./prose/inline-code.css";
+/**
+ * Prose and rendered markdown: the one place in the app that styles HTML it
+ * did not author. Everything here dresses output from the markdown renderer,
+ * KaTeX, Mermaid, or Shiki — elements no component can put a class on — which
+ * is why it is a stylesheet and not Tailwind.
+ */
+
+/* ── base.css ─────────────────────────────────────────────────── */
+
+.prose.prose {
+	@apply text-muted-foreground max-w-none
+    [--tw-prose-body:var(--muted-foreground)]
+    [--tw-prose-lead:var(--muted-foreground)]
+    [--tw-prose-counters:var(--muted-foreground)]
+    [--tw-prose-bullets:var(--muted-foreground)]
+    [--tw-prose-captions:var(--muted-foreground)]
+    [--tw-prose-headings:var(--foreground)]
+    [--tw-prose-links:var(--foreground)]
+    [--tw-prose-bold:var(--foreground)]
+    [--tw-prose-quotes:var(--foreground)]
+    [--tw-prose-kbd:var(--foreground)]
+    [--tw-prose-code:var(--foreground)]
+    [--tw-prose-pre-code:var(--foreground)]
+    [--tw-prose-hr:var(--border)]
+    [--tw-prose-quote-borders:var(--border)]
+    [--tw-prose-th-borders:var(--border)]
+    [--tw-prose-td-borders:var(--border)];
+}
+
+.docs-prose-media-scope {
+	--docs-prose-max-inline-size: 74ch;
+	--docs-prose-media-inline-size: min(
+		100%,
+		max(var(--docs-prose-media-width, 0px), var(--docs-prose-max-inline-size))
+	);
+}
+
+.prose.prose :where(p, li, blockquote):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	text-wrap: pretty;
+}
+
+.prose.prose :where(blockquote):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-muted-foreground font-normal not-italic;
+}
+
+.prose.prose
+	:where(blockquote p:first-of-type):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	)::before,
+.prose.prose
+	:where(blockquote p:last-of-type):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	)::after {
+	content: none;
+}
+
+.prose.prose :where(blockquote cite):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-muted-foreground mt-4 block text-base/7 font-normal not-italic;
+}
+
+.prose.prose
+	> :where(
+		:not(.docs-code-snippet, .docs-command-snippet, .docs-mermaid-diagram, .docs-note-group)
+	):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	max-width: var(--docs-prose-max-inline-size, 74ch);
+}
+
+.prose.prose
+	:where(strong, kbd, h1, h2, h3, h4, h5, h6):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	) {
+	@apply text-foreground;
+}
+
+.docs-prose-media-scope .docs-prose-divider {
+	@apply max-w-full;
+	width: var(--docs-prose-media-inline-size, min(100%, 74ch));
+}
+
+/* ── headings.css ─────────────────────────────────────────────────── */
+
+.prose.prose
+	:where(h1, h2, h3, h4, h5, h6):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	font-family: var(--font-heading);
+	font-weight: 600;
+	letter-spacing: -0.03em;
+	text-wrap: balance;
+}
+
+.prose.prose :where(h1):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-3xl leading-tight;
+}
+
+.prose.prose :where(h2):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-2xl leading-tight;
+}
+
+.prose.prose :where(h3):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-xl leading-snug;
+}
+
+.prose.prose :where(h4, h5, h6):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-lg leading-snug;
+}
+
+.prose.prose
+	:where(h2, h3, h4, h5, h6)[id]:not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply flex scroll-mt-7 items-center gap-2;
+}
+
+.docs-heading-self-link,
+.prose.prose .docs-heading-self-link {
+	border-radius: var(--radius-sm);
+	color: inherit;
+	font-weight: inherit;
+	min-width: 0;
+	text-decoration-line: none;
+	transition-duration: var(--duration-fast);
+	transition-property: color;
+	transition-timing-function: var(--ease-smooth-out);
+}
+
+.docs-page-title {
+	max-width: 100%;
+	min-width: 0;
+	overflow-wrap: anywhere;
+	text-wrap: balance;
+}
+
+.docs-page-title .docs-heading-self-link {
+	max-width: 100%;
+	overflow-wrap: inherit;
+}
+
+.docs-heading-self-link:hover,
+.docs-heading-self-link:focus-visible,
+.prose.prose .docs-heading-self-link:hover,
+.prose.prose .docs-heading-self-link:focus-visible {
+	color: var(--foreground-extra);
+}
+
+.docs-heading-self-link:focus-visible,
+.prose.prose .docs-heading-self-link:focus-visible {
+	outline: 2px solid color-mix(in srgb, var(--ring) 52%, transparent);
+	outline-offset: 0.1875rem;
+}
+
+.prose.prose .docs-heading-copy {
+	flex-shrink: 0;
+	margin-block: -0.25rem;
+	opacity: 0;
+	transform: translateX(-0.25rem) scale(0.98);
+	transition-duration: var(--duration-fast);
+	transition-property: opacity, transform;
+	transition-timing-function: var(--ease-smooth-out);
+}
+
+.prose.prose :where(h2, h3, h4, h5, h6)[id]:hover > .docs-heading-copy,
+.prose.prose :where(h2, h3, h4, h5, h6)[id]:focus-within > .docs-heading-copy {
+	opacity: 1;
+	transform: translateX(0) scale(1);
+}
+
+@media (hover: none) {
+	.prose.prose .docs-heading-copy {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.docs-heading-self-link,
+	.prose.prose .docs-heading-self-link {
+		transition-duration: 0ms;
+	}
+
+	.prose.prose .docs-heading-copy {
+		transform: none;
+		transition-duration: 0ms;
+	}
+}
+
+/* ── links.css ─────────────────────────────────────────────────── */
+
+.prose.prose :where(a):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-foreground underline underline-offset-3 transition-colors
+    duration-(--duration-fast) ease-in-out hover:text-foreground-extra
+    motion-reduce:transition-none;
+}
+
+.prose.prose.conversation-markdown
+	:where(a.conversation-link):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-blue-500 no-underline hover:text-blue-600 focus-visible:rounded-xs
+    focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current
+    dark:text-blue-400 dark:hover:text-blue-300;
+	display: inline-flex;
+	/**
+	 * A favicon has no baseline of its own, so centring every item would leave
+	 * the flex container synthesising its baseline from the icon's bottom edge
+	 * and lifting the whole link off the surrounding prose baseline. Aligning on
+	 * the link text's baseline seats it in the line instead; the icons recentre
+	 * themselves against the line box in the anchor component's stylesheet.
+	 */
+	align-items: baseline;
+	gap: 0.375em;
+	vertical-align: baseline;
+}
+
+/* ── inline-code.css ─────────────────────────────────────────────────── */
+
+.prose.prose :where(code):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply font-mono font-normal text-muted-foreground;
+}
+
+.prose :where(:not(pre) > code):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	white-space: pre;
+}
+
+.prose :where(:not(pre) > code):not(:where([class~="not-prose"], [class~="not-prose"] *))::before,
+.prose :where(:not(pre) > code):not(:where([class~="not-prose"], [class~="not-prose"] *))::after {
+	@apply content-none;
+}
+
+/* ── components/code-snippet.css ─────────────────────────────────────────────────── */
+
+.prose .docs-code-snippet {
+	@apply relative my-6 w-full max-w-full;
+}
+
+.docs-code-snippet-header {
+	@apply mb-4 flex h-7 w-full flex-row items-start justify-between gap-4;
+}
+
+.docs-code-snippet-filename {
+	@apply flex w-min flex-row items-center gap-2 rounded-3xl bg-linear-to-b
+		from-surface-175 to-surface-75 px-2 py-px text-sm text-foreground
+		dark:from-surface-875 dark:to-surface-925
+		no-underline card-lg;
+}
+
+.docs-code-snippet-filename .docs-source-location-name {
+	@apply whitespace-nowrap font-normal text-foreground;
+}
+
+.docs-code-snippet-filename .docs-source-location-position {
+	@apply whitespace-nowrap font-medium text-muted-foreground;
+}
+
+.docs-code-snippet-filename[href] .docs-source-location-position {
+	@apply font-medium text-blue-600 transition-colors duration-(--duration-fast) ease-in-out
+		dark:text-blue-400;
+}
+
+.docs-code-snippet-filename[href]:hover .docs-source-location-position {
+	@apply text-blue-500 dark:text-blue-300;
+}
+
+.docs-code-snippet-copy {
+	@apply p-1.5;
+}
+
+.docs-code-snippet-copy-overlay {
+	@apply absolute right-4 top-4 z-10;
+}
+
+.docs-code-snippet-copy-overlay + .docs-code-snippet-body {
+	@apply pr-14;
+}
+
+.docs-code-snippet-body {
+	@apply max-w-full w-full items-center overflow-x-auto rounded-3xl
+    bg-linear-to-t from-surface-50 to-surface-125 p-4 card-lg
+    dark:from-surface-950 dark:to-surface-900;
+}
+
+.docs-code-snippet-body .shiki {
+	@apply m-0 min-w-full w-max bg-transparent p-0 font-mono text-sm leading-6
+    [tab-size:2];
+}
+
+.docs-code-snippet-body .shiki,
+.docs-code-snippet-body .shiki span {
+	@apply text-[var(--shiki-light)];
+}
+
+.dark .docs-code-snippet-body .shiki,
+.dark .docs-code-snippet-body .shiki span {
+	@apply text-[var(--shiki-dark)];
+	color: var(--shiki-dark) !important;
+}
+
+.docs-code-snippet-body code {
+	@apply block bg-transparent p-0 font-mono font-normal;
+	counter-reset: docs-code-line;
+	isolation: isolate;
+	position: relative;
+	z-index: 0;
+}
+
+.docs-code-snippet-body .line {
+	@apply inline-block min-h-6 relative align-top;
+	counter-increment: docs-code-line;
+	display: inline-block !important;
+	padding-left: 2.75rem;
+}
+
+.docs-code-snippet-body .line.highlight {
+	box-sizing: border-box;
+	min-width: 100%;
+	padding-right: 0.5rem;
+	border-radius: var(--radius-lg);
+	background-image: linear-gradient(
+		to bottom,
+		color-mix(in oklab, var(--foreground) 8%, transparent),
+		color-mix(in oklab, var(--foreground) 4%, transparent)
+	);
+	box-shadow: inset 0 0 0 0.5px color-mix(in oklab, var(--foreground) 12%, transparent);
+}
+
+.docs-code-snippet-body .line.highlight::before {
+	color: var(--foreground);
+}
+
+.docs-code-snippet-body .line[data-diff] {
+	@apply pr-2;
+	--diff-fill-from-opacity: 12.5%;
+	--diff-fill-to-opacity: 20%;
+	--diff-radius: 0.875rem;
+	--diff-lip-radius: var(--diff-radius);
+	--diff-card-drop-opacity: 45%;
+	--diff-card-ring-opacity: 36%;
+	--diff-card-shadow-opacity: 8%;
+	--diff-card-top-opacity: 24%;
+}
+
+.docs-code-snippet-body .line[data-diff="deleted"] {
+	--diff-fill-from-opacity: 9%;
+	--diff-fill-to-opacity: 18%;
+	--diff-card-drop-opacity: 30%;
+	--diff-card-ring-opacity: 24%;
+	--diff-card-shadow-opacity: 5%;
+	--diff-card-top-opacity: 16%;
+}
+
+.docs-code-diff-card {
+	--diff-fill-from-color: color-mix(
+		in oklab,
+		var(--shiki-diff-light) var(--diff-fill-from-opacity),
+		transparent
+	);
+	--diff-fill-to-color: color-mix(
+		in oklab,
+		var(--shiki-diff-light) var(--diff-fill-to-opacity),
+		transparent
+	);
+	--diff-card-drop-color: color-mix(
+		in oklab,
+		var(--shiki-diff-light) var(--diff-card-drop-opacity),
+		#000
+	);
+	--diff-card-ring-color: color-mix(
+		in oklab,
+		var(--shiki-diff-light) var(--diff-card-ring-opacity),
+		transparent
+	);
+	--diff-card-shadow-color: color-mix(
+		in oklab,
+		var(--shiki-diff-light) var(--diff-card-shadow-opacity),
+		transparent
+	);
+	--diff-card-top-color: color-mix(
+		in oklab,
+		var(--shiki-diff-light) var(--diff-card-top-opacity),
+		transparent
+	);
+	filter: drop-shadow(0 -0.5px var(--diff-card-top-color))
+		drop-shadow(0 4px 8px var(--diff-card-shadow-color))
+		drop-shadow(0 1px 2px var(--diff-card-drop-color));
+	overflow: visible;
+	pointer-events: none;
+	position: absolute;
+	z-index: -1;
+}
+
+.docs-code-diff-card-gradient-start {
+	stop-color: var(--diff-fill-from-color);
+}
+
+.docs-code-diff-card-gradient-end {
+	stop-color: var(--diff-fill-to-color);
+}
+
+.docs-code-diff-card path {
+	stroke: var(--diff-card-ring-color);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1px;
+}
+
+.docs-code-snippet-body .line::before {
+	@apply absolute left-0 select-none text-muted-foreground;
+	content: counter(docs-code-line);
+	font-variant-numeric: tabular-nums;
+	width: 1.75rem;
+	text-align: right;
+}
+
+/* ── components/command-snippet.css ─────────────────────────────────────────────────── */
+
+.prose .docs-command-snippet {
+	@apply my-6 max-w-full;
+	width: var(--docs-prose-media-inline-size, min(100%, 74ch));
+}
+
+.docs-command-snippet-measurement {
+	@apply whitespace-pre font-mono text-sm leading-6 font-normal;
+}
+
+.docs-command-snippet-measurement {
+	@apply pointer-events-none invisible absolute top-0 left-0 w-max;
+}
+
+.docs-command-snippet-code .shiki {
+	@apply m-0 bg-transparent p-0 font-mono text-sm leading-6 w-max
+    [tab-size:2];
+}
+
+.docs-command-snippet-code .shiki,
+.docs-command-snippet-code .shiki span {
+	@apply text-[var(--shiki-light)];
+}
+
+.dark .docs-command-snippet-code .shiki,
+.dark .docs-command-snippet-code .shiki span {
+	@apply text-[var(--shiki-dark)];
+}
+
+.docs-command-snippet-code code {
+	@apply block bg-transparent p-0 font-mono font-normal whitespace-pre;
+}
+
+.docs-command-snippet-code .line {
+	@apply inline-block min-h-6 align-top;
+}
+
+.docs-command-snippet-content {
+	-webkit-backdrop-filter: blur(64px);
+	backdrop-filter: blur(64px);
+	left: var(--docs-command-content-left, 0);
+	max-height: var(--docs-command-content-max-height, none);
+	opacity: 0;
+	pointer-events: none;
+	top: var(--docs-command-content-top, 0);
+	transform: translateY(var(--docs-command-content-enter-y, 0)) scale(var(--scale-medium, 0.97));
+	will-change: transform, opacity;
+}
+
+.docs-command-snippet-content[data-side="bottom"] {
+	--docs-command-content-enter-y: calc(var(--distance-micro, 4px) * -1);
+	transform-origin: top right;
+}
+
+.docs-command-snippet-content[data-side="top"] {
+	--docs-command-content-enter-y: var(--distance-micro, 4px);
+	transform-origin: bottom right;
+}
+
+.docs-command-snippet-content[data-ready="true"] {
+	opacity: 1;
+	pointer-events: auto;
+	transform: translateY(0) scale(1);
+	transition:
+		transform var(--duration-fast) var(--ease-smooth-out),
+		opacity var(--duration-fast) var(--ease-smooth-out);
+}
+
+.docs-command-snippet-content > [data-slot="select-viewport"] {
+	max-height: inherit;
+}
+
+.docs-command-snippet-hover-highlight {
+	background-image: linear-gradient(
+		to bottom,
+		oklch(from var(--foreground) l c h / 7.5%),
+		oklch(from var(--foreground) l c h / 2.5%)
+	);
+	border-radius: var(--radius-xl);
+	box-shadow: inset 0 0 0 0.5px oklch(from var(--foreground) l c h / 7%);
+	height: var(--docs-command-hover-height, 0);
+	opacity: 0;
+	transform: translate3d(0, var(--docs-command-hover-y, 0), 0);
+	will-change: transform, height;
+	z-index: 0;
+}
+
+.docs-command-snippet-hover-highlight[data-active="true"] {
+	opacity: 1;
+}
+
+.docs-command-snippet-hover-highlight[data-animate="true"] {
+	transition:
+		transform var(--duration-fast) var(--ease-smooth-out),
+		height var(--duration-fast) var(--ease-smooth-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.docs-command-snippet-content,
+	.docs-command-snippet-hover-highlight {
+		transition: none !important;
+	}
+}
+
+/* ── components/math.css ─────────────────────────────────────────────────── */
+
+.docs-math-inline {
+	@apply text-foreground;
+}
+
+.prose .docs-math-block {
+	@apply my-6 max-w-full overflow-x-auto py-2 text-foreground;
+}
+
+.docs-math-block .katex-display {
+	@apply m-0 w-max min-w-full;
+}
+
+.docs-math-fallback {
+	@apply font-mono text-sm text-muted-foreground;
+}
+
+.prose pre.docs-math-fallback {
+	@apply my-6 max-w-full overflow-x-auto rounded-2xl bg-surface-100 px-4 py-3;
+}
+
+/* ── components/mermaid.css ─────────────────────────────────────────────────── */
+
+.prose .docs-mermaid-diagram {
+	@apply my-6 w-full max-w-full overflow-x-auto rounded-3xl bg-linear-to-t
+		from-surface-50 to-surface-125 p-4 card-lg
+		dark:from-surface-950 dark:to-surface-900;
+}
+
+.docs-mermaid-diagram > svg,
+.docs-mermaid-zoom-trigger > svg {
+	display: block;
+	height: auto;
+	margin-inline: auto;
+	max-width: 100%;
+}
+
+.docs-mermaid-zoom-trigger {
+	@apply block w-full cursor-zoom-in border-0 bg-transparent p-0;
+}
+
+.docs-mermaid-zoom-overlay {
+	@apply fixed inset-0 z-50 flex flex-col bg-background/85 backdrop-blur-sm;
+}
+
+.docs-mermaid-zoom-controls {
+	@apply absolute top-4 right-4 z-10 flex items-center gap-2;
+}
+
+.docs-mermaid-zoom-control {
+	@apply flex items-center justify-center rounded-full border border-border bg-card p-2
+		text-muted-foreground transition-colors duration-(--duration-fast) hover:text-foreground;
+}
+
+.docs-mermaid-zoom-viewport {
+	@apply flex flex-1 cursor-grab items-center justify-center overflow-hidden;
+	touch-action: none;
+}
+
+.docs-mermaid-zoom-viewport:active {
+	@apply cursor-grabbing;
+}
+
+.docs-mermaid-zoom-stage {
+	@apply select-none;
+}
+
+.docs-mermaid-zoom-stage > svg {
+	display: block;
+	height: auto;
+	max-width: none;
+}
+
+.docs-mermaid-error {
+	@apply flex flex-col gap-3 text-sm text-muted-foreground;
+}
+
+.docs-mermaid-error pre,
+.docs-mermaid-source {
+	@apply m-0 max-w-full overflow-x-auto bg-transparent p-0;
+}
+
+.docs-mermaid-error code,
+.docs-mermaid-source code {
+	@apply bg-transparent p-0 font-mono text-sm font-normal;
+}
+
+/* ── components/notes.css ─────────────────────────────────────────────────── */
+
+.prose .docs-note {
+	@apply my-6 max-w-full;
+	width: var(--docs-prose-media-inline-size, min(100%, 74ch));
+}
+
+.prose .docs-note-group {
+	@apply flex max-w-full flex-col gap-8;
+	width: var(--docs-prose-media-inline-size, min(100%, 74ch));
+}
+
+.prose .docs-note-group .docs-note {
+	@apply my-0 w-full max-w-none;
+}
+
+.docs-note {
+	@apply flex flex-col gap-2 rounded-3xl bg-linear-to-t from-surface-50
+	to-surface-125 p-4 card-lg dark:from-surface-950 dark:to-surface-900;
+}
+
+.docs-note-header {
+	@apply flex flex-row items-center gap-3;
+}
+
+.docs-note-icon {
+	@apply size-5 shrink-0;
+}
+
+.docs-note[data-note-variant="info"] .docs-note-icon {
+	@apply text-blue-600;
+}
+
+.docs-note[data-note-variant="tip"] .docs-note-icon {
+	@apply text-purple-600;
+}
+
+.docs-note[data-note-variant="warning"] .docs-note-icon {
+	@apply text-yellow-500;
+}
+
+.docs-note-title {
+	@apply text-xl font-semibold text-foreground;
+	font-family: var(--font-heading);
+}
+
+.docs-note-body {
+	@apply text-muted-foreground;
+}
+
+.docs-note-body > * {
+	@apply my-0;
+	text-wrap: pretty;
+}
+
+.docs-note-body > * + * {
+	@apply mt-3;
+}
+
+.docs-note-body a {
+	@apply text-foreground underline underline-offset-3 transition-colors
+    duration-(--duration-fast) ease-in-out hover:text-foreground-extra
+    motion-reduce:transition-none;
+}
+
+.docs-note-body strong {
+	@apply text-foreground;
+}
+
+.docs-note-header code,
+.docs-note-body code {
+	@apply font-mono font-normal text-muted-foreground;
+	white-space: pre;
+}
+
+/* ── components/streaming-word.css ─────────────────────────────────────────────────── */
+.docs-stream-word {
+	display: inline-block;
+}
+
+/**
+ * A revealed word rises out of a blur, as before — but on its own duration.
+ *
+ * This entrance runs once per word, and the reveal commits a word every 40ms
+ * when calm and every 12ms while catching up. Borrowing the 500ms sidebar
+ * stagger, which is sized for a handful of list items, therefore left a dozen
+ * words mid-flight at rest and past thirty under load: most of the visible tail
+ * of the message in motion at once, each on its own compositing layer. A
+ * duration short enough to finish within a few words keeps the wave — several
+ * words always arriving — without putting the whole tail in it.
+ *
+ * No paint hint: the animation begins the frame the word mounts, so there is
+ * nothing to promote in advance, and the hint only holds the layer open
+ * afterwards.
+ */
+.docs-stream-word-incoming {
+	animation: docs-stream-word-in var(--stream-word-dur, 320ms)
+		var(--stagger-ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+@keyframes docs-stream-word-in {
+	from {
+		opacity: 0;
+		transform: translateY(var(--stream-word-rise, 0.3em));
+		filter: blur(var(--stream-word-blur, 3px));
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+		filter: blur(0);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.docs-stream-word-incoming {
+		animation: none !important;
+	}
+}
+
+/* ── the workspace's own type, layered over prose ──────────────── */
+
+/**
+ * The reading surface sets a lighter body and a tighter heading than stock
+ * prose. These have to out-specify the prose rules above rather than sit in the
+ * surface utility, which prose's own `.prose.prose` doubling would outrank.
+ */
+.docs-responsive-surfaces .prose {
+	font-size: 1rem;
+	font-weight: 410;
+	letter-spacing: -0.04em;
+}
+
+.docs-responsive-surfaces
+	.prose.prose
+	:where(h1, h2, h3, h4, h5, h6):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	font-weight: 630;
+	letter-spacing: -0.045em;
+}
+
+/* ── conversation markdown ─────────────────────────────────────── */
+
+/**
+ * Conversation body text keeps the chat foreground colour; the docs-derived
+ * `.prose.prose` foundation would otherwise dim it to muted-foreground.
+ */
+.comark-content.conversation-markdown.prose {
+	--tw-prose-body: var(--foreground);
+	color: var(--foreground);
+}
+
+/**
+ * `text-wrap: pretty` and `balance` re-break lines that are already on screen:
+ * every appended word lets the browser reconsider the tail of the block, so
+ * settled words slide between lines while the newest one is still animating in.
+ * Growing text has no stable tail to optimise, so streaming blocks take plain
+ * greedy wrapping, where appending never moves a word that has already landed.
+ * The typographic pass returns when the text settles.
+ */
+.conversation-markdown.conversation-markdown-streaming
+	:is(p, li, blockquote, h1, h2, h3, h4, h5, h6) {
+	text-wrap: wrap;
+}

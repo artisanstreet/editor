@@ -1,6 +1,7 @@
 <script lang="ts" effect>
 	import { Effect, Stream } from "effect";
 	import { RunBrowserDom } from "$lib/browser/dom";
+	import { RuntimeSurfaceFor } from "$lib/browser/runtime-surface";
 	import { Button } from "$lib/components/ui/button";
 	import { Switch } from "$lib/components/ui/switch";
 	import { Tooltip, TooltipContent, TooltipTrigger } from "$lib/components/ui/tooltip";
@@ -9,7 +10,10 @@
 		SystemNotifications,
 		type SystemNotificationSettings,
 	} from "$lib/notifications/service";
+	import Card from "./card.svelte";
+	import Header from "./header.svelte";
 	import Row from "./row.svelte";
+	import Section from "./section.svelte";
 
 	const notifications = yield* SystemNotifications;
 	/**
@@ -19,12 +23,13 @@
 	 * arrival is what lets the notice below resolve itself rather than needing
 	 * a reload to clear.
 	 */
-	let settings = $state.raw<SystemNotificationSettings>(yield* notifications.Refresh);
+	let settings = $state.raw<SystemNotificationSettings>(yield* notifications.Current);
 	const ApplySettings = (next: SystemNotificationSettings) =>
 		Effect.gen(function* () {
 			settings = next;
 		});
 	yield* notifications.Changes.pipe(Stream.runForEach(ApplySettings), Effect.forkScoped);
+	yield* notifications.Refresh.pipe(Effect.forkScoped);
 
 	/**
 	 * Which shell is asking. The bundled desktop window is granted notifications
@@ -33,7 +38,7 @@
 	 * permissions. Same feature, two different places to go and undo it.
 	 */
 	const desktop = yield* RunBrowserDom(
-		() => globalThis.navigator?.userAgent.includes("Electron/") ?? false,
+		() => RuntimeSurfaceFor(globalThis.navigator?.userAgent ?? "") === "desktop",
 	);
 	const gap = $derived(SystemNotificationGapFor(settings));
 
@@ -74,64 +79,58 @@
 	);
 </script>
 
-<h1 class="text-lg font-semibold text-foreground">Notifications</h1>
-<p class="mt-1 text-sm text-muted-foreground">When Artisan is allowed to interrupt you.</p>
+<Header title="Notifications" description="When Artisan is allowed to interrupt you." />
 
-<section class="mt-10" aria-labelledby="system">
-	<h2 id="system" class="scroll-mt-6 text-sm font-medium text-foreground">System</h2>
-	<div
-		class="card mt-3 rounded-xl bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925"
-	>
-		<div class="flex flex-col divide-y divide-border/40">
-			<Row title="Notify me" description={toggle_description}>
-				{#snippet control()}
-					{#if gap === "unsupported"}
-						<Tooltip>
-							<TooltipTrigger>
-								{#snippet child({ props: tooltip_props })}
-									<span {...tooltip_props} class="flex">
-										<Switch checked={false} disabled aria-label="Notify me" />
-									</span>
-								{/snippet}
-							</TooltipTrigger>
-							<TooltipContent side="left" class="max-w-60">
-								This browser exposes no notification API, so there is nothing for
-								Artisan to post to.
-							</TooltipContent>
-						</Tooltip>
-					{:else}
-						<Switch
-							checked={settings.enabled}
-							aria-label="Notify me"
-							onclick={yield* SetEnabled(!settings.enabled)}
-						/>
-					{/if}
-				{/snippet}
-			</Row>
+<Section id="system" title="System">
+	<Card class="mt-3">
+		<Row title="Notify me" description={toggle_description}>
+			{#snippet control()}
+				{#if gap === "unsupported"}
+					<Tooltip>
+						<TooltipTrigger>
+							{#snippet child({ props: tooltip_props })}
+								<span {...tooltip_props} class="flex">
+									<Switch checked={false} disabled aria-label="Notify me" />
+								</span>
+							{/snippet}
+						</TooltipTrigger>
+						<TooltipContent side="left" class="max-w-60">
+							This browser exposes no notification API, so there is nothing for
+							Artisan to post to.
+						</TooltipContent>
+					</Tooltip>
+				{:else}
+					<Switch
+						checked={settings.enabled}
+						aria-label="Notify me"
+						onclick={yield* SetEnabled(!settings.enabled)}
+					/>
+				{/if}
+			{/snippet}
+		</Row>
 
-			{#if gap_notice !== undefined}
-				<!--
-					Shown in place rather than as a toast, and the switch stays on:
-					the reader did ask for this, and the only thing between that and
-					a notification is a host setting that is not ours to change.
-				-->
-				<div class="flex items-start justify-between gap-6 px-4 py-3.5">
-					<div class="flex min-w-0 flex-col gap-0.5">
-						<span class="text-sm text-destructive">{gap_notice.title}</span>
-						<span class="text-pretty text-xs text-muted-foreground">
-							{gap_notice.description}
-						</span>
-					</div>
-					<Button variant="outline" size="sm" onclick={yield* RequestAgain}>
-						Check again
-					</Button>
+		{#if gap_notice !== undefined}
+			<!--
+				Shown in place rather than as a toast, and the switch stays on:
+				the reader did ask for this, and the only thing between that and
+				a notification is a host setting that is not ours to change.
+			-->
+			<div class="flex items-start justify-between gap-6 px-4 py-3.5">
+				<div class="flex min-w-0 flex-col gap-0.5">
+					<span class="text-sm text-destructive">{gap_notice.title}</span>
+					<span class="text-pretty text-xs leading-relaxed text-muted-foreground">
+						{gap_notice.description}
+					</span>
 				</div>
-			{/if}
+				<Button variant="outline" size="sm" onclick={yield* RequestAgain}>
+					Check again
+				</Button>
+			</div>
+		{/if}
 
-			<Row
-				title="Clears itself"
-				description="A notification you don't answer disappears after a few seconds. Nothing is lost by letting it go — an approval or a question keeps waiting in its thread — so a notification can never pile up into something you have to go and dismiss."
-			/>
-		</div>
-	</div>
-</section>
+		<Row
+			title="Clears itself"
+			description="A notification you don't answer disappears after a few seconds. Nothing is lost by letting it go — an approval or a question keeps waiting in its thread — so a notification can never pile up into something you have to go and dismiss."
+		/>
+	</Card>
+</Section>

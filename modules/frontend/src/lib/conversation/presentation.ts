@@ -1,3 +1,10 @@
+/** Neither details nor failure state opens settled history; only currently live work starts open. */
+export const work_session_initially_open = (input: {
+	readonly has_details: boolean;
+	readonly unsuccessful: boolean;
+	readonly working: boolean;
+}): boolean => input.working;
+
 /**
  * The visual contract for a work-session disclosure. Keeping it pure makes the
  * active-state exception explicit: active work keeps its detail tree mounted,

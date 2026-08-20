@@ -1,25 +1,17 @@
 <script lang="ts" effect>
 	import "$lib/styles/fonts.css";
 	import "$lib/styles/global.css";
-	import "$lib/styles/artisan-compatibility.css";
 
 	import { page } from "$app/state";
-	import type { EventEnvelope, ThreadListItem } from "@artisan/protocol";
-	import {
-		ArtisanClient,
-		type ArtisanConnectionState,
-		type ThreadListUpdate,
-	} from "@artisan/transport/client";
+	import type { EventEnvelope } from "@artisan/protocol";
+	import { ArtisanClient, type ArtisanConnectionState } from "@artisan/transport/client";
 	import { Effect, Option, Stream } from "effect";
 	import * as HttpClient from "effect/unstable/http/HttpClient";
 	import { ModeWatcher } from "mode-watcher";
-	import { Toaster } from "svelte-sonner";
 	import {
 		BeginForgeHydration,
 		CompleteForgeHydration,
 		DismissForgeGate,
-		FailForgeHydration,
-		ForgeHydrationFailure,
 		ForgeShellIsBlocked,
 		ForgeShellIsMounted,
 		InitialForgeGateModel,
@@ -27,24 +19,47 @@
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
 	import { RunBrowserDom } from "$lib/browser/dom";
+	import { WarmConversationRenderers } from "$lib/components/markdown/warming";
+	import { BrowserReaderAttention } from "$lib/browser/reader-attention";
+	import { IsMacDesktop, RuntimeSurfaceFor } from "$lib/browser/runtime-surface";
 	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
+	import {
+		ThreadChecklist,
+		conversation_plan_has_open_entries,
+		type ThreadChecklistState,
+	} from "$lib/conversation/checklist";
+	import {
+		ThreadOrchestrationRoster,
+		type ThreadOrchestrationState,
+	} from "$lib/orchestration/service";
 	import { LogTransportDiagnostic } from "$lib/forge/diagnostics";
+	import { ProbeForgeRecoveryHealth } from "$lib/forge/recovery-health-probe";
 	import { IsNotifiableEvent } from "$lib/notifications/events";
 	import { SystemNotifications } from "$lib/notifications/service";
 	import {
-		DraftThreadController,
-		type DraftThreadState,
-	} from "$lib/root/draft-thread";
-	import {
-		ApplyRootThreadListUpdate,
 		ResolveThreadRoute,
 		ThreadRoutePathFor,
+		ThreadWorkspaceId,
 	} from "$lib/root/thread-navigation";
+	import {
+		WorkspaceCatalogController,
+		type WorkspaceCatalogState,
+	} from "$lib/root/workspace-catalog-controller";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
-	import { prose_width, shader_enabled } from "$lib/appearance-config";
-	import { AppearancePreferences } from "$lib/runtime/appearance-preferences";
+	import { resolve_typography_preferences } from "$lib/appearance/typography";
+	import {
+		prose_width,
+		shader_enabled,
+		typography,
+	} from "$lib/appearance-config";
+	import { BrowserTypography } from "$lib/browser/typography";
+	import {
+		AppearancePreferences,
+		type AppearanceState,
+	} from "$lib/runtime/appearance-preferences";
 	import { AttemptDevelopmentSelfPair } from "$lib/runtime/pairing";
 	import { SessionDefaultsController } from "$lib/settings/session-defaults-controller";
+	import AttentionTitleMarker from "./components/attention-title-marker.svelte";
 	import DevInstanceBadge from "./components/dev-instance-badge.svelte";
 	import ForgeConnectionOverlay from "./components/forge-connection-overlay.svelte";
 	import ForgeShellPreview from "./components/forge-shell-preview.svelte";
@@ -57,23 +72,45 @@
 	let desktop_runtime = $state(false);
 	let mac_desktop = $state(false);
 	let forge_gate = $state.raw(InitialForgeGateModel);
-	let threads = $state.raw<ReadonlyArray<ThreadListItem>>([]);
-	const draft_thread = yield* DraftThreadController;
-	let draft_state = $state.raw<DraftThreadState>(yield* draft_thread.Current);
-	const ApplyDraftState = (next: DraftThreadState) =>
-		Effect.gen(function* () {
-			draft_state = next;
-		});
-	yield* draft_thread.Changes.pipe(
-		Stream.runForEach(ApplyDraftState),
-		Effect.forkScoped,
-	);
-	/** Only a canonical conversation route owns the transcript proximity rail. */
-	const is_thread_route = $derived(
+	let forge_unreachable = $state(false);
+	const client = yield* ArtisanClient;
+	const session_defaults = yield* SessionDefaultsController;
+	const workspace_catalog = yield* WorkspaceCatalogController;
+	let catalog_state = $state.raw<WorkspaceCatalogState>(yield* workspace_catalog.Current);
+	const threads = $derived(catalog_state.threads);
+	const threads_loaded = $derived(catalog_state.threads_loaded);
+	/**
+	 * The attached catalog, held by the shell because the shell is what has to
+	 * turn a `/t/<workspace>` segment back into a project. A route can assert an
+	 * identity; only Forge can say it exists.
+	 */
+	const projects = $derived(catalog_state.projects);
+	/** A canonical conversation: a workspace and a thread inside it. */
+	const is_conversation_route = $derived(
 		/^\/t\/[^/]+\/[^/]+\/?$/.test(page.url.pathname),
 	);
-	/** The root draft and canonical thread route own the inspector. */
-	const is_thread = $derived(is_thread_route || page.url.pathname === "/");
+	/** The workspace itself, with no thread open in it yet. */
+	const is_workspace_route = $derived(/^\/t\/[^/]+\/?$/.test(page.url.pathname));
+	/**
+	 * Every surface a thread is started from: the root, which names its project
+	 * in prose, and a workspace, which names it in the URL. They are one surface
+	 * with two ways of answering the same question.
+	 */
+	const is_new_thread_route = $derived(page.url.pathname === "/" || is_workspace_route);
+	/**
+	 * Both `/t/` surfaces. They are the same room — the transcript's left margin
+	 * carries the thread list in either, and the workspace route is simply the
+	 * one where the transcript has not been written yet.
+	 */
+	const is_thread_route = $derived(is_conversation_route || is_workspace_route);
+	/**
+	 * Every thread surface carries the list the same way: the margin stays clear
+	 * until the pointer asks for it. Routes outside a thread surface do not carry
+	 * it at all.
+	 */
+	const thread_rail = $derived(
+		is_conversation_route || is_new_thread_route ? "proximity" : "hidden",
+	);
 	/**
 	 * The layout owns route-derived state and hands it down: read inside the panel
 	 * itself, the same derivation went stale after a client-side navigation.
@@ -86,25 +123,74 @@
 			: Option.getOrUndefined(ResolveThreadRoute(threads, active_route_thread_id)),
 	);
 	/**
-	 * The workspace the current route is actually inside, or nothing. The open
-	 * thread names its project and the draft names the project picked for it.
-	 * There is no fallback to a route-asserted or arbitrary attached project, so
-	 * routes outside an authoritative workspace keep the surface switch closed.
+	 * The workspace the current route is actually inside, or nothing.
+	 *
+	 * The open thread names its project authoritatively. Failing that, a `/t/`
+	 * route names one in the URL, and it is resolved against the catalog rather
+	 * than trusted: a segment naming a project Forge does not have is not a
+	 * workspace, and the surfaces keyed on this must not act as though it were.
+	 * There is no fallback to an arbitrary attached project.
 	 */
+	const route_workspace_id = $derived(
+		is_thread_route ? ThreadWorkspaceId(page.params.workspace ?? "") : undefined,
+	);
 	const active_project = $derived.by(() => {
 		if (active_thread !== undefined) return active_thread.primary_project;
-		if (is_thread && draft_state._tag !== "Uninitialized") return draft_state.project;
-		return undefined;
+		if (route_workspace_id === undefined) return undefined;
+		return projects.find((candidate) => candidate.project_id === route_workspace_id);
 	});
 	const active_workspace_id = $derived(active_project?.project_id);
 	/**
-	 * Only a durable thread titles itself with its workspace. The root draft
-	 * also knows a picked project, but nothing exists there yet to title — a
-	 * header on `/` would name a folder above an empty composer.
+	 * Both `/t/` surfaces title themselves with their workspace: the conversation
+	 * adds its own name after the project, and the workspace route is the project
+	 * alone, which is exactly what it is. The root names nothing here — its
+	 * sentence already says which project, and saying it twice on one screen
+	 * would make the header look like the authority when the sentence is.
 	 */
-	const header_project = $derived(active_thread?.primary_project);
-	const client = yield* ArtisanClient;
-	const session_defaults = yield* SessionDefaultsController;
+	const header_project = $derived(active_project);
+	const thread_checklist = yield* ThreadChecklist;
+	let checklist_state = $state.raw<ThreadChecklistState>(yield* thread_checklist.Current);
+	const ApplyChecklistState = (next: ThreadChecklistState) =>
+		Effect.gen(function* () {
+			checklist_state = next;
+		});
+	yield* thread_checklist.Changes.pipe(
+		Stream.runForEach(ApplyChecklistState),
+		Effect.forkScoped,
+	);
+	const active_checklist = $derived(
+		checklist_state._tag === "Ready" &&
+			checklist_state.thread_id === active_thread?.thread_id &&
+			conversation_plan_has_open_entries(checklist_state.plan)
+			? checklist_state.plan
+			: undefined,
+	);
+	const thread_orchestration = yield* ThreadOrchestrationRoster;
+	let orchestration_state = $state.raw<ThreadOrchestrationState>(
+		yield* thread_orchestration.Current,
+	);
+	const ApplyOrchestrationState = (next: ThreadOrchestrationState) =>
+		Effect.gen(function* () {
+			orchestration_state = next;
+		});
+	yield* thread_orchestration.Changes.pipe(
+		Stream.runForEach(ApplyOrchestrationState),
+		Effect.forkScoped,
+	);
+	const orchestration_lease = yield* thread_orchestration.Acquire(undefined);
+	yield* Effect.addFinalizer(orchestration_lease.Release);
+	/** The shell is persistent across route changes, so its one lease follows the active thread. */
+	yield* orchestration_lease.Select(active_thread?.thread_id);
+	const active_agents = $derived(
+		orchestration_state._tag === "Ready" &&
+			orchestration_state.thread_id === active_thread?.thread_id &&
+			orchestration_state.entries.length > 0
+			? orchestration_state.entries
+			: undefined,
+	);
+	const thread_inspector_open = $derived(surface === "threads");
+	/** Whichever workspace surface owns the column, when one is on screen at all. */
+	const inspector_open = $derived(surface === "editor" || thread_inspector_open);
 
 	/**
 	 * Read once for the whole shell: every glass surface reads the store while
@@ -112,87 +198,100 @@
 	 * the settings screen happens to be opened.
 	 */
 	const appearance = yield* AppearancePreferences;
-	const stored_appearance = yield* appearance.Load;
-	shader_enabled.set(stored_appearance.shader_enabled);
-	prose_width.set(stored_appearance.prose_width ?? "balanced");
-
-	const ApplyThreadListUpdate = (update: ThreadListUpdate) =>
+	const browser_typography = yield* BrowserTypography;
+	const initial_appearance = yield* appearance.Current;
+	let stored_appearance = $state.raw<AppearanceState>(initial_appearance);
+	const ApplyAppearance = (next: AppearanceState) =>
 		Effect.gen(function* () {
-			threads = ApplyRootThreadListUpdate(threads, update);
+			const next_typography = resolve_typography_preferences(next);
+			stored_appearance = next;
+			shader_enabled.set(next.shader_enabled);
+			prose_width.set(next.prose_width ?? "balanced");
+			typography.set(next_typography);
+			yield* browser_typography.Apply(next_typography).pipe(Effect.ignore);
 		});
+	shader_enabled.set(initial_appearance.shader_enabled);
+	prose_width.set(initial_appearance.prose_width ?? "balanced");
+	typography.set(resolve_typography_preferences(initial_appearance));
+	/**
+	 * The store moves first so the rail answers in the same frame the control was
+	 * pressed; the durable write follows and is never what the reader waits on.
+	 * Written from the shell because the shell is what hands the rail its mode.
+	 */
+	yield* appearance.Changes.pipe(
+		Stream.runForEach(ApplyAppearance),
+		Effect.forkScoped,
+	);
+	yield* appearance.Load.pipe(Effect.forkScoped);
 
-	const RefreshThreads = Effect.gen(function* () {
-		const next_threads = yield* client.ListThreads;
-		yield* ApplyThreadListUpdate({
-			journal_sequence: 0,
-			threads: next_threads,
-			type: "snapshot" as const,
+	const ApplyWorkspaceCatalogState = (next: WorkspaceCatalogState) =>
+		Effect.gen(function* () {
+			catalog_state = next;
 		});
-	});
 
 	/**
-	 * The shell mounts before Forge is necessarily reachable, and the
-	 * subscription below re-runs this same refresh on every recovery attempt.
-	 * A failed first load is therefore expected and already answered.
+	 * The persistent shell is the sole catalog owner. Routes read this retained
+	 * state synchronously and subscribe to Changes; they never open their own
+	 * project/thread queries or authoritative streams.
 	 */
-	yield* RefreshThreads.pipe(Effect.ignore);
-
-	yield* RunAuthoritativeSubscription(
-		client.SubscribeThreadList,
-		ApplyThreadListUpdate,
-		RefreshThreads,
+	yield* workspace_catalog.Changes.pipe(
+		Stream.runForEach(ApplyWorkspaceCatalogState),
+		Effect.forkScoped,
+	);
+	yield* Effect.all(
+		[workspace_catalog.SubscribeProjects, workspace_catalog.SubscribeThreadList],
+		{ concurrency: "unbounded", discard: true },
 	).pipe(Effect.forkScoped);
 
 	const HydrateForge = (generation: number): Effect.Effect<void> =>
 		Effect.gen(function* () {
-			const [, , next_threads] = yield* Effect.all(
-				[
-					session_defaults.Refresh.pipe(
-						Effect.mapError(
-							(error) =>
-								new ForgeHydrationFailure({ error, operation: "session_defaults" }),
-						),
-					),
-					client.ListProjects.pipe(
-						Effect.mapError(
-							(error) => new ForgeHydrationFailure({ error, operation: "projects" }),
-						),
-					),
-					client.ListThreads.pipe(
-						Effect.mapError(
-							(error) => new ForgeHydrationFailure({ error, operation: "threads" }),
-						),
-					),
-				],
-				{
-					concurrency: "unbounded",
-				},
-			);
+			/**
+			 * The connection is ready before this runs. Catalog subscriptions own
+			 * their initial snapshots and recovery reads, while defaults hydrate in
+			 * the persistent shell without delaying its first usable frame.
+			 */
+			yield* session_defaults.Refresh.pipe(Effect.ignore, Effect.forkScoped);
 			const state = yield* client.ConnectionState;
 			if (state.phase === "ready") {
 				if (!IsCurrentForgeHydration(forge_gate, generation)) return;
-				yield* ApplyThreadListUpdate({
-					journal_sequence: 0,
-					threads: next_threads,
-					type: "snapshot" as const,
-				});
+				catalog_state = yield* workspace_catalog.Current;
 				forge_gate = CompleteForgeHydration(forge_gate, generation);
 				return;
 			}
 			yield* ApplyConnectionState(state);
-		}).pipe(
-			Effect.catchTag("ForgeHydrationFailure", ({ error, operation }) =>
-				Effect.gen(function* () {
-					forge_gate = FailForgeHydration(forge_gate, generation, operation, error);
-				}),
-			),
-		);
+		});
+
+	/**
+	 * A parked supervisor waits on a manual retry gate. Nobody is guaranteed to
+	 * be looking at the overlay — the machine may simply have slept through the
+	 * outage — so the shell re-arms the retry itself: on a slow cadence while
+	 * the phase stays exhausted, and immediately when the window regains focus.
+	 * Disconnection stays a state the app leaves on its own once Forge returns.
+	 */
+	let exhausted_retry_generation = 0;
+	const RetryExhaustedConnectionLater = (generation: number) =>
+		Effect.gen(function* () {
+			yield* Effect.sleep("15 seconds");
+			if (generation !== exhausted_retry_generation) return;
+			if (forge_gate.state.phase !== "exhausted") return;
+			yield* client.RetryConnection;
+		});
+	const RetryExhaustedConnectionNow = Effect.gen(function* () {
+		if (forge_gate.state.phase !== "exhausted") return;
+		yield* client.RetryConnection;
+	});
 
 	const ApplyConnectionState = (
 		state: ArtisanConnectionState,
 	): Effect.Effect<void> =>
 		Effect.gen(function* () {
 			forge_gate = ObserveForgeConnection(forge_gate, state);
+			if (forge_gate.state.phase === "exhausted") {
+				exhausted_retry_generation += 1;
+				yield* RetryExhaustedConnectionLater(exhausted_retry_generation).pipe(
+					Effect.forkScoped,
+				);
+			}
 			if (forge_gate.state.phase !== "hydrating") return;
 			yield* HydrateForge(forge_gate.state.generation).pipe(Effect.forkScoped);
 		});
@@ -235,20 +334,13 @@
 	 * notification centre exactly the way a paired browser tab does.
 	 */
 	const notifications = yield* SystemNotifications;
+	const reader_attention = yield* BrowserReaderAttention;
 	const NotifyForEvent = (envelope: EventEnvelope) =>
 		Effect.gen(function* () {
 			const thread = threads.find(
 				(candidate) => candidate.thread_id === envelope.thread_id,
 			);
-			const focused = yield* RunBrowserDom(
-				() => document.hasFocus() && document.visibilityState === "visible",
-			).pipe(
-				Effect.catch(() =>
-					Effect.gen(function* () {
-						return false;
-					}),
-				),
-			);
+			const focused = yield* reader_attention.Current;
 			yield* notifications.Handle(envelope, {
 				active_thread_id: active_thread?.thread_id,
 				focused,
@@ -289,16 +381,18 @@
 				continue;
 			}
 			if (attempted) continue;
-			const reachable = yield* http_client
-				.get(yield* ForgeHttpUrl("/health"))
-				.pipe(
-					Effect.map((response) => response.status >= 200 && response.status < 300),
-					Effect.catch(() =>
-						Effect.gen(function* () {
-							return false;
-						}),
-					),
-				);
+			const reachable = yield* ProbeForgeRecoveryHealth(
+				http_client.get(yield* ForgeHttpUrl("/health")),
+			);
+			/**
+			 * An unreachable origin is not a Forge that is merely slow to return.
+			 * The endpoint was handed to this document once and cannot change
+			 * within it, so a Forge that died and came back on another port stays
+			 * unreachable however long this loop runs. Only the desktop shell can
+			 * ask `ae` for the new one, and the document title is the only channel
+			 * it observes.
+			 */
+			forge_unreachable = !reachable;
 			if (!reachable || forge_gate.state.phase !== "exhausted") continue;
 			/**
 			 * A reachable Forge with an exhausted connection is the unpaired
@@ -314,8 +408,16 @@
 	});
 	yield* AutoRecoverConnection.pipe(Effect.forkScoped);
 
+	/**
+	 * The first settled transcript otherwise pays Shiki's whole chunk graph at
+	 * the moment it should be painting, and math or Mermaid pay theirs at first
+	 * sight. Warming runs in idle slices after the shell is up, so by the time
+	 * a thread opens the renderer modules are usually already cached.
+	 */
+	yield* WarmConversationRenderers.pipe(Effect.forkScoped);
+
 	desktop_runtime = yield* RunBrowserDom(
-		() => globalThis.navigator?.userAgent.includes("Electron/") ?? false,
+		() => RuntimeSurfaceFor(globalThis.navigator?.userAgent ?? "") === "desktop",
 	);
 	/**
 	 * macOS is the one desktop platform whose window controls overlay the
@@ -324,23 +426,31 @@
 	 * itself past the traffic lights: a right-aligned line reads cleanly and
 	 * the lights keep their native position.
 	 */
-	mac_desktop = yield* RunBrowserDom(
-		() =>
-			(globalThis.navigator?.userAgent.includes("Electron/") ?? false) &&
-			(globalThis.navigator?.userAgent.includes("Macintosh") ?? false),
+	mac_desktop = yield* RunBrowserDom(() =>
+		IsMacDesktop(globalThis.navigator?.userAgent ?? ""),
 	);
 </script>
 
+<svelte:window onfocus={yield* RetryExhaustedConnectionNow} />
+
 <ModeWatcher defaultMode="dark" />
-<Toaster position="top-center" />
 <DevInstanceBadge />
+<AttentionTitleMarker {threads} {forge_unreachable} />
 
 {#snippet primary()}
 	{@render children()}
 {/snippet}
 
 {#snippet secondary()}
-	<ThreadPanel />
+	<ThreadPanel
+		plan={active_checklist}
+		agents={active_agents}
+		oninspectagent={thread_orchestration.Inspect}
+		thread_id={active_thread?.thread_id}
+		project_id={active_project?.project_id}
+		project_root_path={active_project?.root_path}
+		workspace_id={active_workspace_id}
+	/>
 {/snippet}
 
 <!--
@@ -386,16 +496,22 @@
 					screen names a workspace the screen says is unreachable.
 				-->
 				{#if !ForgeShellIsBlocked(forge_gate)}
+					<!--
+						The line fades into the window controls rather than running under
+						them: the controls float over one end of this strip, and which end
+						is the platform's business — trailing on Windows and Linux, leading
+						on macOS, where the identity is right-aligned away from the lights.
+					-->
 					<div
 						class={mac_desktop
-							? "flex w-full min-w-0 items-center justify-end pl-16 pr-6"
-							: "flex w-full min-w-0 items-center pr-6"}
+							? "fade-edge-start flex w-full min-w-0 items-center justify-end pl-16 pr-6"
+							: "fade-edge-end flex w-full min-w-0 items-center pr-6"}
 					>
 						{@render workspace_header()}
 					</div>
 				{/if}
 			</div>
-			{#if surface === "editor" || is_thread}
+			{#if inspector_open}
 				<div
 					class="w-[calc(clamp(16rem,25vw,350px)+1rem)] shrink-0"
 					aria-hidden="true"
@@ -415,13 +531,14 @@
 					{primary}
 					{surface}
 					{threads}
+					{threads_loaded}
 					header={desktop_runtime || header_project === undefined
 						? undefined
 						: workspace_header}
-					show_thread_hover_rail={is_thread_route}
+					{thread_rail}
 					thread_id={active_thread?.thread_id}
 					workspace_id={active_workspace_id}
-					secondary={surface === "editor" ? editor_files : is_thread ? secondary : undefined}
+					secondary={surface === "editor" ? editor_files : secondary}
 				/>
 			{:else}
 				<ForgeShellPreview />

@@ -1,5 +1,10 @@
 import { writable } from "svelte/store";
 
+import {
+	default_typography_preferences,
+	type TypographyPreferences,
+} from "./appearance/typography";
+
 /**
  * Whether glass surfaces light themselves with the shader.
  *
@@ -23,3 +28,14 @@ export type ProseWidth = "tight" | "balanced" | "loose";
  * `AppearancePreferences`; this store is what the shell paints from.
  */
 export const prose_width = writable<ProseWidth>("balanced");
+
+/**
+ * Whether the thread rail keeps its complete list on screen rather than
+ * revealing it when the pointer enters the margin. Same shape as the two above:
+ * the durable value lives in `AppearancePreferences` and this store is what the
+ * shell paints from. Starts closed so a first frame drawn before the stored
+ * preference has been read matches the rail's designed resting state.
+ */
+
+/** The resolved families the shell applies after it has loaded appearance preferences. */
+export const typography = writable<TypographyPreferences>(default_typography_preferences);

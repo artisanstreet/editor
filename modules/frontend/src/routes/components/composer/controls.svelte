@@ -15,6 +15,7 @@
 		TooltipProvider,
 		TooltipTrigger,
 	} from "$lib/components/ui/tooltip";
+	import { ComposerContextUsageIsCurrent } from "$lib/composer/send-readiness";
 	import { ContextUsageAutoCompactionPercent } from "$lib/context-usage/auto-compaction";
 	import { ContextUsageModelName } from "$lib/context-usage/model-name";
 	import ContextUsageGauge from "../context-usage-gauge.svelte";
@@ -64,11 +65,18 @@
 		if (onstartnewthread !== undefined) yield* onstartnewthread;
 	});
 
-	/** All three are needed to state a reading; any one missing means no gauge at all. */
+	/**
+	 * All three are needed to state a reading; any one missing means no gauge at
+	 * all. So is a reading that belongs to a different engine or model than the
+	 * thread now targets: a stale numerator over a fresh denominator is not a
+	 * conservative reading, it is a wrong one, and it was what put a 252K window
+	 * beside a picker reading 1M. No gauge until the current pairing reports.
+	 */
 	const has_context_reading = $derived(
 		context_usage?.context_tokens !== undefined &&
 			context_window_tokens !== undefined &&
-			context_percent !== undefined,
+			context_percent !== undefined &&
+			ComposerContextUsageIsCurrent(policy, context_usage),
 	);
 	/**
 	 * Where the reporting run's engine begins compacting, which the gauge's red
@@ -114,12 +122,20 @@
 			draft is not stuck behind the run — it can open its own thread. The grid
 			track tween keeps the reveal purely CSS and fully reversible mid-flight.
 		-->
-		<div class="t-new-thread" data-open={new_thread_open}>
-			<div class="t-new-thread-inner">
+		<!--
+			Card-resize reveal for the run-time "start a new thread" action: the grid
+			track tweens 0fr → 1fr so the row grows leftward from the stop button,
+			while the label blurs in behind it.
+		-->
+		<div
+			class="group/new-thread grid grid-cols-[0fr] transition-[grid-template-columns] duration-(--duration-fast) ease-(--ease-smooth-out) data-[open=true]:grid-cols-[1fr]"
+			data-open={new_thread_open}
+		>
+			<div class="flex min-w-0 overflow-hidden">
 				<Button
 					variant="ghost"
 					size="sm"
-					class="new-thread-action mr-1 gap-1.5 whitespace-nowrap rounded-[calc(var(--composer-radius)-0.5rem)] text-muted-foreground hover:text-foreground"
+					class="mr-1 gap-1.5 rounded-(--radius-nested) whitespace-nowrap text-muted-foreground opacity-0 blur-[var(--blur-small)] [transition-property:opacity,filter] duration-(--duration-quick) ease-(--ease-smooth-out) group-data-[open=true]/new-thread:opacity-100 group-data-[open=true]/new-thread:blur-none group-data-[open=true]/new-thread:duration-(--duration-fast) hover:text-foreground"
 					disabled={!new_thread_open}
 					tabindex={new_thread_open ? 0 : -1}
 					onclick={yield* ActivateNewThread}
@@ -143,7 +159,7 @@
 							<Button
 								variant="ghost"
 								size="icon-sm"
-								class="composer-send rounded-[calc(var(--composer-radius)-0.5rem)]"
+								class="composer-send rounded-(--radius-nested)"
 								aria-label={run_active ? "Stop current run" : "Send message"}
 								data-ready={run_active || send_ready}
 								disabled={run_active ? disabled || cancelling || !abort_available : !send_ready}
@@ -171,140 +187,3 @@
 	</div>
 </div>
 
-<style>
-	:global(:root) {
-		--icon-swap-dur: var(--duration-fast);
-		--icon-swap-blur: 2px;
-		--icon-swap-start-scale: 0.25;
-		--icon-swap-ease: var(--ease-in-out);
-	}
-
-	:global(.t-icon-swap) {
-		position: relative;
-		display: inline-grid;
-	}
-
-	:global(.t-icon-swap) .t-icon {
-		grid-area: 1 / 1;
-		transition:
-			opacity var(--icon-swap-dur) var(--icon-swap-ease),
-			filter var(--icon-swap-dur) var(--icon-swap-ease),
-			transform var(--icon-swap-dur) var(--icon-swap-ease);
-		will-change: opacity, filter, transform;
-	}
-
-	:global(.t-icon-swap[data-state="a"]) .t-icon[data-icon="a"],
-	:global(.t-icon-swap[data-state="b"]) .t-icon[data-icon="b"] {
-		opacity: 1;
-		filter: blur(0);
-		transform: scale(1);
-	}
-
-	:global(.t-icon-swap[data-state="a"]) .t-icon[data-icon="b"],
-	:global(.t-icon-swap[data-state="b"]) .t-icon[data-icon="a"] {
-		opacity: 0;
-		filter: blur(var(--icon-swap-blur));
-		transform: scale(var(--icon-swap-start-scale));
-	}
-
-	/**
-	 * Card-resize reveal for the run-time "start a new thread" action: the grid
-	 * track tweens 0fr → 1fr so the row grows leftward from the stop button,
-	 * while the label blurs in slightly after the track starts opening.
-	 */
-	.t-new-thread {
-		display: grid;
-		grid-template-columns: 0fr;
-		transition: grid-template-columns var(--duration-fast) var(--ease-smooth-out);
-	}
-
-	.t-new-thread[data-open="true"] {
-		grid-template-columns: 1fr;
-	}
-
-	.t-new-thread-inner {
-		display: flex;
-		min-width: 0;
-		overflow: hidden;
-	}
-
-	.t-new-thread :global(.new-thread-action) {
-		opacity: 0;
-		filter: blur(var(--blur-small));
-		transform: translateX(var(--distance-micro));
-		transition:
-			opacity var(--duration-quick) var(--ease-smooth-out),
-			filter var(--duration-quick) var(--ease-smooth-out),
-			transform var(--duration-quick) var(--ease-smooth-out);
-		will-change: opacity, filter, transform;
-	}
-
-	.t-new-thread[data-open="true"] :global(.new-thread-action) {
-		opacity: 1;
-		filter: blur(0);
-		transform: translateX(0);
-		transition-duration: var(--duration-fast);
-		transition-delay: var(--duration-micro);
-	}
-
-	/** The face arms from bare arrow to bright gradient when submission becomes possible. */
-	:global(.composer-send) {
-		position: relative;
-		background: transparent;
-		transition: filter var(--duration-quick) var(--ease-in-out);
-	}
-
-	:global(.composer-send)::before {
-		content: "";
-		position: absolute;
-		inset: 0;
-		border-radius: inherit;
-		background: linear-gradient(to bottom, var(--surface-25), var(--surface-100));
-		clip-path: circle(0% at 50% 50%);
-		transition: clip-path var(--duration-quick) var(--ease-smooth-out);
-		will-change: clip-path;
-	}
-
-	:global(.composer-send[data-ready="true"])::before {
-		clip-path: circle(75% at 50% 50%);
-		transition-duration: var(--duration-fast);
-	}
-
-	:global(.composer-send)::after {
-		content: "";
-		position: absolute;
-		inset: 0;
-		border-radius: inherit;
-		pointer-events: none;
-		box-shadow: none;
-		transition: box-shadow var(--duration-quick) var(--ease-smooth-out);
-	}
-
-	:global(.composer-send[data-ready="true"])::after {
-		box-shadow: var(--shadow-inset-artwork);
-		transition-duration: var(--duration-fast);
-	}
-
-	:global(.composer-send:hover:not(:disabled)) { filter: brightness(0.96); }
-	:global(.composer-send:active:not(:disabled)) { filter: brightness(0.9); }
-	:global(.composer-send[data-ready="true"]:disabled) { filter: brightness(0.8); }
-
-	:global(.composer-send .t-icon-swap) {
-		color: #a1a1aa;
-		transition: color var(--duration-quick) var(--ease-in-out);
-	}
-
-	:global(.composer-send[data-ready="true"] .t-icon-swap) { color: #18181b; }
-
-	@media (prefers-reduced-motion: reduce) {
-		:global(.t-icon-swap) .t-icon,
-		:global(.composer-send),
-		:global(.composer-send)::before,
-		:global(.composer-send)::after,
-		.t-new-thread,
-		.t-new-thread :global(.new-thread-action) {
-			transition: none !important;
-			will-change: auto;
-		}
-	}
-</style>

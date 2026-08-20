@@ -6,7 +6,7 @@ import {
 	count_pending_streaming_words,
 	create_conversation_streaming_words_plugin,
 	find_next_reveal_boundary,
-	get_streaming_word_delay,
+	get_streaming_word_pacing,
 	reveal_streaming_words,
 	wait_for_streaming_word_delay_or_target,
 	wrap_streaming_words,
@@ -66,19 +66,33 @@ describe("conversation streaming words", () => {
 	it("uses bounded tiers and returns to the calm stagger cadence", () => {
 		expect(count_pending_streaming_words("Hello ", streaming("Hello wide world "))).toBe(2);
 		expect(count_pending_streaming_words("stale", streaming("corrected"))).toBe(0);
-		expect(get_streaming_word_delay(0)).toBe(40);
-		expect(get_streaming_word_delay(4)).toBe(40);
-		expect(get_streaming_word_delay(5)).toBe(28);
-		expect(get_streaming_word_delay(13)).toBe(18);
-		expect(get_streaming_word_delay(33)).toBe(12);
-		expect(get_streaming_word_delay(10_000)).toBe(12);
+		expect(get_streaming_word_pacing(0)).toEqual({ delay_ms: 40, words: 1 });
+		expect(get_streaming_word_pacing(4)).toEqual({ delay_ms: 40, words: 1 });
+		expect(get_streaming_word_pacing(5)).toEqual({ delay_ms: 28, words: 1 });
+		expect(get_streaming_word_pacing(13)).toEqual({ delay_ms: 20, words: 2 });
+		expect(get_streaming_word_pacing(33)).toEqual({ delay_ms: 16, words: 4 });
+		expect(get_streaming_word_pacing(10_000)).toEqual({ delay_ms: 16, words: 8 });
+	});
+
+	it("never ticks faster than a display frame; backlog widens the tick instead", () => {
+		for (const backlog of [0, 5, 13, 33, 97, 10_000]) {
+			expect(get_streaming_word_pacing(backlog).delay_ms).toBeGreaterThanOrEqual(16);
+		}
+	});
+
+	it("reveals multiple words per tick while holding the unterminated tail", () => {
+		const target = streaming("one two three four five");
+
+		expect(reveal_streaming_words("", target, 3)).toBe("one two three ");
+		expect(reveal_streaming_words("one ", target, 8)).toBe("one two three four ");
+		expect(reveal_streaming_words("", settled("one two"), 5)).toBe("one two");
 	});
 
 	it("lets a newer transport target preempt an in-flight visual delay", async () => {
 		const correction = streaming("corrected response");
 		const outcome = await Effect.runPromise(
 			Effect.gen(function* () {
-				const targets = yield* Queue.sliding<StreamingWordsTarget>(1);
+				const targets = yield* Queue.unbounded<StreamingWordsTarget>();
 				const waiting = yield* wait_for_streaming_word_delay_or_target(targets, 1_000).pipe(
 					Effect.forkChild,
 				);
@@ -164,6 +178,37 @@ describe("conversation streaming words", () => {
 				" ",
 				["stream-word", { incoming: true }, "text"],
 			],
+		]);
+	});
+
+	it("wraps only freshly parsed nodes when a streaming parse reuses a prefix", () => {
+		const plugin = create_conversation_streaming_words_plugin(() => 7);
+		const post = plugin.post;
+		if (!post) throw new Error("streaming words plugin requires a post hook");
+
+		const reused_paragraph: ComarkNode = [
+			"p",
+			{},
+			["stream-word", { incoming: false }, "settled"],
+		];
+		const tree: ComarkTree = {
+			frontmatter: {},
+			meta: {},
+			nodes: [reused_paragraph, ["p", {}, "fresh words"]],
+		};
+		post({
+			markdown: "fresh words",
+			options: {},
+			reusableNodes: [reused_paragraph],
+			tokens: [],
+			tree,
+		});
+
+		expect(tree.nodes[0]).toBe(reused_paragraph);
+		expect(get_word_nodes(tree.nodes)).toEqual([
+			["settled", false],
+			["fresh", false],
+			["words", true],
 		]);
 	});
 

@@ -17,8 +17,12 @@ describe("failed root run retry", () => {
 		expect(route).toContain(
 			'client.Command({ payload: { run_id, type: "run.retry" }, thread_id })',
 		);
-		expect(send_message).toContain("yield* RefreshInteractionContext.pipe(Effect.ignore);");
-		expect(send_message).not.toContain("yield* Effect.forkIn(");
+		expect(send_message).toContain("const receipt = yield* SubmitDurableCommand(");
+		expect(send_message).toContain("client.Command({ ...result.command");
+		expect(send_message).toContain(
+			"RefreshInteractionContext.pipe(Effect.forkIn(thread_scope), Effect.asVoid)",
+		);
+		expect(send_message).not.toContain("yield* RefreshInteractionContext.pipe(Effect.ignore);");
 		expect(route).toContain("onretry={RetryRun}");
 	});
 
@@ -28,8 +32,15 @@ describe("failed root run retry", () => {
 			"modules/frontend/src/routes/components/conversation-work-session.svelte",
 		);
 
-		expect(workspace).toContain('active_run_status === "failed"');
-		expect(workspace).toContain("active_run_id === block.session.run_id");
+		/**
+		 * The failed session names itself. Gating on the separately fetched work
+		 * item instead meant the offer depended on a second transport agreeing
+		 * with the transcript, which is the same split that left finished runs
+		 * rendering as live.
+		 */
+		expect(workspace).toContain(
+			'onretry={block.session.status === "failed" ? onretry : undefined}',
+		);
 		expect(workspace).toContain('active_run_status === "queued"');
 		expect(session).toContain("retry_available");
 		expect(session).toMatch(/onSuccess:[\s\S]*retrying = false;/u);

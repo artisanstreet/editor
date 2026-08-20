@@ -16,6 +16,7 @@
 		TooltipTrigger,
 	} from "$lib/components/ui/tooltip";
 	import { EngineDisplayName, EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
+	import type { EngineUsageEntry } from "$lib/identity/engine-usage-controller";
 	import {
 		usage_meter_segments,
 		usage_segment_fraction,
@@ -38,7 +39,7 @@
 
 	const {
 		checked_at_ms,
-		checked_label,
+		entries,
 		engine_ids,
 		onrefresh,
 		refreshing_engines,
@@ -46,7 +47,16 @@
 		hidden_engine_ids,
 	}: {
 		readonly checked_at_ms: number;
-		readonly checked_label?: string;
+		/**
+		 * Per-engine readings, each with its own timestamp and its own failure.
+		 *
+		 * The rows used to share one aggregate: a single "last checked" taken from
+		 * the newest engine, printed on every row including engines whose reading
+		 * was hours older, and a single error status that replaced the whole list
+		 * when nothing had answered yet. Each row now states only what its own
+		 * engine reported.
+		 */
+		readonly entries: ReadonlyMap<string, EngineUsageEntry>;
 		/**
 		 * Enabled engines in catalog order. The row set and its ordering come
 		 * from this list — known before any provider answers — never from which
@@ -119,7 +129,8 @@
 	 * its mark and name immediately — skeleton meters until its first report
 	 * lands ("pending") — and fills in place as its provider answers. An
 	 * engine that already has a report keeps painting that report while it
-	 * refreshes; a cleanly signed-out engine renders no row, as before.
+	 * refreshes; a cleanly signed-out engine remains visible with an explicit
+	 * authentication state.
 	 */
 	type EngineUsageRow =
 		| {
@@ -127,26 +138,56 @@
 				readonly kind: "authenticated" | "unavailable";
 				readonly report: EngineUsageReport;
 		  }
+		| {
+				readonly engine_id: string;
+				readonly kind: "unauthenticated";
+				readonly report?: EngineUsageReport;
+		  }
 		| { readonly engine_id: string; readonly kind: "pending"; readonly report?: undefined };
 
-	const reports_by_id = $derived(
-		new Map(
-			(usage_state.status === "loaded" ? usage_state.snapshot.engines : []).map(
-				(report) => [report.engine_id, report] as const,
-			),
-		),
-	);
+	/**
+	 * How long ago this engine answered, in its own words. Absent until it has
+	 * answered at least once, which is also what withholds its refresh control.
+	 */
+	const CheckedLabel = (engine_id: string): string | undefined => {
+		const fetched_at_ms = entries.get(engine_id)?.fetched_at_ms;
+		if (fetched_at_ms === undefined || !Number.isFinite(fetched_at_ms)) return undefined;
+		const minutes = Math.floor((checked_at_ms - fetched_at_ms) / 60_000);
+		if (minutes < 1) return "last checked now";
+		if (minutes < 60) return `last checked ${minutes} min ago`;
+		const hours = Math.floor(minutes / 60);
+		if (hours < 24) return `last checked ${hours} hr ago`;
+		return `last checked ${Math.floor(hours / 24)} d ago`;
+	};
+
 	const RowFor = (engine_id: string): EngineUsageRow | undefined => {
-		const report = reports_by_id.get(engine_id);
+		const entry = entries.get(engine_id);
+		const report = entry?.report;
 		if (report !== undefined) {
 			if (report.authentication === "authenticated") {
 				return { engine_id, kind: "authenticated", report };
 			}
-			return report.authentication === "unknown" && report.failure !== undefined
-				? { engine_id, kind: "unavailable", report }
-				: undefined;
+			return report.authentication === "unauthenticated"
+				? { engine_id, kind: "unauthenticated", report }
+				: { engine_id, kind: "unavailable", report };
 		}
-		return refreshing_engines.has(engine_id) ? { engine_id, kind: "pending" } : undefined;
+		/** A recorded failure is this engine's own answer, not a missing one. */
+		if (entry?.failure !== undefined) {
+			return {
+				engine_id,
+				kind: "unavailable",
+				report: {
+					authentication: "unknown",
+					display_name: EngineDisplayName(engine_id),
+					engine_id,
+					failure: entry.failure,
+					windows: [],
+				},
+			};
+		}
+		return refreshing_engines.has(engine_id)
+			? { engine_id, kind: "pending" }
+			: { engine_id, kind: "unauthenticated" };
 	};
 	const engine_rows = $derived(
 		engine_ids
@@ -198,9 +239,11 @@
 	</Tooltip>
 {/snippet}
 
-{#if usage_state.status === "error"}
-	<p class="px-3 py-2.5 text-xs text-muted-foreground">Usage is unavailable right now.</p>
-{:else if engine_rows.length === 0}
+<!--
+	No aggregate failure branch: one engine failing is that engine's row saying
+	so, never a message that replaces the engines that did answer.
+-->
+{#if engine_rows.length === 0}
 	{#if usage_state.status === "loaded"}
 		<p class="px-3 py-2.5 text-xs text-muted-foreground">No engine accounts connected.</p>
 	{:else}
@@ -227,13 +270,14 @@
 					{@const engine = row.report}
 					{@const groups = GroupWindows(engine.windows)}
 					{@const weekly_reset = weekly_reset_duration(engine.windows, checked_at_ms)}
+					{@const engine_checked_label = CheckedLabel(engine.engine_id)}
 					<div class="flex flex-col gap-1.5 px-2 py-1">
 						<div class="flex items-center justify-between gap-2">
 							<div class="flex min-w-0 items-center gap-2">
 								<MarkIcon class={EngineMarkClass(mark, "size-4")} />
 								<span class="truncate text-xs font-medium text-foreground">{engine.display_name}</span>
 							</div>
-							{#if checked_label !== undefined}
+							{#if engine_checked_label !== undefined}
 								{@const engine_refreshing = refreshing_engines.has(engine.engine_id)}
 								<button
 									type="button"
@@ -242,7 +286,7 @@
 									disabled={engine_refreshing}
 									onclick={yield* onrefresh(engine.engine_id)}
 								>
-									<span class="t-checked-reading whitespace-nowrap text-muted-foreground">{checked_label}</span>
+									<span class="t-checked-reading whitespace-nowrap text-muted-foreground">{engine_checked_label}</span>
 									<span class="t-checked-action whitespace-nowrap text-foreground" aria-hidden="true">Refresh</span>
 									<span class="t-checked-loading" aria-hidden={!engine_refreshing}><FadeArc class="size-3.5 text-muted-foreground" /></span>
 								</button>
@@ -289,6 +333,14 @@
 							<Skeleton class="h-1.5 w-full" />
 						</div>
 					</div>
+				{:else if row.kind === "unauthenticated"}
+					<div class="flex flex-col gap-1 px-2 py-1">
+						<div class="flex items-center gap-2">
+							<MarkIcon class={EngineMarkClass(mark, "size-4")} />
+							<span class="truncate text-xs font-medium text-foreground">{EngineDisplayName(row.engine_id)}</span>
+						</div>
+						<p class="pl-6 text-xs text-muted-foreground">{EngineDisplayName(row.engine_id)} is not authenticated</p>
+					</div>
 				{:else}
 					{@const engine = row.report}
 					<div class="flex flex-col gap-1 px-2 py-1">
@@ -305,24 +357,3 @@
 		</div>
 	</TooltipProvider>
 {/if}
-
-<style>
-	.t-usage-meter {
-		--meter-dim: color-mix(in oklab, var(--foreground) 11%, transparent);
-		--meter-pitch: calc(100% / var(--meter-ticks));
-		background-image: linear-gradient(to right, var(--meter-accent) 0 var(--meter-lit), var(--meter-dim) var(--meter-lit) 100%);
-		mask-image: repeating-linear-gradient(to right, #000 0 calc(var(--meter-pitch) - 2px), transparent calc(var(--meter-pitch) - 2px) var(--meter-pitch));
-		-webkit-mask-image: repeating-linear-gradient(to right, #000 0 calc(var(--meter-pitch) - 2px), transparent calc(var(--meter-pitch) - 2px) var(--meter-pitch));
-	}
-	.t-checked { display: grid; align-items: center; justify-items: end; }
-	.t-checked > span {
-		grid-area: 1 / 1;
-		transition: opacity var(--text-swap-dur) var(--ease-in-out), filter var(--text-swap-dur) var(--ease-in-out), transform var(--text-swap-dur) var(--ease-in-out);
-		will-change: opacity, filter, transform;
-	}
-	.t-checked .t-checked-action, .t-checked .t-checked-loading { opacity: 0; filter: blur(var(--text-swap-blur)); transform: translateY(var(--text-swap-translate-y)); }
-	.t-checked:not([data-loading="true"]):hover .t-checked-reading, .t-checked:not([data-loading="true"]):focus-visible .t-checked-reading,
-	.t-checked[data-loading="true"] .t-checked-reading, .t-checked[data-loading="true"] .t-checked-action { opacity: 0; filter: blur(var(--text-swap-blur)); transform: translateY(calc(-1 * var(--text-swap-translate-y))); }
-	.t-checked:not([data-loading="true"]):hover .t-checked-action, .t-checked:not([data-loading="true"]):focus-visible .t-checked-action, .t-checked[data-loading="true"] .t-checked-loading { opacity: 1; filter: blur(0); transform: translateY(0); }
-	@media (prefers-reduced-motion: reduce) { .t-checked > span { transition: none !important; } }
-</style>

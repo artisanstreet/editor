@@ -1,12 +1,8 @@
-import { Effect, Exit, Layer, Option, Queue, Ref, Scope, Stream } from "effect";
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Queue, Ref, Scope, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
-import {
-	ArtisanClient,
-	ArtisanClientError,
-	type SurfaceUsageAggregateUpdate,
-} from "@artisan/transport/client";
+import { ArtisanClient, type SurfaceUsageAggregateUpdate } from "@artisan/transport/client";
 import {
 	RunUsageController,
 	RunUsageControllerLive,
@@ -34,84 +30,141 @@ const policy = {
 	web_search_enabled: false,
 };
 
-const ClientFailure = (message: string) =>
-	new ArtisanClientError({
-		cause: undefined,
-		code: "protocol",
-		message,
-		protocol_code: "test_failure",
-		retryable: false,
-	});
-
 describe("frontend controller hostile races", () => {
-	it("retains one draft command through a failed send and an interrupted remount claim", async () => {
-		let policy_attempts = 0;
-		const client_layer = Layer.succeed(ArtisanClient, {
-			...FixtureArtisanClientService,
-			UpdateThreadSessionPolicy: (input) =>
-				Effect.gen(function* () {
-					policy_attempts += 1;
-					if (policy_attempts === 1)
-						return yield* Effect.fail(ClientFailure("policy write lost"));
-					return yield* FixtureArtisanClientService.UpdateThreadSessionPolicy(input);
-				}),
-		});
+	it("resets a ready draft and advances its revision", async () => {
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				const controller = yield* DraftThreadController;
+				expect(yield* controller.CurrentRevision).toBe(0);
 				yield* controller.Initialize(fixture_project, policy);
-
-				const failed = yield* Effect.exit(controller.Submit(submission));
-				expect(failed._tag).toBe("Failure");
-				const after_failure = yield* controller.Current;
-				expect(after_failure._tag).toBe("Created");
-				if (after_failure._tag !== "Created") return yield* Effect.die("draft was lost");
-
-				const retried = yield* controller.Retry;
-				expect(retried.command_id).toBe(after_failure.command_id);
-
-				const first_route_scope = yield* Scope.make();
-				const owner = yield* controller
-					.AwaitPendingSubmissionClaim(retried.thread_id)
-					.pipe(Scope.provide(first_route_scope));
-				if (owner === undefined) return yield* Effect.die("no claim owner");
-
-				const replacement_route_scope = yield* Scope.make();
-				const blocked_replacement = yield* controller
-					.AwaitPendingSubmissionClaim(retried.thread_id)
-					.pipe(
-						Scope.provide(replacement_route_scope),
-						Effect.timeoutOption("20 millis"),
-					);
-				expect(Option.isNone(blocked_replacement)).toBe(true);
-
-				/** Closing the outgoing route triggers the claim's controller-owned finalizer. */
-				yield* Scope.close(first_route_scope, Exit.void);
-				const remounted_owner = yield* controller
-					.AwaitPendingSubmissionClaim(retried.thread_id)
-					.pipe(Scope.provide(replacement_route_scope));
-				expect(remounted_owner?.command_id).toBe(owner.command_id);
-				if (remounted_owner === undefined) return yield* Effect.die("remount lost claim");
-
-				/** A stale duplicate route close cannot release the replacement claim. */
-				yield* Scope.close(first_route_scope, Exit.void);
-				const contender_route_scope = yield* Scope.make();
-				const blocked_contender = yield* controller
-					.AwaitPendingSubmissionClaim(retried.thread_id)
-					.pipe(
-						Scope.provide(contender_route_scope),
-						Effect.timeoutOption("20 millis"),
-					);
-				yield* Scope.close(contender_route_scope, Exit.void);
-				expect(Option.isNone(blocked_contender)).toBe(true);
-
-				yield* remounted_owner.Complete;
-				yield* Scope.close(replacement_route_scope, Exit.void);
-				expect((yield* controller.Current)._tag).toBe("Uninitialized");
+				yield* controller.Reset(
+					Effect.gen(function* () {
+						expect((yield* controller.Current)._tag).toBe("Ready");
+						expect(yield* controller.CurrentRevision).toBe(0);
+					}),
+				);
+				expect(yield* controller.Current).toEqual({ _tag: "Uninitialized" });
+				expect(yield* controller.CurrentRevision).toBe(1);
 			}).pipe(
 				Effect.provide(DraftThreadControllerLive),
 				Effect.provide(MakeSnowflakeIdLive(17).pipe(Layer.orDie)),
-				Effect.provide(client_layer),
+				Effect.provide(Layer.succeed(ArtisanClient, FixtureArtisanClientService)),
+			),
+		);
+
+		expect(result).toBeUndefined();
+	});
+
+	it("refuses to reset a retained first submission", async () => {
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const controller = yield* DraftThreadController;
+				const discarded = yield* Ref.make(false);
+				yield* controller.Initialize(fixture_project, policy);
+				const created = yield* controller.Submit(submission);
+				const reset = yield* Effect.exit(controller.Reset(Ref.set(discarded, true)));
+
+				expect(reset._tag).toBe("Failure");
+				expect(yield* Ref.get(discarded)).toBe(false);
+				expect(yield* controller.Current).toEqual(created);
+				expect(yield* controller.CurrentRevision).toBe(0);
+			}).pipe(
+				Effect.provide(DraftThreadControllerLive),
+				Effect.provide(MakeSnowflakeIdLive(17).pipe(Layer.orDie)),
+				Effect.provide(Layer.succeed(ArtisanClient, FixtureArtisanClientService)),
+			),
+		);
+
+		expect(result).toBeUndefined();
+	});
+
+	it("rejects an alignment whose delayed seed finishes after a fresh-draft reset", async () => {
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const controller = yield* DraftThreadController;
+				const seed = yield* Deferred.make<typeof policy>();
+				const revision = yield* controller.CurrentRevision;
+				const alignment = yield* Effect.gen(function* () {
+					const loaded_policy = yield* Deferred.await(seed);
+					return yield* controller.AlignAtRevision(
+						revision,
+						fixture_project,
+						loaded_policy,
+					);
+				}).pipe(Effect.forkChild);
+
+				yield* controller.Reset(Effect.void);
+				yield* Deferred.succeed(seed, policy);
+
+				expect(yield* Fiber.join(alignment)).toBe(false);
+				expect(yield* controller.Current).toEqual({ _tag: "Uninitialized" });
+				expect(yield* controller.CurrentRevision).toBe(1);
+			}).pipe(
+				Effect.provide(DraftThreadControllerLive),
+				Effect.provide(MakeSnowflakeIdLive(17).pipe(Layer.orDie)),
+				Effect.provide(Layer.succeed(ArtisanClient, FixtureArtisanClientService)),
+			),
+		);
+
+		expect(result).toBeUndefined();
+	});
+
+	it("retains one draft command through an interrupted remount claim", async () => {
+		const client_layer = Layer.succeed(ArtisanClient, {
+			...FixtureArtisanClientService,
+		});
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const controller = yield* DraftThreadController;
+					yield* controller.Initialize(fixture_project, policy);
+
+					const retried = yield* controller.Submit(submission);
+
+					const first_route_scope = yield* Scope.make();
+					const owner = yield* controller
+						.AwaitPendingSubmissionClaim(retried.thread_id)
+						.pipe(Scope.provide(first_route_scope));
+					if (owner === undefined) return yield* Effect.die("no claim owner");
+
+					const replacement_route_scope = yield* Scope.make();
+					const blocked_replacement = yield* controller
+						.AwaitPendingSubmissionClaim(retried.thread_id)
+						.pipe(
+							Scope.provide(replacement_route_scope),
+							Effect.timeoutOption("20 millis"),
+						);
+					expect(Option.isNone(blocked_replacement)).toBe(true);
+
+					/** Closing the outgoing route triggers the claim's controller-owned finalizer. */
+					yield* Scope.close(first_route_scope, Exit.void);
+					const remounted_owner = yield* controller
+						.AwaitPendingSubmissionClaim(retried.thread_id)
+						.pipe(Scope.provide(replacement_route_scope));
+					expect(remounted_owner?.command_id).toBe(owner.command_id);
+					if (remounted_owner === undefined)
+						return yield* Effect.die("remount lost claim");
+
+					/** A stale duplicate route close cannot release the replacement claim. */
+					yield* Scope.close(first_route_scope, Exit.void);
+					const contender_route_scope = yield* Scope.make();
+					const blocked_contender = yield* controller
+						.AwaitPendingSubmissionClaim(retried.thread_id)
+						.pipe(
+							Scope.provide(contender_route_scope),
+							Effect.timeoutOption("20 millis"),
+						);
+					yield* Scope.close(contender_route_scope, Exit.void);
+					expect(Option.isNone(blocked_contender)).toBe(true);
+
+					yield* remounted_owner.Complete;
+					yield* Scope.close(replacement_route_scope, Exit.void);
+					expect((yield* controller.Current)._tag).toBe("Uninitialized");
+				}).pipe(
+					Effect.provide(DraftThreadControllerLive),
+					Effect.provide(MakeSnowflakeIdLive(17).pipe(Layer.orDie)),
+					Effect.provide(client_layer),
+				),
 			),
 		);
 

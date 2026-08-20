@@ -39,8 +39,15 @@ describe("editor SER migration", () => {
 			"modules/frontend/src/routes/components/editor-file-panel.svelte",
 		);
 
-		expect(source).toContain("let directory_requests = $state.raw");
-		expect(source).toContain("yield* LoadDirectory(parent);");
+		expect(source).toContain("const workspace_generation = yield* Ref.make(0)");
+		expect(source).toContain(
+			"const active_directory_requests = yield* Ref.make<ReadonlySet<string>>(new Set())",
+		);
+		expect(source).toContain("const request_key = `${generation}:${parent}`");
+		expect(source).toContain("Ref.modify(active_directory_requests");
+		expect(source).toContain("Effect.ensuring(");
+		expect(source).toContain("Effect.forkScoped");
+		expect(source).toContain('Effect.timeoutOption("10 seconds")');
 		expect(source).not.toMatch(/Queue\.|offerUnsafe|\bvoid goto\b/);
 	});
 });

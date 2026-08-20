@@ -1,0 +1,1265 @@
+/**
+ * Custom Tailwind utilities. Everything here is written as `@utility`, which is
+ * Tailwind's own extension point rather than a stylesheet beside it: a
+ * definition emits nothing until markup asks for it, and it composes with every
+ * variant — `md:card`, `data-[open=true]:t-panel-slide`, and so on.
+ *
+ * The bar for landing here is reuse. A rule worn by one element belongs in that
+ * element's class list; a rule worn by several, or one that needs a pseudo
+ * element to exist at all, belongs here.
+ */
+
+/* ── Surfaces ─────────────────────────────────────────────────── */
+
+@utility inset-shadow {
+	position: relative;
+	isolation: isolate;
+	box-shadow: var(--shadow-inset);
+}
+
+/**
+ * The `inset-shadow` layers are tuned for dark chrome and vanish over bright
+ * artwork. Same shadow shape, artwork strength — for surfaces that carry their
+ * own image or gradient (the composer's send button, seeded avatars).
+ */
+@utility inset-shadow-artwork {
+	position: relative;
+	isolation: isolate;
+	box-shadow: var(--shadow-inset-artwork);
+}
+
+@utility card {
+	box-shadow:
+		0 -0.5px rgba(255, 255, 255, 0.08),
+		0 4px 8px rgba(0, 0, 0, 0.06),
+		0 0 0 0.5px oklch(from var(--highlight) l c h / 8%),
+		0 1px 6px -4px #000;
+}
+
+@utility card-glass {
+	box-shadow:
+		0 -1px 0 rgb(255 255 255 / 14%),
+		inset 0 1px 0 rgb(255 255 255 / 10%),
+		inset 0 -1px 0 rgb(0 0 0 / 22%),
+		0 18px 48px -18px rgb(0 0 0 / 70%),
+		0 0 0 0.5px rgb(255 255 255 / 8%);
+}
+
+@utility card-lg {
+	box-shadow:
+		0 -0.5px rgba(255, 255, 255, 0.12),
+		0 10px 24px -12px rgba(0, 0, 0, 0.32),
+		0 4px 12px -8px rgba(0, 0, 0, 0.2),
+		0 0 0 0.5px oklch(from var(--highlight) l c h / 12%);
+}
+
+/**
+ * A moulded surface for saturated artwork. The bright inner top and dark inner
+ * foot shape the face itself; the outer stack then lifts it from the canvas.
+ */
+@utility card-plastic {
+	box-shadow:
+		inset 0 1.5px 0 rgb(255 255 255 / 20%),
+		inset 0 10px 18px -10px rgb(255 255 255 / 20%),
+		inset 0 -10px 18px -10px rgb(0 0 0 / 38%),
+		inset 0 -1.5px 0 rgb(0 0 0 / 28%),
+		inset 0 0 0 0.5px rgb(255 255 255 / 20%),
+		0 1px 2px rgb(0 0 0 / 22%),
+		0 8px 16px -6px rgb(0 0 0 / 38%),
+		0 22px 44px -18px rgb(0 0 0 / 48%);
+}
+
+@utility card-color {
+	box-shadow:
+		0 -0.5px color-mix(in oklab, var(--card-color) 18%, transparent),
+		0 4px 8px color-mix(in oklab, var(--card-color) 8%, transparent),
+		0 0 0 0.5px color-mix(in oklab, var(--card-color) 20%, transparent),
+		0 1px 6px -4px color-mix(in oklab, var(--card-color) 35%, #000);
+}
+
+@utility card-info {
+	--card-color: oklch(70.7% 0.165 254.624);
+	@apply card-color;
+}
+
+@utility card-error {
+	--card-color: oklch(70.4% 0.191 22.216);
+	@apply card-color;
+}
+
+@utility card-success {
+	--card-color: oklch(79.2% 0.209 151.711);
+	@apply card-color;
+}
+
+@utility card-warning {
+	--card-color: oklch(82.8% 0.189 84.429);
+	@apply card-color;
+}
+
+@utility card-diff {
+	box-shadow:
+		0 -0.5px
+			color-mix(
+				in oklab,
+				var(--shiki-diff-light) var(--diff-card-top-opacity, 24%),
+				transparent
+			),
+		0 4px 8px
+			color-mix(
+				in oklab,
+				var(--shiki-diff-light) var(--diff-card-shadow-opacity, 8%),
+				transparent
+			),
+		0 0 0 0.5px
+			color-mix(
+				in oklab,
+				var(--shiki-diff-light) var(--diff-card-ring-opacity, 36%),
+				transparent
+			),
+		0 1px 6px -4px
+			color-mix(in oklab, var(--shiki-diff-light) var(--diff-card-drop-opacity, 45%), #000);
+}
+
+/**
+ * Hides a scroll container's scrollbar without disabling scrolling. An
+ * `overflow-x-auto` row that reserves a scrollbar gutter steals height from the
+ * bottom of the box and pushes its contents off the centre line its neighbours
+ * are aligned to.
+ */
+@utility no-scrollbar {
+	-ms-overflow-style: none;
+
+	&::-webkit-scrollbar {
+		display: none;
+	}
+}
+
+/* ── Banners ──────────────────────────────────────────────────── */
+
+@utility banner {
+	--banner-tone: var(--foreground);
+	--banner-surface: var(--surface-100);
+	--banner-surface-from: var(--surface-125);
+	--banner-surface-to: var(--surface-75);
+	position: relative;
+	isolation: isolate;
+	gap: 0.125rem;
+	padding: 1rem 1.5rem;
+	overflow: hidden;
+	border-radius: var(--radius-lg);
+	background-color: var(--banner-surface);
+	background-image: linear-gradient(
+		to bottom,
+		var(--banner-surface-from),
+		var(--banner-surface-to)
+	);
+	color: var(--banner-tone);
+
+	&::before {
+		position: absolute;
+		z-index: 0;
+		inset: 0;
+		background-image:
+			linear-gradient(
+				to right,
+				color-mix(in oklch, var(--banner-tone) 3%, transparent) 1px,
+				transparent 1px
+			),
+			linear-gradient(
+				to bottom,
+				color-mix(in oklch, var(--banner-tone) 3%, transparent) 1px,
+				transparent 1px
+			);
+		background-size: 14px 24px;
+		content: "";
+		mask-image: radial-gradient(ellipse 80% 50% at 50% 0%, #000 70%, transparent 110%);
+		pointer-events: none;
+	}
+
+	& > * {
+		position: relative;
+		z-index: 1;
+	}
+
+	& > span {
+		color: var(--banner-tone);
+		font-size: 0.8125rem;
+		font-weight: 550;
+		line-height: 1.125rem;
+	}
+
+	& > p {
+		color: color-mix(in oklch, var(--foreground) 66%, var(--background));
+		font-size: 0.75rem;
+		line-height: 1rem;
+	}
+
+	.dark & {
+		--banner-surface: var(--surface-925);
+		--banner-surface-from: var(--surface-900);
+		--banner-surface-to: var(--surface-950);
+	}
+}
+
+@utility banner-info {
+	--banner-tone: oklch(70.7% 0.165 254.624);
+}
+
+@utility banner-error {
+	--banner-tone: oklch(70.4% 0.191 22.216);
+}
+
+@utility banner-warning {
+	--banner-tone: oklch(82.8% 0.189 84.429);
+}
+
+@utility banner-success {
+	--banner-tone: oklch(79.2% 0.209 151.711);
+}
+
+/**
+ * A banner's own action. It tints from whatever tone the banner set, so it
+ * cannot be spelled with palette utilities.
+ */
+@utility banner-action {
+	background: color-mix(in oklch, var(--banner-tone) 10%, transparent);
+	transition: background var(--duration-quick) var(--ease-in-out);
+
+	&:hover {
+		background: color-mix(in oklch, var(--banner-tone) 16%, transparent);
+	}
+
+	&:focus-visible {
+		outline: 2px solid color-mix(in oklch, var(--banner-tone) 42%, transparent);
+		outline-offset: 2px;
+	}
+}
+
+/* ── Motion (transitions.dev) ─────────────────────────────────── */
+
+/**
+ * Panel reveal on the Y axis: a short translate, opacity, and a 2px cross-blur
+ * on one duration and ease, so a small travel still reads as a full open /
+ * close. Set --panel-translate-y on the element to its travel distance.
+ *
+ * The open resting state must be `none`, not zeroed values, and neither state
+ * may carry will-change: either makes the panel a stacking context, and an
+ * atomic housing would then paint over the sidebar's shared hover pill instead
+ * of letting the pill sandwich between card and controls.
+ */
+@utility t-panel-slide {
+	transform: translateY(var(--panel-translate-y));
+	opacity: 0;
+	filter: blur(var(--panel-blur));
+	pointer-events: none;
+	transition:
+		transform var(--panel-close-dur) var(--panel-ease),
+		opacity var(--panel-close-dur) var(--panel-ease),
+		filter var(--panel-close-dur) var(--panel-ease);
+
+	&[data-open="true"] {
+		transform: none;
+		opacity: 1;
+		filter: none;
+		pointer-events: auto;
+		transition:
+			transform var(--panel-open-dur) var(--panel-ease),
+			opacity var(--panel-open-dur) var(--panel-ease),
+			filter var(--panel-open-dur) var(--panel-ease);
+	}
+}
+
+/** The same reveal on the X axis, for surfaces that live on a side edge. */
+@utility t-panel-slide-x {
+	transform: translateX(var(--panel-translate-x));
+	opacity: 0;
+	filter: blur(var(--panel-blur));
+	pointer-events: none;
+	transition:
+		transform var(--panel-close-dur) var(--panel-ease),
+		opacity var(--panel-close-dur) var(--panel-ease),
+		filter var(--panel-close-dur) var(--panel-ease);
+
+	&[data-open="true"] {
+		transform: none;
+		opacity: 1;
+		filter: none;
+		pointer-events: auto;
+		transition:
+			transform var(--panel-open-dur) var(--panel-ease),
+			opacity var(--panel-open-dur) var(--panel-ease),
+			filter var(--panel-open-dur) var(--panel-ease);
+	}
+}
+
+/**
+ * Card resize: tweens a container's own size when its layout state changes, so
+ * the composer's controls and the model picker read one duration and easing.
+ */
+@utility t-resize {
+	transition:
+		width var(--resize-dur) var(--resize-ease),
+		height var(--resize-dur) var(--resize-ease);
+	will-change: width, height;
+}
+
+/**
+ * The picker grows when a model's detail pane appears. `interpolate-size` is
+ * what lets the height tween to `auto` instead of snapping; without it the card
+ * resize has nothing to interpolate towards.
+ */
+@utility t-resize-auto {
+	interpolate-size: allow-keywords;
+}
+
+/** Both glyphs stack in one cell and cross-fade; `data-state` picks the winner. */
+@utility t-icon-swap {
+	position: relative;
+	display: inline-grid;
+
+	& .t-icon {
+		grid-area: 1 / 1;
+		transition:
+			opacity var(--icon-swap-dur) var(--icon-swap-ease),
+			filter var(--icon-swap-dur) var(--icon-swap-ease),
+			transform var(--icon-swap-dur) var(--icon-swap-ease);
+		will-change: opacity, filter, transform;
+		opacity: 0;
+		filter: blur(var(--icon-swap-blur));
+		transform: scale(var(--icon-swap-start-scale));
+	}
+
+	&[data-state="a"] .t-icon[data-icon="a"],
+	&[data-state="b"] .t-icon[data-icon="b"] {
+		opacity: 1;
+		filter: blur(0);
+		transform: scale(1);
+	}
+}
+
+/**
+ * Tooltip open / close (transitions.dev), worn by hover cards the component
+ * keeps mounted itself: `data-shown` drives the reveal. The entrance is an
+ * animation rather than a transition because the first engagement mounts the
+ * card already shown — a transition has no earlier frame to leave from there
+ * and pops, where an animation replays every time the rule starts matching.
+ * The delay is the surface's hover dwell, named per card through `--tt-delay`;
+ * `backwards` is what makes the dwell real, holding the from-frame through the
+ * delay. Concealing is the transition on the base rule, undelayed and short —
+ * the dwell guards against accidental reveals, and a card that lingered after
+ * the pointer left would read as stuck.
+ *
+ * Shown is statically scaleless for the same reason the dropdown's open state
+ * is: a transform makes the card a backdrop root and the glass inside it
+ * paints flat, so the card only carries one while it is actually moving.
+ */
+@utility t-tt {
+	opacity: 0;
+	transform: scale(var(--tt-scale));
+	transition:
+		opacity var(--tt-out-dur) var(--tt-out-ease),
+		transform var(--tt-out-dur) var(--tt-out-ease);
+
+	&[data-shown="true"] {
+		opacity: 1;
+		transform: none;
+		animation: t-tt-in var(--tt-in-dur) var(--tt-in-ease) var(--tt-delay, 0ms) backwards;
+	}
+}
+
+/**
+ * The same entrance for floating surfaces bits-ui mounts on open, where the
+ * primitive's presence attributes stand in for `data-shown`: the first painted
+ * frame wears `data-starting-style` and unmount holds `data-ending-style`
+ * until the exit transition ends, so open animates out of the scaled state and
+ * close plays before the node leaves. No delay — the primitive already owns
+ * open timing in JS, and a CSS delay would stack on top of it.
+ */
+@utility t-tt-presence {
+	transition:
+		opacity var(--tt-in-dur) var(--tt-in-ease),
+		transform var(--tt-in-dur) var(--tt-in-ease);
+
+	&[data-starting-style],
+	&[data-ending-style] {
+		opacity: 0;
+		transform: scale(var(--tt-scale));
+	}
+
+	&[data-ending-style] {
+		transition-duration: var(--tt-out-dur);
+		transition-timing-function: var(--tt-out-ease);
+	}
+}
+
+/**
+ * The accordion lip: `grid-template-rows` 0fr → 1fr gives a clean height
+ * animation with no JS measurement, and the inner element clips overflow.
+ * `data-animate="false"` paints state changes instantly, for while a
+ * mount-time state is still settling.
+ */
+@utility t-acc {
+	& > .t-acc-panel {
+		display: grid;
+		grid-template-rows: 0fr;
+		pointer-events: none;
+		transition: grid-template-rows var(--acc-collapse) var(--acc-ease);
+	}
+
+	& > .t-acc-panel > .t-acc-panel-inner {
+		min-height: 0;
+		overflow: hidden;
+		opacity: 0;
+		filter: blur(var(--blur-small));
+		transition:
+			opacity var(--acc-collapse) var(--acc-ease),
+			filter var(--acc-collapse) var(--acc-ease);
+	}
+
+	&[data-open="true"] > .t-acc-panel {
+		grid-template-rows: 1fr;
+		pointer-events: auto;
+		transition: grid-template-rows var(--acc-expand) var(--acc-ease);
+	}
+
+	&[data-open="true"] > .t-acc-panel > .t-acc-panel-inner {
+		opacity: 1;
+		filter: blur(0);
+		transition:
+			opacity var(--acc-expand) var(--acc-ease),
+			filter var(--acc-expand) var(--acc-ease);
+	}
+
+	&[data-animate="false"] > .t-acc-panel,
+	&[data-animate="false"] > .t-acc-panel > .t-acc-panel-inner {
+		transition: none;
+	}
+}
+
+/**
+ * One row of the queued-steer stack. Each row owns a grid track that plays
+ * `lip-row-grow` on mount, so a newer steer landing on top grows the lip on
+ * the accordion's own timing rather than snapping it taller. The inner
+ * element clips while the track opens. Exits ride the lip's accordion
+ * collapse when the stack empties; a row leaving a still-open stack yields
+ * its height instantly, which reads as the send departing upward.
+ */
+@utility t-lip-row {
+	display: grid;
+	grid-template-rows: 1fr;
+	animation: lip-row-grow var(--acc-expand) var(--acc-ease);
+
+	& > .t-lip-row-inner {
+		min-height: 0;
+		overflow: hidden;
+	}
+}
+
+/**
+ * Fades scrollable content into the container's edges, matching the thread
+ * transcript. Each edge only fades while content is actually hidden past it, so
+ * a list that fits never dims its first or last row. The animated lengths are
+ * registered properties, which is what lets a scroll timeline drive them.
+ */
+@utility docs-scroll-fade {
+	--docs-scroll-fade-size: 24px;
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent,
+		black var(--docs-scroll-fade-start),
+		black calc(100% - var(--docs-scroll-fade-end)),
+		transparent
+	);
+	mask-image: linear-gradient(
+		to bottom,
+		transparent,
+		black var(--docs-scroll-fade-start),
+		black calc(100% - var(--docs-scroll-fade-end)),
+		transparent
+	);
+	overscroll-behavior: contain;
+
+	@supports (animation-timeline: scroll()) {
+		animation:
+			docs-scroll-fade-start linear both,
+			docs-scroll-fade-end linear both;
+		animation-timeline: scroll(self block), scroll(self block);
+		animation-range:
+			0 var(--docs-scroll-fade-size),
+			calc(100% - var(--docs-scroll-fade-size)) 100%;
+	}
+}
+
+/**
+ * The shared hover pill. One flat surface slides between the controls it spans,
+ * so the highlight crosses gaps instead of each control fading its own in. The
+ * position, size, and radius arrive as custom properties from the surface that
+ * measures them.
+ */
+@utility docs-sidebar-hover-highlight {
+	position: absolute;
+	top: 0;
+	left: 0;
+	z-index: 0;
+	height: var(--docs-sidebar-hover-height, 0);
+	width: var(--docs-sidebar-hover-width, 0);
+	pointer-events: none;
+	border-radius: var(--docs-sidebar-hover-radius, var(--radius-md));
+	background-image: var(--hover-surface-fill);
+	box-shadow: inset 0 0 0 0.5px oklch(from var(--foreground) l c h / 13%);
+	opacity: 0;
+	transform: translate3d(var(--docs-sidebar-hover-x, 0), var(--docs-sidebar-hover-y, 0), 0);
+	will-change: transform, height, width;
+
+	&[data-active="true"] {
+		opacity: 1;
+	}
+
+	&[data-animate="true"] {
+		transition:
+			transform var(--duration-fast) var(--ease-smooth-out),
+			height var(--duration-fast) var(--ease-smooth-out),
+			width var(--duration-fast) var(--ease-smooth-out);
+	}
+}
+
+/**
+ * The brand mark is a cutout: the element's own mask is the logo's alpha, so
+ * everything painted inside — the resting foreground fill and the gradient
+ * layer — only shows through the mark's shape.
+ *
+ * The gradient layer wears a second mask: a soft-edged vertical wipe three
+ * times the mark's height. Sliding mask-position from 0% to 100% sweeps the
+ * opaque band up through the mark, so the gradient reads as being painted on
+ * from the bottom; the resting position parks the transparent band over the
+ * mark, hiding the layer entirely. Hover paints slowly in, release un-paints
+ * quickly back down.
+ */
+@utility docs-sidebar-logo-mark {
+	position: relative;
+	background-color: var(--foreground);
+	mask-image: var(--docs-sidebar-logo-cutout);
+	mask-size: contain;
+	mask-repeat: no-repeat;
+	mask-position: center;
+	-webkit-mask-image: var(--docs-sidebar-logo-cutout);
+	-webkit-mask-size: contain;
+	-webkit-mask-repeat: no-repeat;
+	-webkit-mask-position: center;
+
+	&::after {
+		content: "";
+		position: absolute;
+		inset: 0;
+		background-image: var(--docs-sidebar-logo-gradient);
+		background-size: cover;
+		background-position: center;
+		mask-image: linear-gradient(to top, black 45%, transparent 65%);
+		mask-size: 100% 300%;
+		mask-position: 0 0%;
+		-webkit-mask-image: linear-gradient(to top, black 45%, transparent 65%);
+		-webkit-mask-size: 100% 300%;
+		-webkit-mask-position: 0 0%;
+		transition:
+			mask-position var(--duration-quick) var(--ease-smooth-out),
+			-webkit-mask-position var(--duration-quick) var(--ease-smooth-out);
+		will-change: mask-position;
+	}
+
+	&:where(:hover, :focus-visible)::after,
+	:where(a, button):where(:hover, :focus-visible) &::after {
+		mask-position: 0 100%;
+		-webkit-mask-position: 0 100%;
+		transition-duration: var(--duration-medium);
+	}
+}
+
+/* ── The reading column ───────────────────────────────────────── */
+
+/**
+ * The transcript and the composer are one column in two components. It centres
+ * by default — on the root draft the margins either side of it are equally
+ * empty — and shifts off centre only where the proximity rail claims the left
+ * one. That switch is an ancestor's fact about context, so it is read from the
+ * card rather than passed down through both component trees.
+ */
+@utility prose-column {
+	margin-inline: auto;
+
+	/**
+	 * Where the rail owns the left margin, that margin stops being empty: it is
+	 * the thread list. So surplus width goes left until the band is full while
+	 * the right side keeps the gutter and nothing else. Past the band's maximum
+	 * there is no more work for the left to do and the remainder falls right.
+	 *
+	 * The outer clamp is what keeps a card narrower than the column itself
+	 * honest: an auto start margin balances whatever the end margin claims, so a
+	 * gutter claimed out of width that does not exist is paid for with a
+	 * negative margin and the transcript hangs off its own left edge.
+	 */
+	[data-thread-rail="true"] & {
+		margin-inline: auto
+			clamp(
+				0px,
+				max(
+					var(--prose-gutter),
+					calc(100% - var(--prose-width) - var(--prose-rail-margin))
+				),
+				calc(100% - var(--prose-width))
+			);
+	}
+
+	/**
+	 * The composer floats in its own frame over the transcript, so the frame
+	 * must measure from exactly the transcript's edges: an inset frame offsets
+	 * from a different right edge, which centring cancelled and the shift does
+	 * not. What that inset used to buy — a composer flush against the card on a
+	 * window too narrow for the column — is a width bound instead, which is what
+	 * it always was. The transcript wants no such bound: it is full bleed and
+	 * insets its own text.
+	 */
+	.prose-column-frame & {
+		max-width: min(var(--prose-width), calc(100% - 3rem));
+	}
+}
+
+/* ── Typography ───────────────────────────────────────────────── */
+
+/**
+ * The workspace's own type. Applied to the surfaces row so both cards and
+ * everything inside them inherit it, which is why it is a utility with
+ * descendant rules rather than a font utility per element.
+ */
+@utility docs-responsive-surfaces {
+	--font-heading: var(--font-sans);
+	--font-weight-medium: 410;
+	font-family: var(--font-sans);
+	font-optical-sizing: auto;
+	font-synthesis: none;
+	font-weight: 410;
+	letter-spacing: -0.04em;
+
+	& :where(code, kbd, samp, pre) {
+		letter-spacing: normal;
+	}
+
+	& :where(h1, h2, h3, h4, h5, h6) {
+		font-weight: 630;
+		letter-spacing: -0.045em;
+	}
+}
+
+/* ── Odds and ends worn by more than one surface ──────────────── */
+
+/**
+ * The transcript's edge treatment: content blanks out into the top and bottom
+ * of its scroller rather than being cut. The rail's titles borrow the same idea
+ * on the inline axis, which is why it is named for the effect and not for the
+ * transcript.
+ */
+@utility transcript-fade {
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent,
+		black 16px,
+		black calc(100% - 16px),
+		transparent
+	);
+	mask-image: linear-gradient(
+		to bottom,
+		transparent,
+		black 16px,
+		black calc(100% - 16px),
+		transparent
+	);
+}
+
+/**
+ * A label that reads as still thinking: a bright band travels along the text
+ * through `background-clip: text`, which needs the fill to be transparent and
+ * so cannot be spelled with colour utilities.
+ *
+ * The sweep is continuous. It was stepped once, to cap the glyph repaints a
+ * clipped background forces, and the cap landed at ten a second — visible as
+ * a band that jerks along the word instead of gliding, which on the one label
+ * whose whole job is to look alive reads as the app struggling. Motion this
+ * small is not what costs frames; if it ever needs to stand down, it should
+ * do so by not running, the way reduced motion already turns it off.
+ */
+@utility t-shimmer-text {
+	--shimmer-contrast: color-mix(in srgb, currentColor 35%, white);
+	background-color: currentColor;
+	background-image: linear-gradient(
+		to right,
+		currentColor 0%,
+		var(--shimmer-contrast) 40%,
+		var(--shimmer-contrast) 60%,
+		currentColor 100%
+	);
+	background-position-x: 250%;
+	background-repeat: no-repeat;
+	background-size: var(--shimmer-spread) 200%;
+	background-clip: text;
+	-webkit-background-clip: text;
+	-webkit-text-fill-color: transparent;
+	animation: shimmer-text var(--shimmer-duration) linear var(--shimmer-delay) infinite;
+
+	.dark & {
+		--shimmer-contrast: color-mix(in srgb, currentColor 45%, black);
+	}
+
+	/** A travelling band is pure decoration, and the text has to stay readable. */
+	@media (prefers-reduced-motion: reduce) {
+		animation: none;
+		background-image: none;
+		-webkit-text-fill-color: currentColor;
+	}
+}
+
+/* ── The new-thread sentence ──────────────────────────────────── */
+
+/**
+ * One word of the opening line, sharpening into place.
+ *
+ * Inline rather than inline-block, so the sentence wraps between words like the
+ * prose it is; `both` holds the first frame through the delay, which is what
+ * keeps a late word from flashing at full opacity before its turn.
+ */
+@utility sentence-word {
+	animation: sentence-word-in var(--duration-medium) var(--ease-smooth-out)
+		var(--sentence-delay, 0ms) both;
+
+	/** The reveal is the point, so it keeps its fade and simply stops blurring. */
+	@media (prefers-reduced-motion: reduce) {
+		animation-name: sentence-word-fade-in;
+		animation-duration: var(--duration-quick);
+	}
+}
+
+/* ── Surfaces that need a layer of their own ──────────────────── */
+
+/**
+ * The glass material and its top highlight. Both are painted layers rather than
+ * properties of the surface, and the fallbacks below them are feature and
+ * preference queries Tailwind has no variant for, so the whole material is one
+ * utility rather than a class list on two divs.
+ */
+@utility shader-glass-material {
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	pointer-events: none;
+	/**
+	 * Chromium composites backdrop-filter without honouring the ancestor's
+	 * rounded overflow clip; the layer must carry the radius itself or the
+	 * blurred square corners bleed past the surface.
+	 */
+	border-radius: inherit;
+	background: linear-gradient(145deg, rgb(82 82 91 / 0.2), rgb(39 39 42 / 0.14));
+	-webkit-backdrop-filter: blur(12px) saturate(115%) brightness(102%);
+	backdrop-filter: blur(12px) saturate(115%) brightness(102%);
+
+	[data-strength="strong"] & {
+		background: linear-gradient(145deg, rgb(82 82 91 / 0.28), rgb(39 39 42 / 0.2));
+		-webkit-backdrop-filter: blur(20px) saturate(120%) brightness(103%);
+		backdrop-filter: blur(20px) saturate(120%) brightness(103%);
+	}
+
+	@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+		background: var(--surface-825);
+	}
+
+	@media (prefers-reduced-transparency: reduce) {
+		background: var(--surface-825);
+		-webkit-backdrop-filter: none;
+		backdrop-filter: none;
+	}
+}
+
+@utility shader-glass-highlight {
+	position: absolute;
+	inset: 0;
+	z-index: 2;
+	pointer-events: none;
+	background: linear-gradient(180deg, rgb(255 255 255 / 0.05), transparent 42%);
+
+	[data-strength="strong"] & {
+		background: linear-gradient(180deg, rgb(255 255 255 / 0.08), transparent 44%);
+	}
+}
+
+/**
+ * Hover feedback on the account avatar is a shimmer across the artwork rather
+ * than an accent fill — shimmer-text's sweeping band, painted on an overlay
+ * that ramps from transparent instead of clipping to glyphs. The band travels
+ * by transform rather than background-position so its resting point can sit
+ * exactly off the top-right edge: the sweep is visible from the first frame of
+ * the hover instead of spending part of the cycle off-canvas. The avatar's
+ * overflow clips the pass to the circle.
+ *
+ * One pass per hover, not a loop: the keyframes end off the bottom-left edge
+ * and the resting transform is off the top-right, so afterwards the overlay is
+ * invisible either way. Leaving and re-entering replays it.
+ */
+@utility account-avatar {
+	&::after {
+		--account-shimmer-contrast: rgb(255 255 255 / 40%);
+		content: "";
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+		background-image: linear-gradient(
+			to bottom left,
+			transparent 35%,
+			var(--account-shimmer-contrast) 45%,
+			var(--account-shimmer-contrast) 55%,
+			transparent 65%
+		);
+		transform: translate(100%, -100%);
+		will-change: transform;
+	}
+
+	:hover > &::after {
+		animation: account-shimmer 600ms var(--ease-smooth-out);
+	}
+}
+
+/**
+ * The lit patch behind the selected engine tab. Position and width arrive as
+ * custom properties from whatever measured the tab; the glow itself is a masked
+ * gradient on a pseudo element, so it cannot be a class list.
+ */
+@utility engine-light {
+	position: absolute;
+	top: 0;
+	left: 0;
+	z-index: 0;
+	width: var(--engine-light-width, 0);
+	height: 100%;
+	pointer-events: none;
+	opacity: 0;
+	transform: translate3d(var(--engine-light-x, 0), 0, 0);
+	will-change: transform, width;
+
+	&::after {
+		position: absolute;
+		top: -0.125rem;
+		left: 50%;
+		width: 2rem;
+		height: 1.5rem;
+		content: "";
+		background: linear-gradient(
+			to bottom,
+			oklch(from var(--foreground) l c h / 32%) 0%,
+			oklch(from var(--foreground) l c h / 10%) 26%,
+			oklch(from var(--foreground) l c h / 2%) 52%,
+			transparent 74%
+		);
+		filter: blur(0.125rem);
+		-webkit-mask-image: radial-gradient(
+			ellipse 48% 70% at 50% 35%,
+			#000 0%,
+			rgb(0 0 0 / 50%) 42%,
+			rgb(0 0 0 / 10%) 68%,
+			transparent 88%
+		);
+		mask-image: radial-gradient(
+			ellipse 48% 70% at 50% 35%,
+			#000 0%,
+			rgb(0 0 0 / 50%) 42%,
+			rgb(0 0 0 / 10%) 68%,
+			transparent 88%
+		);
+		transform: translateX(-50%);
+	}
+
+	&[data-active="true"] {
+		opacity: 1;
+	}
+
+	&[data-animate="true"] {
+		transition:
+			transform var(--duration-fast) var(--ease-smooth-out),
+			width var(--duration-fast) var(--ease-smooth-out);
+	}
+}
+
+/**
+ * The ticked usage meter. Lit and dim run as one gradient and the ticks are cut
+ * out of it by a repeating mask, so the pitch stays even at any tick count.
+ */
+@utility t-usage-meter {
+	--meter-dim: color-mix(in oklab, var(--foreground) 11%, transparent);
+	--meter-pitch: calc(100% / var(--meter-ticks));
+	background-image: linear-gradient(
+		to right,
+		var(--meter-accent) 0 var(--meter-lit),
+		var(--meter-dim) var(--meter-lit) 100%
+	);
+	mask-image: repeating-linear-gradient(
+		to right,
+		#000 0 calc(var(--meter-pitch) - 2px),
+		transparent calc(var(--meter-pitch) - 2px) var(--meter-pitch)
+	);
+	-webkit-mask-image: repeating-linear-gradient(
+		to right,
+		#000 0 calc(var(--meter-pitch) - 2px),
+		transparent calc(var(--meter-pitch) - 2px) var(--meter-pitch)
+	);
+}
+
+/**
+ * Three readings stacked in one cell: the value at rest, the action on hover,
+ * and the spinner while loading. Which one shows is a combination of the
+ * element's own state and the pointer's, across three children — spelling that
+ * on each child would mean repeating the other two states on every one.
+ */
+@utility t-checked {
+	display: grid;
+	align-items: center;
+	justify-items: end;
+
+	& > span {
+		grid-area: 1 / 1;
+		transition:
+			opacity var(--text-swap-dur) var(--ease-in-out),
+			filter var(--text-swap-dur) var(--ease-in-out),
+			transform var(--text-swap-dur) var(--ease-in-out);
+		will-change: opacity, filter, transform;
+	}
+
+	& .t-checked-action,
+	& .t-checked-loading {
+		opacity: 0;
+		filter: blur(var(--text-swap-blur));
+		transform: translateY(var(--text-swap-translate-y));
+	}
+
+	&:not([data-loading="true"]):where(:hover, :focus-visible) .t-checked-reading,
+	&[data-loading="true"] .t-checked-reading,
+	&[data-loading="true"] .t-checked-action {
+		opacity: 0;
+		filter: blur(var(--text-swap-blur));
+		transform: translateY(calc(-1 * var(--text-swap-translate-y)));
+	}
+
+	&:not([data-loading="true"]):where(:hover, :focus-visible) .t-checked-action,
+	&[data-loading="true"] .t-checked-loading {
+		opacity: 1;
+		filter: blur(0);
+		transform: translateY(0);
+	}
+
+	/**
+	 * The spinner stays mounted so the swap can transition, but `opacity: 0`
+	 * alone leaves its rotation animating invisibly. Pausing rather than
+	 * removing the animation keeps the swap transition intact.
+	 */
+	&:not([data-loading="true"]) .t-checked-loading svg {
+		animation-play-state: paused;
+	}
+}
+
+/**
+ * A sweeping highlight painted only through a clone's own letterforms: the
+ * gradient is the clone's background, clipped to its text, while the glyph
+ * colour itself stays transparent. Under reduced motion the sweep goes and the
+ * mark beneath it carries the reading instead. The sweep steps rather than
+ * glides for the same reason as `t-shimmer-text`: clipped backgrounds repaint
+ * the glyphs on every animation frame.
+ */
+@utility banner-shimmer {
+	pointer-events: none;
+	background-image: linear-gradient(
+		90deg,
+		transparent 0%,
+		transparent 40%,
+		var(--foreground) 50%,
+		transparent 60%,
+		transparent 100%
+	);
+	background-size: 400% 100%;
+	background-repeat: no-repeat;
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+	-webkit-text-fill-color: transparent;
+	animation: t-shimmer 2000ms steps(24) infinite;
+
+	@media (prefers-reduced-motion: reduce) {
+		display: none;
+	}
+}
+
+/**
+ * The settled header's divider. A pseudo element rather than a border so its
+ * extent can animate: it starts under the label's measured width and grows to
+ * the edge once the header's own entrance has landed.
+ */
+@utility t-settle-underline {
+	&::after {
+		content: "";
+		position: absolute;
+		bottom: 0;
+		left: 0;
+		height: 1px;
+		width: 100%;
+		background: var(--border);
+	}
+
+	&[data-settled="true"]::after {
+		animation: settle-underline-grow var(--duration-fast) var(--ease-smooth-out)
+			calc(var(--text-swap-dur) * 2) both;
+	}
+}
+
+/**
+ * The composer's send face, arming from a bare arrow to a bright gradient when
+ * submission becomes possible. The gradient and the inset ring are two pseudo
+ * layers rather than properties of the button, so that the reveal can be a
+ * clip-path wipe and the ring can fade independently of it.
+ */
+@utility composer-send {
+	position: relative;
+	background: transparent;
+	transition: filter var(--duration-quick) var(--ease-in-out);
+
+	&::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+		background: linear-gradient(to bottom, var(--surface-25), var(--surface-100));
+		clip-path: circle(0% at 50% 50%);
+		transition: clip-path var(--duration-quick) var(--ease-smooth-out);
+		will-change: clip-path;
+	}
+
+	&::after {
+		content: "";
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+		pointer-events: none;
+		box-shadow: none;
+		transition: box-shadow var(--duration-quick) var(--ease-smooth-out);
+	}
+
+	&[data-ready="true"]::before {
+		clip-path: circle(75% at 50% 50%);
+		transition-duration: var(--duration-fast);
+	}
+
+	&[data-ready="true"]::after {
+		box-shadow: var(--shadow-inset-artwork);
+		transition-duration: var(--duration-fast);
+	}
+
+	&:hover:not(:disabled) {
+		filter: brightness(0.96);
+	}
+
+	&:active:not(:disabled) {
+		filter: brightness(0.9);
+	}
+
+	&[data-ready="true"]:disabled {
+		filter: brightness(0.8);
+	}
+
+	& .t-icon-swap {
+		color: var(--surface-400);
+		transition: color var(--duration-quick) var(--ease-in-out);
+	}
+
+	&[data-ready="true"] .t-icon-swap {
+		color: var(--surface-900);
+	}
+}
+
+/* ── The conversation trace ───────────────────────────────────── */
+
+/**
+ * A clause is an inline grid so its track can carry the open. It is a mount
+ * animation rather than a transition because a clause has no previous state to
+ * leave: it did not exist until the chain did that kind of work for the first
+ * time. Only clauses added to a chain already on screen animate — a chain's
+ * opening clauses arrive already open, or the header would mount as an icon and
+ * a chevron either side of nothing for the length of its own entrance.
+ */
+@utility trace-clause {
+	display: inline-grid;
+	grid-template-columns: 1fr;
+
+	&[data-entering="true"] {
+		animation: trace-clause-in var(--duration-fast) var(--ease-smooth-out) both;
+	}
+}
+
+/**
+ * The odometer window. Each digit is its own column, keyed by decimal place, so
+ * 25 → 26 rolls one glyph while the rest hold still.
+ *
+ * The window is a mask rather than `overflow` so the inline box keeps its text
+ * baseline — a scroll container synthesises one from its bottom edge — and
+ * because the mask tracks the box through the width tween: 9 → 10 reveals its
+ * new column as the cell grows, clipped until there is room.
+ */
+@utility trace-count {
+	--trace-count-shift: 1;
+	--trace-count-rise: 8px;
+	/** The number pop-in's bounce: the landing digit overshoots a hair and settles. */
+	--trace-count-ease: cubic-bezier(0.34, 1.45, 0.64, 1);
+	display: inline-flex;
+	width: var(--trace-count-width);
+	transition: width var(--duration-fast) var(--ease-smooth-out);
+	-webkit-mask-image: linear-gradient(#000, #000);
+	mask-image: linear-gradient(#000, #000);
+	-webkit-mask-repeat: no-repeat;
+	mask-repeat: no-repeat;
+
+	&[data-direction="down"] {
+		--trace-count-shift: -1;
+	}
+
+	/** Tabular figures make every column exactly one `ch`, so width is arithmetic. */
+	& .trace-count-digit {
+		display: inline-grid;
+		justify-items: center;
+		width: 1ch;
+	}
+
+	& .trace-count-char {
+		grid-area: 1 / 1;
+		will-change: transform, opacity, filter;
+	}
+
+	& .trace-count-char[data-entering="true"] {
+		animation: trace-count-in var(--duration-fast) var(--trace-count-ease) both;
+	}
+
+	/**
+	 * Resting styles are the exit's end state. A busy chain can re-render
+	 * mid-roll, and stripping an animation snaps the element to its own styles —
+	 * which for the outgoing glyph must mean gone, never back on top of the
+	 * digit that replaced it.
+	 */
+	& .trace-count-char[data-outgoing="true"] {
+		opacity: 0;
+		/**
+		 * `opacity` is not enough beneath a shimmering ancestor: its text clip can
+		 * retain this glyph's outline after the exit fills. Visibility removes that
+		 * retired outline from the paint tree once the roll has actually finished.
+		 */
+		visibility: hidden;
+		transform: translateY(calc(var(--trace-count-rise) * -1 * var(--trace-count-shift)));
+		filter: blur(var(--text-swap-blur));
+		animation: trace-count-out var(--duration-fast) var(--ease-smooth-out) both;
+	}
+}
+
+/**
+ * A command that outruns its line fades out at the edge instead of being cut.
+ * The mask belongs only to the clipped text; icons and the disclosure stay
+ * crisp. The scroll-driven variant keeps a command that fits fully opaque.
+ */
+@utility trace-command-label {
+	--trace-command-fade-size: 1.5rem;
+	overflow: hidden;
+	white-space: nowrap;
+	-webkit-mask-image: linear-gradient(
+		to right,
+		black calc(100% - var(--trace-command-fade-end)),
+		transparent
+	);
+	mask-image: linear-gradient(
+		to right,
+		black calc(100% - var(--trace-command-fade-end)),
+		transparent
+	);
+
+	@supports (animation-timeline: scroll()) {
+		animation: trace-command-fade-end linear both;
+		animation-timeline: scroll(self inline);
+		animation-range: 0 100%;
+	}
+}
+
+/* ── Concentric corners ───────────────────────────────────────── */
+
+/**
+ * A rounded surface, and the radius its own padding implies for anything
+ * nested inside it.
+ *
+ * Concentric rectangles only read as concentric when the inner radius is the
+ * outer one minus the gap between them. Deriving that here means the surface
+ * states its radius and its inset once, and a child asks for
+ * `rounded-(--radius-nested)` — instead of every child re-doing the arithmetic
+ * against whichever global step it guessed was its parent, which is how a
+ * corner ends up spelled `calc(var(--radius-3xl) - 0.375rem)` for a card that
+ * is not 3xl and a gap that is not 0.375rem.
+ *
+ * Set `--radius-surface` from the radius ramp and `--radius-gap` from the
+ * spacing scale, both on the element. Neither is ever a literal.
+ */
+@utility radius-surface {
+	--radius-nested: calc(var(--radius-surface) - var(--radius-gap, 0px));
+	border-radius: var(--radius-surface);
+}
+
+/* ── Edge fades ───────────────────────────────────────────────── */
+
+/**
+ * A line that outruns its box blanks out into the edge instead of stopping at
+ * an ellipsis — the same treatment the transcript and the thread rail use, on
+ * the inline axis.
+ *
+ * The window frame is the case that needs both directions: the platform's
+ * controls overlay one end of the titlebar, and the header has to fade into
+ * them rather than run underneath. Windows and Linux put them at the trailing
+ * edge, macOS at the leading one.
+ */
+@utility fade-edge-end {
+	-webkit-mask-image: linear-gradient(
+		to right,
+		black calc(100% - var(--fade-edge, 2rem)),
+		transparent
+	);
+	mask-image: linear-gradient(to right, black calc(100% - var(--fade-edge, 2rem)), transparent);
+}
+
+@utility fade-edge-start {
+	-webkit-mask-image: linear-gradient(
+		to left,
+		black calc(100% - var(--fade-edge, 2rem)),
+		transparent
+	);
+	mask-image: linear-gradient(to left, black calc(100% - var(--fade-edge, 2rem)), transparent);
+}
+
+/**
+ * The row's state dot. One element across every state so the change is a
+ * transition rather than a mount: an indicator that unmounts and remounts
+ * cannot tween, and this one changes colour far more often than it appears.
+ *
+ * The glow is a spread-less shadow in the dot's own colour, which keeps it a
+ * halo rather than a ring — a ring around a 6px dot reads as a target.
+ */
+@utility state-dot {
+	--state-dot-tone: transparent;
+	background-color: var(--state-dot-tone);
+	box-shadow: 0 0 6px -1px var(--state-dot-tone);
+	transition:
+		background-color var(--duration-fast) var(--ease-smooth-out),
+		box-shadow var(--duration-fast) var(--ease-smooth-out),
+		scale var(--duration-fast) var(--ease-smooth-out);
+
+	@starting-style {
+		scale: 0.4;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		transition: none;
+	}
+}

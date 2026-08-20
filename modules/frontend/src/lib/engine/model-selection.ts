@@ -110,6 +110,7 @@ export const thinking_level_labels: Readonly<Record<ThinkingLevel, string>> = {
 	light: "Light",
 	max: "Max",
 	medium: "Medium",
+	ultra: "Ultra",
 	xhigh: "Extra High",
 };
 

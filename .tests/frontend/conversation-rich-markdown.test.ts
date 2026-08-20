@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { createServer, type ViteDevServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { ReadStylesheets } from "./stylesheet-source";
+
 const workspace = resolve(import.meta.dirname, "../..");
 const frontend_root = resolve(workspace, "modules/frontend");
 const original_working_directory = process.cwd();
@@ -169,21 +171,21 @@ describe("conversation rich Markdown", () => {
 		const math_renderer = ReadSource(
 			"modules/frontend/src/lib/components/markdown/math-renderer.svelte",
 		);
-		const global_markdown_styles = ReadSource("modules/frontend/src/lib/styles/markdown.css");
 
-		expect(content).toContain(
-			"? conversation_streaming_markdown_plugins\n\t\t\t: settled_markdown_plugins",
-		);
-		expect(highlighting).toContain("create_conversation_streaming_markdown_plugins");
+		/** The streaming plugin sets never carry math or Mermaid recognition. */
+		expect(content).toContain("? [streaming_words_plugin]");
+		expect(content).toContain(": [streaming_highlight_plugin, streaming_words_plugin]");
 		expect(content).toContain("create_conversation_streaming_words_plugin");
 		/**
-		 * The highlighter is deferred with them. Shiki tokenizes synchronously,
-		 * and the reveal reparses the whole message once per revealed word, so
-		 * highlighting from the streaming set re-tokenized every code block a
-		 * thousand times over one reply — blocking work that grows with the
-		 * message and peaks exactly when its last blocks are waiting to paint.
+		 * Mid-stream highlighting is safe only because it is bounded: the
+		 * incremental parse re-emits just the tail, the one unterminated fence
+		 * stays plain instead of re-tokenizing as it grows, and every closed
+		 * fence body tokenizes once into a shared cache that the settle reparse
+		 * reuses.
 		 */
-		expect(highlighting).toContain(") => [streaming_words_plugin];");
+		expect(highlighting).toContain("LoadConversationStreamingHighlightPlugin");
+		expect(settled_highlighting).toContain("is_open_conversation_fence_body");
+		expect(settled_highlighting).toContain("fence_token_cache");
 		expect(content).toContain("yield* LoadConversationSettledMarkdownPlugins(");
 		expect(highlighting).toContain('try: () => import("./settled-highlighting")');
 		expect(highlighting).not.toContain('from "shiki/');
@@ -194,13 +196,36 @@ describe("conversation rich Markdown", () => {
 			'javascript: () => import("shiki/dist/langs/javascript.mjs")',
 		);
 		expect(math_expression).not.toContain('from "./math-rendering"');
-		expect(math_renderer).toContain('try: () => import("./math-rendering")');
-		expect(math_renderer).toContain('try: () => import("katex/dist/katex.min.css")');
-		expect(math_renderer).toContain("MathRendererLoadFailure");
-		expect(global_markdown_styles).not.toContain("katex");
+		expect(math_renderer).toContain("yield* MathRendererController");
+		expect(math_renderer).toContain("renderer_controller.Current");
+		expect(math_renderer).toContain("renderer_controller.Refresh.pipe(Effect.forkScoped)");
+		expect(content).not.toContain("katex");
 		expect(mermaid_renderer).toContain("Effect.tryPromise");
 		expect(mermaid_renderer).toContain("MermaidRendererLoadFailure");
 		expect(mermaid_renderer).not.toContain("Effect.promise");
+	});
+
+	it("keeps a settled transcript's first paint off the highlighter's chunk graph", () => {
+		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.svelte");
+		const layout = ReadSource("modules/frontend/src/routes/+layout.svelte");
+		const warming = ReadSource("modules/frontend/src/lib/components/markdown/warming.ts");
+
+		/**
+		 * The settled plugin set upgrades in the background: the transcript paints
+		 * with unhighlighted code and the worker swaps Shiki in when it arrives. A
+		 * direct blocking yield here held every first-of-session code message —
+		 * and the whole thread open behind it — until Shiki's ~2MB chunk graph
+		 * loaded.
+		 */
+		expect(content).toContain("TryResidentConversationSettledMarkdownPlugins(source)");
+		expect(content).toContain(
+			"yield* RenderSettledTree(source, conversation_rich_markdown_plugins)",
+		);
+		expect(content).toContain("yield* RenderSettledMarkdown.pipe(Effect.forkScoped)");
+		/** The shell warms renderer chunks at idle so a first settled message rarely pays them. */
+		expect(warming).toContain('() => import("./settled-highlighting")');
+		expect(warming).toContain("requestIdleCallback");
+		expect(layout).toContain("yield* WarmConversationRenderers.pipe(Effect.forkScoped)");
 	});
 
 	it("selects only requested known fence grammars before loading settled Shiki", async () => {
@@ -224,7 +249,7 @@ describe("conversation rich Markdown", () => {
 	it("registers every grammar when different messages settle concurrently", async () => {
 		const [
 			effect_module,
-			{ LoadConversationSettledMarkdownPlugins },
+			{ LoadConversationSettledMarkdownPlugins, TokenizeConversationFences },
 			{ parse },
 			{ resetHighlighter },
 		] = await Promise.all([
@@ -244,6 +269,21 @@ describe("conversation rich Markdown", () => {
 				{ concurrency: "unbounded" },
 			),
 		);
+		/**
+		 * Tokens come from the shared fence cache; a grammar that lost the
+		 * concurrent registration race would tokenize to plain text here.
+		 */
+		await Effect.runPromise(
+			Effect.all(
+				[
+					TokenizeConversationFences([
+						{ body: "const answer: number = 42", language: "typescript" },
+					]),
+					TokenizeConversationFences([{ body: "answer: int = 42", language: "python" }]),
+				] as const,
+				{ concurrency: "unbounded" },
+			),
+		);
 		const [typescript_tree, python_tree] = await Promise.all([
 			parse("```typescript\nconst answer: number = 42\n```", {
 				plugins: typescript_plugins,
@@ -256,12 +296,11 @@ describe("conversation rich Markdown", () => {
 	});
 
 	it("makes code cards fill the available transcript width without wrapping long code", () => {
-		const styles = ReadSource(
-			"modules/frontend/src/lib/styles/markdown/components/code-snippet.css",
-		);
+		const styles = ReadStylesheets();
 
 		expect(styles).toMatch(/\.prose \.docs-code-snippet \{[\s\S]*w-full max-w-full/u);
 		expect(styles).toMatch(/\.docs-code-snippet-body \.shiki \{[\s\S]*min-w-full w-max/u);
-		expect(styles).not.toContain("width: var(--docs-prose-media-inline-size");
+		/** Media sizes itself from the column rather than from a media-only token. */
+		expect(styles).not.toContain("width: var(--docs-prose-media-inline-size:");
 	});
 });

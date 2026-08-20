@@ -120,6 +120,13 @@ export const gallery_active_work = define_item({
 	type: "work_session",
 });
 
+/** A Claude-style phase: headline-less paragraphs, the newest still arriving. */
+export const gallery_thinking_summary_text = [
+	"The delivery race is ruled out — mutation handlers already hold the event lock at the dispatch fork, so the duplication has to come from somewhere else.",
+	"Now I'm tracing the retention window: 256 patches with a matching drain budget means any stall during fast streaming pushes the cursor off the window, and the recovery path is a full snapshot resend.",
+	"That snapshot is what multiplies — each one rematerializes every item, so I'm widening retention and deriving the drain budget from it",
+].join("\n\n");
+
 export const gallery_completed_work = define_item({
 	...fixture_entity("gallery-completed-work", 7),
 	ended_at: fixture_time(-32_000),

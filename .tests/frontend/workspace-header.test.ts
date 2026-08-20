@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { RepositoryQualifiedLabel } from "../../modules/frontend/src/lib/vcs/labels";
+import {
+	RepositoryDestinationLabel,
+	RepositoryQualifiedLabel,
+} from "../../modules/frontend/src/lib/vcs/labels";
 
 const ReadSource = (path: string) =>
 	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");
@@ -24,6 +27,13 @@ describe("workspace header", () => {
 		expect(RepositoryQualifiedLabel("not a url")).toBe("not a url");
 	});
 
+	it("names an external repository destination with its host", () => {
+		expect(RepositoryDestinationLabel("https://github.com/artisanstreet/editor")).toBe(
+			"github.com/artisanstreet/editor",
+		);
+		expect(RepositoryDestinationLabel("not a url")).toBe("not a url");
+	});
+
 	/**
 	 * The identity renders exactly once per surface: inside the window frame on
 	 * the bundled desktop shell, and as the primary card's top band on the web.
@@ -36,17 +46,31 @@ describe("workspace header", () => {
 		expect(layout).toContain("-webkit-app-region: drag;");
 		expect(layout).toContain("{@render workspace_header()}");
 		expect(layout).toContain("header={desktop_runtime || header_project === undefined");
-		/** Only a durable thread titles itself; the root draft renders no identity. */
-		expect(layout).toContain("active_thread?.primary_project);");
+		/**
+		 * Both thread surfaces title themselves with the workspace they are inside;
+		 * the project picker has no workspace yet and so renders no identity.
+		 */
+		expect(layout).toContain("const header_project = $derived(active_project);");
 		expect(panel).toContain("{@render header()}");
 		/** A repository names its remote, branch, and checkout; a plain folder keeps the folder mark. */
 		expect(header).toContain("RepositoryQualifiedLabel(remote.web_url)");
+		/** Header identity paints from Current; Git inspection belongs to the component scope. */
+		expect(header).toContain(
+			"repository_controller.Refresh(project?.project_id).pipe(Effect.forkScoped)",
+		);
+		expect(header).not.toContain("yield* repository_controller.Refresh(project?.project_id);");
+		expect(header).not.toMatch(/GetProjectRepositories\(\s*\)/u);
 		expect(header).toContain('repository.branch.type === "detached"');
 		expect(header).toContain("{project.display_name}");
 		expect(header).toContain('<span class="shrink-0">in</span>');
 		/** The open thread closes the line after a slash, as the one foreground segment. */
 		expect(header).toContain('<span class="shrink-0">/</span>');
-		expect(header).toContain('text-foreground">{thread_title}</span>');
+		expect(header).toContain(
+			'<span class="min-w-0 flex-1 truncate text-foreground">{thread_title}</span>',
+		);
+		/** Workspace context never competes with the thread title for truncation. */
+		expect(header).not.toContain('class="truncate text-(--banner-info)');
+		expect(header).not.toContain('class="truncate">{project.display_name}</span>');
 		expect(layout).toContain("thread_title={active_thread?.title}");
 		/** The remote link must escape the titlebar drag region to stay clickable. */
 		expect(header).toContain("[-webkit-app-region:no-drag]");

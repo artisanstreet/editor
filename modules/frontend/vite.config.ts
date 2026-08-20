@@ -78,6 +78,14 @@ const development_only_surfaces = () => {
 			source: "<!-- development-only surface -->",
 			suffix: "/routes/debug/components/+page.svelte",
 		},
+		/**
+		 * The draft gallery, and with it every variant, piece, and fixture it
+		 * imports: stubbing the page unroots the whole subtree.
+		 */
+		{
+			source: "<!-- development-only surface -->",
+			suffix: "/routes/drafts/starting/+page.svelte",
+		},
 	];
 
 	return {

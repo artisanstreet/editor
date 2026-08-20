@@ -1,11 +1,14 @@
-import { Effect, Option, Stream } from "effect";
+import { Effect, Option, Ref, Stream } from "effect";
 import { model_manifest } from "@artisan/catalog";
-import type { TerminalSession } from "@artisan/protocol";
+import type { EngineInstallationReport, TerminalSession } from "@artisan/protocol";
 import { ArtisanClient } from "@artisan/transport/client";
 
 import type { FixtureArtisanClientData } from "./data";
 import * as FixtureData from "./data";
-import { FixtureProjectIdentityQueries } from "./project-identity-queries";
+import {
+	MakeFixtureProjectIdentityQueries,
+	FixtureProjectIdentityQueries,
+} from "./project-identity-queries";
 import {
 	FixtureConversation,
 	FixtureFailure,
@@ -476,6 +479,8 @@ export const FixtureClientQueries = {
 	| "GetProjectRepositories"
 	| "GetProjectDiffs"
 	| "GetHostIdentity"
+	| "GetHostMachines"
+	| "ConnectHostMachine"
 	| "GetEngineUsage"
 	| "GetThreadUsageSeries"
 	| "DetachProject"
@@ -490,3 +495,11 @@ export const FixtureClientQueries = {
 	| "ListRoutines"
 	| "ListCapabilities"
 >;
+
+/** Builds the interactive fixture client around Layer-owned mutable projections. */
+export const MakeFixtureClientQueries = (
+	installation_reports: Ref.Ref<Readonly<Record<string, EngineInstallationReport>>>,
+) => ({
+	...FixtureClientQueries,
+	...MakeFixtureProjectIdentityQueries(installation_reports),
+});

@@ -1,5 +1,6 @@
-declare global {
-	namespace App {}
-}
+declare namespace App {}
 
-export {};
+declare module "katex/dist/katex.min.css" {
+	const stylesheet: string;
+	export default stylesheet;
+}

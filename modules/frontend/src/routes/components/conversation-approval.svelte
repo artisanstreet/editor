@@ -7,11 +7,9 @@
 	import FileDiff from "@tabler/icons-svelte/icons/file-diff";
 	import Terminal2 from "@tabler/icons-svelte/icons/terminal-2";
 	import X from "@tabler/icons-svelte/icons/x";
-	import { BannerService } from "$lib/banner/service";
 	import { Button } from "$lib/components/ui/button";
 	import { GetApprovalPresentation } from "$lib/conversation/approval-presentation";
 
-	const banner = yield* BannerService;
 	let {
 		item,
 		onapproval,
@@ -36,17 +34,18 @@
 					: "Approving…",
 	);
 
+	/** A refused decision must say so; a reset button alone reads as nothing happening. */
+	let decision_failure = $state<string | undefined>(undefined);
 	const SubmitDecision = (approved: boolean) =>
 		Effect.gen(function* () {
 			if (submitted_decision !== undefined || onapproval === undefined) return;
 			submitted_decision = approved;
+			decision_failure = undefined;
 			yield* onapproval(item.interaction_id, approved).pipe(
 				Effect.catch((error) =>
 					Effect.gen(function* () {
 						submitted_decision = undefined;
-						yield* banner.error("Could not respond to approval", {
-							description: error.message,
-						});
+						decision_failure = `Could not respond to approval: ${error.message}`;
 					}),
 				),
 			);
@@ -117,6 +116,9 @@
 						{submitted_decision === false ? pending_label : "Deny"}
 					</Button>
 				</div>
+				{#if decision_failure !== undefined}
+					<p class="mt-2 text-sm text-(--banner-error)" role="alert">{decision_failure}</p>
+				{/if}
 			</div>
 		</div>
 	</section>

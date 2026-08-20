@@ -8,9 +8,8 @@
 		type RuntimeCatalog,
 		type ThreadSessionPolicy,
 	} from "@artisan/protocol";
-	import { ArtisanClient } from "@artisan/transport/client";
-	import { BannerService } from "$lib/banner/service";
 	import { EngineMarkClass, EngineMarkFor, ProviderMarkFor } from "$lib/engine/presentation";
+	import { speed_option_presentation } from "$lib/engine/speed-presentation";
 	import {
 		SessionDefaultsController,
 		type SessionDefaultsState,
@@ -73,10 +72,11 @@
 		runtime_catalog: RuntimeCatalog;
 	} = $props();
 
-	const client = yield* ArtisanClient;
-	const banner = yield* BannerService;
 	const defaults_controller = yield* SessionDefaultsController;
-	let defaults_state = $state.raw<SessionDefaultsState | undefined>(undefined);
+	/** The shell owns Forge hydration; selectors paint from its retained snapshot. */
+	let defaults_state = $state.raw<SessionDefaultsState | undefined>(
+		yield* defaults_controller.Current,
+	);
 	const effective_catalog = $derived(defaults_state?.catalog ?? runtime_catalog);
 	const model_manifest = $derived(effective_catalog.manifest);
 	/**
@@ -117,19 +117,12 @@
 	 * order. It is read as its own statement rather than an awaited binding: a
 	 * favorite is a nicety, and the picker must not wait on it to render.
 	 */
-	let favorite_ids = $state.raw<ReadonlyArray<string>>([]);
+	let favorite_ids = $state.raw<ReadonlyArray<string>>(defaults_state.favorite_ids);
 	const favorites_available = $derived(
 		defaults_state?.available ?? !IsOfflineRuntimeCatalog(effective_catalog),
 	);
 	const policy_controller = yield* MakeModelPolicyController;
 	let displayed_policy = $state.raw<ThreadSessionPolicy | undefined>(undefined);
-	const RefreshFavorites = Effect.gen(function* () {
-		const snapshot = yield* defaults_controller.Refresh;
-		defaults_state = snapshot;
-		favorite_ids = snapshot.favorite_ids;
-		return snapshot;
-	});
-
 	const PersistFavorite = (request: ModelFavoriteRequest) =>
 		Effect.gen(function* () {
 			const snapshot = yield* defaults_controller.SetFavorite(
@@ -138,22 +131,8 @@
 			);
 			favorite_ids = snapshot.favorite_ids;
 		}).pipe(
-			Effect.catch((error) =>
-				Effect.gen(function* () {
-					yield* banner.error("Could not update model favorite", {
-						description: error.message,
-					});
-					const snapshot = yield* RefreshFavorites.pipe(
-						Effect.catch(() =>
-							Effect.gen(function* () {
-								return yield* defaults_controller.Current;
-							}),
-						),
-					);
-					favorite_ids = snapshot.favorite_ids;
-				}),
-			),
-		);
+		Effect.catch(() => Effect.void),
+	);
 
 	const RequestFavorite = (model_id: string, favorite: boolean) =>
 		Effect.gen(function* () {
@@ -180,27 +159,6 @@
 		Effect.forkScoped,
 	);
 
-	/**
-	 * The replayed ready state hydrates once at mount; a real reconnect refreshes
-	 * once more without clearing the last known set while Forge is unavailable.
-	 */
-	yield* client.ConnectionChanges.pipe(
-		Stream.changesWith((left, right) => left.phase === right.phase),
-		Stream.filter((state) => state.phase === "ready"),
-		Stream.runForEach(() =>
-			Effect.gen(function* () {
-				yield* RefreshFavorites;
-			}),
-		),
-		Effect.forkScoped,
-	);
-	yield* RefreshFavorites.pipe(
-		Effect.catch(() =>
-			Effect.gen(function* () {
-			}),
-		),
-	);
-
 	const ThinkingLevelFromPolicy = (
 		effort: ThreadSessionPolicy["reasoning_effort"],
 	): ThinkingLevel => (effort === "low" ? "light" : effort);
@@ -211,19 +169,16 @@
 	const PermissionModeFromPolicy = SessionPolicyPermission;
 	/**
 	 * Persists the Forge-owned half of a policy change. Permission is shared
-	 * across every model and engine; effort and context belong to the model that
-	 * was configured, because their option sets differ per model. The write is
+	 * across every model and engine; effort, speed, and context belong to the model
+	 * that was configured, because their option sets differ per model. The write is
 	 * deliberately secondary to the thread's authoritative policy: failure is
 	 * reported, but it cannot roll back a thread policy Forge already accepted.
 	 */
 	const RememberDefaults = (next: ThreadSessionPolicy) =>
 		Effect.gen(function* () {
 			yield* defaults_controller.RememberPolicyDefaults(next).pipe(
-				Effect.catch((error) =>
+				Effect.catch(() =>
 					Effect.gen(function* () {
-						yield* banner.error("Could not save model defaults", {
-							description: error.message,
-						});
 					}),
 				),
 			);
@@ -240,11 +195,8 @@
 
 	const FlushPolicy = Effect.gen(function* () {
 		const result = yield* policy_controller.Flush(PersistPolicy).pipe(
-			Effect.catchTag("ModelPolicyMutationError", (error) =>
+			Effect.catchTag("ModelPolicyMutationError", () =>
 				Effect.gen(function* () {
-					yield* banner.error("Could not update thread policy", {
-						description: error.message,
-					});
 					return {
 						confirmed: [],
 						current: yield* policy_controller.Current,
@@ -280,11 +232,11 @@
 	 * The speed only earns a word when it is not the model's own default: every
 	 * model would otherwise trail a "Standard" that says nothing.
 	 */
-	const trigger_speed_label = $derived.by(() => {
+	const trigger_speed_presentation = $derived.by(() => {
 		const speeds = selected_model?.definition.capabilities.speed_options ?? [];
 		const selected = speeds.find((option) => option.id === speed_option_id);
 		if (selected === undefined || selected.default) return undefined;
-		return selected.label;
+		return speed_option_presentation(selected);
 	});
 	const selected_thinking_level = $derived(
 		selected_model?.definition.capabilities.thinking.availability === "supported"
@@ -302,6 +254,17 @@
 	const previewed_model = $derived(
 		models.find((model) => model.id === previewed_model_id) ?? selected_model,
 	);
+	const selected_permissions = $derived(
+		selected_model === undefined
+			? undefined
+			: PermissionsForModel(effective_catalog, selected_model),
+	);
+	/**
+	 * The controls describe the previewed model, so its harness decides which
+	 * permission options they may offer. Reading the selection's here instead
+	 * would let a Claude row be configured with Codex's vocabulary whenever the
+	 * two harnesses disagree.
+	 */
 	const previewed_permissions = $derived(
 		previewed_model === undefined
 			? undefined
@@ -313,7 +276,7 @@
 	);
 
 	/** Makes the model current without flushing so inline controls coalesce with it. */
-	const AdoptModel = (model: ModelChoice, context_suffix = "") =>
+	const AdoptModel = (model: ModelChoice) =>
 		Effect.gen(function* () {
 			if (model.definition.disabled !== undefined) return false;
 			if (engine_locked && model.engine !== selected_model?.engine) return false;
@@ -344,7 +307,6 @@
 			yield* ReplacePolicy({
 				...rest,
 				...policy_fields_for_permission(target_permission),
-				...(context_suffix === "" ? {} : { context_window: context_suffix }),
 				engine_id: model.engine,
 				model: model.definition.native_model_id,
 				reasoning_effort:
@@ -356,12 +318,25 @@
 			return true;
 		});
 
+	/**
+	 * Turns a previewed model into the configured one at the moment its settings
+	 * are actually touched.
+	 *
+	 * Hovering alone still adopts nothing — the pointer passing over a row must
+	 * not rewrite the thread's policy. But a setting is a statement about the
+	 * model it sits under, and there is no way to hold an effort or a window for
+	 * a model the thread is not using, so the first control the reader touches
+	 * is the moment the preview becomes the choice.
+	 */
+	const AdoptForConfiguration = (model: ModelChoice) =>
+		Effect.gen(function* () {
+			if (selected_model?.id === model.id) return true;
+			return yield* AdoptModel(model);
+		});
+
 	const ApplyModelContext = (model: ModelChoice, option: ContextWindowChoice) =>
 		Effect.gen(function* () {
-			if (model.id !== selected_model_id) {
-				if (yield* AdoptModel(model, option.native_suffix)) yield* FlushPolicy;
-				return;
-			}
+			if (!(yield* AdoptForConfiguration(model))) return;
 			const base_policy = yield* policy_controller.Current;
 			if (disabled || base_policy === undefined || onpolicychange === undefined) return;
 			const { context_window: _previous, ...rest } = base_policy;
@@ -380,7 +355,7 @@
 
 	const ApplyModelThinking = (model: ModelChoice, level: ThinkingLevel) =>
 		Effect.gen(function* () {
-			if (selected_model?.id !== model.id && !(yield* AdoptModel(model))) return;
+			if (!(yield* AdoptForConfiguration(model))) return;
 			thinking_level = level;
 			yield* PatchPolicy({ reasoning_effort: PolicyEffortFromThinking(level) });
 			yield* FlushPolicy;
@@ -388,8 +363,8 @@
 
 	const ApplyModelSpeed = (model: ModelChoice, option: SpeedOption) =>
 		Effect.gen(function* () {
-			if (selected_model?.id !== model.id && !(yield* AdoptModel(model))) return;
 			if (option.disabled !== undefined) return;
+			if (!(yield* AdoptForConfiguration(model))) return;
 			speed_option_id = option.id;
 			yield* PatchPolicy({ service_tier: option.native_value });
 			yield* FlushPolicy;
@@ -397,7 +372,7 @@
 
 	const ApplyModelPermission = (model: ModelChoice, option: PermissionOption) =>
 		Effect.gen(function* () {
-			if (selected_model?.id !== model.id && !(yield* AdoptModel(model))) return;
+			if (!(yield* AdoptForConfiguration(model))) return;
 			permission_mode = option.id;
 			yield* PatchPolicy(policy_fields_for_permission(option));
 			yield* FlushPolicy;
@@ -409,7 +384,8 @@
 			const current = displayed_policy ?? next;
 			const model = models.find(
 				(candidate) =>
-					candidate.definition.native_model_id === current.model ||
+					(candidate.engine === current.engine_id &&
+						candidate.definition.native_model_id === current.model) ||
 					(current.model === undefined && candidate.id === effective_catalog.default_model_id),
 			);
 			if (model !== undefined && model.id !== untrack(() => selected_model_id)) {
@@ -463,7 +439,7 @@
 					<PopoverTrigger
 							aria-label="Select model"
 							disabled={disabled}
-							class="model-trigger group/model-trigger flex h-8 shrink-0 items-center gap-2 rounded-[calc(var(--radius-3xl)-1rem)] bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none"
+							class="model-trigger group/model-trigger flex h-8 shrink-0 items-center gap-2 rounded-sm bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none"
 						>
 							{@const trigger_mark = ProviderMarkFor(selected_model?.definition.provider)}
 							{@const TriggerMark = trigger_mark.icon}
@@ -476,12 +452,14 @@
 											{thinking_level_labels[selected_thinking_level]}
 										</span>
 									{/if}
-									{#if trigger_speed_label !== undefined}
-										<span class="text-muted-foreground">{trigger_speed_label}</span>
+									{#if trigger_speed_presentation !== undefined}
+										<span class={trigger_speed_presentation.class_name}>
+											{trigger_speed_presentation.label}
+										</span>
 									{/if}
 								</span>
 							</span>
-							<Selector class="model-trigger-chevron pointer-events-none size-3.5 shrink-0" />
+							<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
 						</PopoverTrigger>
 					</span>
 				{/snippet}
@@ -517,7 +495,12 @@
 					{selected_engine}
 				/>
 				<div class="flex min-w-0 gap-2">
-					<div class="model-scroll docs-scroll-fade h-48 min-w-0 grow overflow-y-auto rounded-xl">
+					<!--
+						No radius of its own: the list is not a card, it is the inside of
+						one. Rounding the scroller only clipped the hover pill's corners
+						against an edge that is never drawn.
+					-->
+					<div class="docs-scroll-fade h-48 min-w-0 grow overflow-y-auto">
 						<ModelList
 							{disabled}
 							{favorite_ids}
@@ -529,8 +512,16 @@
 							{selected_model_id}
 						/>
 					</div>
-					{#if previewed_model !== undefined}
-						<div class="h-48 w-56 shrink-0">
+					{#if previewed_model !== undefined && selected_model !== undefined}
+						<!--
+							The preview deliberately survives the pointer arriving here.
+							Clearing it on enter snapped the whole panel back to the current
+							selection the instant you moved toward the controls, so the only
+							settings you could ever reach were the ones you already had —
+							the hovered model's could not be touched without selecting it
+							first, which is the click this panel exists to save.
+						-->
+						<div class="h-48 w-56 shrink-0" role="presentation">
 							<div class="flex h-full flex-col justify-between gap-2 overflow-y-auto p-2.5">
 								<div class="flex min-w-0 flex-col gap-1">
 									<span class="truncate text-sm font-semibold text-foreground">{previewed_model.name}</span>
@@ -565,5 +556,3 @@
 	</Popover>
 </div>
 </TooltipProvider>
-
-<style src="./model-selector.css"></style>

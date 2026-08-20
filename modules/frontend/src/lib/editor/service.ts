@@ -69,6 +69,12 @@ interface OpenDocument {
 	readonly diagnostics: ReadonlyArray<EditorDiagnostic>;
 	readonly file: EditorWorkspaceFile;
 	readonly document: EditorDocument;
+	/**
+	 * A compacted document still owns every unsaved byte, but its previous
+	 * adapter model (language workers, parse state, and undo history) has been
+	 * released. It becomes hot again only when the user returns to it.
+	 */
+	readonly residency: "compacted" | "hot";
 	readonly view_state: Option.Option<EditorViewState>;
 }
 
@@ -86,8 +92,9 @@ const EmptyState: InternalState = {
 
 /**
  * The editor service is runtime-long-lived, so inactive clean documents need a
- * bounded resident set. Dirty documents and the active document are always
- * protected; a large protected working set is preferable to losing edits.
+ * bounded resident set. Dirty document content and the active hot model are
+ * always protected; inactive dirty adapter state may be compacted without
+ * discarding the user's unsaved bytes.
  */
 const MaximumRetainedDocuments = 8;
 const MaximumRetainedDocumentCharacters = 4 * 1024 * 1024;
@@ -139,6 +146,7 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 		Effect.gen(function* () {
 			const scope = yield* Scope.Scope;
 			const state = yield* Ref.make<InternalState>(EmptyState);
+			let compacted_document_sequence = 0;
 			/** Every mutable adapter boundary is lazy, yielded, and tagged. */
 			const RunAdapter = <Value>(operation: () => Value) =>
 				Effect.gen(function* () {
@@ -197,7 +205,7 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 			 * to the end, and the first clean inactive entry is evicted first. Reading
 			 * each value here also makes the character budget reflect unsaved changes.
 			 */
-			const EvictInactiveCleanDocuments = (
+			const ReclaimInactiveDocuments = (
 				documents: ReadonlyMap<string, OpenDocument>,
 				active_file_key: string,
 			) =>
@@ -215,6 +223,7 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 
 					const retained = new Map(documents);
 					const evicted: Array<OpenDocument> = [];
+					const compacted: Array<OpenDocument> = [];
 					while (
 						retained.size > MaximumRetainedDocuments ||
 						retained_characters > MaximumRetainedDocumentCharacters
@@ -229,7 +238,69 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 						evicted.push(managed);
 					}
 
-					return { documents: retained, evicted };
+					/**
+					 * A dirty document cannot be evicted without data loss. Once clean
+					 * candidates are gone, release the oldest inactive *hot* adapter
+					 * models instead. The replacement starts with only its current text;
+					 * diagnostics and view state live in this service and are restored on
+					 * activation. Its compacted residency prevents a budget that remains
+					 * over limit because of unsaved text from repeatedly rebuilding it.
+					 */
+					let hot_document_count = [...retained.values()].filter(
+						(managed) => managed.residency === "hot",
+					).length;
+					let hot_document_characters = [...retained].reduce(
+						(total, [file_key, managed]) =>
+							total +
+							(managed.residency === "hot"
+								? (character_counts.get(file_key) ?? 0)
+								: 0),
+						0,
+					);
+					while (
+						hot_document_count > MaximumRetainedDocuments ||
+						hot_document_characters > MaximumRetainedDocumentCharacters
+					) {
+						const candidate = [...retained].find(
+							([file_key, managed]) =>
+								file_key !== active_file_key &&
+								managed.residency === "hot" &&
+								protected_keys.has(file_key),
+						);
+						if (candidate === undefined) break;
+						const [file_key, managed] = candidate;
+						const value = yield* RunAdapter(() => managed.document.get_value());
+						const document = yield* RunAdapter(() =>
+							adapter.create_document({
+								language: EditorLanguageForPath(
+									managed.file.path,
+									managed.file.language,
+								),
+								/**
+								 * A replacement cannot share a still-live adapter URI with the
+								 * model it is about to retire. Keeping this identity distinct also
+								 * makes compaction safe for adapters that defer registry cleanup
+								 * until after disposal returns.
+								 */
+								uri: EditorUriForFile({
+									...managed.file,
+									/** Keep the real path suffix so language detection still sees its extension. */
+									id: `${managed.file.id}:compacted:${compacted_document_sequence++}`,
+								}),
+								value,
+							}),
+						);
+						retained.set(file_key, {
+							...managed,
+							document,
+							residency: "compacted",
+						});
+						hot_document_count -= 1;
+						hot_document_characters -= value.length;
+						compacted.push(managed);
+					}
+
+					return { compacted, documents: retained, evicted };
 				});
 
 			const Dispose = Effect.gen(function* () {
@@ -337,10 +408,11 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 									value: file.content,
 								}),
 							),
+							residency: "hot",
 							view_state: Option.none<EditorViewState>(),
 						};
 					} else if (existing.file.revision === file.revision || is_dirty) {
-						managed = existing;
+						managed = { ...existing, residency: "hot" };
 					} else {
 						yield* RunAdapter(() => existing.document.set_value(file.content));
 						yield* RunAdapter(() =>
@@ -350,13 +422,22 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 							diagnostics: [] as ReadonlyArray<EditorDiagnostic>,
 							file,
 							document: existing.document,
+							residency: "hot",
 							view_state: Option.none<EditorViewState>(),
 						};
 					}
-					if (existing === undefined && adapter.install_language !== undefined) {
+					if (
+						(existing === undefined || existing.residency === "compacted") &&
+						adapter.install_language !== undefined
+					) {
 						yield* adapter
 							.install_language(managed.document)
 							.pipe(Effect.ignore, Effect.forkIn(scope));
+					}
+					if (existing?.residency === "compacted" && managed.diagnostics.length > 0) {
+						yield* RunAdapter(() =>
+							adapter.set_markers(managed.document, "artisan", managed.diagnostics),
+						);
 					}
 
 					const surface = Option.getOrUndefined(current.surface);
@@ -382,13 +463,15 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 					/** Delete before set so activation is a recency touch even for an existing document. */
 					documents.delete(file_key);
 					documents.set(file_key, managed);
-					const retained = yield* EvictInactiveCleanDocuments(documents, file_key);
+					const retained = yield* ReclaimInactiveDocuments(documents, file_key);
 					yield* Ref.set(state, {
 						...current,
 						active_file_key: Option.some(file_key),
 						documents: retained.documents,
 					});
-					yield* ReleaseAll(retained.evicted.map(ReleaseDocument));
+					yield* ReleaseAll(
+						[...retained.evicted, ...retained.compacted].map(ReleaseDocument),
+					);
 					return outcome;
 				});
 

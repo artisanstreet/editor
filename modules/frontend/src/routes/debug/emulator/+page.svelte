@@ -4,7 +4,6 @@
 	import PlayerTrackNext from "@tabler/icons-svelte/icons/player-track-next";
 	import PlayerTrackPrev from "@tabler/icons-svelte/icons/player-track-prev";
 	import { Effect } from "effect";
-	import { BannerService } from "$lib/banner/service";
 	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import { Button } from "$lib/components/ui/button";
 	import {
@@ -22,7 +21,6 @@
 
 	let script_id = $state(emulator_scripts[0]?.id ?? "");
 	let step = $state(0);
-	const banner = yield* BannerService;
 
 	const script = $derived(
 		emulator_scripts.find((candidate) => candidate.id === script_id) ?? emulator_scripts[0],
@@ -54,8 +52,10 @@
 	 * and the exact snapshot the renderer was handed. A screenshot of a wrong
 	 * transcript says what it looked like, not what it was given.
 	 */
+	let copy_failed = $state(false);
 	const CopyStep = Effect.gen(function* () {
 		if (script === undefined) return;
+		copy_failed = false;
 		yield* WriteClipboardText(
 			JSON.stringify(
 				{
@@ -71,9 +71,7 @@
 		).pipe(
 			Effect.catchTag("ClipboardWriteError", () =>
 				Effect.gen(function* () {
-					yield* banner.error("Could not copy emulator step", {
-						description: "Copy the reproduction payload manually instead.",
-					});
+					copy_failed = true;
 				}),
 			),
 		);
@@ -148,6 +146,12 @@
 					Copy step
 				</Button>
 			</div>
+
+			{#if copy_failed}
+				<p class="text-sm text-destructive" role="status">
+					Could not copy emulator step. Select the payload and copy manually.
+				</p>
+			{/if}
 
 			<label class="flex flex-col gap-1">
 				<span class="sr-only">Timeline</span>

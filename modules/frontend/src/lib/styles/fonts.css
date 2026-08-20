@@ -1,12 +1,8 @@
-@reference "./global.css";
-
-@font-face {
-	font-family: "Geist";
-	src: url("../assets/fonts/geist/geist-wght.woff2") format("woff2");
-	font-weight: 100 900;
-	font-style: normal;
-	font-display: swap;
-}
+/**
+ * The typefaces themselves. `@font-face` is a declaration, not a rule applied
+ * to anything, so it has nowhere else to live; the families it declares are
+ * spent through the theme's `--font-*` tokens and Tailwind's font utilities.
+ */
 
 @font-face {
 	font-family: "JetBrains Mono";
@@ -41,103 +37,6 @@
 }
 
 :root {
-	--font-heading: "Geist", sans-serif;
-	--font-logo: "Cal Sans", sans-serif;
-}
-
-.font-heading {
-	font-family: var(--font-heading);
-	letter-spacing: -0.03em;
-}
-
-.font-logo {
-	@apply text-foreground-extra;
-	font-family: var(--font-logo);
-	font-size: 1.5rem;
-	font-weight: 700;
-	line-height: 2rem;
-	letter-spacing: -0.05em;
-}
-
-.docs-responsive-surfaces,
-.docs-sidebar-nav-surface {
 	--font-heading: "Artisan Neo", sans-serif;
-	--font-weight-medium: var(--docs-dev-prose-weight, 410);
-	font-family: "Artisan Neo", sans-serif;
-	font-optical-sizing: auto;
-	font-synthesis: none;
-	font-weight: var(--docs-dev-prose-weight, 410);
-	letter-spacing: var(--docs-dev-prose-tracking, -0.04em);
-}
-
-.docs-responsive-surfaces :where(code, kbd, samp, pre),
-.docs-sidebar-nav-surface :where(code, kbd, samp, pre) {
-	letter-spacing: normal;
-}
-
-.docs-responsive-surfaces :where(.font-heading, h1, h2, h3, h4, h5, h6),
-.docs-sidebar-nav-surface :where(.font-heading, h1, h2, h3, h4, h5, h6) {
-	font-weight: var(--docs-dev-heading-weight, 630);
-	letter-spacing: var(--docs-dev-heading-tracking, -0.045em);
-}
-
-.docs-responsive-surfaces .docs-page-title {
-	font-size: calc(1.875rem * var(--docs-dev-heading-scale, 1));
-}
-
-.docs-sidebar-nav-surface .font-heading.text-sm {
-	font-size: calc(0.875rem * var(--docs-dev-heading-scale, 1));
-}
-
-.docs-sidebar-nav-surface .font-heading.text-xs {
-	font-size: calc(0.75rem * var(--docs-dev-heading-scale, 1));
-}
-
-.docs-responsive-surfaces .prose {
-	font-size: calc(1rem * var(--docs-dev-prose-scale, 1));
-	font-weight: var(--docs-dev-prose-weight, 410);
-	letter-spacing: var(--docs-dev-prose-tracking, -0.04em);
-}
-
-.docs-responsive-surfaces
-	.prose.prose
-	:where(h1, h2, h3, h4, h5, h6):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
-	font-weight: var(--docs-dev-heading-weight, 630);
-	letter-spacing: var(--docs-dev-heading-tracking, -0.045em);
-}
-
-.docs-responsive-surfaces
-	.prose.prose
-	:where(h1):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
-	font-size: calc(1.875rem * var(--docs-dev-heading-scale, 1));
-}
-
-.docs-responsive-surfaces
-	.prose.prose
-	:where(h2):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
-	font-size: calc(1.5rem * var(--docs-dev-heading-scale, 1));
-}
-
-.docs-responsive-surfaces
-	.prose.prose
-	:where(h3):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
-	font-size: calc(1.25rem * var(--docs-dev-heading-scale, 1));
-}
-
-.docs-responsive-surfaces
-	.prose.prose
-	:where(h4, h5, h6):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
-	font-size: calc(1.125rem * var(--docs-dev-heading-scale, 1));
-}
-
-.docs-responsive-surfaces .docs-page-title + span {
-	font-size: calc(1rem * var(--docs-dev-prose-scale, 1));
-	font-weight: var(--docs-dev-prose-weight, 410);
-	letter-spacing: var(--docs-dev-prose-tracking, -0.04em);
-}
-
-[data-slot="sidebar"]:has(.docs-sidebar-nav-surface) .font-logo {
-	font-size: var(--docs-dev-logo-size, 24px);
-	font-weight: var(--docs-dev-logo-weight, 700);
-	letter-spacing: var(--docs-dev-logo-tracking, -0.05em);
+	--font-logo: "Cal Sans", sans-serif;
 }

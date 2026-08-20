@@ -93,3 +93,30 @@ export const ContextUsageAutoCompactionPercent = (
 		native_model_id: usage?.context_origin?.model_id,
 		window_tokens,
 	});
+
+/**
+ * True when the engine must compact before it can answer again.
+ *
+ * This is the one thing that explains a turn which starts and then emits
+ * nothing for minutes. Claude Code announces compaction only at its
+ * `compact_boundary` — after the fact, carrying the `durationMs` it already
+ * spent — so there is no frame to wait for while it runs, and the silence is
+ * otherwise indistinguishable from a slow provider.
+ *
+ * Reading it from the gauge is a deduction from the documented trigger rather
+ * than a guess about the provider: an engine at or past its compaction
+ * threshold cannot take another turn without compacting first, which is
+ * exactly what `ContextAutoCompactionPercent` records per harness. The
+ * reading must be the engine's own post-turn measurement — a stale
+ * pre-compaction number would assert this forever — which is why the boundary
+ * publishes `postTokens` as a usage observation.
+ */
+export const ContextCompactionIsImminent = (
+	usage: SurfaceUsageAggregate | undefined,
+	window_tokens: number | undefined,
+): boolean => {
+	const used = usage?.context_tokens;
+	if (used === undefined || window_tokens === undefined || window_tokens <= 0) return false;
+	const percent = (used / window_tokens) * 100;
+	return percent >= ContextUsageAutoCompactionPercent(usage, window_tokens);
+};

@@ -39,3 +39,21 @@ export const RepositoryQualifiedLabel = (web_url: string): string => {
 		return web_url;
 	}
 };
+
+/**
+ * Names a repository link without its transport scheme, preserving the host so
+ * a destination button says exactly where it will open.
+ *
+ * @param web_url - An https page derived from a remote.
+ * @returns `host/owner/repo`, or the raw value when it is not a URL.
+ */
+export const RepositoryDestinationLabel = (web_url: string): string => {
+	try {
+		const parsed = new URL(web_url);
+		const pathname = parsed.pathname.replace(/\/$/u, "");
+
+		return `${parsed.hostname}${pathname}`;
+	} catch {
+		return web_url;
+	}
+};

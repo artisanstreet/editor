@@ -11,10 +11,23 @@ export type StreamingWordDelayOutcome =
 	| { readonly _tag: "Elapsed" }
 	| { readonly _tag: "Target"; readonly target: StreamingWordsTarget };
 
-const calm_delay_ms = 40;
-const medium_delay_ms = 28;
-const fast_delay_ms = 18;
-const catch_up_delay_ms = 12;
+/**
+ * One pacing tick of the reveal queue: how long to hold before the next tick
+ * and how many words that tick may commit at once. Delays never dip below a
+ * display frame — a 60Hz screen shows at most one update per ~16ms, so any
+ * faster cadence parses and renders work no frame can paint. Backlog is
+ * drained by widening the tick instead.
+ */
+export type StreamingWordPacing = {
+	readonly delay_ms: number;
+	readonly words: number;
+};
+
+const calm_pacing: StreamingWordPacing = { delay_ms: 40, words: 1 };
+const medium_pacing: StreamingWordPacing = { delay_ms: 28, words: 1 };
+const fast_pacing: StreamingWordPacing = { delay_ms: 20, words: 2 };
+const catch_up_pacing: StreamingWordPacing = { delay_ms: 16, words: 4 };
+const drain_pacing: StreamingWordPacing = { delay_ms: 16, words: 8 };
 
 const is_whitespace = (value: string): boolean => /^\s+$/u.test(value);
 
@@ -70,7 +83,16 @@ export const find_next_reveal_boundary = (
 export const reveal_streaming_words = (
 	current_prefix: string,
 	target: StreamingWordsTarget,
-): string => target.text.slice(0, find_next_reveal_boundary(current_prefix, target));
+	words = 1,
+): string => {
+	let revealed = current_prefix;
+	for (let step = 0; step < words; step += 1) {
+		const next = target.text.slice(0, find_next_reveal_boundary(revealed, target));
+		if (next === revealed) break;
+		revealed = next;
+	}
+	return revealed;
+};
 
 /** Counts pending visual words so the queue can select its catch-up tier. */
 export const count_pending_streaming_words = (
@@ -82,21 +104,22 @@ export const count_pending_streaming_words = (
 };
 
 /**
- * The queue starts at transitions.dev's 40ms stagger cadence, then reduces
- * only its delay as the backlog grows. Every tier is bounded and it returns to
- * calm immediately once the reader catches up.
+ * The queue starts at transitions.dev's 40ms stagger cadence. As the backlog
+ * grows it first shortens the tick toward the frame floor, then reveals more
+ * words per tick, and returns to calm immediately once the reader catches up.
  */
-export const get_streaming_word_delay = (backlog_words: number): number => {
-	if (backlog_words <= 4) return calm_delay_ms;
-	if (backlog_words <= 12) return medium_delay_ms;
-	if (backlog_words <= 32) return fast_delay_ms;
-	return catch_up_delay_ms;
+export const get_streaming_word_pacing = (backlog_words: number): StreamingWordPacing => {
+	if (backlog_words <= 4) return calm_pacing;
+	if (backlog_words <= 12) return medium_pacing;
+	if (backlog_words <= 32) return fast_pacing;
+	if (backlog_words <= 96) return catch_up_pacing;
+	return drain_pacing;
 };
 
 /**
  * A fresh transport target interrupts the visual cadence. Corrections therefore
  * fail closed before a stale queued word can be committed, while a newer append
- * is reconsidered against the latest sliding-queue value.
+ * is reconsidered against the next losslessly queued target.
  */
 export const wait_for_streaming_word_delay_or_target = (
 	targets: Queue.Dequeue<StreamingWordsTarget>,
@@ -176,7 +199,19 @@ export const create_conversation_streaming_words_plugin = (
 			const generation = get_animation_generation();
 			const animate_latest_word =
 				generation !== undefined && generation !== consumed_generation;
-			state.tree.nodes = wrap_streaming_words(state.tree.nodes, animate_latest_word);
+			/**
+			 * An incremental streaming parse re-emits only the message tail;
+			 * everything before `reusableNodes` is this plugin's own output from
+			 * an earlier parse and must keep node identity, or the renderer
+			 * re-renders the entire settled prefix on every revealed word.
+			 */
+			const reused: number = Array.isArray(state.reusableNodes)
+				? state.reusableNodes.length
+				: 0;
+			state.tree.nodes = [
+				...state.tree.nodes.slice(0, reused),
+				...wrap_streaming_words(state.tree.nodes.slice(reused), animate_latest_word),
+			];
 			if (animate_latest_word) consumed_generation = generation;
 		},
 	};
