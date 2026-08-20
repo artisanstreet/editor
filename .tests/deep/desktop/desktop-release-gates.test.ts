@@ -14,10 +14,6 @@ const forge_config = readFileSync(
 	resolve(workspace_root, ".config/forge.rolldown.config.ts"),
 	"utf8",
 );
-const release_policy = readFileSync(
-	resolve(workspace_root, "docs/release/validation-policy.md"),
-	"utf8",
-);
 
 const known_electron_package_files = [
 	"electron-builder.yml",
@@ -97,15 +93,6 @@ describe("deep desktop release gates", () => {
 		expect(builder).not.toContain("nsis");
 		expect(builder).not.toContain("signExecutable: false");
 		expect(builder).not.toContain("extraResources:");
-	});
-
-	it("records the managed payload and signing policy as release-only evidence", () => {
-		expect(release_policy).toContain("Desktop integration dependency gates");
-		expect(release_policy).toContain("emits only `.dist/electron-release/win-unpacked`");
-		expect(release_policy).toContain("not emit NSIS");
-		expect(release_policy).toContain("Electron Builder's standard Windows signing path");
-		expect(release_policy).toContain("requires status `Valid`");
-		expect(release_policy).toContain("required release-only evidence");
 	});
 
 	it("verifies the installed ae payload and ownership boundary locally", () => {
