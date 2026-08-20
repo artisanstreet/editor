@@ -1,6 +1,6 @@
 import { join, normalize } from "node:path";
 
-import { AttentionCountFromTitle } from "@artisan/protocol";
+import { AttentionCountFromTitle, TitleRequestsForgeRepair } from "@artisan/protocol";
 import { BrowserWindow, app, contentTracing, protocol, session, shell } from "electron";
 import { Effect, Layer, Option } from "effect";
 
@@ -125,6 +125,13 @@ export const StartDesktop = Effect.gen(function* () {
 		titleBarOverlay: { color: "#09090b", height: 40, symbolColor: "#9f9fa9" },
 		titleBarStyle: "hidden",
 		webPreferences: {
+			/**
+			 * A minimized or occluded renderer must keep answering Forge's
+			 * transport heartbeat; Chromium's background timer clamping delays
+			 * pongs past the heartbeat timeout and drops the session while the
+			 * window sits in the taskbar.
+			 */
+			backgroundThrottling: false,
 			contextIsolation: true,
 			nodeIntegration: false,
 			partition: renderer_partition,
@@ -139,8 +146,31 @@ export const StartDesktop = Effect.gen(function* () {
 	 * embeds in it becomes the taskbar badge here: a numbered overlay where
 	 * Windows wants an image, the native dock badge everywhere else.
 	 */
+	/**
+	 * Re-pairs the window with a live Forge, once per ask.
+	 *
+	 * `ae` hands the endpoint to the document once, in its launch fragment, so a
+	 * Forge that died and came back on a different port is unreachable to that
+	 * document however long it retries — which is why a crashed Forge left a
+	 * disconnected window that only a restart could clear. The renderer proves
+	 * the origin is gone and asks here, because the shell is the only side that
+	 * can obtain a new endpoint.
+	 *
+	 * The marker stays in the title for as long as the renderer believes it is
+	 * stranded, and every route change rewrites the title, so the ask arrives
+	 * repeatedly. Only the transition into it starts work, and the latch clears
+	 * when the renderer stops asking.
+	 */
+	let repairing_forge = false;
+	let RequestForgeRepair: () => void = () => undefined;
 	editor_window.on("page-title-updated", (event, title) => {
 		event.preventDefault();
+		if (!TitleRequestsForgeRepair(title)) {
+			repairing_forge = false;
+		} else if (!repairing_forge) {
+			repairing_forge = true;
+			RequestForgeRepair();
+		}
 		const attention_count = AttentionCountFromTitle(title) ?? 0;
 		if (process.platform === "win32") {
 			if (attention_count === 0) {
@@ -232,9 +262,19 @@ export const StartDesktop = Effect.gen(function* () {
 				try: () =>
 					contentTracing.startRecording({
 						included_categories: dev_tools_trace_categories.split(","),
+						/**
+						 * Chromium's `TraceConfig` parser reads `record_mode`; Electron's
+						 * typings only expose `recording_mode`, which the parser silently
+						 * ignores. Sending only the typed spelling falls back to the default
+						 * `record-until-full`, so the buffer fills during startup and every
+						 * capture returns the same first seconds of the session instead of
+						 * the window that preceded the trigger. Both spellings are sent so
+						 * the config survives whichever name the running Electron accepts.
+						 */
+						record_mode: "record-continuously",
 						recording_mode: "record-continuously",
 						trace_buffer_size_in_kb,
-					}),
+					} as Parameters<typeof contentTracing.startRecording>[0]),
 				catch: (cause) => cause,
 			});
 		const CaptureFreezeTrace = (trigger: string) => {
@@ -446,6 +486,13 @@ export const StartDesktop = Effect.gen(function* () {
 		Effect.provide(Layer.succeed(DesktopRenderer, renderer)),
 		Effect.provide(make_node_forge_handoff_process_layer),
 	);
+	/**
+	 * The same pairing `ae open` performs for a second instance, reached from the
+	 * title channel instead of a new process.
+	 */
+	RequestForgeRepair = () => {
+		void Effect.runPromise(desktop_lifecycle.Reconnect());
+	};
 	let cleanup: Promise<void> | undefined;
 	let quitting = false;
 	const renderer_death_recovery = make_renderer_death_recovery({

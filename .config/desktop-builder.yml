@@ -23,8 +23,8 @@ protocols:
       schemes:
           - artisan
 win:
-    # electron-builder rasterizes the existing 720px Artisan/Barekey SVG into
-    # the multi-resolution Windows ICO resource during packaging.
-    icon: logo-gradient.svg
+    # Keep the canonical SVG editable, but inject its pre-rasterized Windows
+    # icon directly so packaging does not spend minutes evaluating SVG filters.
+    icon: artisan-app-icon.ico
     target:
         - dir

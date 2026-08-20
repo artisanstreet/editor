@@ -80,6 +80,8 @@ describe("desktop packaging configuration", () => {
 		expect(main).toContain("contextIsolation: true");
 		expect(main).toContain("nodeIntegration: false");
 		expect(main).toContain("sandbox: true");
+		/** A backgrounded window must keep the transport heartbeat alive. */
+		expect(main).toContain("backgroundThrottling: false");
 		expect(main).toContain('title: "Artisan Editor"');
 		/** The pinned window title doubles as the IPC-free badge channel. */
 		expect(main).toContain('editor_window.on("page-title-updated", (event, title) => {');
@@ -89,6 +91,19 @@ describe("desktop packaging configuration", () => {
 		expect(main).toContain("AttentionOverlayDescription(attention_count)");
 		expect(main).toContain('editor_window.setOverlayIcon(null, "")');
 		expect(main).toContain("app.setBadgeCount(attention_count)");
+		/**
+		 * The same channel carries the renderer's ask for a live Forge. The
+		 * endpoint reaches a document once, in its launch fragment, so a Forge
+		 * that respawned on another port is unreachable to it forever — only the
+		 * shell can pair it again, and without this a crashed Forge left a
+		 * disconnected window that only a restart could clear.
+		 */
+		expect(main).toContain("TitleRequestsForgeRepair(title)");
+		expect(main).toContain("RequestForgeRepair()");
+		expect(main).toContain("desktop_lifecycle.Reconnect()");
+		/** Asked on every title rewrite, so only the transition may start work. */
+		expect(main).toContain("repairing_forge = false");
+		expect(main).toContain("repairing_forge = true");
 		expect(main).not.toContain("preload:");
 		expect(main).not.toContain("ipcMain");
 		/** Freeze diagnosis remains opt-in and does not add a renderer bridge. */
