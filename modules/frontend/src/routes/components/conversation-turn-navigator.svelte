@@ -47,7 +47,7 @@
 	-->
 	<nav
 		aria-label="Conversation turns"
-		class="group pointer-events-none absolute top-1/2 right-2 z-30 flex max-h-[70%] max-w-full -translate-y-1/2 justify-end"
+		class="conversation-range group pointer-events-none absolute top-1/2 right-2 z-30 flex max-h-[70%] max-w-full -translate-y-1/2 justify-end"
 	>
 		<div class="relative flex min-h-0 max-w-full justify-end">
 			<!--
@@ -58,12 +58,19 @@
 				`card-glass` shadow is the same one every other card casts — which is
 				what puts a shadow down the right edge here.
 			-->
-			<ShaderGlassSurface
-				aria-hidden="true"
-				class="radius-surface pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-(--duration-fast) ease-in-out group-hover:opacity-100 group-focus-within:opacity-100 motion-reduce:transition-none [--radius-gap:var(--spacing)] [--radius-surface:var(--radius-xl)]"
-			>
-				<span class="sr-only"></span>
-			</ShaderGlassSurface>
+			<!--
+				The picker animates a positioning wrapper around its glass, never the
+				glass itself. Keeping that boundary here too lets the material recover
+				its backdrop as soon as the entrance finishes and `transform` becomes
+				`none`.
+			-->
+			<div aria-hidden="true" class="conversation-range-backdrop pointer-events-none absolute inset-0">
+				<ShaderGlassSurface
+					class="radius-surface size-full [--radius-gap:var(--spacing)] [--radius-surface:var(--radius-xl)]"
+				>
+					<span class="sr-only"></span>
+				</ShaderGlassSurface>
+			</div>
 			<!--
 				The model picker's scroll grammar: the fade-masked scroller wraps the
 				hover surface, so the pill scrolls with the rows it highlights and the
@@ -84,7 +91,7 @@
 						reaching the transcript underneath.
 					-->
 					<ol
-						class="flex max-w-full flex-col items-end gap-1 p-2 group-hover:w-(--inspector-width) group-focus-within:w-(--inspector-width)"
+						class="conversation-range-list flex w-10 max-w-full flex-col items-end gap-1 p-2 group-hover:w-(--inspector-width) group-focus-within:w-(--inspector-width)"
 					>
 						{#each markers as marker (marker.id)}
 							{@const active = marker.id === active_id}
@@ -132,3 +139,51 @@
 		</div>
 	</nav>
 {/if}
+
+<style>
+	/**
+	 * Exactly the model picker's dropdown grammar: grow from 0.97 over 250ms,
+	 * then leave faster toward 0.99 over 150ms. The right edge is this
+	 * surface's trigger, so it replaces bits-ui's floating transform origin.
+	 */
+	.conversation-range-backdrop {
+		opacity: 0;
+		transform: scale(var(--dropdown-closing-scale));
+		transform-origin: right center;
+		transition:
+			transform var(--dropdown-close-dur) var(--dropdown-ease),
+			opacity var(--dropdown-close-dur) var(--dropdown-ease);
+	}
+
+	.conversation-range:hover .conversation-range-backdrop,
+	.conversation-range:focus-within .conversation-range-backdrop {
+		opacity: 1;
+		transform: none;
+		animation: conversation-range-in var(--dropdown-open-dur) var(--dropdown-ease);
+	}
+
+	/** The card's width opens and closes on the same asymmetric beats. */
+	.conversation-range-list {
+		transition: width var(--dropdown-close-dur) var(--dropdown-ease);
+	}
+
+	.conversation-range:hover .conversation-range-list,
+	.conversation-range:focus-within .conversation-range-list {
+		transition-duration: var(--dropdown-open-dur);
+	}
+
+	@keyframes conversation-range-in {
+		from {
+			opacity: 0;
+			transform: scale(var(--dropdown-pre-scale));
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.conversation-range-backdrop,
+		.conversation-range-list {
+			animation: none;
+			transition: none;
+		}
+	}
+</style>

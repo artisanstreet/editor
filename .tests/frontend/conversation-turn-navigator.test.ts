@@ -123,9 +123,9 @@ describe("conversation turn navigator surface", () => {
 		);
 
 		expect(navigator).toContain("<ShaderGlassSurface");
-		expect(navigator).toContain("absolute inset-0 opacity-0");
-		expect(navigator).toContain("group-hover:opacity-100");
-		expect(navigator).toContain("group-focus-within:opacity-100");
+		expect(navigator).toContain(
+			"conversation-range-backdrop pointer-events-none absolute inset-0",
+		);
 		/** The same radius vocabulary the card facing it across the transcript uses. */
 		for (const token of [
 			"[--radius-gap:var(--spacing)]",
@@ -137,6 +137,29 @@ describe("conversation turn navigator surface", () => {
 		expect(navigator).toContain("group-hover:w-(--inspector-width)");
 		expect(navigator).toContain("<DropdownHoverSurface");
 		expect(navigator).toContain("onpointerenter={move_hover}");
+	});
+
+	it("opens and closes with the model picker's dropdown motion", () => {
+		const model_picker = Read(
+			"modules/frontend/src/routes/components/model-selector/view.svelte",
+		);
+		const dropdown_styles = Read("modules/frontend/src/lib/styles/vendor.css");
+
+		expect(model_picker).toContain('class="t-dropdown');
+		/** Both surfaces use the exact shared timings, scales, and easing. */
+		for (const token of [
+			"--dropdown-open-dur",
+			"--dropdown-close-dur",
+			"--dropdown-pre-scale",
+			"--dropdown-closing-scale",
+			"--dropdown-ease",
+		]) {
+			expect(navigator).toContain(token);
+			expect(dropdown_styles).toContain(token);
+		}
+		expect(navigator).toContain("transform-origin: right center");
+		expect(navigator).toContain("@keyframes conversation-range-in");
+		expect(navigator).toContain("@media (prefers-reduced-motion: reduce)");
 	});
 
 	/** A long thread outgrows the frame; the map scrolls rather than being cut. */

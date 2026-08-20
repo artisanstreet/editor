@@ -379,6 +379,14 @@ history pagination retain their existing behavior. Five focused frontend files p
 tests; frontend format, lint, and the production build pass, and the aggregate test phase
 reaches 991/992 with only the protected composer line-budget assertion failing.
 
+On 2026-08-20, the conversation turn-range navigator adopted the model picker's shared
+dropdown entrance and exit grammar: a 250ms fade/scale from 0.97 on hover or focus, a
+faster 150ms fade/scale toward 0.99 on close, the same easing, and a right-centre origin.
+The width follows the same asymmetric timing, the glass keeps a backdrop-safe transform
+wrapper, and reduced-motion users receive an instant state change. Focused coverage passes
+12 tests; frontend format, lint, and production build pass, and aggregate tests reach
+995/996 with only the protected composer line-budget assertion failing.
+
 On 2026-07-31, workspace-scoped surface identity was restored: canonical
 conversation URLs use `/t/:workspace/:thread`, canonical editor URLs use
 `/e/:workspace/:thread`, and optional editor file identity remains in `?file=`.
