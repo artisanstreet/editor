@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 
 import {
+	Clock,
 	Context,
 	Deferred,
 	Effect,
@@ -23,6 +24,7 @@ import {
 	type EngineCommandFailure,
 	type EngineFailure,
 	type EngineOpenInput,
+	type EngineProbe,
 	type EngineRun,
 	type EngineUserInputPart,
 	EngineCommandIdConflictError,
@@ -32,14 +34,18 @@ import {
 	EngineProtocolError,
 	EngineRunClosedError,
 	EngineUnavailableError,
-	EngineUnsupportedCommandError,
 	EngineUnsupportedOperationError,
 	ValidateEngineGlobalGuidance,
 	ValidateEngineProductInstructions,
 } from "../engine";
 import { MakeEngineEventBuffer } from "../process/event-buffer";
+import { engine_exit_is_interruption } from "../process/exit-classification";
 import { WatchEngineInactivity } from "../process/inactivity-deadline";
 import { EngineProcessFactory } from "../process/process";
+import {
+	with_engine_spawn_override,
+	type ResolveEngineSpawnOverride,
+} from "../process/spawn-override";
 import { ClaudeEngineDescriptor, claude_protocol_version, claude_transport } from "./descriptor";
 import {
 	AdvanceClaudeChildTranscripts,
@@ -64,7 +70,11 @@ import {
 	read_claude_task_started,
 	read_claude_tool_uses,
 } from "./normalizer";
-import { claude_native_continuation_version, MakeClaudeProbe } from "./probe";
+import {
+	claude_native_continuation_version,
+	MakeClaudeProbe,
+	ReadClaudeAuthentication,
+} from "./probe";
 import { AdvanceClaudeTaskLineage, EmptyClaudeTaskLineage } from "./task-lineage";
 import { MakeClaudeUsage } from "./usage";
 
@@ -74,11 +84,12 @@ export class ClaudeEngine extends Context.Service<ClaudeEngine, Engine>()("Artis
 export interface ClaudeEngineOptions {
 	readonly executable?: string;
 	readonly executable_args?: ReadonlyArray<string>;
+	/** Consulted before every spawn; a managed toolchain repoints binary and home here. */
+	readonly ResolveSpawnOverride?: ResolveEngineSpawnOverride;
 	readonly auth_retry_attempts?: number;
 	readonly auth_retry_delay_ms?: number;
 	readonly auth_timeout_ms?: number;
 	readonly version_timeout_ms?: number;
-	readonly event_capacity?: number;
 	readonly inactivity_ms?: number;
 	readonly max_frame_bytes?: number;
 	readonly max_stdout_bytes?: number;
@@ -92,12 +103,27 @@ const defaults = {
 	auth_retry_delay_ms: 1_000,
 	auth_timeout_ms: 15_000,
 	version_timeout_ms: 15_000,
-	event_capacity: 256,
 	inactivity_ms: 600_000,
 	max_frame_bytes: 1_048_576,
 	max_stdout_bytes: 16 * 1024 * 1024,
 	max_stderr_bytes: 1_048_576,
 };
+
+/**
+ * How long a proven-ready probe may start a run without being re-proven.
+ *
+ * A probe is two more spawns of the same 265 MB executable the run is about to
+ * spawn anyway — `--version` then `auth status`, measured at ~105 ms and
+ * ~235 ms — so re-running it before every message spent roughly a third of a
+ * second per turn re-answering a question whose answer changes on the scale of
+ * a login.
+ *
+ * The window can be generous because it is not the safety net it looks like:
+ * expired credentials are caught by the run itself, whose failure clears this
+ * cache (see `init_seen` below), and only a *ready* probe is ever cached, so an
+ * engine that is not signed in is re-checked on every attempt exactly as before.
+ */
+const probe_freshness_ms = 300_000;
 const ControlPermissionRequest = Schema.Struct({
 	type: Schema.Literal("control_request"),
 	request_id: Schema.String,
@@ -138,6 +164,103 @@ const ToUserMessage = (
 	type: "user",
 });
 
+/**
+ * Claude asks the user questions over the same permission channel it uses for
+ * tools, but a question is not a permission: answering it *is* the
+ * authorization. Gating it behind a second approval left the CLI blocked on a
+ * terminal dialog Artisan never renders, so the user cleared a prompt and then
+ * watched nothing happen. These requests are lifted out of the approval path
+ * and canonicalized as questions instead.
+ */
+const claude_question_tool_name = "AskUserQuestion";
+
+const AskUserQuestionInput = Schema.Struct({
+	questions: Schema.Array(
+		Schema.Struct({
+			header: Schema.optional(Schema.String),
+			multiSelect: Schema.optional(Schema.Boolean),
+			options: Schema.optional(
+				Schema.Array(
+					Schema.Struct({
+						description: Schema.optional(Schema.String),
+						label: Schema.String,
+					}),
+				),
+			),
+			question: Schema.String,
+		}),
+	),
+});
+
+interface ClaudeQuestion {
+	readonly header?: string;
+	readonly id: string;
+	readonly multi_select: boolean;
+	readonly options: ReadonlyArray<{ readonly description?: string; readonly label: string }>;
+	readonly text: string;
+}
+
+interface ClaudeQuestionRequest {
+	/** The tool input verbatim, because the answer is returned by amending it. */
+	readonly input: Record<string, unknown>;
+	readonly questions: ReadonlyArray<ClaudeQuestion>;
+	readonly request_id: string;
+}
+
+const ReadQuestionRequest = (payload: unknown): ClaudeQuestionRequest | undefined => {
+	const decoded = Schema.decodeUnknownOption(ControlPermissionRequest, {
+		onExcessProperty: "preserve",
+	})(payload);
+	if (Option.isNone(decoded) || decoded.value.request.tool_name !== claude_question_tool_name)
+		return undefined;
+	const input = Schema.decodeUnknownOption(AskUserQuestionInput, {
+		onExcessProperty: "preserve",
+	})(decoded.value.request.input);
+	/**
+	 * A question request that carries no question is not answerable, so it stays
+	 * on the approval path rather than becoming a card with nothing to choose.
+	 */
+	if (Option.isNone(input) || input.value.questions.length === 0) return undefined;
+	const request_id = decoded.value.request_id;
+	return {
+		input: decoded.value.request.input,
+		/**
+		 * Claude does not name its questions, so identity is positional within
+		 * the request that carried them. That is stable for as long as the
+		 * request is open, which is the whole life of the answer.
+		 */
+		questions: input.value.questions.map((question, index) => ({
+			...(question.header === undefined ? {} : { header: question.header }),
+			id: `${request_id}:${index}`,
+			multi_select: question.multiSelect ?? false,
+			options: (question.options ?? []).map((option) => ({
+				...(option.description === undefined ? {} : { description: option.description }),
+				label: option.label,
+			})),
+			text: question.question,
+		})),
+		request_id,
+	};
+};
+
+/**
+ * Claude collects a question's answers through the permission response: the
+ * harness allows the call and returns the same input amended with an `answers`
+ * record keyed by question text, which the tool then reports as its result.
+ */
+const QuestionResponse = (
+	request_id: string,
+	input: Record<string, unknown>,
+	answers: Record<string, string>,
+) => ({
+	type: "control_response" as const,
+	response: {
+		subtype: "success" as const,
+		request_id,
+		response: { behavior: "allow" as const, updatedInput: { ...input, answers } },
+	},
+});
+
 const ReadApproval = (
 	payload: unknown,
 ):
@@ -148,6 +271,7 @@ const ReadApproval = (
 	})(payload);
 	if (Option.isNone(decoded)) return undefined;
 	const request = decoded.value.request;
+	if (ReadQuestionRequest(payload) !== undefined) return undefined;
 	return {
 		id: decoded.value.request_id,
 		description:
@@ -211,7 +335,6 @@ const ValidateConfiguration = (options: typeof defaults) => {
 	const positive = {
 		auth_retry_delay_ms: options.auth_retry_delay_ms,
 		auth_timeout_ms: options.auth_timeout_ms,
-		event_capacity: options.event_capacity,
 		inactivity_ms: options.inactivity_ms,
 		max_frame_bytes: options.max_frame_bytes,
 		max_stderr_bytes: options.max_stderr_bytes,
@@ -334,7 +457,6 @@ export const make_claude_engine_layer = (
 		auth_timeout_ms: input.auth_timeout_ms ?? defaults.auth_timeout_ms,
 		executable: input.executable ?? defaults.executable,
 		executable_args: input.executable_args ?? defaults.executable_args,
-		event_capacity: input.event_capacity ?? defaults.event_capacity,
 		inactivity_ms: input.inactivity_ms ?? defaults.inactivity_ms,
 		max_frame_bytes: input.max_frame_bytes ?? defaults.max_frame_bytes,
 		max_stderr_bytes: input.max_stderr_bytes ?? defaults.max_stderr_bytes,
@@ -344,7 +466,11 @@ export const make_claude_engine_layer = (
 	return Layer.effect(
 		ClaudeEngine,
 		Effect.gen(function* () {
-			const factory = yield* EngineProcessFactory;
+			const base_factory = yield* EngineProcessFactory;
+			const factory =
+				input.ResolveSpawnOverride === undefined
+					? base_factory
+					: with_engine_spawn_override(base_factory, input.ResolveSpawnOverride);
 			const validated = () => ValidateConfiguration(options);
 			const Probe: Engine["Probe"] = () =>
 				validated().pipe(
@@ -360,19 +486,47 @@ export const make_claude_engine_layer = (
 						}),
 					),
 				);
+			/**
+			 * The last probe that came back ready, and when. Deliberately not
+			 * shared with `Probe` itself: a caller that asks for readiness — a
+			 * settings surface, a sign-in flow — is asking about right now and
+			 * must pay for the truth. Only the pre-run check reuses it.
+			 */
+			const proven_ready = yield* Ref.make<
+				{ readonly probe: EngineProbe; readonly proven_at_ms: number } | undefined
+			>(undefined);
+			/**
+			 * Called when a run exits without the CLI's `init` event — the shape
+			 * every refusal to start takes, expired credentials among them. The
+			 * readiness this cache asserted has just been disproven by the only
+			 * authority that matters, so the next run pays for a fresh probe.
+			 */
+			const ForgetReadiness = Ref.set(proven_ready, undefined);
+			const ReadyProbe = Effect.gen(function* () {
+				const now = yield* Clock.currentTimeMillis;
+				const cached = yield* Ref.get(proven_ready);
+				if (cached !== undefined && now - cached.proven_at_ms < probe_freshness_ms)
+					return cached.probe;
+				let probe = yield* Probe({});
+				for (
+					let attempt = 0;
+					!probe.ready && attempt < options.auth_retry_attempts;
+					attempt += 1
+				) {
+					yield* Effect.sleep(options.auth_retry_delay_ms * 2 ** attempt);
+					probe = yield* Probe({});
+				}
+				yield* Ref.set(
+					proven_ready,
+					probe.ready ? { probe, proven_at_ms: now } : undefined,
+				);
+				return probe;
+			});
 			const Open: Engine["Open"] = (input) =>
 				Effect.gen(function* () {
 					yield* validated();
 					const resolved = yield* ResolveRunOptions(input);
-					let probe = yield* Probe({});
-					for (
-						let attempt = 0;
-						!probe.ready && attempt < options.auth_retry_attempts;
-						attempt += 1
-					) {
-						yield* Effect.sleep(options.auth_retry_delay_ms * 2 ** attempt);
-						probe = yield* Probe({});
-					}
+					const probe = yield* ReadyProbe;
 					if (!probe.ready)
 						return yield* Effect.fail(
 							new EngineUnavailableError({
@@ -405,6 +559,27 @@ export const make_claude_engine_layer = (
 						"stream-json",
 						"--verbose",
 						"--include-partial-messages",
+						/**
+						 * Ask for the reasoning summaries, which a non-interactive
+						 * session does not get by default.
+						 *
+						 * The CLI resolves thinking display from the session shape and
+						 * forces `omitted` for a `-p` run unless the flag was given
+						 * explicitly — which is why every `thinking_delta` arrived with
+						 * `thinking: ""` and a signature, and why this looked like
+						 * reasoning the provider encrypts rather than reasoning nobody
+						 * asked for. `summarized` is the same thing the Claude app
+						 * shows: the provider's own summary, never raw chain-of-thought.
+						 *
+						 * Gated on the verified release for the same reason native
+						 * continuation is: an unknown flag is a hard launch failure, so
+						 * a CLI this build has not been checked against must not be
+						 * handed one. The constant is also what the toolchain installs,
+						 * so the gate moves with the version rather than rotting.
+						 */
+						...(probe.version === claude_native_continuation_version
+							? ["--thinking-display", "summarized"]
+							: []),
 						"--forward-subagent-text",
 						"--permission-prompt-tool",
 						"stdio",
@@ -445,7 +620,6 @@ export const make_claude_engine_layer = (
 						);
 					const events = yield* MakeEngineEventBuffer({
 						artisan_run_id: input.artisan_run_id,
-						capacity: options.event_capacity,
 						CloseResource: handle.Close,
 						make_terminal_observation: (state, sequence) => ({
 							_tag: "run_terminal",
@@ -467,6 +641,15 @@ export const make_claude_engine_layer = (
 						init_seen: false,
 						input_ended: false,
 						pending: new Map<string, ReturnType<typeof ReadApproval>>(),
+						/** Answers collected so far, keyed by question id. */
+						question_answers: new Map<string, ReadonlyArray<string>>(),
+						questions: new Map<
+							string,
+							{
+								readonly question: ClaudeQuestion;
+								readonly request: ClaudeQuestionRequest;
+							}
+						>(),
 						child_transcripts: EmptyClaudeChildTranscripts(),
 						result_seen: false,
 						semantic_failure: false,
@@ -514,6 +697,45 @@ export const make_claude_engine_layer = (
 										? { semantic_failure: true }
 										: {}),
 								}));
+							const question_request = ReadQuestionRequest(frame);
+							if (question_request !== undefined) {
+								yield* Ref.update(state, (value) => {
+									const questions = new Map(value.questions);
+									for (const question of question_request.questions)
+										questions.set(question.id, {
+											question,
+											request: question_request,
+										});
+									return { ...value, questions };
+								});
+								yield* Effect.forEach(question_request.questions, (question) =>
+									events.Emit({
+										_tag: "question",
+										artisan_run_id: input.artisan_run_id,
+										...(question.header === undefined
+											? {}
+											: { header: question.header }),
+										multi_select: question.multi_select,
+										observation_id: `${input.artisan_run_id}:claude:${question.id}:requested`,
+										...(question.options.length === 0
+											? {}
+											: { options: question.options }),
+										question_id: question.id,
+										raw: {
+											engine_id: "claude",
+											frame,
+											frame_sequence: sequence,
+											protocol_version: claude_protocol_version,
+											raw_frame_base64: decoded.raw_frame_base64,
+											transport: claude_transport,
+										},
+										sequence: 0,
+										state: "requested",
+										text: question.text,
+									}),
+								);
+								return;
+							}
 							const approval = ReadApproval(frame);
 							if (approval !== undefined) {
 								yield* Ref.update(state, (value) => ({
@@ -731,12 +953,30 @@ export const make_claude_engine_layer = (
 								yield* Deferred.await(stdout_drained);
 								yield* Deferred.await(stderr_drained);
 								const current = yield* Ref.get(state);
-								return yield* events.Finish(
+								/**
+								 * No `init` means the CLI never opened a session, which
+								 * is what a refused launch looks like — expired
+								 * credentials included. Whatever the cached probe
+								 * claimed, it is not true now.
+								 */
+								if (!current.init_seen) yield* ForgetReadiness;
+								if (
 									result.code === 0 &&
-										current.init_seen &&
-										current.result_seen &&
-										!current.semantic_failure
-										? "completed"
+									current.init_seen &&
+									current.result_seen &&
+									!current.semantic_failure
+								)
+									return yield* events.Finish("completed");
+
+								/**
+								 * A session that opened and was then killed did not fail —
+								 * it was ended from outside, and its turn can be resumed.
+								 * Without `init` the CLI never opened anything, so there is
+								 * nothing to resume and the launch itself is the failure.
+								 */
+								return yield* events.Finish(
+									current.init_seen && engine_exit_is_interruption(result)
+										? "interrupted"
 										: "failed",
 								);
 							}),
@@ -857,13 +1097,117 @@ export const make_claude_engine_layer = (
 										state: "resolved",
 									});
 								}
-								return yield* Effect.fail(
-									new EngineUnsupportedCommandError({
-										engine_id: "claude",
-										command: command._tag,
-										command_id: command.command_id,
-									}),
-								);
+								if (command._tag === "respond_question") {
+									const answered = Object.entries(command.answers).map(
+										([question_id, answers]) => ({
+											answers,
+											pending: current.questions.get(question_id),
+											question_id,
+										}),
+									);
+									const known = answered.flatMap((entry) =>
+										entry.pending === undefined
+											? []
+											: [{ ...entry, pending: entry.pending }],
+									);
+									const first = known[0];
+									if (first === undefined || known.length !== answered.length)
+										return yield* Effect.fail(
+											new EngineCommandTargetError({
+												artisan_run_id: input.artisan_run_id,
+												command_id: command.command_id,
+												target: "question",
+												target_id:
+													answered.find(
+														(entry) => entry.pending === undefined,
+													)?.question_id ?? "no-questions-answered",
+											}),
+										);
+									const request = first.pending.request;
+									if (
+										known.some(
+											(entry) =>
+												entry.pending.request.request_id !==
+												request.request_id,
+										)
+									)
+										return yield* Effect.fail(
+											new EngineCommandTargetError({
+												artisan_run_id: input.artisan_run_id,
+												command_id: command.command_id,
+												target: "question",
+												target_id: "multiple-request-groups",
+											}),
+										);
+									/**
+									 * Claude asks up to four questions in one request and its
+									 * tool stays blocked until every one of them has an
+									 * answer, while Artisan renders each as its own card. So
+									 * answers accumulate here and the response is written
+									 * only once the request's whole group is answered;
+									 * releasing early would answer questions the user never
+									 * saw.
+									 */
+									const collected = new Map(current.question_answers);
+									for (const entry of known)
+										collected.set(entry.question_id, entry.answers);
+									const group = request.questions;
+									if (group.every((question) => collected.has(question.id))) {
+										yield* handle.Write(
+											new TextEncoder().encode(
+												`${JSON.stringify(
+													QuestionResponse(
+														request.request_id,
+														request.input,
+														Object.fromEntries(
+															group.map((question) => [
+																question.text,
+																(
+																	collected.get(question.id) ?? []
+																).join(", "),
+															]),
+														),
+													),
+												)}\n`,
+											),
+										);
+									}
+									yield* Ref.update(state, (value) => ({
+										...value,
+										question_answers: collected,
+									}));
+									return yield* Effect.forEach(known, (entry) =>
+										events.Emit({
+											_tag: "question",
+											answers: entry.answers,
+											artisan_run_id: input.artisan_run_id,
+											...(entry.pending.question.header === undefined
+												? {}
+												: { header: entry.pending.question.header }),
+											multi_select: entry.pending.question.multi_select,
+											observation_id: `${input.artisan_run_id}:claude:${entry.question_id}:resolved`,
+											question_id: entry.question_id,
+											raw: {
+												engine_id: "claude",
+												frame: {
+													answers: entry.answers,
+													question_id: entry.question_id,
+												},
+												protocol_version: claude_protocol_version,
+												transport: claude_transport,
+											},
+											sequence: 0,
+											state: "resolved",
+											text: entry.pending.question.text,
+										}),
+									).pipe(Effect.asVoid);
+								}
+								/**
+								 * Every command tag is answered above. Asserting the
+								 * remainder is empty makes a future command a compile
+								 * error here rather than one that is silently dropped.
+								 */
+								return command satisfies never;
 							}),
 						);
 					return {
@@ -875,18 +1219,31 @@ export const make_claude_engine_layer = (
 						Send,
 					} satisfies EngineRun;
 				});
-			const Usage: Required<Engine>["Usage"] = Probe({}).pipe(
-				Effect.flatMap((probe) =>
-					probe.authentication.state === "authenticated"
+			/**
+			 * Gated on auth alone, read through the one spawn that answers it.
+			 *
+			 * A usage read used to run the whole probe first, which charged an extra
+			 * `--version` spawn — with its own timeout budget to fail inside — for a
+			 * version string this path never reads. Every engine refreshes usage
+			 * concurrently against one deadline, so that spawn was pure risk.
+			 */
+			const Usage: Required<Engine>["Usage"] = ReadClaudeAuthentication(factory, {
+				auth_timeout_ms: options.auth_timeout_ms,
+				descriptor: ClaudeEngineDescriptor,
+				executable: options.executable,
+				executable_args: options.executable_args,
+				max_stderr_bytes: options.max_stderr_bytes,
+				max_stdout_bytes: options.max_stdout_bytes,
+				version_timeout_ms: options.version_timeout_ms,
+			}).pipe(
+				Effect.flatMap((authentication) =>
+					authentication.state === "authenticated"
 						? MakeClaudeUsage({
 								executable: options.executable,
 								executable_args: options.executable_args,
 								factory,
 							})
-						: Effect.succeed({
-								authentication: probe.authentication,
-								windows: [],
-							}),
+						: Effect.succeed({ authentication, windows: [] }),
 				),
 			);
 			return {

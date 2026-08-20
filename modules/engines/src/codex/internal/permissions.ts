@@ -16,10 +16,21 @@ interface CodexPermissionSettings {
 	readonly sandbox?: CodexSandbox;
 }
 
-const allowed_provider_options = new Set(["codex.reasoning_effort", "codex.service_tier"]);
+const allowed_provider_options = new Set([
+	"codex.model_context_window",
+	"codex.reasoning_effort",
+	"codex.service_tier",
+]);
 
 function FailConfiguration(option: string, value: unknown) {
 	return Effect.fail(new EngineConfigurationError({ engine_id: "codex", option, value }));
+}
+
+/** Provider options travel as strings, so a token count arrives as one. */
+function is_positive_integer_string(value: unknown): value is string {
+	if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+	const parsed = Number(value);
+	return Number.isSafeInteger(parsed) && parsed > 0;
 }
 
 function make_developer_instructions(input: EngineOpenInput) {
@@ -71,6 +82,21 @@ function ResolveCodexPermissions(input: EngineOpenInput) {
 			(typeof service_tier !== "string" || !new Set(["standard", "fast"]).has(service_tier))
 		) {
 			return yield* FailConfiguration("provider_options.codex.service_tier", service_tier);
+		}
+
+		/**
+		 * Rejected here rather than ignored downstream, like every other option
+		 * on this boundary. A window is not a preference Codex can shrug off: a
+		 * value that failed to parse would silently seat the session back at the
+		 * harness default, and the only visible sign would be compaction arriving
+		 * far earlier than the picker promised.
+		 */
+		const context_window = provider_options["codex.model_context_window"];
+		if (context_window !== undefined && !is_positive_integer_string(context_window)) {
+			return yield* FailConfiguration(
+				"provider_options.codex.model_context_window",
+				context_window,
+			);
 		}
 
 		const policy = input.permission_policy;
@@ -151,6 +177,11 @@ export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 		Effect.map((permissions) => {
 			const developer_instructions = make_developer_instructions(input);
 			const reasoning_effort = input.provider_options?.["codex.reasoning_effort"];
+			/** Already rejected above unless well formed, so this only converts. */
+			const requested_context_window = input.provider_options?.["codex.model_context_window"];
+			const model_context_window = is_positive_integer_string(requested_context_window)
+				? Number(requested_context_window)
+				: undefined;
 
 			return {
 				...(permissions.approval_policy === undefined
@@ -168,6 +199,7 @@ export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 				/** Request only Codex's public summaries; raw reasoning stays private. */
 				config: {
 					model_reasoning_summary: "auto",
+					...(model_context_window === undefined ? {} : { model_context_window }),
 					...(reasoning_effort === undefined
 						? {}
 						: { model_reasoning_effort: reasoning_effort }),

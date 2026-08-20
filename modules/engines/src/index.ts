@@ -1,7 +1,12 @@
 export * from "./engine";
 export * from "./registry";
 export * from "./process/process";
+export * from "./process/spawn-override";
 export * from "./process/jsonl";
+export * from "./toolchain/distribution";
+export * from "./toolchain/http";
+export * from "./toolchain/service";
+export * from "./toolchain/store";
 export { WindowsProcessHostProgram } from "./process/windows-process-host";
 export { WindowsProcessHostModeArgument } from "./process/windows-process-host-mode";
 export * from "./patch/unified-diff";

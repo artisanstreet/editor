@@ -28,13 +28,13 @@ import {
 	type EngineRun,
 	EngineCommandIdConflictError,
 	EngineCommandTargetError,
-	EngineConfigurationError,
 	EngineProcessError,
 	EngineProtocolError,
 	EngineRunClosedError,
 	EngineUnavailableError,
 } from "../engine";
 import { WatchEngineInactivity } from "../process/inactivity-deadline";
+import { type ResolveEngineSpawnOverride } from "../process/spawn-override";
 import { normalise_codex_notification } from "./normalizer";
 import { NormalizeCodexChildObservation } from "./child-observation";
 import {
@@ -109,10 +109,11 @@ export interface CodexEngineOptions {
 	readonly app_server_inactivity_ms?: number;
 	readonly app_server_max_frame_bytes?: number;
 	readonly executable_args?: ReadonlyArray<string>;
-	readonly event_capacity?: number;
 	readonly executable?: string;
 	readonly initialize_timeout_ms?: number;
 	readonly request_timeout_ms?: number;
+	/** Consulted before every spawn; a managed toolchain repoints binary and home here. */
+	readonly ResolveSpawnOverride?: ResolveEngineSpawnOverride;
 	readonly version_timeout_ms?: number;
 }
 
@@ -171,18 +172,6 @@ const ThreadResponseSchema = Schema.Struct({
 	}),
 });
 const TurnResponseSchema = Schema.Struct({ turn: Schema.Struct({ id: Schema.String }) });
-
-function ValidateEventCapacity(event_capacity: number) {
-	return Number.isSafeInteger(event_capacity) && event_capacity > 0
-		? Effect.void
-		: Effect.fail(
-				new EngineConfigurationError({
-					engine_id: "codex",
-					option: "event_capacity",
-					value: event_capacity,
-				}),
-			);
-}
 
 function command_intent(command: EngineCommand) {
 	switch (command._tag) {
@@ -288,7 +277,6 @@ function make_codex_app_server_engine(
 ): Engine {
 	const app_server_max_frame_bytes = options.app_server_max_frame_bytes ?? 8 * 1_024 * 1_024;
 	const executable = options.executable ?? resolve_codex_executable();
-	const event_capacity = options.event_capacity ?? 256;
 	const executable_args = options.executable_args ?? [];
 	/**
 	 * Never shorter than the total budget this replaced, so no run that used to
@@ -319,7 +307,6 @@ function make_codex_app_server_engine(
 	});
 	const Open = (input: EngineOpenInput): Effect.Effect<EngineRun, EngineFailure, Scope.Scope> =>
 		Effect.gen(function* () {
-			yield* ValidateEventCapacity(event_capacity);
 			const thread_options = yield* MakeCodexAppServerThreadOptions(input);
 
 			yield* ReadTransportVersion;
@@ -338,7 +325,6 @@ function make_codex_app_server_engine(
 			});
 			const event_buffer = yield* MakeCodexAppServerEventBuffer({
 				artisan_run_id: input.artisan_run_id,
-				capacity: event_capacity,
 				CloseSession: session.Close.pipe(Effect.ignore),
 			});
 			const Finish = event_buffer.Finish;
@@ -870,7 +856,7 @@ function make_codex_app_server_engine(
  * Builds the Codex engine Layer and captures its process factory at composition.
  *
  * @since 0.3.0
- * @param options - Executable override and bounded transport configuration.
+ * @param options - Executable override and transport configuration.
  * @returns A Layer whose public engine has no process dependency in its Effects.
  */
 export function make_codex_engine_layer(
@@ -882,20 +868,29 @@ export function make_codex_engine_layer(
 			const base_factory = yield* CodexProcessFactory;
 			const file_system = yield* FileSystem.FileSystem;
 			const runtime_environment = yield* CodexRuntimeEnvironment;
-			const executable = options.executable ?? (yield* ResolveCodexExecutable);
+			const resolve_spawn_override = options.ResolveSpawnOverride;
+			/** A managed factory replaces this sentinel before every process start. */
+			const executable =
+				options.executable ??
+				(resolve_spawn_override === undefined ? yield* ResolveCodexExecutable : "codex");
 			const factory = {
 				Spawn: (input: CodexProcessSpawnInput) =>
 					Effect.gen(function* () {
+						const override =
+							resolve_spawn_override === undefined
+								? undefined
+								: yield* resolve_spawn_override(input.profile_id);
+						const command = override?.executable ?? input.command;
 						if (
-							isAbsolute(input.command) &&
+							isAbsolute(command) &&
 							!(yield* file_system
-								.exists(input.command)
+								.exists(command)
 								.pipe(Effect.orElseSucceed(() => false)))
 						) {
 							return yield* Effect.fail(
 								new EngineProcessError({
 									cause: new Error(
-										`Engine executable does not exist: ${input.command}`,
+										`Engine executable does not exist: ${command}`,
 									),
 									operation: "spawn",
 								}),
@@ -904,11 +899,16 @@ export function make_codex_engine_layer(
 
 						return yield* base_factory.Spawn({
 							...input,
-							env: make_codex_process_environment(
-								input.env,
-								runtime_environment.inherited_environment,
-								runtime_environment.user_profile,
-							),
+							command,
+							env: {
+								...make_codex_process_environment(
+									input.env,
+									runtime_environment.inherited_environment,
+									runtime_environment.user_profile,
+								),
+								/** The managed home always outranks ambient `CODEX_HOME`. */
+								...override?.environment,
+							},
 						});
 					}),
 			};

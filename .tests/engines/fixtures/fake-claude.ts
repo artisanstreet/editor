@@ -50,6 +50,24 @@ if (args.includes("--version")) {
 		process.stdout.write(`${JSON.stringify({ loggedIn: scenario !== "auth-unauth" })}\n`);
 		process.exit(0);
 	}
+} else if (args.includes("/usage")) {
+	/**
+	 * The real CLI takes its prompt from stdin here and waits out a grace period
+	 * before proceeding without it, so a caller that never sends EOF pays that
+	 * wait on every read. Exiting only once stdin ends keeps that cost visible to
+	 * anything that forgets to close it.
+	 */
+	process.stdin.resume();
+	process.stdin.on("end", () => {
+		process.stdout.write(
+			`${JSON.stringify({
+				result:
+					"Current session: 12% used · resets Aug 16, 5:50am (Europe/Oslo)\n" +
+					"Current week (all models): 28% used · resets Aug 19, 12am (Europe/Oslo)",
+			})}\n`,
+		);
+		process.exit(0);
+	});
 } else {
 	const decoder = new TextDecoder();
 	let input = "";
@@ -152,6 +170,84 @@ if (args.includes("--version")) {
 			setTimeout(() => process.exit(0), 10);
 		}
 	};
+	/**
+	 * Claude asks its questions over the permission channel and stays blocked
+	 * until every question in the request has an answer, which it collects from
+	 * the allow response's `updatedInput.answers`, keyed by question text.
+	 */
+	const question_one = "Which library should we use?";
+	const question_two = "Which deployment targets?";
+	let question_started = false;
+	let question_finished = false;
+	const question = () => {
+		const session_id = interactive_session();
+		if (!question_started) {
+			question_started = true;
+			write({ type: "system", subtype: "init", session_id, model: "fake", tools: [] });
+			write({
+				type: "control_request",
+				request_id: "question-1",
+				request: {
+					subtype: "can_use_tool",
+					tool_name: "AskUserQuestion",
+					input: {
+						questions: [
+							{
+								header: "Library",
+								multiSelect: false,
+								options: [
+									{ label: "Effect", description: "Already in the workspace" },
+									{ label: "RxJS", description: "One more dependency" },
+								],
+								question: question_one,
+							},
+							{
+								header: "Targets",
+								multiSelect: true,
+								options: [{ label: "Desktop" }, { label: "Web" }],
+								question: question_two,
+							},
+						],
+					},
+				},
+			});
+			return;
+		}
+		if (question_finished) return;
+		const response = interactive_messages.find((line) => line.type === "control_response");
+		if (!response) return;
+		question_finished = true;
+		const envelope = response.response;
+		const result = is_record(envelope) ? envelope.response : undefined;
+		const updated = is_record(result) ? result.updatedInput : undefined;
+		const answers = is_record(updated) ? updated.answers : undefined;
+		const valid =
+			is_record(envelope) &&
+			envelope.subtype === "success" &&
+			envelope.request_id === "question-1" &&
+			is_record(result) &&
+			result.behavior === "allow" &&
+			is_record(answers) &&
+			answers[question_one] === "Effect" &&
+			answers[question_two] === "Desktop, Web";
+		write(
+			valid
+				? {
+						type: "result",
+						subtype: "success",
+						session_id,
+						usage: { input_tokens: 1, output_tokens: 1 },
+					}
+				: {
+						type: "result",
+						subtype: "error_during_execution",
+						is_error: true,
+						session_id,
+						errors: ["invalid question control_response"],
+					},
+		);
+		setTimeout(() => process.exit(0), 10);
+	};
 	const immediate = () => {
 		if (immediate_finished) return;
 		immediate_finished = true;
@@ -213,7 +309,11 @@ if (args.includes("--version")) {
 		input += decoded;
 		if (invocation_file)
 			appendFileSync(invocation_file, `${JSON.stringify({ stdin_chunk: decoded })}\n`);
-		if (scenario === "interactive" || scenario === "interactive-deny") {
+		if (
+			scenario === "interactive" ||
+			scenario === "interactive-deny" ||
+			scenario === "interactive-question"
+		) {
 			interactive_buffer += decoded;
 			for (;;) {
 				const line_end = interactive_buffer.indexOf("\n");
@@ -222,12 +322,17 @@ if (args.includes("--version")) {
 				interactive_buffer = interactive_buffer.slice(line_end + 1);
 				if (line) interactive_messages.push(JSON.parse(line) as FixtureEvent);
 			}
-			interactive();
+			if (scenario === "interactive-question") question();
+			else interactive();
 		}
 		if (scenario.startsWith("immediate-")) immediate();
 	});
 	process.stdin.on("end", () => {
-		if (scenario === "interactive" || scenario === "interactive-deny") {
+		if (
+			scenario === "interactive" ||
+			scenario === "interactive-deny" ||
+			scenario === "interactive-question"
+		) {
 			if (invocation_file)
 				appendFileSync(invocation_file, `${JSON.stringify({ stdin: input })}\n`);
 			process.exit(0);

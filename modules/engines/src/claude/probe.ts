@@ -60,40 +60,91 @@ function read_bounded(stream: AsyncIterable<Uint8Array>, max_bytes: number) {
  * @param options - Executable, byte bounds, and per-phase deadlines.
  * @returns Version, authentication readiness, and the declared capabilities.
  */
+function RunClaudeCli(
+	factory: typeof EngineProcessFactory.Service,
+	options: ClaudeProbeOptions,
+	args: ReadonlyArray<string>,
+	timeout_ms: number,
+) {
+	return Effect.scoped(
+		Effect.gen(function* () {
+			const handle = yield* factory.Spawn({
+				command: options.executable,
+				args: [...options.executable_args, ...args],
+			});
+
+			/** A probe is one-shot; unlike a run session, it must observe EOF. */
+			yield* handle.EndInput;
+
+			return yield* Effect.all(
+				[
+					read_bounded(handle.Stdout, options.max_stdout_bytes),
+					read_bounded(handle.Stderr, options.max_stderr_bytes),
+					handle.Exit,
+				],
+				{ concurrency: "unbounded" },
+			).pipe(
+				Effect.ensuring(handle.Close),
+				Effect.timeoutOrElse({
+					duration: timeout_ms,
+					orElse: () =>
+						Effect.fail(
+							new EngineProbeTimeoutError({
+								engine_id: "claude",
+								phase: args[0] === "auth" ? "authentication" : "version",
+								timeout_ms,
+							}),
+						),
+				}),
+			);
+		}),
+	);
+}
+
+/**
+ * Reads saved-session auth readiness through the one CLI spawn that answers it.
+ *
+ * Split out because a usage read needs exactly this and nothing else. Asking a
+ * full probe for it charged a second spawn on `--version` — whose only output
+ * is a version string the usage path never looks at — on every refresh, and
+ * gave that spawn its own timeout budget to fail inside.
+ *
+ * @since 0.9.0
+ */
+export function ReadClaudeAuthentication(
+	factory: typeof EngineProcessFactory.Service,
+	options: ClaudeProbeOptions,
+): Effect.Effect<EngineProbe["authentication"], EngineFailure> {
+	return Effect.gen(function* () {
+		const [auth_stdout, auth_stderr, auth_exit] = yield* RunClaudeCli(
+			factory,
+			options,
+			["auth", "status"],
+			options.auth_timeout_ms,
+		);
+		const auth_status = Schema.decodeUnknownOption(
+			Schema.fromJsonString(Schema.Struct({ loggedIn: Schema.Boolean })),
+		)(new TextDecoder().decode(auth_stdout));
+		const unknown = auth_status._tag === "None" || auth_exit.code !== 0;
+		const authenticated = !unknown && auth_status._tag === "Some" && auth_status.value.loggedIn;
+
+		return unknown
+			? {
+					reason:
+						new TextDecoder().decode(auth_stderr).trim() ||
+						"Claude auth status is unavailable",
+					state: "unknown" as const,
+				}
+			: { state: authenticated ? ("authenticated" as const) : ("unauthenticated" as const) };
+	});
+}
+
 export function MakeClaudeProbe(
 	factory: typeof EngineProcessFactory.Service,
 	options: ClaudeProbeOptions,
 ): Effect.Effect<EngineProbe, EngineFailure> {
 	const run = (args: ReadonlyArray<string>, timeout_ms: number) =>
-		Effect.scoped(
-			Effect.gen(function* () {
-				const handle = yield* factory.Spawn({
-					command: options.executable,
-					args: [...options.executable_args, ...args],
-				});
-				return yield* Effect.all(
-					[
-						read_bounded(handle.Stdout, options.max_stdout_bytes),
-						read_bounded(handle.Stderr, options.max_stderr_bytes),
-						handle.Exit,
-					],
-					{ concurrency: "unbounded" },
-				).pipe(
-					Effect.ensuring(handle.Close),
-					Effect.timeoutOrElse({
-						duration: timeout_ms,
-						orElse: () =>
-							Effect.fail(
-								new EngineProbeTimeoutError({
-									engine_id: "claude",
-									phase: args[0] === "auth" ? "authentication" : "version",
-									timeout_ms,
-								}),
-							),
-					}),
-				);
-			}),
-		);
+		RunClaudeCli(factory, options, args, timeout_ms);
 
 	return Effect.gen(function* () {
 		const [version_stdout, version_stderr, version_exit] = yield* run(
@@ -117,29 +168,13 @@ export function MakeClaudeProbe(
 					message: "Claude --version did not contain a semantic version",
 				}),
 			);
-		const [auth_stdout, auth_stderr, auth_exit] = yield* run(
-			["auth", "status"],
-			options.auth_timeout_ms,
-		);
-		const auth_status = Schema.decodeUnknownOption(
-			Schema.fromJsonString(Schema.Struct({ loggedIn: Schema.Boolean })),
-		)(new TextDecoder().decode(auth_stdout));
-		const unknown = auth_status._tag === "None" || auth_exit.code !== 0;
-		const authenticated = !unknown && auth_status._tag === "Some" && auth_status.value.loggedIn;
-		const authentication = unknown
-			? {
-					reason:
-						new TextDecoder().decode(auth_stderr).trim() ||
-						"Claude auth status is unavailable",
-					state: "unknown" as const,
-				}
-			: { state: authenticated ? ("authenticated" as const) : ("unauthenticated" as const) };
+		const authentication = yield* ReadClaudeAuthentication(factory, options);
 		return {
 			authentication,
 			capabilities: options.descriptor.capabilities,
 			descriptor: options.descriptor,
 			metadata: {},
-			ready: authenticated,
+			ready: authentication.state === "authenticated",
 			version,
 		};
 	});

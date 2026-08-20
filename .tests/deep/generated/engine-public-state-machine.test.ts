@@ -72,7 +72,6 @@ describe("generated public engine state machine", () => {
 		for (const seed of [1, 7, 19, 43, 97, 211, 503, 997]) {
 			let cleanup_count = 0;
 			const engine = make_fake_engine({
-				event_capacity: 64,
 				on_cleanup: () => {
 					cleanup_count += 1;
 				},
@@ -150,7 +149,6 @@ describe("generated public engine state machine", () => {
 					Effect.gen(function* () {
 						const buffer = yield* MakeEngineEventBuffer({
 							artisan_run_id: `generated-buffer-${seed}`,
-							capacity: 64,
 							CloseResource: Effect.sync(() => {
 								cleanup_count += 1;
 							}),

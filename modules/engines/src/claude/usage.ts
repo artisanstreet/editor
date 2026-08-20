@@ -224,6 +224,15 @@ export function MakeClaudeUsage(
 				args: [...(options.executable_args ?? []), ...claude_cli_usage_args],
 				command: options.executable ?? "claude",
 			});
+
+			/**
+			 * `-p` reads the prompt from stdin, so a pipe left open costs this read a
+			 * flat three seconds — the CLI's grace period before it gives up waiting
+			 * and proceeds ("no stdin data received in 3s"). The slash command is
+			 * already in argv and there is nothing to send, so EOF goes immediately.
+			 */
+			yield* handle.EndInput;
+
 			const [stdout, , exit] = yield* Effect.all(
 				[
 					ReadBounded(handle.Stdout, claude_cli_usage_max_bytes),

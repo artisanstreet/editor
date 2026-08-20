@@ -40,12 +40,9 @@ import {
 } from "./jsonl";
 import { CodexProcessFactory, type CodexProcessSpawnInput } from "./process";
 
-/** Configures one scoped Codex app-server process and its bounded transport buffers. @since 0.3.0 */
+/** Configures one scoped Codex app-server process and its transport framing. @since 0.3.0 */
 export interface CodexAppServerSessionOptions {
-	readonly diagnostic_capacity?: number;
 	readonly max_frame_bytes?: number;
-	readonly notification_capacity?: number;
-	readonly notification_ingress_warning_threshold?: number;
 	readonly request_timeout_ms?: number;
 	readonly spawn: CodexProcessSpawnInput;
 }
@@ -70,7 +67,7 @@ export interface CodexAppServerNotification {
 	readonly raw_frame_base64: string;
 }
 
-/** Captures bounded process and protocol diagnostics independently from control frames. @since 0.3.0 */
+/** Captures process and protocol diagnostics independently from control frames. @since 0.3.0 */
 export interface CodexAppServerDiagnostic {
 	readonly frame_sequence?: number;
 	readonly level: "error" | "info" | "warning";
@@ -184,7 +181,7 @@ function ValidatePositiveOption(option: string, value: number) {
  * correlated JSON-RPC requests. The process is finalized with its parent scope.
  *
  * @since 0.3.0
- * @param options - Spawn input plus bounded buffer capacities and request deadline.
+ * @param options - Spawn input plus frame and request limits.
  * @returns A live app-server session backed by exactly one child process.
  */
 export const open_codex_app_server_session = (
@@ -194,42 +191,21 @@ export const open_codex_app_server_session = (
 	CodexAppServerConfigurationError | EngineProcessError,
 	CodexProcessFactory | Scope.Scope
 > => {
-	const diagnostic_capacity = options.diagnostic_capacity ?? 128;
 	const max_frame_bytes = options.max_frame_bytes ?? 8 * 1_024 * 1_024;
-	const notification_capacity = options.notification_capacity ?? 128;
-	/**
-	 * The ingress queue isolates stdout framing and JSON-RPC response correlation
-	 * from a temporarily slow notification consumer. It is intentionally
-	 * unbounded: connection-level notification bursts must not terminate an
-	 * active run or discard its lifecycle frames.
-	 */
-	const notification_ingress_warning_threshold =
-		options.notification_ingress_warning_threshold ?? 1_024;
 	const request_timeout_ms = options.request_timeout_ms ?? 10_000;
 
 	return Effect.gen(function* () {
-		yield* ValidatePositiveOption("diagnostic_capacity", diagnostic_capacity);
 		yield* ValidatePositiveOption("max_frame_bytes", max_frame_bytes);
-		yield* ValidatePositiveOption("notification_capacity", notification_capacity);
-		yield* ValidatePositiveOption(
-			"notification_ingress_warning_threshold",
-			notification_ingress_warning_threshold,
-		);
 		yield* ValidatePositiveOption("request_timeout_ms", request_timeout_ms);
 
 		const factory = yield* CodexProcessFactory;
 		const handle = yield* factory.Spawn(options.spawn);
-		/** New causal failures displace stale diagnostics when the bounded queue is full. */
-		const diagnostics = yield* Queue.sliding<CodexAppServerDiagnostic, Cause.Done>(
-			diagnostic_capacity,
-		);
+		const diagnostics = yield* Queue.unbounded<CodexAppServerDiagnostic, Cause.Done>();
 		const notification_ingress = yield* Queue.unbounded<
 			CodexAppServerNotification,
 			Cause.Done
 		>();
-		const notifications = yield* Queue.bounded<CodexAppServerNotification, Cause.Done>(
-			notification_capacity,
-		);
+		const notifications = yield* Queue.unbounded<CodexAppServerNotification, Cause.Done>();
 		const close_complete = yield* Deferred.make<void>();
 		const stdout_drained = yield* Deferred.make<
 			void,
@@ -242,8 +218,6 @@ export const open_codex_app_server_session = (
 			next_request_id: 0,
 			pending: new Map(),
 		});
-		const notification_ingress_warned = yield* Ref.make(false);
-		const notification_ingress_monitor_lock = yield* Semaphore.make(1);
 		const write_lock = yield* Semaphore.make(1);
 
 		const OfferDiagnostic = (diagnostic: CodexAppServerDiagnostic) =>
@@ -390,30 +364,7 @@ export const open_codex_app_server_session = (
 					return;
 				}
 
-				yield* Semaphore.withPermit(notification_ingress_monitor_lock)(
-					Effect.gen(function* () {
-						yield* Queue.offer(notification_ingress, notification);
-						const depth = yield* Queue.size(notification_ingress);
-						const reached_warning = yield* Ref.modify(
-							notification_ingress_warned,
-							(warned) => {
-								const next_warned =
-									warned || depth > notification_ingress_warning_threshold;
-
-								return [!warned && next_warned, next_warned] as const;
-							},
-						);
-
-						if (reached_warning) {
-							yield* EmitDiagnostic({
-								frame_sequence: notification.frame_sequence,
-								level: "warning",
-								message: `Codex notification ingress exceeded warning threshold ${notification_ingress_warning_threshold}; retaining notifications`,
-								source: "stdout",
-							});
-						}
-					}),
-				);
+				yield* Queue.offer(notification_ingress, notification);
 			});
 		const ProcessFrame = (frame: CodexJsonlFrame, frame_sequence: number) =>
 			Effect.gen(function* () {
@@ -507,33 +458,7 @@ export const open_codex_app_server_session = (
 		);
 		const DeliverNotifications = Stream.fromQueue(notification_ingress).pipe(
 			Stream.runForEach((notification) =>
-				Effect.gen(function* () {
-					yield* Semaphore.withPermit(notification_ingress_monitor_lock)(
-						Effect.gen(function* () {
-							const depth = yield* Queue.size(notification_ingress);
-							const recovered = yield* Ref.modify(
-								notification_ingress_warned,
-								(warned) => {
-									const next_warned =
-										warned && depth > notification_ingress_warning_threshold;
-
-									return [warned && !next_warned, next_warned] as const;
-								},
-							);
-
-							if (recovered) {
-								yield* EmitDiagnostic({
-									frame_sequence: notification.frame_sequence,
-									level: "info",
-									message: `Codex notification ingress recovered at or below warning threshold ${notification_ingress_warning_threshold}`,
-									source: "stdout",
-								});
-							}
-						}),
-					);
-
-					yield* Queue.offer(notifications, notification).pipe(Effect.asVoid);
-				}),
+				Queue.offer(notifications, notification).pipe(Effect.asVoid),
 			),
 			Effect.ensuring(Queue.end(notifications)),
 		);

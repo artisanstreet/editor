@@ -1,5 +1,6 @@
 import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { isSea } from "node:sea";
 import { fileURLToPath } from "node:url";
 
@@ -28,6 +29,13 @@ export interface EngineProcessSpawnInput {
 	readonly command: string;
 	readonly cwd?: string;
 	readonly env?: NodeJS.ProcessEnv;
+	/**
+	 * Selects the account home this process runs against. Absent means the
+	 * engine's default profile, so callers that predate multiple accounts keep
+	 * their behaviour. Consumed by the spawn override, not by the OS spawn.
+	 * @since 0.5.0
+	 */
+	readonly profile_id?: string;
 }
 
 /** Owns byte streams and lifecycle controls for one spawned engine process. @since 0.4.0 */
@@ -479,6 +487,44 @@ function spawn_posix_process(input: EngineProcessSpawnInput): OwnedEngineProcess
 	};
 }
 
+/**
+ * Stable public error identifier for a spawn rejected before any process ran.
+ * A wire-level value rather than a catalog import: engines classifies native
+ * failures before any catalog or presentation layer exists, and the catalog
+ * owns the human-readable definition for the same stable value.
+ */
+export const engine_process_working_directory_missing_code = "AE-CLIENT_STATE-107";
+
+/**
+ * Refuses a spawn whose working directory does not exist, as its own
+ * classified failure. The OS reports that spawn as an opaque instant death —
+ * on Windows the process host fails before the CLI even runs — which settles
+ * into the transcript as a generic startup failure the user retries forever.
+ * Naming the actual fault turns that loop into one actionable card: the
+ * folder is gone; restore it or repoint the thread.
+ */
+const EnsureSpawnWorkingDirectory = (input: EngineProcessSpawnInput) =>
+	Effect.gen(function* () {
+		if (input.cwd === undefined) return;
+		const cwd = input.cwd;
+		const exists = yield* Effect.sync(() => {
+			try {
+				return statSync(cwd).isDirectory();
+			} catch {
+				return false;
+			}
+		});
+		if (!exists) {
+			return yield* Effect.fail(
+				new EngineProcessError({
+					artisan_code: engine_process_working_directory_missing_code,
+					cause: new Error(`Working directory does not exist: ${cwd}`),
+					operation: "spawn",
+				}),
+			);
+		}
+	});
+
 /** Provides the Node child-process implementation used by all CLI engines. @since 0.4.0 */
 export const EngineProcessFactoryLayer = Layer.effect(
 	EngineProcessFactory,
@@ -488,6 +534,7 @@ export const EngineProcessFactoryLayer = Layer.effect(
 		return {
 			Spawn: (input) =>
 				Effect.gen(function* () {
+					yield* EnsureSpawnWorkingDirectory(input);
 					const claim_token = yield* environment.MakeClaimToken;
 					const AcquireOwned =
 						environment.platform === "win32"

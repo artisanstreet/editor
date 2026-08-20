@@ -12,7 +12,7 @@ export const CodexTransportMetadata = {
 /**
  * Notifications Artisan deliberately does not project into a run. Opting out
  * at the native boundary prevents app-scoped MCP and remote-control churn from
- * occupying the bounded run transport before a consumer is attached.
+ * occupying the run observation stream before a consumer is attached.
  *
  * @since 0.7.0
  */
@@ -254,7 +254,7 @@ export class CodexAppServerProtocolError extends Data.TaggedError("CodexAppServe
 	readonly message: string;
 }> {}
 
-/** Reports invalid bounded transport settings before a session opens. @since 0.3.0 */
+/** Reports invalid transport settings before a session opens. @since 0.3.0 */
 export class CodexAppServerConfigurationError extends Data.TaggedError(
 	"CodexAppServerConfigurationError",
 )<{

@@ -56,6 +56,24 @@ describe("Claude readiness probe", () => {
 		});
 	});
 
+	/**
+	 * A usage read is gated on auth and nothing else. Running the whole probe for
+	 * it charged a second spawn on `--version`, whose only output is a version
+	 * string this path never reads, and gave that spawn its own timeout budget to
+	 * fail inside — on a deadline every engine refreshes against concurrently.
+	 * A broken `--version` must therefore not be able to break a usage read.
+	 */
+	it("reads usage without spawning the version probe", async () => {
+		process.env.FAKE_CLAUDE_SCENARIO = "version-nonzero";
+		const claude = await engine();
+
+		expect((await Effect.runPromise(Effect.exit(claude.Probe({}))))._tag).toBe("Failure");
+		const usage = await Effect.runPromise(claude.Usage!);
+
+		expect(usage.authentication).toEqual({ state: "authenticated" });
+		expect(usage.windows.map((window) => window.id)).toEqual(["five_hour", "seven_day"]);
+	});
+
 	it("fails missing binaries, nonzero version, bounds, and typed timeouts", async () => {
 		const missing = await Effect.runPromise(
 			Effect.exit((await engine({ executable: "missing-claude-binary" })).Probe({})),

@@ -43,7 +43,6 @@ describe("claude stream-json normalization", () => {
 			claude_hook_started_frame,
 			claude_hook_response_frame,
 			claude_status_frame,
-			claude_thinking_tokens_frame,
 			claude_message_start_frame,
 			claude_content_block_start_frame,
 			claude_signature_delta_frame,
@@ -87,6 +86,29 @@ describe("claude stream-json normalization", () => {
 			delta: "The user has sent",
 			summary_index: 0,
 		});
+	});
+
+	it("carries the thinking-token estimate on the reasoning item the deltas would open", () => {
+		const message_id = read_claude_stream_message_id(claude_message_start_frame);
+		if (message_id === undefined) throw new Error("message_start must announce an id");
+		const [delta] = normalize(claude_thinking_delta_frame, { stream_message_id: message_id });
+		const observations = normalize(claude_thinking_tokens_frame, {
+			stream_message_id: message_id,
+		});
+
+		expect(observations).toEqual([
+			expect.objectContaining({
+				_tag: "reasoning_summary_delta",
+				delta: "",
+				item_id: (delta as { item_id: string }).item_id,
+				summary_index: 0,
+				thinking_tokens: 28,
+				turn_id: "claude:run_1:turn",
+			}),
+		]);
+		expect(normalize({ ...claude_thinking_tokens_frame, estimated_tokens: undefined })).toEqual(
+			[],
+		);
 	});
 
 	it("correlates streamed text and its completion onto one item", () => {

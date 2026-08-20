@@ -12,8 +12,6 @@ import {
 import { claude_protocol_version, claude_transport } from "./descriptor";
 import { ResolveClaudeChildTranscriptOwner, type ClaudeTaskLineageState } from "./task-lineage";
 
-const max_deferred_child_frames = 128;
-
 interface DeferredChildFrame {
 	readonly frame_sequence: number;
 	readonly message: unknown;
@@ -25,7 +23,7 @@ interface ChildStream {
 	readonly tool_uses: ReadonlyMap<string, ClaudeToolUse>;
 }
 
-/** Run-owned bounded correlation state for multiplexed Claude child streams. */
+/** Run-owned correlation state for multiplexed Claude child streams. */
 export interface ClaudeChildTranscriptState {
 	readonly deferred: ReadonlyArray<DeferredChildFrame>;
 	readonly streams: ReadonlyMap<string, ChildStream>;
@@ -99,7 +97,7 @@ export function AdvanceClaudeChildTranscripts(input: ClaudeChildTranscriptInput)
 						parent_tool_use_id: input.parent_tool_use_id,
 					},
 				]),
-	].slice(-max_deferred_child_frames);
+	];
 	const streams = new Map(input.state.streams);
 	const pending: Array<DeferredChildFrame> = [];
 	const observations: Array<EngineObservation> = [];

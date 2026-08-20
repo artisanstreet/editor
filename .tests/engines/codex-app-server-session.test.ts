@@ -15,10 +15,7 @@ interface CircularValue {
 
 function make_session(
 	options: {
-		readonly diagnostic_capacity?: number;
 		readonly max_frame_bytes?: number;
-		readonly notification_capacity?: number;
-		readonly notification_ingress_warning_threshold?: number;
 		readonly request_timeout_ms?: number;
 	} = {},
 ) {
@@ -143,10 +140,7 @@ describe("Codex app-server session", () => {
 		const result = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const session = yield* make_session({
-						notification_capacity: 1,
-						notification_ingress_warning_threshold: 2,
-					});
+					const session = yield* make_session();
 					const initialized = yield* session.Handshake({
 						client_name: "artisan-test",
 						client_version: "0.3.0",
@@ -186,19 +180,11 @@ describe("Codex app-server session", () => {
 		});
 	});
 
-	it("retains a critical notification behind more than 1,024 streamed deltas", async () => {
+	it("retains a critical notification behind a large streamed burst", async () => {
 		const result = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const session = yield* make_session({ notification_capacity: 1 });
-					const diagnostic_fiber = yield* session.Diagnostics.pipe(
-						Stream.filter((diagnostic) =>
-							diagnostic.message.includes("warning threshold"),
-						),
-						Stream.take(1),
-						Stream.runCollect,
-						Effect.forkChild,
-					);
+					const session = yield* make_session();
 					const response = yield* session.Request(
 						"scenario/lossyThenCriticalNotificationFlood",
 						{ count: 1_200 },
@@ -210,7 +196,6 @@ describe("Codex app-server session", () => {
 					const follow_up = yield* session.Request("scenario/inspect", {});
 
 					return {
-						diagnostics: [...(yield* Fiber.join(diagnostic_fiber))],
 						follow_up,
 						notifications: [...notifications],
 						response,
@@ -228,14 +213,6 @@ describe("Codex app-server session", () => {
 		).toHaveLength(1_200);
 		expect(result.notifications.at(-1)).toMatchObject({ method: "turn/completed" });
 		expect(result.follow_up.result).toMatchObject({ received: expect.any(Array) });
-		expect(result.diagnostics).toMatchObject([
-			{
-				level: "warning",
-				message:
-					"Codex notification ingress exceeded warning threshold 1024; retaining notifications",
-				source: "stdout",
-			},
-		]);
 	});
 
 	it("serializes concurrent writes and correlates out-of-order responses with unique ids", async () => {
@@ -269,14 +246,11 @@ describe("Codex app-server session", () => {
 		});
 	});
 
-	it("correlates a response after notifications backpressure the consumer queue", async () => {
+	it("correlates a response without a notification consumer", async () => {
 		const response = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const session = yield* make_session({
-						notification_capacity: 1,
-						notification_ingress_warning_threshold: 16,
-					});
+					const session = yield* make_session();
 
 					return yield* session.Request("scenario/notificationFlood", { count: 8 });
 				}).pipe(Effect.provide(CodexProcessFactoryLive)),
@@ -290,7 +264,7 @@ describe("Codex app-server session", () => {
 		const response = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const session = yield* make_session({ notification_capacity: 1 });
+					const session = yield* make_session();
 
 					return yield* session.Request("scenario/notificationFlood", { count: 600 });
 				}).pipe(Effect.provide(CodexProcessFactoryLive)),
@@ -330,14 +304,11 @@ describe("Codex app-server session", () => {
 		]);
 	});
 
-	it("finalizes when the downstream notification queue is full and unconsumed", async () => {
+	it("finalizes with an unconsumed notification burst", async () => {
 		const finalized = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const session = yield* make_session({
-						notification_capacity: 1,
-						notification_ingress_warning_threshold: 16,
-					});
+					const session = yield* make_session();
 
 					yield* session.Request("scenario/notificationFlood", { count: 8 });
 				}),
@@ -354,22 +325,11 @@ describe("Codex app-server session", () => {
 		expect(finalized).toBe(true);
 	});
 
-	it("retains notifications after crossing the ingress warning threshold", async () => {
+	it("retains notifications without a consumer until they are read", async () => {
 		const result = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const session = yield* make_session({
-						notification_capacity: 1,
-						notification_ingress_warning_threshold: 2,
-					});
-					const diagnostic_fiber = yield* Stream.runCollect(
-						session.Diagnostics.pipe(
-							Stream.filter((diagnostic) =>
-								diagnostic.message.includes("warning threshold"),
-							),
-							Stream.take(1),
-						),
-					).pipe(Effect.forkChild);
+					const session = yield* make_session();
 					const response = yield* session.Request("scenario/lossyNotificationFlood", {
 						count: 100,
 					});
@@ -380,7 +340,6 @@ describe("Codex app-server session", () => {
 					const follow_up = yield* session.Request("scenario/inspect", {});
 
 					return {
-						diagnostics: [...(yield* Fiber.join(diagnostic_fiber))],
 						follow_up,
 						notifications: [...notifications],
 						response,
@@ -392,48 +351,6 @@ describe("Codex app-server session", () => {
 		expect(result.response.result).toEqual({ count: 100 });
 		expect(result.notifications).toHaveLength(100);
 		expect(result.follow_up.result).toMatchObject({ received: expect.any(Array) });
-		expect(result.diagnostics).toMatchObject([
-			{
-				level: "warning",
-				message:
-					"Codex notification ingress exceeded warning threshold 2; retaining notifications",
-				source: "stdout",
-			},
-		]);
-	});
-
-	it("reports recovery once ingress drains below its warning threshold", async () => {
-		const result = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const session = yield* make_session({
-						notification_capacity: 1,
-						notification_ingress_warning_threshold: 2,
-					});
-					const recovery_fiber = yield* Stream.runCollect(
-						session.Diagnostics.pipe(
-							Stream.filter((diagnostic) => diagnostic.message.includes("recovered")),
-							Stream.take(1),
-						),
-					).pipe(Effect.forkChild);
-
-					yield* session.Request("scenario/lossyNotificationFlood", { count: 10 });
-					/** Draining buffered notifications frees ingress capacity again. */
-					yield* Stream.runCollect(session.Notifications.pipe(Stream.take(10)));
-					yield* session.Request("scenario/additiveNotification", {});
-
-					return { diagnostics: [...(yield* Fiber.join(recovery_fiber))] };
-				}).pipe(Effect.provide(CodexProcessFactoryLive)),
-			),
-		);
-
-		expect(result.diagnostics).toMatchObject([
-			{
-				level: "info",
-				message: "Codex notification ingress recovered at or below warning threshold 2",
-				source: "stdout",
-			},
-		]);
 	});
 
 	it("recovers after malformed JSONL and sequences every complete frame", async () => {
@@ -605,7 +522,7 @@ describe("Codex app-server session", () => {
 		const response = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const session = yield* make_session({ diagnostic_capacity: 2 });
+					const session = yield* make_session();
 
 					return yield* session.Request("scenario/stderr", {}, 2_000);
 				}).pipe(Effect.provide(CodexProcessFactoryLive)),

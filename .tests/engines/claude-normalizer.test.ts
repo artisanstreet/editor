@@ -279,6 +279,86 @@ describe("Claude normalization", () => {
 		]);
 	});
 
+	/**
+	 * Claude Code encrypts its reasoning. A live 2.1.220 stream opens a thinking
+	 * block, sends every `thinking_delta` with `thinking: ""`, and settles it
+	 * with a signature and no text — so there is no summary to forward, and a
+	 * delta that forwards the emptiness opens a reasoning row with nothing in it
+	 * and nothing ever to put there.
+	 */
+	it("forwards no reasoning for a thinking delta that carries none", () => {
+		expect(
+			normalize_claude_event(
+				input({
+					type: "stream_event",
+					event: {
+						type: "content_block_delta",
+						index: 0,
+						delta: { type: "thinking_delta", thinking: "", estimated_tokens: 50 },
+					},
+				}),
+			),
+		).toEqual([]);
+	});
+
+	it("still forwards a thinking delta that does carry text", () => {
+		const events = normalize_claude_event(
+			input({
+				type: "stream_event",
+				event: {
+					type: "content_block_delta",
+					index: 0,
+					delta: { type: "thinking_delta", thinking: "Weighing two readings" },
+				},
+			}),
+		);
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				_tag: "reasoning_summary_delta",
+				delta: "Weighing two readings",
+			}),
+		]);
+	});
+
+	/**
+	 * The exact envelope Claude Code 2.1.220 writes: snake outside, camel within.
+	 * Declaring one convention throughout read every count as absent, which left
+	 * the gauge showing the pre-compaction reading — a million tokens, on a
+	 * window that had just been emptied — until some later turn happened to
+	 * report usage.
+	 */
+	it("reads a live boundary's camelCase measurements", () => {
+		const events = normalize_claude_event(
+			input({
+				type: "system",
+				subtype: "compact_boundary",
+				uuid: "boundary-live",
+				session_id: "session",
+				compactMetadata: {
+					trigger: "auto",
+					preTokens: 1_000_564,
+					postTokens: 12_345,
+					durationMs: 133_291,
+				},
+			}),
+		);
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				_tag: "compaction",
+				compaction_id: "boundary-live",
+				duration_ms: 133_291,
+				state: "completed",
+			}),
+			expect.objectContaining({
+				_tag: "usage",
+				basis: "cumulative",
+				context_tokens: 12_345,
+			}),
+		]);
+	});
+
 	/** Recognition must not hinge on metadata internals the protocol may reshape. */
 	it("captures a compact boundary whose metadata is missing or differently spelled", () => {
 		const bare = normalize_claude_event(

@@ -5,6 +5,10 @@ import {
 	EmptyClaudeTaskLineage,
 	ResolveClaudeChildTranscriptOwner,
 } from "../../modules/engines/src/claude/task-lineage";
+import {
+	AdvanceClaudeChildTranscripts,
+	EmptyClaudeChildTranscripts,
+} from "../../modules/engines/src/claude/child-transcripts";
 
 const root = "claude-session";
 const lifecycle = (overrides: {
@@ -127,5 +131,29 @@ describe("Claude task lineage", () => {
 		});
 
 		expect(state.subagent_task_ids).toContain("remote-agent");
+	});
+
+	it("retains every deferred child frame until its owner is known", () => {
+		const lineage = EmptyClaudeTaskLineage();
+		let state = EmptyClaudeChildTranscripts();
+
+		for (let index = 0; index < 129; index += 1) {
+			state = AdvanceClaudeChildTranscripts({
+				base: {
+					artisan_run_id: "run",
+					protocol_version: "v1",
+					raw_frame_base64: "e30=",
+					transport: "stdio-jsonl",
+					turn_id: "turn",
+				},
+				frame_sequence: index,
+				lineage,
+				message: { type: "assistant" },
+				parent_tool_use_id: "not-yet-announced",
+				state,
+			}).state;
+		}
+
+		expect(state.deferred).toHaveLength(129);
 	});
 });

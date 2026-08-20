@@ -40,13 +40,8 @@ afterEach(() => {
 	}
 });
 
-function make_layer(
-	options: {
-		readonly event_capacity?: number;
-	} = {},
-) {
+function make_layer() {
 	return make_codex_engine_layer({
-		...options,
 		executable: process.execPath,
 		executable_args: [fixture_path],
 	}).pipe(Layer.provide(CodexProcessFactoryLive));
@@ -926,7 +921,7 @@ describe("Codex engine run", () => {
 					const engine = yield* CodexEngine;
 					const run = yield* engine.Open({
 						_tag: "start",
-						artisan_run_id: "run-backpressure",
+						artisan_run_id: "run-event-flood",
 						initial_text: "Flood",
 						working_directory: "C:\\workspace",
 					});
@@ -938,7 +933,7 @@ describe("Codex engine run", () => {
 
 					return { events: [...events], terminal };
 				}),
-			).pipe(Effect.provide(make_layer({ event_capacity: 4 }))),
+			).pipe(Effect.provide(make_layer())),
 		);
 
 		expect(result.terminal).toBe("completed");
@@ -946,7 +941,7 @@ describe("Codex engine run", () => {
 		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "completed" })]);
 	});
 
-	it("keeps 1,200 private reasoning deltas outside the bounded event buffer", async () => {
+	it("keeps 1,200 private reasoning deltas outside the public event stream", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "private-reasoning-flood";
 
 		const result = await Effect.runPromise(
@@ -966,7 +961,7 @@ describe("Codex engine run", () => {
 
 					return { events: [...events], terminal: yield* run.Closed };
 				}),
-			).pipe(Effect.provide(make_layer({ event_capacity: 4 }))),
+			).pipe(Effect.provide(make_layer())),
 		);
 
 		expect(result.terminal).toBe("completed");
@@ -1007,7 +1002,6 @@ describe("Codex engine run", () => {
 						BeforeFinish: Deferred.succeed(finish_started, undefined).pipe(
 							Effect.asVoid,
 						),
-						capacity: 4,
 						CloseSession: Ref.update(close_count, (count) => count + 1),
 					});
 					const events_fiber = yield* buffer.Events.pipe(
@@ -1069,36 +1063,10 @@ describe("Codex engine run", () => {
 			expect(result.events.map((event) => event.sequence)).toEqual([1, 2]);
 			expect(terminal_events).toEqual([expect.objectContaining({ state: terminal_state })]);
 			expect(result.events.at(-1)).toEqual(terminal_events[0]);
-			expect(Exit.isFailure(result.late_emit)).toBe(true);
+			expect(Exit.isSuccess(result.late_emit)).toBe(true);
 			expect(result.close_count).toBe(1);
 		},
 	);
-
-	it("rejects invalid event capacity before spawning Codex", async () => {
-		const exit = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const engine = yield* CodexEngine;
-
-					return yield* engine
-						.Open({
-							_tag: "start",
-							artisan_run_id: "run-invalid-capacity",
-							initial_text: "No spawn",
-							working_directory: "C:\\workspace",
-						})
-						.pipe(Effect.exit);
-				}),
-			).pipe(Effect.provide(make_layer({ event_capacity: 0 }))),
-		);
-		const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
-
-		expect(error).toMatchObject({
-			_tag: "EngineConfigurationError",
-			option: "event_capacity",
-			value: 0,
-		});
-	});
 
 	it("emits one closed terminal and kills the child when its owning scope closes", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "artisan-engine-"));

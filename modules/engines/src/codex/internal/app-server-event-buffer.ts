@@ -9,7 +9,6 @@ export interface CodexAppServerEventBufferOptions {
 	readonly artisan_run_id: string;
 	readonly BeforeEnqueue?: (observation: EngineObservation) => Effect.Effect<void>;
 	readonly BeforeFinish?: Effect.Effect<void>;
-	readonly capacity: number;
 	readonly CloseSession: Effect.Effect<void>;
 }
 
@@ -19,7 +18,6 @@ export function MakeCodexAppServerEventBuffer(options: CodexAppServerEventBuffer
 		artisan_run_id: options.artisan_run_id,
 		...(options.BeforeEnqueue === undefined ? {} : { BeforeEnqueue: options.BeforeEnqueue }),
 		...(options.BeforeFinish === undefined ? {} : { BeforeFinish: options.BeforeFinish }),
-		capacity: options.capacity,
 		CloseResource: options.CloseSession,
 		make_terminal_observation: (terminal_state: EngineRunTerminalState, sequence: number) => ({
 			_tag: "run_terminal",

@@ -36,8 +36,8 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 		},
 		probe: { state: "supported", reason: "Only --version and auth status are probed." },
 		question: {
-			state: "unsupported",
-			reason: "AskUserQuestion dialogs are not yet canonicalized.",
+			state: "supported",
+			reason: "AskUserQuestion permission requests are canonicalized and answered in place.",
 		},
 		raw_frames: { state: "supported" },
 		resume: { state: "supported" },

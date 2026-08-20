@@ -70,13 +70,35 @@ const RetrySchema = Schema.Struct({
  * and requiring any particular metadata internals is what silently dropped
  * every compaction before — the schema demanded `compactMetadata` while the
  * current CLI stream spells it `compact_metadata`.
+ *
+ * The envelope and its contents disagree about casing, and each spelling is
+ * accepted on both sides for the same reason. A live 2.1.220 boundary carries
+ * `compactMetadata: { preTokens, postTokens, durationMs }` — snake outside,
+ * camel within — so declaring one convention throughout silently read every
+ * token count as absent, and an absent `post_tokens` is what left the context
+ * gauge showing the pre-compaction reading until the next response happened
+ * to report usage.
  */
 const CompactionMetadataSchema = Schema.Struct({
 	trigger: Schema.optional(Schema.String),
 	pre_tokens: Schema.optional(TokenCount),
+	preTokens: Schema.optional(TokenCount),
 	/** The tokens the summarized history occupies after the boundary. */
 	post_tokens: Schema.optional(TokenCount),
+	postTokens: Schema.optional(TokenCount),
+	/** How long the compaction held the stream silent, which nothing else reports. */
+	duration_ms: Schema.optional(Schema.Number),
+	durationMs: Schema.optional(Schema.Number),
 });
+
+type ClaudeCompactionMetadata = typeof CompactionMetadataSchema.Type;
+
+/** Reads one compaction measurement across both spellings the CLI has used. */
+const compaction_post_tokens = (metadata: ClaudeCompactionMetadata | undefined) =>
+	metadata?.post_tokens ?? metadata?.postTokens;
+
+const compaction_duration_ms = (metadata: ClaudeCompactionMetadata | undefined) =>
+	metadata?.duration_ms ?? metadata?.durationMs;
 const CompactBoundarySchema = Schema.Struct({
 	type: Schema.Literal("system"),
 	subtype: Schema.Literal("compact_boundary"),
@@ -101,6 +123,13 @@ const DeltaSchema = Schema.Struct({
  * Claude streams private reasoning as `thinking_delta` blocks. Only the
  * provider-authored summary text travels onward; the canonical reasoning
  * observation is what the renderer shows while a turn is still thinking.
+ *
+ * On the current CLI that text is never present. A live 2.1.220 stream opens
+ * `content_block_start` with `{type: "thinking", thinking: "", signature: ""}`,
+ * sends every `thinking_delta` with `thinking: ""`, and settles the block with
+ * a signature and no text — the reasoning is encrypted, not summarized, so
+ * there is nothing to forward. The shape is kept because an engine that does
+ * send text must still be carried.
  */
 const ThinkingDeltaSchema = Schema.Struct({
 	type: Schema.Literal("stream_event"),
@@ -112,6 +141,19 @@ const ThinkingDeltaSchema = Schema.Struct({
 			thinking: Schema.String,
 		}),
 	}),
+});
+/**
+ * The CLI's running estimate of how much thinking this turn has done.
+ *
+ * It is the only live evidence of reasoning Claude publishes, since the text
+ * itself never arrives. `estimated_tokens` is cumulative for the turn and
+ * `estimated_tokens_delta` is the step, so the cumulative value is what a
+ * reader wants and a replayed frame cannot double-count it.
+ */
+const ThinkingTokensSchema = Schema.Struct({
+	type: Schema.Literal("system"),
+	subtype: Schema.Literal("thinking_tokens"),
+	estimated_tokens: Schema.optional(TokenCount),
 });
 /** Announces the native message id every subsequent delta belongs to. */
 const MessageStartSchema = Schema.Struct({
@@ -305,12 +347,7 @@ export function read_claude_tool_uses(payload: unknown): ReadonlyArray<ClaudeToo
  * already retained verbatim as raw provenance, so re-emitting these as
  * canonical observations would only bury real diagnostics in noise.
  */
-const silent_system_subtypes = new Set([
-	"hook_started",
-	"hook_response",
-	"status",
-	"thinking_tokens",
-]);
+const silent_system_subtypes = new Set(["hook_started", "hook_response", "status"]);
 const silent_stream_events = new Set([
 	"message_start",
 	"message_delta",
@@ -612,6 +649,11 @@ function tool_observation(
 			_tag: "terminal_activity",
 			activity_id: tool.id,
 			...(input_value?.command === undefined ? {} : { command: input_value.command }),
+			/**
+			 * Which tool ran it is the only evidence of which interpreter the text
+			 * was written for; nothing downstream can recover it from the command.
+			 */
+			shell: name === "PowerShell" ? "pwsh" : "bash",
 			state:
 				action === "failed" ? "failed" : action === "completed" ? "completed" : "started",
 		} satisfies EngineTerminalActivityObservation;
@@ -712,6 +754,8 @@ export function normalize_claude_event(
 	if (compact_boundary !== undefined) {
 		const base = make_base(input, "system.compact_boundary", "compact_boundary");
 		const metadata = compact_boundary.compact_metadata ?? compact_boundary.compactMetadata;
+		const duration_ms = compaction_duration_ms(metadata);
+		const post_tokens = compaction_post_tokens(metadata);
 		const observations: Array<EngineObservation> = [
 			{
 				...base,
@@ -719,6 +763,9 @@ export function normalize_claude_event(
 				...(compact_boundary.uuid === undefined
 					? {}
 					: { compaction_id: compact_boundary.uuid }),
+				...(duration_ms === undefined || !Number.isFinite(duration_ms) || duration_ms < 0
+					? {}
+					: { duration_ms }),
 				raw: {
 					...base.raw,
 					...(compact_boundary.uuid === undefined
@@ -734,12 +781,12 @@ export function normalize_claude_event(
 		 * instead of leaving the pre-compaction reading standing until the next
 		 * assistant response happens to report.
 		 */
-		if (metadata?.post_tokens !== undefined) {
+		if (post_tokens !== undefined) {
 			observations.push({
 				...make_base(input, "system.compact_boundary", "compact_usage"),
 				_tag: "usage",
 				basis: "cumulative",
-				context_tokens: metadata.post_tokens,
+				context_tokens: post_tokens,
 				turn_id: input.turn_id,
 			} satisfies EngineUsageObservation);
 		}
@@ -767,7 +814,14 @@ export function normalize_claude_event(
 		];
 
 	const thinking_delta = decode(ThinkingDeltaSchema, input.payload);
-	if (thinking_delta !== undefined)
+	if (thinking_delta !== undefined) {
+		/**
+		 * An empty delta is not a summary of anything. Forwarding one opened a
+		 * reasoning item with no text and nothing ever to put in it — 1,834 of
+		 * them across this database, one per Claude thinking block, each
+		 * rendering as a blank row that claimed the model had said something.
+		 */
+		if (thinking_delta.event.delta.thinking.length === 0) return [];
 		return [
 			{
 				...make_base(input, "stream_event.thinking_delta"),
@@ -778,6 +832,28 @@ export function normalize_claude_event(
 				turn_id: input.turn_id,
 			} satisfies EngineReasoningSummaryDeltaObservation,
 		];
+	}
+
+	/**
+	 * The thinking counter opens the same reasoning item the deltas would have,
+	 * so a turn whose reasoning is encrypted still has one row that says the
+	 * model is working and how hard, rather than nothing until it speaks.
+	 */
+	const thinking_tokens = decode(ThinkingTokensSchema, input.payload);
+	if (thinking_tokens !== undefined) {
+		if (thinking_tokens.estimated_tokens === undefined) return [];
+		return [
+			{
+				...make_base(input, "system.thinking_tokens"),
+				_tag: "reasoning_summary_delta",
+				delta: "",
+				item_id: `${message_item_id(input, undefined)}:reasoning`,
+				summary_index: 0,
+				thinking_tokens: thinking_tokens.estimated_tokens,
+				turn_id: input.turn_id,
+			} satisfies EngineReasoningSummaryDeltaObservation,
+		];
+	}
 
 	const stream_lifecycle = decode(StreamLifecycleSchema, input.payload);
 	if (stream_lifecycle !== undefined && silent_stream_events.has(stream_lifecycle.event.type))

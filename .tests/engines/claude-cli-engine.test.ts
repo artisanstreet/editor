@@ -157,6 +157,133 @@ describe("Claude direct CLI transport", () => {
 		expect(events.at(-1)).toMatchObject({ _tag: "run_terminal", state: "completed" });
 	});
 
+	/**
+	 * A question is not a permission: answering it is the authorization. Routing
+	 * AskUserQuestion through the approval path put a prompt in front of a tool
+	 * that can only ask something, and the CLI then blocked on a terminal dialog
+	 * Artisan never renders — the user cleared a prompt and nothing happened.
+	 */
+	it("canonicalizes AskUserQuestion as answerable questions instead of an approval", async () => {
+		process.env.FAKE_CLAUDE_SCENARIO = "interactive-question";
+		const engine = await GetEngine();
+		const events = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const run = yield* engine.Open({
+						_tag: "start",
+						artisan_run_id: "cli-question",
+						initial_text: "start",
+						working_directory: process.cwd(),
+					});
+					const asked = yield* Deferred.make<void>();
+					const observed = yield* Ref.make<ReadonlyArray<unknown>>([]);
+					const collector = yield* Effect.forkScoped(
+						run.Events.pipe(
+							Stream.runForEach((event) =>
+								Ref.update(observed, (events) => [...events, event]).pipe(
+									Effect.andThen(
+										event._tag === "question" &&
+											event.state === "requested" &&
+											event.question_id === "question-1:1"
+											? Deferred.succeed(asked, undefined)
+											: Effect.void,
+									),
+								),
+							),
+						),
+					);
+					yield* Deferred.await(asked);
+					/**
+					 * Each question is its own card, so answers arrive one at a time.
+					 * The response must not be released until the request's whole group
+					 * is answered — the fixture fails the turn if it is.
+					 */
+					yield* run.Send({
+						_tag: "respond_question",
+						answers: { "question-1:0": ["Effect"] },
+						command_id: "answer-one",
+					});
+					yield* run.Send({
+						_tag: "respond_question",
+						answers: { "question-1:1": ["Desktop", "Web"] },
+						command_id: "answer-two",
+					});
+					yield* Fiber.join(collector);
+					return yield* Ref.get(observed);
+				}),
+			),
+		);
+
+		expect(events).not.toContainEqual(expect.objectContaining({ _tag: "approval" }));
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				_tag: "question",
+				header: "Library",
+				multi_select: false,
+				options: [
+					{ description: "Already in the workspace", label: "Effect" },
+					{ description: "One more dependency", label: "RxJS" },
+				],
+				question_id: "question-1:0",
+				state: "requested",
+				text: "Which library should we use?",
+			}),
+		);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				_tag: "question",
+				multi_select: true,
+				question_id: "question-1:1",
+				state: "requested",
+			}),
+		);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				_tag: "question",
+				answers: ["Desktop", "Web"],
+				question_id: "question-1:1",
+				state: "resolved",
+			}),
+		);
+		/** The fixture only succeeds when both answers arrive in one allow response. */
+		expect(events.at(-1)).toMatchObject({ _tag: "run_terminal", state: "completed" });
+	});
+
+	it("rejects an answer to a question the run never asked", async () => {
+		process.env.FAKE_CLAUDE_SCENARIO = "interactive-question";
+		const engine = await GetEngine();
+		const exit = await Effect.runPromiseExit(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const run = yield* engine.Open({
+						_tag: "start",
+						artisan_run_id: "cli-question-unknown",
+						initial_text: "start",
+						working_directory: process.cwd(),
+					});
+					const asked = yield* Deferred.make<void>();
+					yield* Effect.forkScoped(
+						run.Events.pipe(
+							Stream.runForEach((event) =>
+								event._tag === "question" && event.state === "requested"
+									? Deferred.succeed(asked, undefined)
+									: Effect.void,
+							),
+						),
+					);
+					yield* Deferred.await(asked);
+					return yield* run.Send({
+						_tag: "respond_question",
+						answers: { "question-9:0": ["Effect"] },
+						command_id: "answer-unknown",
+					});
+				}),
+			),
+		);
+
+		expect(Exit.isFailure(exit)).toBe(true);
+	});
+
 	it("writes the exact deny control envelope before accepting further steering", async () => {
 		process.env.FAKE_CLAUDE_SCENARIO = "interactive-deny";
 		const engine = await Effect.runPromise(
@@ -334,6 +461,14 @@ describe("Claude direct CLI transport", () => {
 				expect.arrayContaining([
 					"--session-id",
 					"-p",
+					/**
+					 * A `-p` session is forced to `omitted` unless the flag is explicit,
+					 * which is what made every `thinking_delta` arrive empty beside a
+					 * signature — reasoning nobody had asked for rather than reasoning
+					 * the provider withholds.
+					 */
+					"--thinking-display",
+					"summarized",
 					"--permission-mode",
 					"plan",
 					"--tools",

@@ -121,7 +121,7 @@ describe("Engine conformance", () => {
 		expect(cleanup_count).toBe(1);
 	});
 
-	it("supports resume, cancellation, unsupported commands, backpressure, and scope finalization", async () => {
+	it("supports resume, cancellation, unsupported commands, lossless delivery, and scope finalization", async () => {
 		let cleanup_count = 0;
 		const make_engine = (options?: Parameters<typeof make_fake_engine>[0]) =>
 			make_fake_engine({
@@ -168,55 +168,27 @@ describe("Engine conformance", () => {
 					yield* unsupported_run.Send(EngineTerminalCommandScenarios.close);
 					yield* unsupported_run.Closed;
 
-					const backpressure_engine = make_engine({ event_capacity: 2 });
-					const backpressure_run = yield* backpressure_engine.Open(
-						EngineOpenScenarios.start,
-					);
-					const backpressure = yield* Effect.match(
-						backpressure_run.Send({
-							_tag: "steer",
-							command_id: "command-backpressure",
-							text: "Overflow",
-						}),
-						{
-							onFailure: (error) => error,
-							onSuccess: () => undefined,
-						},
-					);
-
-					expect(backpressure).toMatchObject({
-						_tag: "EngineBackpressureError",
-						capacity: 2,
-					});
-
-					const buffered_open_events = yield* backpressure_run.Events.pipe(
-						Stream.take(2),
-						Stream.runCollect,
-					);
-
-					expect(buffered_open_events.map((event) => event.sequence)).toEqual([1, 2]);
-
-					yield* backpressure_run.Send({
+					const lossless_run = yield* make_engine().Open(EngineOpenScenarios.start);
+					yield* lossless_run.Send({
 						_tag: "steer",
-						command_id: "command-backpressure",
-						text: "Overflow",
+						command_id: "command-lossless",
+						text: "Retain this",
 					});
 
-					const retried_event = yield* backpressure_run.Events.pipe(
-						Stream.take(1),
+					const buffered_open_events = yield* lossless_run.Events.pipe(
+						Stream.take(3),
 						Stream.runCollect,
 					);
 
-					expect(retried_event).toMatchObject([
-						{ _tag: "agent_message_delta", sequence: 3 },
-					]);
+					expect(buffered_open_events.map((event) => event.sequence)).toEqual([1, 2, 3]);
+					expect(buffered_open_events.at(-1)).toMatchObject({
+						_tag: "agent_message_delta",
+					});
 
-					yield* backpressure_run.Send(EngineTerminalCommandScenarios.close);
-					const backpressure_events = yield* backpressure_run.Events.pipe(
-						Stream.runCollect,
-					);
+					yield* lossless_run.Send(EngineTerminalCommandScenarios.close);
+					const lossless_events = yield* lossless_run.Events.pipe(Stream.runCollect);
 
-					expect(terminal_observations(backpressure_events)).toHaveLength(1);
+					expect(terminal_observations(lossless_events)).toHaveLength(1);
 
 					const scoped_engine = make_engine();
 

@@ -518,8 +518,21 @@ export interface EngineRunTerminalObservation extends EngineObservationBase {
 	readonly state: EngineRunTerminalState;
 }
 
-/** Names the only outcomes that can complete an engine run. @since 0.2.0 */
-export type EngineRunTerminalState = "completed" | "cancelled" | "failed" | "closed";
+/**
+ * Names the only outcomes that can complete an engine run.
+ *
+ * `interrupted` separates "something ended this run from outside" — a host
+ * restart, a shutdown, an externally killed process — from `failed`, which
+ * claims the work itself went wrong. Only the former can be picked back up.
+ *
+ * @since 0.2.0
+ */
+export type EngineRunTerminalState =
+	| "completed"
+	| "cancelled"
+	| "failed"
+	| "interrupted"
+	| "closed";
 
 /** Reports shell or process activity independently from the run outcome. @since 0.2.0 */
 export interface EngineTerminalActivityObservation extends EngineObservationBase {
@@ -529,6 +542,13 @@ export interface EngineTerminalActivityObservation extends EngineObservationBase
 	readonly command?: string;
 	readonly exit_code?: number;
 	readonly output?: string;
+	/**
+	 * The interpreter the command was handed to, as an executable name — `bash`,
+	 * `pwsh`, `nu`. The provider decides this by which of its shell tools ran,
+	 * and it is the only place that knows: by the time a command reaches a
+	 * durable terminal row, all that survives is the text that was run.
+	 */
+	readonly shell?: string;
 	readonly state: "started" | "output" | "completed" | "failed";
 }
 
@@ -649,10 +669,30 @@ export interface EngineApprovalObservation extends EngineObservationBase {
 	readonly state: "requested" | "resolved";
 }
 
+/** Describes one provider-offered answer to a question. @since 0.10.0 */
+export interface EngineQuestionOption {
+	/** What choosing this option means, when the provider explains it. */
+	readonly description?: string;
+	readonly label: string;
+}
+
 /** Reports a question request or its resolution. @since 0.2.0 */
 export interface EngineQuestionObservation extends EngineObservationBase {
 	readonly _tag: "question";
 	readonly answers?: ReadonlyArray<string>;
+	/**
+	 * Short category label the provider shows beside the question. Distinct from
+	 * `text`, which is the question itself. @since 0.10.0
+	 */
+	readonly header?: string;
+	/** Whether more than one option may be chosen at once. @since 0.10.0 */
+	readonly multi_select?: boolean;
+	/**
+	 * Offered answers. Absent for a free-form question; present when the provider
+	 * enumerates choices, in which case answering is a selection rather than
+	 * typed text. @since 0.10.0
+	 */
+	readonly options?: ReadonlyArray<EngineQuestionOption>;
 	readonly question_id: string;
 	readonly state: "requested" | "resolved";
 	readonly text: string;
@@ -667,6 +707,13 @@ export interface EngineCompactionObservation extends EngineObservationBase {
 	 * that only announce completion deliberately leave it absent.
 	 */
 	readonly compaction_id?: string;
+	/**
+	 * How long the compaction ran, for engines that measure it. An engine which
+	 * announces only the completed boundary reports the silence it already
+	 * caused, so this is the sole evidence of a stall the transcript cannot
+	 * otherwise account for.
+	 */
+	readonly duration_ms?: number;
 	readonly state: "started" | "completed";
 	readonly summary?: string;
 }
@@ -677,6 +724,13 @@ export interface EngineReasoningSummaryDeltaObservation extends EngineObservatio
 	readonly delta: string;
 	readonly item_id: string;
 	readonly summary_index: number;
+	/**
+	 * The engine's cumulative estimate of reasoning done so far this turn, from
+	 * an engine that counts thinking it will not publish. Carried on the same
+	 * item the deltas would have opened, with an empty `delta`, so a turn whose
+	 * reasoning is encrypted still has one row saying the model is working.
+	 */
+	readonly thinking_tokens?: number;
 	readonly turn_id: string;
 }
 
@@ -869,12 +923,6 @@ export class EngineCommandTargetError extends Data.TaggedError("EngineCommandTar
 	readonly target: "approval" | "question";
 }> {}
 
-/** Represents a command rejected because the local event buffer is full. @since 0.2.0 */
-export class EngineBackpressureError extends Data.TaggedError("EngineBackpressureError")<{
-	readonly artisan_run_id: string;
-	readonly capacity: number;
-}> {}
-
 /** Represents invalid adapter configuration rejected before provider work begins. @since 0.3.0 */
 export class EngineConfigurationError extends Data.TaggedError("EngineConfigurationError")<{
 	readonly engine_id: string;
@@ -896,10 +944,53 @@ export class EngineProtocolError extends Data.TaggedError("EngineProtocolError")
 }> {}
 
 /** Represents a process boundary failure while operating an engine. @since 0.2.0 */
+/**
+ * Renders an unknown process failure as one short line, without reproducing
+ * provider output: a tagged cause contributes its tag, an `Error` its code and
+ * message, and anything else its own string form, bounded.
+ */
+function describe_engine_process_cause(cause: unknown): string {
+	if (cause !== null && typeof cause === "object") {
+		const tag = "_tag" in cause ? String((cause as { _tag: unknown })._tag) : undefined;
+		const detail = cause instanceof Error ? cause.message.trim() : "";
+		const code =
+			"code" in cause && typeof (cause as { code: unknown }).code === "string"
+				? (cause as { code: string }).code
+				: undefined;
+		const described = [tag ?? code, detail.length > 0 ? detail : undefined]
+			.filter((part) => part !== undefined)
+			.join(": ");
+		if (described.length > 0) return described.slice(0, 200);
+		if (cause instanceof Error && cause.name.length > 0) return cause.name;
+	}
+
+	return String(cause).slice(0, 200);
+}
+
 export class EngineProcessError extends Data.TaggedError("EngineProcessError")<{
+	/**
+	 * The Artisan error code for why the process operation failed, when the
+	 * factory can classify it — a spawn preflight knows the working directory
+	 * is gone, not that some generic startup fault occurred. Consumers that
+	 * settle the failure into the transcript prefer this over their own guess.
+	 */
+	readonly artisan_code?: string;
 	readonly cause: unknown;
 	readonly operation: "close" | "exit" | "kill" | "read" | "spawn" | "write";
-}> {}
+}> {
+	/**
+	 * Carried rather than left to the tag alone.
+	 *
+	 * Every surface that reports an engine failure reads `message` and falls back
+	 * to printing the bare tag when it is empty, which is what turned a missing
+	 * managed install into an unreadable "(EngineProcessError)" — the operation
+	 * that failed and the cause underneath it were both already here, and neither
+	 * reached anyone who could act on them.
+	 */
+	override get message(): string {
+		return `Engine process ${this.operation} failed: ${describe_engine_process_cause(this.cause)}`;
+	}
+}
 
 /** Represents a duplicate or unknown engine registration. @since 0.2.0 */
 export class EngineRegistryError extends Data.TaggedError("EngineRegistryError")<{
@@ -909,7 +1000,6 @@ export class EngineRegistryError extends Data.TaggedError("EngineRegistryError")
 
 /** Enumerates failures emitted while opening or probing an engine. @since 0.2.0 */
 export type EngineFailure =
-	| EngineBackpressureError
 	| EngineCommandIdConflictError
 	| EngineCommandTargetError
 	| EngineConfigurationError
@@ -924,7 +1014,6 @@ export type EngineFailure =
 
 /** Enumerates failures emitted by run command delivery. @since 0.2.0 */
 export type EngineCommandFailure =
-	| EngineBackpressureError
 	| EngineCommandIdConflictError
 	| EngineCommandTargetError
 	| EngineProcessError

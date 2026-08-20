@@ -16,7 +16,6 @@ import type {
 	EngineRunTerminalState,
 } from "@artisan/engines";
 import {
-	EngineBackpressureError,
 	EngineCommandIdConflictError,
 	EngineRunClosedError,
 	EngineUnsupportedCommandError,
@@ -25,7 +24,6 @@ import {
 /** Configures the deterministic test-only engine adapter. @since 0.2.0 */
 export interface FakeEngineOptions {
 	readonly engine_id?: string;
-	readonly event_capacity?: number;
 	readonly on_cleanup?: () => void;
 	readonly transport?: string;
 	readonly unsupported_commands?: ReadonlyArray<EngineCommand["_tag"]>;
@@ -151,14 +149,13 @@ function make_observation(
 function open_fake_run(
 	descriptor: EngineDescriptor,
 	input: EngineOpenInput,
-	event_capacity: number,
 	on_cleanup: (() => void) | undefined,
 ): Effect.Effect<EngineRun, EngineFailure, Scope.Scope> {
 	return Effect.gen(function* () {
 		const run_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
 			Scope.close(scope, Exit.succeed(undefined)),
 		);
-		const queue = yield* Queue.dropping<EngineObservation | FakeStreamEnd>(event_capacity + 2);
+		const queue = yield* Queue.unbounded<EngineObservation | FakeStreamEnd>();
 		const closed = yield* Deferred.make<EngineRunTerminalState>();
 		const lock = yield* Semaphore.make(1);
 		const state = yield* Ref.make<FakeRunState>({
@@ -171,18 +168,6 @@ function open_fake_run(
 				? input.resume_token.native_thread_id
 				: `native:${input.artisan_run_id}`;
 
-		const EnsureEventCapacity = Effect.gen(function* () {
-			const size = yield* Queue.size(queue);
-
-			if (size >= event_capacity) {
-				return yield* Effect.fail(
-					new EngineBackpressureError({
-						artisan_run_id: input.artisan_run_id,
-						capacity: event_capacity,
-					}),
-				);
-			}
-		});
 		const Offer = (observation: EngineObservation) => Queue.offer(queue, observation);
 		const terminal = (terminal_state: EngineRunTerminalState) =>
 			Effect.gen(function* () {
@@ -226,8 +211,6 @@ function open_fake_run(
 
 		const emit_run_state = (state_name: "opening" | "running" | "waiting", frame: unknown) =>
 			Effect.gen(function* () {
-				yield* EnsureEventCapacity;
-
 				const base = yield* make_observation(
 					state,
 					input.artisan_run_id,
@@ -303,8 +286,6 @@ function open_fake_run(
 						}));
 						return true;
 					}
-
-					yield* EnsureEventCapacity;
 
 					const base = yield* make_observation(
 						state,
@@ -383,12 +364,11 @@ function open_fake_run(
  * Creates a deterministic scoped engine adapter for conformance tests.
  *
  * @since 0.2.0
- * @param options - Scenario-specific fake behavior and observation capacity.
+ * @param options - Scenario-specific fake behavior.
  * @returns An adapter that exercises the production Engine seam without I/O.
  */
 export function make_fake_engine(options: FakeEngineOptions = {}): Engine {
 	const descriptor = make_descriptor(options);
-	const event_capacity = options.event_capacity ?? 16;
 	const Probe = (): Effect.Effect<EngineProbe> =>
 		Effect.succeed({
 			authentication: { state: "authenticated" },
@@ -401,7 +381,7 @@ export function make_fake_engine(options: FakeEngineOptions = {}): Engine {
 
 	return {
 		Descriptor: descriptor,
-		Open: (input) => open_fake_run(descriptor, input, event_capacity, options.on_cleanup),
+		Open: (input) => open_fake_run(descriptor, input, options.on_cleanup),
 		Probe,
 	};
 }

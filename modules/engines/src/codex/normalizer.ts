@@ -511,7 +511,7 @@ export function normalise_codex_notification(
 			/**
 			 * Private reasoning is never surfaced or durably projected. Retaining one
 			 * native action per token would only let a provider burst occupy the
-			 * bounded run delivery path; the public summary and completion frames are
+			 * run delivery path; the public summary and completion frames are
 			 * the canonical evidence for this item.
 			 */
 			return decode_known(input, PrivateReasoningDeltaSchema, () => []);

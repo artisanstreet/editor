@@ -27,6 +27,7 @@ interface FactoryOptions {
 const MakeFactory = (options: FactoryOptions = {}) => {
 	const spawns: Array<EngineProcessSpawnInput> = [];
 	let closes = 0;
+	let input_ends = 0;
 	const factory: typeof EngineProcessFactory.Service = {
 		Spawn: (input) => {
 			spawns.push(input);
@@ -34,7 +35,9 @@ const MakeFactory = (options: FactoryOptions = {}) => {
 				Close: Effect.sync(() => {
 					closes += 1;
 				}),
-				EndInput: Effect.void,
+				EndInput: Effect.sync(() => {
+					input_ends += 1;
+				}),
 				Exit: options.waits
 					? Effect.never
 					: Effect.succeed(options.exit ?? { code: 0, signal: null }),
@@ -45,7 +48,7 @@ const MakeFactory = (options: FactoryOptions = {}) => {
 			});
 		},
 	};
-	return { closes: () => closes, factory, spawns };
+	return { closes: () => closes, factory, input_ends: () => input_ends, spawns };
 };
 
 const ValidUsage = JSON.stringify({
@@ -67,6 +70,21 @@ describe("Claude CLI usage", () => {
 			{ args: ["-p", "/usage", "--output-format", "json"], command: "claude" },
 		]);
 		expect(fixture.closes()).toBe(1);
+	});
+
+	/**
+	 * `-p` takes its prompt from stdin. A pipe left open costs this read a flat
+	 * three seconds — the CLI's grace period before it gives up waiting and
+	 * proceeds ("no stdin data received in 3s") — spent against a usage deadline
+	 * every engine refreshes against concurrently. The slash command is already
+	 * in argv, so there is nothing to send and EOF goes immediately.
+	 */
+	it("closes stdin so the CLI never waits out its stdin grace period", async () => {
+		const fixture = MakeFactory({ stdout: [ValidUsage] });
+
+		await Effect.runPromise(MakeClaudeUsage({ factory: fixture.factory }));
+
+		expect(fixture.input_ends()).toBe(1);
 	});
 
 	it("propagates the configured external executable and its fixed wrapper args", async () => {
