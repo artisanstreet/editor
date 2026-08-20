@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Effect } from "effect";
 
 import {
+	argv_disables_tui,
 	derive_dev_instance,
 	derive_dev_paths,
 	enqueue_dev_tui_event,
@@ -30,6 +31,7 @@ import {
 	should_wrap_artisan_runner,
 	should_use_portless,
 	route_artisan_runner_output,
+	strip_tui_flags,
 	write_dev_config,
 } from "../../.scripts/dev/runner";
 
@@ -333,30 +335,54 @@ describe("dev dashboard capability", () => {
 		expect(resolve_dev_tui_entry()).toMatch(/[\\/]modules[\\/]dev-tui[\\/]src[\\/]entry\.ts$/u);
 	});
 
-	it("bounds backpressured events while retaining control updates", () => {
+	it("retains every backpressured dashboard event in arrival order", () => {
 		const pending_events: DevTuiEvent[] = [
 			{ lane_id: "api", line: "stale", type: "log" },
 			{ lane_id: "api", status: "running", type: "status" },
 		];
 
-		enqueue_dev_tui_event(
-			pending_events,
-			{ lane_id: "api", status: "ready", type: "status" },
-			2,
-		);
+		enqueue_dev_tui_event(pending_events, {
+			lane_id: "api",
+			status: "ready",
+			type: "status",
+		});
 
 		expect(pending_events).toEqual([
+			{ lane_id: "api", line: "stale", type: "log" },
 			{ lane_id: "api", status: "running", type: "status" },
 			{ lane_id: "api", status: "ready", type: "status" },
 		]);
 
-		enqueue_dev_tui_event(
-			pending_events,
-			{ lane_id: "api", line: "discarded", type: "log" },
-			2,
-		);
+		enqueue_dev_tui_event(pending_events, {
+			lane_id: "api",
+			line: "retained",
+			type: "log",
+		});
 
-		expect(pending_events).toHaveLength(2);
+		expect(pending_events.at(-1)).toEqual({
+			lane_id: "api",
+			line: "retained",
+			type: "log",
+		});
+
+		for (let index = 0; index < 2_048; index += 1) {
+			enqueue_dev_tui_event(pending_events, {
+				lane_id: "api",
+				line: `backfill-${String(index)}`,
+				type: "log",
+			});
+		}
+		expect(pending_events).toHaveLength(2_052);
+		expect(pending_events[4]).toEqual({
+			lane_id: "api",
+			line: "backfill-0",
+			type: "log",
+		});
+		expect(pending_events.at(-1)).toEqual({
+			lane_id: "api",
+			line: "backfill-2047",
+			type: "log",
+		});
 	});
 });
 
@@ -512,5 +538,39 @@ describe("dev home interop", () => {
 		expect(environment.ARTISAN_FORGE_DEVELOPMENT).toBe("1");
 		expect(environment.ARTISAN_WINDOWS_PROCESS_HOST).toContain("windows-process-host.js");
 		expect(environment.ARTISAN_HOME).toBe(paths.forge_home);
+	});
+});
+
+describe("dev runner tui flags", () => {
+	it("detects the shared opt-out flags and keeps them out of mode parsing", () => {
+		expect(argv_disables_tui(["dev"])).toBe(false);
+		expect(argv_disables_tui(["dev", "--no-tui"])).toBe(true);
+		expect(argv_disables_tui(["--plain", "forge"])).toBe(true);
+		expect(strip_tui_flags(["dev", "--no-tui"])).toEqual(["dev"]);
+		expect(strip_tui_flags(["--plain", "forge"])).toEqual(["forge"]);
+		expect(parse_runner_mode(strip_tui_flags(["--no-tui"])[0])).toBe("dev");
+		expect(parse_runner_mode(strip_tui_flags(["web", "--no-tui"])[0])).toBe("web");
+	});
+
+	it("resolves the opt-out to the dashboard gate both runners already read", () => {
+		const instance = derive_dev_instance({
+			environment: {},
+			is_main_worktree: true,
+			repository_root: "C:/repo",
+		});
+		const endpoints = make_dashboard_dev_endpoints(instance, {});
+
+		expect(
+			make_artisan_runner_options("dev", instance, endpoints, { ARTISAN_DEV_TUI: "0" })
+				.dashboard,
+		).toBe("never");
+		expect(make_artisan_runner_options("dev", instance, endpoints, {}).dashboard).toBe("auto");
+		expect(
+			should_use_dev_tui({
+				environment: { ARTISAN_DEV_TUI: "0" },
+				stdin_is_tty: true,
+				stdout_is_tty: true,
+			}),
+		).toBe(false);
 	});
 });

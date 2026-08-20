@@ -3,16 +3,56 @@
 	"private": true,
 	"type": "module",
 	"exports": {
-		".": "./src/index.ts",
-		"./client": "./src/client.ts",
-		"./connector": "./src/connector.ts",
-		"./message-port": "./src/message-port.ts",
-		"./node": "./src/node-message-port.ts",
-		"./server": "./src/server.ts",
-		"./websocket/client": "./src/websocket/client.ts",
-		"./websocket/protocol": "./src/websocket/protocol.ts",
-		"./websocket/server": "./src/websocket/server.ts",
-		"./wire": "./src/wire.ts"
+		".": {
+			"types": "./src/index.ts",
+			"development": "./src/index.ts",
+			"default": "./.dist/index.mjs"
+		},
+		"./client": {
+			"types": "./src/client.ts",
+			"development": "./src/client.ts",
+			"default": "./.dist/client.mjs"
+		},
+		"./connector": {
+			"types": "./src/connector.ts",
+			"development": "./src/connector.ts",
+			"default": "./.dist/connector.mjs"
+		},
+		"./message-port": {
+			"types": "./src/message-port.ts",
+			"development": "./src/message-port.ts",
+			"default": "./.dist/message-port.mjs"
+		},
+		"./node": {
+			"types": "./src/node-message-port.ts",
+			"development": "./src/node-message-port.ts",
+			"default": "./.dist/node.mjs"
+		},
+		"./server": {
+			"types": "./src/server.ts",
+			"development": "./src/server.ts",
+			"default": "./.dist/server.mjs"
+		},
+		"./websocket/client": {
+			"types": "./src/websocket/client.ts",
+			"development": "./src/websocket/client.ts",
+			"default": "./.dist/websocket/client.mjs"
+		},
+		"./websocket/protocol": {
+			"types": "./src/websocket/protocol.ts",
+			"development": "./src/websocket/protocol.ts",
+			"default": "./.dist/websocket/protocol.mjs"
+		},
+		"./websocket/server": {
+			"types": "./src/websocket/server.ts",
+			"development": "./src/websocket/server.ts",
+			"default": "./.dist/websocket/server.mjs"
+		},
+		"./wire": {
+			"types": "./src/wire.ts",
+			"development": "./src/wire.ts",
+			"default": "./.dist/wire.mjs"
+		}
 	},
 	"dependencies": {
 		"@artisan/backend": "workspace:*",

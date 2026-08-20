@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import {
 	createReadStream,
@@ -12,6 +11,17 @@ import {
 } from "node:fs";
 import { createServer } from "node:http";
 import { basename, join, resolve } from "node:path";
+
+import { Checklist } from "@artisanstreet/checklist";
+import {
+	NodeChildProcessSpawner,
+	NodeFileSystem,
+	NodePath,
+	NodeRuntime,
+} from "@effect/platform-node-shared";
+import { Effect, Layer } from "effect";
+
+import { module_build_steps } from "./build-modules.ts";
 
 /**
  * One-command local release loop: build the distribution for this platform,
@@ -28,41 +38,9 @@ const public_key_path = resolve(dev_root, "release-public-key.hex");
 const installer_executable = resolve(repository_root, "target", "release", "ae-installer.exe");
 const signing_key_id = "local-dev";
 
-const log = (line: string) => console.log(`[build] ${line}`);
-
-const run = (
-	label: string,
-	command: string,
-	arguments_?: ReadonlyArray<string>,
-	environment?: Record<string, string>,
-) =>
-	new Promise<void>((resolve_run, reject) => {
-		const started = Date.now();
-		log(`${label}…`);
-		const child =
-			arguments_ === undefined
-				? spawn(command, {
-						cwd: repository_root,
-						env: { ...process.env, ...environment },
-						shell: true,
-						stdio: "inherit",
-					})
-				: spawn(command, arguments_, {
-						cwd: repository_root,
-						env: { ...process.env, ...environment },
-						stdio: "inherit",
-					});
-
-		child.once("error", reject);
-		child.once("exit", (code) => {
-			if (code === 0) {
-				log(`${label} done in ${Math.round((Date.now() - started) / 1000)}s`);
-				resolve_run();
-			} else {
-				reject(new Error(`${label} failed with exit code ${code}`));
-			}
-		});
-	});
+const release_version = Checklist.value<string>("release_version");
+const release_public_key = Checklist.value<string>("release_public_key");
+const release_origin = Checklist.value<string>("release_origin");
 
 const parse_version = (value: string): [number, number, number] | undefined => {
 	const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(value);
@@ -136,7 +114,6 @@ const ensure_signing_key = (): string => {
 		return readFileSync(public_key_path, "utf8").trim();
 	}
 
-	log("generating local release signing key");
 	mkdirSync(dev_root, { recursive: true });
 	const pair = generateKeyPairSync("ed25519");
 	const public_key_hex = pair.publicKey.export({ format: "der", type: "spki" }).toString("hex");
@@ -186,71 +163,115 @@ const serve_release = () =>
 		});
 	});
 
-const main = async () => {
+/**
+ * Bound to the run's scope rather than a try/finally, so the port is released
+ * on interruption too — a Ctrl-C during install used to leave it listening.
+ */
+const ServeRelease = Effect.acquireRelease(
+	Effect.tryPromise({ catch: (cause: unknown) => cause, try: serve_release }),
+	(server) => Effect.sync(server.close),
+).pipe(Effect.map((server) => server.origin));
+
+const BuildProgram = Checklist.make(
+	[
+		{
+			name: "prepare",
+			provides: release_version,
+			run: (step) => {
+				const install_root = detect_install_root();
+				const next = next_release_version(install_root);
+
+				step.log(`platform  windows-x64`);
+				step.log(`root      ${install_root}`);
+				step.detail(`${next} → windows-x64`);
+
+				return next;
+			},
+		},
+		{
+			name: "signing key",
+			provides: release_public_key,
+			run: () => ensure_signing_key(),
+		},
+		/**
+		 * Ahead of every application bundle: the packaged editor resolves
+		 * `@artisan/*` to these artifacts, so a stale `.dist` would ship silently.
+		 */
+		{ concurrency: 4, name: "modules", steps: module_build_steps() },
+		{ name: "native build", run: "pnpm run build:native" },
+		{
+			env: (step) => {
+				const version = step.get(release_version);
+
+				return { ARTISAN_RELEASE_VERSION: version };
+			},
+			name: "desktop package",
+			run: "pnpm run package:desktop",
+		},
+		{
+			name: "verify installer",
+			run: () => {
+				if (!existsSync(installer_executable)) {
+					throw new Error(`release ae-installer is missing at ${installer_executable}`);
+				}
+			},
+		},
+		{
+			name: "clean release root",
+			run: () => rmSync(release_root, { force: true, recursive: true }),
+		},
+		{
+			cwd: repository_root,
+			env: (step) => ({
+				ARTISAN_RELEASE_SIGNING_KEY_FILE: signing_key_path,
+				ARTISAN_RELEASE_SIGNING_KEY_ID: signing_key_id,
+				ARTISAN_RELEASE_VERSION: step.get(release_version),
+			}),
+			name: "release artifact",
+			run: [process.execPath, ".scripts/package/build-distribution-release-entry.ts"],
+		},
+		{ name: "release server", provides: release_origin, run: () => ServeRelease },
+		{
+			name: "install",
+			run: (step) =>
+				Checklist.command([
+					installer_executable,
+					"--manifest-url",
+					`${step.get(release_origin)}/release-manifest.json`,
+					"--public-key",
+					step.get(release_public_key),
+					/**
+					 * Unattended, and with the installer free to retire whatever is
+					 * still running a superseded version — otherwise Electron's
+					 * single-instance lock hands the freshly built release straight
+					 * back to the old window. A Forge that will not stop still fails
+					 * the build rather than losing its work; that needs --force.
+					 */
+					"--yes",
+				]),
+		},
+		{
+			name: "open editor",
+			run: () => Checklist.command([join(detect_install_root(), "bin", "ae.exe"), "open"]),
+		},
+	],
+	{ subtitle: "windows-x64", title: "artisan build" },
+);
+
+const NodeProcessLive = NodeChildProcessSpawner.layer.pipe(
+	Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodePath.layer)),
+);
+
+const Main = Effect.gen(function* () {
 	if (process.platform !== "win32") {
-		throw new Error(
-			`the ${process.platform} distribution is not implemented yet; only win32 builds exist`,
+		return yield* Effect.fail(
+			new Error(
+				`the ${process.platform} distribution is not implemented yet; only win32 builds exist`,
+			),
 		);
 	}
 
-	const started = Date.now();
-	const install_root = detect_install_root();
-	const version = next_release_version(install_root);
-	const public_key_hex = ensure_signing_key();
-
-	log(`platform  windows-x64`);
-	log(`root      ${install_root}`);
-	log(`version   ${version}`);
-
-	await run("native build", "pnpm run build:native");
-	await run("desktop package", "pnpm run package:desktop", undefined, {
-		ARTISAN_RELEASE_VERSION: version,
-	});
-
-	if (!existsSync(installer_executable)) {
-		throw new Error(`release ae-installer is missing at ${installer_executable}`);
-	}
-
-	rmSync(release_root, { force: true, recursive: true });
-	await run(
-		"release artifact",
-		process.execPath,
-		[".scripts/package/build-distribution-release-entry.ts"],
-		{
-			ARTISAN_RELEASE_SIGNING_KEY_FILE: signing_key_path,
-			ARTISAN_RELEASE_SIGNING_KEY_ID: signing_key_id,
-			ARTISAN_RELEASE_VERSION: version,
-		},
-	);
-
-	const server = await serve_release();
-
-	try {
-		await run("install", installer_executable, [
-			"--manifest-url",
-			`${server.origin}/release-manifest.json`,
-			"--public-key",
-			public_key_hex,
-			/**
-			 * Unattended, and with the installer free to retire whatever is
-			 * still running a superseded version — otherwise Electron's
-			 * single-instance lock hands the freshly built release straight
-			 * back to the old window. A Forge that will not stop still fails
-			 * the build rather than losing its work; that needs --force.
-			 */
-			"--yes",
-		]);
-	} finally {
-		server.close();
-	}
-
-	await run("open editor", join(install_root, "bin", "ae.exe"), ["open"]);
-	log(
-		`installed ${version} and opened Artisan Editor in ${Math.round((Date.now() - started) / 1000)}s`,
-	);
-};
-
-main().catch((cause: unknown) => {
-	console.error(`[build] ${cause instanceof Error ? cause.message : String(cause)}`);
-	process.exitCode = 1;
+	yield* BuildProgram;
 });
+
+NodeRuntime.runMain(Main.pipe(Effect.provide(NodeProcessLive)));

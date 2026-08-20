@@ -47,7 +47,6 @@ type ProcessLaneId = "forge" | "web";
 const base_forge_port = 4848;
 const base_web_port = 4849;
 const max_instance_offset = 3000;
-const max_dashboard_pending_events = 1_000;
 const dependency_require = createRequire(import.meta.url);
 const artisan_runner_adapter_environment = "ARTISAN_DEV_RUNNER_ADAPTER";
 
@@ -122,30 +121,22 @@ export const resolve_portless_entry = (): string =>
 export const resolve_dev_tui_entry = (): string =>
 	dependency_require.resolve("@artisan/dev-tui/entry");
 
-export const enqueue_dev_tui_event = (
-	pending_events: DevTuiEvent[],
-	event: DevTuiEvent,
-	max_pending_events = max_dashboard_pending_events,
-): void => {
-	const capacity = Number.isFinite(max_pending_events)
-		? Math.max(1, Math.floor(max_pending_events))
-		: max_dashboard_pending_events;
-
-	while (pending_events.length >= capacity) {
-		const stale_log_index = pending_events.findIndex((pending) => pending.type === "log");
-
-		if (stale_log_index >= 0) {
-			pending_events.splice(stale_log_index, 1);
-			continue;
-		}
-
-		if (event.type === "log") return;
-
-		pending_events.shift();
-	}
-
+export const enqueue_dev_tui_event = (pending_events: DevTuiEvent[], event: DevTuiEvent): void => {
 	pending_events.push(event);
 };
+
+/**
+ * The same switch the checklist answers to, so one flag turns off both
+ * dashboards. It resolves to `ARTISAN_DEV_TUI=0`, which the adapter child
+ * inherits and every existing dashboard gate already reads.
+ */
+const tui_flags: ReadonlySet<string> = new Set(["--no-tui", "--plain"]);
+
+export const argv_disables_tui = (argv: ReadonlyArray<string>): boolean =>
+	argv.some((argument) => tui_flags.has(argument));
+
+export const strip_tui_flags = (argv: ReadonlyArray<string>): ReadonlyArray<string> =>
+	argv.filter((argument) => !tui_flags.has(argument));
 
 export const parse_runner_mode = (value: string | undefined): RunnerMode | undefined => {
 	if (value === undefined || value === "dev") return "dev";
@@ -594,10 +585,13 @@ if (runner_is_entry) {
 	const paths = derive_dev_paths(repository_root, instance.offset);
 	let endpoints = make_direct_dev_endpoints(instance);
 	const dashboard_endpoints = make_dashboard_dev_endpoints(instance, process.env);
-	const mode = parse_runner_mode(process.argv[2]);
+	const cli_arguments = process.argv.slice(2);
+	if (argv_disables_tui(cli_arguments)) process.env.ARTISAN_DEV_TUI = "0";
+	const positional = strip_tui_flags(cli_arguments);
+	const mode = parse_runner_mode(positional[0]);
 	if (mode === undefined) {
-		console.error(`Unknown development mode: ${process.argv[2]}`);
-		console.error("Usage: pnpm dev [dev|forge|web|pair|doctor]");
+		console.error(`Unknown development mode: ${positional[0]}`);
+		console.error("Usage: pnpm dev [dev|forge|web|pair|doctor] [--no-tui]");
 		process.exit(1);
 	}
 	if (should_wrap_artisan_runner({ environment: process.env, mode })) {

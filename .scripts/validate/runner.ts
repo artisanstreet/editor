@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 
+import { Checklist, strip_presentation_flags, type StepHandle } from "@artisanstreet/checklist";
 import {
 	NodeChildProcessSpawner,
 	NodeFileSystem,
@@ -7,7 +8,6 @@ import {
 	NodeRuntime,
 } from "@effect/platform-node-shared";
 import { Console, Data, Effect, Layer, Schema } from "effect";
-import { ChildProcess } from "effect/unstable/process";
 
 export const ValidationArea = Schema.Literals([
 	"frontend",
@@ -61,39 +61,29 @@ export class ValidationAreaError extends Data.TaggedError("ValidationAreaError")
 	readonly message: string;
 }> {}
 
-export class ValidationScriptError extends Data.TaggedError("ValidationScriptError")<{
-	readonly exit_code: number;
-	readonly message: string;
-	readonly script: string;
-}> {}
+/** Surfaces the counts the underlying tools already print, on the step's own row. */
+export const watch_validation_progress = (line: string, step: StepHandle): void => {
+	const tests = /Tests\s+(\d+) passed\s*\((\d+)\)/u.exec(line);
 
-const RunScript = (script: string) =>
-	Effect.gen(function* () {
-		// Windows package-manager shims are command scripts. Keep the selected
-		// package script in one fixed shell command so Node does not concatenate
-		// a separately supplied argv (DEP0190); every value comes from the map above.
-		const command = process.platform === "win32" ? `pnpm run ${script}` : "pnpm";
-		const arguments_ = process.platform === "win32" ? [] : ["run", script];
-		const child = yield* ChildProcess.make(command, arguments_, {
-			shell: process.platform === "win32",
-			stderr: "inherit",
-			stdin: "inherit",
-			stdout: "inherit",
-		});
-		const exit_code = yield* child.exitCode;
-		if (exit_code !== 0) {
-			return yield* Effect.fail(
-				new ValidationScriptError({
-					exit_code,
-					message: `pnpm run ${script} failed with exit code ${exit_code}`,
-					script,
-				}),
-			);
-		}
-	});
+	if (tests !== null) {
+		step.progress(Number(tests[1]), Number(tests[2]));
+		return;
+	}
+
+	const files = /Test Files\s+(\d+) passed\s*\((\d+)\)/u.exec(line);
+
+	if (files !== null) {
+		step.detail(`${files[1]}/${files[2]} files`);
+		return;
+	}
+
+	const modules = /(\d+) modules transformed/u.exec(line);
+
+	if (modules !== null) step.detail(`${modules[1]} modules`);
+};
 
 const PrintUsage = Effect.gen(function* () {
-	yield* Console.log("Usage: pnpm run validate [-- <area> ...]");
+	yield* Console.log("Usage: pnpm run validate [-- <area> ...] [--no-tui|--json]");
 	yield* Console.log(`Areas: ${Object.keys(validation_areas).join(", ")}`);
 	yield* Console.log(
 		"Run one Vitest target: pnpm run test:focus -- .tests/<area>/<file>.test.ts",
@@ -101,7 +91,7 @@ const PrintUsage = Effect.gen(function* () {
 });
 
 export const ValidationProgram = Effect.gen(function* () {
-	const requested_areas = process.argv.slice(2);
+	const requested_areas = strip_presentation_flags(process.argv.slice(2));
 
 	if (requested_areas.some((area) => area === "--help" || area === "-h")) {
 		yield* PrintUsage;
@@ -117,13 +107,21 @@ export const ValidationProgram = Effect.gen(function* () {
 				),
 			),
 	);
-	const scripts = select_validation_scripts(selected_areas);
 
-	yield* Console.log(`[validate] ${selected_areas.join("+")}: ${scripts.join(" -> ")}`);
-	for (const script of scripts) {
-		yield* RunScript(script);
-	}
-}).pipe(Effect.scoped);
+	/**
+	 * The gates stay sequential and deduplicated across areas, exactly as before:
+	 * overlapping type-checks and native builds would contend for the same cores
+	 * and interleave their output. Only the presentation changed.
+	 */
+	yield* Checklist.make(
+		select_validation_scripts(selected_areas).map((script) => ({
+			name: script,
+			run: `pnpm run ${script}`,
+			watch: watch_validation_progress,
+		})),
+		{ subtitle: selected_areas.join("+"), title: "validate" },
+	);
+});
 
 const NodeProcessLive = NodeChildProcessSpawner.layer.pipe(
 	Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodePath.layer)),

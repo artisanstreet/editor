@@ -14,6 +14,7 @@ _WORKSPACE_EXCLUDES = [
 _ALL_WORKSPACE_PACKAGES = [
     "backend",
     "catalog",
+    "checklist",
     "cli",
     "data",
     "desktop",

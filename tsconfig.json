@@ -17,6 +17,8 @@
 			"@artisan/dev-tui": ["./modules/dev-tui/src/index.ts"],
 			"@artisan/dev-tui/model": ["./modules/dev-tui/src/model.ts"],
 			"@artisan/distribution": ["./modules/distribution/src/index.ts"],
+			"@artisanstreet/checklist": ["./modules/checklist/src/index.ts"],
+			"@artisanstreet/checklist/model": ["./modules/checklist/src/model.ts"],
 			"@artisan/engines": ["./modules/engines/src/index.ts"],
 			"@artisan/forge": ["./modules/forge/src/index.ts"],
 			"@artisan/protocol": ["./modules/protocol/src/index.ts"],

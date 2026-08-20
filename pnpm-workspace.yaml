@@ -28,7 +28,7 @@ minimumReleaseAgeExclude:
     - "@koromix/koffi-win32-ia32@3.1.1"
     - "@koromix/koffi-win32-x64@3.1.1"
     - koffi@3.1.1
-    - svelte-effect-runtime@4.2.3
+    - svelte-effect-runtime@4.2.4
     - "@decimalturn/toml-patch@3.0.1"
 patchedDependencies:
     "@effect/platform-node-shared@4.0.0-beta.97": patches/@effect__platform-node-shared@4.0.0-beta.97.patch

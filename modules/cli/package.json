@@ -6,8 +6,16 @@
 	},
 	"type": "module",
 	"exports": {
-		".": "./src/index.ts",
-		"./entry": "./src/entry.ts"
+		".": {
+			"types": "./src/index.ts",
+			"development": "./src/index.ts",
+			"default": "./.dist/index.mjs"
+		},
+		"./entry": {
+			"types": "./src/entry.ts",
+			"development": "./src/entry.ts",
+			"default": "./.dist/entry.mjs"
+		}
 	},
 	"dependencies": {
 		"@artisan/backend": "workspace:*",

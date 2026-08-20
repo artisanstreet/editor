@@ -3,8 +3,16 @@
 	"private": true,
 	"type": "module",
 	"exports": {
-		".": "./src/index.ts",
-		"./renderer-diagnostics": "./src/renderer-diagnostics.ts"
+		".": {
+			"types": "./src/index.ts",
+			"development": "./src/index.ts",
+			"default": "./.dist/index.mjs"
+		},
+		"./renderer-diagnostics": {
+			"types": "./src/renderer-diagnostics.ts",
+			"development": "./src/renderer-diagnostics.ts",
+			"default": "./.dist/renderer-diagnostics.mjs"
+		}
 	},
 	"dependencies": {
 		"@artisan/protocol": "workspace:*",
