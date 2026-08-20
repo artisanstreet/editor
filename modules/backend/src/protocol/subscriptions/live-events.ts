@@ -12,7 +12,6 @@ import {
 } from "../connection-state";
 import { ConnectionSubscriptionControl } from "./control";
 import { ConnectionConversationDelivery } from "./conversation-delivery";
-import { EventAffectsConversation } from "./patch-selection";
 import { MakeConnectionProjectionPatches } from "./projection-patches";
 
 /** Constructs ordered live-event and projection delivery for one connection. */
@@ -181,9 +180,16 @@ export const MakeLiveEventDelivery = Effect.gen(function* () {
 		options: { readonly projection_only?: boolean } = {},
 	) =>
 		Effect.gen(function* () {
-			/* A positive notifier with an empty trusted tail is a duplicate wake.
-			 * Only notifier zero explicitly requests a projection-only refresh. */
-			if (events.length === 0 && !options.projection_only) return;
+			/*
+			 * A positive notifier with an empty trusted tail is a duplicate wake —
+			 * but a duplicate wake is not a no-op. Several projection writers
+			 * publish watermarks that can already be delivered (a subagent
+			 * transcript names its group's stored sequence), and the conversation
+			 * patches their transaction wrote are then owed exactly one thing: a
+			 * cursor drain. Returning here made those patches wait for a wake
+			 * nobody owed, which froze the open transcript while every other
+			 * surface stayed live.
+			 */
 
 			/**
 			 * The projection phase must observe the state as it stood under the
@@ -240,18 +246,20 @@ export const MakeLiveEventDelivery = Effect.gen(function* () {
 				current.delivered_journal_sequence,
 				new_events,
 			);
-			const affected_conversation_threads = new Set(
-				new_events.filter(EventAffectsConversation).map((event) => event.thread_id),
-			);
+			/**
+			 * Conversation delivery is cursor-driven on every wake, never gated on
+			 * what the wake's events look like. The patches live in projection
+			 * tables written outside the journal, so no event predicate can prove
+			 * a wake carried none — the predicate this replaces missed the
+			 * native-subagent writers and starved exactly one subscription while
+			 * the connection stayed healthy.
+			 */
 			subscriptions = yield* conversation_delivery
-				.EnqueuePatches(
-					{
-						...current,
-						delivered_journal_sequence,
-						subscriptions,
-					},
-					new_events.length === 0 ? undefined : affected_conversation_threads,
-				)
+				.EnqueuePatches({
+					...current,
+					delivered_journal_sequence,
+					subscriptions,
+				})
 				.pipe(IsolateDeliveryPhase("conversation_patches", subscriptions));
 			if (options.projection_only) {
 				subscriptions = yield* EnqueueProjectionOnlySurfacePatches({

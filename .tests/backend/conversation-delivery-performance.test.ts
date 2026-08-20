@@ -1,4 +1,4 @@
-import { Effect, Ref } from "effect";
+import { Effect, Option, Ref } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -89,7 +89,8 @@ const Deliver = (
 		{ readonly status: "available"; readonly snapshot: ConversationSnapshot },
 		ConversationReadModelFailure
 	>,
-	affected_thread_ids?: ReadonlySet<string>,
+	/** Whether a claim still publishes; a lost claim swallows the publication. */
+	publishes: (subscription_id: string) => boolean = () => true,
 ) =>
 	Effect.gen(function* () {
 		const envelopes = yield* Ref.make<ReadonlyArray<OutboundControlEnvelope>>([]);
@@ -108,6 +109,10 @@ const Deliver = (
 					Enqueue: (envelope) =>
 						Ref.update(envelopes, (current) => [...current, envelope]),
 					EnqueueError: () => Effect.void,
+					PublishClaim: (subscription_id, _claim, publication) =>
+						publishes(subscription_id)
+							? publication.pipe(Effect.map(Option.some))
+							: Effect.succeed(Option.none()),
 					state,
 				}),
 			),
@@ -119,7 +124,7 @@ const Deliver = (
 				} as never),
 			),
 		);
-		const subscriptions = yield* delivery.EnqueuePatches(current, affected_thread_ids);
+		const subscriptions = yield* delivery.EnqueuePatches(current);
 		return { envelopes: yield* Ref.get(envelopes), subscriptions };
 	});
 
@@ -301,7 +306,14 @@ describe("conversation delivery performance", () => {
 		]);
 	});
 
-	it("limits non-empty notifier delivery to affected threads but keeps an empty wake global", async () => {
+	/**
+	 * There is no affected-threads filter to test any more, and that is the
+	 * point: conversation patches are written outside the journal, so no event
+	 * predicate can prove a wake carried none. Every wake consults every
+	 * subscribed cursor, and a thread whose patches were written by a writer
+	 * the old predicate missed is healed by whatever wakes the connection next.
+	 */
+	it("drains every subscribed conversation from its own cursor on every wake", async () => {
 		const calls = await Ref.make<ReadonlyArray<string>>([]).pipe(Effect.runPromise);
 		const current = State([
 			["thread_a", "thread_a", 0],
@@ -312,18 +324,46 @@ describe("conversation delivery performance", () => {
 		const read_snapshot = (thread_id: string) =>
 			Effect.succeed({ status: "available" as const, snapshot: Snapshot(thread_id, 0) });
 
-		const affected = await Effect.runPromise(
-			Deliver(current, read_patches, read_snapshot, new Set(["thread_a"])),
-		);
-		expect(await Effect.runPromise(Ref.get(calls))).toEqual(["thread_a"]);
-		expect(SubscriptionIds(affected.envelopes)).toEqual(["thread_a"]);
-		expect(affected.subscriptions.thread_b).toMatchObject({ patch_sequence: 0, sequence: 0 });
+		const delivered = await Effect.runPromise(Deliver(current, read_patches, read_snapshot));
 
-		await Effect.runPromise(Deliver(current, read_patches, read_snapshot));
-		expect(await Effect.runPromise(Ref.get(calls))).toEqual([
-			"thread_a",
-			"thread_a",
-			"thread_b",
+		expect(await Effect.runPromise(Ref.get(calls))).toEqual(["thread_a", "thread_b"]);
+		expect(new Set(SubscriptionIds(delivered.envelopes))).toEqual(
+			new Set(["thread_a", "thread_b"]),
+		);
+	});
+
+	/**
+	 * A claim that is no longer owned publishes nothing, and a cursor advanced
+	 * past an envelope that never left the process makes the skipped patches
+	 * unreachable forever — the client would wait on a window nobody will send.
+	 */
+	it("never advances a cursor past an envelope its claim refused to publish", async () => {
+		const current = State([
+			["thread_a", "thread_a", 0],
+			["thread_b", "thread_b", 0],
 		]);
+		const read_patches = (_thread_id: string, patch_sequence: number) =>
+			Effect.succeed(patch_sequence === 0 ? [Patch(1)] : []);
+		const read_snapshot = (thread_id: string) =>
+			Effect.succeed({ status: "available" as const, snapshot: Snapshot(thread_id, 0) });
+
+		const delivered = await Effect.runPromise(
+			Deliver(
+				current,
+				read_patches,
+				read_snapshot,
+				(subscription_id) => subscription_id !== "thread_b",
+			),
+		);
+
+		expect(SubscriptionIds(delivered.envelopes)).toEqual(["thread_a"]);
+		expect(delivered.subscriptions.thread_a).toMatchObject({
+			patch_sequence: 1,
+			sequence: 1,
+		});
+		expect(delivered.subscriptions.thread_b).toMatchObject({
+			patch_sequence: 0,
+			sequence: 0,
+		});
 	});
 });

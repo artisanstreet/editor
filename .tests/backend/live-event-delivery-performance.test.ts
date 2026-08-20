@@ -356,10 +356,16 @@ describe("live event delivery performance", () => {
 		);
 		const session = await Effect.runPromise(Deliver([session_event], ["thread.session"]));
 
+		/**
+		 * Conversation is the one projection never skipped: its patches are
+		 * written outside the journal, so no event shape can prove a wake
+		 * carried none. The cursor read costs one indexed query that returns
+		 * nothing when nothing is pending.
+		 */
 		expect(unrelated).toEqual({
 			aggregate: 0,
 			affects: 0,
-			conversation: 0,
+			conversation: 1,
 			conflicts: 0,
 			graph: 1,
 			groups: 1,
@@ -378,14 +384,19 @@ describe("live event delivery performance", () => {
 		});
 		expect(conflicts.conflicts).toBe(1);
 		expect(other_thread).toMatchObject({
-			conversation: 0,
+			conversation: 1,
 			conflicts: 0,
 			surfaces: 0,
 			transcript: 0,
 		});
 		expect(later_relevant).toMatchObject({ conversation: 1, surfaces: 1, transcript: 1 });
-		/** A positive notifier whose trusted tail is empty is a duplicate wake. */
-		expect(empty_wake.conversation).toBe(0);
+		/**
+		 * A positive notifier whose trusted tail is empty is a duplicate wake —
+		 * and a duplicate wake still drains conversation cursors, because
+		 * projection writers can publish already-delivered watermarks after
+		 * writing patches that are owed exactly this drain.
+		 */
+		expect(empty_wake.conversation).toBe(1);
 		expect(projection_wake).toMatchObject({
 			aggregate: 1,
 			conversation: 1,
@@ -410,6 +421,7 @@ describe("live event delivery performance", () => {
 		for (const counts of [run_state, terminal, message]) {
 			expect(counts).toMatchObject({ conversation: 1, surfaces: 1 });
 		}
-		expect(unrelated).toMatchObject({ conversation: 0, surfaces: 0 });
+		/** Surfaces stay predicate-gated; the conversation cursor is always consulted. */
+		expect(unrelated).toMatchObject({ conversation: 1, surfaces: 0 });
 	});
 });

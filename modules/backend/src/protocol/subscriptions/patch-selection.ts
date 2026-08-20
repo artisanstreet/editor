@@ -73,19 +73,6 @@ const surface_event_types = new Set([
 /** Workspace reconciliation writes only conflict updates; erasure clears the projection. */
 const workspace_conflict_event_types = new Set(["workspace.conflict.updated", "thread.erased"]);
 
-/** These durable events are the notifier-visible writers of conversation patches. */
-const conversation_event_types = new Set([
-	"usage.interruption.updated",
-	"thread.model_transition",
-	"run.lifecycle",
-	"thread.message_queued",
-	"thread.message_steering",
-	"assistant.message_completed",
-	"interaction.approval",
-	"interaction.question",
-	"thread.erased",
-]);
-
 /**
  * `RunLifecycle.record_observation` writes the conversation and surface
  * projections before it publishes these provider-attributed graph forms. They
@@ -108,9 +95,12 @@ const IsProviderProjectionEvent = (event: EventEnvelope) => {
 	);
 };
 
-export const EventAffectsConversation = (event: EventEnvelope) =>
-	conversation_event_types.has(event.payload.type) || IsProviderProjectionEvent(event);
-
+/**
+ * There is intentionally no `EventAffectsConversation`. Conversation patches
+ * are written by projection transactions outside the journal, so no event
+ * predicate can prove a wake carried none — conversation delivery drains
+ * every subscription's cursor on every wake instead.
+ */
 export const EventAffectsTranscript = (event: EventEnvelope) =>
 	transcript_event_types.has(event.payload.type);
 

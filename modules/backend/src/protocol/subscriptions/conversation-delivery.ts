@@ -17,7 +17,6 @@ export class ConnectionConversationDelivery extends Context.Service<
 	{
 		readonly EnqueuePatches: (
 			current: ReadyState,
-			affected_thread_ids?: ReadonlySet<string>,
 		) => Effect.Effect<
 			Readonly<Record<string, ProjectionSubscription>>,
 			ConversationReadModelFailure
@@ -37,7 +36,19 @@ export const MakeConnectionConversationDelivery = Effect.gen(function* () {
 			publication: Effect.Effect<A, E, R>,
 		) => publication.pipe(Effect.map(Option.some)));
 
-	const EnqueuePatches = (current: ReadyState, affected_thread_ids?: ReadonlySet<string>) =>
+	/**
+	 * Every wake drains every subscribed conversation from its own cursor.
+	 *
+	 * There is deliberately no "affected threads" filter: conversation patches
+	 * are written by projection transactions outside the journal, so no event
+	 * predicate can prove a wake carried no conversation content — the last
+	 * predicate missed six native-subagent writers, and each miss froze an
+	 * open transcript mid-run while every other surface kept flowing. The
+	 * cursor read is one indexed query per open conversation that returns
+	 * nothing when nothing is pending; correctness is not worth trading for
+	 * skipping it.
+	 */
+	const EnqueuePatches = (current: ReadyState) =>
 		Effect.gen(function* () {
 			/**
 			 * One delivery must be able to drain the entire retained patch window:
@@ -87,11 +98,6 @@ export const MakeConnectionConversationDelivery = Effect.gen(function* () {
 				if (subscription._tag !== "conversation") continue;
 				const claim = current.subscription_claims?.[subscription_id];
 				if (claim === undefined) continue;
-				if (
-					affected_thread_ids !== undefined &&
-					!affected_thread_ids.has(subscription.thread_id)
-				)
-					continue;
 				let patch_sequence = subscription.patch_sequence;
 				let stream_sequence = subscription.sequence;
 				let delivered_batches = 0;
@@ -108,7 +114,7 @@ export const MakeConnectionConversationDelivery = Effect.gen(function* () {
 						if (availability.status !== "available") break;
 						const snapshot = availability.snapshot;
 						stream_sequence += 1;
-						yield* PublishClaim(
+						const published = yield* PublishClaim(
 							subscription_id,
 							claim,
 							Enqueue({
@@ -125,6 +131,13 @@ export const MakeConnectionConversationDelivery = Effect.gen(function* () {
 								subscription_id,
 							}),
 						);
+						/**
+						 * A claim that is no longer owned publishes nothing, and a cursor
+						 * advanced past an envelope that never left the process makes the
+						 * skipped patches unreachable forever. The claim's owner will
+						 * register its own cursor; this delivery must not write one.
+						 */
+						if (Option.isNone(published)) break;
 						patch_sequence = snapshot.last_patch_sequence;
 						subscriptions = {
 							...subscriptions,
@@ -142,7 +155,7 @@ export const MakeConnectionConversationDelivery = Effect.gen(function* () {
 					stream_sequence += 1;
 					const from_sequence = patch_sequence + 1;
 					patch_sequence = final_patch.sequence;
-					yield* PublishClaim(
+					const published = yield* PublishClaim(
 						subscription_id,
 						claim,
 						Enqueue({
@@ -165,6 +178,8 @@ export const MakeConnectionConversationDelivery = Effect.gen(function* () {
 							subscription_id,
 						}),
 					);
+					/** Same rule as the snapshot branch: no publish, no cursor. */
+					if (Option.isNone(published)) break;
 					subscriptions = {
 						...subscriptions,
 						[subscription_id]: {
