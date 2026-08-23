@@ -668,6 +668,30 @@ function handle_request(request: FixtureRecord) {
 			}, 5);
 		}
 
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "auth-failure") {
+			setTimeout(() => {
+				write_frame({
+					method: "error",
+					params: {
+						error: {
+							message:
+								"Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+						},
+						threadId: request.params.threadId,
+						turnId: active_turn_id,
+						willRetry: false,
+					},
+				});
+				write_frame({
+					method: "turn/completed",
+					params: {
+						threadId: request.params.threadId,
+						turn: make_turn(active_turn_id, "failed"),
+					},
+				});
+			}, 5);
+		}
+
 		if (process.env.FAKE_APP_SERVER_SCENARIO === "subagent-lifecycle") {
 			const root_thread_id = request.params.threadId;
 			const root_turn_id = active_turn_id;

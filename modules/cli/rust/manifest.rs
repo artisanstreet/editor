@@ -50,6 +50,14 @@ impl InstallationManifest {
         directory.join("artisan-forge")
     }
 
+    pub fn broker_executable(&self) -> PathBuf {
+        let directory = self.version_root().join("forge");
+        #[cfg(target_os = "windows")]
+        return directory.join("Artisan Broker.exe");
+        #[cfg(not(target_os = "windows"))]
+        directory.join("artisan-broker")
+    }
+
     pub fn editor_executable(&self) -> PathBuf {
         let directory = self.version_root().join("editor");
         #[cfg(target_os = "windows")]
@@ -81,5 +89,19 @@ mod tests {
         assert!(message.contains("no installation manifest"), "{message}");
         assert!(message.contains("pnpm run dev:forge"), "{message}");
         assert!(message.contains("dev:ae-installer -- install"), "{message}");
+    }
+
+    #[test]
+    fn broker_lives_beside_the_versioned_forge() {
+        let manifest = InstallationManifest {
+            activation_state: "active".into(),
+            active_version: Some("1.2.3".into()),
+            install_root: PathBuf::from("artisan"),
+            permanent_ae_path: None,
+        };
+        assert_eq!(
+            manifest.broker_executable().parent(),
+            manifest.forge_executable().parent()
+        );
     }
 }

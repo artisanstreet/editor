@@ -912,6 +912,35 @@ describe("Codex engine run", () => {
 		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "failed" })]);
 	});
 
+	it("carries the sign-in classification onto the failed terminal", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "auth-failure";
+
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					const run = yield* engine.Open({
+						_tag: "start",
+						artisan_run_id: "run-auth-failure",
+						initial_text: "Hi",
+						working_directory: "C:\\workspace",
+					});
+					const events = yield* run.Events.pipe(Stream.runCollect);
+
+					return { events: [...events], terminal: yield* run.Closed };
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+
+		expect(result.terminal).toBe("failed");
+		expect(terminals(result.events)).toEqual([
+			expect.objectContaining({
+				error_ref: expect.objectContaining({ artisan_code: "AE-CLIENT_STATE-102" }),
+				state: "failed",
+			}),
+		]);
+	});
+
 	it("completes a 600-event burst with a deliberately slow canonical consumer", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "event-flood";
 

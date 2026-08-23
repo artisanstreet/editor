@@ -16,6 +16,7 @@ import type {
 	SurfaceUsageAggregateUpdate,
 	WorkspaceConflictListUpdate,
 	ThreadSessionUpdate,
+	ThreadWorkUpdate,
 	ThreadTranscriptUpdate,
 	ThreadListUpdate,
 	ConversationUpdate,
@@ -40,6 +41,7 @@ import type {
 	SurfaceUsageAggregateSubscription,
 	ThreadListSubscription,
 	ThreadSessionSubscription,
+	ThreadWorkSubscription,
 	ThreadTranscriptSubscription,
 	WorkspaceConflictListSubscription,
 } from "./model";
@@ -55,6 +57,9 @@ import { offer_projection_update } from "./offers";
  * would churn the retry loop against a healthy server.
  */
 const subscribe_deadline = "15 seconds";
+
+/** A stalled renderer resynchronizes instead of retaining an unbounded projection tail. */
+export const projection_subscription_queue_capacity = 128;
 
 /** Builds lossless subscription delivery and ACK cursor state. */
 export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
@@ -162,6 +167,8 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 					return yield* Queue.fail(subscription.queue, error);
 				case "thread.session":
 					return yield* Queue.fail(subscription.queue, error);
+				case "thread.work":
+					return yield* Queue.fail(subscription.queue, error);
 				case "surface.list":
 					return yield* Queue.fail(subscription.queue, error);
 				case "surface.usage.aggregate":
@@ -186,6 +193,8 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 				case "orchestration.group.list":
 					return yield* Queue.end(subscription.queue);
 				case "thread.session":
+					return yield* Queue.end(subscription.queue);
+				case "thread.work":
 					return yield* Queue.end(subscription.queue);
 				case "surface.list":
 					return yield* Queue.end(subscription.queue);
@@ -220,13 +229,16 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 
 			const offer = offer_projection_update(subscription, envelope);
 
-			if (offer === "mismatch") {
+			if (offer !== "offered") {
 				const subscriptions = new Map(current.subscriptions);
 
 				subscriptions.delete(envelope.subscription_id);
 
 				return [
-					{ _tag: "Gap", subscription },
+					{
+						_tag: offer === "overflow" ? "Overflow" : "Gap",
+						subscription,
+					},
 					{ ...current, subscriptions },
 				];
 			}
@@ -248,15 +260,24 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			];
 		}).pipe(
 			Effect.flatMap((delivery) => {
-				if (delivery._tag !== "Gap") {
+				if (delivery._tag !== "Gap" && delivery._tag !== "Overflow") {
 					return Effect.void;
 				}
 
-				const error = client_error(
-					"stream_gap",
-					"The projection subscription sequence contained a gap.",
-					new Error("projection subscription could not remain contiguous"),
-				);
+				const error =
+					delivery._tag === "Overflow"
+						? client_error(
+								"stream_overflow",
+								"The projection consumer fell behind its bounded delivery queue.",
+								new Error("projection subscription queue capacity exceeded"),
+								true,
+								"subscription.overflow",
+							)
+						: client_error(
+								"stream_gap",
+								"The projection subscription sequence contained a gap.",
+								new Error("projection subscription could not remain contiguous"),
+							);
 
 				return fail_projection(delivery.subscription, error).pipe(
 					Effect.andThen(send_unsubscribe(envelope.subscription_id)),
@@ -418,7 +439,7 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 
 	/**
 	 * One factory owns every projection subscription lifecycle: trace, id,
-	 * lossless queue, start registration, and stream exposure. Each kind supplies
+	 * bounded queue, start registration, and stream exposure. Each kind supplies
 	 * only its typed identity through the builder, whose annotation ties the
 	 * queue element type to the subscription tag — the pairing the previous
 	 * hand-written copies re-stated six times and the old generic asserted with
@@ -439,7 +460,9 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			const trace = yield* make_trace;
 			const subscription_id = yield* make_id(id_prefix);
 			const queue = yield* Effect.acquireRelease(
-				Queue.unbounded<Update, ArtisanClientError | Cause.Done<void>>(),
+				Queue.bounded<Update, ArtisanClientError | Cause.Done<void>>(
+					projection_subscription_queue_capacity,
+				),
 				Queue.shutdown,
 			);
 			const started = yield* Deferred.make<void, ArtisanClientError>();
@@ -643,6 +666,12 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 				"thread.session_subscription",
 				{ type: "thread.session", thread_id },
 				(parts) => ({ _tag: "thread.session", ...parts }),
+			),
+		SubscribeThreadWork: (thread_id) =>
+			subscribe_projection<ThreadWorkUpdate, ThreadWorkSubscription>(
+				"thread.work_subscription",
+				{ type: "thread.work", thread_id },
+				(parts) => ({ _tag: "thread.work", ...parts }),
 			),
 		SubscribeSurfaceItems: (query) =>
 			subscribe_projection<SurfaceListUpdate, SurfaceListSubscription>(

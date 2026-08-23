@@ -1,28 +1,29 @@
 {
-	"name": "@artisan/backend",
-	"private": true,
-	"type": "module",
-	"exports": {
-		".": {
-			"types": "./src/index.ts",
-			"development": "./src/index.ts",
-			"default": "./.dist/index.mjs"
-		}
-	},
-	"dependencies": {
-		"@artisan/catalog": "workspace:*",
-		"@artisan/data": "workspace:*",
-		"@artisan/engines": "workspace:*",
-		"@artisan/protocol": "workspace:*",
-		"@decimalturn/toml-patch": "3.0.1",
-		"@effect/platform-node-shared": "4.0.0-beta.97",
-		"@effect/sql-sqlite-node": "4.0.0-beta.97",
-		"diff": "9.0.0",
-		"drizzle-orm": "1.0.0-rc.4",
-		"effect": "4.0.0-beta.97",
-		"ipaddr.js": "2.4.0",
-		"koffi": "3.1.1",
-		"node-pty": "1.1.0",
-		"parse5": "8.0.1"
-	}
+  "name": "@artisan/backend",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./.dist/index.mjs"
+    }
+  },
+  "dependencies": {
+    "@artisan/catalog": "workspace:*",
+    "@artisan/data": "workspace:*",
+    "@artisan/engines": "workspace:*",
+    "@artisan/observability": "workspace:*",
+    "@artisan/protocol": "workspace:*",
+    "@decimalturn/toml-patch": "3.0.1",
+    "@effect/platform-node-shared": "4.0.0-beta.97",
+    "@effect/sql-sqlite-node": "4.0.0-beta.97",
+    "diff": "9.0.0",
+    "drizzle-orm": "1.0.0-rc.4",
+    "effect": "4.0.0-beta.97",
+    "ipaddr.js": "2.4.0",
+    "koffi": "3.1.1",
+    "node-pty": "1.1.0",
+    "parse5": "8.0.1"
+  }
 }

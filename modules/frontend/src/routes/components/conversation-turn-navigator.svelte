@@ -77,14 +77,17 @@
 				what puts a shadow down the right edge here.
 			-->
 			<!--
-				The picker animates a positioning wrapper around its glass, never the
-				glass itself. Keeping that boundary here too lets the material recover
-				its backdrop as soon as the entrance finishes and `transform` becomes
-				`none`.
+				The moving layer hosts its own backdrop sampling, just like the model
+				picker. A filter nested below this scale transform cannot see the page
+				behind it in Chromium until the transform finishes.
 			-->
-			<div aria-hidden="true" class="conversation-range-backdrop pointer-events-none absolute inset-0">
+			<div
+				aria-hidden="true"
+				class="conversation-range-backdrop pointer-events-none absolute inset-0 shader-glass-backdrop radius-surface [--radius-gap:var(--spacing)] [--radius-surface:var(--radius-xl)]"
+			>
 				<ShaderGlassSurface
-					class="radius-surface size-full [--radius-gap:var(--spacing)] [--radius-surface:var(--radius-xl)]"
+					class="radius-surface size-full"
+					use_backdrop_filter={false}
 				>
 					<span class="sr-only"></span>
 				</ShaderGlassSurface>

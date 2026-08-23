@@ -45,6 +45,7 @@
 	let terminals = $state.raw<ReadonlyArray<TerminalSession>>([]);
 	let viewing = $state.raw<TerminalSession | undefined>(undefined);
 	let viewer_raw = $state("");
+	let viewer_state = $state<"failed" | "loading" | "ready">("loading");
 	let output_generation = 0;
 	const component_scope = yield* Scope.Scope;
 	let output_scope: Scope.Closeable | undefined;
@@ -82,6 +83,7 @@
 			const { previous_scope } = DetachOutputScope();
 			viewing = undefined;
 			viewer_raw = "";
+			viewer_state = "loading";
 			terminals = [];
 			/** Navigation paints immediately; the component scope owns the release. */
 			yield* CloseOutputScope(previous_scope).pipe(Effect.forkScoped);
@@ -122,6 +124,7 @@
 			if (generation !== output_generation) return;
 			viewing = terminal;
 			viewer_raw = "";
+			viewer_state = "loading";
 			const next_output_scope = yield* Scope.fork(component_scope);
 			if (generation !== output_generation) {
 				yield* Scope.close(next_output_scope, Exit.void);
@@ -137,6 +140,7 @@
 			const { previous_scope } = DetachOutputScope();
 			viewing = undefined;
 			viewer_raw = "";
+			viewer_state = "loading";
 			yield* CloseOutputScope(previous_scope);
 		});
 
@@ -151,6 +155,11 @@
 		Effect.scoped(
 			Effect.gen(function* () {
 				const decoder = yield* Effect.sync(() => new TextDecoder());
+				const AppendOutput = (text: string) => {
+					if (generation !== output_generation || text.length === 0) return;
+					viewer_raw = append_terminal_output(viewer_raw, text);
+					viewer_state = "ready";
+				};
 				const output = yield* client.OpenTerminalOutput({
 					terminal_id: target.terminal_id,
 					thread_id: target.thread_id,
@@ -161,22 +170,21 @@
 				yield* output.pipe(
 					Stream.runForEach((chunk) =>
 						Effect.sync(() => {
-							if (generation !== output_generation) return;
-							viewer_raw = append_terminal_output(
-								viewer_raw,
-								decoder.decode(chunk, { stream: true }),
-							);
+							AppendOutput(decoder.decode(chunk, { stream: true }));
 						}),
 					),
 				);
+				if (generation !== output_generation) return;
+				AppendOutput(decoder.decode());
+				viewer_state = "ready";
 			}),
-			).pipe(
-				Effect.catch(() =>
-					Effect.gen(function* () {
-						/** A dropped stream leaves whatever already arrived on screen. */
-					}),
-				),
-			);
+		).pipe(
+			Effect.catch(() =>
+				Effect.sync(() => {
+					if (generation === output_generation) viewer_state = "failed";
+				}),
+			),
+		);
 
 	const presented_output = $derived(present_terminal_output(viewer_raw));
 </script>
@@ -216,12 +224,25 @@
 				no scroll bookkeeping.
 			-->
 			<div
-				class="flex h-[60vh] min-h-0 flex-col-reverse overflow-y-auto rounded-xl bg-background/50 ring-1 ring-foreground/10"
+				class="relative flex h-[60vh] min-h-0 flex-col-reverse overflow-y-auto rounded-xl bg-background/50 ring-1 ring-foreground/10"
 			>
-				<pre
-					class="px-3 py-2.5 font-mono text-xs leading-5 break-words whitespace-pre-wrap text-foreground"><code
-						>{presented_output}</code
-					></pre>
+				{#if presented_output.length > 0}
+					<pre
+						class="px-3 py-2.5 font-mono text-xs leading-5 break-words whitespace-pre-wrap text-foreground"><code
+							>{presented_output}</code
+						></pre>
+				{:else}
+					<p
+						class="absolute inset-0 grid place-items-center px-4 text-center text-xs text-muted-foreground"
+						role="status"
+					>
+						{viewer_state === "failed"
+							? "Terminal output is unavailable."
+							: viewer_state === "ready"
+								? "No output."
+								: "Waiting for output…"}
+					</p>
+				{/if}
 			</div>
 		{/if}
 	</Dialog.Content>

@@ -23,7 +23,10 @@ import { ProjectIdentityControllerLive } from "../root/project-identity-controll
 import { WorkspaceCatalogControllerLive } from "../root/workspace-catalog-controller";
 import { EngineInstallationsControllerLive } from "../settings/engine-installations-controller";
 import { SessionDefaultsControllerLive } from "../settings/session-defaults-controller";
+import { TelemetryControllerLive } from "../settings/telemetry-controller";
 import { ThreadRetentionPolicyControllerLive } from "../settings/thread-retention-policy-controller";
+import { RendererErrorMonitoringLive } from "../telemetry/renderer-sentry";
+import { ProductTelemetryBootstrapLive } from "../telemetry/product-bootstrap";
 import { ThreadTerminalsControllerLive } from "../terminal/thread-terminals-controller";
 import { ThreadOpenControllerLive } from "../thread-interaction/thread-open-controller";
 import { ThreadSessionProjectionLive } from "../thread-interaction/session-projection";
@@ -33,30 +36,35 @@ import { AttentionReconnectLive } from "./attention-reconnect";
 import { FrontendRuntimeLive } from "./frontend-runtime";
 import { HostResumeRecoveryLive } from "./host-resume-recovery";
 
+/** Installation completion invalidates the same shared usage entry both account surfaces read. */
+const EngineToolchainControllersLive = EngineInstallationsControllerLive.pipe(
+  Layer.provideMerge(EngineUsageControllerLive),
+);
+
 /** Controllers consume the one production client supplied by the base runtime. */
 const FrontendControllersLive = Layer.mergeAll(
-	ComposerDraftStoreLive,
-	MathRendererControllerLive,
-	RichLinkAssetControllerLive,
-	RichLinkMetadataControllerLive,
-	DraftThreadControllerLive,
-	ProjectIdentityControllerLive,
-	WorkspaceCatalogControllerLive,
-	ImageInspectionStoreLive,
-	RunUsageControllerLive,
-	HostIdentityControllerLive,
-	HostMachinesControllerLive,
-	EngineUsageControllerLive,
-	EngineInstallationsControllerLive,
-	SessionDefaultsControllerLive,
-	ThreadRetentionPolicyControllerLive,
-	ThreadTerminalsControllerLive,
-	ThreadOpenControllerLive,
-	ThreadSessionProjectionLive,
-	ThreadChecklistLive,
-	ThreadOrchestrationRosterLive,
-	ProjectRepositoryControllerLive,
-	GitWorkspaceControllerLive,
+  ComposerDraftStoreLive,
+  MathRendererControllerLive,
+  RichLinkAssetControllerLive,
+  RichLinkMetadataControllerLive,
+  DraftThreadControllerLive,
+  ProjectIdentityControllerLive,
+  WorkspaceCatalogControllerLive,
+  ImageInspectionStoreLive,
+  RunUsageControllerLive,
+  HostIdentityControllerLive,
+  HostMachinesControllerLive,
+  EngineToolchainControllersLive,
+  SessionDefaultsControllerLive,
+  TelemetryControllerLive,
+  ThreadRetentionPolicyControllerLive,
+  ThreadTerminalsControllerLive,
+  ThreadOpenControllerLive,
+  ThreadSessionProjectionLive,
+  ThreadChecklistLive,
+  ThreadOrchestrationRosterLive,
+  ProjectRepositoryControllerLive,
+  GitWorkspaceControllerLive,
 ).pipe(Layer.provide(FrontendRuntimeLive));
 
 /**
@@ -65,13 +73,9 @@ const FrontendControllersLive = Layer.mergeAll(
  * notification navigates, which needs the routed browser adapter.
  */
 const SystemNotificationsRuntimeLive = SystemNotificationsLive.pipe(
-	Layer.provide(
-		Layer.mergeAll(
-			RouteNavigationLive,
-			WebSystemNotificationPresenterLive,
-			FrontendRuntimeLive,
-		),
-	),
+  Layer.provide(
+    Layer.mergeAll(RouteNavigationLive, WebSystemNotificationPresenterLive, FrontendRuntimeLive),
+  ),
 );
 
 /**
@@ -80,7 +84,7 @@ const SystemNotificationsRuntimeLive = SystemNotificationsLive.pipe(
  * the monotonic scheduler disagree after resume.
  */
 const HostResumeRecoveryRuntimeLive = HostResumeRecoveryLive.pipe(
-	Layer.provide(FrontendRuntimeLive),
+  Layer.provide(FrontendRuntimeLive),
 );
 
 /**
@@ -88,7 +92,14 @@ const HostResumeRecoveryRuntimeLive = HostResumeRecoveryLive.pipe(
  * a manual reload; returning attention re-arms the same bounded retry.
  */
 const AttentionReconnectRuntimeLive = AttentionReconnectLive.pipe(
-	Layer.provide(Layer.mergeAll(BrowserReaderAttentionLive, FrontendRuntimeLive)),
+  Layer.provide(Layer.mergeAll(BrowserReaderAttentionLive, FrontendRuntimeLive)),
+);
+
+const RendererErrorMonitoringRuntimeLive = RendererErrorMonitoringLive.pipe(
+  Layer.provide(FrontendControllersLive),
+);
+const ProductTelemetryBootstrapRuntimeLive = ProductTelemetryBootstrapLive.pipe(
+  Layer.provide(FrontendControllersLive),
 );
 
 /**
@@ -97,13 +108,15 @@ const AttentionReconnectRuntimeLive = AttentionReconnectLive.pipe(
  * a file is fetched on demand by the adapter.
  */
 export const BrowserFrontendRuntimeLive = Layer.mergeAll(
-	FrontendRuntimeLive,
-	HostResumeRecoveryRuntimeLive,
-	AttentionReconnectRuntimeLive,
-	BrowserReaderAttentionLive,
-	BrowserTypographyLive,
-	RouteNavigationLive,
-	FrontendControllersLive,
-	SystemNotificationsRuntimeLive,
-	MakeEditorLayer(BrowserCodeMirrorAdapter),
+  FrontendRuntimeLive,
+  HostResumeRecoveryRuntimeLive,
+  AttentionReconnectRuntimeLive,
+  BrowserReaderAttentionLive,
+  BrowserTypographyLive,
+  RouteNavigationLive,
+  FrontendControllersLive,
+  SystemNotificationsRuntimeLive,
+  RendererErrorMonitoringRuntimeLive,
+  ProductTelemetryBootstrapRuntimeLive,
+  MakeEditorLayer(BrowserCodeMirrorAdapter),
 );

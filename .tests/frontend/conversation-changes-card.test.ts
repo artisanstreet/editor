@@ -33,7 +33,18 @@ describe("conversation changes card layout", () => {
 
 		expect(thread_route).toContain("project_root_path={thread?.primary_project?.root_path}");
 		expect(thread_workspace).toContain("{project_root_path}");
-		expect(card).toContain("display_file_change_path(file.path, project_root_path)");
+		expect(card).toContain(
+			"display_file_change_path(file.path, project_root_path, $path_separator)",
+		);
 		expect(card).toContain("CopyPath(file.path)");
+	});
+
+	it("renders partial header totals instead of hiding all known counts", async () => {
+		const source = await readFile(card_path, "utf8");
+
+		expect(source).toContain('aggregate_diff.kind !== "unavailable"');
+		expect(source).toContain('aggregate_diff.kind === "partial"');
+		expect(source).toContain("At least ${aggregate_diff.additions} additions");
+		expect(source).toContain('class="text-muted-foreground">≥</span>');
 	});
 });

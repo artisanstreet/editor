@@ -218,9 +218,13 @@ const PermanentAe = text_encoder.encode(["@echo off", '"%~dp0ae.exe" %*', ""].jo
 
 const ValidateForgeSeaPayload = (entries: ReadonlyArray<ArchiveEntry>) => {
 	const forge_entries = entries.filter((entry) => entry.path.startsWith("forge/"));
-	if (forge_entries.length !== 1 || forge_entries[0]?.path !== "forge/Artisan Forge.exe")
+	const expected = ["forge/Artisan Broker.exe", "forge/Artisan Forge.exe"];
+	if (
+		forge_entries.length !== expected.length ||
+		forge_entries.some((entry, index) => entry.path !== expected[index])
+	)
 		throw new Error(
-			`Forge SEA payload must contain only forge/Artisan Forge.exe; received: ${forge_entries
+			`Forge payload must contain only Artisan Broker and Artisan Forge; received: ${forge_entries
 				.map((entry) => entry.path)
 				.join(", ")}`,
 		);
@@ -268,6 +272,7 @@ export const BuildWindowsDistributionRelease = (input: DistributionReleaseInput)
 		});
 		if (
 			!entries.some((entry) => entry.path === "editor/Artisan Editor.exe") ||
+			!entries.some((entry) => entry.path === "forge/Artisan Broker.exe") ||
 			!entries.some((entry) => entry.path === "forge/Artisan Forge.exe") ||
 			(configuration.native_cli_path !== undefined &&
 				!entries.some((entry) => entry.path === "bin/ae.exe")) ||

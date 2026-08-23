@@ -178,6 +178,11 @@ describe("Forge boundary", () => {
 					migrations_path: join(directory, "migrations"),
 				}),
 				authority,
+				{
+					ActiveWorkCount: Effect.gen(function* () {
+						return yield* Effect.succeed(2);
+					}),
+				},
 			),
 		);
 		closers.push(async () => {
@@ -195,6 +200,7 @@ describe("Forge boundary", () => {
 			},
 		});
 		expect(await status.json()).toMatchObject({
+			active_work_count: 2,
 			instance_id: test_instance_id,
 			service: "artisan-forge",
 			status: "ready",

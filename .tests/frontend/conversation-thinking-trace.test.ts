@@ -277,9 +277,8 @@ describe("live thinking line", () => {
 		expect(trace).not.toContain("reasoning_group");
 		expect(workspace).not.toContain("ConversationReasoningSummary");
 		expect(workspace).toContain('policy_reasoning_display(policy) === "trace"');
-		expect(workspace).toContain(
-			"conversation_live_reasoning_summary(render_blocks, active_run_id, run_active)",
-		);
+		expect(workspace).toContain("conversation_live_reasoning_summary(");
+		expect(workspace).toContain("presentation_run_active,");
 		expect(workspace).toContain("block.session.run_id === active_run_id");
 		expect(workspace).toContain("strip_conversation_trace_reasoning(block.details)");
 		expect(workspace).toContain("has_details={visible_details.length > 0}");

@@ -49,7 +49,7 @@ describe("thread route data loading", () => {
 		expect(refresh).not.toContain("workspace_catalog.Current");
 	});
 
-	it("streams session/catalog state and ignores unrelated event traffic", () => {
+	it("streams session, work, and catalog state while ignoring unrelated event traffic", () => {
 		const route = Read("modules/frontend/src/routes/components/thread-route.svelte");
 		const events = route.slice(
 			route.lastIndexOf("RunAuthoritativeSubscription("),
@@ -57,9 +57,10 @@ describe("thread route data loading", () => {
 		);
 
 		expect(route).toContain("client.SubscribeThreadSession(thread_id)");
+		expect(route).toContain("client.SubscribeThreadWork(thread_id)");
 		expect(route).toContain("workspace_catalog.Changes.pipe(Stream.runForEach(ApplyCatalog))");
-		expect(events).toContain('event.payload.type === "run.lifecycle"');
 		expect(events).toContain('event.payload.type === "thread.erased"');
+		expect(events).not.toContain('event.payload.type === "run.lifecycle"');
 		for (const unrelated of [
 			"filesystem.mutation",
 			"process.ownership",
@@ -68,6 +69,25 @@ describe("thread route data loading", () => {
 		]) {
 			expect(events).not.toContain(unrelated);
 		}
+	});
+
+	it("never authorizes a send from cached thread-open session or work", () => {
+		const route = Read("modules/frontend/src/routes/components/thread-route.svelte");
+		const send = route.slice(
+			route.indexOf("const SendMessage"),
+			route.indexOf("const WithdrawQueuedMessage"),
+		);
+
+		expect(route).toContain("let work_ready = $state(false);");
+		expect(route).toContain("let session_ready = $state(false);");
+		expect(route).toContain("work_ready &&");
+		expect(route).toContain(
+			"disabled={!session_ready || !work_ready || first_submission_blocked}",
+		);
+		expect(send).toContain("Effect.all([AwaitSessionAuthority, AwaitWorkAuthority]");
+		expect(route).toContain(
+			"if (!work_ready) yield* ApplyWorkValue(Option.getOrUndefined(next_work));",
+		);
 	});
 
 	it("coalesces conversation resyncs and runs independent recovery reads concurrently", () => {

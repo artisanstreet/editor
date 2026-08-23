@@ -976,6 +976,7 @@ export const JournalStoreLive = Layer.effect(
 								created_at: occurred_at,
 								current_goal: payload.title,
 								last_activity_at: occurred_at,
+								last_message_at: occurred_at,
 								reader_activity_at: occurred_at,
 								live_status: "Idle",
 								metadata_version: 0,
@@ -1005,8 +1006,15 @@ export const JournalStoreLive = Layer.effect(
 									engine_id: payload.policy.engine_id,
 									native_resume_json: null,
 									native_thread_id: null,
+									policy_catalog_revision:
+										payload.policy.catalog_revision ?? null,
 									policy_context_window: payload.policy.context_window ?? null,
 									policy_model: payload.policy.model ?? null,
+									policy_model_id: payload.policy.model_id ?? null,
+									policy_profile_id: payload.policy.profile_id ?? null,
+									policy_provider_route_id:
+										payload.policy.provider_route_id ?? null,
+									policy_variant_id: payload.policy.variant_id ?? null,
 									policy_permission: SessionPolicyPermission(payload.policy),
 									policy_permission_mode: payload.policy.permission_mode,
 									policy_reasoning_effort: payload.policy.reasoning_effort,

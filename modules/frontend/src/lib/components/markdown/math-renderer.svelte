@@ -39,7 +39,13 @@
 		<div class="docs-math-block not-prose">{@html rendered.html}</div>
 	{/if}
 {:else if is_inline}
-	<code class="docs-math-fallback">{content}</code>
+	<code
+		class="docs-math-fallback"
+		aria-busy={renderer_state._tag === "Loading" ? "true" : undefined}
+	>{content}</code>
 {:else}
-	<pre class="docs-math-fallback not-prose"><code>{content}</code></pre>
+	<pre
+		class="docs-math-fallback not-prose"
+		aria-busy={renderer_state._tag === "Loading" ? "true" : undefined}
+	><code>{content}</code></pre>
 {/if}

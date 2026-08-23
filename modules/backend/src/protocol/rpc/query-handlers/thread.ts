@@ -102,7 +102,12 @@ export const MakeThreadQueryHandler = Effect.gen(function* () {
 
 	const handlers = {
 		"conversation.query": (query: ConversationQueryEnvelope) =>
-			conversation_read_model.ReadSnapshot(query.payload.thread_id).pipe(
+			conversation_read_model
+				.ReadSnapshot(query.payload.thread_id, {
+					range: query.payload.range,
+					window: query.payload.window,
+				})
+				.pipe(
 				Effect.mapError(() =>
 					ProjectionUnavailable("The conversation projection could not be read."),
 				),

@@ -12,6 +12,7 @@
 	} from "$lib/conversation/file-change-groups";
 	import { resolve_file_icon } from "$lib/conversation/file-icon";
 	import { changed_files_style_config } from "$lib/conversation-style-config";
+	import { path_separator } from "$lib/appearance-config";
 
 	type ChangeSet = Extract<ConversationItem, { type: "change_set" }>;
 	type FileChange = Extract<ConversationItem, { type: "file_change" }>;
@@ -61,12 +62,15 @@
 		});
 </script>
 
-{#snippet diff_stat(additions, deletions, label)}
+{#snippet diff_stat(additions, deletions, label, partial = false)}
 	<span
 		role="group"
 		aria-label={label}
 		class="ml-auto inline-flex shrink-0 items-center justify-end gap-2 font-mono text-xs leading-4 tabular-nums"
 	>
+		{#if partial}
+			<span aria-hidden="true" class="text-muted-foreground">≥</span>
+		{/if}
 		<!--
 			Content-sized, so the counts end flush with the row's right edge. A fixed
 			numeric column reserved room for a width the count rarely uses, which left
@@ -91,11 +95,14 @@
 >
 	<header class="flex items-center justify-between gap-4">
 		<p class="font-semibold">Edited {file_count} {file_count === 1 ? "file" : "files"}</p>
-		{#if aggregate_diff.kind === "known"}
+		{#if aggregate_diff.kind !== "unavailable"}
 			{@render diff_stat(
 				aggregate_diff.additions,
 				aggregate_diff.deletions,
-				`${aggregate_diff.additions} additions, ${aggregate_diff.deletions} deletions`,
+				aggregate_diff.kind === "partial"
+					? `At least ${aggregate_diff.additions} additions and ${aggregate_diff.deletions} deletions; line counts unavailable for ${aggregate_diff.unavailable_files} ${aggregate_diff.unavailable_files === 1 ? "change" : "changes"}`
+					: `${aggregate_diff.additions} additions, ${aggregate_diff.deletions} deletions`,
+				aggregate_diff.kind === "partial",
 			)}
 		{/if}
 	</header>
@@ -103,7 +110,9 @@
 	{#if grouped_files.length > 0}
 		<ul>
 			{#each grouped_files as file (file.id)}
-				{@const parts = path_parts(display_file_change_path(file.path, project_root_path))}
+				{@const parts = path_parts(
+					display_file_change_path(file.path, project_root_path, $path_separator),
+				)}
 				<li>
 					<ContextMenu.Root>
 						<ContextMenu.Trigger
@@ -123,11 +132,14 @@
 									><span class="text-foreground">{parts.filename}</span>
 								</span>
 							</span>
-							{#if file.diff.kind === "known"}
+							{#if file.diff.kind !== "unavailable"}
 								{@render diff_stat(
 									file.diff.additions,
 									file.diff.deletions,
-									`${file.diff.additions} additions, ${file.diff.deletions} deletions`,
+									file.diff.kind === "partial"
+										? `At least ${file.diff.additions} additions and ${file.diff.deletions} deletions; line counts unavailable for ${file.diff.unavailable_files} ${file.diff.unavailable_files === 1 ? "change" : "changes"}`
+										: `${file.diff.additions} additions, ${file.diff.deletions} deletions`,
+									file.diff.kind === "partial",
 								)}
 							{/if}
 						</ContextMenu.Trigger>

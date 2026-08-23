@@ -11,8 +11,14 @@ export {
 	ForgeDatabaseLeaseFailure,
 	type ForgeDatabaseLease,
 } from "./database-lease";
-export { start_forge_http, ForgeHttpFailure, type ForgeHttpServer } from "./http-host";
+export {
+	start_forge_http,
+	ForgeHttpFailure,
+	type ForgeActivity,
+	type ForgeHttpServer,
+} from "./http-host";
 export { StartForge, type ForgeHandle } from "./forge-host";
+export { ArtisanBrokerFailure, EvaluateArtisanBroker, type BrokerExecutor } from "./broker";
 export {
 	ForgeControlAuthority,
 	make_forge_control_authority_layer,

@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, Fiber, Layer } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { describe, expect, it } from "vitest";
 
@@ -10,9 +10,12 @@ import {
 	SubscriptionProtocol,
 } from "../../../../modules/transport/src/internal/subscriptions/context";
 import { make_client_subscription_coordinator } from "../../../../modules/transport/src/internal/subscriptions/coordinator";
+import { event_observer_queue_capacity } from "../../../../modules/transport/src/internal/subscriptions/ingress";
+import { projection_subscription_queue_capacity } from "../../../../modules/transport/src/internal/subscriptions/registry";
 
 const make_test_context = () => {
 	const sent: Array<InboundControlEnvelope> = [];
+	const errors: Array<unknown> = [];
 	let tick = 0;
 
 	const layer = Layer.mergeAll(
@@ -41,7 +44,9 @@ const make_test_context = () => {
 					sent.push(envelope);
 				}),
 		}),
-		Layer.succeed(SubscriptionErrorReporter, { publish_error: () => Effect.void }),
+		Layer.succeed(SubscriptionErrorReporter, {
+			publish_error: (error) => Effect.sync(() => void errors.push(error)),
+		}),
 	);
 
 	const started_envelope = (
@@ -70,7 +75,7 @@ const make_test_context = () => {
 		return envelope;
 	};
 
-	return { layer, sent, sent_subscribe, started_envelope };
+	return { errors, layer, sent, sent_subscribe, started_envelope };
 };
 
 const until_sent = (sent: ReadonlyArray<InboundControlEnvelope>, count: number) =>
@@ -328,6 +333,132 @@ describe("client subscription registry connection reset", () => {
 
 					expect(Exit.isSuccess(restarted)).toBe(true);
 					yield* coordinator.AwaitReady.pipe(Effect.timeout("2 seconds"));
+				}),
+			),
+		);
+	});
+
+	it("fails one stalled projection at its bound without retiring the connection", async () => {
+		const context = make_test_context();
+
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const coordinator = yield* make_client_subscription_coordinator.pipe(
+						Effect.provide(context.layer),
+					);
+					const subscriber = yield* coordinator.SubscribeThreadList.pipe(
+						Effect.forkScoped,
+					);
+					yield* until_sent(context.sent, 1);
+					const subscribe = context.sent_subscribe(0);
+					const stream_id = "bounded_projection_stream";
+					yield* coordinator.HandleStarted(
+						context.started_envelope(
+							subscribe.message_id,
+							subscribe.subscription_id,
+							stream_id,
+						),
+					);
+					const updates = yield* Fiber.join(subscriber);
+
+					for (
+						let sequence = 0;
+						sequence <= projection_subscription_queue_capacity;
+						sequence += 1
+					) {
+						yield* coordinator.HandleUpdate({
+							journal_sequence: sequence,
+							kind: "thread.list.snapshot",
+							message_id: `bounded_projection_${sequence}`,
+							origin: "backend",
+							payload: { threads: [] },
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at: "2026-08-21T00:00:00.000Z",
+							sequence,
+							stream_id,
+							subscription_id: subscribe.subscription_id,
+						});
+					}
+
+					const outcome = yield* updates.pipe(Stream.runDrain, Effect.exit);
+					expect(Exit.isFailure(outcome)).toBe(true);
+					if (Exit.isFailure(outcome)) {
+						expect(Cause.squash(outcome.cause)).toMatchObject({
+							code: "stream_overflow",
+							protocol_code: "subscription.overflow",
+						});
+					}
+					expect(context.errors).toHaveLength(1);
+					expect(context.sent.some((envelope) => envelope.kind === "unsubscribe")).toBe(
+						true,
+					);
+				}),
+			),
+		);
+	});
+
+	it("fails only a stalled event observer when its private bound fills", async () => {
+		const context = make_test_context();
+
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const coordinator = yield* make_client_subscription_coordinator.pipe(
+						Effect.provide(context.layer),
+					);
+					const first_started = yield* Deferred.make<void>();
+					const release_first = yield* Deferred.make<void>();
+					let first = true;
+					const observer = yield* coordinator.Events.pipe(
+						Stream.tap(() => {
+							if (!first) return Effect.void;
+							first = false;
+							return Deferred.succeed(first_started, undefined).pipe(
+								Effect.andThen(Deferred.await(release_first)),
+							);
+						}),
+						Stream.runDrain,
+						Effect.exit,
+						Effect.forkScoped,
+					);
+					yield* Effect.yieldNow;
+
+					for (
+						let sequence = 1;
+						sequence <= event_observer_queue_capacity + 2;
+						sequence += 1
+					) {
+						yield* coordinator.ApplyEvent({
+							causation_id: `bounded_event_${sequence}`,
+							correlation_id: `bounded_event_${sequence}`,
+							journal_sequence: sequence,
+							kind: "event",
+							message_id: `bounded_event_${sequence}`,
+							origin: "backend",
+							payload: { type: "thread.erased" },
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at: "2026-08-21T00:00:00.000Z",
+							sequence,
+							stream_id: "thread:bounded-observer",
+							thread_id: "thread_bounded_observer",
+						});
+						if (sequence === 1) yield* Deferred.await(first_started);
+					}
+
+					yield* Deferred.succeed(release_first, undefined);
+					const outcome = yield* Fiber.join(observer);
+					expect(Exit.isFailure(outcome)).toBe(true);
+					if (Exit.isFailure(outcome)) {
+						expect(Cause.squash(outcome.cause)).toMatchObject({
+							code: "event_overflow",
+							protocol_code: "event.observer_overflow",
+						});
+					}
+					/** Observer overflow is local; the protocol session remains usable. */
+					expect(context.errors).toEqual([]);
 				}),
 			),
 		);

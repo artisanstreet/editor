@@ -5,6 +5,7 @@ import type {
 	ProjectCatalogUpdate,
 	ThreadListUpdate,
 	ThreadTranscriptUpdate,
+	ThreadWorkUpdate,
 } from "../../client-api/service";
 import type { ProjectionEnvelope, ProjectionOffer, ProjectionSubscription } from "./model";
 
@@ -37,8 +38,7 @@ export const offer_projection_update = (
 							type: "remove",
 						};
 
-		Queue.offerUnsafe(subscription.queue, update);
-		return "offered";
+		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 	}
 
 	if (
@@ -49,8 +49,7 @@ export const offer_projection_update = (
 			snapshot: envelope.payload,
 			type: envelope.kind === "project.list.snapshot" ? "snapshot" : "replacement",
 		};
-		Queue.offerUnsafe(subscription.queue, update);
-		return "offered";
+		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 	}
 
 	if (
@@ -64,8 +63,7 @@ export const offer_projection_update = (
 			type: envelope.kind === "orchestration.graph.snapshot" ? "snapshot" : "patch",
 		};
 
-		Queue.offerUnsafe(subscription.queue, update);
-		return "offered";
+		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 	}
 
 	if (
@@ -85,8 +83,7 @@ export const offer_projection_update = (
 						journal_sequence: envelope.journal_sequence,
 						entries: envelope.payload.entries,
 					};
-		Queue.offerUnsafe(subscription.queue, update);
-		return "offered";
+		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 	}
 
 	if (
@@ -98,8 +95,7 @@ export const offer_projection_update = (
 				? { type: "snapshot", snapshot: envelope.payload }
 				: { type: "patch", batch: envelope.payload };
 
-		Queue.offerUnsafe(subscription.queue, update);
-		return "offered";
+		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 	}
 
 	if (
@@ -107,45 +103,54 @@ export const offer_projection_update = (
 		(envelope.kind === "orchestration.group.list.snapshot" ||
 			envelope.kind === "orchestration.group.list.patch")
 	) {
-		Queue.offerUnsafe(subscription.queue, {
+		return Queue.offerUnsafe(subscription.queue, {
 			type: envelope.kind === "orchestration.group.list.snapshot" ? "snapshot" : "patch",
 			snapshot: envelope.payload,
-		});
-		return "offered";
+		})
+			? "offered"
+			: "overflow";
 	}
 	if (subscription._tag === "thread.session" && envelope.kind === "thread.session.snapshot") {
-		Queue.offerUnsafe(subscription.queue, {
+		return Queue.offerUnsafe(subscription.queue, {
 			type: "snapshot",
 			snapshot: envelope.payload,
-		});
-		return "offered";
+		})
+			? "offered"
+			: "overflow";
+	}
+	if (subscription._tag === "thread.work" && envelope.kind === "thread.work.snapshot") {
+		const update: ThreadWorkUpdate = { type: "snapshot", snapshot: envelope.payload };
+		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 	}
 	if (subscription._tag === "surface.list" && envelope.kind === "surface.list.snapshot") {
-		Queue.offerUnsafe(subscription.queue, {
+		return Queue.offerUnsafe(subscription.queue, {
 			type: "snapshot",
 			snapshot: envelope.payload,
-		});
-		return "offered";
+		})
+			? "offered"
+			: "overflow";
 	}
 	if (
 		subscription._tag === "surface.usage.aggregate" &&
 		envelope.kind === "surface.usage.aggregate.snapshot"
 	) {
-		Queue.offerUnsafe(subscription.queue, {
+		return Queue.offerUnsafe(subscription.queue, {
 			type: "snapshot",
 			snapshot: envelope.payload,
-		});
-		return "offered";
+		})
+			? "offered"
+			: "overflow";
 	}
 	if (
 		subscription._tag === "workspace.conflict.list" &&
 		envelope.kind === "workspace.conflict.list.snapshot"
 	) {
-		Queue.offerUnsafe(subscription.queue, {
+		return Queue.offerUnsafe(subscription.queue, {
 			type: "snapshot",
 			snapshot: envelope.payload,
-		});
-		return "offered";
+		})
+			? "offered"
+			: "overflow";
 	}
 
 	return "mismatch";

@@ -16,7 +16,10 @@
 		SelectTrigger,
 	} from "$lib/components/ui/select";
 	import {
+		PermissionLevelLabel,
+		PermissionOptionDescription,
 		thinking_level_labels,
+		VariantLabel,
 		type ContextWindowChoice,
 		type ModelChoice,
 		type PermissionOption,
@@ -36,6 +39,7 @@
 		onpermission,
 		onspeed,
 		onthinking,
+		onvariant,
 		permission_mode,
 		permission_options,
 		permission_default,
@@ -43,6 +47,7 @@
 		selected_model_id,
 		speed_option_id,
 		thinking_level,
+		variant_options,
 	}: {
 		disabled: boolean;
 		model: ModelChoice;
@@ -50,6 +55,7 @@
 		onpermission: (model: ModelChoice, option: PermissionOption) => Effect.Effect<void>;
 		onspeed: (model: ModelChoice, option: SpeedOption) => Effect.Effect<void>;
 		onthinking: (model: ModelChoice, level: ThinkingLevel) => Effect.Effect<void>;
+		onvariant: (model: ModelChoice) => Effect.Effect<void>;
 		permission_mode: string;
 		permission_options: ReadonlyArray<PermissionOption>;
 		permission_default?: string;
@@ -57,6 +63,7 @@
 		selected_model_id: string;
 		speed_option_id: string;
 		thinking_level: ThinkingLevel;
+		variant_options: ReadonlyArray<ModelChoice>;
 	} = $props();
 
 	const thinking = $derived(model.definition.capabilities.thinking);
@@ -107,9 +114,7 @@
 				context.options[0]),
 	);
 	const current_permission = $derived(
-		(model.id === selected_model_id
-			? permission_options.find((option) => option.id === permission_mode)
-			: undefined) ??
+		permission_options.find((option) => option.id === permission_mode) ??
 			permission_options.find((option) => option.id === permission_default) ??
 			permission_options[0],
 	);
@@ -139,9 +144,51 @@
 			const option = permission_options.find((candidate) => candidate.id === value);
 			if (option !== undefined) yield* onpermission(model, option);
 		});
+
+	const SelectVariant = (value: string) =>
+		Effect.gen(function* () {
+			const option = variant_options.find((candidate) => candidate.id === value);
+			if (option !== undefined) yield* onvariant(option);
+		});
 </script>
 
 <div class="flex flex-col gap-1.5">
+	{#if variant_options.length > 1}
+		<Select
+			type="single"
+			value={model.id}
+			onValueChange={yield* SelectVariant(event)}
+			{disabled}
+		>
+			<div class="card min-w-0 rounded-md bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925">
+				<SelectTrigger
+					size="sm"
+					class="h-6 w-full border-transparent bg-transparent px-2 text-xs shadow-none data-[size=sm]:h-6 dark:bg-transparent dark:hover:bg-transparent dark:hover:text-foreground"
+				>
+					<Brain class="size-3.5 shrink-0 text-muted-foreground" />
+					<span class="truncate">{VariantLabel(model)}</span>
+				</SelectTrigger>
+			</div>
+			<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
+				<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
+					<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
+						{#snippet children({ move_hover })}
+							{#each variant_options as option (option.id)}
+								<SelectItem
+									value={option.id}
+									class="focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+									{@attach FollowHighlight(move_hover)}
+								>
+									{VariantLabel(option)}
+								</SelectItem>
+							{/each}
+						{/snippet}
+					</DropdownHoverSurface>
+				</ShaderGlassSurface>
+			</SelectContent>
+		</Select>
+	{/if}
+
 	{#if thinking.availability === "supported" && current_thinking !== undefined}
 		<Select
 			type="single"
@@ -313,7 +360,7 @@
 					class="h-6 w-full border-transparent bg-transparent px-2 text-xs shadow-none data-[size=sm]:h-6 dark:bg-transparent dark:hover:bg-transparent dark:hover:text-foreground"
 				>
 					<Lock class="size-3.5 shrink-0 text-muted-foreground" />
-					<span class="truncate">{current_permission.label}</span>
+					<span class="truncate">{PermissionLevelLabel(current_permission)}</span>
 				</SelectTrigger>
 			</div>
 			<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
@@ -321,13 +368,13 @@
 					<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
 						{#snippet children({ move_hover })}
 							{#each permission_options as option (option.id)}
-								<OptionTooltip description={option.description}>
+								<OptionTooltip description={PermissionOptionDescription(option)}>
 									<SelectItem
 										value={option.id}
 										class="w-full focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
 										{@attach FollowHighlight(move_hover)}
 									>
-										{option.label}
+									<span class="truncate">{PermissionLevelLabel(option)}</span>
 									</SelectItem>
 								</OptionTooltip>
 							{/each}

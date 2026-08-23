@@ -25,9 +25,14 @@ export const OrchestrationCoordinators = sqliteTable("orchestration_coordinators
 		.notNull()
 		.default(true),
 	policy_model: text("policy_model"),
+	policy_model_id: text("policy_model_id"),
+	policy_profile_id: text("policy_profile_id"),
+	policy_provider_route_id: text("policy_provider_route_id"),
+	policy_variant_id: text("policy_variant_id"),
+	policy_catalog_revision: text("policy_catalog_revision"),
 	policy_context_window: text("policy_context_window"),
 	policy_reasoning_effort: text("policy_reasoning_effort").notNull().default("medium"),
-	policy_permission: text("policy_permission").notNull().default("supervised"),
+	policy_permission: text("policy_permission").notNull().default("autonomous"),
 	policy_permission_mode: text("policy_permission_mode").notNull().default("on_request"),
 	policy_sandbox_mode: text("policy_sandbox_mode").notNull().default("workspace_write"),
 	policy_service_tier: text("policy_service_tier").notNull().default("standard"),
@@ -83,6 +88,10 @@ export const OrchestrationRuns = sqliteTable(
 		engine_id: text("engine_id").notNull(),
 		/** Catalog model resolved at dispatch; null for runs stamped before collection began. */
 		model_id: text("model_id"),
+		profile_id: text("profile_id"),
+		provider_route_id: text("provider_route_id"),
+		variant_id: text("variant_id"),
+		catalog_revision: text("catalog_revision"),
 		working_directory: text("working_directory").notNull(),
 		status: text("status").notNull(),
 		/** Durable monotonic receipt; full provider frames are never retained. */

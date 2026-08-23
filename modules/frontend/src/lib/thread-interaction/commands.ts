@@ -173,19 +173,27 @@ export const BuildThreadMessageCommand = (
 			}),
 		};
 	}
-	const steerable_work =
+	const active_work =
 		context.work?.status === "running" || context.work?.status === "waiting"
 			? context.work
 			: undefined;
+	/**
+	 * A model selected on another engine belongs to the next turn. Naming the
+	 * active run here would pin the command back to its engine and turn the send
+	 * into a steer; leaving that identity off lets Forge queue a new run and
+	 * prepare its portable cross-engine continuation after the source settles.
+	 */
+	const steering_work =
+		active_work?.engine_id === context.session.policy.engine_id ? active_work : undefined;
 
 	return {
 		_tag: "ready",
 		command: {
-			...(steerable_work === undefined
+			...(steering_work === undefined
 				? {}
-				: { agent_id: steerable_work.agent_id, run_id: steerable_work.run_id }),
+				: { agent_id: steering_work.agent_id, run_id: steering_work.run_id }),
 			payload: {
-				engine_id: steerable_work?.engine_id ?? context.session.policy.engine_id,
+				engine_id: context.session.policy.engine_id,
 				attachments: submission.attachments.map((attachment) => ({
 					bytes: Uint8Array.from(
 						globalThis.atob(attachment.content_base64),

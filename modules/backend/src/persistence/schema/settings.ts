@@ -27,6 +27,9 @@ export const SessionDefaults = sqliteTable("session_defaults", {
 	compaction_model_id: text("compaction_model_id"),
 	defaults_id: integer("defaults_id").primaryKey(),
 	last_model_id: text("last_model_id"),
+	onboarding_completed: integer("onboarding_completed", { mode: "boolean" })
+		.notNull()
+		.default(false),
 	permission: text("permission").notNull(),
 	thread_title_mode: text("thread_title_mode").notNull().default("summary"),
 	updated_at: text("updated_at").notNull(),

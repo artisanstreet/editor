@@ -91,15 +91,28 @@ export const ApplyRootThreadListUpdate = (
 	if (update.type === "remove")
 		return threads.filter((thread) => thread.thread_id !== update.thread_id);
 
-	return SortRecentThreads([
-		...threads.filter((thread) => thread.thread_id !== update.thread.thread_id),
-		update.thread,
-	]);
+	const current_index = threads.findIndex(
+		(thread) => thread.thread_id === update.thread.thread_id,
+	);
+	if (current_index === -1) return SortRecentThreads([...threads, update.thread]);
+
+	const current = threads[current_index]!;
+	const next = [...threads];
+	next[current_index] = update.thread;
+	return ThreadLastMessageAt(current) === ThreadLastMessageAt(update.thread)
+		? next
+		: SortRecentThreads(next);
 };
 
-/** Sorts durable projections by their backend-owned activity timestamp. */
+/** Legacy projections without message recency fall back to their creation position. */
+export const ThreadLastMessageAt = (thread: ThreadListItem): string =>
+	thread.last_message_at ?? thread.created_at;
+
+/** Sorts threads like an inbox: newest sent message first, stable for equal cursors. */
 export const SortRecentThreads = (threads: ReadonlyArray<ThreadListItem>) =>
-	[...threads].sort((left, right) => right.last_activity_at.localeCompare(left.last_activity_at));
+	[...threads].sort((left, right) =>
+		ThreadLastMessageAt(right).localeCompare(ThreadLastMessageAt(left)),
+	);
 
 /** Describes one sidebar project section and its durably scoped recent threads. */
 export type ProjectScopedThreadGroup =
@@ -234,7 +247,7 @@ export const ThreadRailTimeGroups = (
 	];
 
 	for (const thread of SortRecentThreads(threads)) {
-		const elapsed_ms = now_ms - Date.parse(thread.last_activity_at);
+		const elapsed_ms = now_ms - Date.parse(ThreadLastMessageAt(thread));
 		const group_index =
 			Number.isFinite(elapsed_ms) && elapsed_ms < MillisecondsPerDay
 				? 0

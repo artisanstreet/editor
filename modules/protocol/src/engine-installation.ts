@@ -30,7 +30,19 @@ export type EngineInstallationPhase = typeof EngineInstallationPhase.Type;
 export const EngineInstallationReport = Schema.Struct({
 	active_version: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
 	activity: EngineInstallationActivity,
+	/** A safe, user-facing substage supplied by staged installers. */
+	activity_detail: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
 	activity_phase: Schema.optional(EngineInstallationPhase),
+	/** Browser/device action for a service-owned OAuth attempt. Secrets are never carried here. */
+	authorization: Schema.optional(
+		Schema.Struct({
+			attempt_id: Identifier,
+			expires_at_ms: Schema.Number,
+			instructions: Schema.String,
+			mode: Schema.Literals(["auto", "code"]),
+			url: Schema.String.check(Schema.isMinLength(1)),
+		}),
+	),
 	/** Whether the owned config home already carries a provider sign-in. */
 	credentials_present: Schema.Boolean,
 	display_name: Schema.String.check(Schema.isMinLength(1)),
@@ -86,6 +98,8 @@ export type EngineInstallRequest = typeof EngineInstallRequest.Type;
 /** Starts the provider sign-in flow in Artisan's owned config home. */
 export const EngineAuthenticationRequest = Schema.Struct({
 	engine_id: Identifier,
+	profile_id: Schema.optional(Identifier),
+	working_directory: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
 });
 export type EngineAuthenticationRequest = typeof EngineAuthenticationRequest.Type;
 

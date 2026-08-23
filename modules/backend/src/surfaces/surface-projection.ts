@@ -165,6 +165,7 @@ export const PersistSurfaceProjectionWithChange = (
 			prior?.cached_input_tokens,
 			observation.cached_input_tokens,
 		);
+		const cost_usd = next_total(prior?.cost_usd, observation.cost_usd);
 		const context_tokens = next_gauge(prior?.context_tokens, observation.context_tokens);
 		const context_window_tokens = next_gauge(
 			prior?.context_window_tokens,
@@ -179,6 +180,7 @@ export const PersistSurfaceProjectionWithChange = (
 				input_tokens,
 				output_tokens,
 				cached_input_tokens,
+				cost_usd,
 				context_tokens,
 				context_window_tokens,
 				last_observation_id: observation.observation_id,
@@ -190,6 +192,7 @@ export const PersistSurfaceProjectionWithChange = (
 					input_tokens,
 					output_tokens,
 					cached_input_tokens,
+					cost_usd,
 					context_tokens,
 					context_window_tokens,
 					last_observation_id: observation.observation_id,

@@ -137,10 +137,24 @@ export const ThreadContinuationServiceLive = Layer.effect(
 						0,
 					),
 					source: {
+						...(source.catalog_revision === null ||
+						source.catalog_revision === undefined
+							? {}
+							: { catalog_revision: source.catalog_revision }),
 						engine_id: source.engine_id,
 						...(source.model_id === null || source.model_id === undefined
 							? {}
 							: { model_id: source.model_id }),
+						...(source.profile_id === null || source.profile_id === undefined
+							? {}
+							: { profile_id: source.profile_id }),
+						...(source.provider_route_id === null ||
+						source.provider_route_id === undefined
+							? {}
+							: { provider_route_id: source.provider_route_id }),
+						...(source.variant_id === null || source.variant_id === undefined
+							? {}
+							: { variant_id: source.variant_id }),
 					},
 					working_directory: source.working_directory,
 				});

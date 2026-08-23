@@ -265,11 +265,65 @@ export const ApplyActivityObservation = (
 					 * A search names where it looked: the bare kind reads as a web
 					 * search downstream, so a workspace-scoped one must say so or a
 					 * grep chain counts itself as web searches.
+					 * For `tool`, enrich the kind from the provider's tool_name so
+					 * OpenCode (and any generic tool) reads like Codex/Claude:
+					 * `read` → `file.read`, `edit` → `file.edit`, `bash` → `command`, etc.
 					 */
-					kind:
-						observation._tag === "search" && observation.scope === "workspace"
-							? "workspace_search"
-							: observation._tag,
+					kind: (() => {
+						if (observation._tag === "search" && observation.scope === "workspace")
+							return "workspace_search";
+						if (observation._tag === "tool") {
+							const n = (observation.tool_name ?? "").toLowerCase();
+							if (/(^|[\W_])read($|[\W_])/.test(n) || n.includes("read.file") || n === "read")
+								return "file.read";
+							if (
+								n.includes("write") ||
+								n.includes("edit") ||
+								n.includes("apply") ||
+								n.includes("patch") ||
+								n === "edit"
+							)
+								return "file.edit";
+							if (n.includes("delete") || n.includes("remove") || n.includes("unlink"))
+								return "file.delete";
+							if (
+								n.includes("bash") ||
+								n.includes("shell") ||
+								n.includes("command") ||
+								n.includes("exec") ||
+								n.includes("terminal") ||
+								n === "bash"
+							)
+								return "command";
+							if (
+								n.includes("grep") ||
+								n.includes("glob") ||
+								n.includes("list") ||
+								n.includes("find") ||
+								n.includes("search") ||
+								n === "grep" ||
+								n === "glob"
+							)
+								return "file_search";
+							if (n.includes("test") || n === "test") return "test";
+							if (n.includes("typecheck") || n.includes("typescript") || n.includes("tsc"))
+								return "typecheck";
+							if (n.includes("git")) return "git.status";
+							if (n.includes("diff")) return "diff";
+							if (n.includes("database") || n.includes("db")) return "database";
+							if (
+								n.includes("preview") ||
+								n.includes("browser") ||
+								n.includes("inspect") ||
+								n.includes("accessibility")
+							)
+								return "app_inspect";
+							if (n.includes("web") || n.includes("fetch")) return "web.search";
+							if (n.includes("mcp") || n.includes("integration")) return "integration";
+							return "tool";
+						}
+						return observation._tag;
+					})(),
 					label:
 						observation._tag === "tool"
 							? text(observation.tool_name) || "Tool"

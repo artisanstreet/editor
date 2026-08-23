@@ -62,8 +62,11 @@ describe("editor shell", () => {
 		expect(gate).toContain("ThreadRouteHasWorkspace(thread, workspace_id)");
 		expect(gate).toContain("active_thread = undefined");
 		expect(gate).toContain(
-			"<EditorRoute\n\t\tthread_id={active_thread.thread_id}\n\t\tworkspace_id={active_thread.primary_project.project_id}\n\t/>",
+			"<EditorRoute\n\t\tthread_id={active_thread?.thread_id}\n\t\tworkspace_id={active_thread?.primary_project?.project_id}\n\t/>",
 		);
+		expect(gate).toContain('let route_id = $state.raw("");');
+		expect(gate).toContain("route_id = untrack(() => route_thread_id);");
+		expect(gate).not.toContain("const threads = $derived(");
 		/** Saving and the strip that carried it are gone for now, not merely hidden. */
 		expect(route).not.toContain("ReplaceWorkspaceFile({");
 		expect(route).not.toContain("editor.Save");
@@ -103,9 +106,13 @@ describe("editor shell", () => {
 
 		expect(route).toContain("yield* MakeLatestRequestGate");
 		expect(route).toContain("OpenPath(path, target_workspace_id, generation)");
-		expect(route).toContain(".pipe(Effect.forkScoped);");
+		expect(route).toContain("Effect.ensuring(");
+		expect(route).toContain("duration: editor_open_deadline");
+		expect(route).toContain("The editor did not finish opening this file before its deadline.");
+		expect(route).toContain("Effect.forkScoped,");
 		expect(route).toContain("{:else if opening_path === active_path}");
-		expect(route).toContain("retained_files.get(active_path)");
+		expect(route).toContain("const retained = retained_files.get(path);");
+		expect(route).not.toContain("const retained_file = $derived(");
 		expect(route).not.toContain("yield* OpenPath(active_path)");
 	});
 

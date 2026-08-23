@@ -20,9 +20,12 @@ import type {
 	EngineInstallationSnapshot,
 } from "@artisan/protocol";
 import { ArtisanClient, type ArtisanClientError } from "@artisan/transport/client";
+import { EngineUsageController } from "../identity/engine-usage-controller";
 
 const installation_poll_delay = "750 millis";
 const installation_poll_timeout = "90 seconds";
+const authentication_poll_timeout = "10 minutes";
+const staged_installation_poll_timeout = "30 minutes";
 
 export class EngineInstallationRejected extends Data.TaggedError("EngineInstallationRejected")<{
 	readonly engine_id: string;
@@ -167,6 +170,9 @@ export const EngineInstallationsControllerLive = Layer.effect(
 	EngineInstallationsController,
 	Effect.gen(function* () {
 		const client = yield* ArtisanClient;
+		const usage_controller = Option.getOrUndefined(
+			yield* Effect.serviceOption(EngineUsageController),
+		);
 		const controller_scope = yield* Effect.scope;
 		const state = yield* SubscriptionRef.make<EngineInstallationsState>(InitialState);
 		const mutation_locks = yield* Ref.make<ReadonlyMap<string, Semaphore.Semaphore>>(new Map());
@@ -245,6 +251,22 @@ export const EngineInstallationsControllerLive = Layer.effect(
 			);
 
 		/**
+		 * Installation, rollback, and sign-in can all replace a cached pre-mutation
+		 * spawn/authentication result. Refresh in controller scope so route teardown
+		 * cannot leave the shared Settings/sidebar usage entry stale.
+		 */
+		const RefreshUsageAfterSuccess = (report: EngineInstallationReport | undefined) =>
+			report?.activity === "idle" &&
+			report.failure === undefined &&
+			report.managed &&
+			usage_controller !== undefined
+				? Effect.forkIn(
+						usage_controller.Load(report.engine_id, { force: true }).pipe(Effect.ignore),
+						controller_scope,
+					).pipe(Effect.asVoid)
+				: Effect.void;
+
+		/**
 		 * A monitor owns its query result until it has checked its generation. A
 		 * replacement command therefore cannot be settled by a late response from
 		 * the preceding operation.
@@ -260,7 +282,14 @@ export const EngineInstallationsControllerLive = Layer.effect(
 				);
 			});
 
-		const AwaitTerminal = (engine_id: string, generation: number) => {
+		const AwaitTerminal = (
+			engine_id: string,
+			generation: number,
+		timeout:
+			| typeof installation_poll_timeout
+			| typeof authentication_poll_timeout
+			| typeof staged_installation_poll_timeout,
+		) => {
 			const Poll = (): Effect.Effect<
 				EngineInstallationsState,
 				ArtisanClientError | EngineInstallationMonitorReplaced
@@ -287,7 +316,7 @@ export const EngineInstallationsControllerLive = Layer.effect(
 
 			return Effect.gen(function* () {
 				const completed = yield* Poll().pipe(
-					Effect.timeoutOption(installation_poll_timeout),
+					Effect.timeoutOption(timeout),
 				);
 
 				if (Option.isNone(completed)) {
@@ -324,10 +353,22 @@ export const EngineInstallationsControllerLive = Layer.effect(
 				return generation;
 			});
 
-		const StartMonitor = (engine_id: string, generation: number) =>
+		const StartMonitor = (
+			engine_id: string,
+			generation: number,
+			activity: EngineInstallationReport["activity"],
+		) =>
 			Effect.gen(function* () {
 				const Monitor = (): Effect.Effect<void, never> =>
-					AwaitTerminal(engine_id, generation).pipe(
+					AwaitTerminal(
+						engine_id,
+						generation,
+						activity === "authenticating"
+							? authentication_poll_timeout
+							: engine_id === "hermes"
+								? staged_installation_poll_timeout
+							: installation_poll_timeout,
+					).pipe(
 						Effect.result,
 						Effect.flatMap((outcome) =>
 							IsCurrentMonitor(engine_id, generation).pipe(
@@ -346,13 +387,10 @@ export const EngineInstallationsControllerLive = Layer.effect(
 											),
 										);
 									}
+									const report = outcome.success.reports[engine_id];
 									return SubscriptionRef.update(state, (state) =>
-										Settled(
-											state,
-											engine_id,
-											outcome.success.reports[engine_id]?.failure,
-										),
-									);
+										Settled(state, engine_id, report?.failure),
+									).pipe(Effect.andThen(RefreshUsageAfterSuccess(report)));
 								}),
 							),
 						),
@@ -416,12 +454,18 @@ export const EngineInstallationsControllerLive = Layer.effect(
 							result.report.activity === "installing" ||
 							result.report.activity === "authenticating"
 						) {
-							yield* StartMonitor(engine_id, generation);
+							yield* StartMonitor(
+								engine_id,
+								generation,
+								result.report.activity,
+							);
 							return yield* Current;
 						}
-						return yield* SubscriptionRef.updateAndGet(state, (current) =>
+						const settled = yield* SubscriptionRef.updateAndGet(state, (current) =>
 							Settled(current, engine_id, result.report.failure),
 						);
+						yield* RefreshUsageAfterSuccess(result.report);
+						return settled;
 					}),
 				),
 			);

@@ -5,8 +5,12 @@ import { defineConfig } from "vite";
 
 const workspace_root = resolve(import.meta.dirname, "..");
 const desktop_root = resolve(workspace_root, ".dist", "desktop");
+const runtime_app_icon_source = resolve(
+  workspace_root,
+  "modules/frontend/src/lib/assets/barekey/runtime-app-icons",
+);
 const workspace = JSON.parse(readFileSync(resolve(workspace_root, "package.json"), "utf8")) as {
-	readonly version: string;
+  readonly version: string;
 };
 const desktop_version = process.env.ARTISAN_RELEASE_VERSION ?? workspace.version;
 
@@ -25,20 +29,20 @@ const browser_connect_src = "connect-src 'self'";
 const editor_connect_src = "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*";
 
 const patch_editor_csp = (frontend_root: string) => {
-	const html_documents = readdirSync(frontend_root, {
-		recursive: true,
-		withFileTypes: true,
-	}).filter((entry) => entry.isFile() && entry.name.endsWith(".html"));
-	for (const entry of html_documents) {
-		const path = join(entry.parentPath, entry.name);
-		const document = readFileSync(path, "utf8");
-		if (!document.includes(browser_connect_src)) {
-			throw new Error(
-				`The frontend CSP no longer declares \`${browser_connect_src}\`; update the editor staging patch in .config/desktop.vite.config.ts: ${path}`,
-			);
-		}
-		writeFileSync(path, document.replaceAll(browser_connect_src, editor_connect_src));
-	}
+  const html_documents = readdirSync(frontend_root, {
+    recursive: true,
+    withFileTypes: true,
+  }).filter((entry) => entry.isFile() && entry.name.endsWith(".html"));
+  for (const entry of html_documents) {
+    const path = join(entry.parentPath, entry.name);
+    const document = readFileSync(path, "utf8");
+    if (!document.includes(browser_connect_src)) {
+      throw new Error(
+        `The frontend CSP no longer declares \`${browser_connect_src}\`; update the editor staging patch in .config/desktop.vite.config.ts: ${path}`,
+      );
+    }
+    writeFileSync(path, document.replaceAll(browser_connect_src, editor_connect_src));
+  }
 };
 
 /**
@@ -47,72 +51,86 @@ const patch_editor_csp = (frontend_root: string) => {
  * editor renders it from `artisan://app` without any web hosting.
  */
 const stage_desktop_payload = () => ({
-	closeBundle: () => {
-		const frontend_source = resolve(workspace_root, ".dist", "frontend");
-		if (!existsSync(frontend_source)) {
-			throw new Error("Build the static frontend before the Artisan editor payload");
-		}
-		const frontend_destination = resolve(desktop_root, "frontend");
-		rmSync(frontend_destination, { force: true, recursive: true });
-		cpSync(frontend_source, frontend_destination, {
-			dereference: true,
-			/**
-			 * The editor's protocol handler serves plain files without content
-			 * negotiation, so the precompressed siblings emitted for the
-			 * Forge-hosted copy would only bloat the payload — and carry the
-			 * unpatched same-origin CSP inside their compressed HTML.
-			 */
-			filter: (source) => !source.endsWith(".br") && !source.endsWith(".gz"),
-			recursive: true,
-		});
-		patch_editor_csp(frontend_destination);
-		writeFileSync(
-			resolve(desktop_root, "package.json"),
-			JSON.stringify({
-				author: "Barekey",
-				description: "Artisan Editor",
-				main: "./main.js",
-				name: "artisan-editor-desktop",
-				packageManager: "npm@11.4.2",
-				private: true,
-				type: "module",
-				version: desktop_version,
-			}),
-		);
-		writeFileSync(
-			resolve(desktop_root, "package-lock.json"),
-			JSON.stringify({
-				lockfileVersion: 3,
-				name: "artisan-editor-desktop",
-				packages: {
-					"": {
-						name: "artisan-editor-desktop",
-						version: desktop_version,
-					},
-				},
-				requires: true,
-				version: desktop_version,
-			}),
-		);
-	},
-	name: "stage-artisan-desktop-payload",
+  closeBundle: () => {
+    const frontend_source = resolve(workspace_root, ".dist", "frontend");
+    if (!existsSync(frontend_source)) {
+      throw new Error("Build the static frontend before the Artisan editor payload");
+    }
+    const frontend_destination = resolve(desktop_root, "frontend");
+    rmSync(frontend_destination, { force: true, recursive: true });
+    cpSync(frontend_source, frontend_destination, {
+      dereference: true,
+      /**
+       * The editor's protocol handler serves plain files without content
+       * negotiation, so the precompressed siblings emitted for the
+       * Forge-hosted copy would only bloat the payload — and carry the
+       * unpatched same-origin CSP inside their compressed HTML.
+       */
+      filter: (source) =>
+        !source.endsWith(".br") && !source.endsWith(".gz") && !source.endsWith(".map"),
+      recursive: true,
+    });
+    patch_editor_csp(frontend_destination);
+    const runtime_app_icon_destination = resolve(desktop_root, "app-icons");
+    rmSync(runtime_app_icon_destination, { force: true, recursive: true });
+    cpSync(runtime_app_icon_source, runtime_app_icon_destination, { recursive: true });
+    writeFileSync(
+      resolve(desktop_root, "package.json"),
+      JSON.stringify({
+        author: "Barekey",
+        description: "Artisan Editor",
+        main: "./main.js",
+        name: "artisan-editor-desktop",
+        packageManager: "npm@11.4.2",
+        private: true,
+        type: "module",
+        version: desktop_version,
+      }),
+    );
+    writeFileSync(
+      resolve(desktop_root, "package-lock.json"),
+      JSON.stringify({
+        lockfileVersion: 3,
+        name: "artisan-editor-desktop",
+        packages: {
+          "": {
+            name: "artisan-editor-desktop",
+            version: desktop_version,
+          },
+        },
+        requires: true,
+        version: desktop_version,
+      }),
+    );
+  },
+  name: "stage-artisan-desktop-payload",
 });
 
 /** Bundles only privileged Electron entry points; the renderer stays a static asset tree. */
 export default defineConfig({
-	plugins: [stage_desktop_payload()],
-	// Installed Electron applications cannot resolve workspace dependencies from
-	// the repository. Bundle every JavaScript dependency; only Electron and Node
-	// built-ins remain external through Rollup/Vite's platform handling.
-	ssr: { noExternal: true },
-	build: {
-		outDir: ".dist/desktop",
-		rollupOptions: {
-			external: ["electron"],
-			input: resolve(workspace_root, "modules/desktop/src/main.ts"),
-			output: { entryFileNames: "[name].js", format: "es" },
-		},
-		ssr: true,
-		target: "node22",
-	},
+  define: {
+    __ARTISAN_RELEASE_COMMIT__: JSON.stringify(process.env.ARTISAN_RELEASE_COMMIT ?? "development"),
+    __ARTISAN_RELEASE_VERSION__: JSON.stringify(desktop_version),
+    __ARTISAN_SENTRY_EDITOR_DSN__: JSON.stringify(process.env.ARTISAN_SENTRY_EDITOR_DSN ?? ""),
+    __ARTISAN_TELEMETRY_ENVIRONMENT__: JSON.stringify(
+      process.env.ARTISAN_TELEMETRY_ENVIRONMENT ?? "development",
+    ),
+  },
+  plugins: [stage_desktop_payload()],
+  // Installed Electron applications cannot resolve workspace dependencies from
+  // the repository. Bundle every JavaScript dependency; only Electron and Node
+  // built-ins remain external through Rollup/Vite's platform handling.
+  ssr: { noExternal: true },
+  build: {
+    outDir: ".dist/desktop",
+    /** Private build artifact for Sentry upload; excluded by electron-builder. */
+    sourcemap: "hidden",
+    rollupOptions: {
+      external: ["electron"],
+      input: resolve(workspace_root, "modules/desktop/src/main.ts"),
+      output: { entryFileNames: "[name].js", format: "es" },
+    },
+    ssr: true,
+    target: "node22",
+  },
 });

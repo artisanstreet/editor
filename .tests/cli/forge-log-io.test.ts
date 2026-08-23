@@ -84,6 +84,7 @@ describe("Forge log I/O", () => {
 				token: "secret",
 			},
 			{
+				broker_executable_path: "C:/artisan/Artisan Broker.exe",
 				executable_path: "C:/artisan/Artisan Forge.exe",
 				host_entry_path: "C:/artisan/host.js",
 				migrations_path: "C:/artisan/migrations",

@@ -70,6 +70,12 @@ export function thread_activity_kind_from_event(
 	return undefined;
 }
 
+/** Whether one journal event is a message that should change visible list order. */
+export const thread_message_sent_from_event = (payload: EventPayload): boolean =>
+	payload.type === "thread.message_queued" ||
+	payload.type === "thread.message_steering" ||
+	payload.type === "assistant.message_completed";
+
 /**
  * Activity can be retention-relevant without being exposed in the root
  * transcript. Native worker lifecycle is the one such case: it keeps the
@@ -88,8 +94,9 @@ export const RecordThreadActivity = (
 ) =>
 	Effect.gen(function* () {
 		const activity_kind = thread_activity_kind_from_event(payload);
+		const message_sent = thread_message_sent_from_event(payload);
 
-		if (!activity_kind) return;
+		if (!activity_kind && !message_sent) return;
 
 		const automatic_title = automatic_thread_title_from_event(payload);
 		const current =
@@ -113,8 +120,15 @@ export const RecordThreadActivity = (
 		yield* transaction
 			.update(Threads)
 			.set({
-				activity_version: sql`${Threads.activity_version} + 1`,
-				last_activity_at: sql`max(${Threads.last_activity_at}, ${occurred_at})`,
+				...(activity_kind
+					? {
+							activity_version: sql`${Threads.activity_version} + 1`,
+							last_activity_at: sql`max(${Threads.last_activity_at}, ${occurred_at})`,
+						}
+					: {}),
+				...(message_sent
+					? { last_message_at: sql`max(${Threads.last_message_at}, ${occurred_at})` }
+					: {}),
 				...(thread_activity_is_reader_visible(payload)
 					? {
 							reader_activity_at: sql`max(${Threads.reader_activity_at}, ${occurred_at})`,

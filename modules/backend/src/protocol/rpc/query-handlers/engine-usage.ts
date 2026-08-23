@@ -121,6 +121,9 @@ function FetchUsageOutcome(engine: Engine): Effect.Effect<UsageOutcome> {
 					...(account_usage.authentication.reason === undefined
 						? {}
 						: { failure: account_usage.authentication.reason }),
+					...(account_usage.quota_surface === undefined
+						? {}
+						: { quota_surface: account_usage.quota_surface }),
 					windows: account_usage.windows
 						.slice(0, max_windows_per_report)
 						.map(to_usage_window),

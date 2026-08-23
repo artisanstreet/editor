@@ -14,6 +14,7 @@ import {
 	type SurfaceListProjectionSubscription,
 	type SurfaceUsageProjectionSubscription,
 	type ThreadSessionProjectionSubscription,
+	type ThreadWorkProjectionSubscription,
 	type WorkspaceConflictListProjectionSubscription,
 } from "../connection-state";
 import { ConnectionProjectionRuntime } from "./runtime";
@@ -80,6 +81,46 @@ export const MakeBasicProjectionHandler = Effect.gen(function* () {
 						({ message_id, sent_at }) => ({
 							journal_sequence: snapshot.journal_sequence,
 							kind: "thread.session.snapshot",
+							message_id,
+							origin: "backend",
+							payload: snapshot,
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at,
+							sequence: 0,
+							stream_id,
+							subscription_id,
+						}),
+					);
+					return;
+				}
+
+				if (subscribe.payload.type === "thread.work") {
+					const thread_id = subscribe.payload.thread_id;
+					const work = yield* orchestration.GetWork(thread_id);
+					const journal_sequence = current.delivered_journal_sequence;
+					const snapshot = {
+						journal_sequence,
+						thread_id,
+						...(work === undefined ? {} : { work }),
+					};
+					const stream_id = `projection:thread.work:${thread_id}:${subscription_id}`;
+					const subscription: ThreadWorkProjectionSubscription = {
+						_tag: "thread.work",
+						thread_id,
+						journal_sequence,
+						sequence: 0,
+						stream_id,
+					};
+					yield* runtime.Start(
+						correlation_id,
+						subscription_id,
+						claim,
+						current,
+						subscription,
+						({ message_id, sent_at }) => ({
+							journal_sequence,
+							kind: "thread.work.snapshot",
 							message_id,
 							origin: "backend",
 							payload: snapshot,

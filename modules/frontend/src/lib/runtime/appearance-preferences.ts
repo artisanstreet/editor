@@ -17,6 +17,7 @@ import {
 	default_typography_preferences,
 	StoredTypographyPreferences,
 } from "../appearance/typography";
+import { PathSeparator, TimeFormat } from "../appearance/display-format";
 
 export const AppearanceState = Schema.Struct({
 	version: Schema.Literal(1),
@@ -32,6 +33,10 @@ export const AppearanceState = Schema.Struct({
 	 * wholesale; readers fall back to "balanced" when it is absent.
 	 */
 	prose_width: Schema.optional(Schema.Literals(["tight", "balanced", "loose"])),
+	/** Optional so existing records resolve to the current host's native separator. */
+	path_separator: Schema.optional(PathSeparator),
+	/** Optional so existing records resolve from the reader's locale. */
+	time_format: Schema.optional(TimeFormat),
 	/**
 	 * Whether the thread rail holds its complete list open instead of revealing it
 	 * on proximity. Optional for the same reason `prose_width` is: a record written

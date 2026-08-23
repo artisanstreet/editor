@@ -94,7 +94,7 @@ const definitions: ReadonlyArray<ArtisanErrorDefinition> = [
 		docs_slug: "engine-unavailable",
 		retryable: true,
 		summary:
-			"The engine could not start a session. Its readiness check failed — the reason it reported is in the details below.",
+			"The engine could not start a session. Check its installation and sign-in, then retry.",
 		title: "Engine unavailable",
 	},
 	{
@@ -102,7 +102,7 @@ const definitions: ReadonlyArray<ArtisanErrorDefinition> = [
 		docs_slug: "engine-start-failed",
 		retryable: true,
 		summary:
-			"The engine failed before its native session became ready. The failure it reported is in the details below.",
+			"The engine failed before its native session became ready. Check the engine's installation and sign-in, then retry.",
 		title: "Engine startup failed",
 	},
 	{

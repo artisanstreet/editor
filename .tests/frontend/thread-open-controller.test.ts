@@ -4,7 +4,7 @@ import { Deferred, Effect, Fiber, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 
 import type { ThreadOpenSnapshot } from "@artisan/protocol";
-import { ArtisanClient } from "@artisan/transport/client";
+import { ArtisanClient, ArtisanClientError } from "@artisan/transport/client";
 import { FixtureArtisanClientService } from "../../modules/frontend/src/lib/runtime/fixtures/client";
 import {
 	ThreadOpenController,
@@ -36,6 +36,50 @@ it("atomically admits app-owned opens while leaving only deferred waits interrup
 });
 
 describe("thread open controller", () => {
+	it("retries one unanswered cold open after transport recovery", async () => {
+		const base = await Effect.runPromise(
+			FixtureArtisanClientService.GetThreadOpen("thread-editor-shell"),
+		);
+		let reads = 0;
+		const opened = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const services = yield* Layer.build(
+						Layer.provide(
+							ThreadOpenControllerLive,
+							Layer.succeed(ArtisanClient, {
+								...FixtureArtisanClientService,
+								GetThreadOpen: (thread_id) =>
+									Effect.gen(function* () {
+										reads += 1;
+										if (reads === 1) {
+											return yield* Effect.fail(
+												new ArtisanClientError({
+													cause: new Error("request deadline exceeded"),
+													code: "connection",
+													message: "Forge did not answer.",
+													protocol_code: "request.timeout",
+													retryable: true,
+												}),
+											);
+										}
+										return WithThreadId(base, thread_id);
+									}),
+							}),
+						),
+					);
+					return yield* ThreadOpenController.pipe(
+						Effect.flatMap((controller) => controller.Open("101")),
+						Effect.provide(services),
+					);
+				}),
+			),
+		);
+
+		expect(reads).toBe(2);
+		expect(opened.thread.thread_id).toBe("thread_101");
+	});
+
 	it("keeps cold-open work alive for followers and serves revisits from memory", async () => {
 		const base = await Effect.runPromise(
 			FixtureArtisanClientService.GetThreadOpen("thread-editor-shell"),

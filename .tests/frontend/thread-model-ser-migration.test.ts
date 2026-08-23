@@ -83,7 +83,8 @@ describe("thread and model SER migration", () => {
 		);
 		expect(route).toContain("[Resync, RefreshInteractionContext],");
 		expect(route).toContain('{ concurrency: "unbounded", discard: true }');
-		expect(route).toContain("yield* run_usage_lease.Select(work?.run_id)");
+		expect(route).toContain("yield* run_usage_lease.Select(next?.run_id)");
+		expect(route).toContain("client.SubscribeThreadWork(thread_id)");
 		expect(route).toContain("AwaitPendingSubmissionClaim(thread_id)");
 		expect(route).toContain('if (update.type === "snapshot")');
 		expect(route).not.toContain('update.type === "snapshot"\n\t\t\t? ReplaceSnapshot');

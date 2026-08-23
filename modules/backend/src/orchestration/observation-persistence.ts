@@ -27,11 +27,13 @@ type UsageObservation = Extract<EngineObservation, { _tag: "usage" }>;
 
 const MergeDeltaUsage = (prior: UsageObservation, current: UsageObservation): UsageObservation => {
 	const cached_input_tokens = AddOptional(prior.cached_input_tokens, current.cached_input_tokens);
+	const cost_usd = AddOptional(prior.cost_usd, current.cost_usd);
 	const input_tokens = AddOptional(prior.input_tokens, current.input_tokens);
 	const output_tokens = AddOptional(prior.output_tokens, current.output_tokens);
 	return {
 		...current,
 		...(cached_input_tokens === undefined ? {} : { cached_input_tokens }),
+		...(cost_usd === undefined ? {} : { cost_usd }),
 		...(current.context_tokens !== undefined
 			? {}
 			: prior.context_tokens === undefined

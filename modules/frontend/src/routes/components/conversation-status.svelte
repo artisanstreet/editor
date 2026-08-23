@@ -1,17 +1,27 @@
 <script lang="ts" effect>
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import { Separator } from "$lib/components/ui/separator";
-	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
-	import { model_transition_presentation } from "$lib/conversation/presentation";
+	import {
+		EngineDisplayName,
+		EngineMarkClass,
+		PresentationForModelInCatalog,
+	} from "$lib/engine/presentation";
 	import { FormatElapsed } from "$lib/conversation/duration";
-	import { model_manifest } from "@artisan/catalog";
+	import { OfflineRuntimeCatalog } from "$lib/runtime/offline-catalog";
+	import {
+		SessionDefaultsController,
+		type SessionDefaultsState,
+	} from "$lib/settings/session-defaults-controller";
 	import type { ConversationItem } from "@artisan/protocol";
+	import type { RuntimeCatalog } from "@artisan/protocol";
+	import { Effect, Option, Stream } from "effect";
 	import type { Snippet } from "svelte";
 
 	let {
 		item,
 		trailing,
 		size = "sm",
+		catalog,
 	}: {
 		item: Extract<
 			ConversationItem,
@@ -20,69 +30,83 @@
 		trailing?: Snippet;
 		/** "base" matches host text (the work-session header); timeline rows stay "sm". */
 		size?: "sm" | "base";
+		catalog?: RuntimeCatalog;
 	} = $props();
+
+	const defaults_controller = yield* Effect.serviceOption(SessionDefaultsController).pipe(
+		Effect.map(Option.getOrUndefined),
+	);
+	let defaults_state = $state.raw<SessionDefaultsState | undefined>(
+		yield* (defaults_controller === undefined
+			? Effect.succeed(undefined)
+			: defaults_controller.Current.pipe(Effect.orElseSucceed(() => undefined))),
+	);
+	/**
+	 * Bound to a const rather than written inline: an inline handler makes this
+	 * yield site read the very state it writes, which is the reactive loop that
+	 * has taken the renderer down before.
+	 */
+	const ApplyDefaults = (next: SessionDefaultsState) =>
+		Effect.sync(() => {
+			defaults_state = next;
+		});
+	if (defaults_controller !== undefined) {
+		yield* defaults_controller.Changes.pipe(
+			Stream.runForEach(ApplyDefaults),
+			Effect.forkScoped,
+			Effect.orElseSucceed(() => undefined),
+		);
+	}
+
+	const effective_catalog = $derived(catalog ?? defaults_state?.catalog ?? OfflineRuntimeCatalog);
 
 	const timeline_status_class = $derived(
 		`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 py-0.5 ${size === "base" ? "text-base" : "text-sm"} text-muted-foreground`,
 	);
-	const engine_name_for = (engine_id: string) =>
-		engine_id.charAt(0).toUpperCase() + engine_id.slice(1);
-	/**
-	 * Names a model, or nothing when the run never recorded which one it used —
-	 * a run started on its engine's default keeps no model id. The engine name
-	 * is not a stand-in here: "Changed Codex for GPT 5.6 Sol" reads as a swap of
-	 * harnesses when only the model moved, and both sides may be the same engine.
-	 */
-	const model_name_for = (engine_id: string, model_id: string | undefined) =>
-		model_id === undefined
-			? undefined
-			: (model_manifest.models.find(
-					(candidate) =>
-						candidate.harness === engine_id && candidate.native_model_id === model_id,
-				)?.name ?? model_id);
 </script>
 
 {#if item.type === "model_transition"}
-	{@const source_model_name = model_name_for(item.source_engine_id, item.source_model_id)}
-	{@const target_model_name = model_name_for(item.target_engine_id, item.target_model_id)}
-	{@const source_mark = EngineMarkFor(item.source_engine_id)}
-	{@const target_mark = EngineMarkFor(item.target_engine_id)}
-	{@const SourceIcon = source_mark.icon}
-	{@const TargetIcon = target_mark.icon}
+	{@const source_presentation = PresentationForModelInCatalog(
+		item.source_engine_id,
+		item.source_model_id,
+		effective_catalog,
+	)}
+	{@const target_presentation = PresentationForModelInCatalog(
+		item.target_engine_id,
+		item.target_model_id,
+		effective_catalog,
+	)}
+	{@const SourceIcon = source_presentation.mark.icon}
+	{@const TargetIcon = target_presentation.mark.icon}
 	{@const handing_over = item.state === "started"}
-	{@const presentation = model_transition_presentation(item.state, item.source_model_id)}
-	{#if presentation !== "pending_source"}
 	<div
 		class={timeline_status_class}
 		data-conversation-status="model-transition"
 		data-live-work-detail={handing_over ? "true" : undefined}
 		role={handing_over ? "status" : undefined}
 	>
-		{#if handing_over}
-			<!-- The next engine has not taken the thread yet, so nothing is thinking. -->
-			<ShimmerText class="text-muted-foreground" delay={0} duration={2.4}>
-				{source_model_name === undefined ? "Changing to" : "Changing"}
-			</ShimmerText>
-		{:else if presentation === "target_only"}
-			<!-- Nothing to name on the way out, so the line states where the thread arrived. -->
-			<span>Changed to</span>
-		{:else}
-			<span>Changed</span>
+		<!-- One persistent sentence prevents the pending and completed states from disagreeing. -->
+		<ShimmerText
+			active={handing_over}
+			class="inline-flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-muted-foreground"
+			delay={0}
+			duration={2.4}
+		>
+			<span>{handing_over ? "Changing" : "Changed"}</span>
 			<span class="inline-flex min-w-0 items-center gap-1.5 text-foreground">
-				<SourceIcon class={EngineMarkClass(source_mark, "size-3.5")} aria-hidden="true" />
-				<span class="sr-only">{engine_name_for(item.source_engine_id)} </span>
-				<span class="truncate">{source_model_name}</span>
+				<SourceIcon class={EngineMarkClass(source_presentation.mark, "size-3.5")} aria-hidden="true" />
+				<span class="sr-only">{EngineDisplayName(item.source_engine_id)} </span>
+				<span class="truncate">{source_presentation.label}</span>
 			</span>
 			<span>for</span>
-		{/if}
-		<span class="inline-flex min-w-0 items-center gap-1.5 text-foreground">
-			<TargetIcon class={EngineMarkClass(target_mark, "size-3.5")} aria-hidden="true" />
-			<span class="sr-only">{engine_name_for(item.target_engine_id)} </span>
-			<span class="truncate">{target_model_name ?? engine_name_for(item.target_engine_id)}</span>
-		</span>
+			<span class="inline-flex min-w-0 items-center gap-1.5 text-foreground">
+				<TargetIcon class={EngineMarkClass(target_presentation.mark, "size-3.5")} aria-hidden="true" />
+				<span class="sr-only">{EngineDisplayName(item.target_engine_id)} </span>
+				<span class="truncate">{target_presentation.label}</span>
+			</span>
+		</ShimmerText>
 		{#if trailing !== undefined}{@render trailing()}{/if}
 	</div>
-	{/if}
 {:else if item.type === "compaction"}
 	<div
 		class="flex w-full min-w-0 flex-row items-center gap-4 py-0.5 text-base text-muted-foreground"

@@ -75,6 +75,12 @@ export const bundled_modules: ReadonlyArray<BundledModule> = [
 		ships_in_editor: true,
 	},
 	{
+		directory: "modules/observability",
+		entries: { ".": "src/index.ts" },
+		name: "@artisan/observability",
+		ships_in_editor: true,
+	},
+	{
 		directory: "modules/transport",
 		entries: {
 			".": "src/index.ts",

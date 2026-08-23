@@ -16,6 +16,7 @@ export const ThreadUsagePoint = Schema.Struct({
 	cached_input_tokens: Schema.optional(NonNegativeInt),
 	/** How full the window was after this turn; a gauge, not an accumulating total. */
 	context_tokens: Schema.optional(NonNegativeInt),
+	cost_usd: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
 	input_tokens: Schema.optional(NonNegativeInt),
 	/** Position within the window, starting at 1 after the last compaction. */
 	ordinal: Schema.Int.check(Schema.isGreaterThan(0)),

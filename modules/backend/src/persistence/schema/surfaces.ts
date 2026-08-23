@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 /** Safe, ordered projection of one raw engine observation. */
 export const SurfaceItems = sqliteTable(
@@ -55,6 +55,7 @@ export const SurfaceUsageTotals = sqliteTable(
 		input_tokens: integer("input_tokens"),
 		output_tokens: integer("output_tokens"),
 		cached_input_tokens: integer("cached_input_tokens"),
+		cost_usd: real("cost_usd"),
 		context_tokens: integer("context_tokens"),
 		context_window_tokens: integer("context_window_tokens"),
 		last_observation_id: text("last_observation_id").notNull().default(""),

@@ -15,6 +15,7 @@ export type EngineCapabilityName =
 	| "close"
 	| "events"
 	| "global_guidance"
+	| "model_catalog"
 	| "model_selection"
 	| "native_continuation"
 	| "native_tools"
@@ -32,8 +33,15 @@ export interface EngineCapability {
 	readonly state: EngineCapabilityState;
 }
 
-/** Lists every capability declared by an engine adapter. @since 0.2.0 */
-export type EngineCapabilities = Readonly<Record<EngineCapabilityName, EngineCapability>>;
+/**
+ * Lists the stable capability surface plus newly introduced optional probes.
+ * `model_catalog` stays optional so third-party and persisted test adapters do
+ * not falsely claim live inventory merely to satisfy a structural upgrade.
+ */
+export type EngineCapabilities = Readonly<
+	Record<Exclude<EngineCapabilityName, "model_catalog">, EngineCapability> &
+		Partial<Record<"model_catalog", EngineCapability>>
+>;
 
 /** Identifies an installed engine adapter and the contract it currently supports. @since 0.2.0 */
 export interface EngineDescriptor {
@@ -58,11 +66,151 @@ export interface EnginePermissionPolicy {
 /** Represents one provider-scoped adapter option value. @since 0.3.0 */
 export type EngineProviderOptionValue = string | boolean | number | null;
 
+/**
+ * Preserves the executable-facing model identity without conflating a billing
+ * route, a provider model id, and an optional harness variant.
+ *
+ * OpenCode is the first adapter that requires every field, but the shape is
+ * provider-neutral so other gateway-backed engines can adopt it without
+ * encoding route identity into `model`.
+ */
+export interface EngineModelSelection {
+	readonly catalog_revision?: string;
+	readonly model_id: string;
+	readonly profile_id: string;
+	readonly provider_route_id: string;
+	readonly variant_id?: string;
+}
+
 /** Carries canonical policy and provider-owned preferences chosen by the caller. @since 0.2.0 */
 export interface EngineRunMetadata {
+	readonly catalog_revision?: string;
 	readonly model?: string;
+	readonly model_id?: string;
 	readonly permission_policy?: EnginePermissionPolicy;
+	readonly profile_id?: string;
+	readonly provider_route_id?: string;
 	readonly provider_options?: Readonly<Record<string, EngineProviderOptionValue>>;
+	readonly variant_id?: string;
+}
+
+/** Scopes provider inventory to the config, credentials, and project that produced it. */
+export interface EngineCatalogScope {
+	readonly profile_id: string;
+	readonly working_directory: string;
+	readonly workspace_trust: "safe" | "trusted_project_config";
+}
+
+export type EngineCatalogMetadataConfidence = "configured" | "inferred" | "reported" | "unknown";
+
+/** One executable provider route and its catalog presentation group. */
+export interface EngineCatalogRoute {
+	readonly group: {
+		readonly id: string;
+		readonly label: string;
+		readonly order: number;
+		readonly show_route_labels: boolean;
+	};
+	readonly id: string;
+	readonly label: string;
+	readonly status: "available" | "unavailable";
+	readonly unavailable_reason?: string;
+}
+
+/** One executable model choice reported by a live engine catalog. */
+export interface EngineCatalogModel {
+	readonly capabilities: {
+		readonly context_window_tokens?: number;
+		/** Whether the live provider route exposes a distinct fast-delivery mode. */
+		readonly fast?: boolean;
+		readonly image_input: boolean;
+		readonly output_tokens?: number;
+		/** Whether the live provider route accepts a reasoning-effort choice. */
+		readonly reasoning?: boolean;
+		readonly tools: boolean;
+	};
+	readonly catalog_id: string;
+	readonly cost?: {
+		readonly input_usd_per_million?: number;
+		readonly output_usd_per_million?: number;
+	};
+	readonly enabled: boolean;
+	readonly metadata_confidence: EngineCatalogMetadataConfidence;
+	readonly model_id: string;
+	readonly name: string;
+	readonly provider_route_id: string;
+	readonly status: "active" | "alpha" | "beta" | "deprecated";
+	readonly upstream_model_id?: string;
+	readonly variant_id?: string;
+}
+
+/** Immutable result of one scoped live-inventory read. */
+export interface EngineModelCatalogSnapshot {
+	readonly engine_id: string;
+	readonly generated_at: string;
+	readonly models: ReadonlyArray<EngineCatalogModel>;
+	readonly revision: string;
+	readonly routes: ReadonlyArray<EngineCatalogRoute>;
+	readonly scope: EngineCatalogScope;
+}
+
+/** One authentication/configuration method exposed by a live engine integration. */
+export type EngineConnectionMethod =
+	| { readonly id: string; readonly label: string; readonly type: "oauth" }
+	| { readonly label: string; readonly type: "key" }
+	| { readonly label: string; readonly names: ReadonlyArray<string>; readonly type: "env" }
+	| { readonly id: string; readonly label: string; readonly type: "command" };
+
+export interface EngineConnectionInfo {
+	readonly connected: boolean;
+	readonly id: string;
+	readonly methods: ReadonlyArray<EngineConnectionMethod>;
+	readonly name: string;
+}
+
+export interface EngineOAuthAttempt {
+	readonly attempt_id: string;
+	readonly expires_at_ms: number;
+	readonly instructions: string;
+	readonly mode: "auto" | "code";
+	readonly url: string;
+}
+
+export type EngineOAuthAttemptStatus =
+	| { readonly status: "complete" | "expired" | "pending" }
+	| { readonly message: string; readonly status: "failed" };
+
+/** Provider-neutral connection seam for integrations whose auth is service-owned. */
+export interface EngineConnectionManager {
+	readonly BeginOAuth: (
+		scope: EngineCatalogScope,
+		integration_id: string,
+		method_id: string,
+	) => Effect.Effect<EngineOAuthAttempt, EngineFailure>;
+	readonly CancelOAuth: (
+		scope: EngineCatalogScope,
+		integration_id: string,
+		attempt_id: string,
+	) => Effect.Effect<void, EngineFailure>;
+	readonly CompleteOAuth: (
+		scope: EngineCatalogScope,
+		integration_id: string,
+		attempt_id: string,
+		code?: string,
+	) => Effect.Effect<void, EngineFailure>;
+	readonly ConnectKey: (
+		scope: EngineCatalogScope,
+		integration_id: string,
+		key: string,
+	) => Effect.Effect<void, EngineFailure>;
+	readonly List: (
+		scope: EngineCatalogScope,
+	) => Effect.Effect<ReadonlyArray<EngineConnectionInfo>, EngineFailure>;
+	readonly OAuthStatus: (
+		scope: EngineCatalogScope,
+		integration_id: string,
+		attempt_id: string,
+	) => Effect.Effect<EngineOAuthAttemptStatus, EngineFailure>;
 }
 
 /**
@@ -775,9 +923,14 @@ export interface EngineUsageObservation extends EngineObservationBase {
 	 * is the denominator for `context_tokens`, not the raw model limit.
 	 */
 	readonly context_window_tokens?: number;
+	/** Provider-reported run or turn cost in US dollars, when available. */
+	readonly cost_usd?: number;
 	readonly input_tokens?: number;
 	readonly output_tokens?: number;
+	/** Route provenance keeps gateway billing distinct for otherwise identical models. */
+	readonly provider_route_id?: string;
 	readonly turn_id?: string;
+	readonly variant_id?: string;
 }
 
 /**
@@ -1074,8 +1227,8 @@ export interface EngineQuotaWindow {
 
 /**
  * Reports provider-account authentication and quota usage without starting a
- * run. `windows` is empty when the account is unauthenticated or the provider
- * exposes no quota surface.
+ * run. `windows` can be empty even when a quota surface exists — for example,
+ * when the account has no configured spend limit.
  *
  * @since 0.6.0
  */
@@ -1083,11 +1236,18 @@ export interface EngineAccountUsage {
 	/** The provider account's email when the transport discloses one. */
 	readonly account_email?: string;
 	readonly authentication: EngineAuthReadiness;
+	/** Explicit capability evidence; clients must not infer this from an empty window list. */
+	readonly quota_surface?: "supported" | "unknown" | "unsupported";
 	readonly windows: ReadonlyArray<EngineQuotaWindow>;
 }
 
 /** Defines the dependency-free provider-neutral seam implemented by every engine adapter. @since 0.2.0 */
 export interface Engine {
+	/** Returns live model inventory for engines whose catalog depends on location or credentials. */
+	readonly Catalog?: (
+		scope: EngineCatalogScope,
+	) => Effect.Effect<EngineModelCatalogSnapshot, EngineFailure>;
+	readonly Connections?: EngineConnectionManager;
 	readonly Descriptor: EngineDescriptor;
 	/**
 	 * Decides whether a source token may continue natively with the requested

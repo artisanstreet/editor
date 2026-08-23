@@ -34,16 +34,23 @@ describe("thread route conversation liveness", () => {
 	});
 
 	/**
-	 * The deterministic half of self-healing: the run-lifecycle push that raises
-	 * the finish toast also proves the transcript stale when its session never
-	 * settled, and one resync converges. No interval is involved.
+	 * The deterministic half of self-healing: retained work authority proves the
+	 * transcript stale when its session never settled, and one resync converges.
+	 * No hot-event observer or interval is involved.
 	 */
 	it("resyncs when a settled run's tail provably never reached the transcript", () => {
 		expect(route).toContain("const TranscriptReflectsSettledWork = ");
 		expect(route).toContain("const EnsureTranscriptSettled = Effect.gen(function* () {");
 		expect(route).toContain("if (TranscriptReflectsSettledWork()) return;");
 		expect(route).toContain('yield* Effect.sleep("2 seconds");');
-		expect(route).toContain("yield* Effect.forkIn(EnsureTranscriptSettled, thread_scope);");
+		const work_update = route.slice(
+			route.indexOf("const ApplyWorkUpdate"),
+			route.indexOf("const conversation_liveness_interval_ms"),
+		);
+		expect(work_update).toContain(
+			"yield* Effect.forkIn(EnsureTranscriptSettled, thread_scope);",
+		);
+		expect(route).toContain("client.SubscribeThreadWork(thread_id)");
 	});
 
 	it("counts every delivered conversation envelope as liveness, snapshots included", () => {

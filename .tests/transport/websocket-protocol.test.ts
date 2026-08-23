@@ -6,6 +6,7 @@ import {
 	EncodeWebSocketTransportFrame,
 	MakeWebSocketConnection,
 	type WebSocketEndpoint,
+	websocket_frame_queue_capacity,
 } from "@artisan/transport/websocket/protocol";
 import {
 	prepare_browser_websocket,
@@ -129,6 +130,38 @@ describe("WebSocket transport framing", () => {
 		);
 	});
 
+	it("does not advance the outbound drain until the endpoint finishes a send", async () => {
+		let release_send = () => undefined;
+		const endpoint: WebSocketEndpoint = {
+			add_close_listener: () => () => undefined,
+			add_error_listener: () => () => undefined,
+			add_message_listener: () => () => undefined,
+			close: () => undefined,
+			send: () =>
+				new Promise<void>((resolve) => {
+					release_send = resolve;
+				}),
+		};
+		const state = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const connection = yield* MakeWebSocketConnection(endpoint);
+					const sending = yield* connection.control_port
+						.Send(hello)
+						.pipe(Effect.forkScoped);
+					yield* Effect.yieldNow;
+					const before = sending.pollUnsafe();
+					release_send();
+					yield* Fiber.join(sending);
+					return { before, after: sending.pollUnsafe() };
+				}),
+			),
+		);
+
+		expect(state.before).toBeUndefined();
+		expect(state.after?._tag).toBe("Success");
+	});
+
 	it("retains a control and stream burst until receivers drain both channels", async () => {
 		const [, right] = make_pair();
 		const control_count = 258;
@@ -229,6 +262,25 @@ describe("WebSocket transport framing", () => {
 		);
 
 		expect(received).toHaveLength(count);
+	});
+
+	it("closes before an unconsumed native frame burst can grow without bound", async () => {
+		const [, right] = make_pair();
+		const frame = await Effect.runPromise(EncodeWebSocketTransportFrame("control", hello));
+		const closed = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const connection = yield* MakeWebSocketConnection(right.endpoint);
+					for (let index = 0; index <= websocket_frame_queue_capacity; index += 1) {
+						right.receive(frame);
+					}
+					return yield* connection.control_port.Closed;
+				}),
+			),
+		);
+
+		expect(closed).toEqual({ code: "message_error", dropped_messages: 1 });
+		expect(right.close_count()).toBe(1);
 	});
 
 	it("closes a shared socket exactly once when either logical port closes", async () => {

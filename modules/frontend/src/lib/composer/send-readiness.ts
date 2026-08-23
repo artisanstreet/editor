@@ -67,10 +67,18 @@ export const ComposerContextWindowTokens = (
 	) {
 		return context_usage.context_window_tokens;
 	}
-	const capability = catalog.manifest.models.find(
-		(model) => model.native_model_id === policy?.model,
-	)?.capabilities.context_window;
-	if (capability === undefined) return undefined;
+	const capabilities = catalog.manifest.models.find((model) => {
+		if (model.harness !== policy?.engine_id || model.native_model_id !== policy.model)
+			return false;
+		const selection = model.native_selection;
+		return selection === undefined
+			? policy.provider_route_id === undefined && policy.variant_id === undefined
+			: selection.provider_route_id === policy.provider_route_id &&
+					selection.model_id === (policy.model_id ?? policy.model) &&
+					selection.variant_id === policy.variant_id;
+	})?.capabilities;
+	const capability = capabilities?.context_window;
+	if (capability === undefined) return capabilities?.context_window_tokens;
 	const default_option = capability.options.find(
 		(candidate) => candidate.id === capability.default,
 	);

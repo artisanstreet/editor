@@ -21,8 +21,15 @@ export interface WebSocketEndpoint {
 	readonly add_error_listener: (listener: (cause: unknown) => void) => () => void;
 	readonly add_message_listener: (listener: (data: unknown) => void) => () => void;
 	readonly close: () => void;
-	readonly send: (data: Uint8Array) => void;
+	readonly send: (data: Uint8Array) => void | Promise<void>;
 }
+
+/**
+ * Browser message events can outrun MessagePack decoding by orders of
+ * magnitude during a journal resume. Bound both the native ingress handoff and
+ * each decoded logical lane so retained ArrayBuffers have a hard ceiling.
+ */
+export const websocket_frame_queue_capacity = 512;
 
 const bytes = (input: unknown) => {
 	if (input instanceof Uint8Array) {
@@ -92,22 +99,22 @@ const MakeWebSocketMultiplexer = (
 ) => {
 	return Effect.gen(function* () {
 		const raw_frames = yield* Effect.acquireRelease(
-			Queue.unbounded<unknown, MessagePortError>(),
+			Queue.bounded<unknown, MessagePortError>(websocket_frame_queue_capacity),
 			Queue.shutdown,
 		);
 		const control_incoming = yield* Effect.acquireRelease(
-			Queue.unbounded<unknown, MessagePortError>(),
+			Queue.bounded<unknown, MessagePortError>(websocket_frame_queue_capacity),
 			Queue.shutdown,
 		);
 		const stream_incoming = yield* Effect.acquireRelease(
-			Queue.unbounded<unknown, MessagePortError>(),
+			Queue.bounded<unknown, MessagePortError>(websocket_frame_queue_capacity),
 			Queue.shutdown,
 		);
 		const closed = yield* Deferred.make<MessagePortClose>();
 		let close_state: MessagePortClose | undefined;
 		let socket_closed = false;
-		const Fail = (code: "message_error", cause: unknown) =>
-			new MessagePortFailure({ cause, code, dropped_messages: 0 });
+		const Fail = (code: "message_error", cause: unknown, dropped_messages = 0) =>
+			new MessagePortFailure({ cause, code, dropped_messages });
 		const close_socket = () => {
 			if (!socket_closed) {
 				socket_closed = true;
@@ -147,7 +154,14 @@ const MakeWebSocketMultiplexer = (
 		};
 
 		const remove_message = endpoint.add_message_listener((raw) => {
-			if (!close_state) Queue.offerUnsafe(raw_frames, raw);
+			if (close_state || Queue.offerUnsafe(raw_frames, raw)) return;
+			const dropped_messages = 1;
+			const failure = Fail(
+				"message_error",
+				new Error("WebSocket ingress exceeded its bounded frame queue"),
+				dropped_messages,
+			);
+			finish({ code: "message_error", dropped_messages }, failure, true);
 		});
 		const remove_error = endpoint.add_error_listener((cause) => {
 			const failure = Fail("message_error", cause);
@@ -207,8 +221,8 @@ const MakeWebSocketMultiplexer = (
 			Send: (message: unknown) =>
 				EncodeWebSocketTransportFrame(channel, message).pipe(
 					Effect.flatMap((encoded) =>
-						Effect.try({
-							try: () => {
+						Effect.tryPromise({
+							try: async () => {
 								if (close_state) {
 									throw new MessagePortFailure({
 										cause: new Error("cannot send after WebSocket close"),
@@ -216,7 +230,7 @@ const MakeWebSocketMultiplexer = (
 										dropped_messages: close_state.dropped_messages,
 									});
 								}
-								endpoint.send(encoded);
+								await endpoint.send(encoded);
 							},
 							catch: (cause) =>
 								cause instanceof MessagePortFailure

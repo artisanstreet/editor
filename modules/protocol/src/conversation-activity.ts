@@ -95,10 +95,18 @@ const normalized_kind = (kind: string) =>
 export const GetConversationActivityCategory = (kind: string): ConversationActivityCategory => {
 	const value = normalized_kind(kind);
 
-	if (value.includes("terminal") || value.includes("command") || value.includes("shell"))
+	if (
+		value.includes("terminal") ||
+		value.includes("command") ||
+		value.includes("shell") ||
+		value.includes("bash") ||
+		value.includes("exec")
+	)
 		return "command";
 	if (
 		value === "file" ||
+		value === "read" ||
+		value === "read.file" ||
 		value.includes("file.read") ||
 		value.includes("workspace.read") ||
 		value.endsWith(".read")
@@ -106,14 +114,27 @@ export const GetConversationActivityCategory = (kind: string): ConversationActiv
 		return "file_read";
 	if (value.includes("file.delete")) return "file_delete";
 	if (
+		value === "write" ||
+		value === "edit" ||
+		value === "apply" ||
 		value.includes("file.edit") ||
 		value.includes("file.write") ||
 		value.includes("workspace.edit") ||
-		value.includes("workspace.write")
+		value.includes("workspace.write") ||
+		value.includes("apply.patch")
 	)
 		return "file_edit";
-	if (value.includes("workspace.search") || value.includes("file.list")) return "file_search";
-	if (value === "search" || value.includes("web.search")) return "web_search";
+	if (
+		value.includes("workspace.search") ||
+		value.includes("file.list") ||
+		value.includes("grep") ||
+		value.includes("glob") ||
+		value.includes("find") ||
+		value.includes("ripgrep")
+	)
+		return "file_search";
+	if (value === "search" || value.includes("web.search") || value.includes("fetch"))
+		return "web_search";
 	if (value.includes("test")) return "test";
 	if (value.includes("typescript") || value.includes("typecheck")) return "typecheck";
 	if (value.includes("git.status")) return "git_status";
@@ -305,8 +326,35 @@ export const GetConversationActivityGroupPresentation = (
 export const GetConversationActivityPresentation = (
 	activity: ConversationActivityPresentationInput,
 ): ConversationActivityPresentation => {
-	const category = GetConversationActivityCategory(activity.kind);
+	let category = GetConversationActivityCategory(activity.kind);
+	// Back-compat: older rows stored `tool` for OpenCode with the real name in `label`.
+	// Re-derive so `read` → `Read a file` instead of `Used a tool`.
+	if (
+		(category === "tool" || category === "other") &&
+		activity.label !== "Tool" &&
+		activity.label !== "Tools"
+	) {
+		const label_category = GetConversationActivityCategory(activity.label);
+		if (label_category !== "tool" && label_category !== "other") category = label_category;
+	}
 	if (category === "other") return { label: activity.label };
+	if (category === "tool" && activity.label !== "Tool" && activity.label !== "Tools") {
+		const name = activity.label
+			.trim()
+			.replaceAll(/[._-]+/gu, " ")
+			.replaceAll(/\s+/gu, " ");
+		if (name.length > 0) {
+			const state = ActivityState(activity.status);
+			return {
+				label:
+					state === "active"
+						? `Using ${name}`
+						: state === "completed"
+							? `Used ${name}`
+							: `${name[0]?.toUpperCase()}${name.slice(1)} failed`,
+			};
+		}
+	}
 	if (category === "subagent" && activity.subagent !== undefined) {
 		const name = activity.subagent.display_name;
 		return {

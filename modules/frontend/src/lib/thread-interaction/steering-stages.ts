@@ -16,7 +16,7 @@ const minimum_lip_display_ms = 150;
 export interface SteeringStageHarness<Submission> {
 	readonly Lip: () => SteeringPendingLipState<Submission>;
 	readonly ReplaceLip: (next: SteeringPendingLipState<Submission>) => void;
-	readonly SteeringChanged: (pending: boolean) => void;
+	readonly SteeringChanged: (pending: boolean, source_reference?: string) => void;
 	/** Recalls one queued steer durably; fails once the engine has claimed it. */
 	readonly Withdraw: (command_id: string) => Effect.Effect<void, { readonly message: string }>;
 }
@@ -101,7 +101,7 @@ export const MakeSteeringStages = <Submission>(harness: SteeringStageHarness<Sub
 			Effect.gen(function* () {
 				yield* ReleaseLip(generation);
 				label_generation = generation;
-				harness.SteeringChanged(true);
+				harness.SteeringChanged(true, steers.get(generation)?.command_id);
 			}),
 		/**
 		 * Recalls a queued steer. Intent acts now — the lip closes even while the

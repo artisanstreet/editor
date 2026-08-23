@@ -542,6 +542,22 @@ describe("dev home interop", () => {
 });
 
 describe("dev runner tui flags", () => {
+	it("restores the console on dashboard close, crash, and parent exit", () => {
+		const runner = readFileSync(".scripts/dev/runner.ts", "utf8");
+		const tui = readFileSync("modules/dev-tui/src/index.ts", "utf8");
+
+		expect(runner).toContain(
+			'import { restore_terminal_presentation } from "@artisanstreet/checklist"',
+		);
+		expect(runner).toContain('process.once("exit", emergency_exit)');
+		expect(runner).toContain("restore_terminal_presentation();");
+		expect(runner).not.toContain("windowsHide: false");
+		expect(tui).toContain("enableMouseMovement: false");
+		expect(tui).toContain("useMouse: false");
+		expect(tui).toContain("autoFocus: false");
+		expect(tui).toContain("useKittyKeyboard: null");
+	});
+
 	it("detects the shared opt-out flags and keeps them out of mode parsing", () => {
 		expect(argv_disables_tui(["dev"])).toBe(false);
 		expect(argv_disables_tui(["dev", "--no-tui"])).toBe(true);

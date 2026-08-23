@@ -27,18 +27,3 @@ export const work_session_disclosure = (input: {
 		details_mounted: input.details_defined && (input.working || input.open),
 	};
 };
-
-export type ModelTransitionPresentation = "pending_source" | "target_only" | "source_and_target";
-
-/**
- * A handoff can be announced before the prior provider has reported its model.
- * Do not briefly claim that it changed only *to* the target: the completion
- * observation can fill that source in on the same durable transition item.
- */
-export const model_transition_presentation = (
-	state: "started" | "completed",
-	source_model_id: string | undefined,
-): ModelTransitionPresentation => {
-	if (state === "started" && source_model_id === undefined) return "pending_source";
-	return source_model_id === undefined ? "target_only" : "source_and_target";
-};

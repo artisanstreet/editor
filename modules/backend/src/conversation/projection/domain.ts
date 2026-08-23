@@ -92,6 +92,10 @@ export const resume_without_progress_detail =
 export const working_directory_missing_detail =
 	"The thread's working directory no longer exists on this machine.";
 
+/** Safe startup wording for an adapter-classified provider model rejection. */
+export const selected_model_unavailable_detail =
+	"The selected model configuration is not available to this account.";
+
 const renderer_safe_terminal_details = new Set([
 	"Artisan could not finish preparing the engine run.",
 	"Engine startup was interrupted before the native session became ready.",
@@ -101,6 +105,7 @@ const renderer_safe_terminal_details = new Set([
 	"The engine could not deliver observations fast enough to continue safely.",
 	observation_persistence_abandoned_detail,
 	resume_without_progress_detail,
+	selected_model_unavailable_detail,
 	working_directory_missing_detail,
 ]);
 

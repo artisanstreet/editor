@@ -30,6 +30,40 @@ afterEach(async () => {
 });
 
 describe("session defaults service", () => {
+	it("defaults onboarding to incomplete and persists completion", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_path(),
+			migrations_path,
+		});
+		try {
+			const readings = await runtime.runPromise(
+				Effect.gen(function* () {
+					const settings = yield* SessionDefaultsService;
+					const initial = yield* settings.Read;
+					yield* settings.Update({
+						kind: "command",
+						message_id: "onboarding-complete",
+						origin: "frontend",
+						payload: {
+							onboarding_completed: true,
+							type: "session.defaults.update",
+						},
+						protocol_version: 1,
+						schema_version: 1,
+						sent_at: "2026-08-23T13:00:00.000Z",
+						thread_id: session_defaults_thread_id,
+					});
+					return { completed: yield* settings.Read, initial };
+				}),
+			);
+
+			expect(readings.initial.onboarding_completed).toBe(false);
+			expect(readings.completed.onboarding_completed).toBe(true);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("persists each model's speed tier independently from its reasoning effort", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_path(),
@@ -111,6 +145,35 @@ describe("session defaults service", () => {
 			expect(readings.explicit.thread_title_mode).toBe("latest_message");
 			expect(readings.untouched.thread_title_mode).toBe("latest_message");
 			expect(readings.untouched.auto_continue_usage_limits).toBe(false);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("rewrites retired permission defaults as Auto", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_path(),
+			migrations_path,
+		});
+		try {
+			const permission = await runtime.runPromise(
+				Effect.gen(function* () {
+					const settings = yield* SessionDefaultsService;
+					yield* settings.Update({
+						kind: "command",
+						message_id: "retired-permission",
+						origin: "frontend",
+						payload: { permission: "trusted", type: "session.defaults.update" },
+						protocol_version: 1,
+						schema_version: 1,
+						sent_at: "2026-08-21T12:00:00.000Z",
+						thread_id: session_defaults_thread_id,
+					});
+					return (yield* settings.Read).permission;
+				}),
+			);
+
+			expect(permission).toBe("autonomous");
 		} finally {
 			await runtime.dispose();
 		}

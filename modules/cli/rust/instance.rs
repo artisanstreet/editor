@@ -184,7 +184,7 @@ pub fn setup(
     Ok(())
 }
 
-fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|source| CliError::Json {
         path: path.to_path_buf(),
         source,
@@ -230,7 +230,7 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     result
 }
 
-fn reject_unsafe_destination(path: &Path) -> Result<()> {
+pub(crate) fn reject_unsafe_destination(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(CliError::UnsafePath(path.to_path_buf()))

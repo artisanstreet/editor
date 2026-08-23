@@ -19,6 +19,59 @@ import { make_plain_presenter, type Presenter } from "./presentation.ts";
 
 const dependency_require = createRequire(import.meta.url);
 
+/**
+ * Terminal modes that a renderer may leave behind if its process is killed
+ * between setup and destroy. Mouse modes are the visible failure: every
+ * pointer move becomes an SGR escape sequence typed into the resumed shell.
+ */
+export const terminal_presentation_reset = [
+	"\u001b[?1000l",
+	"\u001b[?1002l",
+	"\u001b[?1003l",
+	"\u001b[?1004l",
+	"\u001b[?1005l",
+	"\u001b[?1006l",
+	"\u001b[?1007l",
+	"\u001b[?1015l",
+	"\u001b[?1016l",
+	"\u001b[?2004l",
+	"\u001b[?1049l",
+	"\u001b[<u",
+	"\u001b[?25h",
+	"\u001b[0m",
+].join("");
+
+interface TerminalInput {
+	readonly isTTY?: boolean;
+	readonly setRawMode?: (enabled: boolean) => unknown;
+}
+
+interface TerminalOutput {
+	readonly isTTY?: boolean;
+	readonly write: (text: string) => unknown;
+}
+
+/** Idempotent parent-side recovery for graceful and abnormal dashboard exits. */
+export const restore_terminal_presentation = (
+	input: TerminalInput = process.stdin,
+	output: TerminalOutput = process.stdout,
+): void => {
+	if (input.isTTY === true && input.setRawMode !== undefined) {
+		try {
+			input.setRawMode(false);
+		} catch {
+			/** The console handle may already be closing. */
+		}
+	}
+
+	if (output.isTTY !== true) return;
+	try {
+		output.write(terminal_presentation_reset);
+	} catch {
+		/** The process is already past writable shutdown. */
+	}
+};
+
 const resolve_bun_executable = (): string => {
 	const package_path = dependency_require.resolve("bun/package.json");
 	const manifest = JSON.parse(readFileSync(package_path, "utf8")) as {
@@ -43,7 +96,7 @@ const start_tui_presenter = (write: (line: string) => void): Presenter => {
 		child = spawn(resolve_bun_executable(), [resolve_entry()], {
 			env: process.env,
 			stdio: ["inherit", "inherit", "inherit", "pipe", "pipe"],
-			windowsHide: false,
+			windowsHide: true,
 		});
 	} catch (cause) {
 		return fall_back(cause instanceof Error ? cause.message : String(cause));
@@ -69,6 +122,16 @@ const start_tui_presenter = (write: (line: string) => void): Presenter => {
 	let backpressured = false;
 	let closing = false;
 	let fallback: Presenter | undefined;
+	let close_promise: Promise<void> | undefined;
+	let force_close_timer: ReturnType<typeof setTimeout> | undefined;
+
+	const restore_terminal = () => restore_terminal_presentation();
+	const emergency_exit = () => {
+		if (child.exitCode === null && !child.killed) child.kill();
+		restore_terminal();
+	};
+	process.once("exit", emergency_exit);
+	const release_emergency_exit = () => process.removeListener("exit", emergency_exit);
 
 	const degrade = (reason: string): void => {
 		if (fallback !== undefined || closing) return;
@@ -107,11 +170,15 @@ const start_tui_presenter = (write: (line: string) => void): Presenter => {
 	child.once("error", (cause) => {
 		active = false;
 		pending.length = 0;
+		restore_terminal();
 		degrade(`failed (${cause.message})`);
 	});
 	child.once("exit", (code) => {
 		active = false;
 		pending.length = 0;
+		if (force_close_timer !== undefined) clearTimeout(force_close_timer);
+		release_emergency_exit();
+		restore_terminal();
 		degrade(`exited with code ${code ?? "unknown"}`);
 	});
 
@@ -131,19 +198,40 @@ const start_tui_presenter = (write: (line: string) => void): Presenter => {
 
 	return {
 		close: () => {
-			if (closing) return;
+			if (close_promise !== undefined) return close_promise;
 			closing = true;
+			close_promise = new Promise<void>((resolve) => {
+				const finish = () => {
+					if (force_close_timer !== undefined) clearTimeout(force_close_timer);
+					release_emergency_exit();
+					restore_terminal();
+					resolve();
+				};
 
-			try {
-				if (!event_stream.destroyed && !event_stream.writableEnded) {
-					event_stream.end(`${JSON.stringify({ type: "shutdown" })}\n`);
+				if (child.exitCode !== null) {
+					finish();
+					return;
 				}
-			} catch {
-				/** The dashboard is already gone; nothing left to notify. */
-			}
+
+				child.once("exit", finish);
+				try {
+					if (!event_stream.destroyed && !event_stream.writableEnded) {
+						event_stream.end(`${JSON.stringify({ type: "shutdown" })}\n`);
+					}
+				} catch {
+					/** The dashboard is already gone; the exit waiter still restores. */
+				}
+
+				force_close_timer = setTimeout(() => {
+					if (child.exitCode === null && !child.killed) child.kill();
+					/** A broken child must not hold the failed build open forever. */
+					setTimeout(finish, 500).unref();
+				}, 500);
+			});
 
 			active = false;
 			pending.length = 0;
+			return close_promise;
 		},
 		emit: (event) => {
 			if (event.type === "configure" || event.type === "expand") structure.push(event);
@@ -167,6 +255,7 @@ const start_tui_presenter = (write: (line: string) => void): Presenter => {
 				degrade("stopped accepting events");
 			}
 		},
+		transient: true,
 	};
 };
 
@@ -175,5 +264,5 @@ export const MakeTuiPresenter = (
 ): Effect.Effect<Presenter, never, Scope.Scope> =>
 	Effect.acquireRelease(
 		Effect.sync(() => start_tui_presenter(write)),
-		(presenter) => Effect.sync(presenter.close),
+		(presenter) => Effect.promise(async () => await presenter.close()),
 	);

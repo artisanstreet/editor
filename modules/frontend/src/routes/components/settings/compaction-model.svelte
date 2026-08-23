@@ -1,7 +1,6 @@
 <script lang="ts" effect>
 	import ArrowsMinimize from "@tabler/icons-svelte/icons/arrows-minimize";
 	import Selector from "@tabler/icons-svelte/icons/selector";
-	import Tool from "@tabler/icons-svelte/icons/tool";
 	import type { Component } from "svelte";
 	import { Effect, Stream } from "effect";
 	import type { SessionDefaults } from "@artisan/protocol";
@@ -17,6 +16,8 @@
 	import {
 		ModelsFromCatalog,
 		OrderModels,
+		PermissionLevelLabel,
+		RouteGroupsForModels,
 		thinking_level_labels,
 		type EngineChoice,
 		type HarnessId,
@@ -90,17 +91,18 @@
 			? models.find((model) => model.id === compaction_selection.model_id)
 			: undefined,
 	);
-	const active_engine_choice = $derived(
-		engines.find((engine) => engine.id === active_engine) ??
-			engines[0] ?? { icon: Tool, id: "codex", monochrome: true, name: "Unavailable" },
-	);
 	/**
 	 * Forge owns the starred set and both pickers read it from the same snapshot,
 	 * so a model starred in the composer opens starred here and in the same
 	 * order.
 	 */
 	const favorite_ids = $derived(defaults_state.favorite_ids);
-	const active_models = $derived(OrderModels(models, active_engine, favorite_ids));
+	const active_models = $derived(
+		OrderModels(models, active_engine, favorite_ids, compaction_model?.id),
+	);
+	const route_groups = $derived(
+		RouteGroupsForModels(runtime_catalog, active_engine, active_models),
+	);
 
 	const RequestFavorite = (model_id: string, favorite: boolean) =>
 		Effect.gen(function* () {
@@ -376,7 +378,7 @@
 		>
 			<ShaderGlassSurface strength="strong" class="w-full rounded-3xl">
 				<Tabs bind:value={active_engine} class="min-h-0 gap-2 p-2">
-					<EngineSection {active_engine} disabled={!forge_available} engine_locked={false} {engines} selected_engine={active_engine_choice} />
+					<EngineSection {active_engine} disabled={!forge_available} {engines} />
 					<div class="flex min-w-0 flex-col gap-2 sm:flex-row">
 						<div
 							class="docs-scroll-fade h-48 min-w-0 w-full grow overflow-y-auto rounded-xl"
@@ -389,6 +391,7 @@
 								onfavorite={RequestFavorite}
 								onpreview={PreviewModelId}
 								onselect={SelectModel}
+								{route_groups}
 								selected_model_id={compaction_model?.id ?? ""}
 							>
 								{#snippet leading({ move_hover })}
@@ -470,7 +473,10 @@
 										{@render policy_select(
 											"Permission",
 											defaults.permission,
-											previewed_permissions.map((option) => ({ id: option.id, label: option.label })),
+											previewed_permissions.map((option) => ({
+												id: option.id,
+												label: PermissionLevelLabel(option),
+											})),
 											UpdatePermission,
 										)}
 									{/if}

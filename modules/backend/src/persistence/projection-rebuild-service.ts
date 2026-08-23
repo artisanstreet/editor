@@ -28,6 +28,7 @@ import {
 	automatic_thread_title_from_event,
 	thread_activity_is_reader_visible,
 	thread_activity_kind_from_event,
+	thread_message_sent_from_event,
 } from "../threads/internal/thread-activity";
 
 /**
@@ -136,6 +137,7 @@ const thread_row = (thread: ThreadListItem): RebuiltThread => ({
 	created_at: thread.created_at,
 	current_goal: thread.current_goal ?? null,
 	last_activity_at: thread.last_activity_at,
+	last_message_at: thread.last_message_at ?? thread.created_at,
 	reader_activity_at: thread.reader_activity_at ?? thread.last_activity_at,
 	reader_acknowledged_activity_at:
 		thread.reader_acknowledged_activity_at ?? "1970-01-01T00:00:00.000Z",
@@ -165,6 +167,7 @@ const created_thread_row = (thread_id: string, title: string, occurred_at: strin
 		affinity_version: 0,
 		created_at: occurred_at,
 		last_activity_at: occurred_at,
+		last_message_at: occurred_at,
 		reader_activity_at: occurred_at,
 		reader_acknowledged_activity_at: "1970-01-01T00:00:00.000Z",
 		live_status: "Idle",
@@ -376,7 +379,17 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 									message: `Thread ${event.thread_id} was updated without a live creation.`,
 								});
 							}
-							threads.set(event.thread_id, thread_row(payload.thread));
+							{
+								const current = threads.get(event.thread_id)!;
+								const projected = thread_row(payload.thread);
+								threads.set(event.thread_id, {
+									...projected,
+									last_message_at:
+										payload.thread.last_message_at ??
+										current.last_message_at ??
+										current.created_at,
+								});
+							}
 							break;
 						case "thread.attention.acknowledged": {
 							const thread = threads.get(event.thread_id);
@@ -454,8 +467,12 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 					}
 
 					const activity_kind = thread_activity_kind_from_event(payload);
+					const message_sent = thread_message_sent_from_event(payload);
 					const active_thread = threads.get(event.thread_id);
-					if (activity_kind !== undefined && active_thread !== undefined) {
+					if (
+						(activity_kind !== undefined || message_sent) &&
+						active_thread !== undefined
+					) {
 						const automatic_title = automatic_thread_title_from_event(payload);
 						const updates_title =
 							automatic_title !== undefined &&
@@ -465,12 +482,25 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 
 						threads.set(event.thread_id, {
 							...active_thread,
-							activity_version: (active_thread.activity_version ?? 0) + 1,
-							last_activity_at:
-								(active_thread.last_activity_at ?? "1970-01-01T00:00:00.000Z") >
-								event.occurred_at
-									? active_thread.last_activity_at
-									: event.occurred_at,
+							...(activity_kind === undefined
+								? {}
+								: {
+										activity_version: (active_thread.activity_version ?? 0) + 1,
+										last_activity_at:
+											(active_thread.last_activity_at ??
+												"1970-01-01T00:00:00.000Z") > event.occurred_at
+												? active_thread.last_activity_at
+												: event.occurred_at,
+									}),
+							...(message_sent
+								? {
+										last_message_at:
+											(active_thread.last_message_at ??
+												active_thread.created_at) > event.occurred_at
+												? active_thread.last_message_at
+												: event.occurred_at,
+									}
+								: {}),
 							...(thread_activity_is_reader_visible(payload)
 								? {
 										reader_activity_at:

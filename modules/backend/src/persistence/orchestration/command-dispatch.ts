@@ -208,7 +208,12 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 				});
 				const policy_columns = {
 					engine_id: payload.policy.engine_id,
+					policy_catalog_revision: payload.policy.catalog_revision ?? null,
 					policy_model: payload.policy.model ?? null,
+					policy_model_id: payload.policy.model_id ?? null,
+					policy_profile_id: payload.policy.profile_id ?? null,
+					policy_provider_route_id: payload.policy.provider_route_id ?? null,
+					policy_variant_id: payload.policy.variant_id ?? null,
 					policy_context_window: payload.policy.context_window ?? null,
 					policy_reasoning_effort: payload.policy.reasoning_effort,
 					policy_permission: payload.policy.permission,
@@ -339,16 +344,20 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 						.where(eq(OrchestrationCoordinators.thread_id, command.thread_id));
 				yield* transaction.insert(OrchestrationRuns).values({
 					agent_id: resolved_agent_id,
+					catalog_revision: coordinator?.policy_catalog_revision ?? null,
 					created_at: accepted_at,
 					engine_id: pending.engine_id,
 					/** The model this run launches with, so what answered stays knowable later. */
-					model_id: coordinator?.policy_model ?? null,
+					model_id: coordinator?.policy_model_id ?? coordinator?.policy_model ?? null,
 					native_resume_json: null,
 					native_thread_id: null,
+					profile_id: coordinator?.policy_profile_id ?? null,
+					provider_route_id: coordinator?.policy_provider_route_id ?? null,
 					run_id,
 					status: "queued",
 					thread_id: command.thread_id,
 					updated_at: accepted_at,
+					variant_id: coordinator?.policy_variant_id ?? null,
 					working_directory: pending.working_directory,
 				});
 				yield* ReconcileRootThreadLiveStatus(transaction, command.thread_id, accepted_at);
@@ -792,16 +801,20 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 			if (send_message && !steer) {
 				yield* transaction.insert(OrchestrationRuns).values({
 					agent_id,
+					catalog_revision: coordinator?.policy_catalog_revision ?? null,
 					created_at: accepted_at,
 					engine_id,
 					/** The model this run launches with, so what answered stays knowable later. */
-					model_id: coordinator?.policy_model ?? null,
+					model_id: coordinator?.policy_model_id ?? coordinator?.policy_model ?? null,
 					native_resume_json: null,
 					native_thread_id: null,
+					profile_id: coordinator?.policy_profile_id ?? null,
+					provider_route_id: coordinator?.policy_provider_route_id ?? null,
 					run_id,
 					status: "queued",
 					thread_id: command.thread_id,
 					updated_at: accepted_at,
+					variant_id: coordinator?.policy_variant_id ?? null,
 					working_directory: payload.working_directory,
 				});
 				yield* transaction

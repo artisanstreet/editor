@@ -3,10 +3,11 @@ import { cursor_native_speed, exceptional, standard } from "./options";
 
 export const cursor_other_models = [
 	{
-		id: "cursor-gemini-3-6-flash",
-		name: "Gemini 3.6 Flash",
-		native_model_id: "gemini-3.6-flash",
-		description: "Google's fast production workhorse for coding and multi-step agents.",
+		id: "cursor-gemini-3-7-flash",
+		name: "Gemini 3.7 Flash",
+		native_model_id: "gemini-3.7-flash",
+		description:
+			"Google's latest speed-tier model for high-throughput coding and large-context agent work.",
 		harness: "cursor",
 		provider: "google",
 		routing: { kind: "default" },
@@ -21,7 +22,7 @@ export const cursor_other_models = [
 					standard("high", "high"),
 				],
 			},
-			speed_options: [cursor_native_speed("Gemini 3.6 Flash", false)],
+			speed_options: [cursor_native_speed("Gemini 3.7 Flash", false)],
 			image_input: false,
 			local_tools: true,
 			mcp: true,

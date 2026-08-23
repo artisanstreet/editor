@@ -2,6 +2,7 @@
 	import Bell from "@tabler/icons-svelte/icons/bell";
 	import Messages from "@tabler/icons-svelte/icons/messages";
 	import Palette from "@tabler/icons-svelte/icons/palette";
+	import ShieldLock from "@tabler/icons-svelte/icons/shield-lock";
 	import Sparkles from "@tabler/icons-svelte/icons/sparkles";
 	import type { Component } from "svelte";
 	import { page } from "$app/state";
@@ -60,6 +61,7 @@
 		},
 		{
 			anchors: [
+				{ hash: "app-icon", label: "App icon" },
 				{ hash: "typography", label: "Typography" },
 				{ hash: "glass", label: "Glass" },
 				{ hash: "reading", label: "Reading" },
@@ -73,6 +75,15 @@
 			href: "/settings/notifications",
 			icon: Bell,
 			label: "Notifications",
+		},
+		{
+			anchors: [
+				{ hash: "telemetry", label: "Observability" },
+				{ hash: "never-collected", label: "Never collected" },
+			],
+			href: "/settings/privacy",
+			icon: ShieldLock,
+			label: "Privacy",
 		},
 	];
 	const engines: ReadonlyArray<Item> = $derived(

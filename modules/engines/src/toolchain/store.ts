@@ -9,9 +9,16 @@ const SafeBasename = Schema.String.check(
 	Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
 );
 
+const SafeRelativePath = Schema.String.check(
+	Schema.isMinLength(1),
+	Schema.isPattern(
+		/^(?![A-Za-z]:)(?![\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$))[A-Za-z0-9][A-Za-z0-9._\\/-]*$/,
+	),
+);
+
 /** One installed binary generation: the version directory plus its file name. */
 export const ToolchainGeneration = Schema.Struct({
-	binary: SafeBasename,
+	binary: SafeRelativePath,
 	/** Immutable unique directory; permits a repaired copy of the same version. */
 	directory: SafeBasename,
 	sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
@@ -39,6 +46,10 @@ export class ToolchainStateError extends Data.TaggedError("ToolchainStateError")
 /** Rejects values that could escape the per-engine layout before joining paths. */
 export const ValidateToolchainPathComponent = (value: string) =>
 	Schema.decodeUnknownEffect(SafeBasename)(value);
+
+/** Allows a generation-owned nested executable while rejecting absolute/traversal paths. */
+export const ValidateToolchainRelativePath = (value: string) =>
+	Schema.decodeUnknownEffect(SafeRelativePath)(value);
 
 /**
  * The implicit profile an engine carries before anyone adds a second account.

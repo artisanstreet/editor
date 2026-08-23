@@ -50,6 +50,7 @@ import type {
 	ThreadTranscriptSnapshot,
 	ThreadSessionSnapshot,
 	ThreadSessionPolicy,
+	ThreadWorkSnapshot,
 	TranscriptEntry,
 	RoutineDetail,
 	RoutineDriftResolutionRequest,
@@ -514,6 +515,10 @@ export type OrchestrationGroupListUpdate =
 export type ThreadSessionUpdate = {
 	readonly type: "snapshot";
 	readonly snapshot: ThreadSessionSnapshot;
+};
+export type ThreadWorkUpdate = {
+	readonly type: "snapshot";
+	readonly snapshot: ThreadWorkSnapshot;
 };
 export type SurfaceListUpdate = { readonly type: "snapshot"; readonly snapshot: SurfaceSnapshot };
 export type SurfaceUsageAggregateUpdate = {

@@ -388,6 +388,20 @@ const codex_usage_limit_error = (): EngineErrorRef => ({
 	limit_scope: "unknown",
 });
 
+/**
+ * ChatGPT sign-in failures disclose themselves only through wording about the
+ * credential — an expired, rotated, or missing token — never a stable code, so
+ * the phrases Codex actually emits are the classification boundary.
+ */
+const is_codex_auth_failure = (message: string): boolean =>
+	/(?:\bunauthorized\b|\btoken[\s_-]+(?:expired|refresh)\b|\b(?:access|refresh|authentication)[\s_-]+token\b|\bsign(?:ed)?[\s_-]*in[\s_-]+again\b|\bnot[\s_-]+(?:signed|logged)[\s_-]*in\b)/iu.test(
+		message,
+	);
+
+const codex_auth_error = (): EngineErrorRef => ({
+	artisan_code: "AE-CLIENT_STATE-102",
+});
+
 function decode_known<S extends Schema.Constraint>(
 	input: CodexNormalizationInput,
 	schema: S,
@@ -618,20 +632,31 @@ export function normalise_codex_notification(
 					will_retry: value.willRetry,
 				} satisfies EngineRetryObservation;
 
-				if (value.willRetry || !is_explicit_codex_usage_limit(value.error.message)) {
+				if (value.willRetry) {
 					return [retry];
 				}
 
-				return [
-					retry,
-					native_action(
-						input,
-						value.error.message,
-						false,
-						codex_usage_limit_error(),
-						"usage_limit",
-					),
-				];
+				if (is_explicit_codex_usage_limit(value.error.message)) {
+					return [
+						retry,
+						native_action(
+							input,
+							value.error.message,
+							false,
+							codex_usage_limit_error(),
+							"usage_limit",
+						),
+					];
+				}
+
+				if (is_codex_auth_failure(value.error.message)) {
+					return [
+						retry,
+						native_action(input, value.error.message, false, codex_auth_error(), "auth"),
+					];
+				}
+
+				return [retry];
 			});
 		case "warning":
 			return decode_known(input, WarningSchema, (value) => [
@@ -711,7 +736,22 @@ export function normalise_codex_notification(
 				switch (value.item.type) {
 					case "agentMessage":
 						return started
-							? [native_action(input, "Started agent message item")]
+							? [
+									{
+										...base,
+										_tag: "agent_message_delta",
+										delta: "",
+										item_id: value.item.id,
+										/**
+										 * Delta notifications omit the phase. Opening the durable item
+										 * here preserves Codex's final/commentary signal before its
+										 * first word, so a final reply never streams inside work history.
+										 */
+										phase: assistant_message_phase(value.item.phase),
+										sequence: 0,
+										turn_id: value.turnId,
+									} satisfies EngineAgentMessageDeltaObservation,
+								]
 							: [
 									{
 										...base,

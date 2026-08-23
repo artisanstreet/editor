@@ -153,3 +153,7 @@ export const SnapshotScrollback = (
 				: Stream.succeed(concat_chunks(current.chunks)),
 		),
 	);
+
+/** Returns the retained bytes without following future output. */
+export const ReadScrollback = (scrollback: TerminalScrollback): Effect.Effect<Uint8Array> =>
+	Ref.get(scrollback.state).pipe(Effect.map((current) => concat_chunks(current.chunks)));

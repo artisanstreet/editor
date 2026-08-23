@@ -79,7 +79,7 @@ const status_border_colors: Readonly<Record<StepStatus, string>> = {
 	skipped: "#475569",
 };
 
-const name_column = 34;
+const name_column = 32;
 
 const pad_to = (text: string, width: number): string =>
 	text.length >= width ? `${text.slice(0, width - 1)} ` : text.padEnd(width, " ");
@@ -188,10 +188,14 @@ export const create_checklist_tui = async (
 	const renderer =
 		options.renderer ??
 		(await createCliRenderer({
+			autoFocus: false,
 			consoleMode: "disabled",
+			enableMouseMovement: false,
 			exitOnCtrlC: false,
 			exitSignals: [],
 			targetFps: 30,
+			useKittyKeyboard: null,
+			useMouse: false,
 		}));
 	const header = new TextRenderable(renderer, {
 		content: new StyledText([brightCyan(bold("Checklist"))]),
@@ -216,10 +220,11 @@ export const create_checklist_tui = async (
 		borderColor: "#3b4252",
 		borderStyle: "rounded",
 		flexDirection: "column",
-		flexGrow: 2,
+		height: "100%",
 		id: "steps",
 		padding: 1,
 		title: " Steps ",
+		width: 43,
 	});
 	const output_text = new TextRenderable(renderer, {
 		content: "Waiting for output…",
@@ -244,10 +249,18 @@ export const create_checklist_tui = async (
 		borderColor: "#3b4252",
 		borderStyle: "rounded",
 		flexDirection: "column",
-		flexGrow: 3,
+		flexGrow: 1,
+		height: "100%",
 		id: "output",
 		padding: 1,
 		title: " Output ",
+	});
+	const body = new BoxRenderable(renderer, {
+		flexDirection: "row",
+		flexGrow: 1,
+		gap: 1,
+		id: "body",
+		width: "100%",
 	});
 	const footer = new TextRenderable(renderer, {
 		content: new StyledText([
@@ -275,9 +288,10 @@ export const create_checklist_tui = async (
 	rows_scroll.add(rows_text);
 	output_scroll.add(output_text);
 	output.add(output_scroll);
+	body.add(steps);
+	body.add(output);
 	app.add(header);
-	app.add(steps);
-	app.add(output);
+	app.add(body);
 	app.add(footer);
 	renderer.root.add(app);
 

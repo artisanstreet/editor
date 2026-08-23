@@ -1,6 +1,13 @@
 import { Schema } from "effect";
 
-export const HarnessId = Schema.Literals(["codex", "claude", "grok", "cursor"]);
+export const HarnessId = Schema.Literals([
+	"codex",
+	"claude",
+	"grok",
+	"cursor",
+	"opencode2",
+	"hermes",
+]);
 export type HarnessId = typeof HarnessId.Type;
 
 /** Provider identifiers are open because account-discovered harnesses add labs independently. */
@@ -227,19 +234,11 @@ export const SpeedOptions = Schema.NonEmptyArray(SpeedOption).check(
 export type SpeedOptions = typeof SpeedOptions.Type;
 
 /** Artisan's ordered permission vocabulary; harnesses may expose a sparse subset. */
-export const PermissionLevel = Schema.Literals([
-	"restricted",
-	"supervised",
-	"trusted",
-	"autonomous",
-	"unrestricted",
-]);
+export const PermissionLevel = Schema.Literals(["restricted", "autonomous", "unrestricted"]);
 export type PermissionLevel = typeof PermissionLevel.Type;
 
 export const permission_level_order = Schema.decodeUnknownSync(Schema.Array(PermissionLevel))([
 	"restricted",
-	"supervised",
-	"trusted",
 	"autonomous",
 	"unrestricted",
 ]);
@@ -298,10 +297,13 @@ export const ReasoningDisplay = Schema.Literals(["summary", "trace"]);
 export type ReasoningDisplay = typeof ReasoningDisplay.Type;
 
 export const ModelCapabilities = Schema.Struct({
+	/** Provider-reported limit metadata; unlike `context_window`, this is not selectable. */
+	context_window_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 	context_window: Schema.optional(ContextWindowCapability),
 	image_input: Schema.Boolean,
 	local_tools: Schema.Boolean,
 	mcp: Schema.Boolean,
+	output_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 	/** Absent reads as `summary`; see {@link ReasoningDisplay}. */
 	reasoning_display: Schema.optional(ReasoningDisplay),
 	speed_options: SpeedOptions,
@@ -349,6 +351,21 @@ export type HarnessDefinition = typeof HarnessDefinition.Type;
 
 export const ModelDefinition = Schema.Struct({
 	capabilities: ModelCapabilities,
+	/** Live catalog pricing in USD per million tokens; absent when unpublished. */
+	cost: Schema.optional(
+		Schema.Struct({
+			input_usd_per_million: Schema.optional(
+				Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+			),
+			output_usd_per_million: Schema.optional(
+				Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+			),
+		}),
+	),
+	/** Confidence of live/provider metadata; curated models omit it. */
+	metadata_confidence: Schema.optional(
+		Schema.Literals(["configured", "inferred", "reported", "unknown"]),
+	),
 	/**
 	 * One-line vendor copy sourced from the harness's own model picker or the
 	 * provider's docs. Absent for dynamically discovered models (for example
@@ -360,12 +377,25 @@ export const ModelDefinition = Schema.Struct({
 	id: Schema.String,
 	name: Schema.String,
 	native_model_id: Schema.NonEmptyString,
+	/** Structured executable identity for location-scoped gateway/provider catalogs. */
+	native_selection: Schema.optional(
+		Schema.Struct({
+			model_id: Schema.NonEmptyString,
+			provider_route_id: Schema.NonEmptyString,
+			variant_id: Schema.optional(Schema.NonEmptyString),
+		}),
+	),
 	provider: ProviderId,
 	routing: Schema.Union([
 		Schema.Struct({ kind: Schema.Literal("default") }),
 		Schema.Struct({ gateway_id: Schema.NonEmptyString, kind: Schema.Literal("gateway") }),
+		Schema.Struct({
+			kind: Schema.Literal("provider-route"),
+			provider_route_id: Schema.NonEmptyString,
+		}),
 	]),
-	status: Schema.Literals(["curated", "prototype"]),
+	status: Schema.Literals(["curated", "dynamic", "prototype"]),
+	upstream_model_id: Schema.optional(Schema.NonEmptyString),
 });
 export type ModelDefinition = typeof ModelDefinition.Type;
 
@@ -414,10 +444,22 @@ export const ModelManifest = Schema.Struct({
 						issue: "unknown harness gateway",
 					});
 				}
-			} else if (harness !== undefined && harness.gateways.length > 0) {
+			} else if (
+				model.routing.kind === "default" &&
+				harness !== undefined &&
+				harness.gateways.length > 0
+			) {
 				issues.push({
 					path: ["models", index, "routing"],
 					issue: "models on gateway-routed harnesses must declare a gateway",
+				});
+			} else if (
+				model.routing.kind === "provider-route" &&
+				model.native_selection?.provider_route_id !== model.routing.provider_route_id
+			) {
+				issues.push({
+					path: ["models", index, "native_selection"],
+					issue: "provider-route models must carry the same structured route identity",
 				});
 			}
 		}

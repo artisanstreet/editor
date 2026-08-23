@@ -3,6 +3,34 @@ import { standard, xai_standard_speed } from "./options";
 
 export const xai_models = [
 	{
+		id: "grok-4-6",
+		name: "Grok 4.6",
+		native_model_id: "grok-4.6",
+		description:
+			"SpaceXAI's frontier model for long-running agents, coding, and knowledge work.",
+		harness: "grok",
+		provider: "xai",
+		routing: { kind: "default" },
+		status: "prototype",
+		capabilities: {
+			thinking: {
+				availability: "supported",
+				default: "high",
+				options: [
+					standard("light", "low"),
+					standard("medium", "medium"),
+					standard("high", "high"),
+					standard("xhigh", "xhigh"),
+				],
+			},
+			speed_options: [xai_standard_speed("Grok 4.6")],
+			image_input: true,
+			local_tools: true,
+			mcp: false,
+			web_search: true,
+		},
+	},
+	{
 		id: "grok-4-5",
 		name: "Grok 4.5",
 		native_model_id: "grok-4.5",

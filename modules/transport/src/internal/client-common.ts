@@ -33,9 +33,31 @@ export type SendCurrent = (
  * envelope waits for the next session to resend it, so nothing on the backend
  * has seen the request it describes and no result will ever correlate to it.
  */
-export type RequestDelivery = { readonly _tag: "Delivered" } | { readonly _tag: "Held" };
+export type RequestDelivery =
+	| {
+			readonly _tag: "Delivered";
+			readonly connection_id: string | undefined;
+			/** Inbound activity observed when this exact session accepted the request. */
+			readonly inbound_generation: number | undefined;
+	  }
+	| { readonly _tag: "Held" };
 
-export const RequestDelivered: RequestDelivery = { _tag: "Delivered" };
+/** Guards a correlation while a send has not yet revealed which session carried it. */
+export const RequestDeliveryInFlight: RequestDelivery = {
+	_tag: "Delivered",
+	connection_id: undefined,
+	inbound_generation: undefined,
+};
+
+/** Records the exact session that accepted a request onto its wire. */
+export const RequestDelivered = (
+	connection_id: string,
+	inbound_generation = 0,
+): RequestDelivery => ({
+	_tag: "Delivered",
+	connection_id,
+	inbound_generation,
+});
 export const RequestHeld: RequestDelivery = { _tag: "Held" };
 
 /** Sends one already-built envelope and reports whether a session carried it. */

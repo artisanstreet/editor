@@ -14,17 +14,19 @@ type InteractionObservation = Extract<
 	EngineObservation,
 	{ _tag: "approval" | "compaction" | "plan" | "question" | "retry" }
 >;
+type RunTerminalState = Extract<EngineObservation, { _tag: "run_terminal" }>['state'];
 
 /**
- * A run that reached a terminal state can never answer its pending
- * interactions, so every approval or question still requested when the run
- * ends resolves to cancelled instead of holding the conversation open forever.
+ * A run that reached a terminal state can neither answer pending interactions
+ * nor finish a still-started native compaction. Settle both classes instead of
+ * holding the conversation open forever.
  */
 export const CancelPendingInteractions = (
 	transaction: DatabaseClient,
 	input: ConversationObservationContext,
 	turn_id: string,
 	reference: string,
+	terminal_state: RunTerminalState,
 ) =>
 	Effect.gen(function* () {
 		const rows = yield* transaction
@@ -44,6 +46,23 @@ export const CancelPendingInteractions = (
 				row.entity_json,
 				"stored conversation item",
 			);
+			if (prior.type === "compaction" && prior.state === "started") {
+				const settled_state = terminal_state === "completed" ? "completed" : "failed";
+				yield* UpsertItem(
+					transaction,
+					input.thread_id,
+					{
+						id: prior.id,
+						type: "compaction",
+						lifecycle: settled_state,
+						source_refs: source_refs(reference, { provider: "engine" }),
+						state: settled_state,
+						updated_at: input.occurred_at,
+					},
+					source,
+				);
+				continue;
+			}
 			if (
 				(prior.type !== "approval" && prior.type !== "question") ||
 				prior.state !== "requested"
@@ -163,8 +182,13 @@ export const ApplyInteractionObservation = (
 					transaction,
 					input.thread_id,
 					{
+						/**
+						 * Scoped by run because provider approval ids are only unique
+						 * within one engine process — Codex numbers them from zero every
+						 * run, and the bare id is a primary key across every thread.
+						 */
 						...item_base(
-							`approval:${observation.approval_id}`,
+							`approval:${input.run_id}:${observation.approval_id}`,
 							turn_id,
 							input,
 							observation.state === "requested" ? "waiting" : "completed",
@@ -202,7 +226,7 @@ export const ApplyInteractionObservation = (
 				input.thread_id,
 				{
 					...item_base(
-						`question:${observation.question_id}`,
+						`question:${input.run_id}:${observation.question_id}`,
 						turn_id,
 						input,
 						observation.state === "requested" ? "waiting" : "completed",

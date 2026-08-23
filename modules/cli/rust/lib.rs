@@ -8,6 +8,7 @@ pub mod manifest;
 pub mod paths;
 pub mod payload;
 pub mod process;
+pub mod telemetry;
 
 pub use commands::{Cli, run};
 pub use error::{CliError, Result};

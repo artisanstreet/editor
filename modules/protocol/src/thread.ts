@@ -102,6 +102,15 @@ export const ThreadListItem = Schema.Struct({
 	engine_id: Schema.optional(Identifier),
 	model_id: Schema.optional(Schema.NonEmptyString),
 	last_activity_at: IsoDateTime,
+	/**
+	 * Newest user or assistant message in the root conversation. Thread lists use
+	 * this cursor for stable inbox-style ordering; lifecycle and background work
+	 * deliberately do not advance it.
+	 *
+	 * Optional only for compatibility with projections written before message
+	 * recency was persisted. Current Forge projections always emit it.
+	 */
+	last_message_at: Schema.optional(IsoDateTime),
 	last_assistant_message: Schema.optional(ThreadAssistantMessagePreview),
 	live_status: Schema.NonEmptyString,
 	metadata_version: StreamSequence,

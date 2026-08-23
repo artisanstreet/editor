@@ -58,6 +58,7 @@ describe("desktop packaging configuration", () => {
 		expect(config).toContain("electronLanguages: en-US");
 		expect(config).toContain("- main.js");
 		expect(config).toContain("- frontend/**");
+		expect(config).toContain("- app-icons/**");
 		expect(config).not.toContain("preload.cjs");
 		expect(config).not.toContain("asarUnpack:");
 		expect(config).not.toContain("extraResources:");
@@ -73,6 +74,7 @@ describe("desktop packaging configuration", () => {
 		expect(vite_config).not.toContain("koffi");
 		/** The staged renderer copy gets the loopback CSP variant; the browser copy stays same-origin. */
 		expect(vite_config).toContain("connect-src 'self' http://127.0.0.1:*");
+		expect(vite_config).toContain('resolve(desktop_root, "app-icons")');
 		expect(main).toContain("requestSingleInstanceLock");
 		expect(main).not.toContain("setAsDefaultProtocolClient");
 		/** The window is a pure renderer host: sandboxed, isolated, and bridge-free. */
@@ -166,6 +168,11 @@ describe("desktop packaging configuration", () => {
 		);
 		expect(main).toContain("app.setAppUserModelId(windows_app_user_model_id)");
 		expect(main).toContain("app.setToastActivatorCLSID(windows_toast_activator_clsid)");
+		expect(main).toContain("editor_window.setAppDetails({");
+		expect(main).toContain("appIconPath: path");
+		expect(main).toContain("appId: WindowsTaskbarAppIdFor(icon)");
+		expect(main).toContain("`${windows_app_user_model_id}.${icon}`");
+		expect(main).toContain("MaterializeWindowsAppIcon");
 		expect(main.indexOf("app.setAppUserModelId(windows_app_user_model_id)")).toBeLessThan(
 			main.indexOf("app.whenReady"),
 		);

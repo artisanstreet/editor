@@ -108,7 +108,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         .join("versions")
         .join(&manifest.product_version);
     if existing_release.is_dir() {
-        let stable_ae = install_stable_cli(&options.install_root, &existing_release)?;
+        let lifecycle_ae = release_cli(&existing_release)?;
         let existing_protocol = read_existing_protocol(&options.install_root)?;
         let bootstrap = existing_release.join("bin").join(if cfg!(windows) {
             "ae-installer.exe"
@@ -118,6 +118,8 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if !bootstrap.is_file() {
             return Err(InstallerError::MissingInstaller(bootstrap));
         }
+        let retirement = retire_for(&options, &existing_release, &lifecycle_ae)?;
+        let stable_ae = install_stable_cli(&options.install_root, &existing_release)?;
         let protocol = if options.integrations.register_protocol {
             prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
         } else {
@@ -137,7 +139,6 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         }
         shortcuts::apply(&launchers)?;
-        let retirement = retire_for(&options, &existing_release, &stable_ae)?;
         restore_retired_forge(&options, &existing_release, retirement)?;
         invoke_ae(&existing_release, &["--version"])?;
         return Ok(());
@@ -188,7 +189,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             std::fs::create_dir_all(parent).map_err(io(parent))?;
         }
         std::fs::rename(&stage, &release).map_err(io(&release))?;
-        let stable_ae = install_stable_cli(&options.install_root, &release)?;
+        let lifecycle_ae = release_cli(&release)?;
         let existing_protocol = read_existing_protocol(&options.install_root)?;
         let bootstrap = release.join("bin").join(if cfg!(windows) {
             "ae-installer.exe"
@@ -198,6 +199,8 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if !bootstrap.is_file() {
             return Err(InstallerError::MissingInstaller(bootstrap));
         }
+        let retirement = retire_for(&options, &release, &lifecycle_ae)?;
+        let stable_ae = install_stable_cli(&options.install_root, &release)?;
         let protocol = if options.integrations.register_protocol {
             prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
         } else {
@@ -217,7 +220,6 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         }
         shortcuts::apply(&launchers)?;
-        let retirement = retire_for(&options, &release, &stable_ae)?;
         if options.run_setup && options.components.contains(&"cli") {
             for arguments in FIRST_RUN_CONFIGURATION_COMMANDS {
                 invoke_ae(&release, arguments)?;
@@ -347,10 +349,9 @@ fn shortcut_records(targets: &[shortcuts::ShortcutTarget]) -> Result<Vec<OwnedIn
         .collect()
 }
 
-/// Frees the newly activated release from whatever is still running the old
-/// one. Deliberately last: a failure here leaves a correctly activated
-/// installation that simply needs its old window closed, rather than an app
-/// closed for an update that then failed.
+/// Closes the old editor and proves Forge can stop before activation changes
+/// any durable pointer or integration. A busy Forge therefore cancels the
+/// update while the prior installation remains authoritative.
 fn retire_for(options: &InstallOptions, release: &Path, stable_ae: &Path) -> Result<Retirement> {
     let Some(policy) = options.retirement else {
         return Ok(Retirement::default());
@@ -483,12 +484,7 @@ fn activate(
 }
 
 fn install_stable_cli(root: &Path, release: &Path) -> Result<PathBuf> {
-    let source = release
-        .join("bin")
-        .join(if cfg!(windows) { "ae.exe" } else { "ae" });
-    if !source.is_file() {
-        return Err(InstallerError::MissingCli(source));
-    }
+    let source = release_cli(release)?;
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).map_err(io(&bin))?;
     let stable = bin.join(if cfg!(windows) { "ae.exe" } else { "ae" });
@@ -515,6 +511,16 @@ fn install_stable_cli(root: &Path, release: &Path) -> Result<PathBuf> {
     std::fs::rename(&temporary, &stable).map_err(io(&stable))?;
     integrate_path(&bin)?;
     Ok(stable)
+}
+
+fn release_cli(release: &Path) -> Result<PathBuf> {
+    let executable = release
+        .join("bin")
+        .join(if cfg!(windows) { "ae.exe" } else { "ae" });
+    if !executable.is_file() {
+        return Err(InstallerError::MissingCli(executable));
+    }
+    Ok(executable)
 }
 
 #[cfg(windows)]

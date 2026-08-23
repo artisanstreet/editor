@@ -465,6 +465,6 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 		owner: "frontend",
 		surface: "desktop_shell",
 		pane: "application",
-		reason: "Electron is a single-instance sandboxed window that renders the bundled frontend from artisan://app and delegates Forge lifecycle and one-time pairing to ae; it has no preload, IPC, or application state.",
+		reason: "Electron is a single-instance sandboxed window that renders the bundled frontend from artisan://app and delegates Forge lifecycle and one-time pairing to ae; it has no preload or IPC, and its one narrow same-origin control persists the selected runtime app icon.",
 	},
 ] as const;

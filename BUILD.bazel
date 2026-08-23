@@ -34,7 +34,10 @@ pnpm_script(
 
 pnpm_script(
     name = "forge_sea",
-    publish = [".dist/forge/Artisan Forge.exe"],
+    publish = [
+        ".dist/forge/Artisan Broker.exe",
+        ".dist/forge/Artisan Forge.exe",
+    ],
     script = "build:forge:sea",
     workspace_packages = [
         "backend",

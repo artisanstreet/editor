@@ -1,18 +1,21 @@
 <script lang="ts" effect>
-	import ChevronDown from "@tabler/icons-svelte/icons/chevron-down";
 	import DeviceLaptop from "@tabler/icons-svelte/icons/device-laptop";
 	import FileDiff from "@tabler/icons-svelte/icons/file-diff";
 	import FolderCode from "@tabler/icons-svelte/icons/folder-code";
 	import GitBranch from "@tabler/icons-svelte/icons/git-branch";
+	import Selector from "@tabler/icons-svelte/icons/selector";
 	import type {
 		GitBranchState,
 		GitRepositoryProjection,
 		HostIdentitySnapshot,
 		HostMachineSnapshot,
 		HostMachinesSnapshot,
+		Project,
 		ProjectRepository,
 	} from "@artisan/protocol";
 	import { Effect, Stream } from "effect";
+	import { FormatPathSeparators } from "$lib/appearance/display-format";
+	import { path_separator } from "$lib/appearance-config";
 	import {
 		DropdownMenu,
 		DropdownMenuContent,
@@ -30,6 +33,7 @@
 		RememberHomeHost,
 	} from "$lib/identity/machine-switch";
 	import { RequestForgeRepair } from "$lib/root/forge-repair-request.svelte";
+	import type { RecentProject } from "$lib/root/project-catalog";
 	import { ProjectRepositoryController } from "$lib/workspace/project-repository-controller";
 	import {
 		GitWorkspaceController,
@@ -37,18 +41,27 @@
 		type GitWorkspaceState,
 	} from "$lib/workspace/git-workspace-controller";
 	import HoverPill, { type PillHover } from "./hover-pill.svelte";
+	import ProjectSelector from "./project-selector.svelte";
 	import ShaderGlassSurface from "./shader-glass-surface.svelte";
 
 	let {
 		hover,
+		onnewproject,
+		onselectproject,
+		project,
 		project_id,
 		project_root_path,
+		projects,
 		thread_id,
 		workspace_id,
 	}: {
 		readonly hover: PillHover;
+		readonly onnewproject: Effect.Effect<void>;
+		readonly onselectproject: (project: Project) => Effect.Effect<void>;
+		readonly project: Project | undefined;
 		readonly project_id: string | undefined;
 		readonly project_root_path: string | undefined;
+		readonly projects: ReadonlyArray<RecentProject>;
 		readonly thread_id: string | undefined;
 		readonly workspace_id: string | undefined;
 	} = $props();
@@ -281,6 +294,14 @@
 		<div class="min-w-0 p-1">
 			<div class="relative flex flex-col text-sm">
 				<HoverPill {hover} />
+				<ProjectSelector
+					{hover}
+					onnewproject={onnewproject}
+					onselect={onselectproject}
+					{project}
+					{projects}
+				/>
+				<div class="flex min-w-0 flex-col">
 				{#if machine_choices.length > 1 || home_row !== undefined}
 					<DropdownMenu>
 						<DropdownMenuTrigger
@@ -292,7 +313,10 @@
 							<DeviceLaptop class="size-4 shrink-0 text-muted-foreground" />
 							<span class="min-w-0 flex-1 text-left text-foreground">Machine</span>
 							<span class="max-w-36 truncate text-foreground">{machine_label}</span>
-							<ChevronDown class="size-4 shrink-0 text-muted-foreground" />
+							<Selector
+								class="pointer-events-none size-3.5 shrink-0 text-muted-foreground"
+								aria-hidden="true"
+							/>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end" class="min-w-64 bg-transparent! p-0! shadow-none! ring-0!">
 							<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
@@ -372,7 +396,10 @@
 							<GitBranch class="size-4 shrink-0 text-muted-foreground" />
 							<span class="min-w-0 flex-1 text-left text-foreground">Branch</span>
 							<span class="max-w-36 truncate text-foreground">{BranchLabel(current_branch)}</span>
-							<ChevronDown class="size-4 shrink-0 text-muted-foreground" />
+							<Selector
+								class="pointer-events-none size-3.5 shrink-0 text-muted-foreground"
+								aria-hidden="true"
+							/>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end" class="min-w-56 bg-transparent! p-0! shadow-none! ring-0!">
 							<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
@@ -397,7 +424,10 @@
 							<FolderCode class="size-4 shrink-0 text-muted-foreground" />
 							<span class="min-w-0 flex-1 text-left text-foreground">Worktree</span>
 							<span class="max-w-36 truncate text-foreground">{WorktreeLabel(current_worktree_path)}</span>
-							<ChevronDown class="size-4 shrink-0 text-muted-foreground" />
+							<Selector
+								class="pointer-events-none size-3.5 shrink-0 text-muted-foreground"
+								aria-hidden="true"
+							/>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end" class="min-w-72 bg-transparent! p-0! shadow-none! ring-0!">
 							<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
@@ -405,7 +435,9 @@
 									{#each worktree_paths as worktree_path (worktree_path)}
 										<div class="flex min-w-0 flex-col rounded-lg px-2 py-2">
 											<span class="truncate text-foreground">{WorktreeLabel(worktree_path)}</span>
-											<span class="truncate text-xs text-muted-foreground">{worktree_path}</span>
+											<span class="truncate text-xs text-muted-foreground"
+												>{FormatPathSeparators(worktree_path, $path_separator)}</span
+											>
 										</div>
 									{/each}
 								</div>
@@ -427,6 +459,7 @@
 						<MarkIcon class={RepositoryChipMarkClass(mark, "size-4")} />
 					</div>
 				{/if}
+				</div>
 			</div>
 		</div>
 	</ShaderGlassSurface>

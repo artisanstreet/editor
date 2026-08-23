@@ -479,23 +479,32 @@ export const UsageInterruptionServiceLive = Layer.effect(
 							: {
 									policy_context_window: default_context || null,
 									policy_model: input.target_model_id,
+									policy_model_id: null,
+									policy_profile_id: null,
+									policy_provider_route_id: null,
 									policy_reasoning_effort: default_reasoning ?? "medium",
 									policy_service_tier: default_speed ?? "standard",
+									policy_variant_id: null,
+									policy_catalog_revision: null,
 								}),
 						updated_at: now,
 					})
 					.where(eq(OrchestrationCoordinators.thread_id, row.thread_id));
 				yield* transaction.insert(OrchestrationRuns).values({
 					agent_id: row.source_agent_id,
+					catalog_revision: switches_model ? null : source.catalog_revision,
 					created_at: now,
 					engine_id: input.target_engine_id,
 					model_id: input.target_model_id ?? row.source_model_id,
 					native_resume_json: null,
 					native_thread_id: null,
+					profile_id: switches_model ? null : source.profile_id,
+					provider_route_id: switches_model ? null : source.provider_route_id,
 					run_id,
 					status: "queued",
 					thread_id: row.thread_id,
 					updated_at: now,
+					variant_id: switches_model ? null : source.variant_id,
 					working_directory: source.working_directory,
 				});
 				yield* ReconcileRootThreadLiveStatus(transaction, row.thread_id, now);

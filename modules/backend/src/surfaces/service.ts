@@ -58,12 +58,14 @@ const aggregate_usage_fields = (
 	const input_tokens = sum(usage.map((row) => row.input_tokens));
 	const output_tokens = sum(usage.map((row) => row.output_tokens));
 	const cached_input_tokens = sum(usage.map((row) => row.cached_input_tokens));
+	const cost_usd = sum(usage.map((row) => row.cost_usd));
 	return {
 		scope,
 		scope_id,
 		...(input_tokens === undefined ? {} : { input_tokens }),
 		...(output_tokens === undefined ? {} : { output_tokens }),
 		...(cached_input_tokens === undefined ? {} : { cached_input_tokens }),
+		...(cost_usd === undefined ? {} : { cost_usd }),
 		...(latest?.context_tokens === undefined ? {} : { context_tokens: latest.context_tokens }),
 		...(latest?.context_window_tokens === undefined
 			? {}
@@ -168,6 +170,7 @@ export const SurfaceServiceLive = Layer.effect(
 				...(row.cached_input_tokens === null
 					? {}
 					: { cached_input_tokens: row.cached_input_tokens }),
+				...(row.cost_usd === null ? {} : { cost_usd: row.cost_usd }),
 				...(row.context_tokens === null ? {} : { context_tokens: row.context_tokens }),
 				...(row.context_window_tokens === null
 					? {}
@@ -302,6 +305,7 @@ export const SurfaceServiceLive = Layer.effect(
 								...(row.context_tokens === null
 									? {}
 									: { context_tokens: row.context_tokens }),
+								...(row.cost_usd === null ? {} : { cost_usd: row.cost_usd }),
 								...(row.input_tokens === null
 									? {}
 									: { input_tokens: row.input_tokens }),

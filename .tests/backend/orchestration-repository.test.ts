@@ -1337,6 +1337,58 @@ describe("orchestration repository hardening", () => {
 		}
 	});
 
+	it("persists OpenCode profile, route, model, variant, and catalog identity across restart", async () => {
+		const database_path = await make_database_path();
+		const policy = {
+			catalog_revision: "opencode-live-1",
+			engine_id: "opencode2" as const,
+			model: "claude-sonnet-4-5",
+			model_id: "claude-sonnet-4-5",
+			permission: "supervised",
+			permission_mode: "on_request" as const,
+			profile_id: "work",
+			provider_route_id: "opencode-go",
+			reasoning_effort: "medium" as const,
+			sandbox_mode: "workspace_write" as const,
+			service_tier: "standard" as const,
+			strict_clarification: false,
+			variant_id: "high",
+			web_search_enabled: true,
+		};
+		const first_runtime = make_backend_runtime({ database_path, migrations_path });
+		try {
+			await first_runtime.runPromise(SetupFreshThread("thread_opencode2"));
+			await first_runtime.runPromise(
+				Accept(
+					make_command("policy_opencode2", "thread_opencode2", {
+						policy,
+						type: "thread.session_policy.update",
+					}),
+				),
+			);
+			const session = await first_runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* OrchestrationRepository).GetSession("thread_opencode2");
+				}),
+			);
+			expect(session.policy).toEqual(policy);
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const restarted_runtime = make_backend_runtime({ database_path, migrations_path });
+		try {
+			const session = await restarted_runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* OrchestrationRepository).GetSession("thread_opencode2");
+				}),
+			);
+			expect(session.policy).toEqual(policy);
+		} finally {
+			await restarted_runtime.dispose();
+		}
+	});
+
 	it("rejects corrupt persisted session policy rows instead of casting them into launches", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),

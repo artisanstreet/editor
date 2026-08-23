@@ -36,9 +36,9 @@ export const EngineUsageAuthentication = Schema.Literals([
 export type EngineUsageAuthentication = typeof EngineUsageAuthentication.Type;
 
 /**
- * Projects one engine's provider-account usage. `windows` is empty when the
- * account is not authenticated or the provider exposes no quota surface;
- * `failure` explains an authenticated account whose usage fetch failed.
+ * Projects one engine's provider-account usage. An empty `windows` list does
+ * not imply that the provider lacks a quota API; `quota_surface` carries that
+ * distinction explicitly.
  */
 export const EngineUsageReport = Schema.Struct({
 	/** The provider account's email when the engine's transport discloses one. */
@@ -47,6 +47,7 @@ export const EngineUsageReport = Schema.Struct({
 	display_name: Schema.String.check(Schema.isMinLength(1)),
 	engine_id: Schema.String.check(Schema.isMinLength(1)),
 	failure: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
+	quota_surface: Schema.optional(Schema.Literals(["supported", "unknown", "unsupported"])),
 	windows: Schema.Array(EngineUsageWindow).check(Schema.isMaxLength(64)),
 });
 

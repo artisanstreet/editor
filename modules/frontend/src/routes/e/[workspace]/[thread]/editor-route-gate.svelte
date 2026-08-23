@@ -23,13 +23,15 @@
 		readonly thread_id: string;
 		readonly workspace_id: string;
 	} = $props();
-	const route_id = untrack(() => route_thread_id);
-	const workspace_id = untrack(() => route_workspace_id);
+	/** Two-step sources prevent the compiler from folding these snapshots back into prop-deriveds. */
+	let route_id = $state.raw("");
+	let workspace_id = $state.raw("");
+	route_id = untrack(() => route_thread_id);
+	workspace_id = untrack(() => route_workspace_id);
 
 	const navigation = yield* RouteNavigation;
 	const workspace_catalog = yield* WorkspaceCatalogController;
 	let catalog_state = $state.raw<WorkspaceCatalogState>(yield* workspace_catalog.Current);
-	const threads = $derived(catalog_state.threads);
 	let active_thread = $state.raw<ThreadListItem | undefined>();
 
 	/**
@@ -38,7 +40,8 @@
 	 * or the conversation surface of this one — owns the URL (or a navigation
 	 * is heading there) would steal focus back and cancel that navigation.
 	 */
-	const owning_route = untrack(() => page.route.id);
+	let owning_route = $state.raw<string | null>(null);
+	owning_route = untrack(() => page.route.id);
 	const route_owns_thread = () =>
 		navigating.to === null
 			? ThreadRouteOwnsTarget(
@@ -61,7 +64,7 @@
 	const ReconcileRoute = Effect.gen(function* () {
 		if (!route_owns_thread()) return;
 		if (!catalog_state.threads_loaded) return;
-		const thread = Option.getOrUndefined(ResolveThreadRoute(threads, route_id));
+		const thread = Option.getOrUndefined(ResolveThreadRoute(catalog_state.threads, route_id));
 		if (thread === undefined) {
 			active_thread = undefined;
 			yield* navigation.Navigate("/", {
@@ -108,8 +111,8 @@
 
 {#if active_thread?.primary_project !== undefined}
 	<EditorRoute
-		thread_id={active_thread.thread_id}
-		workspace_id={active_thread.primary_project.project_id}
+		thread_id={active_thread?.thread_id}
+		workspace_id={active_thread?.primary_project?.project_id}
 	/>
 {:else if !catalog_state.threads_loaded}
 	<div class="flex h-full min-h-0 items-center justify-center" role="status">

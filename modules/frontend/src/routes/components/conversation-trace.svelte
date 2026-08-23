@@ -34,11 +34,14 @@
 	let {
 		failed = false,
 		items,
+		message_streaming = false,
 		work_active = false,
 	}: {
 		/** Failed work must explain itself: diagnostics render open and unmuted. */
 		failed?: boolean;
 		items: ReadonlyArray<ConversationItem>;
+		/** The owning run and turn are live; item lifecycle may now animate prose. */
+		message_streaming?: boolean;
 		/**
 		 * Owning work's liveness, which alone may let a group keep shimmering: a
 		 * provider can leave a settled run's last activity looking open forever.
@@ -297,7 +300,7 @@
 	<div class="flex flex-col gap-5">
 		{#each segments as segment (segment.id)}
 			{#if segment.type === "item"}
-				<ConversationItemView item={segment.item} />
+				<ConversationItemView {message_streaming} item={segment.item} />
 			{:else if segment.type === "activity_group"}
 				{@const open = open_groups[segment.id] ?? false}
 				{@const clauses = GroupClauses(segment.id, segment.items)}

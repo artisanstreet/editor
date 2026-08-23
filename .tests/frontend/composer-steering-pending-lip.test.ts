@@ -67,7 +67,7 @@ describe("composer steering acknowledgement lip", () => {
 		expect(queued_lip_begin).toContain("steering.Begin(");
 		expect(queued_lip_begin).not.toContain("onsteeringchange");
 		expect(queued_lip_begin).not.toContain("TakeUp");
-		expect(stages.indexOf("harness.SteeringChanged(true)")).toBeGreaterThan(
+		expect(stages.indexOf("harness.SteeringChanged(true,")).toBeGreaterThan(
 			stages.indexOf("TakeUp: (generation: number) =>"),
 		);
 		expect(stages.indexOf("harness.SteeringChanged(false)")).toBeGreaterThan(
@@ -111,13 +111,15 @@ describe("composer steering acknowledgement lip", () => {
 	/** A late settlement of steer A must not lower the label steer B raised. */
 	it("hands the label between overlapping steers by generation", async () => {
 		let lip: SteeringPendingLipState<string> = { next_generation: 0, pending: [] };
-		const changes: Array<boolean> = [];
+		const changes: Array<{ readonly pending: boolean; readonly source_reference?: string }> =
+			[];
 		const stages = MakeSteeringStages<string>({
 			Lip: () => lip,
 			ReplaceLip: (next) => {
 				lip = next;
 			},
-			SteeringChanged: (pending) => changes.push(pending),
+			SteeringChanged: (pending, source_reference) =>
+				changes.push({ pending, source_reference }),
 			Withdraw: () => Effect.void,
 		});
 
@@ -127,21 +129,33 @@ describe("composer steering acknowledgement lip", () => {
 		expect(changes).toEqual([]);
 
 		/** The echo releases only this steer's row and raises the label in one act. */
+		expect(stages.Bind(steer_a, "command-a")).toBe(false);
 		await Effect.runPromise(stages.TakeUp(steer_a));
 		expect(lip.pending).toEqual([]);
-		expect(changes).toEqual([true]);
+		expect(changes).toEqual([{ pending: true, source_reference: "command-a" }]);
 
 		const steer_b = stages.Begin("steer B", 0);
+		expect(stages.Bind(steer_b, "command-b")).toBe(false);
 		await Effect.runPromise(stages.TakeUp(steer_b));
 		expect(lip.pending).toEqual([]);
-		expect(changes).toEqual([true, true]);
+		expect(changes).toEqual([
+			{ pending: true, source_reference: "command-a" },
+			{ pending: true, source_reference: "command-b" },
+		]);
 
 		/** Steer A settles late; steer B's label survives it. */
 		await Effect.runPromise(stages.Settle(steer_a));
-		expect(changes).toEqual([true, true]);
+		expect(changes).toEqual([
+			{ pending: true, source_reference: "command-a" },
+			{ pending: true, source_reference: "command-b" },
+		]);
 
 		await Effect.runPromise(stages.Settle(steer_b));
-		expect(changes).toEqual([true, true, false]);
+		expect(changes).toEqual([
+			{ pending: true, source_reference: "command-a" },
+			{ pending: true, source_reference: "command-b" },
+			{ pending: false, source_reference: undefined },
+		]);
 	});
 
 	/** A recall acts on intent immediately and completes durably once the send has a name. */

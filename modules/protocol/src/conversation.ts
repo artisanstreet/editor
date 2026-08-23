@@ -430,6 +430,31 @@ export const ConversationItem = Schema.Union([
 export type ConversationItem = typeof ConversationItem.Type;
 
 /** A versioned renderer snapshot. Patch sequence zero means no patches have been applied. */
+/** One user-message anchor from the full durable thread, navigable before hydration. */
+export const ConversationWindowMarker = Schema.Struct({
+	id: Identifier,
+	/** The message's leading words, bounded for transport; the renderer formats them. */
+	label: Schema.String.check(
+		Schema.makeFilter<string>((value) =>
+			value.length <= 200 ? undefined : "Expected at most 200 characters",
+		),
+	),
+	ordinal: NonNegativeInt,
+	turn_ordinal: NonNegativeInt,
+});
+export type ConversationWindowMarker = typeof ConversationWindowMarker.Type;
+
+/**
+ * Present when the snapshot carries only the newest turns of a longer thread.
+ * Older history is fetched on demand with a `ConversationQuery` range; the
+ * markers keep whole-thread navigation available before that hydration.
+ */
+export const ConversationSnapshotWindow = Schema.Struct({
+	markers: Schema.Array(ConversationWindowMarker),
+	total_turn_count: NonNegativeInt,
+});
+export type ConversationSnapshotWindow = typeof ConversationSnapshotWindow.Type;
+
 export const ConversationSnapshot = Schema.Struct({
 	conversation_id: Identifier,
 	items: Schema.Array(ConversationItem),
@@ -439,6 +464,7 @@ export const ConversationSnapshot = Schema.Struct({
 	thread_id: Identifier,
 	turns: Schema.Array(ConversationTurn),
 	updated_at: IsoDateTime,
+	window: Schema.optional(ConversationSnapshotWindow),
 });
 export type ConversationSnapshot = typeof ConversationSnapshot.Type;
 
@@ -449,9 +475,37 @@ export const ConversationSubscriptionCursor = Schema.Struct({
 });
 export type ConversationSubscriptionCursor = typeof ConversationSubscriptionCursor.Type;
 
+/** Caps how many turns one windowed or ranged conversation read may return. */
+export const conversation_query_maximum_turn_count = 512;
+
+/** The tail-window size readers use when they do not need the whole thread. */
+export const conversation_default_window_turn_count = 128;
+
+const ConversationQueryTurnCount = Schema.Int.check(
+	Schema.isGreaterThan(0),
+	Schema.isLessThanOrEqualTo(conversation_query_maximum_turn_count),
+);
+
+/** Bounds a snapshot to the thread's newest turns plus whole-thread markers. */
+export const ConversationQueryWindow = Schema.Struct({
+	maximum_turn_count: ConversationQueryTurnCount,
+});
+export type ConversationQueryWindow = typeof ConversationQueryWindow.Type;
+
+/** Hydrates older history: the newest turns created before an already-loaded floor. */
+export const ConversationQueryRange = Schema.Struct({
+	before_turn_ordinal: NonNegativeInt,
+	maximum_turn_count: ConversationQueryTurnCount,
+	/** Do not descend past this turn; a caller loops toward a distant target. */
+	minimum_turn_ordinal: Schema.optional(NonNegativeInt),
+});
+export type ConversationQueryRange = typeof ConversationQueryRange.Type;
+
 /** Requests the current canonical conversation projection for one thread. */
 export const ConversationQuery = Schema.Struct({
+	range: Schema.optional(ConversationQueryRange),
 	thread_id: Identifier,
+	window: Schema.optional(ConversationQueryWindow),
 });
 export type ConversationQuery = typeof ConversationQuery.Type;
 
@@ -624,11 +678,18 @@ const legal_lifecycle_transitions: Readonly<
 const lifecycle_transition_is_legal = (from: ConversationLifecycle, to: ConversationLifecycle) =>
 	from === to || legal_lifecycle_transitions[from].has(to);
 
+/**
+ * A windowed snapshot legitimately dangles parents and references that point
+ * below its loaded floor, so graph validation applies only to complete
+ * snapshots — the durable projection validated every entity at write time.
+ */
 const validate_references = (
 	entity: ConversationEntityBase,
 	item_ids: ReadonlySet<string>,
 	turn_ids: ReadonlySet<string>,
+	windowed: boolean,
 ): ConversationPatchResult | undefined => {
+	if (windowed) return;
 	if (
 		entity.parent_id !== undefined &&
 		!item_ids.has(entity.parent_id) &&
@@ -676,14 +737,15 @@ export const InitializeConversation = (snapshot: ConversationSnapshot): Conversa
 	if (ordinals.size !== snapshot.turns.length + snapshot.items.length) {
 		return invariant_error("duplicate_ordinal", "Conversation contains duplicate ordinals");
 	}
+	const windowed = snapshot.window !== undefined;
 	for (const item of snapshot.items) {
 		if (!turn_ids.has(item.turn_id))
 			return invariant_error("invalid_turn", `Unknown turn ${item.turn_id}`);
-		const validation = validate_references(item, item_ids, turn_ids);
+		const validation = validate_references(item, item_ids, turn_ids, windowed);
 		if (validation !== undefined) return validation;
 	}
 	for (const turn of snapshot.turns) {
-		const validation = validate_references(turn, item_ids, turn_ids);
+		const validation = validate_references(turn, item_ids, turn_ids, windowed);
 		if (validation !== undefined) return validation;
 	}
 	const reducer = make_reducer(snapshot);
@@ -718,6 +780,7 @@ export const ApplyConversationPatch = (
 		);
 	}
 	const { items, turns } = reducer;
+	const windowed = state.snapshot.window !== undefined;
 
 	if (patch.type === "turn_upsert") {
 		const existing_index = reducer.turn_index.get(patch.turn.id);
@@ -727,7 +790,12 @@ export const ApplyConversationPatch = (
 					"duplicate_ordinal",
 					`Duplicate ordinal ${patch.turn.ordinal}`,
 				);
-			const validation = validate_references(patch.turn, reducer.item_ids, reducer.turn_ids);
+			const validation = validate_references(
+				patch.turn,
+				reducer.item_ids,
+				reducer.turn_ids,
+				windowed,
+			);
 			if (validation !== undefined) return validation;
 			turns.push(patch.turn);
 			reducer.turn_ids.add(patch.turn.id);
@@ -750,7 +818,12 @@ export const ApplyConversationPatch = (
 					"invalid_lifecycle_transition",
 					"Illegal turn lifecycle transition",
 				);
-			const validation = validate_references(patch.turn, reducer.item_ids, reducer.turn_ids);
+			const validation = validate_references(
+				patch.turn,
+				reducer.item_ids,
+				reducer.turn_ids,
+				windowed,
+			);
 			if (validation !== undefined) return validation;
 			turns[existing_index] = patch.turn;
 		}
@@ -764,7 +837,12 @@ export const ApplyConversationPatch = (
 				);
 			if (!reducer.turn_ids.has(patch.item.turn_id))
 				return invariant_error("invalid_turn", `Unknown turn ${patch.item.turn_id}`);
-			const validation = validate_references(patch.item, reducer.item_ids, reducer.turn_ids);
+			const validation = validate_references(
+				patch.item,
+				reducer.item_ids,
+				reducer.turn_ids,
+				windowed,
+			);
 			if (validation !== undefined) return validation;
 			items.push(patch.item);
 			reducer.item_ids.add(patch.item.id);
@@ -789,7 +867,12 @@ export const ApplyConversationPatch = (
 					"invalid_lifecycle_transition",
 					"Illegal item lifecycle transition",
 				);
-			const validation = validate_references(patch.item, reducer.item_ids, reducer.turn_ids);
+			const validation = validate_references(
+				patch.item,
+				reducer.item_ids,
+				reducer.turn_ids,
+				windowed,
+			);
 			if (validation !== undefined) return validation;
 			items[existing_index] = patch.item;
 		}

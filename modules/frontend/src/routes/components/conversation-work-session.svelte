@@ -37,11 +37,11 @@
 		duration_kind,
 		onretry,
 		reasoning_summary,
-		steering_pending = false,
 		superseded = false,
 		transition,
 		waiting_for_activity = false,
 		progress_phase = "none",
+		reply_confirmed = false,
 	}: {
 		/**
 		 * True when the thread's own context reading says the engine must compact
@@ -86,7 +86,6 @@
 		 * models that stream raw thought instead.
 		 */
 		reasoning_summary?: string;
-		steering_pending?: boolean;
 		/**
 		 * True once later blocks of the same turn render below this session, which
 		 * is what steering does to the work that follows it. The turn's one status
@@ -101,6 +100,11 @@
 		waiting_for_activity?: boolean;
 		/** The newest visible reply-or-work phase in this session's durable order. */
 		progress_phase?: ConversationProgressPhase;
+		/**
+		 * True once the newest prose finished without turning out to be tool
+		 * narration. Only a confirmed reply may fold the trace into its summary.
+		 */
+		reply_confirmed?: boolean;
 	} = $props();
 	/**
 	 * Settled work history arrives collapsed even when it has details or failed.
@@ -259,12 +263,12 @@
 	const renders_status_line = $derived(
 		is_working &&
 			!superseded &&
-			(steering_pending || (!has_live_reply && !has_live_status_detail && !waiting_for_activity)),
+			!has_live_reply &&
+			!has_live_status_detail &&
+			!waiting_for_activity,
 	);
 	const status_label = $derived(
-		steering_pending
-			? "Steering"
-			: is_working
+		is_working
 			? active_work_label_for({
 					awaiting_compaction,
 					background_agent_names,
@@ -314,10 +318,14 @@
 
 	let previous_progress_phase = untrack(() => progress_phase);
 	let previous_working = untrack(() => item.ended_at === undefined);
+	let previous_reply_confirmed = untrack(() => reply_confirmed || item.ended_at !== undefined);
 	/**
 	 * The reply retires the history it came from. Every unfinished session still
 	 * starts open, including one mounted after prose has already begun; only a
-	 * later reply phase or successful settlement may fold it. If activity or
+	 * confirmed reply phase or successful settlement may fold it. Streaming
+	 * prose is not confirmation — the provider has not yet said whether tool
+	 * calls follow in the same message, and folding on it flashed the settled
+	 * state in the middle of every working Claude turn. If activity or
 	 * reasoning moves past prose, the chain is the progress again and opens. The
 	 * durable cross-item order also catches completed prose batched with settlement
 	 * and engines that leave an earlier text item streaming. Work wins whenever it
@@ -329,18 +337,28 @@
 		phase: ConversationProgressPhase,
 		working: boolean,
 		status: typeof item.status,
+		confirmed_reply: boolean,
 	) =>
 		Effect.gen(function* () {
 			const phase_changed = phase !== previous_progress_phase;
 			const settled = previous_working && !working;
+			/** Settlement confirms by itself: nothing further can follow it. */
+			const confirmed = confirmed_reply || !working;
+			const confirmed_changed = confirmed !== previous_reply_confirmed;
 			previous_progress_phase = phase;
 			previous_working = working;
+			previous_reply_confirmed = confirmed;
 			if (user_chose_disclosure) return;
 			if (status === "failed" || status === "cancelled" || status === "interrupted") return;
 			if (phase === "work" && working) open = true;
-			else if (phase === "reply" && (phase_changed || settled)) open = false;
+			else if (
+				phase === "reply" &&
+				confirmed &&
+				(phase_changed || settled || confirmed_changed)
+			)
+				open = false;
 		});
-	yield* ReconcileReplyDisclosure(progress_phase, is_working, item.status);
+	yield* ReconcileReplyDisclosure(progress_phase, is_working, item.status, reply_confirmed);
 
 	/**
 	 * A quiet-status line earns a new word only after it was actually removed

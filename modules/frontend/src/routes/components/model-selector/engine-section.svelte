@@ -9,16 +9,12 @@
 		active_engine,
 		disabled,
 		disabled_reason,
-		engine_locked,
 		engines,
-		selected_engine,
 	}: {
 		active_engine: EngineChoice["id"];
 		disabled: boolean;
 		disabled_reason?: string;
-		engine_locked: boolean;
 		engines: ReadonlyArray<EngineChoice>;
-		selected_engine: EngineChoice;
 	} = $props();
 
 	let surface = $state<HTMLElement | null>(null);
@@ -90,17 +86,13 @@
 	></div>
 	{#each engines as engine (engine.id)}
 		{@const EngineIcon = engine.icon}
-		{@const engine_disabled_reason =
-			engine_locked && engine.id !== selected_engine.id
-				? `${engine.name} — finish the active run before switching engines`
-				: disabled_reason}
 		<Tooltip>
 			<TooltipTrigger>
 				{#snippet child({ props: tooltip_props })}
 					<span {...tooltip_props} class="flex flex-none has-[:disabled]:cursor-not-allowed">
 						<TabsTrigger
 							value={engine.id}
-							disabled={disabled || (engine_locked && engine.id !== selected_engine.id)}
+							disabled={disabled}
 							data-engine={engine.id}
 							aria-label={engine.name}
 							class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
@@ -110,10 +102,9 @@
 					</span>
 				{/snippet}
 			</TooltipTrigger>
-			{#if engine_disabled_reason !== undefined}
-				<TooltipContent>{engine_disabled_reason}</TooltipContent>
+			{#if disabled_reason !== undefined}
+				<TooltipContent>{disabled_reason}</TooltipContent>
 			{/if}
 		</Tooltip>
 	{/each}
 </TabsList>
-

@@ -6,7 +6,7 @@ describe("short project path", () => {
 	it("collapses a Windows home directory and drops the repeated project name", () => {
 		expect(
 			ShortProjectPath("C:\\Users\\sander\\Desktop\\artisan-editor", "artisan-editor"),
-		).toBe("~/Desktop");
+		).toBe("~\\Desktop");
 	});
 
 	it("collapses a POSIX home directory", () => {
@@ -25,29 +25,29 @@ describe("short project path", () => {
 
 	it("keeps a trailing segment that is not the project name", () => {
 		expect(ShortProjectPath("C:\\Users\\sander\\Desktop\\artisan-editor", "Artisan")).toBe(
-			"~/Desktop/artisan-editor",
+			"~\\Desktop\\artisan-editor",
 		);
 	});
 
-	it("normalizes separators without a home directory to collapse", () => {
-		expect(ShortProjectPath("D:\\work\\repos\\artisan", "artisan")).toBe("D:/work/repos");
+	it("retains native separators without a home directory to collapse", () => {
+		expect(ShortProjectPath("D:\\work\\repos\\artisan", "artisan")).toBe("D:\\work\\repos");
 	});
 
-	it("keeps an ordinary UNC server and share while normalizing its separators", () => {
+	it("keeps an ordinary UNC server and share", () => {
 		expect(ShortProjectPath("\\\\server\\share\\team\\artisan", "artisan")).toBe(
-			"//server/share/team",
+			"\\\\server\\share\\team",
 		);
 	});
 
 	it("keeps a WSL distribution while collapsing its Linux home directory", () => {
 		expect(
 			ShortProjectPath("\\\\wsl.localhost\\Ubuntu\\home\\sander\\code\\artisan", "artisan"),
-		).toBe("~/code · Ubuntu (WSL)");
+		).toBe("~\\code · Ubuntu (WSL)");
 	});
 
 	it("recognises WSL's legacy UNC hostname too", () => {
 		expect(ShortProjectPath("\\\\wsl$\\Ubuntu\\home\\sander\\code\\artisan", "artisan")).toBe(
-			"~/code · Ubuntu (WSL)",
+			"~\\code · Ubuntu (WSL)",
 		);
 	});
 
@@ -61,5 +61,39 @@ describe("short project path", () => {
 
 	it("does not mistake a home-named directory elsewhere for the home root", () => {
 		expect(ShortProjectPath("/srv/home/sander/artisan", "artisan")).toBe("/srv/home/sander");
+	});
+
+	it("keeps the broad and nearest context for a deep home path", () => {
+		expect(
+			ShortProjectPath(
+				"C:\\Users\\sander\\Development\\clients\\northwind\\repositories\\artisan",
+				"artisan",
+			),
+		).toBe("~\\Development\\…\\repositories");
+	});
+
+	it("keeps project folder context when its name differs from the display name", () => {
+		expect(ShortProjectPath("C:\\Users\\sander\\Desktop\\artisan-editor", "Artisan")).toBe(
+			"~\\Desktop\\artisan-editor",
+		);
+	});
+
+	it("matches a repeated Windows project name without case sensitivity", () => {
+		expect(ShortProjectPath("C:\\Users\\Sander\\Desktop\\Artisan", "artisan")).toBe(
+			"~\\Desktop",
+		);
+	});
+
+	it("honours an explicit display separator independently of the source path", () => {
+		expect(
+			ShortProjectPath(
+				"C:\\Users\\sander\\Desktop\\artisan-editor",
+				"artisan-editor",
+				"forward-slash",
+			),
+		).toBe("~/Desktop");
+		expect(ShortProjectPath("/home/sander/code/artisan", "artisan", "backslash")).toBe(
+			"~\\code",
+		);
 	});
 });

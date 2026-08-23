@@ -11,8 +11,8 @@
 	 * same object.
 	 */
 	import Check from "@tabler/icons-svelte/icons/check";
-	import ChevronDown from "@tabler/icons-svelte/icons/chevron-down";
 	import FolderPlus from "@tabler/icons-svelte/icons/folder-plus";
+	import Selector from "@tabler/icons-svelte/icons/selector";
 	import { Effect, Stream } from "effect";
 	import type { Snippet } from "svelte";
 	import {
@@ -20,16 +20,28 @@
 		type Project,
 		type ProjectIdentitySource,
 	} from "@artisan/protocol";
-	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
+	import {
+		DropdownMenu,
+		DropdownMenuContent,
+		DropdownMenuItem,
+		DropdownMenuTrigger,
+	} from "$lib/components/ui/dropdown-menu";
+	import { MakeFollowHighlight } from "$lib/components/dropdown-highlight";
 	import { ProjectIdentityController } from "$lib/root/project-identity-controller";
 	import { type RecentProject } from "$lib/root/project-catalog";
 	import { ShortProjectPath } from "$lib/root/project-path";
+	import { path_separator } from "$lib/appearance-config";
+	import { FormatPathSeparators } from "$lib/appearance/display-format";
 	import DropdownHoverSurface from "./dropdown-hover-surface.svelte";
+	import type { PillHover } from "./hover-pill.svelte";
 	import ProjectIdentityMark from "./project-identity-mark.svelte";
 	import ShaderGlassSurface from "./shader-glass-surface.svelte";
 
+	const FollowHighlight = yield* MakeFollowHighlight;
+
 	let {
 		disabled = false,
+		hover,
 		onnewproject,
 		onselect,
 		project,
@@ -38,6 +50,7 @@
 		trigger_label,
 	}: {
 		disabled?: boolean;
+		hover: PillHover;
 		/** Attaching a folder, which the surface owns because it owns the dialog. */
 		onnewproject: Effect.Effect<void>;
 		onselect: (project: Project) => Effect.Effect<void>;
@@ -56,6 +69,7 @@
 	} = $props();
 
 	let open = $state(false);
+	let selected_project_item: HTMLElement | undefined;
 	const identity_controller = yield* ProjectIdentityController;
 	let identities = $state.raw<ReadonlyMap<string, ProjectIdentitySource>>(
 		yield* identity_controller.Current,
@@ -97,42 +111,67 @@
 		open = false;
 		yield* onnewproject;
 	});
+
+	/**
+	 * Dropdown menus otherwise focus their first item when they open. Capture the
+	 * row representing the current project so Bits' initial highlighted item and
+	 * the shared hover pill both begin on the actual selection instead.
+	 */
+	const CaptureSelectedProject = (selected: boolean) => (node: HTMLElement) => {
+		if (!selected) return;
+		selected_project_item = node;
+		return () => {
+			if (selected_project_item === node) selected_project_item = undefined;
+		};
+	};
+
+	const FocusSelectedProject = (event: Event) => {
+		if (selected_project_item === undefined) return;
+		event.preventDefault();
+		selected_project_item.focus({ preventScroll: true });
+	};
 </script>
 
-<Popover bind:open>
-	<PopoverTrigger
+<DropdownMenu bind:open>
+	<DropdownMenuTrigger
 		{disabled}
 		aria-label={trigger === undefined ? `Project: ${label}` : (trigger_label ?? label)}
 		class={trigger === undefined
-			? "group/project flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm outline-none transition-colors duration-(--duration-fast) ease-in-out hover:bg-surface-875/60 focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none motion-reduce:transition-none data-[state=open]:bg-surface-875/60"
+			? "relative flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none"
 			: "w-full rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none"}
+		onpointerenter={hover.move}
+		onpointermove={hover.move}
+		onfocusin={hover.move}
 	>
 		{#if trigger !== undefined}
 			{@render trigger()}
 		{:else}
 			<ProjectIdentityMark {identity} />
 			<span class="min-w-0 flex-1 truncate text-foreground">{label}</span>
-			<ChevronDown
-				class="size-4 shrink-0 text-muted-foreground transition-transform duration-(--duration-fast) ease-in-out group-data-[state=open]/project:rotate-180 motion-reduce:transition-none"
-				aria-hidden="true"
-			/>
+			<Selector class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
 		{/if}
-	</PopoverTrigger>
+	</DropdownMenuTrigger>
 
 	<!--
 		Opens upward off its leading edge: the trigger is the foot of its pane, so
 		a menu dropped below it would have nowhere to go, and the names differ in
 		length, which would step a centred card sideways on every switch.
 	-->
-	<PopoverContent
-		variant="bare"
+	<DropdownMenuContent
 		align="start"
 		side="top"
 		sideOffset={10}
-		class="t-dropdown w-[min(20rem,calc(100vw-2rem))] rounded-2xl animate-none!"
+		onOpenAutoFocus={FocusSelectedProject}
+		class="t-dropdown w-[min(20rem,calc(100vw-2rem))] rounded-2xl bg-transparent! p-0! shadow-none! ring-0! animate-none!"
 	>
 		<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
-			<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
+			<!--
+				Keep the last row's geometry while focus crosses the separator. Without
+				this, Bits briefly returns focus to the menu between the final project
+				and New project, clearing the pill so the next row fades in instead of
+				sliding from the row it left. Closing the dropdown unmounts the surface.
+			-->
+			<DropdownHoverSurface hold class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
 				{#snippet children({ move_hover })}
 					<div class="flex min-w-0 flex-col">
 						{#each projects as recent (recent.project.project_id)}
@@ -141,14 +180,16 @@
 							{@const compact_path = ShortProjectPath(
 								recent.project.root_path,
 								recent.project.display_name,
+								$path_separator,
 							)}
-							<button
-								type="button"
-								class="relative flex min-w-0 items-center gap-2.5 rounded-xl px-2 py-1.5 text-left text-sm outline-none"
+							<DropdownMenuItem
+								class="relative w-full rounded-xl px-2 py-1.5 focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+								onSelect={yield* Choose(recent.project)}
 								onpointerenter={move_hover}
 								onpointermove={move_hover}
 								onfocusin={move_hover}
-								onclick={yield* Choose(recent.project)}
+								{@attach FollowHighlight(move_hover)}
+								{@attach CaptureSelectedProject(chosen)}
 							>
 								<ProjectIdentityMark identity={recent_identity} />
 								<span class="flex min-w-0 flex-1 flex-col">
@@ -158,7 +199,10 @@
 									{#if compact_path !== undefined}
 										<span
 											class="min-w-0 truncate font-mono text-[0.6875rem] text-muted-foreground"
-											title={recent.project.root_path}
+											title={FormatPathSeparators(
+												recent.project.root_path,
+												$path_separator,
+											)}
 										>
 											{compact_path}
 										</span>
@@ -167,7 +211,7 @@
 								{#if chosen}
 									<Check class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
 								{/if}
-							</button>
+							</DropdownMenuItem>
 						{/each}
 
 						<!--
@@ -179,25 +223,25 @@
 						<span class="pointer-events-none -mx-1 my-1 h-px bg-border/50" aria-hidden="true"
 						></span>
 
-						<button
-							type="button"
-							class="relative flex min-w-0 items-center gap-2.5 rounded-xl px-2 py-1.5 text-left text-sm outline-none"
+						<DropdownMenuItem
+							class="relative w-full rounded-xl px-2 py-1.5 focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+							onSelect={yield* NewProject}
 							onpointerenter={move_hover}
 							onpointermove={move_hover}
 							onfocusin={move_hover}
-							onclick={yield* NewProject}
+							{@attach FollowHighlight(move_hover)}
 						>
 							<span
 								aria-hidden="true"
-								class="grid size-6 shrink-0 place-items-center rounded-lg text-muted-foreground"
+								class="grid size-6 shrink-0 place-items-center rounded-sm text-muted-foreground"
 							>
 								<FolderPlus class="size-4" />
 							</span>
 							<span class="min-w-0 flex-1 truncate text-foreground">New project</span>
-						</button>
+						</DropdownMenuItem>
 					</div>
 				{/snippet}
 			</DropdownHoverSurface>
 		</ShaderGlassSurface>
-	</PopoverContent>
-</Popover>
+	</DropdownMenuContent>
+</DropdownMenu>

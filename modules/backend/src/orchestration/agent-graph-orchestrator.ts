@@ -58,6 +58,7 @@ type DispatchState = "idle" | "pending" | "running";
 export class AgentGraphOrchestrator extends Context.Service<
 	AgentGraphOrchestrator,
 	{
+		readonly ActiveRunCount: Effect.Effect<number>;
 		readonly Handle: (
 			command: CommandEnvelope,
 		) => Effect.Effect<AcceptedAgentGraphCommand, AgentGraphError>;
@@ -93,6 +94,9 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		const recovery_gate = yield* OrchestrationRecoveryGate;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveAgentRun>());
+		const ActiveRunCount = Effect.gen(function* () {
+			return (yield* Ref.get(live_runs)).size;
+		});
 		const shutdown_state = yield* Ref.make({
 			draining: false,
 			owned_scopes: new Map<string, Scope.Closeable>(),
@@ -714,6 +718,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 			}),
 		);
 		return {
+			ActiveRunCount,
 			DrainForShutdown,
 			GetGraph: (group_id) =>
 				AwaitRecovery.pipe(Effect.andThen(repository.GetGraph(group_id))),

@@ -21,7 +21,7 @@ const policy = {
 	context_window: "1m",
 	engine_id: "codex",
 	model: "gpt-5.6-sol",
-	permission: "supervised",
+	permission: "autonomous",
 	permission_mode: "on_request",
 	reasoning_effort: "high",
 	sandbox_mode: "workspace_write",
@@ -117,7 +117,7 @@ describe("atomic thread creation policy", () => {
 
 			expect(result.session.policy).toMatchObject({
 				engine_id: "codex",
-				permission: "supervised",
+				permission: "autonomous",
 				service_tier: "standard",
 			});
 			expect(result.coordinators).toHaveLength(0);

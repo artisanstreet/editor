@@ -35,11 +35,25 @@ export interface ObservedTerminalContext {
 	readonly workspace_id: string;
 }
 
+/** The authoritative fallback when a run ends before a command's final observation arrives. */
+export type ObservedTerminalSettlement =
+	| {
+			readonly action: "closed" | "exited" | "killed";
+			readonly exit_reason: "closed" | "exited" | "killed";
+			readonly state: "closed";
+	  }
+	| {
+			readonly action: "failed";
+			readonly failure: string;
+			readonly state: "failed";
+	  };
+
 /** The observation fields this adoption reads, named locally to avoid an engine import. */
 export interface ObservedTerminalActivity {
 	readonly activity_id: string;
 	readonly command?: string | undefined;
 	readonly exit_code?: number | undefined;
+	readonly output?: string | undefined;
 	/** The interpreter the provider handed the command to, when it names one. */
 	readonly shell?: string | undefined;
 	readonly state: "started" | "output" | "completed" | "failed";

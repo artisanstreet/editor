@@ -33,15 +33,40 @@ describe("thread scroll opening", () => {
 		expect(bottom_assignment).toBeLessThan(positioned_latch);
 	});
 
-	it("keeps the accepted-message anchor smooth after the instant thread landing", () => {
+	it("keeps the opening pinned while asynchronous transcript surfaces finish rendering", () => {
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
+
+		/**
+		 * SER observes arguments at a yield site, not state reads hidden inside a
+		 * prebuilt Effect. Without these arguments both setup programs execute once
+		 * against null DOM bindings and never attach after mount.
+		 */
+		expect(workspace).toContain(
+			"yield* SyncTranscriptSizeObserver(transcript_content, viewport);",
+		);
+		expect(workspace).toContain("yield* SyncFollowListeners(viewport);");
+		expect(workspace).toContain("observer.observe(content);");
+		expect(workspace).toContain("observer.observe(current_viewport);");
+		expect(workspace).toContain("top: ConversationBottomScrollTop(");
+		expect(workspace).not.toContain("yield* SyncTranscriptSizeObserver;");
+		expect(workspace).not.toContain("yield* SyncFollowListeners;");
+	});
+
+	it("lands an accepted-message anchor before animating its visual travel", () => {
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
+		const anchor_layout = workspace.match(
+			/const UpdateAnchorLayout[\s\S]*?const ScheduleAnchorLayout/u,
+		)?.[0];
 
 		expect(workspace).toContain(
 			"yield* UpdateAnchorLayout(true).pipe(Effect.forkIn(anchor_scope));",
 		);
-		expect(workspace).toContain(
-			'behavior: globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"',
+		expect(anchor_layout).toBeDefined();
+		expect(anchor_layout).toContain('behavior: "auto"');
+		expect(anchor_layout).not.toContain('behavior: "smooth"');
+		expect(anchor_layout).toContain("GlideAnchorCorrection(");
+		expect(anchor_layout?.indexOf("yield* ArmAnchorScroll(")).toBeLessThan(
+			anchor_layout?.indexOf("viewport.scrollTo({") ?? -1,
 		);
-		expect(workspace).toContain("yield* ArmAnchorScroll(viewport, false);");
 	});
 });

@@ -1,23 +1,25 @@
 {
-	"name": "@artisan/desktop",
-	"private": true,
-	"type": "module",
-	"exports": {
-		".": {
-			"types": "./src/index.ts",
-			"development": "./src/index.ts",
-			"default": "./.dist/index.mjs"
-		},
-		"./renderer-diagnostics": {
-			"types": "./src/renderer-diagnostics.ts",
-			"development": "./src/renderer-diagnostics.ts",
-			"default": "./.dist/renderer-diagnostics.mjs"
-		}
-	},
-	"dependencies": {
-		"@artisan/protocol": "workspace:*",
-		"@effect/platform-node-shared": "4.0.0-beta.97",
-		"effect": "4.0.0-beta.97",
-		"electron": "43.1.1"
-	}
+  "name": "@artisan/desktop",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./.dist/index.mjs"
+    },
+    "./renderer-diagnostics": {
+      "types": "./src/renderer-diagnostics.ts",
+      "development": "./src/renderer-diagnostics.ts",
+      "default": "./.dist/renderer-diagnostics.mjs"
+    }
+  },
+  "dependencies": {
+    "@artisan/observability": "workspace:*",
+    "@artisan/protocol": "workspace:*",
+    "@effect/platform-node-shared": "4.0.0-beta.97",
+    "@sentry/electron": "7.17.0",
+    "effect": "4.0.0-beta.97",
+    "electron": "43.1.1"
+  }
 }

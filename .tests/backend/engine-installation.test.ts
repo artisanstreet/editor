@@ -14,6 +14,8 @@ import {
 	EngineToolchainBusyError,
 	EngineToolchainRollbackUnavailableError,
 	EngineToolchainUnknownEngineError,
+	make_engine_registry_layer,
+	type Engine,
 	type EngineToolchainStatus,
 } from "@artisan/engines";
 
@@ -80,6 +82,93 @@ const handler = (toolchain: typeof EngineToolchain.Service) =>
 	);
 
 describe("engine installation handler", () => {
+	it.effect("starts and retains OpenCode Console OAuth through the engine service API", () =>
+		Effect.gen(function* () {
+			const toolchain = EngineToolchain.of({
+				Install: () => Effect.die("install not used"),
+				List: () =>
+					Effect.succeed([
+						status({
+							active_version: "0.0.0-beta-17778",
+							display_name: "OpenCode",
+							engine_id: "opencode2",
+						}),
+					]),
+				ResolveSpawn: () => Effect.die("spawn resolution not used"),
+				Rollback: () => Effect.die("rollback not used"),
+				StartAuthentication: () => Effect.die("CLI authentication must not be used"),
+				StartInstall: () => Effect.die("install not used"),
+				Status: () =>
+					Effect.succeed(
+						status({
+							active_version: "0.0.0-beta-17778",
+							display_name: "OpenCode",
+							engine_id: "opencode2",
+						}),
+					),
+			});
+			const engine = {
+				Connections: {
+					BeginOAuth: () =>
+						Effect.succeed({
+							attempt_id: "con_test",
+							expires_at_ms: 2_000,
+							instructions: "Enter the device code.",
+							mode: "auto" as const,
+							url: "https://console.opencode.ai/device",
+						}),
+					CancelOAuth: () => Effect.void,
+					CompleteOAuth: () => Effect.void,
+					ConnectKey: () => Effect.void,
+					List: () =>
+						Effect.succeed([
+							{
+								connected: false,
+								id: "opencode",
+								methods: [
+									{ id: "device", label: "Console", type: "oauth" as const },
+								],
+								name: "OpenCode Console",
+							},
+						]),
+					OAuthStatus: () => Effect.succeed({ status: "pending" as const }),
+				},
+				Descriptor: { id: "opencode2" },
+			} as unknown as Engine;
+			const Handle = yield* MakeEngineInstallationHandler.pipe(
+				Effect.provide(
+					Layer.mergeAll(
+						MetadataLive,
+						Layer.succeed(EngineToolchain, toolchain),
+						make_engine_registry_layer([engine]),
+					),
+				),
+			);
+			const request = {
+				...authentication_request(),
+				payload: { engine_id: "opencode2" },
+			} satisfies EngineAuthenticationRequestEnvelope;
+			const started = (yield* Handle(request)) as EngineInstallationMutationResultEnvelope;
+			expect(started.payload).toMatchObject({
+				report: {
+					activity: "authenticating",
+					authorization: {
+						attempt_id: "con_test",
+						url: "https://console.opencode.ai/device",
+					},
+				},
+				status: "accepted",
+			});
+			const polled = (yield* Handle(
+				installation_query("opencode2"),
+			)) as EngineInstallationQueryResultEnvelope;
+			expect(polled.payload.engines[0]).toMatchObject({
+				activity: "authenticating",
+				authorization: { attempt_id: "con_test" },
+			});
+		}),
+	);
+
 	it.effect("accepts an install only after the toolchain atomically enters installing", () =>
 		Effect.gen(function* () {
 			let installs = 0;

@@ -93,6 +93,14 @@ export interface ThreadSessionProjectionSubscription {
 	readonly stream_id: string;
 }
 
+export interface ThreadWorkProjectionSubscription {
+	readonly _tag: "thread.work";
+	readonly thread_id: string;
+	readonly journal_sequence: number;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+
 export interface WorkspaceConflictListProjectionSubscription {
 	readonly _tag: "workspace.conflict.list";
 	readonly thread_id: string;
@@ -126,6 +134,7 @@ export type ProjectionSubscription =
 	| ConversationProjectionSubscription
 	| OrchestrationGroupListProjectionSubscription
 	| ThreadSessionProjectionSubscription
+	| ThreadWorkProjectionSubscription
 	| WorkspaceConflictListProjectionSubscription
 	| SurfaceListProjectionSubscription
 	| SurfaceUsageProjectionSubscription;

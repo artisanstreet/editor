@@ -83,7 +83,8 @@ describe("Bazel scaffold", () => {
 		expect(runner).toContain("const ResolveBunExecutable");
 		expect(runner).toContain('WriteBin("bunx", executable, ["x"], true)');
 		expect(runner).toContain("rmSync(join(workspace, entry.name)");
-		expect(build).toContain('publish = [".dist/forge/Artisan Forge.exe"]');
+		expect(build).toContain('".dist/forge/Artisan Broker.exe"');
+		expect(build).toContain('".dist/forge/Artisan Forge.exe"');
 		expect(build).toContain("use_host_path = True");
 	});
 

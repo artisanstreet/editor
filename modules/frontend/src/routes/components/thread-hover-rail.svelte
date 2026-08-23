@@ -11,7 +11,7 @@
 		reader_can_acknowledge_root_conversation,
 	} from "$lib/browser/reader-attention";
 	import { RunBrowserDom } from "$lib/browser/dom";
-	import { EngineMarkClass, UsageSlicePresentationFor } from "$lib/engine/presentation";
+	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import {
 		ThreadOrchestrationRoster,
 		type ThreadAgentInspection,
@@ -21,10 +21,10 @@
 		PinnedThreads,
 		ResolveThreadRoute,
 		SettledThreads,
-		SortRecentThreads,
 		ThreadFailed,
 		ThreadHasActiveWork,
 		ThreadIsAwaitingAnswer,
+		ThreadLastMessageAt,
 		ThreadNeedsAttention,
 		ThreadRailTimeGroups,
 		ThreadReaderActivityAt,
@@ -292,10 +292,10 @@
 	};
 
 	/**
-	 * The reveal dwell is purely a CSS transition delay: engaging any row
-	 * starts the fade-in after that delay, retargets while the card is still
-	 * transparent slide it silently, and once it has faded in each retarget
-	 * reads as an animated tick down or up the list.
+	 * The reveal beat is purely a CSS animation delay (`--tt-delay`): engaging
+	 * any row starts the fade-in after that beat, a retarget while the card is
+	 * still transparent slides it silently, and once it has faded in each
+	 * retarget reads as an animated tick down or up the list.
 	 */
 	const RowHover =
 		(move_hover: (event: Event) => void, thread: ThreadListItem) => (event: Event) => {
@@ -466,7 +466,7 @@
 			{/if}
 			{#each group.threads as thread (thread.thread_id)}
 				{@const is_active = thread.thread_id === active_thread_id}
-				{@const thread_mark = UsageSlicePresentationFor(thread.engine_id, thread.model_id).mark}
+				{@const thread_mark = EngineMarkFor(thread.engine_id)}
 				{@const ThreadMark = thread_mark.icon}
 				<a
 					href={ThreadRoutePathFor(thread)}
@@ -482,7 +482,7 @@
 						>{thread_display_title(thread, $thread_title_mode)}</span
 					>
 					<span class="shrink-0 whitespace-nowrap text-xs text-muted-foreground @max-[13rem]:hidden">
-						{FormatRecentThreadTime(thread.last_activity_at, now_ms)}
+						{FormatRecentThreadTime(ThreadLastMessageAt(thread), now_ms)}
 					</span>
 				</a>
 			{/each}
@@ -581,7 +581,7 @@
 									<div class="flex flex-col" bind:clientHeight={working_rows_height}>
 										{#each working_threads as thread (thread.thread_id)}
 											{@const is_active = thread.thread_id === active_thread_id}
-											{@const thread_mark = UsageSlicePresentationFor(thread.engine_id, thread.model_id).mark}
+											{@const thread_mark = EngineMarkFor(thread.engine_id)}
 											{@const ThreadMark = thread_mark.icon}
 											<!-- Only an inactive unread outcome asks for attention. -->
 											{@const needs_attention = ThreadNeedsAttention(thread)}
@@ -711,7 +711,7 @@
 		no pointer events, so it can overlay the transcript without stealing it.
 	-->
 	{#if card_thread !== undefined}
-		{@const card_mark = UsageSlicePresentationFor(card_thread.engine_id, card_thread.model_id).mark}
+		{@const card_mark = EngineMarkFor(card_thread.engine_id)}
 		{@const CardMark = card_mark.icon}
 		{@const card_awaiting = ThreadIsAwaitingAnswer(card_thread)}
 		{@const card_failed = ThreadFailed(card_thread)}
@@ -742,15 +742,12 @@
 			style={`transform: translate3d(0, ${card_y}px, 0)`}
 		>
 			<!--
-				The tooltip entrance: the dwell delays only the reveal, so the travel
-				above stays undelayed and concealing snaps. The card grows in from the
-				row's own edge rather than only fading, which is what makes it read as
-				coming from the row it names.
+				The tooltip entrance: the short beat delays only the reveal, so the
+				travel above stays undelayed and concealing snaps. The card grows in
+				from the row's own edge rather than only fading, which is what makes
+				it read as coming from the row it names.
 			-->
-			<div
-				data-shown={card_engaged}
-				class="t-tt origin-left [--tt-delay:450ms]"
-			>
+			<div data-shown={card_engaged} class="t-tt origin-left">
 			<ShaderGlassSurface class="rounded-xl">
 				<div class="relative flex min-w-0 flex-col gap-1.5 p-3">
 					<!--
@@ -834,7 +831,7 @@
 							{/if}
 						</span>
 						<span class="shrink-0">
-							{FormatRecentThreadTime(card_thread.last_activity_at, now_ms)}
+							{FormatRecentThreadTime(ThreadLastMessageAt(card_thread), now_ms)}
 						</span>
 					</span>
 				</div>

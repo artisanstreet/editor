@@ -9,6 +9,10 @@ import {
 	EngineInstallationsController,
 	EngineInstallationsControllerLive,
 } from "../../modules/frontend/src/lib/settings/engine-installations-controller";
+import {
+	EngineUsageController,
+	EngineUsageControllerLive,
+} from "../../modules/frontend/src/lib/identity/engine-usage-controller";
 
 const Report = (
 	activity: EngineInstallationReport["activity"],
@@ -27,6 +31,74 @@ const Snapshot = (activity: EngineInstallationReport["activity"]) => ({
 });
 
 describe("engine installations controller", () => {
+	it("force-refreshes shared usage after a first install becomes ready", async () => {
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const usage_refreshed = yield* Deferred.make<void>();
+					const usage_requests = yield* Ref.make<ReadonlyArray<boolean>>([]);
+					const client_layer = Layer.succeed(ArtisanClient, {
+						...FixtureArtisanClientService,
+						GetEngineInstallations: () =>
+							Effect.succeed({
+								engines: [
+									{
+										...Report("idle"),
+										active_version: "1.0.0",
+									},
+								],
+								fetched_at: "2026-08-21T10:00:00.000Z",
+							}),
+						GetEngineUsage: (input) =>
+							Effect.gen(function* () {
+								yield* Ref.update(usage_requests, (current) => [
+									...current,
+									input?.force === true,
+								]);
+								yield* Deferred.succeed(usage_refreshed, undefined);
+								return {
+									engines: [
+										{
+											authentication: "unauthenticated" as const,
+											display_name: "Codex",
+											engine_id: "codex",
+											windows: [],
+										},
+									],
+									fetched_at: "2026-08-21T10:00:01.000Z",
+								};
+							}),
+						InstallEngine: () =>
+							Effect.succeed({
+								report: { ...Report("installing"), managed: false },
+								status: "accepted" as const,
+							}),
+					});
+					const services = yield* Layer.build(
+						EngineInstallationsControllerLive.pipe(
+							Layer.provideMerge(EngineUsageControllerLive),
+							Layer.provide(client_layer),
+						),
+					);
+
+					return yield* Effect.gen(function* () {
+						const installations = yield* EngineInstallationsController;
+						const usage = yield* EngineUsageController;
+						yield* installations.Install("codex");
+						yield* Deferred.await(usage_refreshed);
+						return {
+							entry: yield* usage.Load("codex"),
+							requests: yield* Ref.get(usage_requests),
+						};
+					}).pipe(Effect.provide(services));
+				}),
+			),
+		);
+
+		expect(result.requests).toEqual([true]);
+		expect(result.entry?.report?.authentication).toBe("unauthenticated");
+	});
+
 	it("shares an interrupted route refresh with its surviving caller", async () => {
 		const result = await Effect.runPromise(
 			Effect.scoped(

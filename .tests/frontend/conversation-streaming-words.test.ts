@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { Effect, Fiber, Queue } from "effect";
 import { TestClock } from "effect/testing";
 import { describe, expect, it } from "vitest";
@@ -8,6 +10,7 @@ import {
 	find_next_reveal_boundary,
 	get_streaming_word_pacing,
 	reveal_streaming_words,
+	should_animate_streaming_target,
 	wait_for_streaming_word_delay_or_target,
 	wrap_streaming_words,
 	type StreamingWordsTarget,
@@ -35,6 +38,38 @@ const get_word_nodes = (nodes: readonly ComarkNode[]): [string, boolean][] => {
 };
 
 describe("conversation streaming words", () => {
+	it("paints exact text while the first asynchronous Markdown tree is pending", () => {
+		const source = readFileSync(
+			resolve("modules/frontend/src/lib/components/markdown/content.svelte"),
+			"utf8",
+		);
+
+		expect(source).toContain("{:else if revealed_text.trim().length > 0}");
+		expect(source).toContain('<p class="whitespace-pre-wrap">{revealed_text}</p>');
+	});
+
+	it("enables word reveal only for a live owning run and turn", () => {
+		const workspace = readFileSync(
+			resolve("modules/frontend/src/routes/components/thread-workspace.svelte"),
+			"utf8",
+		);
+		const message = readFileSync(
+			resolve("modules/frontend/src/routes/components/conversation-message.svelte"),
+			"utf8",
+		);
+
+		expect(workspace).toContain("const streaming_turn_ids = $derived(");
+		expect(workspace).toContain("message_streaming={run_active &&");
+		expect(workspace).toContain("block.item.run_id === active_run_id");
+		expect(workspace).toContain("streaming_turn_ids.has(block.turn_id)");
+		expect(message).toContain(
+			'streaming={message_streaming && item.lifecycle === "streaming"}',
+		);
+		expect(message).not.toContain(
+			'<MarkdownContent streaming={item.lifecycle === "streaming"}',
+		);
+	});
+
 	it("preserves every byte while revealing complete streaming words", () => {
 		const target = streaming("Hello,\tworld  \nnext");
 
@@ -54,6 +89,12 @@ describe("conversation streaming words", () => {
 		expect(find_next_reveal_boundary("Hello world", settled("Hello world"))).toBe(
 			"Hello world".length,
 		);
+	});
+
+	it("snaps settled hydration while still draining a genuinely live presentation", () => {
+		expect(should_animate_streaming_target(true, settled("hydrated history"))).toBe(false);
+		expect(should_animate_streaming_target(false, settled("finished live reply"))).toBe(true);
+		expect(should_animate_streaming_target(true, streaming("live reply"))).toBe(true);
 	});
 
 	it("fails closed for corrections that are not prefix appends", () => {

@@ -1,12 +1,12 @@
 import { execFileSync, spawn, type Serializable } from "node:child_process";
 import {
-	cpSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
 
@@ -14,13 +14,13 @@ import { build } from "rolldown";
 import { Schema } from "effect";
 
 import {
-	BrandForgeExecutable,
-	CreateForgeSeaRolldownConfig,
+  BrandForgeExecutable,
+  CreateForgeSeaRolldownConfig,
 } from "../../.config/forge.rolldown.config.ts";
 import { WindowsProcessHostModeArgument } from "../../modules/engines/src/process/windows-process-host-mode.ts";
 import {
-	ForgeSeaRuntimeSmokeModeArgument,
-	ForgeSeaSmokeModeArgument,
+  ForgeSeaRuntimeSmokeModeArgument,
+  ForgeSeaSmokeModeArgument,
 } from "../../modules/forge/src/executable-runtime.ts";
 import { CollectForgeSeaAssets } from "./forge-sea-assets.ts";
 import { GenerateSeaBuildArtifacts } from "./sea/config.ts";
@@ -36,227 +36,258 @@ const blob_path = resolve(build_root, "forge.blob");
 const manifest_path = resolve(build_root, "asset-manifest.json");
 const config_path = resolve(build_root, "sea-config.json");
 const executable_path = resolve(staging_root, "Artisan Forge.exe");
+const broker_build_path = resolve(workspace_root, "target", "release", "artisan-broker.exe");
+const broker_output_path = resolve(staging_root, "Artisan Broker.exe");
 const manifest_asset_id = "artisan-sea-manifest";
 const sea_sentinel = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 
 export const provider_sdk_bundle_markers = [
-	"@anthropic-ai/claude-agent-sdk",
-	"@anthropic-ai/sdk",
-	"@openai/codex-sdk",
+  "@anthropic-ai/claude-agent-sdk",
+  "@anthropic-ai/sdk",
+  "@openai/codex-sdk",
 ] as const;
 
 /** Rejects provider package code while allowing Artisan's provider-neutral adapter vocabulary. */
 export const AssertForgeBundleHasNoProviderSdk = (bundle: Uint8Array) => {
-	const source = new TextDecoder().decode(bundle);
-	const matches = provider_sdk_bundle_markers.filter((marker) => source.includes(marker));
-	if (matches.length > 0)
-		throw new Error(`Forge bundle contains provider SDK package code: ${matches.join(", ")}`);
+  const source = new TextDecoder().decode(bundle);
+  const matches = provider_sdk_bundle_markers.filter((marker) => source.includes(marker));
+  if (matches.length > 0)
+    throw new Error(`Forge bundle contains provider SDK package code: ${matches.join(", ")}`);
 };
 
 const SeaSmokeReport = Schema.Struct({
-	assets: Schema.Int.check(Schema.isGreaterThan(0)),
-	manifest_version: Schema.Literal(1),
-	provider_payloads: Schema.Literal(false),
-	sea: Schema.Literal(true),
+  assets: Schema.Int.check(Schema.isGreaterThan(0)),
+  manifest_version: Schema.Literal(1),
+  provider_payloads: Schema.Literal(false),
+  sea: Schema.Literal(true),
 });
 
 const SeaRuntimeSmokeReport = Schema.Struct({
-	koffi: Schema.Literal(true),
-	migrations: Schema.Int.check(Schema.isGreaterThan(0)),
-	node_pty: Schema.Literal(true),
-	provider_payloads: Schema.Literal(false),
-	runtime: Schema.Literal(true),
-	sea: Schema.Literal(true),
+  koffi: Schema.Literal(true),
+  migrations: Schema.Int.check(Schema.isGreaterThan(0)),
+  node_pty: Schema.Literal(true),
+  provider_payloads: Schema.Literal(false),
+  runtime: Schema.Literal(true),
+  sea: Schema.Literal(true),
 });
 
 const ProcessHostResponse = Schema.Union([
-	Schema.Struct({ claim_token: Schema.NonEmptyString, type: Schema.Literal("claim_ack") }),
-	Schema.Struct({ process_id: Schema.Int, type: Schema.Literal("ready") }),
-	Schema.Struct({ message: Schema.String, type: Schema.Literal("spawn_error") }),
+  Schema.Struct({ claim_token: Schema.NonEmptyString, type: Schema.Literal("claim_ack") }),
+  Schema.Struct({ process_id: Schema.Int, type: Schema.Literal("ready") }),
+  Schema.Struct({ message: Schema.String, type: Schema.Literal("spawn_error") }),
 ]);
 
 const CanonicalJson = (value: unknown) => `${JSON.stringify(value, undefined, "\t")}\n`;
 const RemoveTree = (path: string) =>
-	rmSync(path, { force: true, maxRetries: 20, recursive: true, retryDelay: 250 });
+  rmSync(path, { force: true, maxRetries: 20, recursive: true, retryDelay: 250 });
+
+/**
+ * The debug ID must be embedded in the JavaScript before Node creates the SEA
+ * blob, but only a credentialed release uploads the maps it pairs with. Every
+ * other build skips the step so a missing or undownloaded sentry-cli binary
+ * never blocks packaging. The credential check mirrors
+ * `upload-sentry-source-maps.ts`, which is the step that consumes the IDs.
+ */
+const SentryReleaseConfigured = () =>
+  ["SENTRY_AUTH_TOKEN", "SENTRY_ORG", "SENTRY_EDITOR_PROJECT", "SENTRY_FORGE_PROJECT"].every(
+    (name) => (process.env[name]?.length ?? 0) > 0,
+  );
+const InjectForgeDebugIds = async (directory: string) => {
+  if (!SentryReleaseConfigured()) {
+    console.log("[sentry] Forge debug-ID injection skipped (release credentials are not configured)");
+    return;
+  }
+  const { SentryCli } = await import("@sentry/cli");
+  const sentry = new SentryCli(null, { silent: false });
+  await sentry.sourceMaps.inject({ paths: [directory] });
+};
 
 const SmokeWindowsProcessHost = (executable: string, environment: NodeJS.ProcessEnv) =>
-	new Promise<void>((accept, reject) => {
-		const child = spawn(executable, [WindowsProcessHostModeArgument], {
-			cwd: workspace_root,
-			env: environment,
-			stdio: ["pipe", "pipe", "pipe", "ipc"],
-			windowsHide: true,
-		});
-		let acknowledged = false;
-		let ready = false;
-		let settled = false;
-		let stdout = "";
-		let stderr = "";
-		const Finish = (cause?: unknown) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			if (cause === undefined) accept();
-			else {
-				if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-				reject(cause);
-			}
-		};
-		const Send = (message: Serializable) =>
-			child.send(message, (cause) => {
-				if (cause) Finish(cause);
-			});
-		const timeout = setTimeout(
-			() => Finish(new Error(`Forge SEA process-host smoke timed out: ${stderr}`)),
-			60_000,
-		);
-		child.stdout?.setEncoding("utf8");
-		child.stderr?.setEncoding("utf8");
-		child.stdout?.on("data", (chunk: string) => {
-			stdout = `${stdout}${chunk}`.slice(-4_096);
-		});
-		child.stderr?.on("data", (chunk: string) => {
-			stderr = `${stderr}${chunk}`.slice(-4_096);
-		});
-		child.once("error", Finish);
-		child.once("spawn", () => Send({ claim_token: "sea-build-smoke", type: "claim" }));
-		child.on("message", (unknown_message) => {
-			try {
-				const message = Schema.decodeUnknownSync(ProcessHostResponse)(unknown_message);
-				if (message.type === "spawn_error") {
-					Finish(new Error(message.message));
-				} else if (message.type === "claim_ack") {
-					acknowledged = message.claim_token === "sea-build-smoke";
-					Send({
-						input: {
-							args: ["-e", "process.stdout.write('artisan-sea-host-ok')"],
-							command: process.execPath,
-							cwd: workspace_root,
-						},
-						type: "start",
-					});
-				} else ready = message.process_id > 0;
-			} catch (cause) {
-				Finish(cause);
-			}
-		});
-		child.once("exit", (code) => {
-			if (code === 0 && acknowledged && ready && stdout === "artisan-sea-host-ok") Finish();
-			else
-				Finish(
-					new Error(
-						`Forge SEA process-host smoke failed (${String(code)}): ${stderr || stdout}`,
-					),
-				);
-		});
-	});
+  new Promise<void>((accept, reject) => {
+    const child = spawn(executable, [WindowsProcessHostModeArgument], {
+      cwd: workspace_root,
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
+      windowsHide: true,
+    });
+    let acknowledged = false;
+    let ready = false;
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    const Finish = (cause?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (cause === undefined) accept();
+      else {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        reject(cause);
+      }
+    };
+    const Send = (message: Serializable) =>
+      child.send(message, (cause) => {
+        if (cause) Finish(cause);
+      });
+    const timeout = setTimeout(
+      () => Finish(new Error(`Forge SEA process-host smoke timed out: ${stderr}`)),
+      60_000,
+    );
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout = `${stdout}${chunk}`.slice(-4_096);
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-4_096);
+    });
+    child.once("error", Finish);
+    child.once("spawn", () => Send({ claim_token: "sea-build-smoke", type: "claim" }));
+    child.on("message", (unknown_message) => {
+      try {
+        const message = Schema.decodeUnknownSync(ProcessHostResponse)(unknown_message);
+        if (message.type === "spawn_error") {
+          Finish(new Error(message.message));
+        } else if (message.type === "claim_ack") {
+          acknowledged = message.claim_token === "sea-build-smoke";
+          Send({
+            input: {
+              args: ["-e", "process.stdout.write('artisan-sea-host-ok')"],
+              command: process.execPath,
+              cwd: workspace_root,
+            },
+            type: "start",
+          });
+        } else ready = message.process_id > 0;
+      } catch (cause) {
+        Finish(cause);
+      }
+    });
+    child.once("exit", (code) => {
+      if (code === 0 && acknowledged && ready && stdout === "artisan-sea-host-ok") Finish();
+      else
+        Finish(
+          new Error(`Forge SEA process-host smoke failed (${String(code)}): ${stderr || stdout}`),
+        );
+    });
+  });
 
 const PublishForgeSea = () => {
-	RemoveTree(backup_root);
-	const had_previous = existsSync(output_root);
-	if (had_previous) renameSync(output_root, backup_root);
-	try {
-		renameSync(staging_root, output_root);
-	} catch (cause) {
-		if (had_previous && !existsSync(output_root)) {
-			try {
-				renameSync(backup_root, output_root);
-			} catch (rollback_cause) {
-				throw new AggregateError(
-					[cause, rollback_cause],
-					`Forge SEA publish failed; the previous artifact remains at ${backup_root}`,
-				);
-			}
-		}
-		throw cause;
-	}
-	if (had_previous) {
-		try {
-			RemoveTree(backup_root);
-		} catch (cause) {
-			console.warn(`[forge-build] left the replaced SEA at ${backup_root} (${cause})`);
-		}
-	}
+  RemoveTree(backup_root);
+  const had_previous = existsSync(output_root);
+  if (had_previous) renameSync(output_root, backup_root);
+  try {
+    renameSync(staging_root, output_root);
+  } catch (cause) {
+    if (had_previous && !existsSync(output_root)) {
+      try {
+        renameSync(backup_root, output_root);
+      } catch (rollback_cause) {
+        throw new AggregateError(
+          [cause, rollback_cause],
+          `Forge SEA publish failed; the previous artifact remains at ${backup_root}`,
+        );
+      }
+    }
+    throw cause;
+  }
+  if (had_previous) {
+    try {
+      RemoveTree(backup_root);
+    } catch (cause) {
+      console.warn(`[forge-build] left the replaced SEA at ${backup_root} (${cause})`);
+    }
+  }
 };
 
 export const BuildForgeSea = async () => {
-	if (process.platform !== "win32" || process.arch !== "x64")
-		throw new Error("Artisan Forge SEA production builds currently require Windows x64");
+  if (process.platform !== "win32" || process.arch !== "x64")
+    throw new Error("Artisan Forge SEA production builds currently require Windows x64");
 
-	await build(CreateForgeSeaRolldownConfig());
-	AssertForgeBundleHasNoProviderSdk(readFileSync(bundle_path));
-	const artifacts = GenerateSeaBuildArtifacts({
-		assets: CollectForgeSeaAssets(workspace_root),
-		main_path: bundle_path,
-		output_path: blob_path,
-	});
-	writeFileSync(manifest_path, artifacts.asset_manifest_json);
-	writeFileSync(
-		config_path,
-		CanonicalJson({
-			...artifacts.sea_config,
-			assets: {
-				...artifacts.sea_config.assets,
-				[manifest_asset_id]: manifest_path,
-			},
-		}),
-	);
+  execFileSync("cargo", ["build", "--release", "--package", "artisan-broker"], {
+    cwd: workspace_root,
+    stdio: "inherit",
+  });
 
-	execFileSync(process.execPath, ["--experimental-sea-config", config_path], {
-		cwd: workspace_root,
-		stdio: "inherit",
-	});
-	RemoveTree(staging_root);
-	mkdirSync(staging_root, { recursive: true });
-	try {
-		cpSync(process.execPath, executable_path);
-		const workspace = Schema.decodeUnknownSync(
-			Schema.Struct({ version: Schema.NonEmptyString }),
-		)(JSON.parse(readFileSync(resolve(workspace_root, "package.json"), "utf8")));
-		BrandForgeExecutable(executable_path, workspace.version);
-		execFileSync(
-			process.execPath,
-			[
-				resolve(workspace_root, "node_modules/postject/dist/cli.js"),
-				executable_path,
-				"NODE_SEA_BLOB",
-				blob_path,
-				"--sentinel-fuse",
-				sea_sentinel,
-				"--overwrite",
-			],
-			{ cwd: workspace_root, stdio: "inherit" },
-		);
-		const smoke = execFileSync(executable_path, [ForgeSeaSmokeModeArgument], {
-			encoding: "utf8",
-			timeout: 60_000,
-			windowsHide: true,
-		});
-		Schema.decodeUnknownSync(SeaSmokeReport)(JSON.parse(smoke));
-		RemoveTree(runtime_smoke_root);
-		const smoke_environment = {
-			...process.env,
-			ARTISAN_SEA_CACHE_ROOT: runtime_smoke_root,
-		};
-		try {
-			const runtime_smoke = execFileSync(
-				executable_path,
-				[ForgeSeaRuntimeSmokeModeArgument],
-				{
-					encoding: "utf8",
-					env: smoke_environment,
-					timeout: 120_000,
-					windowsHide: true,
-				},
-			);
-			Schema.decodeUnknownSync(SeaRuntimeSmokeReport)(JSON.parse(runtime_smoke));
-			await SmokeWindowsProcessHost(executable_path, smoke_environment);
-		} finally {
-			RemoveTree(runtime_smoke_root);
-		}
+  await build(CreateForgeSeaRolldownConfig());
+  AssertForgeBundleHasNoProviderSdk(readFileSync(bundle_path));
+  await InjectForgeDebugIds(build_root);
+  const artifacts = GenerateSeaBuildArtifacts({
+    assets: CollectForgeSeaAssets(workspace_root),
+    main_path: bundle_path,
+    output_path: blob_path,
+  });
+  writeFileSync(manifest_path, artifacts.asset_manifest_json);
+  writeFileSync(
+    config_path,
+    CanonicalJson({
+      ...artifacts.sea_config,
+      assets: {
+        ...artifacts.sea_config.assets,
+        [manifest_asset_id]: manifest_path,
+      },
+    }),
+  );
 
-		PublishForgeSea();
-	} finally {
-		RemoveTree(staging_root);
-	}
+  execFileSync(process.execPath, ["--experimental-sea-config", config_path], {
+    cwd: workspace_root,
+    stdio: "inherit",
+  });
+  RemoveTree(staging_root);
+  mkdirSync(staging_root, { recursive: true });
+  try {
+    cpSync(process.execPath, executable_path);
+    cpSync(broker_build_path, broker_output_path);
+    const workspace = Schema.decodeUnknownSync(Schema.Struct({ version: Schema.NonEmptyString }))(
+      JSON.parse(readFileSync(resolve(workspace_root, "package.json"), "utf8")),
+    );
+    BrandForgeExecutable(executable_path, workspace.version);
+    execFileSync(
+      process.execPath,
+      [
+        resolve(workspace_root, "node_modules/postject/dist/cli.js"),
+        executable_path,
+        "NODE_SEA_BLOB",
+        blob_path,
+        "--sentinel-fuse",
+        sea_sentinel,
+        "--overwrite",
+      ],
+      { cwd: workspace_root, stdio: "inherit" },
+    );
+    const smoke = execFileSync(executable_path, [ForgeSeaSmokeModeArgument], {
+      encoding: "utf8",
+      timeout: 60_000,
+      windowsHide: true,
+    });
+    Schema.decodeUnknownSync(SeaSmokeReport)(JSON.parse(smoke));
+    const broker_smoke = execFileSync(broker_output_path, [], {
+      encoding: "utf8",
+      timeout: 10_000,
+      windowsHide: true,
+    });
+    if (broker_smoke.trim() !== "false")
+      throw new Error("Artisan Broker smoke did not return false for an empty policy");
+    RemoveTree(runtime_smoke_root);
+    const smoke_environment = {
+      ...process.env,
+      ARTISAN_SEA_CACHE_ROOT: runtime_smoke_root,
+    };
+    try {
+      const runtime_smoke = execFileSync(executable_path, [ForgeSeaRuntimeSmokeModeArgument], {
+        encoding: "utf8",
+        env: smoke_environment,
+        timeout: 120_000,
+        windowsHide: true,
+      });
+      Schema.decodeUnknownSync(SeaRuntimeSmokeReport)(JSON.parse(runtime_smoke));
+      await SmokeWindowsProcessHost(executable_path, smoke_environment);
+    } finally {
+      RemoveTree(runtime_smoke_root);
+    }
+
+    PublishForgeSea();
+  } finally {
+    RemoveTree(staging_root);
+  }
 };

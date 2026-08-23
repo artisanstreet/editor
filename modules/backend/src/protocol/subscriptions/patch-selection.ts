@@ -14,6 +14,7 @@ const thread_item_from_event = (event: EventEnvelope): ThreadListItem | undefine
 				created_at: event.sent_at,
 				current_goal: event.payload.title,
 				last_activity_at: event.sent_at,
+				last_message_at: event.sent_at,
 				reader_activity_at: event.sent_at,
 				live_status: "Idle",
 				metadata_version: 0,

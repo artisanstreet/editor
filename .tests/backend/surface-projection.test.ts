@@ -101,6 +101,7 @@ describe("surface projection read model", () => {
 			basis: "cumulative" | "delta",
 			input_tokens?: number,
 			output_tokens?: number,
+			cost_usd?: number,
 		) =>
 			({
 				_tag: "usage",
@@ -111,6 +112,7 @@ describe("surface projection read model", () => {
 				basis,
 				...(input_tokens === undefined ? {} : { input_tokens }),
 				...(output_tokens === undefined ? {} : { output_tokens }),
+				...(cost_usd === undefined ? {} : { cost_usd }),
 			}) as any;
 		try {
 			const total = await runtime.runPromise(
@@ -120,7 +122,7 @@ describe("surface projection read model", () => {
 						Effect.gen(function* () {
 							yield* PersistSurfaceProjection(
 								transaction,
-								usage("usage_1", "cumulative", 10, 5),
+								usage("usage_1", "cumulative", 10, 5, 0.01),
 								{
 									thread_id: "thread_1",
 									run_id: "run_1",
@@ -132,7 +134,7 @@ describe("surface projection read model", () => {
 							);
 							yield* PersistSurfaceProjection(
 								transaction,
-								usage("usage_2", "cumulative", 12, 7),
+								usage("usage_2", "cumulative", 12, 7, 0.02),
 								{
 									thread_id: "thread_1",
 									run_id: "run_1",
@@ -144,7 +146,7 @@ describe("surface projection read model", () => {
 							);
 							yield* PersistSurfaceProjection(
 								transaction,
-								usage("usage_3", "delta", 3, 2),
+								usage("usage_3", "delta", 3, 2, 0.005),
 								{
 									thread_id: "thread_1",
 									run_id: "run_1",
@@ -156,7 +158,7 @@ describe("surface projection read model", () => {
 							);
 							yield* PersistSurfaceProjection(
 								transaction,
-								usage("usage_3", "delta", 3, 2),
+								usage("usage_3", "delta", 3, 2, 0.005),
 								{
 									thread_id: "thread_1",
 									run_id: "run_1",
@@ -176,6 +178,7 @@ describe("surface projection read model", () => {
 					run_id: "run_1",
 					group_id: "group_1",
 					assignment_id: "assignment_1",
+					cost_usd: 0.025,
 					input_tokens: 15,
 					output_tokens: 9,
 				},

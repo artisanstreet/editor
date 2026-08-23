@@ -117,7 +117,8 @@ describe("Claude normalization", () => {
 					_tag: "agent_message_completed",
 					item_id: "claude:run:message",
 					message: "ab",
-					phase: "unspecified",
+					/** Prose sharing a message with tool calls is narration, not the reply. */
+					phase: "commentary",
 				}),
 				expect.objectContaining({ _tag: "terminal_activity", command: "pwd" }),
 			]),
@@ -609,6 +610,7 @@ describe("Claude normalization", () => {
 					_tag: "terminal_activity",
 					activity_id: "bash",
 					command: "pwd",
+					output: "ok",
 					state: "completed",
 				}),
 				expect.objectContaining({

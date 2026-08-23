@@ -110,6 +110,32 @@ describe("typography preferences", () => {
 		expect(query_local_fonts).toHaveBeenCalledTimes(1);
 	});
 
+	it("projects native FontData prototype accessors before validating families", async () => {
+		class PlatformFontData {
+			constructor(private readonly family_name: string) {}
+
+			get family() {
+				return this.family_name;
+			}
+		}
+
+		const native_font = new PlatformFontData("Native Face");
+		expect(Object.hasOwn(native_font, "family")).toBe(false);
+		vi.stubGlobal(
+			"queryLocalFonts",
+			vi.fn(() => Promise.resolve([native_font])),
+		);
+
+		await expect(
+			Effect.runPromise(
+				Effect.gen(function* () {
+					const typography = yield* BrowserTypography;
+					return yield* typography.DiscoverLocalFonts;
+				}).pipe(Effect.provide(BrowserTypographyLive)),
+			),
+		).resolves.toEqual(["Native Face"]);
+	});
+
 	it("applies every semantic role to the document root", async () => {
 		const set_property = vi.fn();
 		vi.stubGlobal("document", { documentElement: { style: { setProperty: set_property } } });
@@ -133,6 +159,17 @@ describe("typography preferences", () => {
 			"--font-mono",
 			expect.stringContaining('"JetBrains Mono"'),
 		);
+	});
+
+	it("keeps document chrome, including the desktop workspace header, on the live text stack", () => {
+		const global_styles = read_source("modules/frontend/src/lib/styles/global.css");
+		const header = read_source(
+			"modules/frontend/src/routes/components/workspace-header.svelte",
+		);
+
+		expect(global_styles).toContain("font-family: var(--font-sans);");
+		expect(global_styles).not.toContain("@apply font-sans;");
+		expect(header).not.toContain("font-mono");
 	});
 
 	it("caches only a successful local-font enumeration for the service lifetime", async () => {

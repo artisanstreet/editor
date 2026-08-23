@@ -190,15 +190,25 @@ export const cursor_grok_standard_speed = (model: string) =>
 		verified_at: "2026-07-27",
 	});
 
-export const cursor_grok_fast_speed = (model: string) =>
-	speed({
+export const cursor_grok_fast_speed = (model: string, output_consumption_multiplier = 3) => {
+	const input_consumption_multiplier = 2;
+	const consumption_multiplier =
+		input_consumption_multiplier === output_consumption_multiplier
+			? input_consumption_multiplier
+			: null;
+	const pricing_description =
+		consumption_multiplier === null
+			? `${input_consumption_multiplier}x input token price and ${output_consumption_multiplier}x output token price`
+			: `${consumption_multiplier}x input and output token price`;
+
+	return speed({
 		availability: "dynamic",
 		consumption_basis: "usage-credit-price",
-		consumption_multiplier: null,
-		input_consumption_multiplier: 2,
-		output_consumption_multiplier: 3,
+		consumption_multiplier,
+		input_consumption_multiplier,
+		output_consumption_multiplier,
 		default: false,
-		description: `${model} uses 2x input token price and 3x output token price for faster responses. Fast mode is available where the Cursor account supports it; Cursor has not published a numerical speed multiplier.`,
+		description: `${model} uses ${pricing_description} for faster responses. Fast mode is available where the Cursor account supports it; Cursor has not published a numerical speed multiplier.`,
 		id: "fast",
 		label: "Fast",
 		native_value: "fast",
@@ -206,6 +216,7 @@ export const cursor_grok_fast_speed = (model: string) =>
 		speed_multiplier: null,
 		verified_at: "2026-07-27",
 	});
+};
 
 export const permission = (input: PermissionOption) =>
 	Schema.decodeUnknownSync(PermissionOption)(input);

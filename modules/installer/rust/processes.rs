@@ -13,6 +13,28 @@ use crate::{
 const GRACEFUL_WINDOW: Duration = Duration::from_secs(20);
 /// Polling interval while waiting for a graceful exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// The permanent CLI reserves this code for a Forge that reports active work.
+const FORGE_BUSY_EXIT_CODE: i32 = 5;
+/// An exact Forge process exists but cannot answer the authenticated activity
+/// probe. It is broken rather than busy, so update retirement may end it.
+const FORGE_ACTIVITY_UNAVAILABLE_EXIT_CODE: i32 = 6;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForgeStopDisposition {
+    Accepted,
+    Busy,
+    Unresponsive,
+    Failed,
+}
+
+fn forge_stop_disposition(exit_code: Option<i32>) -> ForgeStopDisposition {
+    match exit_code {
+        Some(0) => ForgeStopDisposition::Accepted,
+        Some(FORGE_BUSY_EXIT_CODE) => ForgeStopDisposition::Busy,
+        Some(FORGE_ACTIVITY_UNAVAILABLE_EXIT_CODE) => ForgeStopDisposition::Unresponsive,
+        _ => ForgeStopDisposition::Failed,
+    }
+}
 /// One running process launched out of the installation's `versions` tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunningProcess {
@@ -50,9 +72,9 @@ impl Retirement {
 /// Governs how far the installer may go to free a superseded instance.
 #[derive(Clone, Copy, Debug)]
 pub struct RetirementPolicy {
-    /// Permits a hard kill of a Forge that did not stop when asked. Without
-    /// it a stuck Forge fails the update instead of losing whatever it is
-    /// running.
+    /// Permits retirement even when an authenticated Forge reports active
+    /// work. Without it, only that explicit busy report cancels the update;
+    /// an unresponsive broken Forge is still retired.
     pub force: bool,
 }
 
@@ -64,8 +86,10 @@ pub struct RetirementPolicy {
 /// user staring at the previous build with `active_version` already flipped —
 /// an update that silently did nothing. The editor is a renderer, so it is
 /// closed gracefully and then forced; Forge owns live agent runs and the
-/// database lock, so it is only ever asked to stop through the product's own
-/// orderly path and never killed without `--force`.
+/// database lock, so an authenticated active-work report cancels retirement
+/// unless `--force` was explicit. An unresponsive Forge is treated as broken
+/// and retired so it cannot wedge every future build. Forge is gated first so
+/// a busy refusal leaves the editor open around its work.
 ///
 /// Instances already running the incoming release are deliberately left
 /// alone: focusing those is correct behaviour, not staleness.
@@ -89,15 +113,6 @@ pub fn retire_superseded(
         .iter()
         .partition(|process| process.component(&versions_root).as_deref() == Some("forge"));
 
-    for process in &others {
-        request_close(process.pid);
-    }
-    let editors_left = await_exit(&versions_root, &others, GRACEFUL_WINDOW)?;
-    for process in &editors_left {
-        terminate(process.pid);
-    }
-    retirement.editors_closed = others.len();
-
     if !forges.is_empty() {
         // The product's own stop path: it releases the database lock and
         // settles running work rather than severing it mid-write.
@@ -106,10 +121,61 @@ pub fn retire_superseded(
         // lifecycle path repairs that split-brain view before stopping Forge;
         // capture its diagnostic because process identity below is the final
         // authority for whether retirement actually completed.
+        let mut orderly_stop_accepted = false;
+        let mut busy_refusal = false;
+        let mut unresponsive = Vec::new();
+        let mut stop_diagnostics = Vec::new();
         for process in &forges {
-            let _ = background_command(stable_ae)
-                .args(exact_stop_arguments(process.pid))
+            let output = background_command(stable_ae)
+                .args(exact_stop_arguments(process.pid, !policy.force))
+                .env("ARTISAN_HOME", install_root)
                 .output();
+            let disposition = output
+                .as_ref()
+                .map_or(ForgeStopDisposition::Failed, |output| {
+                    forge_stop_disposition(output.status.code())
+                });
+            match disposition {
+                ForgeStopDisposition::Accepted => {
+                    orderly_stop_accepted = true;
+                    continue;
+                }
+                ForgeStopDisposition::Busy => busy_refusal = true,
+                ForgeStopDisposition::Unresponsive if !policy.force => {
+                    unresponsive.push(*process);
+                }
+                ForgeStopDisposition::Unresponsive | ForgeStopDisposition::Failed => {}
+            }
+            let diagnostic = output.as_ref().map_or_else(
+                |error| format!("could not launch the lifecycle CLI: {error}"),
+                |output| String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            );
+            let diagnostic = if diagnostic.is_empty() {
+                "refused shutdown without a diagnostic".to_owned()
+            } else {
+                diagnostic
+            };
+            let diagnostic = format!("pid {}: {diagnostic}", process.pid);
+            stop_diagnostics.push(diagnostic);
+        }
+        if !policy.force && busy_refusal {
+            return Err(InstallerError::InvalidInstallation(format!(
+                "update cancelled before activation: {}. Forge and its active work were left running",
+                stop_diagnostics.join("; ")
+            )));
+        }
+        if !policy.force && !orderly_stop_accepted && unresponsive.is_empty() {
+            return Err(InstallerError::InvalidInstallation(format!(
+                "update cancelled before activation: no authenticated Forge accepted the idle-only shutdown ({})",
+                stop_diagnostics.join("; ")
+            )));
+        }
+        // The safe refusal above is reserved for an authenticated busy report.
+        // A process that cannot answer the activity endpoint is a broken Forge,
+        // not evidence of live work; retire its owned process tree so a stale
+        // version cannot permanently wedge every subsequent build.
+        for process in unresponsive {
+            terminate(process.pid);
         }
         let stuck = await_exit(&versions_root, &forges, GRACEFUL_WINDOW)?;
         if !stuck.is_empty() {
@@ -131,6 +197,15 @@ pub fn retire_superseded(
         }
         retirement.forges_stopped = forges.len();
     }
+
+    for process in &others {
+        request_close(process.pid);
+    }
+    let editors_left = await_exit(&versions_root, &others, GRACEFUL_WINDOW)?;
+    for process in &editors_left {
+        terminate(process.pid);
+    }
+    retirement.editors_closed = others.len();
 
     Ok(retirement)
 }
@@ -191,21 +266,36 @@ fn same_executable(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn exact_stop_arguments(pid: u32) -> [String; 3] {
-    ["stop".into(), "--pid".into(), pid.to_string()]
+fn exact_stop_arguments(pid: u32, if_idle: bool) -> Vec<String> {
+    let mut arguments = vec!["stop".into(), "--pid".into(), pid.to_string()];
+    if if_idle {
+        arguments.push("--if-idle".into());
+    }
+    arguments
+}
+
+#[cfg(windows)]
+fn windows_discovery_script(versions_root: &Path) -> String {
+    // Matching on the executable path rather than a process name catches every
+    // top-level component of an old release regardless of what it is called.
+    // Forge's embedded Windows process host deliberately runs from the same
+    // executable, but it is an owned engine child rather than an authenticated
+    // lifecycle controller. Stopping the controller retires that whole job;
+    // addressing the child separately can only produce a false unauthenticated
+    // Forge diagnostic while model work is live beneath it.
+    format!(
+        "Get-CimInstance Win32_Process | \
+         Where-Object {{ $_.ExecutablePath -and \
+           $_.ExecutablePath.StartsWith('{}', 'OrdinalIgnoreCase') -and \
+           $_.CommandLine -notlike '*--artisan-internal-windows-process-host*' }} | \
+         ForEach-Object {{ \"$($_.ProcessId)|$($_.ExecutablePath)\" }}",
+        versions_root.display().to_string().replace('\'', "''")
+    )
 }
 
 #[cfg(windows)]
 fn discover(versions_root: &Path) -> Result<Vec<RunningProcess>> {
-    // Matching on the executable path rather than a process name catches every
-    // component of an old release — editor, helpers, Forge host — regardless of
-    // what each one is called.
-    let script = format!(
-        "Get-CimInstance Win32_Process | \
-         Where-Object {{ $_.ExecutablePath -and $_.ExecutablePath.StartsWith('{}', 'OrdinalIgnoreCase') }} | \
-         ForEach-Object {{ \"$($_.ProcessId)|$($_.ExecutablePath)\" }}",
-        versions_root.display().to_string().replace('\'', "''")
-    );
+    let script = windows_discovery_script(versions_root);
     let output = background_command("powershell.exe")
         .args([
             "-NoProfile",
@@ -356,8 +446,41 @@ mod tests {
     #[test]
     fn orderly_retirement_targets_the_discovered_forge_pid() {
         assert_eq!(
-            exact_stop_arguments(6172),
+            exact_stop_arguments(6172, true),
+            ["stop", "--pid", "6172", "--if-idle"].map(str::to_owned)
+        );
+        assert_eq!(
+            exact_stop_arguments(6172, false),
             ["stop", "--pid", "6172"].map(str::to_owned)
         );
+    }
+
+    #[test]
+    fn only_an_authenticated_busy_report_cancels_safe_retirement() {
+        assert_eq!(
+            forge_stop_disposition(Some(FORGE_BUSY_EXIT_CODE)),
+            ForgeStopDisposition::Busy
+        );
+        assert_eq!(
+            forge_stop_disposition(Some(FORGE_ACTIVITY_UNAVAILABLE_EXIT_CODE)),
+            ForgeStopDisposition::Unresponsive
+        );
+        assert_eq!(
+            forge_stop_disposition(Some(0)),
+            ForgeStopDisposition::Accepted
+        );
+        assert_eq!(
+            forge_stop_disposition(Some(1)),
+            ForgeStopDisposition::Failed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discovery_keeps_the_owned_engine_host_out_of_forge_control() {
+        let script = windows_discovery_script(Path::new("C:/Artisan/versions"));
+
+        assert!(script.contains("--artisan-internal-windows-process-host"));
+        assert!(script.contains("-notlike"));
     }
 }

@@ -31,39 +31,85 @@ const assistant_message = (id: string) =>
 		type: "assistant_message",
 	}) as ConversationSnapshot["items"][number];
 
+const make_snapshot = (
+	items: ReadonlyArray<ConversationSnapshot["items"][number]>,
+	window?: ConversationSnapshot["window"],
+) =>
+	({
+		conversation_id: "conversation-navigator",
+		items,
+		journal_sequence: 0,
+		last_patch_sequence: 0,
+		schema_version: 1,
+		thread_id: "thread-navigator",
+		turns: [],
+		updated_at: "2026-08-16T00:00:00.000Z",
+		...(window === undefined ? {} : { window }),
+	}) as unknown as ConversationSnapshot;
+
 describe("conversation turn navigator", () => {
 	it("marks what you said and ignores what came back", () => {
-		const markers = ConversationTurnMarkers([
-			user_message("a", "do a timeline of the history of oslo børs"),
-			assistant_message("b"),
-			user_message("c", "why was it called christinia and then oslo?"),
-		]);
+		const markers = ConversationTurnMarkers(
+			make_snapshot([
+				user_message("a", "do a timeline of the history of oslo børs"),
+				assistant_message("b"),
+				user_message("c", "why was it called christinia and then oslo?"),
+			]),
+		);
 
 		expect(markers).toEqual([
-			{ id: "a", label: "do a timeline of the history of oslo børs" },
-			{ id: "c", label: "why was it called christinia and then oslo?" },
+			{ id: "a", label: "do a timeline of the history of oslo børs", ordinal: 0 },
+			{ id: "c", label: "why was it called christinia and then oslo?", ordinal: 0 },
 		]);
 	});
 
 	/** A control that can only take you where you already are is noise. */
 	it("offers nothing to navigate in a transcript with one turn or none", () => {
-		expect(ConversationTurnMarkers([])).toEqual([]);
-		expect(ConversationTurnMarkers([user_message("a", "only turn")])).toEqual([]);
+		expect(ConversationTurnMarkers(make_snapshot([]))).toEqual([]);
+		expect(ConversationTurnMarkers(make_snapshot([user_message("a", "only turn")]))).toEqual(
+			[],
+		);
 	});
 
 	it("flattens a multi-line message so a preview cannot break its row", () => {
-		const [marker] = ConversationTurnMarkers([
-			user_message("a", "  first line\n\n\tsecond   line  "),
-			user_message("b", "another"),
-		]);
+		const [marker] = ConversationTurnMarkers(
+			make_snapshot([
+				user_message("a", "  first line\n\n\tsecond   line  "),
+				user_message("b", "another"),
+			]),
+		);
 
 		expect(marker?.label).toBe("first line second line");
 	});
 
 	it("drops a message with nothing quotable rather than listing a blank row", () => {
 		expect(
-			ConversationTurnMarkers([user_message("a", "   \n  "), user_message("b", "real")]),
+			ConversationTurnMarkers(
+				make_snapshot([user_message("a", "   \n  "), user_message("b", "real")]),
+			),
 		).toEqual([]);
+	});
+
+	/** A windowed snapshot still lists what you said below its loaded floor. */
+	it("interleaves remote markers below the floor with loaded messages", () => {
+		const loaded = {
+			...user_message("recent", "the loaded question"),
+			ordinal: 40,
+		} as ConversationSnapshot["items"][number];
+		const markers = ConversationTurnMarkers(
+			make_snapshot([loaded], {
+				markers: [
+					{ id: "ancient", label: "the first\nquestion", ordinal: 2, turn_ordinal: 1 },
+					{ id: "recent", label: "the loaded question", ordinal: 40, turn_ordinal: 39 },
+				],
+				total_turn_count: 20,
+			}),
+		);
+
+		expect(markers).toEqual([
+			{ id: "ancient", label: "the first question", ordinal: 2, turn_ordinal: 1 },
+			{ id: "recent", label: "the loaded question", ordinal: 40 },
+		]);
 	});
 
 	/**
@@ -126,6 +172,8 @@ describe("conversation turn navigator surface", () => {
 		expect(navigator).toContain(
 			"conversation-range-backdrop pointer-events-none absolute inset-0",
 		);
+		expect(navigator).toContain("shader-glass-backdrop radius-surface");
+		expect(navigator).toContain("use_backdrop_filter={false}");
 		/** The same radius vocabulary the card facing it across the transcript uses. */
 		for (const token of [
 			"[--radius-gap:var(--spacing)]",
@@ -196,7 +244,7 @@ describe("conversation turn navigator surface", () => {
 
 	it("jumps to the turn and stops the tail from pulling the reader off it", () => {
 		expect(workspace).toContain("<ConversationTurnNavigator");
-		expect(workspace).toContain("ConversationTurnMarkers(snapshot.items)");
+		expect(workspace).toContain("ConversationTurnMarkers(snapshot)");
 		expect(workspace).toContain("ActiveConversationTurn(offsets)");
 		expect(workspace).toContain("const SelectTurn = (marker: ConversationTurnMarker)");
 		expect(workspace).toContain("ConversationOlderGroupCountForItem(");

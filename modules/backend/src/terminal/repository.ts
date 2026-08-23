@@ -342,6 +342,7 @@ export const TerminalRepositoryLive = Layer.effect(
 			ReadOwned: queries.ReadOwned,
 			ReadStale: queries.ReadStale,
 			RecoverStale: commits.RecoverStale,
+			SettleObservedRun: observed.SettleObservedRun,
 		};
 	}),
 ).pipe(

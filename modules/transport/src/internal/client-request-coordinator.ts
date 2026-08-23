@@ -10,7 +10,7 @@ import type { ArtisanClientError } from "../client-api/service";
 import {
 	client_error,
 	protocol_client_error,
-	RequestDelivered,
+	RequestDeliveryInFlight,
 	RequestHeld,
 	type PendingRequestEnvelope,
 	type PendingResultEnvelope,
@@ -29,6 +29,8 @@ interface PendingRequest {
 	 * corrected whenever a send reports which of the two actually happened.
 	 */
 	readonly delivery: RequestDelivery;
+	/** Survives state replacement so a deadline can retire the session that last carried it. */
+	readonly observed_delivery: Ref.Ref<RequestDelivery>;
 	readonly envelope: PendingRequestEnvelope;
 	readonly accepts: (envelope: PendingResultEnvelope) => boolean;
 	/** A reconnect fiber has atomically claimed this exact registration for resend. */
@@ -60,6 +62,10 @@ type PendingMatch =
 	| { readonly _tag: "Missing" };
 
 export type RequestDeadline = (kind: PendingRequestEnvelope["kind"]) => number;
+
+export type RequestTimeoutRecovery = (
+	delivery: RequestDelivery,
+) => Effect.Effect<void, ArtisanClientError>;
 
 /**
  * Bounds every control request. Local projection and settings RPCs must answer
@@ -214,6 +220,7 @@ export interface ClientRequestCoordinator {
 export const make_client_request_coordinator = (
 	send_request: SendRequest,
 	request_deadline: RequestDeadline = request_deadline_ms_for,
+	recover_timed_out_request: RequestTimeoutRecovery = () => Effect.void,
 ) =>
 	Effect.gen(function* () {
 		const state = yield* Ref.make<RequestState>({
@@ -263,21 +270,27 @@ export const make_client_request_coordinator = (
 
 		/** Records what a send turned out to be, for this caller's registration only. */
 		const record_delivery = (request: PendingRequest, delivery: RequestDelivery) =>
-			Ref.update(state, (current) => {
-				const found = held_by(current, request);
+			Effect.all(
+				[
+					Ref.set(request.observed_delivery, delivery),
+					Ref.update(state, (current) => {
+						const found = held_by(current, request);
 
-				if (found === undefined) {
-					return current;
-				}
+						if (found === undefined) {
+							return current;
+						}
 
-				return {
-					...current,
-					pending: new Map(current.pending).set(request.envelope.message_id, {
-						...found,
-						delivery,
+						return {
+							...current,
+							pending: new Map(current.pending).set(request.envelope.message_id, {
+								...found,
+								delivery,
+							}),
+						};
 					}),
-				};
-			});
+				],
+				{ discard: true },
+			);
 
 		/** Drops a request nothing will answer, leaving its id free to be reused. */
 		const forget = (request: PendingRequest) =>
@@ -332,13 +345,15 @@ export const make_client_request_coordinator = (
 		const request = <Request extends PendingRequestEnvelope>(envelope: Request) =>
 			Effect.gen(function* () {
 				const deferred = yield* Deferred.make<PendingResultEnvelope, ArtisanClientError>();
+				const observed_delivery = yield* Ref.make<RequestDelivery>(RequestDeliveryInFlight);
 				const rpc = GetControlRpc(envelope.kind);
 				const pending = {
 					accepts: Schema.is(rpc.successSchema),
 					abandoned: false,
 					deferred,
-					delivery: RequestDelivered,
+					delivery: RequestDeliveryInFlight,
 					envelope,
+					observed_delivery,
 					retrying: false,
 				};
 				const registration = yield* register(pending);
@@ -382,15 +397,23 @@ export const make_client_request_coordinator = (
 							Effect.timeoutOrElse({
 								duration: request_deadline(envelope.kind),
 								orElse: () =>
-									Effect.fail(
-										client_error(
-											"connection",
-											`Artisan Forge did not answer the ${envelope.kind} request before its deadline.`,
-											new Error("request deadline exceeded"),
-											true,
-											"request.timeout",
-										),
-									),
+									Effect.gen(function* () {
+										/** Queries are idempotent, so their silence is evidence against the session. */
+										if (envelope.kind.endsWith(".query")) {
+											yield* recover_timed_out_request(
+												yield* Ref.get(observed_delivery),
+											);
+										}
+										return yield* Effect.fail(
+											client_error(
+												"connection",
+												`Artisan Forge did not answer the ${envelope.kind} request before its deadline.`,
+												new Error("request deadline exceeded"),
+												true,
+												"request.timeout",
+											),
+										);
+									}),
 							}),
 						)) as ControlRpcSuccessFor<Request>;
 				}
@@ -517,7 +540,7 @@ export const make_client_request_coordinator = (
 						pending: new Map(current.pending).set(request.envelope.message_id, {
 							...found,
 							/** Pessimistic until send reports otherwise. */
-							delivery: RequestDelivered,
+							delivery: RequestDeliveryInFlight,
 							retrying: true,
 						}),
 					},
@@ -550,7 +573,7 @@ export const make_client_request_coordinator = (
 				const ignored_correlations = new Set(current.ignored_correlations);
 				ignored_correlations.add(request.envelope.message_id);
 				return { ...current, ignored_correlations, pending };
-			});
+			}).pipe(Effect.andThen(Ref.set(request.observed_delivery, delivery)));
 
 		/**
 		 * A held request becomes an answered one here, so each resend reports

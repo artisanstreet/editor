@@ -26,7 +26,7 @@
 		MotionEasing,
 		RunUpFrom,
 	} from "$lib/identity/usage-window-motion";
-	import { weekly_reset_duration } from "$lib/identity/weekly-reset";
+	import { usage_reset_duration } from "$lib/identity/usage-reset";
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import ShaderGlassSurface from "./shader-glass-surface.svelte";
 	import UsageWindowTooltip from "./usage-window-tooltip.svelte";
@@ -82,22 +82,49 @@
 		unknown: "Usage",
 		weekly: "Weekly",
 	};
-	const WindowLabel = (usage_window: EngineUsageWindow): string =>
-		usage_window.label ?? window_kind_labels[usage_window.kind];
+	/** Shortest cadence first; windows of unrecognized cadence sink to the end. */
+	const window_kind_order: ReadonlyArray<EngineUsageWindow["kind"]> = [
+		"session",
+		"weekly",
+		"monthly",
+		"unknown",
+	];
 	/**
-	 * Deduplicated by id before the keyed eachs below. The protocol does not
-	 * forbid a provider reporting the same bucket twice — Claude's CLI repeats
-	 * its weekly line in some layouts — and a duplicate key does not degrade,
-	 * it throws, killing every engine section after the one that repeated.
+	 * Names the account or model a meter measures, never its cadence — the
+	 * cadence is the subheader above it. A provider's bucket label says nothing
+	 * about cadence (Codex stamps the same model name on a 5-hour and a weekly
+	 * bucket), so labels may only ever appear under a cadence subheader. An
+	 * unlabeled window is the provider's account-wide bucket, which Claude's
+	 * own /usage calls "all models".
+	 */
+	const WindowScopeLabel = (usage_window: EngineUsageWindow): string =>
+		usage_window.label ?? "All models";
+	/**
+	 * One group per reported cadence, shortest first, the account-wide bucket
+	 * leading the model buckets inside each group. Deduplicated by id before
+	 * the keyed eachs below: the protocol does not forbid a provider reporting
+	 * the same bucket twice — Claude's CLI repeats its weekly line in some
+	 * layouts — and a duplicate key does not degrade, it throws, killing every
+	 * engine section after the one that repeated.
 	 */
 	const GroupWindows = (windows: ReadonlyArray<EngineUsageWindow>) => {
 		const unique = [
 			...new Map(windows.map((usage_window) => [usage_window.id, usage_window])).values(),
 		];
-		return {
-			extended: unique.filter((usage_window) => usage_window.kind !== "session"),
-			session: unique.filter((usage_window) => usage_window.kind === "session"),
-		};
+		return window_kind_order
+			.map((kind) => ({
+				kind,
+				title: window_kind_labels[kind],
+				windows: [
+					...unique.filter(
+						(usage_window) => usage_window.kind === kind && usage_window.label === undefined,
+					),
+					...unique.filter(
+						(usage_window) => usage_window.kind === kind && usage_window.label !== undefined,
+					),
+				],
+			}))
+			.filter((group) => group.windows.length > 0);
 	};
 
 	const motion_duration = yield* MotionDuration();
@@ -201,14 +228,14 @@
 	<Tooltip
 		onOpenChange={(is_open) => {
 			if (is_open)
-				window_reads.ReplaceUnsafe(`usage-window:${usage_entry.kind}`, usage_entry);
+				window_reads.ReplaceUnsafe(`usage-window:${usage_entry.id}`, usage_entry);
 		}}
 	>
 		<TooltipTrigger>
 			{#snippet child({ props: tooltip_props })}
 				<span {...tooltip_props} class="flex items-center gap-4 outline-none">
-					<span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-						{WindowLabel(usage_entry)}
+					<span class="min-w-0 flex-1 truncate pl-2 text-xs text-muted-foreground">
+						{WindowScopeLabel(usage_entry)}
 					</span>
 					<span
 						class="t-usage-meter h-2 w-18 min-w-18 shrink-0"
@@ -269,7 +296,6 @@
 				{#if row.kind === "authenticated"}
 					{@const engine = row.report}
 					{@const groups = GroupWindows(engine.windows)}
-					{@const weekly_reset = weekly_reset_duration(engine.windows, checked_at_ms)}
 					{@const engine_checked_label = CheckedLabel(engine.engine_id)}
 					<div class="flex flex-col gap-1.5 px-2 py-1">
 						<div class="flex items-center justify-between gap-2">
@@ -292,19 +318,28 @@
 								</button>
 							{/if}
 						</div>
-						{#if groups.session.length > 0}
-							<div class="flex flex-col gap-1.5">
-								{#each groups.session as usage_entry (usage_entry.id)}{@render usage_window(usage_entry, mark.accent)}{/each}
+						<!--
+							One group per cadence the provider disclosed, its subheader
+							naming that cadence exactly once. Rows beneath it name only
+							what the meter measures, so two buckets of one model on
+							different cadences stay distinguishable.
+						-->
+						{#each groups as group, group_index (group.kind)}
+							{@const reset_duration = usage_reset_duration(group.windows, checked_at_ms)}
+							<div class="flex flex-col gap-1.5" class:mt-2={group_index > 0}>
+								<span class="text-xs font-medium text-foreground">
+									{group.title}
+								</span>
+								{#each group.windows as usage_entry (usage_entry.id)}{@render usage_window(usage_entry, mark.accent)}{/each}
+								{#if reset_duration !== undefined}
+									<span class="mt-2 text-xs text-muted-foreground">
+										Your {group.title.toLowerCase()} limit resets in <span class="text-foreground"
+											>{reset_duration}</span
+										>.
+									</span>
+								{/if}
 							</div>
-						{/if}
-						{#if groups.extended.length > 0}
-							<div class="flex flex-col gap-1.5" class:mt-2={groups.session.length > 0}>
-								{#each groups.extended as usage_entry (usage_entry.id)}{@render usage_window(usage_entry, mark.accent)}{/each}
-							</div>
-						{/if}
-						{#if weekly_reset !== undefined}
-							<span class="mt-2 text-xs text-muted-foreground">Your weekly limit resets in <span class="text-foreground">{weekly_reset}</span>.</span>
-						{/if}
+						{/each}
 					</div>
 				{:else if row.kind === "pending"}
 					<!--

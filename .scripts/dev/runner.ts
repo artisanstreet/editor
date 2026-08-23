@@ -26,6 +26,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { NodeRuntime } from "@effect/platform-node-shared";
 import { Runner } from "@artisanstreet/runner";
+import { restore_terminal_presentation } from "@artisanstreet/checklist";
 import { Effect, Schema } from "effect";
 import { ChildProcess as RunnerChildProcess } from "effect/unstable/process";
 import { watch, type RolldownWatcher, type RolldownWatcherEvent } from "rolldown";
@@ -813,7 +814,7 @@ if (runner_is_entry) {
 					cwd: repository_root,
 					env: process.env,
 					stdio: ["inherit", "inherit", "inherit", "pipe", "pipe"],
-					windowsHide: false,
+					windowsHide: true,
 				});
 			} catch (cause) {
 				console.error(
@@ -829,9 +830,17 @@ if (runner_is_entry) {
 			let closing = false;
 			let force_close_timeout: NodeJS.Timeout | undefined;
 			const pending_events: DevTuiEvent[] = [];
+			const emergency_exit = () => {
+				if (child.exitCode === null && !child.killed) child.kill();
+				restore_terminal_presentation();
+			};
+			process.once("exit", emergency_exit);
+			const release_emergency_exit = () => process.removeListener("exit", emergency_exit);
 
 			if (!active || event_stream === null || command_stream === null) {
 				child.kill();
+				release_emergency_exit();
+				restore_terminal_presentation();
 				return undefined;
 			}
 
@@ -890,12 +899,15 @@ if (runner_is_entry) {
 			child.once("error", (cause) => {
 				active = false;
 				pending_events.length = 0;
+				restore_terminal_presentation();
 				console.error(`[dev] dashboard could not start: ${cause.message}`);
 			});
 			child.once("exit", (code) => {
 				active = false;
 				pending_events.length = 0;
 				if (force_close_timeout !== undefined) clearTimeout(force_close_timeout);
+				release_emergency_exit();
+				restore_terminal_presentation();
 				event_stream.destroy();
 				command_stream.destroy();
 				if (!closing && !shutting_down) {
@@ -911,6 +923,7 @@ if (runner_is_entry) {
 					closing = true;
 					active = false;
 					pending_events.length = 0;
+					restore_terminal_presentation();
 
 					if (!event_stream.destroyed && !event_stream.writableEnded) {
 						event_stream.end(`${JSON.stringify({ type: "shutdown" })}\n`);
@@ -945,7 +958,10 @@ if (runner_is_entry) {
 			if (child.pid === undefined || child.exitCode !== null) return;
 
 			if (process.platform === "win32") {
-				spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+				spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+					stdio: "ignore",
+					windowsHide: true,
+				});
 				return;
 			}
 
@@ -1179,7 +1195,10 @@ if (runner_is_entry) {
 					set_lane_status("web", "ready");
 					log(`opening ${endpoints.web.origin} (paired)`, "web");
 					if (process.platform === "win32") {
-						spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
+						spawnSync("cmd", ["/c", "start", "", url], {
+							stdio: "ignore",
+							windowsHide: true,
+						});
 					}
 					return;
 				}
@@ -1261,7 +1280,10 @@ if (runner_is_entry) {
 				}
 				console.log(url);
 				if (process.platform === "win32") {
-					spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
+					spawnSync("cmd", ["/c", "start", "", url], {
+						stdio: "ignore",
+						windowsHide: true,
+					});
 				}
 				return;
 			}

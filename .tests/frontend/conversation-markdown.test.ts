@@ -58,7 +58,7 @@ describe("conversation markdown dialect", () => {
 });
 
 describe("conversation markdown rendering", () => {
-	it("renders assistant messages through the markdown renderer with lifecycle-driven streaming", () => {
+	it("renders assistant messages with owning-run and lifecycle streaming gates", () => {
 		const message = ReadSource(
 			"modules/frontend/src/routes/components/conversation-message.svelte",
 		);
@@ -67,7 +67,7 @@ describe("conversation markdown rendering", () => {
 			'import MarkdownContent from "$lib/components/markdown/content.svelte"',
 		);
 		expect(message).toContain(
-			'<MarkdownContent streaming={item.lifecycle === "streaming"} text={item.text} />',
+			'streaming={message_streaming && item.lifecycle === "streaming"}',
 		);
 	});
 
@@ -99,7 +99,8 @@ describe("conversation markdown rendering", () => {
 		 */
 		expect(content).toContain("createParse");
 		expect(content).toContain("{ streaming: true }");
-		expect(content).toContain("tree={rendered_tree}");
+		expect(content).toContain("tree={visible_tree}");
+		expect(content).toContain("rendered_tree ?? empty_tree");
 		expect(content).toContain("ProseStreamWord: StreamWord");
 		/** A blinking pipe is not part of the reveal; the incoming word is the cue. */
 		expect(content).not.toMatch(/^\s*caret\s*$/mu);

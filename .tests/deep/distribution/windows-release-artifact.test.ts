@@ -67,6 +67,7 @@ describe("Windows distribution release artifact", () => {
 			writeFile(join(editor_root, "Artisan Editor.exe"), "editor"),
 			writeFile(join(editor_root, "resources", "app.asar"), "asar"),
 			writeFile(join(editor_root, "resources", "artisan-forge", "duplicate.txt"), "excluded"),
+			writeFile(join(forge_root, "Artisan Broker.exe"), "broker"),
 			writeFile(join(forge_root, "Artisan Forge.exe"), "forge"),
 			writeFile(native_installer_path, "native bootstrap"),
 			writeFile(native_cli_path, "native ae"),
@@ -119,6 +120,7 @@ describe("Windows distribution release artifact", () => {
 			"bin/ae.exe",
 			"editor/Artisan Editor.exe",
 			"editor/resources/app.asar",
+			"forge/Artisan Broker.exe",
 			"forge/Artisan Forge.exe",
 		]);
 		expect([...archive.keys()]).toEqual(first.archive_entries);
@@ -166,6 +168,7 @@ describe("Windows distribution release artifact", () => {
 		await Promise.all([
 			writeFile(join(editor_root, "Artisan Editor.exe"), "editor"),
 			writeFile(join(editor_root, "resources", "app.asar"), "asar"),
+			writeFile(join(forge_root, "Artisan Broker.exe"), "broker"),
 			writeFile(join(forge_root, "Artisan Forge.exe"), "sea"),
 			writeFile(join(forge_root, legacy_entry), "legacy"),
 		]);

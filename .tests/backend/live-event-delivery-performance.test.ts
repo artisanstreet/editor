@@ -163,32 +163,34 @@ const subscriptions_for = (tags: ReadonlyArray<ProjectionSubscription["_tag"]>) 
 									}
 								: tag === "thread.session"
 									? { ...common, _tag: tag, thread_id: graph_event.thread_id }
-									: tag === "surface.list"
-										? {
-												...common,
-												_tag: tag,
-												query: { thread_id: graph_event.thread_id },
-											}
-										: tag === "workspace.conflict.list"
+									: tag === "thread.work"
+										? { ...common, _tag: tag, thread_id: graph_event.thread_id }
+										: tag === "surface.list"
 											? {
 													...common,
 													_tag: tag,
-													thread_id: graph_event.thread_id,
+													query: { thread_id: graph_event.thread_id },
 												}
-											: tag === "surface.usage.aggregate"
+											: tag === "workspace.conflict.list"
 												? {
 														...common,
 														_tag: tag,
-														query: {
-															scope: "run",
-															scope_id: "run_live_projection",
-														},
+														thread_id: graph_event.thread_id,
 													}
-												: {
-														...common,
-														_tag: "orchestration.graph",
-														group_id: "group_live_projection",
-													};
+												: tag === "surface.usage.aggregate"
+													? {
+															...common,
+															_tag: tag,
+															query: {
+																scope: "run",
+																scope_id: "run_live_projection",
+															},
+														}
+													: {
+															...common,
+															_tag: "orchestration.graph",
+															group_id: "group_live_projection",
+														};
 				return [`${tag}_${index}`, subscription];
 			}),
 		),
@@ -211,6 +213,7 @@ const Deliver = (
 			surfaces: 0,
 			transcript: 0,
 			usage_scope: 0,
+			work: 0,
 		});
 		const subscriptions = subscriptions_for(tags);
 		/** Delivery only serves claimed subscriptions; every registered id shares one live claim here. */
@@ -273,6 +276,7 @@ const Deliver = (
 				OrchestrationRepository,
 				OrchestrationRepository.of({
 					GetSession: () => increment("session").pipe(Effect.as({})),
+					GetWork: () => increment("work").pipe(Effect.as(undefined)),
 				} as never),
 			),
 			Effect.provideService(
@@ -355,6 +359,10 @@ describe("live event delivery performance", () => {
 			}),
 		);
 		const session = await Effect.runPromise(Deliver([session_event], ["thread.session"]));
+		const work = await Effect.runPromise(Deliver([graph_event], ["thread.work"]));
+		const other_thread_work = await Effect.runPromise(
+			Deliver([{ ...graph_event, thread_id: "thread_other" }], ["thread.work"]),
+		);
 
 		/**
 		 * Conversation is the one projection never skipped: its patches are
@@ -373,6 +381,7 @@ describe("live event delivery performance", () => {
 			surfaces: 0,
 			transcript: 0,
 			usage_scope: 0,
+			work: 0,
 		});
 		expect(surfaces).toMatchObject({
 			aggregate: 1,
@@ -404,6 +413,8 @@ describe("live event delivery performance", () => {
 			usage_scope: 1,
 		});
 		expect(session.session).toBe(1);
+		expect(work.work).toBe(1);
+		expect(other_thread_work.work).toBe(0);
 	});
 
 	it("refreshes durable projections for provider observations without widening graph commands", async () => {

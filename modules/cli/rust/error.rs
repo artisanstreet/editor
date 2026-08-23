@@ -8,6 +8,12 @@ pub enum CliError {
     MissingInstance,
     #[error("Forge is not running")]
     NotRunning,
+    #[error(
+        "Forge is doing work ({active_work_count} active model run(s)); refusing idle-only shutdown"
+    )]
+    ForgeBusy { active_work_count: usize },
+    #[error("Forge cannot report active work; refusing idle-only shutdown")]
+    ForgeActivityUnavailable,
     #[error("Forge control request failed: {0}")]
     Control(String),
     #[error("unsupported operation: {0}")]
@@ -35,6 +41,8 @@ impl CliError {
         match self {
             Self::MissingInstance | Self::NotRunning => 3,
             Self::Installation(_) => 4,
+            Self::ForgeBusy { .. } => 5,
+            Self::ForgeActivityUnavailable => 6,
             _ => 1,
         }
     }

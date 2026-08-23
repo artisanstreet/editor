@@ -28,9 +28,17 @@ import {
 	FinishScrollback,
 	FollowScrollback,
 	MakeTerminalScrollback,
+	ReadScrollback,
 	SnapshotScrollback,
 	type TerminalScrollback,
 } from "./scrollback";
+import {
+	AdoptObservedTerminalActivity,
+	ObservedTerminalId,
+	type ObservedTerminalActivity,
+	type ObservedTerminalContext,
+	type ObservedTerminalSettlement,
+} from "./observed";
 import {
 	TerminalInvariantError,
 	TerminalNotActive,
@@ -86,6 +94,10 @@ export interface TerminalCommandAcceptance {
 export class TerminalSessionService extends Context.Service<
 	TerminalSessionService,
 	{
+		readonly AdoptObserved: (
+			activity: ObservedTerminalActivity,
+			context: ObservedTerminalContext,
+		) => Effect.Effect<void, TerminalSessionError>;
 		readonly Handle: (
 			command: CommandEnvelope,
 		) => Effect.Effect<TerminalCommandAcceptance, TerminalSessionError>;
@@ -105,6 +117,10 @@ export class TerminalSessionService extends Context.Service<
 		readonly ReadOutput: (
 			terminal_id: string,
 		) => Effect.Effect<Stream.Stream<Uint8Array>, TerminalSessionError>;
+		readonly SettleObservedRun: (
+			run_id: string,
+			settlement: ObservedTerminalSettlement,
+		) => Effect.Effect<void, TerminalSessionError>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void, TerminalSessionError>;
 	}
 >()("Artisan/TerminalSessionService") {}
@@ -168,6 +184,7 @@ export const TerminalSessionServiceLive = Layer.effect(
 				readonly thread_id: string;
 			}>
 		>([]);
+		const output_encoder = new TextEncoder();
 
 		const RetireScrollback = (terminal_id: string, scrollback: TerminalScrollback) =>
 			Effect.gen(function* () {
@@ -209,6 +226,92 @@ export const TerminalSessionServiceLive = Layer.effect(
 
 					return next;
 				});
+			});
+
+		const ObservedScrollback = (
+			activity: ObservedTerminalActivity,
+			context: ObservedTerminalContext,
+		) =>
+			Effect.gen(function* () {
+				const terminal_id = ObservedTerminalId(activity.activity_id);
+				const current = (yield* Ref.get(scrollbacks)).get(terminal_id);
+				if (
+					current?.thread_id === context.thread_id &&
+					current.workspace_id === context.workspace_id
+				) {
+					return current;
+				}
+
+				const scrollback = yield* MakeTerminalScrollback({
+					generation: 1,
+					thread_id: context.thread_id,
+					workspace_id: context.workspace_id,
+				});
+				yield* Ref.update(scrollbacks, (entries) =>
+					new Map(entries).set(terminal_id, scrollback),
+				);
+				return scrollback;
+			});
+
+		const AppendObservedOutput = (
+			scrollback: TerminalScrollback,
+			activity: ObservedTerminalActivity,
+		) =>
+			Effect.gen(function* () {
+				if (activity.output === undefined || activity.output.length === 0) return;
+				const bytes = output_encoder.encode(activity.output);
+
+				if (activity.state === "output") {
+					yield* AppendScrollback(scrollback, bytes, SCROLLBACK_LIMIT_BYTES);
+					return;
+				}
+
+				/**
+				 * Codex repeats the full aggregate on completion after streaming deltas.
+				 * Append only its unseen suffix; Claude reports output only on completion,
+				 * so its empty scrollback receives the whole result.
+				 */
+				const retained = yield* ReadScrollback(scrollback);
+				const extends_retained =
+					bytes.length >= retained.length &&
+					retained.every((byte, index) => bytes[index] === byte);
+				if (!extends_retained) return;
+				yield* AppendScrollback(
+					scrollback,
+					bytes.slice(retained.length),
+					SCROLLBACK_LIMIT_BYTES,
+				);
+			});
+
+		const AdoptObserved = (
+			activity: ObservedTerminalActivity,
+			context: ObservedTerminalContext,
+		) =>
+			Effect.gen(function* () {
+				const terminal_id = ObservedTerminalId(activity.activity_id);
+				const scrollback = yield* ObservedScrollback(activity, context);
+				yield* AppendObservedOutput(scrollback, activity);
+
+				const session = AdoptObservedTerminalActivity(activity, context);
+				if (session !== undefined) {
+					yield* repository.AdoptObserved(session, metadata.instance_id);
+				}
+
+				if (activity.state === "completed" || activity.state === "failed") {
+					yield* RetireScrollback(terminal_id, scrollback);
+				}
+			});
+
+		const SettleObservedRun = (run_id: string, settlement: ObservedTerminalSettlement) =>
+			Effect.gen(function* () {
+				const settled = yield* repository.SettleObservedRun(run_id, settlement);
+				const retained = yield* Ref.get(scrollbacks);
+				for (const terminal of settled) {
+					const scrollback = retained.get(terminal.terminal_id);
+					if (scrollback !== undefined) {
+						yield* RetireScrollback(terminal.terminal_id, scrollback);
+					}
+				}
 			});
 
 		const PumpOutput = (
@@ -749,6 +852,7 @@ export const TerminalSessionServiceLive = Layer.effect(
 		});
 
 		return {
+			AdoptObserved,
 			Handle,
 			HandleAsAgent,
 			List: repository.List,
@@ -774,6 +878,7 @@ export const TerminalSessionServiceLive = Layer.effect(
 							: Effect.fail(new TerminalNotActive({ terminal_id }));
 					}),
 				),
+			SettleObservedRun,
 			QuiesceThread,
 		};
 	}),

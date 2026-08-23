@@ -8,16 +8,17 @@
  */
 
 import type { Project, ThreadListItem } from "@artisan/protocol";
+import { ThreadLastMessageAt } from "./thread-navigation";
 
 /** One project as the selector needs it: an identity, a place in time, its weight. */
 export type RecentProject = {
 	/**
-	 * When work last happened here. A project's own `updated_at` is a catalog
+	 * When a message was last sent here. A project's own `updated_at` is a catalog
 	 * row's stamp — it moves when the folder is attached or renamed — so the
-	 * threads inside it are the better witness, and the row is only the fallback
-	 * for a project nobody has opened a thread in yet.
+	 * threads inside it are the better witness. The row is only the fallback for
+	 * a project that has no thread messages yet.
 	 */
-	readonly last_activity_at: string;
+	readonly last_message_at: string;
 	readonly project: Project;
 	readonly thread_count: number;
 };
@@ -30,33 +31,34 @@ export const RecentProjects = (
 	projects: ReadonlyArray<Project>,
 	threads: ReadonlyArray<ThreadListItem>,
 ): ReadonlyArray<RecentProject> => {
-	const activity = new Map<string, { last_activity_at: string; thread_count: number }>();
+	const activity = new Map<string, { last_message_at: string; thread_count: number }>();
 	for (const thread of threads) {
 		const project_id = thread.primary_project?.project_id;
 		if (project_id === undefined) continue;
+		const last_message_at = ThreadLastMessageAt(thread);
 		const seen = activity.get(project_id);
 		if (seen === undefined) {
 			activity.set(project_id, {
-				last_activity_at: thread.last_activity_at,
+				last_message_at,
 				thread_count: 1,
 			});
 			continue;
 		}
 		seen.thread_count += 1;
-		if (thread.last_activity_at.localeCompare(seen.last_activity_at) > 0)
-			seen.last_activity_at = thread.last_activity_at;
+		if (last_message_at.localeCompare(seen.last_message_at) > 0)
+			seen.last_message_at = last_message_at;
 	}
 
 	return [...projects]
 		.map((project): RecentProject => {
 			const seen = activity.get(project.project_id);
 			return {
-				last_activity_at: seen?.last_activity_at ?? project.updated_at,
+				last_message_at: seen?.last_message_at ?? project.updated_at,
 				project,
 				thread_count: seen?.thread_count ?? 0,
 			};
 		})
-		.sort((left, right) => right.last_activity_at.localeCompare(left.last_activity_at));
+		.sort((left, right) => right.last_message_at.localeCompare(left.last_message_at));
 };
 
 /**

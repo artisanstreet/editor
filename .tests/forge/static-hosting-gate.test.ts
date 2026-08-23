@@ -16,6 +16,7 @@ import { ForgeChildEnvironment } from "../../modules/cli/src/node-launcher";
 const test_instance_id = "9adf07cc-4e56-4be2-bb70-6a1f6f7b2b41";
 
 const launcher_artifact = {
+	broker_executable_path: "C:/artisan/Artisan Broker.exe",
 	executable_path: "C:/artisan/Artisan Forge.exe",
 	host_entry_path: "C:/artisan/host.js",
 	migrations_path: "C:/artisan/migrations",
@@ -66,6 +67,8 @@ describe("static hosting production gate", () => {
 		expect(child_environment(undefined)).not.toHaveProperty("ARTISAN_STATIC_FRONTEND_ROOT");
 		expect(child_environment(false)).not.toHaveProperty("ARTISAN_STATIC_FRONTEND_ROOT");
 		expect(child_environment(true)).toMatchObject({
+			ARTISAN_BROKER_PATH: "C:/artisan/Artisan Broker.exe",
+			ARTISAN_BROKER_REQUIRED: "1",
 			ARTISAN_STATIC_FRONTEND_ROOT: "C:/artisan/frontend",
 		});
 	});

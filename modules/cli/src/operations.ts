@@ -236,6 +236,7 @@ export const make_forge_operations_layer = Layer.effect(
 					.pipe(Effect.catch(() => Effect.succeed({ state: "unsupported" as const })));
 				const artifacts_available = (yield* Effect.forEach(
 					[
+						artifact.broker_executable_path,
 						artifact.executable_path,
 						artifact.host_entry_path,
 						artifact.migrations_path,

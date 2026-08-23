@@ -97,7 +97,10 @@ describe("model catalog", () => {
 			["claude-opus", [["max", "max"]]],
 			["claude-sonnet", [["max", "max"]]],
 		]);
-		expect(special_options("grok")).toEqual([["grok-4-5", []]]);
+		expect(special_options("grok")).toEqual([
+			["grok-4-6", []],
+			["grok-4-5", []],
+		]);
 		expect(special_options("cursor").filter(([, options]) => options.length > 0)).toEqual([
 			["cursor-claude-fable-5", [["max", "max"]]],
 			["cursor-claude-opus-5", [["max", "max"]]],
@@ -157,6 +160,7 @@ describe("model catalog", () => {
 			"claude-haiku-4-5",
 		]);
 		expect(native_models_by_harness("grok")).toEqual([
+			"grok-4.6",
 			"grok-4.5",
 			"grok-4.3",
 			"grok-build-0.1",
@@ -165,6 +169,7 @@ describe("model catalog", () => {
 		expect(native_models_by_harness("cursor")).toEqual([
 			"composer-2.5",
 			"auto",
+			"cursor-grok-4.6",
 			"cursor-grok-4.5",
 			"gpt-5.6-sol",
 			"gpt-5.6-terra",
@@ -177,7 +182,7 @@ describe("model catalog", () => {
 			"claude-opus-5",
 			"claude-sonnet-5",
 			"claude-haiku-4-5",
-			"gemini-3.6-flash",
+			"gemini-3.7-flash",
 			"gemini-3.1-pro",
 			"kimi-k3",
 			"glm-5.2",
@@ -230,10 +235,12 @@ describe("model catalog", () => {
 		expect(sparse.options.map((option) => option.id)).toEqual(["light", "high"]);
 	});
 
-	it("contains the four primary coding harnesses and providers", () => {
+	it("contains the primary coding harnesses and providers", () => {
 		expect(model_manifest.harnesses.map((harness) => harness.id)).toEqual([
 			"codex",
 			"claude",
+			"opencode2",
+			"hermes",
 			"grok",
 			"cursor",
 		]);
@@ -305,7 +312,11 @@ describe("model catalog", () => {
 		const sol = model_manifest.models.find((model) => model.id === "codex-sol");
 		const opus = model_manifest.models.find((model) => model.id === "claude-opus");
 		const grok = model_manifest.models.find((model) => model.id === "grok-4-5");
+		const grok_46 = model_manifest.models.find((model) => model.id === "grok-4-6");
 		const composer = model_manifest.models.find((model) => model.id === "cursor-composer-2-5");
+		const cursor_grok_46 = model_manifest.models.find(
+			(model) => model.id === "cursor-grok-4-6",
+		);
 		const cursor_grok = model_manifest.models.find((model) => model.id === "cursor-grok-4-5");
 
 		expect(sol?.capabilities.speed_options).toMatchObject([
@@ -329,6 +340,19 @@ describe("model catalog", () => {
 			},
 		]);
 		expect(grok?.capabilities.speed_options).toMatchObject([
+			{ consumption_multiplier: 1, id: "standard", speed_multiplier: 1 },
+		]);
+		expect(grok_46?.capabilities.thinking).toMatchObject({
+			availability: "supported",
+			default: "high",
+			options: [
+				{ id: "light", native_value: "low" },
+				{ id: "medium", native_value: "medium" },
+				{ id: "high", native_value: "high" },
+				{ id: "xhigh", native_value: "xhigh" },
+			],
+		});
+		expect(grok_46?.capabilities.speed_options).toMatchObject([
 			{ consumption_multiplier: 1, id: "standard", speed_multiplier: 1 },
 		]);
 		expect(composer?.capabilities.speed_options).toMatchObject([
@@ -356,6 +380,16 @@ describe("model catalog", () => {
 				id: "fast",
 				input_consumption_multiplier: 2,
 				output_consumption_multiplier: 3,
+				speed_multiplier: null,
+			},
+		]);
+		expect(cursor_grok_46?.capabilities.speed_options).toMatchObject([
+			{ id: "standard" },
+			{
+				consumption_multiplier: 2,
+				id: "fast",
+				input_consumption_multiplier: 2,
+				output_consumption_multiplier: 2,
 				speed_multiplier: null,
 			},
 		]);
@@ -459,25 +493,32 @@ describe("model catalog", () => {
 		expect(permissions).toEqual({
 			claude: [
 				["restricted", "plan"],
-				["supervised", "default"],
-				["trusted", "acceptEdits"],
 				["autonomous", "auto"],
 				["unrestricted", "bypassPermissions"],
 			],
 			codex: [
 				["restricted", "read-only"],
-				["supervised", "workspace-write"],
-				["autonomous", "workspace-write-no-prompts"],
+				["autonomous", "workspace-write"],
 				["unrestricted", "danger-full-access"],
 			],
 			grok: [
-				["supervised", "ask"],
+				["restricted", "plan"],
 				["autonomous", "auto"],
 				["unrestricted", "always-approve"],
 			],
 			cursor: [
-				["supervised", "default"],
+				["restricted", "ask"],
+				["autonomous", "default"],
 				["unrestricted", "force"],
+			],
+			hermes: [
+				["autonomous", "profile"],
+				["unrestricted", "yolo"],
+			],
+			opencode2: [
+				["restricted", "artisan-restricted"],
+				["autonomous", "artisan-auto"],
+				["unrestricted", "artisan-unrestricted"],
 			],
 		});
 	});
@@ -487,7 +528,8 @@ describe("model catalog", () => {
 		const composer = model_manifest.models.find((model) => model.id === "cursor-composer-2-5");
 
 		expect(cursor?.permissions.options).toMatchObject([
-			{ availability: "always", id: "supervised", native_value: "default" },
+			{ availability: "always", id: "restricted", native_value: "ask" },
+			{ availability: "always", id: "autonomous", native_value: "default" },
 			{ availability: "dynamic", id: "unrestricted", native_value: "force" },
 		]);
 		expect(
@@ -502,7 +544,7 @@ describe("model catalog", () => {
 	it("rejects unordered or unsupported permission defaults", () => {
 		expect(() =>
 			Schema.decodeUnknownSync(PermissionCapability)({
-				default: "trusted",
+				default: "autonomous",
 				options: [
 					{
 						approval_behavior: "none",
@@ -519,8 +561,8 @@ describe("model catalog", () => {
 						availability: "always",
 						description: "Ask first.",
 						edit_scope: "host",
-						id: "supervised",
-						label: "Supervised",
+						id: "restricted",
+						label: "Read only",
 						native_value: "ask",
 						safety_boundary: "rules",
 					},

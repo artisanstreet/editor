@@ -4,6 +4,8 @@
 	import CircleX from "@tabler/icons-svelte/icons/circle-x";
 	import Copy from "@tabler/icons-svelte/icons/copy";
 	import { Effect } from "effect";
+	import { FormatLocalDateTime } from "$lib/appearance/display-format";
+	import { time_format } from "$lib/appearance-config";
 	import { RunBrowserDom } from "$lib/browser/dom";
 
 	let {
@@ -31,7 +33,7 @@
 	const resets_label = $derived(
 		error.resets_at === undefined
 			? undefined
-			: new Date(error.resets_at).toLocaleString(undefined, {
+			: FormatLocalDateTime(error.resets_at, $time_format, {
 					dateStyle: "medium",
 					timeStyle: "short",
 				}),

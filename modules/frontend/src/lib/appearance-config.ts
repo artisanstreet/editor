@@ -4,6 +4,12 @@ import {
 	default_typography_preferences,
 	type TypographyPreferences,
 } from "./appearance/typography";
+import {
+	DefaultPathSeparator,
+	DefaultTimeFormat,
+	type PathSeparator,
+	type TimeFormat,
+} from "./appearance/display-format";
 
 /**
  * Whether glass surfaces light themselves with the shader.
@@ -39,3 +45,7 @@ export const prose_width = writable<ProseWidth>("balanced");
 
 /** The resolved families the shell applies after it has loaded appearance preferences. */
 export const typography = writable<TypographyPreferences>(default_typography_preferences);
+
+/** Resolved display preferences; durable values remain in `AppearancePreferences`. */
+export const time_format = writable<TimeFormat>(DefaultTimeFormat());
+export const path_separator = writable<PathSeparator>(DefaultPathSeparator());

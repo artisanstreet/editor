@@ -8,7 +8,9 @@ import {
 	conversation_activity_is_live,
 	conversation_background_agent_names,
 	conversation_has_live_activity,
+	conversation_progress_phase,
 	conversation_reply_is_live,
+	conversation_run_presentation_is_active,
 	conversation_waiting_for_activity,
 	thinking_word_at,
 	thinking_word_for,
@@ -70,6 +72,44 @@ const reasoning = (
 	turn_id: "turn-1",
 	type: "reasoning_summary",
 	updated_at: "2026-07-27T10:00:00.000Z",
+});
+
+const work_session = (
+	status: Extract<ConversationItem, { type: "work_session" }>["status"],
+): Extract<ConversationItem, { type: "work_session" }> => ({
+	created_at: "2026-07-27T10:00:00.000Z",
+	id: "work:run:run-1",
+	lifecycle: status,
+	ordinal: 1,
+	references: [],
+	revision: 0,
+	run_id: "run-1",
+	source_refs: [],
+	started_at: "2026-07-27T10:00:00.000Z",
+	status,
+	title: "Agent work",
+	turn_id: "run:run-1",
+	type: "work_session",
+	updated_at: "2026-07-27T10:00:00.000Z",
+});
+
+describe("conversation progress phase", () => {
+	it("hands off to visible reply prose and returns to later work", () => {
+		const command = { ...activity("activity-1", "terminal_activity", "completed"), ordinal: 1 };
+		const reply = { ...message("streaming"), ordinal: 2 };
+
+		expect(conversation_progress_phase([command, reply])).toBe("reply");
+		expect(conversation_progress_phase([command, { ...reply, phase: "commentary" }])).toBe(
+			"work",
+		);
+		expect(
+			conversation_progress_phase([
+				command,
+				reply,
+				{ ...activity("activity-3", "terminal_activity", "active"), ordinal: 3 },
+			]),
+		).toBe("work");
+	});
 });
 
 describe("per-session thinking word", () => {
@@ -500,5 +540,18 @@ describe("session liveness", () => {
 		for (const status of ["completed", "failed", "interrupted", "cancelled"] as const) {
 			expect(work_session_is_settled(status)).toBe(true);
 		}
+	});
+
+	it("keeps transcript presentation live across an earlier work settlement", () => {
+		expect(
+			conversation_run_presentation_is_active([work_session("active")], "run-1", false),
+		).toBe(true);
+		expect(
+			conversation_run_presentation_is_active([work_session("completed")], "run-1", false),
+		).toBe(false);
+		expect(conversation_run_presentation_is_active([], "run-1", true)).toBe(true);
+		expect(
+			conversation_run_presentation_is_active([work_session("active")], "other-run", false),
+		).toBe(false);
 	});
 });

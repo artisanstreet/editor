@@ -37,11 +37,14 @@ export type ThreadContinuationContext = {
 		| { readonly command_id: string; readonly message_id: string; readonly text: string }
 		| undefined;
 	readonly source: Option.Option<{
+		readonly catalog_revision?: string | null;
 		readonly engine_id: string;
 		readonly last_native_turn_id: string | null | undefined;
 		readonly last_observation_sequence: number;
 		readonly model_id: string | null | undefined;
 		readonly native_thread_id: string | null;
+		readonly profile_id?: string | null;
+		readonly provider_route_id?: string | null;
 		readonly resume_token: Option.Option<EngineResumeToken>;
 		readonly status: string;
 		/**
@@ -51,6 +54,7 @@ export type ThreadContinuationContext = {
 		 * agree with what PrepareLaunch will accept.
 		 */
 		readonly usage_interruption_resume: boolean;
+		readonly variant_id?: string | null;
 		readonly working_directory: string;
 		readonly run_id: string;
 	}>;

@@ -13,7 +13,7 @@ describe("desktop package metadata", () => {
 		);
 
 		expect(builder_config).toContain("buildResources: modules/frontend/src/lib/assets/barekey");
-		expect(builder_config).toContain("icon: artisan-app-icon.ico");
+		expect(builder_config).toContain("icon: runtime-app-icons/foreground-gradient-symbol.png");
 		expect(icon).toContain('width="720" height="720"');
 		expect(icon).toContain('id="star-rising-cutout"');
 	});

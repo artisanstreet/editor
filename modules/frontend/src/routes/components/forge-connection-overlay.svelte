@@ -26,12 +26,14 @@
 	import { DiscoverForge, type ReachableForge } from "$lib/forge/discovery";
 
 	let {
+		failure_visible,
 		model,
 		ondismiss,
 		read_diagnostics,
 		retry_connection,
 		retry_hydration,
 	}: {
+		failure_visible: boolean;
 		model: ForgeGateModel;
 		ondismiss: Effect.Effect<void>;
 		read_diagnostics: Effect.Effect<TransportDiagnosticsSnapshot>;
@@ -40,7 +42,9 @@
 	} = $props();
 
 	const presentation = $derived(PresentForgeGate(model));
-	const is_visible = $derived(ForgeGateIsVisible(model));
+	const is_visible = $derived(
+		ForgeGateIsVisible(model) && (presentation.tone !== "error" || failure_visible),
+	);
 
 	const DismissOnEscape = (event: KeyboardEvent) =>
 		Effect.gen(function* () {

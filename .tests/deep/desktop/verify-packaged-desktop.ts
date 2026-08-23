@@ -18,7 +18,15 @@ const asar_entries = listPackage(artifact_asar, { isPack: false }).map((entry) =
 const contains_entry = (path: string) =>
 	asar_entries.includes(path) || asar_entries.some((entry) => entry.startsWith(`${path}/`));
 
-for (const entry of ["/main.js", "/frontend/index.html", "/frontend/_app"]) {
+for (const entry of [
+	"/main.js",
+	"/frontend/index.html",
+	"/frontend/_app",
+	"/app-icons/plastic-jaw-shading.png",
+	"/app-icons/foreground-gradient-symbol.png",
+	"/app-icons/plastic-jaw-shading.ico",
+	"/app-icons/foreground-gradient-symbol.ico",
+]) {
 	if (!contains_entry(entry)) throw new Error(`Missing ASAR entry: ${entry}`);
 }
 for (const entry of ["/preload.cjs", "/preload.js", "/utility.js"]) {
@@ -58,6 +66,7 @@ if (parallel_installers.length > 0) {
 console.log(
 	"Packaged desktop renderer evidence:",
 	JSON.stringify({
+		app_icon_variants: true,
 		asar_entries: asar_entries.length,
 		bundled_frontend: true,
 		forge_payload_embedded: false,

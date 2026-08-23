@@ -84,6 +84,7 @@ interface StoredThreadProjection {
 	readonly created_at: string;
 	readonly current_goal: string | null;
 	readonly last_activity_at: string;
+	readonly last_message_at: string;
 	readonly reader_activity_at: string;
 	readonly reader_acknowledged_activity_at: string;
 	readonly last_assistant_message: string | null;
@@ -551,6 +552,8 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 							affinity_version: current_projection.affinity_version,
 							archived_at: current_projection.archived_at ?? null,
 							current_goal: current_projection.current_goal ?? null,
+							last_message_at:
+								current_projection.last_message_at ?? current.last_message_at,
 							reader_activity_at:
 								current_projection.reader_activity_at ?? current.reader_activity_at,
 							reader_acknowledged_activity_at:
@@ -615,6 +618,8 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 									archived_at: projection.archived_at ?? null,
 									current_goal: projection.current_goal ?? null,
 									last_activity_at: projection.last_activity_at,
+									last_message_at:
+										projection.last_message_at ?? current.last_message_at,
 									reader_activity_at: projection.reader_activity_at,
 									reader_acknowledged_activity_at:
 										projection.reader_acknowledged_activity_at,

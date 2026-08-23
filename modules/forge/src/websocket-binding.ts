@@ -20,18 +20,31 @@ const is_loopback = (address: string | undefined) =>
 /**
  * The unsent backlog a socket has to reach before it is worth saying so.
  *
- * `send` is fire-and-forget — the protocol layer above hands frames over
- * without being told whether the last one left — so a peer that reads slower
- * than Forge writes accumulates here with nothing to notice it. 8 MiB is far
- * above any legitimate burst of projection frames and far below the scale at
- * which this stopped being survivable, which makes it a usable alarm rather
- * than a limit: the frame is still sent, and the report is what turns a
- * process quietly climbing into a symptom with a cause attached.
+ * Sends now await `ws`' completion callback, so the protocol's sequential
+ * outbound drain cannot queue the entire journal at once. This threshold stays
+ * as an excursion alarm for kernel/network buffering that still exceeds a
+ * legitimate bounded delivery window.
  */
 const socket_backlog_warning_bytes = 8 * 1024 * 1024;
 
 const websocket_endpoint = (socket: WebSocket): WebSocketEndpoint => {
 	let reported_backlog = false;
+	const ReportBacklog = () => {
+		if (socket.bufferedAmount < socket_backlog_warning_bytes) {
+			reported_backlog = false;
+			return;
+		}
+		/** Once per excursion: a backed-up socket would otherwise report per frame. */
+		if (reported_backlog) return;
+		reported_backlog = true;
+		console.error(
+			JSON.stringify({
+				buffered_bytes: socket.bufferedAmount,
+				event: "forge.websocket.backlog",
+				message: "A transport socket is not draining as fast as Forge is writing",
+			}),
+		);
+	};
 
 	return {
 		add_close_listener: (listener) => {
@@ -51,23 +64,16 @@ const websocket_endpoint = (socket: WebSocket): WebSocketEndpoint => {
 			return () => socket.off("message", on_message);
 		},
 		close: () => socket.close(),
-		send: (data) => {
-			socket.send(data);
-			if (socket.bufferedAmount < socket_backlog_warning_bytes) {
-				reported_backlog = false;
-				return;
-			}
-			/** Once per excursion: a backed-up socket would otherwise report per frame. */
-			if (reported_backlog) return;
-			reported_backlog = true;
-			console.error(
-				JSON.stringify({
-					buffered_bytes: socket.bufferedAmount,
-					event: "forge.websocket.backlog",
-					message: "A transport socket is not draining as fast as Forge is writing",
-				}),
-			);
-		},
+		send: (data) =>
+			new Promise<void>((resolve, reject) => {
+				if (socket.readyState !== WebSocket.OPEN) {
+					reject(new Error("WebSocket is not open"));
+					return;
+				}
+				/** `ws` reports success as a nullish callback argument (`null` today). */
+				socket.send(data, (cause) => (cause == null ? resolve() : reject(cause)));
+				ReportBacklog();
+			}),
 	};
 };
 

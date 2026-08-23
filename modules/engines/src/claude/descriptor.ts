@@ -22,6 +22,10 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 			state: "unsupported",
 			reason: "Claude Code reads its own global CLAUDE.md natively; no mirror is wired.",
 		},
+		model_catalog: {
+			state: "unsupported",
+			reason: "Claude model inventory is supplied by Artisan's curated catalog.",
+		},
 		model_selection: {
 			state: "supported",
 			reason: "Native model identifiers pass through to the CLI's --model option.",

@@ -13,6 +13,7 @@ files:
     - main.js
     - package.json
     - frontend/**
+    - app-icons/**
 asar: true
 beforeBuild: .scripts/build/electron-before-build.ts
 disableDefaultIgnoredFiles: true
@@ -23,8 +24,8 @@ protocols:
       schemes:
           - artisan
 win:
-    # Keep the canonical SVG editable, but inject its pre-rasterized Windows
-    # icon directly so packaging does not spend minutes evaluating SVG filters.
-    icon: artisan-app-icon.ico
+    # The installed executable and shortcuts use the same foreground-plastic
+    # treatment that the runtime selector resolves as its default.
+    icon: runtime-app-icons/foreground-gradient-symbol.png
     target:
         - dir

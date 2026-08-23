@@ -57,7 +57,7 @@ const EmptyDefaults: SessionDefaults = {
 	agent_name_dataset: "norwegian",
 	auto_continue_usage_limits: true,
 	models: [],
-	permission: "supervised",
+	permission: "autonomous",
 	thread_title_mode: DefaultThreadTitleMode,
 };
 
@@ -105,6 +105,10 @@ export class SessionDefaultsController extends Context.Service<
 		/** Default captured by newly created provider-usage interruptions. */
 		readonly SetAutoContinueUsageLimits: (
 			auto_continue_usage_limits: boolean,
+		) => Effect.Effect<SessionDefaultsState, ArtisanClientError>;
+		/** Persists completion of the first-run harness setup. */
+		readonly SetOnboardingCompleted: (
+			completed: boolean,
 		) => Effect.Effect<SessionDefaultsState, ArtisanClientError>;
 		/** How thread rows are titled: harness summary or latest user message. */
 		readonly SetThreadTitleMode: (
@@ -225,6 +229,9 @@ export const SessionDefaultsControllerLive = Layer.effect(
 				...(update.last_model_id === undefined
 					? {}
 					: { last_model_id: update.last_model_id }),
+				...(update.onboarding_completed === undefined
+					? {}
+					: { onboarding_completed: update.onboarding_completed }),
 				models,
 				...(update.permission === undefined ? {} : { permission: update.permission }),
 				...(update.thread_title_mode === undefined
@@ -458,6 +465,9 @@ export const SessionDefaultsControllerLive = Layer.effect(
 		const SetAutoContinueUsageLimits = (auto_continue_usage_limits: boolean) =>
 			SaveDefaults({ auto_continue_usage_limits });
 
+		const SetOnboardingCompleted = (completed: boolean) =>
+			SaveDefaults({ onboarding_completed: completed });
+
 		const SetThreadTitleMode = (thread_title_mode: ThreadTitleMode) =>
 			SaveDefaults({ thread_title_mode });
 
@@ -505,6 +515,7 @@ export const SessionDefaultsControllerLive = Layer.effect(
 			SetEngineEnabled,
 			SetAgentNameDataset,
 			SetAutoContinueUsageLimits,
+			SetOnboardingCompleted,
 			SetFavorite,
 			SetThreadTitleMode,
 		});

@@ -223,6 +223,17 @@ const ToolResultSchema = Schema.Struct({
 	is_error: Schema.optional(Schema.Boolean),
 	content: Schema.Unknown,
 });
+
+const tool_result_text = (content: unknown): string | undefined => {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return undefined;
+
+	const text = content.flatMap((part) => {
+		if (typeof part !== "object" || part === null || !("text" in part)) return [];
+		return typeof part.text === "string" ? [part.text] : [];
+	});
+	return text.length === 0 ? undefined : text.join("\n");
+};
 /**
  * The applied-edit report the CLI attaches to the turn that carries a tool
  * result. An update states its patch; a create states what it wrote and that
@@ -633,6 +644,7 @@ function tool_observation(
 	input: ClaudeNormalizationInput,
 	tool: ClaudeToolUse,
 	action: EngineToolObservation["action"] = "started",
+	output?: string,
 ): EngineObservation | undefined {
 	const input_value = tool_input(tool);
 	const name = tool.name;
@@ -649,6 +661,7 @@ function tool_observation(
 			_tag: "terminal_activity",
 			activity_id: tool.id,
 			...(input_value?.command === undefined ? {} : { command: input_value.command }),
+			...(output === undefined ? {} : { output }),
 			/**
 			 * Which tool ran it is the only evidence of which interpreter the text
 			 * was written for; nothing downstream can recover it from the command.
@@ -733,12 +746,13 @@ function tool_observation(
 /**
  * Normalizes documented Claude events with schema validation and raw-frame provenance.
  *
- * Assistant text is emitted with phase `unspecified` because Claude's
- * stream-json protocol never distinguishes commentary from a settled final
- * reply, and inferring a phase from message order would fabricate provider
- * intent. API retry progress remains a native action rather than a canonical
- * retry observation because the native stream discloses neither an attempt
- * lifecycle nor whether the provider will retry.
+ * Assistant text in a message that also carries `tool_use` blocks is emitted
+ * as `commentary` — the provider's own content marks it as work narration, not
+ * a settled reply. Text-only messages stay `unspecified` because Claude's
+ * stream-json protocol never marks a final, and inferring one from message
+ * order would fabricate provider intent. API retry progress remains a native
+ * action rather than a canonical retry observation because the native stream
+ * discloses neither an attempt lifecycle nor whether the provider will retry.
  *
  * @since 0.6.0
  */
@@ -916,7 +930,15 @@ export function normalize_claude_event(
 				_tag: "agent_message_completed",
 				item_id: message_item_id(input, assistant.message.id),
 				message: text_parts.join(""),
-				phase: "unspecified",
+				/**
+				 * A message that invokes tools in the same breath is the model
+				 * narrating its work, not the settled reply — the provider's own
+				 * content says so. Classifying it as commentary keeps mid-run
+				 * prose inside the work trace instead of flashing the transcript
+				 * into its reply state between tool calls. Text-only messages
+				 * stay `unspecified` because stream-json never marks a final.
+				 */
+				phase: has_tool_use ? "commentary" : "unspecified",
 				turn_id: input.turn_id,
 			} satisfies EngineAgentMessageCompletedObservation);
 		/**
@@ -979,6 +1001,7 @@ export function normalize_claude_event(
 					input,
 					tool,
 					result.is_error === true ? "failed" : "completed",
+					tool_result_text(result.content),
 				);
 				if (observation !== undefined) return observation;
 			}

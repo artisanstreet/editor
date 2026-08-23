@@ -10,7 +10,7 @@ import { BrandForgeExecutable } from "../../.config/forge.rolldown.config.ts";
 const root = new URL("../..", import.meta.url);
 
 describe("Forge executable branding", () => {
-	it("injects the dedicated Artisan Forge process icon", () => {
+	it("injects the default Artisan app icon", () => {
 		const temporary_root = mkdtempSync(join(tmpdir(), "artisan-forge-branding-"));
 		const executable_path = join(temporary_root, "Artisan Forge.exe");
 		try {
@@ -26,7 +26,10 @@ describe("Forge executable branding", () => {
 			)[0]?.getIconItemsFromEntries(resources.entries)[0];
 			const expected_icon = Data.IconFile.from(
 				readFileSync(
-					new URL("modules/frontend/src/lib/assets/barekey/artisan-forge-icon.ico", root),
+					new URL(
+						"modules/frontend/src/lib/assets/barekey/runtime-app-icons/foreground-gradient-symbol.ico",
+						root,
+					),
 				),
 			).icons[0]?.data;
 

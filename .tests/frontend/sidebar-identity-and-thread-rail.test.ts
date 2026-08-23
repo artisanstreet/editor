@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { weekly_reset_duration } from "../../modules/frontend/src/lib/identity/weekly-reset";
+import { usage_reset_duration } from "../../modules/frontend/src/lib/identity/usage-reset";
 import { ThreadInspectorFitsBesideRail } from "../../modules/frontend/src/lib/root/shell-layout";
 
 import { ReadStylesheets } from "./stylesheet-source";
@@ -54,6 +54,30 @@ describe("sidebar identity and thread rail regressions", () => {
 		expect(usage).toContain('{#if usage_state.status === "loaded"}');
 	});
 
+	/**
+	 * A provider's bucket label names a model, never a cadence: Codex stamps
+	 * "GPT-5.3-Codex-Spark" on both a 5-hour and a weekly bucket, which used to
+	 * render as two identical rows. The cadence therefore lives in a subheader
+	 * per window kind, and each row beneath names only what its meter measures
+	 * — the provider's bucket label, or the account-wide "All models".
+	 */
+	it("groups usage meters under cadence subheaders", () => {
+		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
+
+		expect(usage).toContain('usage_window.label ?? "All models"');
+		expect(usage).toContain("{#each groups as group, group_index (group.kind)}");
+		expect(usage).toContain("{group.title}");
+		expect(usage).toContain('<span class="text-xs font-medium text-foreground">');
+		expect(usage).not.toContain("tracking-[0.14em] text-muted-foreground uppercase");
+		/** Every disclosed cadence gets its own group; none may be folded away. */
+		expect(usage).toContain('"session",');
+		expect(usage).toContain('"weekly",');
+		expect(usage).toContain('"monthly",');
+		/** A window's kind may no longer be its display label. */
+		expect(usage).not.toContain("groups.extended");
+		expect(usage).not.toContain("window_kind_labels[usage_window.kind]");
+	});
+
 	it("keeps unavailable provider errors out of the provider header", () => {
 		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
 		const unavailable_row = usage.slice(usage.lastIndexOf("{:else}"));
@@ -65,20 +89,14 @@ describe("sidebar identity and thread rail regressions", () => {
 		expect(unavailable_row).not.toContain("— usage unavailable");
 	});
 
-	it("shows the latest trustworthy weekly reset on each shader-glass provider menu", () => {
+	it("shows the latest trustworthy reset at the bottom of each cadence group", () => {
 		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
 		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
 		const now = Date.parse("2026-07-31T12:00:00.000Z");
 
 		expect(
-			weekly_reset_duration(
+			usage_reset_duration(
 				[
-					{
-						id: "session",
-						kind: "session",
-						percent_used: 10,
-						resets_at: "2026-08-07T12:00:00.000Z",
-					},
 					{
 						id: "weekly",
 						kind: "weekly",
@@ -96,7 +114,7 @@ describe("sidebar identity and thread rail regressions", () => {
 			),
 		).toBe("2 days");
 		expect(
-			weekly_reset_duration(
+			usage_reset_duration(
 				[
 					{
 						id: "weekly",
@@ -109,7 +127,7 @@ describe("sidebar identity and thread rail regressions", () => {
 			),
 		).toBe("5 hours");
 		expect(
-			weekly_reset_duration(
+			usage_reset_duration(
 				[
 					{
 						id: "weekly",
@@ -122,7 +140,7 @@ describe("sidebar identity and thread rail regressions", () => {
 			),
 		).toBe("45 minutes");
 		expect(
-			weekly_reset_duration(
+			usage_reset_duration(
 				[
 					{
 						id: "weekly",
@@ -136,7 +154,7 @@ describe("sidebar identity and thread rail regressions", () => {
 			),
 		).toBeUndefined();
 		expect(
-			weekly_reset_duration(
+			usage_reset_duration(
 				[
 					{
 						id: "weekly",
@@ -149,15 +167,14 @@ describe("sidebar identity and thread rail regressions", () => {
 			),
 		).toBeUndefined();
 
-		expect(usage).toContain("weekly_reset_duration(engine.windows, checked_at_ms)");
+		expect(usage).toContain("usage_reset_duration(group.windows, checked_at_ms)");
 		expect(identity).toContain('<ShaderGlassSurface class="w-full rounded-2xl">');
 		expect(identity).toContain("bg-transparent! p-0! shadow-none! ring-0!");
 		expect(usage).toContain('<div class="flex flex-col px-1 py-1">');
 		expect(usage).not.toContain("flex flex-col gap-2.5 px-1 py-1");
 		expect(usage).toContain('<DropdownMenuSeparator class="my-1" />');
-		expect(usage).toContain(
-			'Your weekly limit resets in <span class="text-foreground">{weekly_reset}</span>.',
-		);
+		expect(usage).toContain("Your {group.title.toLowerCase()} limit resets in");
+		expect(usage).toContain("{reset_duration}</span");
 	});
 
 	it("yields sidebar motion token reads through the browser DOM boundary", () => {
@@ -469,7 +486,13 @@ describe("sidebar identity and thread rail regressions", () => {
 		expect(rail).toContain("PinnedThreads(threads)");
 		expect(rail).toContain("SettledThreads(threads)");
 		expect(rail).toContain("ThreadIsAwaitingAnswer(thread)");
-		expect(rail).toContain("thread.engine_id, thread.model_id");
+		/**
+		 * A thread is an engine/harness identity surface. Model labs belong in the
+		 * model catalog, never in the settled list, Working list, or hover card.
+		 */
+		expect(rail.match(/EngineMarkFor\(thread\.engine_id\)/gu)).toHaveLength(2);
+		expect(rail).toContain("EngineMarkFor(card_thread.engine_id)");
+		expect(rail).not.toContain("UsageSlicePresentationFor");
 		expect(rail).not.toMatch(/\b(?:mock_)?(?:narration|timer)\b/iu);
 		expect(rail).not.toMatch(/\b(?:setInterval|setTimeout)\b/u);
 
@@ -596,6 +619,10 @@ describe("sidebar identity and thread rail regressions", () => {
 		expect(hover_surface).toContain("mutation_observer.disconnect();");
 		expect(hover_surface).toContain("resize_observer.disconnect();");
 		expect(hover_surface).toContain("onfocusout={clear_departed_focus}");
+		expect(hover_surface).toContain("focus_clear_frame = requestAnimationFrame");
+		expect(hover_surface).toContain("cancel_deferred_focus_clear();");
+		expect(hover_surface).toContain('surface?.matches(":focus-within")');
+		expect(hover_surface).toContain('active_target?.matches(":hover")');
 		expect(hover_surface).toContain("{@attach observe_hover_target}");
 	});
 

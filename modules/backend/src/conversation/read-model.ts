@@ -1,7 +1,11 @@
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { and, desc, eq } from "drizzle-orm";
 
-import { ConversationSubscriptionCursor, type ThreadListItem } from "@artisan/protocol";
+import {
+	ConversationSubscriptionCursor,
+	conversation_default_window_turn_count,
+	type ThreadListItem,
+} from "@artisan/protocol";
 
 import type {
 	ConversationPatch,
@@ -19,7 +23,11 @@ import {
 	Threads,
 	ConversationThreads,
 } from "../persistence/tables";
-import { ReadConversationPatches, ReadConversationSnapshot } from "./projection-api";
+import {
+	ReadConversationPatches,
+	ReadConversationSnapshot,
+	type ConversationReadBounds,
+} from "./projection-api";
 
 export class ConversationReadModelFailure extends Data.TaggedError("ConversationReadModelFailure")<{
 	readonly cause: unknown;
@@ -43,6 +51,7 @@ export class ConversationReadModel extends Context.Service<
 	{
 		readonly ReadSnapshot: (
 			thread_id: string,
+			bounds?: ConversationReadBounds,
 		) => Effect.Effect<ConversationAvailability, ConversationReadModelFailure>;
 		/**
 		 * Fast path for `thread.open` after ThreadReadModel.Lookup resolved the
@@ -79,6 +88,7 @@ export const ConversationReadModelLive = Layer.effect(
 		const database = yield* Database;
 		const ReadSnapshot = (
 			thread_id: string,
+			bounds?: ConversationReadBounds,
 		): Effect.Effect<ConversationAvailability, ConversationReadModelFailure> =>
 			database.client
 				.transaction((transaction) =>
@@ -96,7 +106,11 @@ export const ConversationReadModelLive = Layer.effect(
 							.where(eq(Threads.thread_id, thread_id))
 							.limit(1);
 						if (!thread) return { status: "unavailable" as const, journal_sequence };
-						const snapshot = yield* ReadConversationSnapshot(transaction, thread_id);
+						const snapshot = yield* ReadConversationSnapshot(
+							transaction,
+							thread_id,
+							bounds,
+						);
 						if (!snapshot)
 							return {
 								status: "available" as const,
@@ -122,7 +136,9 @@ export const ConversationReadModelLive = Layer.effect(
 		): Effect.Effect<Option.Option<ConversationSnapshot>, ConversationReadModelFailure> =>
 			database.client
 				.transaction((transaction) =>
-					ReadConversationSnapshot(transaction, thread.thread_id).pipe(
+					ReadConversationSnapshot(transaction, thread.thread_id, {
+						window: { maximum_turn_count: conversation_default_window_turn_count },
+					}).pipe(
 						Effect.map((snapshot) =>
 							snapshot === undefined ? Option.none() : Option.some(snapshot),
 						),

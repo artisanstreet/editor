@@ -10,17 +10,17 @@ const join_path = {
 } as never;
 
 describe("managed toolchain generations", () => {
-	it("sets both Claude's owned config home and supported update suppression", () => {
+	it("sets managed config homes, Claude update suppression, and OpenCode profile isolation", () => {
 		const service_source = readFileSync(
 			new URL("../../modules/engines/src/toolchain/service.ts", import.meta.url),
 			"utf8",
 		);
 
-		expect(service_source).toContain(
-			"[distribution.home_environment_variable]: layout.home_path",
-		);
+		expect(service_source).toContain("[distribution.home_environment_variable]:");
 		expect(service_source).toContain('DISABLE_UPDATES: "1"');
 		expect(service_source).toContain('DISABLE_INSTALLATION_CHECKS: "1"');
+		expect(service_source).toContain('OPENCODE_CONFIG_PROJECT_DISABLE: "1"');
+		expect(service_source).toContain("OpenCode2ManagedConfigContent()");
 		expect(service_source).not.toContain("autoUpdates: false");
 	});
 
@@ -39,6 +39,20 @@ describe("managed toolchain generations", () => {
 			"C:/artisan/toolchain/codex/versions/0.145.0-unique-generation/codex.exe",
 		);
 		expect(Schema.decodeUnknownSync(ToolchainGeneration)(generation)).toEqual(generation);
+	});
+
+	it("allows a generation-owned nested launcher without allowing path traversal", () => {
+		const generation = {
+			binary: "hermes-agent/bin/hermes.exe",
+			directory: "0.20.5-unique-generation",
+			sha256: "c".repeat(64),
+			version: "0.20.5",
+		};
+		expect(Schema.decodeUnknownSync(ToolchainGeneration)(generation)).toEqual(generation);
+		for (const binary of ["../hermes.exe", "hermes-agent/../../hermes.exe", "C:/hermes.exe"])
+			expect(() =>
+				Schema.decodeUnknownSync(ToolchainGeneration)({ ...generation, binary }),
+			).toThrow();
 	});
 
 	it("keeps the default profile on the pre-profile home so an existing sign-in survives", () => {

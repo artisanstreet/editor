@@ -97,6 +97,21 @@
 	--text-swap-dur: 150ms;
 	--text-swap-translate-y: 4px;
 	--text-swap-blur: 2px;
+	--text-swap-ease: ease-in-out;
+	--check-opacity-dur: 500ms;
+	--check-rotate-dur: 500ms;
+	--check-rotate-from: 80deg;
+	--check-bob-dur: 500ms;
+	--check-y-amount: 40px;
+	--check-blur-dur: 500ms;
+	--check-blur-from: 10px;
+	--check-path-dur: 500ms;
+	--check-path-delay: 80ms;
+	--check-ease-out: var(--ease-smooth-out);
+	--check-ease-opacity: var(--ease-smooth-out);
+	--check-ease-rotate: var(--ease-smooth-out);
+	--check-ease-bob: cubic-bezier(0.34, 1.35, 0.64, 1);
+	--check-ease-path: var(--ease-smooth-out);
 	/**
 	 * A streamed word's own entrance, kept under the sidebar stagger it used to
 	 * borrow. This one runs per word rather than per list item, so its duration
@@ -127,6 +142,7 @@
 	--tt-in-dur: 150ms;
 	--tt-out-dur: 50ms;
 	--tt-scale: 0.98;
+	--tt-delay: 80ms;
 	--tt-in-ease: ease-out;
 	--tt-out-ease: ease-out;
 }

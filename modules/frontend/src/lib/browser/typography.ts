@@ -82,7 +82,8 @@ export const normalize_local_font_families = (
 		.slice(0, local_font_family_limit);
 };
 
-const local_font_data_list = Schema.Array(LocalFontData).check(Schema.isMaxLength(32_768));
+const local_font_record_list = Schema.Array(Schema.Unknown).check(Schema.isMaxLength(32_768));
+const local_font_data_list = Schema.Array(LocalFontData);
 
 const is_denied = (cause: unknown): boolean =>
 	cause instanceof DOMException &&
@@ -165,8 +166,19 @@ export const BrowserTypographyLive = Layer.effect(
 						? new LocalFontsDenied({ cause })
 						: new LocalFontsFailure({ cause }),
 			});
-			const fonts = yield* Schema.decodeUnknownEffect(local_font_data_list)(
+			const font_records = yield* Schema.decodeUnknownEffect(local_font_record_list)(
 				external_fonts,
+			).pipe(Effect.mapError((cause) => new LocalFontsInvalid({ cause })));
+			/** Web IDL exposes FontData fields as prototype accessors, not own properties. */
+			const projected_fonts = yield* Effect.try({
+				try: () =>
+					font_records.map((font) => ({
+						family: Reflect.get(font as object, "family") as unknown,
+					})),
+				catch: (cause) => new LocalFontsInvalid({ cause }),
+			});
+			const fonts = yield* Schema.decodeUnknownEffect(local_font_data_list)(
+				projected_fonts,
 			).pipe(Effect.mapError((cause) => new LocalFontsInvalid({ cause })));
 
 			return normalize_local_font_families(fonts);

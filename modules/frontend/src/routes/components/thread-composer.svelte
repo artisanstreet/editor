@@ -74,7 +74,6 @@
 		context_usage,
 		disabled = false,
 		draft_key,
-		engine_locked = false,
 		onabort,
 		onjumptolatest,
 		onnewthread,
@@ -89,14 +88,13 @@
 		context_usage?: SurfaceUsageAggregate;
 		disabled?: boolean;
 		draft_key?: string;
-		engine_locked?: boolean;
 		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
 		onjumptolatest?: Effect.Effect<void>;
 		onnewthread?: ComposerSubmissionHandler;
 		onpolicychange?: (
 			policy: ThreadSessionPolicy,
 		) => Effect.Effect<ThreadSessionPolicy, { readonly message: string }>;
-		onsteeringchange?: (pending: boolean) => void;
+		onsteeringchange?: (pending: boolean, source_reference?: string) => void;
 		onsubmit?: ComposerSubmissionHandler;
 		/** Recalls one queued steer by the send's own command id, while Forge still holds it. */
 		onwithdraw?: (command_id: string) => Effect.Effect<void, { readonly message: string }>;
@@ -140,7 +138,8 @@
 		ReplaceLip: (next) => {
 			pending_lip_state = next;
 		},
-		SteeringChanged: (pending) => onsteeringchange?.(pending),
+		SteeringChanged: (pending, source_reference) =>
+			onsteeringchange?.(pending, source_reference),
 		Withdraw: (command_id) =>
 			onwithdraw === undefined
 				? Effect.fail({ message: "This surface cannot recall a queued message." })
@@ -596,7 +595,6 @@
 					{context_usage}
 					{context_window_tokens}
 					{disabled}
-					{engine_locked}
 					{new_thread_ready}
 					{onpolicychange}
 					onprimaryaction={ActivatePrimaryAction}

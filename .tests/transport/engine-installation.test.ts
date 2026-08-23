@@ -132,7 +132,7 @@ describe("engine installation client API", () => {
 						case "engine.authentication.request":
 						case "engine.rollback.request":
 							sent.push(envelope);
-							return RequestDelivered;
+							return RequestDelivered("connection_installation");
 						default:
 							return yield* Effect.die(
 								`unexpected engine-installation request ${envelope.kind}`,

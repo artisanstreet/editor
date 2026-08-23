@@ -21,6 +21,7 @@ import {
 	type EngineCommand,
 	type EngineCommandFailure,
 	type EngineDescriptor,
+	type EngineErrorRef,
 	type EngineFailure,
 	type EngineObservation,
 	type EngineOpenInput,
@@ -75,6 +76,10 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 		close: { state: "supported" },
 		events: { state: "supported" },
 		global_guidance: { state: "supported" },
+		model_catalog: {
+			state: "unsupported",
+			reason: "Codex model inventory is supplied by Artisan's curated catalog.",
+		},
 		model_selection: { state: "supported" },
 		native_continuation: {
 			state: "experimental",
@@ -122,6 +127,12 @@ export class CodexEngine extends Context.Service<CodexEngine, Engine>()("Artisan
 
 interface CodexRunState {
 	readonly active_turn_id: string | undefined;
+	/**
+	 * The most recent classified terminal failure, held until the failed turn
+	 * state closes the run. Without it the terminal observation falls back to
+	 * the generic run failure and the classification never reaches the reader.
+	 */
+	readonly failure_ref: EngineErrorRef | undefined;
 	readonly root_native_thread_id: string | undefined;
 	readonly approvals: ReadonlyMap<string, PendingApproval>;
 	readonly command_intents: ReadonlyMap<string, string>;
@@ -318,6 +329,7 @@ function make_codex_app_server_engine(
 			const command_lock = yield* Semaphore.make(1);
 			const state = yield* Ref.make<CodexRunState>({
 				active_turn_id: undefined,
+				failure_ref: undefined,
 				root_native_thread_id: undefined,
 				approvals: new Map(),
 				command_intents: new Map(),
@@ -372,13 +384,21 @@ function make_codex_app_server_engine(
 						};
 					}
 
+					if (
+						observation._tag === "native_action" &&
+						observation.error_ref !== undefined
+					) {
+						return { ...current, failure_ref: observation.error_ref };
+					}
+
 					return current;
 				});
 			const ProcessObservation = (observation: EngineObservation) =>
 				Effect.gen(function* () {
-					const active_turn_id = (yield* Ref.get(state)).active_turn_id;
+					const current = yield* Ref.get(state);
 					const terminal =
-						observation._tag === "turn_state" && observation.turn_id === active_turn_id
+						observation._tag === "turn_state" &&
+						observation.turn_id === current.active_turn_id
 							? terminal_for_turn(observation.state)
 							: undefined;
 
@@ -386,7 +406,10 @@ function make_codex_app_server_engine(
 					yield* Emit(observation);
 
 					if (terminal) {
-						yield* Finish(terminal);
+						yield* Finish(
+							terminal,
+							terminal === "failed" ? current.failure_ref : undefined,
+						);
 					}
 				});
 			const ProcessChildObservation = (

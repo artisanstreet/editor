@@ -12,7 +12,8 @@ describe("thread jump-to-latest affordance", () => {
 		expect(workspace).toContain("anchored_user_item_id = undefined;");
 		expect(workspace).toContain("end_space_height = ConversationBaseEndSpacePixels;");
 		expect(workspace).toContain("ArmAnchorScroll(current_viewport, true)");
-		expect(workspace).toContain('Effect.sleep("1 second")');
+		expect(workspace).toContain("fallback_millis = 1_000");
+		expect(workspace).toContain("Effect.sleep(fallback_millis)");
 		expect(workspace).toContain("generation === anchor_scroll_generation");
 		expect(workspace).toContain("release_anchor_scroll(current_viewport)");
 		expect(composer).toContain('aria-label="Jump to latest"');

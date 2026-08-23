@@ -137,7 +137,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 		const DefaultSessionPolicy = {
 			engine_id: "codex",
 			reasoning_effort: "medium",
-			permission: "supervised",
+			permission: "autonomous",
 			permission_mode: "on_request",
 			sandbox_mode: "workspace_write",
 			service_tier: "standard",
@@ -148,7 +148,12 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			row:
 				| {
 						readonly engine_id: string;
+						readonly policy_catalog_revision: string | null;
 						readonly policy_model: string | null;
+						readonly policy_model_id: string | null;
+						readonly policy_profile_id: string | null;
+						readonly policy_provider_route_id: string | null;
+						readonly policy_variant_id: string | null;
 						readonly policy_context_window: string | null;
 						readonly policy_reasoning_effort: string;
 						readonly policy_permission: string;
@@ -164,8 +169,21 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				? Schema.decodeUnknownEffect(ThreadSessionPolicy, {
 						onExcessProperty: "error",
 					})({
+						...(row.policy_catalog_revision === null
+							? {}
+							: { catalog_revision: row.policy_catalog_revision }),
 						engine_id: row.engine_id,
 						...(row.policy_model === null ? {} : { model: row.policy_model }),
+						...(row.policy_model_id === null ? {} : { model_id: row.policy_model_id }),
+						...(row.policy_profile_id === null
+							? {}
+							: { profile_id: row.policy_profile_id }),
+						...(row.policy_provider_route_id === null
+							? {}
+							: { provider_route_id: row.policy_provider_route_id }),
+						...(row.policy_variant_id === null
+							? {}
+							: { variant_id: row.policy_variant_id }),
 						...(row.policy_context_window === null
 							? {}
 							: { context_window: row.policy_context_window }),
@@ -182,7 +200,12 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			database.client
 				.select({
 					engine_id: OrchestrationCoordinators.engine_id,
+					policy_catalog_revision: OrchestrationCoordinators.policy_catalog_revision,
 					policy_model: OrchestrationCoordinators.policy_model,
+					policy_model_id: OrchestrationCoordinators.policy_model_id,
+					policy_profile_id: OrchestrationCoordinators.policy_profile_id,
+					policy_provider_route_id: OrchestrationCoordinators.policy_provider_route_id,
+					policy_variant_id: OrchestrationCoordinators.policy_variant_id,
 					policy_context_window: OrchestrationCoordinators.policy_context_window,
 					policy_reasoning_effort: OrchestrationCoordinators.policy_reasoning_effort,
 					policy_permission: OrchestrationCoordinators.policy_permission,
@@ -209,7 +232,14 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							.select({
 								enabled: OrchestrationCoordinators.auto_steer_follow_ups,
 								engine_id: OrchestrationCoordinators.engine_id,
+								policy_catalog_revision:
+									OrchestrationCoordinators.policy_catalog_revision,
 								policy_model: OrchestrationCoordinators.policy_model,
+								policy_model_id: OrchestrationCoordinators.policy_model_id,
+								policy_profile_id: OrchestrationCoordinators.policy_profile_id,
+								policy_provider_route_id:
+									OrchestrationCoordinators.policy_provider_route_id,
+								policy_variant_id: OrchestrationCoordinators.policy_variant_id,
 								policy_context_window:
 									OrchestrationCoordinators.policy_context_window,
 								policy_reasoning_effort:

@@ -10,4 +10,5 @@ export {
 	conversation_patch_replay_batch_size,
 	ReadConversationPatches,
 	ReadConversationSnapshot,
+	type ConversationReadBounds,
 } from "./projection/read";

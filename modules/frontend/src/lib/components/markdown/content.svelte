@@ -33,6 +33,7 @@
 		get_streaming_word_pacing,
 		is_append_only_streaming_target,
 		reveal_streaming_words,
+		should_animate_streaming_target,
 		type StreamingWordsTarget,
 		wait_for_streaming_word_delay_or_target,
 	} from "./streaming-words";
@@ -49,6 +50,13 @@
 	let animation_generation = 0;
 	let pending_animation_generation = $state<number | undefined>();
 	let rendered_tree = $state.raw<ComarkTree | undefined>();
+	let settled_transform_pending = $state(
+		untrack(() => !streaming && text.trim().length > 0),
+	);
+	let settled_transform_generation = 0;
+	/** Keeps an already-mounted Comark child valid while its owning message is being replaced. */
+	const empty_tree: ComarkTree = { frontmatter: {}, meta: {}, nodes: [] };
+	const visible_tree = $derived(rendered_tree ?? empty_tree);
 	const streaming_word_targets = yield* Queue.unbounded<StreamingWordsTarget>();
 	const streaming_words_plugin = create_conversation_streaming_words_plugin(
 		() => pending_animation_generation,
@@ -165,7 +173,11 @@
 			latest_streaming_target = target;
 			if (target.streaming) presentation_settled = false;
 
-			if (!is_append_only_streaming_target(current_text, target) || reduced_motion) {
+			if (
+				!should_animate_streaming_target(presentation_settled, target) ||
+				!is_append_only_streaming_target(current_text, target) ||
+				reduced_motion
+			) {
 				current_text = target.text;
 				pending_animation_generation = undefined;
 				revealed_text = target.text;
@@ -275,10 +287,15 @@
 			parsed_text = undefined;
 			rendered_tree = tree;
 		});
-	const settled_render_sources = yield* Queue.unbounded<string>();
+	type SettledRenderRequest = {
+		readonly generation: number;
+		readonly source: string;
+	};
+	const settled_render_sources = yield* Queue.unbounded<SettledRenderRequest>();
 	const RenderSettledMarkdown = Effect.gen(function* () {
 		while (true) {
-			const source = yield* Queue.take(settled_render_sources);
+			const request = yield* Queue.take(settled_render_sources);
+			const { source } = request;
 			if (source.length === 0) continue;
 			const resident = TryResidentConversationSettledMarkdownPlugins(source);
 			if (resident === undefined && rendered_tree === undefined) {
@@ -289,11 +306,27 @@
 			/** Fences streamed mid-run are already cached; this covers the rest. */
 			yield* WarmConversationFenceTokens(source);
 			yield* RenderSettledTree(source, plugins);
+			if (
+				request.generation === settled_transform_generation &&
+				source === revealed_text &&
+				!presentation_streaming
+			)
+				settled_transform_pending = false;
 		}
 	});
 	/** The component scope interrupts the settled worker when its message unmounts. */
 	yield* RenderSettledMarkdown.pipe(Effect.forkScoped);
-	yield* Queue.offer(settled_render_sources, presentation_streaming ? "" : revealed_text);
+	const QueueSettledRender = (currently_streaming: boolean, source: string) =>
+		Effect.gen(function* () {
+			const settled_source = currently_streaming ? "" : source;
+			const generation = ++settled_transform_generation;
+			settled_transform_pending = settled_source.trim().length > 0;
+			yield* Queue.offer(settled_render_sources, {
+				generation,
+				source: settled_source,
+			});
+		});
+	yield* QueueSettledRender(presentation_streaming, revealed_text);
 
 	const components = {
 		ProseA: Anchor,
@@ -305,12 +338,33 @@
 	};
 </script>
 
-<!-- Rich nodes settle once at turn completion; partial math and Mermaid remain literal/code. -->
-{#if rendered_tree !== undefined}
-	<ComarkRenderer
-		class={`prose conversation-markdown ${presentation_streaming ? "conversation-markdown-streaming" : ""}`}
-		tree={rendered_tree}
-		{components}
-		streaming={presentation_streaming}
-	/>
-{/if}
+<!--
+	The contents wrapper has no layout box. Its pending marker lets thread
+	navigation distinguish "text has painted" from "the settled transform has
+	finished" without coupling the route to every Markdown renderer.
+-->
+<div
+	class="contents"
+	data-thread-content-transforming={settled_transform_pending ? "true" : undefined}
+>
+	<!-- Rich nodes settle once at turn completion; partial math and Mermaid remain literal/code. -->
+	{#if rendered_tree !== undefined}
+		<ComarkRenderer
+			class={`prose conversation-markdown ${presentation_streaming ? "conversation-markdown-streaming" : ""}`}
+			tree={visible_tree}
+			{components}
+			streaming={presentation_streaming}
+		/>
+	{:else if revealed_text.trim().length > 0}
+		<!--
+			The transcript switches from its work summary to this message before the
+			async Markdown parser necessarily finishes its first tree. Paint the exact
+			text during that handoff; otherwise both surfaces are absent for one frame.
+		-->
+		<div
+			class={`comark-content prose conversation-markdown ${presentation_streaming ? "conversation-markdown-streaming" : ""}`}
+		>
+			<p class="whitespace-pre-wrap">{revealed_text}</p>
+		</div>
+	{/if}
+</div>

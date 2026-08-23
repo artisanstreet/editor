@@ -58,14 +58,59 @@ export interface ToolchainPlatformTarget {
 	readonly platform: NodeJS.Platform;
 }
 
-/** One concrete downloadable engine binary with its integrity expectations. */
-export interface ResolvedEngineRelease {
+/** One concrete raw executable with its integrity expectations. */
+export interface ResolvedBinaryEngineRelease {
+	readonly artifact_kind?: "binary";
 	readonly binary: string;
 	readonly sha256: string;
 	readonly size_bytes?: number;
 	readonly url: string;
 	readonly version: string;
 }
+
+/** One NPM platform tarball whose single expected executable is extracted without scripts. */
+export interface ResolvedNpmTarballEngineRelease {
+	readonly archive_member: string;
+	readonly artifact_kind: "npm-tarball";
+	readonly binary: string;
+	readonly integrity_sha512: string;
+	readonly size_bytes?: number;
+	readonly url: string;
+	readonly version: string;
+}
+
+/** One ZIP bundle whose root is stripped into an immutable generation directory. */
+export interface ResolvedZipBundleEngineRelease {
+	readonly archive_kind: "zip";
+	readonly archive_root: string;
+	readonly artifact_kind: "archive-bundle";
+	/** Launcher basename after archive_root is stripped. */
+	readonly binary: string;
+	readonly expanded_size_bytes: number;
+	readonly sha256: string;
+	readonly size_bytes?: number;
+	readonly url: string;
+	readonly version: string;
+}
+
+/** A checksum-pinned vendor installer run stage-by-stage into one owned generation. */
+export interface ResolvedStagedInstallerEngineRelease {
+	readonly artifact_kind: "staged-installer";
+	/** Executable path relative to the immutable generation directory. */
+	readonly binary: string;
+	readonly commit: string;
+	readonly installer_sha256: string;
+	readonly size_bytes?: number;
+	readonly stages: ReadonlyArray<string>;
+	readonly url: string;
+	readonly version: string;
+}
+
+export type ResolvedEngineRelease =
+	| ResolvedBinaryEngineRelease
+	| ResolvedNpmTarballEngineRelease
+	| ResolvedZipBundleEngineRelease
+	| ResolvedStagedInstallerEngineRelease;
 
 export class ToolchainReleaseError extends Data.TaggedError("ToolchainReleaseError")<{
 	readonly cause?: unknown;
@@ -83,6 +128,8 @@ export type EngineDistributionFailure = ToolchainHttpFailure | ToolchainReleaseE
  * recommended (tested) versions.
  */
 export interface EngineDistribution {
+	/** API-authenticated engines reject the generic interactive CLI login path. */
+	readonly authentication?: "cli" | "service-api";
 	/** File names copied from the vendor's own home into the owned home once. */
 	readonly credential_files: ReadonlyArray<string>;
 	readonly display_name: string;
@@ -292,8 +339,210 @@ const CodexDistribution: EngineDistribution = {
 	vendor_home_directory: ".codex",
 };
 
+/**
+ * Grok does not publish detached checksums for its mutable stable channel, so
+ * Artisan deliberately pins the vendor binary it has reviewed instead of
+ * treating the channel pointer itself as an integrity statement.
+ */
+export const grok_certified_version = "1.0.5";
+const grok_certified_windows_x64_sha256 =
+	"4b924daa801663ea20e96382408b1f2b5ba39efad62c14d20d88618a9eb0be64";
+const grok_release_base = "https://x.ai/cli";
+
+const GrokDistribution: EngineDistribution = {
+	credential_files: ["auth.json"],
+	display_name: "Grok Build",
+	engine_id: "grok",
+	home_environment_variable: "GROK_HOME",
+	login_args: ["login"],
+	LatestVersion: Effect.gen(function* () {
+		const http = yield* ToolchainReleaseHttp;
+		const stable = yield* http.Get(`${grok_release_base}/stable`, maximum_metadata_bytes);
+		return yield* DecodeVersionText("grok", new TextDecoder().decode(stable.bytes));
+	}),
+	recommended_version: grok_certified_version,
+	ResolveRelease: (version, target) =>
+		Effect.gen(function* () {
+			if (version !== grok_certified_version)
+				return yield* new ToolchainReleaseError({
+					engine_id: "grok",
+					reason: "version_unavailable",
+				});
+			if (target.platform !== "win32" || target.architecture !== "x64")
+				return yield* new ToolchainReleaseError({
+					engine_id: "grok",
+					reason: "platform_unsupported",
+				});
+			return {
+				binary: "grok.exe",
+				sha256: grok_certified_windows_x64_sha256,
+				size_bytes: 142_651_720,
+				url: `${grok_release_base}/grok-${version}-windows-x86_64.exe`,
+				version,
+			} satisfies ResolvedBinaryEngineRelease;
+		}),
+	vendor_home_directory: ".grok",
+};
+
+/** Cursor's installer points at a complete Node/native bundle, not one executable. */
+export const cursor_certified_version = "2026.08.11-e8db854";
+const cursor_certified_windows_x64_sha256 =
+	"0458981ffe0fda840d19b97d7cbcb26832dafcf01a9c229f3fb0e0d233d66c4b";
+const cursor_release_base = `https://downloads.cursor.com/lab/${cursor_certified_version}`;
+const cursor_installer_url = "https://cursor.com/install?win32=true";
+
+const CursorDistribution: EngineDistribution = {
+	credential_files: ["auth.json"],
+	display_name: "Cursor",
+	engine_id: "cursor",
+	home_environment_variable: "CURSOR_CONFIG_DIR",
+	login_args: ["login"],
+	LatestVersion: Effect.gen(function* () {
+		const http = yield* ToolchainReleaseHttp;
+		const installer = yield* http.Get(cursor_installer_url, maximum_metadata_bytes);
+		const source = new TextDecoder("utf-8", { fatal: true }).decode(installer.bytes);
+		const version = /\$version\s*=\s*'([^']+)'/.exec(source)?.[1];
+		if (version === undefined)
+			return yield* new ToolchainReleaseError({
+				engine_id: "cursor",
+				reason: "manifest",
+			});
+		return yield* DecodeVersionText("cursor", version);
+	}),
+	recommended_version: cursor_certified_version,
+	ResolveRelease: (version, target) =>
+		Effect.gen(function* () {
+			if (version !== cursor_certified_version)
+				return yield* new ToolchainReleaseError({
+					engine_id: "cursor",
+					reason: "version_unavailable",
+				});
+			if (target.platform !== "win32" || target.architecture !== "x64")
+				return yield* new ToolchainReleaseError({
+					engine_id: "cursor",
+					reason: "platform_unsupported",
+				});
+			return {
+				archive_kind: "zip",
+				archive_root: "dist-package",
+				artifact_kind: "archive-bundle",
+				binary: "cursor-agent.cmd",
+				expanded_size_bytes: 384 * 1024 * 1024,
+				sha256: cursor_certified_windows_x64_sha256,
+				size_bytes: 73_841_982,
+				url: `${cursor_release_base}/windows/x64/agent-cli-package.zip`,
+				version,
+			} satisfies ResolvedZipBundleEngineRelease;
+		}),
+	vendor_home_directory: ".cursor",
+};
+
+/**
+ * OpenCode is a separate beta channel and executable. The pin is deliberate:
+ * V2's API/config/plugin contracts are experimental, so upgrades require a
+ * compatibility review instead of following an NPM dist-tag at runtime.
+ */
+export const opencode2_certified_version = "0.0.0-beta-17778";
+export const opencode2_certified_upstream_commit = "0d2684b67308380fc47540fe55deb55306a08e3f";
+
+const OpenCode2Distribution: EngineDistribution = {
+	authentication: "service-api",
+	credential_files: [],
+	display_name: "OpenCode",
+	engine_id: "opencode2",
+	home_environment_variable: "OPENCODE_CONFIG_DIR",
+	login_args: [],
+	LatestVersion: Effect.succeed(opencode2_certified_version),
+	minimum_version: opencode2_certified_version,
+	recommended_version: opencode2_certified_version,
+	ResolveRelease: (version, target) =>
+		Effect.gen(function* () {
+			if (
+				version !== opencode2_certified_version ||
+				target.platform !== "win32" ||
+				target.architecture !== "x64"
+			)
+				return yield* new ToolchainReleaseError({
+					engine_id: "opencode2",
+					reason:
+						version === opencode2_certified_version
+							? "platform_unsupported"
+							: "version_unavailable",
+				});
+			return {
+				archive_member: "package/bin/opencode2.exe",
+				artifact_kind: "npm-tarball",
+				binary: "opencode2.exe",
+				integrity_sha512:
+					"Z0oMvTBUhxmz1IYuQSMOZTpI2HoWjeIjdxJ39SoGrhDwvJZK7OI0rgIMYtDGavOucOQT8oxrazUiO4j+2hVMpw==",
+				/** Bound the compressed response above the registry's 144,313,595-byte unpacked size. */
+				size_bytes: 256 * 1024 * 1024,
+				url: `https://registry.npmjs.org/@opencode-ai/cli-windows-x64/-/cli-windows-x64-${version}.tgz`,
+				version,
+			} satisfies ResolvedNpmTarballEngineRelease;
+		}),
+	vendor_home_directory: ".config/opencode",
+};
+
+export const hermes_certified_version = "0.20.5";
+export const hermes_certified_commit = "2eaa863112d2980bbe6f15ea409a6a29e50964fe";
+
+const HermesDistribution: EngineDistribution = {
+	credential_files: [".env", "auth.json"],
+	display_name: "Hermes",
+	engine_id: "hermes",
+	home_environment_variable: "HERMES_HOME",
+	login_args: ["setup"],
+	LatestVersion: Effect.succeed(hermes_certified_version),
+	minimum_version: hermes_certified_version,
+	recommended_version: hermes_certified_version,
+	ResolveRelease: (version, target) =>
+		Effect.gen(function* () {
+			if (version !== hermes_certified_version)
+				return yield* new ToolchainReleaseError({
+					engine_id: "hermes",
+					reason: "version_unavailable",
+				});
+			if (target.platform !== "win32" || target.architecture !== "x64")
+				return yield* new ToolchainReleaseError({
+					engine_id: "hermes",
+					reason: "platform_unsupported",
+				});
+			return {
+				artifact_kind: "staged-installer",
+				binary: "hermes-agent/bin/hermes.exe",
+				commit: hermes_certified_commit,
+				installer_sha256:
+					"e7521626d40f2d9fc2c51968244f22b3441dc4d5efebb28a0af4b335e91aecdf",
+				size_bytes: 238_619,
+				stages: [
+					"uv",
+					"python",
+					"git",
+					"node",
+					"system-packages",
+					"repository",
+					"venv",
+					"dependencies",
+					"node-deps",
+					"path",
+					"config-templates",
+					"platform-sdks",
+					"bootstrap-marker",
+				],
+				url: `https://raw.githubusercontent.com/NousResearch/hermes-agent/${hermes_certified_commit}/scripts/install.ps1`,
+				version,
+			} satisfies ResolvedStagedInstallerEngineRelease;
+		}),
+	vendor_home_directory: "AppData/Local/hermes",
+};
+
 /** Every engine Artisan can own, in catalog order. */
 export const engine_distributions: ReadonlyArray<EngineDistribution> = [
 	CodexDistribution,
 	ClaudeDistribution,
+	OpenCode2Distribution,
+	GrokDistribution,
+	CursorDistribution,
+	HermesDistribution,
 ];

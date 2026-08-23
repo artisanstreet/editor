@@ -4,8 +4,10 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
+	type AckEnvelope,
 	DecodeOutboundControlEnvelope,
 	type CommandEnvelope,
+	type EventEnvelope,
 	type HelloEnvelope,
 	type ThreadListQueryEnvelope,
 } from "@artisan/protocol";
@@ -17,6 +19,8 @@ import {
 	type TransportHelloFrame,
 } from "@artisan/transport";
 import { adapt_node_message_port } from "@artisan/transport/node";
+
+import { reliable_event_window_capacity } from "../../modules/transport/src/internal/server-binding";
 
 import { make_transport_test_harness } from "./message-channel-harness";
 
@@ -304,6 +308,71 @@ describe("MessagePort transport server validation", () => {
 			);
 
 			expect(close).toEqual({ code: "closed", dropped_messages: 0 });
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("holds an oversized replay behind a bounded acknowledgement window", async () => {
+		const harness = await make_transport_test_harness();
+
+		try {
+			for (let index = 0; index < reliable_event_window_capacity + 5; index += 1) {
+				await Effect.runPromise(
+					harness.client.CreateThread({ title: `Replay window ${index}` }),
+				);
+			}
+
+			const output = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const session = yield* open_raw_session(harness.server);
+						const connection_id = yield* bootstrap(session);
+						yield* send_control(session, connection_id, make_hello("windowed_replay"));
+
+						const welcome = yield* receive_control(session);
+						const first = yield* Effect.forEach(
+							Array.from({ length: reliable_event_window_capacity }),
+							() => receive_control(session),
+						);
+						const before_ack = yield* receive_control(session).pipe(
+							Effect.timeoutOption("50 millis"),
+						);
+						const events = first.filter(
+							(envelope): envelope is EventEnvelope => envelope.kind === "event",
+						);
+						const last = events.at(-1);
+						if (last === undefined) return yield* Effect.die("missing replay events");
+						const ack: AckEnvelope = {
+							kind: "ack",
+							message_id: "ack_replay_window",
+							origin: "frontend",
+							payload: {
+								event_cursors: events.map((event) => ({
+									sequence: event.sequence,
+									stream_id: event.stream_id,
+								})),
+								journal_sequence: last.journal_sequence,
+							},
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at: "2026-07-10T08:00:00.000Z",
+						};
+						yield* send_control(session, connection_id, ack);
+						const rest = yield* Effect.forEach(Array.from({ length: 6 }), () =>
+							receive_control(session),
+						).pipe(Effect.timeout("2 seconds"));
+
+						return { before_ack, first, rest, welcome };
+					}),
+				),
+			);
+
+			expect(output.welcome.kind).toBe("welcome");
+			expect(output.first).toHaveLength(reliable_event_window_capacity);
+			expect(output.before_ack._tag).toBe("None");
+			expect(output.rest.filter((envelope) => envelope.kind === "event")).toHaveLength(5);
+			expect(output.rest.at(-1)?.kind).toBe("replay.complete");
 		} finally {
 			await harness.dispose();
 		}

@@ -14,9 +14,12 @@ import type {
 	SurfaceUsageAggregateUpdate,
 	ThreadListUpdate,
 	ThreadSessionUpdate,
+	ThreadWorkUpdate,
 	ThreadTranscriptUpdate,
 	WorkspaceConflictListUpdate,
 } from "../../client-api/service";
+
+export type EventObserverQueue = Queue.Queue<EventEnvelope, ArtisanClientError | Cause.Done<void>>;
 
 interface ProjectionSubscriptionBase {
 	readonly envelope: SubscribeEnvelope;
@@ -52,6 +55,7 @@ export type ThreadSessionSubscription = ProjectionSubscriptionOf<
 	"thread.session",
 	ThreadSessionUpdate
 >;
+export type ThreadWorkSubscription = ProjectionSubscriptionOf<"thread.work", ThreadWorkUpdate>;
 export type SurfaceListSubscription = ProjectionSubscriptionOf<"surface.list", SurfaceListUpdate>;
 export type SurfaceUsageAggregateSubscription = ProjectionSubscriptionOf<
 	"surface.usage.aggregate",
@@ -70,6 +74,7 @@ export type ProjectionSubscription =
 	| ConversationSubscription
 	| OrchestrationGroupListSubscription
 	| ThreadSessionSubscription
+	| ThreadWorkSubscription
 	| SurfaceListSubscription
 	| SurfaceUsageAggregateSubscription
 	| WorkspaceConflictListSubscription;
@@ -92,6 +97,7 @@ export type ProjectionEnvelope = Extract<
 			| "orchestration.group.list.snapshot"
 			| "orchestration.group.list.patch"
 			| "thread.session.snapshot"
+			| "thread.work.snapshot"
 			| "surface.list.snapshot"
 			| "surface.usage.aggregate.snapshot"
 			| "workspace.conflict.list.snapshot";
@@ -100,10 +106,7 @@ export type ProjectionEnvelope = Extract<
 
 export interface SubscriptionState {
 	readonly disposed: boolean;
-	readonly event_observers: ReadonlyMap<
-		string,
-		Queue.Queue<EventEnvelope, ArtisanClientError | Cause.Done<void>>
-	>;
+	readonly event_observers: ReadonlyMap<string, EventObserverQueue>;
 	readonly event_cursors: Readonly<Record<string, number>>;
 	readonly event_terminal: EventTerminal;
 	readonly ignored_correlations: ReadonlySet<string>;
@@ -126,13 +129,21 @@ export type EventTerminal =
 	| { readonly _tag: "failed"; readonly error: ArtisanClientError };
 
 export type EventApplication =
-	| { readonly _tag: "Applied"; readonly cursors: ArtisanClientCursors }
+	| {
+			readonly _tag: "Applied";
+			readonly cursors: ArtisanClientCursors;
+			readonly overflowed_observers: ReadonlyArray<EventObserverQueue>;
+	  }
 	| { readonly _tag: "Duplicate" }
 	| { readonly _tag: "Gap" };
 
 export type SubscriptionDelivery =
 	| { readonly _tag: "Delivered" }
 	| { readonly _tag: "Ignored" }
+	| {
+			readonly _tag: "Overflow";
+			readonly subscription: ProjectionSubscription;
+	  }
 	| {
 			readonly _tag: "Gap";
 			readonly subscription: ProjectionSubscription;
@@ -145,4 +156,4 @@ export type SubscriptionStart =
 	| { readonly _tag: "Missing" };
 
 export type SubscriptionRejection = Exclude<SubscriptionStart, { readonly _tag: "Duplicate" }>;
-export type ProjectionOffer = "mismatch" | "offered";
+export type ProjectionOffer = "mismatch" | "offered" | "overflow";

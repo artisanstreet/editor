@@ -136,6 +136,29 @@ const settled_statuses: ReadonlySet<ConversationLifecycle> = new Set([
 export const work_session_is_settled = (status: ConversationLifecycle): boolean =>
 	settled_statuses.has(status);
 
+/**
+ * Keeps transcript presentation on the transcript's own ordered authority.
+ *
+ * Thread work and conversation patches use separate subscriptions. A terminal
+ * work snapshot can therefore arrive a frame before the conversation's final
+ * message and session settlement. Authoritative controls must follow work
+ * immediately, but presentation must retain the existing thinking/summary line
+ * until the transcript itself reaches that handoff or the reader sees a blank
+ * interval containing neither work nor reply.
+ */
+export const conversation_run_presentation_is_active = (
+	items: ReadonlyArray<ConversationItem>,
+	run_id: string | undefined,
+	work_active: boolean,
+): boolean => {
+	if (work_active) return true;
+	if (run_id === undefined) return false;
+	const session = items.findLast(
+		(item) => item.type === "work_session" && item.run_id === run_id,
+	);
+	return session?.type === "work_session" && !work_session_is_settled(session.status);
+};
+
 /** The instant a session's header presents as its end. */
 export interface WorkSessionSettlement {
 	readonly ended_at: string;
@@ -285,7 +308,11 @@ export const conversation_progress_phase = (
 	let newest_reply_ordinal = -1;
 	let newest_work_ordinal = -1;
 	for (const item of items) {
-		if (item.type === "assistant_message" && item.text.trim().length > 0) {
+		if (
+			item.type === "assistant_message" &&
+			item.phase !== "commentary" &&
+			item.text.trim().length > 0
+		) {
 			newest_reply_ordinal = Math.max(newest_reply_ordinal, item.ordinal);
 		}
 		if (
@@ -297,6 +324,29 @@ export const conversation_progress_phase = (
 	}
 	if (newest_reply_ordinal === -1 && newest_work_ordinal === -1) return "none";
 	return newest_reply_ordinal > newest_work_ordinal ? "reply" : "work";
+};
+
+/**
+ * True once the newest visible prose can no longer turn out to be narration:
+ * its message completed without being reclassified as commentary. While it
+ * still streams, the provider has not yet said whether tool calls follow in
+ * the same message, so treating it as the settled reply flashes the
+ * transcript's finished state in the middle of a working turn.
+ */
+export const conversation_reply_is_confirmed = (
+	items: ReadonlyArray<ConversationItem>,
+): boolean => {
+	let newest: Extract<ConversationItem, { type: "assistant_message" }> | undefined;
+	for (const item of items) {
+		if (
+			item.type !== "assistant_message" ||
+			item.phase === "commentary" ||
+			item.text.trim().length === 0
+		)
+			continue;
+		if (newest === undefined || item.ordinal > newest.ordinal) newest = item;
+	}
+	return newest !== undefined && newest.lifecycle === "completed";
 };
 
 /**

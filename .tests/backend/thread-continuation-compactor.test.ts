@@ -1,10 +1,12 @@
 import { Effect, Layer, Option, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
+import { opencode2_big_pickle_compaction_model_id } from "@artisan/catalog";
 import {
 	make_engine_registry_layer,
 	type Engine,
 	type EngineCapabilities,
+	type EngineModelCatalogSnapshot,
 	type EngineObservation,
 	type EngineOpenInput,
 	type EngineRunTerminalState,
@@ -37,6 +39,30 @@ const capabilities: EngineCapabilities = {
 	steer: { state: "unsupported" },
 	subagents: { state: "unsupported" },
 };
+
+const big_pickle_catalog = (profile_id: string): EngineModelCatalogSnapshot => ({
+	engine_id: "opencode2",
+	generated_at: "2026-08-21T10:00:00.000Z",
+	models: [
+		{
+			capabilities: { image_input: true, tools: true },
+			catalog_id: opencode2_big_pickle_compaction_model_id,
+			enabled: true,
+			metadata_confidence: "reported",
+			model_id: "x-preview-f-free",
+			name: "Big Pickle",
+			provider_route_id: "opencode",
+			status: "active",
+		},
+	],
+	revision: "opencode-live-big-pickle",
+	routes: [],
+	scope: {
+		profile_id,
+		working_directory: "C:\\workspace",
+		workspace_trust: "safe",
+	},
+});
 
 type PartialObservation =
 	| {
@@ -81,10 +107,12 @@ const engine = (
 	id: string,
 	opens: Array<EngineOpenInput>,
 	behavior: {
+		readonly catalog?: EngineModelCatalogSnapshot;
 		readonly observations?: ReadonlyArray<PartialObservation>;
 		readonly terminal?: EngineRunTerminalState;
 	} = {},
 ): Engine => ({
+	...(behavior.catalog === undefined ? {} : { Catalog: () => Effect.succeed(behavior.catalog!) }),
 	Descriptor: {
 		capabilities,
 		display_name: id,
@@ -226,6 +254,92 @@ describe("thread continuation compactor", () => {
 		expect(open.initial_text).toContain("--- END UNTRUSTED CONVERSATION TRANSCRIPT ---");
 		expect(open.initial_text).toContain("Establish the release plan.");
 		expect(open.initial_text).toContain("2 earlier transcript entries were omitted for size.");
+	});
+
+	it("uses Big Pickle with complete OpenCode options for curated portable handoffs", async () => {
+		const opens: Array<EngineOpenInput> = [];
+		const layer = make_layer([
+			engine("opencode2", opens, {
+				catalog: big_pickle_catalog("work"),
+				observations: [
+					{
+						_tag: "agent_message_completed",
+						message: "Portable OpenCode summary.",
+						phase: "final",
+					},
+				],
+			}),
+		]);
+
+		const result = await summarize(
+			layer,
+			request({
+				source: {
+					engine_id: "opencode2",
+					model_id: "claude-sonnet-4-5",
+					profile_id: "work",
+					provider_route_id: "opencode-go",
+				},
+			}),
+		);
+
+		expect(Option.getOrThrow(result)).toEqual({
+			compactor: { engine_id: "opencode2", model_id: "x-preview-f-free" },
+			summary: "Portable OpenCode summary.",
+		});
+		expect(opens[0]).toMatchObject({
+			catalog_revision: "opencode-live-big-pickle",
+			model: "x-preview-f-free",
+			model_id: "x-preview-f-free",
+			permission_policy: {
+				approval: "never",
+				network_access: false,
+				write_access: false,
+			},
+			profile_id: "work",
+			provider_route_id: "opencode",
+			provider_options: {
+				"opencode2.agent": "artisan-v1-restricted-offline-no-web",
+				"opencode2.project_config": false,
+				"opencode2.web_search_enabled": false,
+			},
+		});
+	});
+
+	it("can explicitly use an OpenCode route as another engine's cross-transfer compactor", async () => {
+		const opens: Array<EngineOpenInput> = [];
+		const layer = make_layer(
+			[
+				engine("opencode2", opens, {
+					catalog: big_pickle_catalog("default"),
+					observations: [
+						{
+							_tag: "agent_message_completed",
+							message: "Cross-engine OpenCode summary.",
+							phase: "final",
+						},
+					],
+				}),
+			],
+			opencode2_big_pickle_compaction_model_id,
+		);
+
+		const result = await summarize(layer, request());
+
+		expect(Option.getOrThrow(result).compactor).toEqual({
+			engine_id: "opencode2",
+			model_id: "x-preview-f-free",
+		});
+		expect(opens[0]).toMatchObject({
+			catalog_revision: "opencode-live-big-pickle",
+			model_id: "x-preview-f-free",
+			profile_id: "default",
+			provider_route_id: "opencode",
+			provider_options: {
+				"opencode2.agent": "artisan-v1-restricted-offline-no-web",
+				"opencode2.project_config": false,
+			},
+		});
 	});
 
 	it("prefers the configured catalog compaction model over the source engine", async () => {

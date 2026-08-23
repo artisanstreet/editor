@@ -17,6 +17,7 @@ use crate::{
     manifest::InstallationManifest,
     paths::Layout,
     payload, process,
+    telemetry::{self, Preference},
 };
 
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
@@ -70,6 +71,10 @@ pub enum Commands {
         /// Intended for installer retirement.
         #[arg(long, hide = true, conflicts_with = "instance_id")]
         pid: Option<u32>,
+        /// Refuse shutdown when Forge reports live model work. Intended for
+        /// installer retirement before an update is activated.
+        #[arg(long, hide = true, requires = "pid")]
+        if_idle: bool,
     },
     Restart {
         #[arg(long)]
@@ -116,6 +121,52 @@ pub enum Commands {
         #[arg(long)]
         remove_data: bool,
     },
+    /// Inspect or change privacy-preserving observability preferences.
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TelemetryCommand {
+    /// Print the two independent consent choices without exposing installation identity.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change anonymous usage analytics.
+    Analytics {
+        #[arg(value_enum)]
+        choice: TelemetryChoice,
+    },
+    /// Change sanitized crash reporting.
+    CrashReports {
+        #[arg(value_enum)]
+        choice: TelemetryChoice,
+    },
+    /// Replace the anonymous installation identifier without changing consent.
+    ResetIdentity {
+        #[arg(long, required = true)]
+        yes: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TelemetryChoice {
+    Enable,
+    Disable,
+    Unset,
+}
+
+impl From<TelemetryChoice> for Preference {
+    fn from(value: TelemetryChoice) -> Self {
+        match value {
+            TelemetryChoice::Enable => Self::Enabled,
+            TelemetryChoice::Disable => Self::Disabled,
+            TelemetryChoice::Unset => Self::Unset,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -166,8 +217,12 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Commands::Start { foreground } => start(&layout, foreground).map(|_| ()),
-        Commands::Stop { instance_id, pid } => match pid {
-            Some(pid) => stop_pid(&layout, pid),
+        Commands::Stop {
+            instance_id,
+            pid,
+            if_idle,
+        } => match pid {
+            Some(pid) => stop_pid(&layout, pid, if_idle),
             None => stop(&layout, instance_id.as_deref()),
         },
         Commands::Restart { foreground } => {
@@ -193,6 +248,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Autostart { disable } => autostart(disable),
         Commands::Update => delegate_installer(&layout, "update", false),
+        Commands::Telemetry { command } => telemetry_command(&layout, command),
         Commands::Uninstall { remove_data } => {
             match stop(&layout, None) {
                 Ok(()) | Err(CliError::NotRunning | CliError::MissingInstance) => {}
@@ -204,12 +260,53 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
+fn telemetry_command(layout: &Layout, command: TelemetryCommand) -> Result<()> {
+    match command {
+        TelemetryCommand::Status { json } => {
+            let preferences = telemetry::load_or_create(layout)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "crash_reports": preferences.crash_reports,
+                        "identity_configured": true,
+                        "usage_analytics": preferences.usage_analytics,
+                        "version": preferences.version,
+                    })
+                );
+            } else {
+                println!("Usage analytics: {}", preferences.usage_analytics.as_str());
+                println!("Crash reports: {}", preferences.crash_reports.as_str());
+                println!("Anonymous identity: configured");
+            }
+            Ok(())
+        }
+        TelemetryCommand::Analytics { choice } => {
+            let updated = telemetry::set_usage_analytics(layout, choice.into())?;
+            println!("Usage analytics: {}", updated.usage_analytics.as_str());
+            Ok(())
+        }
+        TelemetryCommand::CrashReports { choice } => {
+            let updated = telemetry::set_crash_reports(layout, choice.into())?;
+            println!("Crash reports: {}", updated.crash_reports.as_str());
+            Ok(())
+        }
+        TelemetryCommand::ResetIdentity { yes } => {
+            debug_assert!(yes, "clap requires --yes");
+            telemetry::reset_identity(layout)?;
+            println!("Anonymous telemetry identity reset");
+            Ok(())
+        }
+    }
+}
+
 fn require_installation(layout: &Layout) -> Result<InstallationManifest> {
     InstallationManifest::load(&layout.manifest)
 }
 
 fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
     let manifest = require_installation(layout)?;
+    telemetry::load_or_create(layout)?;
     let (paths, config, secrets) = instance::load(layout)?;
     process::start(&manifest, &paths, &config, &secrets, foreground)
 }
@@ -219,9 +316,13 @@ fn stop(layout: &Layout, instance_id: Option<&str>) -> Result<()> {
     process::stop_with_instance_id(&paths, &secrets, instance_id)
 }
 
-fn stop_pid(layout: &Layout, pid: u32) -> Result<()> {
+fn stop_pid(layout: &Layout, pid: u32, if_idle: bool) -> Result<()> {
     let (paths, _, secrets) = instance::load(layout)?;
-    process::stop_with_pid(&paths, &secrets, pid)
+    if if_idle {
+        process::stop_with_pid_if_idle(&paths, &secrets, pid)
+    } else {
+        process::stop_with_pid(&paths, &secrets, pid)
+    }
 }
 
 fn autostart(disable: bool) -> Result<()> {
@@ -836,6 +937,7 @@ fn handoff_json(ready: &ReadyState, pair_code: &str) -> serde_json::Value {
 /// capability travels through argv.
 fn launch_editor(layout: &Layout) -> Result<()> {
     let manifest = require_installation(layout)?;
+    telemetry::load_or_create(layout)?;
     let editor = manifest.editor_executable();
     if !editor.is_file() {
         return Err(CliError::Installation(format!(
@@ -848,6 +950,7 @@ fn launch_editor(layout: &Layout) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    detach_editor(&mut command);
     // The managed layout deliberately ships no `ae` shim inside the editor's
     // own resources, so the editor's handoff would resolve a path that does
     // not exist there. This launcher is the one process that knows where the
@@ -856,7 +959,9 @@ fn launch_editor(layout: &Layout) -> Result<()> {
         command.env("ARTISAN_AE_COMMAND", permanent_ae);
     }
     let diagnostics_directory = layout.root.join("diagnostics");
-    command.env("ARTISAN_DIAGNOSTICS_DIR", &diagnostics_directory);
+    command
+        .env("ARTISAN_DIAGNOSTICS_DIR", &diagnostics_directory)
+        .env("ARTISAN_TELEMETRY_CONFIG_PATH", telemetry::path(layout));
     if diagnostics_directory.join("profiling-enabled").is_file() {
         command
             .env("ARTISAN_EDITOR_RENDERER_DIAGNOSTICS", "1")
@@ -869,6 +974,22 @@ fn launch_editor(layout: &Layout) -> Result<()> {
     command.spawn().map_err(io("start Artisan editor"))?;
     Ok(())
 }
+
+#[cfg(target_os = "windows")]
+const EDITOR_CREATION_FLAGS: u32 = 0x0800_0000 | 0x0000_0008;
+
+#[cfg(target_os = "windows")]
+fn detach_editor(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    // `ae open` is a launcher, not the editor's lifetime owner. In particular,
+    // the first Electron process must not retain the invoking build's console
+    // or pipe lifetime after `ae` itself exits.
+    command.creation_flags(EDITOR_CREATION_FLAGS);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detach_editor(_: &mut Command) {}
 
 fn resolve_browser_origin(origin: Option<&str>, forge_endpoint: &str) -> Result<String> {
     validate_origin(origin.unwrap_or(forge_endpoint))
@@ -972,6 +1093,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn telemetry_commands_are_explicit_and_reset_requires_confirmation() {
+        let analytics = Cli::try_parse_from(["ae", "telemetry", "analytics", "enable"])
+            .expect("analytics telemetry command");
+        assert!(matches!(
+            analytics.command,
+            Some(Commands::Telemetry {
+                command: TelemetryCommand::Analytics {
+                    choice: TelemetryChoice::Enable,
+                },
+            })
+        ));
+        assert!(Cli::try_parse_from(["ae", "telemetry", "reset-identity"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "telemetry", "reset-identity", "--yes",]).is_ok());
+    }
+
+    #[test]
     fn plain_invocation_maps_to_open() {
         let cli = Cli::try_parse_from(["ae"]).unwrap();
         assert!(cli.command.is_none());
@@ -1015,14 +1152,16 @@ mod tests {
             Some(Commands::Stop {
                 instance_id: Some(id),
                 pid: None,
+                if_idle: false,
             }) if id == "forge-1"
         ));
-        let pid_stop = Cli::try_parse_from(["ae", "stop", "--pid", "6172"]).unwrap();
+        let pid_stop = Cli::try_parse_from(["ae", "stop", "--pid", "6172", "--if-idle"]).unwrap();
         assert!(matches!(
             pid_stop.command,
             Some(Commands::Stop {
                 instance_id: None,
                 pid: Some(6172),
+                if_idle: true,
             })
         ));
         assert!(
@@ -1035,8 +1174,10 @@ mod tests {
             Some(Commands::Stop {
                 instance_id: None,
                 pid: None,
+                if_idle: false,
             })
         ));
+        assert!(Cli::try_parse_from(["ae", "stop", "--if-idle"]).is_err());
         let disable = Cli::try_parse_from(["ae", "autostart", "--disable"]).unwrap();
         assert!(matches!(
             disable.command,
@@ -1056,6 +1197,15 @@ mod tests {
             resolved_open_flow(OpenFlow::Editor, false),
             OpenFlow::Browser
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn installed_editor_is_detached_from_the_ae_launcher() {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+        assert_eq!(EDITOR_CREATION_FLAGS, CREATE_NO_WINDOW | DETACHED_PROCESS);
     }
 
     #[test]

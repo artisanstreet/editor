@@ -22,6 +22,11 @@ export interface ForgeHttpServer {
 	readonly node_server: Server;
 }
 
+export interface ForgeActivity {
+	/** Number of model runs that an update would interrupt right now. */
+	readonly ActiveWorkCount: Effect.Effect<number>;
+}
+
 const mime_types: Readonly<Record<string, string>> = {
 	".css": "text/css; charset=utf-8",
 	".html": "text/html; charset=utf-8",
@@ -306,6 +311,7 @@ const ServeStatic = (
 export function start_forge_http(
 	config: ForgeConfig,
 	authority: ForgeControlAuthorityShape,
+	activity?: ForgeActivity,
 ): Effect.Effect<ForgeHttpServer, ForgeHttpFailure> {
 	return Effect.gen(function* () {
 		const request_scope = yield* Scope.make();
@@ -408,25 +414,32 @@ export function start_forge_http(
 				return;
 			}
 			if (request.method === "GET" && url.pathname === "/api/control/status") {
-				if (!origin_allowed(request, config)) {
-					respond_json(response, 403, { error: "forbidden" });
-					return;
-				}
-				if (!bearer_allowed(request, config)) {
-					respond_json(response, 401, { error: "unauthorized" });
-					return;
-				}
-				respond_json(
-					response,
-					200,
-					{
-						instance_id: config.instance_id,
-						pid: process.pid,
-						service: "artisan-forge",
-						status: "ready",
-						version: 1,
-					},
-					{ "cache-control": "no-store" },
+				void run_request(
+					Effect.gen(function* () {
+						if (!origin_allowed(request, config)) {
+							respond_json(response, 403, { error: "forbidden" });
+							return;
+						}
+						if (!bearer_allowed(request, config)) {
+							respond_json(response, 401, { error: "unauthorized" });
+							return;
+						}
+						const active_work_count =
+							activity === undefined ? 0 : yield* activity.ActiveWorkCount;
+						respond_json(
+							response,
+							200,
+							{
+								active_work_count,
+								instance_id: config.instance_id,
+								pid: process.pid,
+								service: "artisan-forge",
+								status: "ready",
+								version: 1,
+							},
+							{ "cache-control": "no-store" },
+						);
+					}),
 				);
 				return;
 			}

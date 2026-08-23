@@ -39,10 +39,11 @@ describe("transcript auto-follow", () => {
 		expect(ConversationIsFollowing(0, 300, 600)).toBe(true);
 	});
 
-	it("releases the anchor guard on scrollend rather than leaving it latched", () => {
+	it("releases native scroll guards on scrollend without releasing visual-only anchors", () => {
 		const workspace = read("modules/frontend/src/routes/components/thread-workspace.svelte");
 
 		expect(workspace).toContain('addEventListener("scrollend"');
+		expect(workspace).toContain("if (anchor_scroll_releases_on_scroll_end)");
 		expect(workspace).toContain("anchor_scroll_active = false;");
 		/** A fresh submission parks the reader at the turn's top, not the bottom. */
 		expect(workspace).toContain("anchor_scroll_active = true;");
@@ -54,6 +55,19 @@ describe("transcript auto-follow", () => {
 		 * who scrolled away, which switched following off for the rest of the turn.
 		 */
 		expect(workspace).toContain('behavior: "auto",');
+	});
+
+	it("freezes following before a submitted message can race its receipt", () => {
+		const workspace = read("modules/frontend/src/routes/components/thread-workspace.svelte");
+		const submission = workspace.match(/const SubmitMessage[\s\S]*?const JumpToLatest/u)?.[0];
+
+		expect(submission).toBeDefined();
+		expect(submission).toContain("pending_anchor_owned = true;");
+		expect(submission).toContain("following = false;");
+		expect(workspace).toContain("if (anchor_scroll_active || pending_anchor_owned) return;");
+		expect(submission?.indexOf("following = false;")).toBeLessThan(
+			submission?.indexOf("submit(submission)") ?? -1,
+		);
 	});
 });
 
@@ -82,32 +96,32 @@ describe("turn settlement", () => {
 		expect(workspace).toContain(
 			"{#each visible_render_groups as render_group (render_group.segment_id)}",
 		);
-		expect(workspace).toContain("Show earlier turns ({hidden_render_group_count})");
+		expect(workspace).toContain("`Show earlier turns (${hidden_render_group_count})`");
+		/** An exhausted hidden pool refills from durable history before revealing. */
+		expect(workspace).toContain("hidden_render_group_count > 0 || has_remote_older_turns");
+		expect(workspace).toContain("const hydrated = yield* onhydrateolder();");
+		expect(workspace).toContain("if (!hydrated) remote_history_exhausted = true;");
 		expect(workspace).toContain(
 			"current_viewport.scrollTop += current_viewport.scrollHeight - previous_scroll_height",
 		);
 	});
 
 	/**
-	 * A run reaching a terminal state is only announced through the projection.
-	 * Without re-reading the durable work item the transcript shows the turn
-	 * finished while the composer still offers to stop a run that already ended.
+	 * Work has its own retained authority. Tying settlement to a conversation
+	 * patch and an unversioned point read recreated the same cross-stream race it
+	 * was meant to repair.
 	 */
-	it("re-reads the work item when a turn settles", () => {
+	it("settles work from its authoritative snapshot subscription", () => {
 		const route = read("modules/frontend/src/routes/components/thread-route.svelte");
 
-		expect(route).toContain("const PatchSettlesTurn = (patch: ConversationPatch)");
-		expect(route).toContain(
-			"if (applicable.some(PatchSettlesTurn)) yield* RefreshInteractionContext;",
-		);
+		expect(route).toContain("client.SubscribeThreadWork(thread_id)");
+		expect(route).toContain("const ApplyWorkUpdate = (update: ThreadWorkUpdate)");
+		expect(route).toContain("yield* ApplyWorkValue(next.work);");
+		expect(route).not.toContain("PatchSettlesTurn");
 		/**
-		 * `interrupted` settles too: nothing further arrives on its own, so the
-		 * work item must be re-read rather than left mid-turn until a resume that
-		 * may never come.
+		 * Every terminal work status drives the transcript's own convergence check.
 		 */
-		expect(route).toContain(
-			'settled_lifecycles = new Set(["completed", "failed", "interrupted", "cancelled"])',
-		);
+		expect(route).toContain("!active_work_statuses.has(next.work.status)");
 	});
 
 	/**
@@ -241,13 +255,14 @@ describe("activity group header", () => {
 		expect(exit).toContain("to {\n\t\tvisibility: hidden;");
 	});
 
-	/** A started handoff must not make a target-only claim until its source is durable. */
-	it("delegates pending handoff wording to the pure transition presentation", () => {
+	it("keeps both model endpoints visible throughout a handoff", () => {
 		const status = read("modules/frontend/src/routes/components/conversation-status.svelte");
 
-		expect(status).toContain("model_transition_presentation(item.state, item.source_model_id)");
-		expect(status).toContain('{#if presentation !== "pending_source"}');
-		expect(status).toContain('{:else if presentation === "target_only"}');
+		expect(status).toContain('{handing_over ? "Changing" : "Changed"}');
+		expect(status).toContain("active={handing_over}");
+		expect(status).toContain("{source_model_name}");
+		expect(status).toContain("{target_model_name}");
+		expect(status).toContain("<span>for</span>");
 	});
 
 	it("fades only overflowing command text, leaving its icon and chevron outside the mask", () => {
@@ -381,7 +396,8 @@ describe("orphaned work sessions", () => {
 			anchor.indexOf("pending_user_message_reference = undefined;"),
 		);
 		/** Resolving the same send twice must not scroll the reader twice. */
-		expect(workspace).toContain("if (anchored_user_item_id === item_id) return;");
+		expect(workspace).toContain("if (anchored_user_item_id === item_id) {");
+		expect(workspace).toContain("pending_user_message_reference = undefined;");
 	});
 
 	/**
@@ -398,6 +414,21 @@ describe("orphaned work sessions", () => {
 		/** Committing the start position is what makes the return animate at all. */
 		expect(workspace).toContain("void content.offsetHeight;");
 		expect(workspace).toContain("delta <= 0 || reduced_motion");
+	});
+
+	it("keeps the sent-turn scroll authoritative while its pixels glide", () => {
+		const workspace = read("modules/frontend/src/routes/components/thread-workspace.svelte");
+		const anchor_layout = workspace.match(
+			/const UpdateAnchorLayout[\s\S]*?const ScheduleAnchorLayout/u,
+		)?.[0];
+
+		expect(anchor_layout).toBeDefined();
+		expect(anchor_layout).toContain('behavior: "auto"');
+		expect(anchor_layout).toContain("GlideAnchorCorrection(");
+		expect(anchor_layout).toContain("!anchor_position_owned");
+		expect(anchor_layout).toContain("anchor_initial_layout_pending");
+		expect(workspace).toContain('addEventListener("wheel", on_user_scroll_intent');
+		expect(workspace).toContain('addEventListener("touchstart", on_user_scroll_intent');
 	});
 
 	/**

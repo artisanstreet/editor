@@ -12,6 +12,7 @@
 		BeginForgeHydration,
 		CompleteForgeHydration,
 		DismissForgeGate,
+		ForgeGateFailureNeedsGrace,
 		ForgeShellIsBlocked,
 		ForgeShellIsMounted,
 		InitialForgeGateModel,
@@ -19,6 +20,7 @@
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
 	import { RunBrowserDom } from "$lib/browser/dom";
+	import { RouteNavigation } from "$lib/browser/route-navigation";
 	import { WarmConversationRenderers } from "$lib/components/markdown/warming";
 	import { BrowserReaderAttention } from "$lib/browser/reader-attention";
 	import { IsMacDesktop, RuntimeSurfaceFor } from "$lib/browser/runtime-surface";
@@ -35,6 +37,7 @@
 	import { LogTransportDiagnostic } from "$lib/forge/diagnostics";
 	import { ProbeForgeRecoveryHealth } from "$lib/forge/recovery-health-probe";
 	import { IsNotifiableEvent } from "$lib/notifications/events";
+	import { ShouldRedirectToOnboarding } from "$lib/onboarding-route";
 	import { SystemNotifications } from "$lib/notifications/service";
 	import {
 		ResolveThreadRoute,
@@ -45,11 +48,15 @@
 		WorkspaceCatalogController,
 		type WorkspaceCatalogState,
 	} from "$lib/root/workspace-catalog-controller";
+	import { RecentProjects } from "$lib/root/project-catalog";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
 	import { resolve_typography_preferences } from "$lib/appearance/typography";
+	import { ResolveDisplayFormatPreferences } from "$lib/appearance/display-format";
 	import {
+		path_separator,
 		prose_width,
 		shader_enabled,
+		time_format,
 		typography,
 	} from "$lib/appearance-config";
 	import { BrowserTypography } from "$lib/browser/typography";
@@ -73,20 +80,37 @@
 	let desktop_runtime = $state(false);
 	let mac_desktop = $state(false);
 	let forge_gate = $state.raw(InitialForgeGateModel);
+	let forge_failure_visible = $state(true);
 	let forge_unreachable = $state(false);
+	/** Development surfaces render directly and never sit behind the Forge shell gate. */
+	const is_debug_route = $derived(
+		page.url.pathname === "/debug" || page.url.pathname.startsWith("/debug/"),
+	);
+	const is_onboarding_route = $derived(page.url.pathname === "/onboarding");
 	const client = yield* ArtisanClient;
 	const session_defaults = yield* SessionDefaultsController;
-	/**
-	 * Fed here for the same reason the appearance stores are: every surface
-	 * that names a thread is an ordinary component reading a store while it
-	 * renders, and the shell is the one place already holding the defaults.
-	 */
+	const route_navigation = yield* RouteNavigation;
+	let session_defaults_state = $state.raw(yield* session_defaults.Current);
+	const onboarding_redirecting = $derived(
+		ShouldRedirectToOnboarding({
+			completed: session_defaults_state.defaults.onboarding_completed,
+			defaults_available: session_defaults_state.available,
+			pathname: page.url.pathname,
+		}),
+	);
+	/** The shell retains defaults for route gates and every thread-title reader. */
 	yield* session_defaults.Changes.pipe(
 		Stream.runForEach((next) =>
-			Effect.sync(() => thread_title_mode.set(next.defaults.thread_title_mode)),
+			Effect.sync(() => {
+				session_defaults_state = next;
+				thread_title_mode.set(next.defaults.thread_title_mode);
+			}),
 		),
 		Effect.forkScoped,
 	);
+	if (onboarding_redirecting) {
+		yield* route_navigation.Navigate("/onboarding");
+	}
 	const workspace_catalog = yield* WorkspaceCatalogController;
 	let catalog_state = $state.raw<WorkspaceCatalogState>(yield* workspace_catalog.Current);
 	const threads = $derived(catalog_state.threads);
@@ -97,6 +121,7 @@
 	 * identity; only Forge can say it exists.
 	 */
 	const projects = $derived(catalog_state.projects);
+	const recent_projects = $derived(RecentProjects(projects, threads));
 	/** A canonical conversation: a workspace and a thread inside it. */
 	const is_conversation_route = $derived(
 		/^\/t\/[^/]+\/[^/]+\/?$/.test(page.url.pathname),
@@ -216,14 +241,20 @@
 	const ApplyAppearance = (next: AppearanceState) =>
 		Effect.gen(function* () {
 			const next_typography = resolve_typography_preferences(next);
+			const next_display = ResolveDisplayFormatPreferences(next);
 			stored_appearance = next;
 			shader_enabled.set(next.shader_enabled);
 			prose_width.set(next.prose_width ?? "balanced");
+			path_separator.set(next_display.path_separator);
+			time_format.set(next_display.time_format);
 			typography.set(next_typography);
 			yield* browser_typography.Apply(next_typography).pipe(Effect.ignore);
 		});
 	shader_enabled.set(initial_appearance.shader_enabled);
 	prose_width.set(initial_appearance.prose_width ?? "balanced");
+	const initial_display = ResolveDisplayFormatPreferences(initial_appearance);
+	path_separator.set(initial_display.path_separator);
+	time_format.set(initial_display.time_format);
 	typography.set(resolve_typography_preferences(initial_appearance));
 	/**
 	 * The store moves first so the rail answers in the same frame the control was
@@ -281,6 +312,24 @@
 	 * Disconnection stays a state the app leaves on its own once Forge returns.
 	 */
 	let exhausted_retry_generation = 0;
+	let failure_visibility_generation = 0;
+	const RevealPersistentForgeFailure = (generation: number) =>
+		Effect.gen(function* () {
+			yield* Effect.sleep("4 seconds");
+			if (generation !== failure_visibility_generation) return;
+			if (!ForgeGateFailureNeedsGrace(forge_gate)) return;
+			forge_failure_visible = true;
+		});
+	const RefreshForgeFailureVisibility = Effect.gen(function* () {
+		failure_visibility_generation += 1;
+		const generation = failure_visibility_generation;
+		if (!ForgeGateFailureNeedsGrace(forge_gate)) {
+			forge_failure_visible = true;
+			return;
+		}
+		forge_failure_visible = false;
+		yield* RevealPersistentForgeFailure(generation).pipe(Effect.forkScoped);
+	});
 	const RetryExhaustedConnectionLater = (generation: number) =>
 		Effect.gen(function* () {
 			yield* Effect.sleep("15 seconds");
@@ -298,6 +347,7 @@
 	): Effect.Effect<void> =>
 		Effect.gen(function* () {
 			forge_gate = ObserveForgeConnection(forge_gate, state);
+			yield* RefreshForgeFailureVisibility;
 			if (forge_gate.state.phase === "exhausted") {
 				exhausted_retry_generation += 1;
 				yield* RetryExhaustedConnectionLater(exhausted_retry_generation).pipe(
@@ -316,6 +366,8 @@
 	 */
 	const DismissGate = Effect.gen(function* () {
 		forge_gate = DismissForgeGate(forge_gate);
+		failure_visibility_generation += 1;
+		forge_failure_visible = true;
 	});
 
 	const RetryHydration = Effect.gen(function* () {
@@ -449,8 +501,6 @@
 <svelte:window onfocus={yield* RetryExhaustedConnectionNow} />
 
 <ModeWatcher defaultMode="dark" />
-<DevInstanceBadge />
-<AttentionTitleMarker {threads} {forge_unreachable} />
 
 {#snippet primary()}
 	{@render children()}
@@ -462,8 +512,10 @@
 		agents={active_agents}
 		oninspectagent={thread_orchestration.Inspect}
 		thread_id={active_thread?.thread_id}
+		project={active_project}
 		project_id={active_project?.project_id}
 		project_root_path={active_project?.root_path}
+		projects={recent_projects}
 		workspace_id={active_workspace_id}
 	/>
 {/snippet}
@@ -486,7 +538,31 @@
 	/>
 {/snippet}
 
-<div class="flex h-dvh min-h-0 flex-col bg-background" data-prose-width={$prose_width}>
+{#if is_debug_route}
+	{@render children()}
+{:else if is_onboarding_route}
+	<div class="relative h-dvh min-h-0 bg-background">
+		<div
+			class="h-full"
+			inert={ForgeShellIsBlocked(forge_gate, forge_failure_visible)}
+		>
+			{@render children()}
+		</div>
+		<ForgeConnectionOverlay
+			failure_visible={forge_failure_visible}
+			model={forge_gate}
+			ondismiss={DismissGate}
+			read_diagnostics={client.Diagnostics}
+			retry_connection={client.RetryConnection}
+			retry_hydration={RetryHydration}
+		/>
+	</div>
+{:else if onboarding_redirecting}
+	<div class="h-dvh bg-background" aria-hidden="true"></div>
+{:else}
+	<DevInstanceBadge />
+	<AttentionTitleMarker {threads} {forge_unreachable} />
+	<div class="flex h-dvh min-h-0 flex-col bg-background" data-prose-width={$prose_width}>
 	{#if desktop_runtime}
 		<!--
 			The bundled shell hides the native titlebar, so this strip is the window
@@ -544,7 +620,7 @@
 	<div class="relative min-h-0 flex-1">
 		<div
 			class="h-full"
-			inert={ForgeShellIsBlocked(forge_gate)}
+			inert={ForgeShellIsBlocked(forge_gate, forge_failure_visible)}
 		>
 			{#if ForgeShellIsMounted(forge_gate)}
 				<SectionedPanel
@@ -565,11 +641,13 @@
 			{/if}
 		</div>
 		<ForgeConnectionOverlay
+			failure_visible={forge_failure_visible}
 			model={forge_gate}
 			ondismiss={DismissGate}
 			read_diagnostics={client.Diagnostics}
 			retry_connection={client.RetryConnection}
 			retry_hydration={RetryHydration}
 		/>
+		</div>
 	</div>
-</div>
+{/if}

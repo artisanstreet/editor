@@ -17,7 +17,8 @@ describe("context-usage SER remediation", () => {
 		expect(controller).toContain("readonly Acquire:");
 		expect(controller).toContain("current.owner_id !== owner_id");
 		expect(route).toContain("const run_usage_lease = yield* run_usage.Acquire(undefined)");
-		expect(route).toContain("yield* run_usage_lease.Select(work?.run_id)");
+		expect(route).toContain("yield* run_usage_lease.Select(next?.run_id)");
+		expect(route).toContain("client.SubscribeThreadWork(thread_id)");
 		expect(route).toContain("yield* Effect.addFinalizer(run_usage_lease.Release)");
 		expect(route).not.toContain("GetSurfaceUsageAggregate");
 		expect(route).not.toContain("RefreshContextUsage");

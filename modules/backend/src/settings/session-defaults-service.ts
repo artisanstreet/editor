@@ -11,6 +11,7 @@ import {
 	AgentNameDataset,
 	DefaultAgentNameDatasetId,
 	DefaultThreadTitleMode,
+	NormalizePermissionId,
 	ThreadTitleMode,
 } from "@artisan/protocol";
 
@@ -23,7 +24,7 @@ const session_defaults_stream_id = settings_stream_id("session-defaults");
 const defaults_row_id = 1;
 
 /** Applied until the operator chooses otherwise; the manifest's own default. */
-const initial_permission = "supervised";
+const initial_permission = "autonomous";
 
 import { Database } from "../persistence/database";
 import {
@@ -146,6 +147,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 						auto_continue_usage_limits: SessionDefaults.auto_continue_usage_limits,
 						compaction_model_id: SessionDefaults.compaction_model_id,
 						last_model_id: SessionDefaults.last_model_id,
+						onboarding_completed: SessionDefaults.onboarding_completed,
 						permission: SessionDefaults.permission,
 						thread_title_mode: SessionDefaults.thread_title_mode,
 					})
@@ -179,8 +181,9 @@ export const SessionDefaultsServiceLive = Layer.effect(
 						? { compaction_model: shared.compaction_model_id }
 						: {}),
 					...(shared?.last_model_id ? { last_model_id: shared.last_model_id } : {}),
+					onboarding_completed: shared?.onboarding_completed ?? false,
 					models: models.map(ModelRow),
-					permission: shared?.permission ?? initial_permission,
+					permission: NormalizePermissionId(shared?.permission ?? initial_permission),
 					thread_title_mode: is_thread_title_mode(stored_thread_title_mode)
 						? stored_thread_title_mode
 						: DefaultThreadTitleMode,
@@ -248,6 +251,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 							payload.auto_continue_usage_limits !== undefined ||
 							payload.permission !== undefined ||
 							payload.last_model_id !== undefined ||
+							payload.onboarding_completed !== undefined ||
 							payload.compaction_model !== undefined ||
 							payload.thread_title_mode !== undefined
 						) {
@@ -258,6 +262,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 										SessionDefaults.auto_continue_usage_limits,
 									compaction_model_id: SessionDefaults.compaction_model_id,
 									last_model_id: SessionDefaults.last_model_id,
+									onboarding_completed: SessionDefaults.onboarding_completed,
 									permission: SessionDefaults.permission,
 									thread_title_mode: SessionDefaults.thread_title_mode,
 								})
@@ -281,8 +286,13 @@ export const SessionDefaultsServiceLive = Layer.effect(
 								compaction_model_id,
 								last_model_id:
 									payload.last_model_id ?? current?.last_model_id ?? null,
-								permission:
+								onboarding_completed:
+									payload.onboarding_completed ??
+									current?.onboarding_completed ??
+									false,
+								permission: NormalizePermissionId(
 									payload.permission ?? current?.permission ?? initial_permission,
+								),
 								thread_title_mode:
 									payload.thread_title_mode ??
 									current?.thread_title_mode ??

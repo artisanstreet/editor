@@ -289,6 +289,14 @@ export const UpsertItem = (
 			existing.entity_json,
 			"stored conversation item",
 		);
+		if (
+			existing.thread_id !== thread_id ||
+			(typeof item.turn_id === "string" && prior.turn_id !== item.turn_id) ||
+			(typeof item.type === "string" && prior.type !== item.type)
+		)
+			return yield* Effect.fail(
+				new ConversationProjectionError("Conversation item identity collision"),
+			);
 		const failure_enrichment = is_failure_enrichment(prior, item);
 		if (["completed", "failed", "cancelled"].includes(prior.lifecycle) && !failure_enrichment)
 			return prior;

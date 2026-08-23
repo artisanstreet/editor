@@ -48,6 +48,16 @@ export const is_append_only_streaming_target = (
 ): boolean => target.text.startsWith(current_prefix);
 
 /**
+ * Settled hydration is state replacement, not live prose. A settled target may
+ * finish draining a presentation that genuinely streamed, but two already-
+ * settled states must switch immediately when navigation refreshes a snapshot.
+ */
+export const should_animate_streaming_target = (
+	presentation_settled: boolean,
+	target: StreamingWordsTarget,
+): boolean => target.streaming || !presentation_settled;
+
+/**
  * Finds the next byte boundary the reveal queue may render. Streaming targets
  * retain a final unterminated word; settled targets expose every final byte.
  */

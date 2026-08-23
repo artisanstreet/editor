@@ -3,7 +3,6 @@ import { Effect, Option } from "effect";
 import {
 	ComposerDraftStore,
 	SelectComposerDraftAttachmentsToRelease,
-	type ComposerDraft,
 } from "../../../lib/composer/draft-store";
 import type { ComposerImageAttachment } from "../../../lib/composer/image-attachments";
 import { ReadComposerEditorDocument, WriteComposerEditorDocument } from "./dom";
@@ -88,16 +87,9 @@ export const MakeComposerDraftSession = (options: {
 		 * one can show them again. Anything the store did not retain is released.
 		 */
 		const ReleaseUnretained = Effect.gen(function* () {
-			const stored =
-				draft_key === undefined
-					? Option.none<ComposerDraft>()
-					: yield* store.Read(draft_key);
-			const retained = new Set(
-				Option.match(stored, {
-					onNone: () => [] as ReadonlyArray<string>,
-					onSome: (retained_draft) =>
-						retained_draft.attachments.map((attachment) => attachment.id),
-				}),
+			/** A project switch may have moved this exact document to another key before unmount. */
+			const retained = yield* store.RetainedAttachmentIds(
+				new Set(options.Attachments().keys()),
 			);
 			for (const attachment of options.Attachments().values()) {
 				if (!retained.has(attachment.id)) yield* options.Revoke(attachment);

@@ -64,6 +64,44 @@ describe("composer draft store", () => {
 		expect(Option.getOrThrow(second).text).toBe("for b");
 	});
 
+	it("moves a complete draft between route keys without copying attachment ownership", async () => {
+		const draft = MakeDraft("carry me", [MakeAttachment("image-1")]);
+		const result = await RunStore(
+			Effect.gen(function* () {
+				const store = yield* ComposerDraftStore;
+				yield* store.Write("thread-a", draft);
+				const move = yield* store.Move("thread-a", "draft:project-b");
+				return {
+					from: yield* store.Read("thread-a"),
+					move,
+					retained: yield* store.RetainedAttachmentIds(new Set(["image-1"])),
+					to: yield* store.Read("draft:project-b"),
+				};
+			}),
+		);
+
+		expect(result.move).toEqual({ moved: true, orphaned: [] });
+		expect(Option.isNone(result.from)).toBe(true);
+		expect(Option.getOrThrow(result.to)).toEqual(draft);
+		expect(result.retained).toEqual(new Set(["image-1"]));
+	});
+
+	it("reports only attachment URLs orphaned by a destination replacement", async () => {
+		const replaced = MakeAttachment("replaced");
+		const shared = MakeAttachment("shared");
+		const move = await RunStore(
+			Effect.gen(function* () {
+				const store = yield* ComposerDraftStore;
+				yield* store.Write("source", MakeDraft("current", [shared]));
+				yield* store.Write("destination", MakeDraft("stale", [replaced, shared]));
+				return yield* store.Move("source", "destination");
+			}),
+		);
+
+		expect(move.moved).toBe(true);
+		expect(move.orphaned.map((attachment) => attachment.id)).toEqual(["replaced"]);
+	});
+
 	it("treats an empty document as no draft at all", async () => {
 		const restored = await RunStore(
 			Effect.gen(function* () {

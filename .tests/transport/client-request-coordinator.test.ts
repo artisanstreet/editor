@@ -117,7 +117,7 @@ describe("client request coordinator", () => {
 					Effect.sync(() => {
 						attempts += 1;
 
-						return attempts === 1 ? RequestDelivered : RequestHeld;
+						return attempts === 1 ? RequestDelivered("connection_first") : RequestHeld;
 					}),
 				() => 10,
 			);
@@ -147,7 +147,7 @@ describe("client request coordinator", () => {
 					if (attempts !== 2) return RequestHeld;
 					yield* Deferred.succeed(retry_started, undefined);
 					yield* Deferred.await(release_retry);
-					return RequestDelivered;
+					return RequestDelivered("connection_retry");
 				}),
 			);
 			const waiting = yield* coordinator.Request(request).pipe(Effect.forkScoped);
@@ -179,7 +179,7 @@ describe("client request coordinator", () => {
 					if (attempts !== 2) return RequestHeld;
 					yield* Deferred.succeed(retry_started, undefined);
 					yield* Deferred.await(release_retry);
-					return RequestDelivered;
+					return RequestDelivered("connection_retry");
 				}),
 			);
 			const waiting = yield* coordinator.Request(request).pipe(Effect.forkScoped);
@@ -345,7 +345,7 @@ describe("client request coordinator", () => {
 				Effect.sync(() => {
 					attempted.push(envelope.message_id);
 
-					return RequestDelivered;
+					return RequestDelivered("connection_settled");
 				}),
 			);
 
@@ -377,7 +377,7 @@ describe("client request coordinator", () => {
 				Effect.sync(() => {
 					attempted.push(envelope.message_id);
 
-					return RequestDelivered;
+					return RequestDelivered("connection_abandoned");
 				}),
 			);
 
@@ -397,5 +397,27 @@ describe("client request coordinator", () => {
 		}).pipe(Effect.scoped);
 
 		expect(await Effect.runPromise(program)).toContain("message_after_park");
+	});
+
+	it("retires the exact session behind an unanswered query", async () => {
+		const retired: Array<string | undefined> = [];
+		const program = Effect.gen(function* () {
+			const coordinator = yield* make_client_request_coordinator(
+				() => Effect.succeed(RequestDelivered("connection_zombie")),
+				() => 10,
+				(delivery) =>
+					Effect.sync(() => {
+						retired.push(
+							delivery._tag === "Delivered" ? delivery.connection_id : undefined,
+						);
+					}),
+			);
+			return yield* coordinator.Request(request).pipe(Effect.flip);
+		});
+
+		const error = await Effect.runPromise(program);
+
+		expect(retired).toEqual(["connection_zombie"]);
+		expect(error).toMatchObject({ protocol_code: "request.timeout", retryable: true });
 	});
 });

@@ -16,6 +16,73 @@ const policy_for = (patch: Partial<ThreadSessionPolicy> = {}): ThreadSessionPoli
 });
 
 describe("session policy run metadata", () => {
+	it("preserves Hermes provider groups and session runtime controls", () => {
+		const metadata = MakeSessionPolicyRunMetadata(
+			policy_for({
+				catalog_revision: "hermes-live-1",
+				engine_id: "hermes",
+				model: "anthropic/claude-sonnet-4.6",
+				model_id: "anthropic/claude-sonnet-4.6",
+				permission: "supervised",
+				profile_id: "default",
+				provider_route_id: "nous",
+			}),
+		);
+
+		expect(metadata).toMatchObject({
+			catalog_revision: "hermes-live-1",
+			model: "anthropic/claude-sonnet-4.6",
+			model_id: "anthropic/claude-sonnet-4.6",
+			permission_policy: {
+				approval: "on_request",
+				edit_scope: "host",
+				network_access: true,
+				write_access: true,
+			},
+			profile_id: "default",
+			provider_options: {
+				"hermes.fast": false,
+				"hermes.permission_mode": "profile",
+				"hermes.reasoning_effort": "medium",
+			},
+			provider_route_id: "nous",
+		});
+	});
+
+	it("preserves OpenCode route, profile, variant, and catalog identity", () => {
+		const metadata = MakeSessionPolicyRunMetadata(
+			policy_for({
+				catalog_revision: "live-1",
+				engine_id: "opencode2",
+				model: "claude-sonnet-4-5",
+				model_id: "claude-sonnet-4-5",
+				profile_id: "work",
+				provider_route_id: "opencode-go",
+				variant_id: "high",
+				web_search_enabled: true,
+			}),
+		);
+
+		expect(metadata).toMatchObject({
+			catalog_revision: "live-1",
+			model: "claude-sonnet-4-5",
+			model_id: "claude-sonnet-4-5",
+			permission_policy: {
+				approval: "on_request",
+				network_access: true,
+				write_access: true,
+			},
+			profile_id: "work",
+			provider_route_id: "opencode-go",
+			provider_options: {
+				"opencode2.agent": "artisan-v1-autonomous-network-web",
+				"opencode2.project_config": false,
+				"opencode2.web_search_enabled": true,
+			},
+			variant_id: "high",
+		});
+	});
+
 	it("keeps the canonical policy and Codex provider options for Codex runs", () => {
 		const metadata = MakeSessionPolicyRunMetadata(policy_for());
 
@@ -30,7 +97,7 @@ describe("session policy run metadata", () => {
 		});
 	});
 
-	it("keeps auto approval sandboxed while mapping Full access to host scope", () => {
+	it("keeps Auto sandboxed while mapping Unrestricted to host scope", () => {
 		const auto_approve = MakeSessionPolicyRunMetadata(
 			policy_for({ permission: "autonomous", permission_mode: "never" }),
 		);
@@ -67,7 +134,7 @@ describe("session policy run metadata", () => {
 		});
 
 		expect(auto_approve.permission_policy).toEqual({
-			approval: "never",
+			approval: "on_request",
 			network_access: false,
 			write_access: true,
 		});
@@ -96,18 +163,25 @@ describe("session policy run metadata", () => {
 	});
 
 	it("translates the neutral outcome into Claude's native permission mode", () => {
-		const supervised = MakeSessionPolicyRunMetadata(
-			policy_for({ engine_id: "claude", model: "claude-opus-5" }),
+		const auto = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "claude",
+				model: "claude-opus-5",
+				permission: "autonomous",
+			}),
+		);
+		const legacy_supervised = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "claude",
+				model: "claude-opus-5",
+				permission: "supervised",
+			}),
 		);
 		const restricted = MakeSessionPolicyRunMetadata(
 			policy_for({ engine_id: "claude", model: "claude-opus-5", sandbox_mode: "read_only" }),
 		);
-		const autonomous = MakeSessionPolicyRunMetadata(
-			policy_for({ engine_id: "claude", model: "claude-opus-5", permission_mode: "never" }),
-		);
-
 		/** The adapter rejects canonical policies, so none may be emitted. */
-		for (const metadata of [supervised, restricted, autonomous]) {
+		for (const metadata of [auto, legacy_supervised, restricted]) {
 			expect(metadata.permission_policy).toBeUndefined();
 			expect(metadata.provider_options?.["claude.effort"]).toBe("medium");
 			expect(Object.keys(metadata.provider_options ?? {}).sort()).toEqual([
@@ -115,10 +189,93 @@ describe("session policy run metadata", () => {
 				"claude.permission_mode",
 			]);
 		}
-		expect(supervised.provider_options?.["claude.permission_mode"]).toBe("default");
+		expect(auto.provider_options?.["claude.permission_mode"]).toBe("auto");
+		expect(legacy_supervised.provider_options?.["claude.permission_mode"]).toBe("auto");
 		expect(restricted.provider_options?.["claude.permission_mode"]).toBe("plan");
-		expect(autonomous.provider_options?.["claude.permission_mode"]).toBe("auto");
-		expect(supervised.model).toBe("claude-opus-5");
+		expect(auto.model).toBe("claude-opus-5");
+	});
+
+	it("translates Grok and Cursor model controls into their ACP launch options", () => {
+		const grok_restricted = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "grok",
+				model: "grok-4.6",
+				permission: "restricted",
+				sandbox_mode: "read_only",
+			}),
+		);
+		const grok_legacy_trusted = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "grok",
+				model: "grok-4.6",
+				permission: "trusted",
+			}),
+		);
+		const grok = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "grok",
+				model: "grok-4.6",
+				permission: "autonomous",
+				reasoning_effort: "xhigh",
+				web_search_enabled: true,
+			}),
+		);
+		const cursor_restricted = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "cursor",
+				model: "cursor-grok-4.6",
+				permission: "restricted",
+				permission_mode: "never",
+				sandbox_mode: "read_only",
+			}),
+		);
+		const cursor = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "cursor",
+				model: "cursor-grok-4.6",
+				permission: "unrestricted",
+				permission_mode: "never",
+				reasoning_effort: "high",
+				service_tier: "fast",
+			}),
+		);
+
+		expect(grok_restricted).toMatchObject({
+			permission_policy: { approval: "on_request", write_access: false },
+			provider_options: { "grok.permission_mode": "plan" },
+		});
+		expect(grok_legacy_trusted).toMatchObject({
+			permission_policy: { approval: "on_request", write_access: true },
+			provider_options: { "grok.permission_mode": "auto" },
+		});
+		expect(grok).toMatchObject({
+			model: "grok-4.6",
+			permission_policy: { approval: "on_request", write_access: true },
+			provider_options: {
+				"grok.permission_mode": "auto",
+				"grok.reasoning_effort": "xhigh",
+			},
+		});
+		expect(cursor_restricted).toMatchObject({
+			permission_policy: { approval: "never", write_access: false },
+			provider_options: { "cursor.permission_mode": "ask" },
+		});
+		expect(cursor).toMatchObject({
+			model: "cursor-grok-4.6",
+			permission_policy: {
+				approval: "never",
+				edit_scope: "host",
+				network_access: true,
+				write_access: true,
+			},
+			provider_options: {
+				"cursor.permission_mode": "force",
+				"cursor.reasoning_effort": "high",
+				"cursor.speed": "fast",
+			},
+		});
+		expect(grok.provider_options).not.toHaveProperty("codex.reasoning_effort");
+		expect(cursor.provider_options).not.toHaveProperty("codex.service_tier");
 	});
 
 	it("passes Claude's catalog-validated special effort to the native CLI boundary", () => {
@@ -143,12 +300,12 @@ describe("session policy run metadata", () => {
 		);
 
 		expect(metadata.provider_options).toEqual({
-			"claude.permission_mode": "default",
+			"claude.permission_mode": "auto",
 		});
 	});
 
-	it("carries harness options the coarse axes cannot express", () => {
-		const trusted = MakeSessionPolicyRunMetadata(
+	it("normalizes retired choices while preserving Unrestricted", () => {
+		const legacy_trusted = MakeSessionPolicyRunMetadata(
 			policy_for({ engine_id: "claude", model: "claude-opus-5", permission: "trusted" }),
 		);
 		const unrestricted = MakeSessionPolicyRunMetadata(
@@ -160,7 +317,7 @@ describe("session policy run metadata", () => {
 			}),
 		);
 
-		expect(trusted.provider_options?.["claude.permission_mode"]).toBe("acceptEdits");
+		expect(legacy_trusted.provider_options?.["claude.permission_mode"]).toBe("auto");
 		expect(unrestricted.provider_options?.["claude.permission_mode"]).toBe("bypassPermissions");
 	});
 

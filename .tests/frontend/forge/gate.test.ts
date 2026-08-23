@@ -7,6 +7,7 @@ import {
 	CompleteForgeHydration,
 	DismissForgeGate,
 	FailForgeHydration,
+	ForgeGateFailureNeedsGrace,
 	ForgeGateIsVisible,
 	ForgeShellIsBlocked,
 	ForgeShellIsMounted,
@@ -76,6 +77,34 @@ describe("ForgeGate", () => {
 			title: "Forge is offline",
 			tone: "error",
 		});
+	});
+
+	it("grants only a post-hydration connection failure a presentation grace period", () => {
+		const initial_failure = ObserveForgeConnection(InitialForgeGateModel, {
+			attempts: 5,
+			error: ConnectionError,
+			phase: "exhausted",
+		});
+		const hydrating = BeginForgeHydration(InitialForgeGateModel);
+		const ready = CompleteForgeHydration(hydrating, hydrating.hydration_generation);
+		const reconnect_failure = ObserveForgeConnection(ready, {
+			attempts: 5,
+			error: ConnectionError,
+			phase: "exhausted",
+		});
+		const hydration_failure = FailForgeHydration(
+			ObserveForgeConnection(ready, { phase: "ready" }),
+			ready.hydration_generation + 1,
+			"threads",
+			ConnectionError,
+		);
+
+		expect(ForgeGateFailureNeedsGrace(initial_failure)).toBe(false);
+		expect(ForgeGateFailureNeedsGrace(reconnect_failure)).toBe(true);
+		expect(ForgeShellIsBlocked(reconnect_failure, false)).toBe(false);
+		expect(ForgeShellIsBlocked(reconnect_failure, true)).toBe(true);
+		expect(ForgeGateFailureNeedsGrace(hydration_failure)).toBe(false);
+		expect(ForgeGateFailureNeedsGrace(DismissForgeGate(reconnect_failure))).toBe(false);
 	});
 
 	it("ignores stale hydration results after connection state advances", () => {

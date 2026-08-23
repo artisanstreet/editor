@@ -418,16 +418,13 @@ describe("Codex normalizer", () => {
 				delta: "Checking the adapter",
 				summary_index: 0,
 			},
-			{
-				_tag: "native_action",
-				detail: "Reasoning privately",
-			},
 			{ _tag: "search", state: "started" },
 			{ _tag: "search", state: "completed" },
 			{ _tag: "compaction", compaction_id: "compact-1", state: "started" },
 			{ _tag: "compaction", compaction_id: "compact-1", state: "completed" },
 		]);
-		expect(flattened[1]).not.toHaveProperty("delta");
+		/** Private reasoning deltas stay out of both canonical and native-visible output. */
+		expect(JSON.stringify(flattened)).not.toContain("private reasoning");
 	});
 
 	it("keeps public reasoning boundaries and authoritative completion separate from private content", async () => {
@@ -537,6 +534,30 @@ describe("Codex normalizer", () => {
 			item_id: "reasoning-empty",
 		});
 		expect(observation).not.toHaveProperty("text");
+	});
+
+	it("preserves a final message phase from item start before phase-less deltas arrive", async () => {
+		const [observation] = await Effect.runPromise(
+			normalise("item/started", {
+				item: {
+					id: "assistant-final",
+					memoryCitation: null,
+					phase: "final",
+					text: "",
+					type: "agentMessage",
+				},
+				threadId: "thread-1",
+				turnId: "turn-1",
+			}),
+		);
+
+		expect(observation).toMatchObject({
+			_tag: "agent_message_delta",
+			delta: "",
+			item_id: "assistant-final",
+			phase: "final",
+			turn_id: "turn-1",
+		});
 	});
 
 	it("keeps each assistant item's delta and completion identity stable within one turn", async () => {
@@ -738,6 +759,70 @@ describe("Codex normalizer", () => {
 			expect(observations, error_case.message).toHaveLength(1);
 			expect(observations[0]).toMatchObject({ _tag: "retry" });
 		}
+	});
+
+	it("classifies terminal sign-in failures without replacing the retry observation", async () => {
+		const payload = {
+			error: {
+				message:
+					"Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+			},
+			threadId: "thread-1",
+			turnId: "turn-1",
+			willRetry: false,
+		};
+		const observations = await Effect.runPromise(
+			normalise("error", payload, { frame_sequence: 29 }),
+		);
+
+		expect(observations).toMatchObject([
+			{
+				_tag: "retry",
+				attempt_state: "terminal",
+				message: payload.error.message,
+				will_retry: false,
+			},
+			{
+				_tag: "native_action",
+				detail: payload.error.message,
+				error_ref: { artisan_code: "AE-CLIENT_STATE-102" },
+			},
+		]);
+		expect(observations.map(({ observation_id }) => observation_id)).toEqual([
+			"normalizer-run:native:29",
+			"normalizer-run:native:29:auth",
+		]);
+
+		for (const message of [
+			"401 Unauthorized",
+			"Provided authentication token is expired. Please try signing in again.",
+			"You are not signed in",
+		]) {
+			const classified = await Effect.runPromise(
+				normalise("error", {
+					error: { message },
+					threadId: "thread-1",
+					turnId: "turn-1",
+					willRetry: false,
+				}),
+			);
+			expect(classified, message).toHaveLength(2);
+			expect(classified[1]).toMatchObject({
+				_tag: "native_action",
+				error_ref: { artisan_code: "AE-CLIENT_STATE-102" },
+			});
+		}
+
+		const retrying = await Effect.runPromise(
+			normalise("error", {
+				error: { message: "401 Unauthorized" },
+				threadId: "thread-1",
+				turnId: "turn-1",
+				willRetry: true,
+			}),
+		);
+		expect(retrying).toHaveLength(1);
+		expect(retrying[0]).toMatchObject({ _tag: "retry" });
 	});
 
 	it("preserves unknown and malformed known frames without inventing canonical facts", async () => {

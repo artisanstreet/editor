@@ -16,7 +16,7 @@ use error::{InstallerError, Result};
 use install::{InstallIntegrationOptions, InstallOptions, diagnose, install, repair, uninstall};
 use manifest::TrustKey;
 use platform::Platform;
-use processes::RetirementPolicy;
+use processes::{RetirementPolicy, retire_superseded};
 use url::Url;
 
 const DEFAULT_MANIFEST: &str = "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release-manifest.json";
@@ -122,6 +122,9 @@ enum Operation {
     /// Verify bootstrap-owned integrations without changing them.
     #[command(hide = true)]
     Diagnose,
+    /// Close the editor and retire Forge before a local release build begins.
+    #[command(hide = true)]
+    PrepareUpdate,
     /// Install the latest signed release without first-time Forge setup.
     Update,
     /// Restore bootstrap-owned launchers, PATH integration, and installation health.
@@ -160,6 +163,7 @@ async fn run() -> Result<()> {
     if let Some(operation) = arguments.operation.as_ref() {
         match operation {
             Operation::Diagnose => diagnose(&root)?,
+            Operation::PrepareUpdate => prepare_update(&arguments, &root)?,
             Operation::Update => {
                 let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
                 install(make_install_options(
@@ -197,6 +201,36 @@ async fn run() -> Result<()> {
 
     if arguments.automation.self_cleanup {
         schedule_self_cleanup()?;
+    }
+    Ok(())
+}
+
+fn prepare_update(arguments: &Arguments, root: &std::path::Path) -> Result<()> {
+    if arguments.activation.skip_retire {
+        return Ok(());
+    }
+    let installer = std::env::current_exe().map_err(InstallerError::CurrentExecutable)?;
+    let lifecycle_ae = installer
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(if cfg!(windows) { "ae.exe" } else { "ae" });
+    if !lifecycle_ae.is_file() {
+        return Err(InstallerError::MissingCli(lifecycle_ae));
+    }
+    let incoming_release = root.join(".incoming-release");
+    let retirement = retire_superseded(
+        root,
+        &incoming_release,
+        &lifecycle_ae,
+        RetirementPolicy {
+            force: arguments.activation.force,
+        },
+    )?;
+    if !retirement.is_empty() {
+        println!(
+            "prepared update: closed {} editor, stopped {} forge",
+            retirement.editors_closed, retirement.forges_stopped
+        );
     }
     Ok(())
 }
@@ -326,5 +360,16 @@ mod tests {
     fn diagnostic_operation_is_available_to_permanent_ae() {
         let arguments = Arguments::try_parse_from(["ae-installer", "diagnose"]).expect("diagnose");
         assert!(matches!(arguments.operation, Some(Operation::Diagnose)));
+    }
+
+    #[test]
+    fn prepare_update_is_a_manifest_free_lifecycle_operation() {
+        let arguments = Arguments::try_parse_from(["ae-installer", "prepare-update", "--yes"])
+            .expect("prepare update");
+        assert!(matches!(
+            arguments.operation,
+            Some(Operation::PrepareUpdate)
+        ));
+        assert!(!arguments.activation.force);
     }
 }

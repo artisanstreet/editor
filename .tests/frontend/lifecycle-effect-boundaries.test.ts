@@ -67,10 +67,8 @@ describe("frontend browser lifecycle ownership", () => {
 		expect(surface).toContain("Effect.ensuring(editor.Detach)");
 		expect(surface).not.toContain("onMount(");
 		expect(surface).not.toMatch(/\bEffect\.runFork\b|\brunFork\b/);
-		expect(route).toContain(
-			"yield* ReconcileOpenPath(active_path, workspace_id, retained_file);",
-		);
-		expect(route).toContain(".pipe(Effect.forkScoped);");
+		expect(route).toContain("yield* ReconcileOpenPath(active_path, workspace_id);");
+		expect(route).toContain("Effect.forkScoped,");
 		expect(route).toContain("open_requests.IsCurrent(generation)");
 		expect(route).not.toContain("Queue.offerUnsafe");
 		expect(hooks).toContain("BrowserHttpClient.layerFetch");

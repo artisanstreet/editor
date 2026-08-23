@@ -1,7 +1,7 @@
 <script lang="ts" effect>
 	import { navigating, page } from "$app/state";
 	import { untrack } from "svelte";
-	import { SnowflakeId } from "@artisan/protocol";
+	import { SnowflakeId, conversation_default_window_turn_count } from "@artisan/protocol";
 	import type {
 		ImageAttachmentReference,
 		SurfaceUsageAggregate,
@@ -11,17 +11,19 @@
 		ThreadSessionSnapshot,
 		ThreadWorkItem,
 	} from "@artisan/protocol";
-	import type { ConversationPatch } from "@artisan/protocol";
 	import {
 		ArtisanClient,
 		type ArtisanClientError,
 		type ConversationUpdate,
 		type ThreadSessionUpdate,
+		type ThreadWorkUpdate,
 	} from "@artisan/transport/client";
 	import {
 		ApplyConversationViewPatch,
 		CanReplaceConversationSnapshot,
+		ConversationTurnFloor,
 		MakeConversationViewState,
+		MergeConversationRange,
 		type ConversationViewState,
 	} from "$lib/conversation/store";
 	import {
@@ -42,6 +44,7 @@
 	import { thread_display_title, thread_title_mode } from "$lib/threads/title";
 	import { ConversationUserMessageWithSourceReference } from "$lib/conversation/scroll-position";
 	import { ConversationSteeringAcknowledged } from "$lib/conversation/steering";
+	import type { ConversationVisualSettlementMeasurement } from "$lib/conversation/visual-settlement";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
 	import {
@@ -68,9 +71,13 @@
 	import ThreadWorkspace from "./thread-workspace.svelte";
 
 	let {
+		onvisualsettled,
 		thread_id: route_thread_id,
 		thread_open: route_thread_open,
 	}: {
+		readonly onvisualsettled?: (
+			measurement: ConversationVisualSettlementMeasurement,
+		) => Effect.Effect<void>;
 		readonly thread_id: string;
 		readonly thread_open: ThreadOpenSnapshot;
 	} = $props();
@@ -149,11 +156,13 @@
 		});
 	yield* CanonicalizeThreadPath(initial_thread);
 	let session = $state.raw<ThreadSessionSnapshot | undefined>(thread_open.session);
+	let session_ready = $state(false);
+	const session_authority_ready = yield* Deferred.make<void>();
 	const PublishSession = (next: ThreadSessionSnapshot | undefined) =>
 		next === undefined
 			? Effect.void
 			: session_projection.Publish(next).pipe(Effect.asVoid);
-	const ApplySession = (next: ThreadSessionSnapshot) =>
+	const ApplySession = (next: ThreadSessionSnapshot, authoritative = true) =>
 		Effect.gen(function* () {
 			if (
 				session !== undefined &&
@@ -161,12 +170,31 @@
 			)
 				return session;
 			session = next;
-			yield* PublishSession(next);
+			if (authoritative) {
+				session_ready = true;
+				yield* PublishSession(next);
+				yield* Deferred.succeed(session_authority_ready, undefined);
+			}
 			return next;
 		});
-	yield* ApplySession(thread_open.session);
+	yield* ApplySession(thread_open.session, false);
+	const AwaitSessionAuthority = Deferred.await(session_authority_ready).pipe(
+		Effect.timeoutOrElse({
+			duration: "45 seconds",
+			orElse: () =>
+				Effect.fail(
+					new ThreadInteractionError({
+						message: "Thread session state is still synchronizing.",
+					}),
+				),
+		}),
+	);
 	let thread = $state.raw<ThreadListItem | undefined>(initial_thread);
 	let work = $state.raw<ThreadWorkItem | undefined>(thread_open.work);
+	/** Cached thread-open work paints provisionally but never authorizes an action. */
+	let work_ready = $state(false);
+	let work_journal_sequence = -1;
+	const work_authority_ready = yield* Deferred.make<void>();
 	const ApplyCatalog = (catalog: {
 		readonly threads: ReadonlyArray<ThreadListItem>;
 		readonly threads_loaded: boolean;
@@ -191,7 +219,8 @@
 		thread_scope,
 	);
 	const run_active = $derived(
-		work?.status === "queued" || work?.status === "running" || work?.status === "waiting",
+		work_ready &&
+			(work?.status === "queued" || work?.status === "running" || work?.status === "waiting"),
 	);
 	let context_usage = $state.raw<SurfaceUsageAggregate | undefined>(undefined);
 	/**
@@ -223,7 +252,25 @@
 		Stream.runForEach(ApplyRunUsage),
 		Effect.forkScoped,
 	);
-	yield* run_usage_lease.Select(work?.run_id);
+	const ApplyWorkValue = (next: ThreadWorkItem | undefined) =>
+		Effect.gen(function* () {
+			work = next;
+			work_ready = true;
+			yield* run_usage_lease.Select(next?.run_id);
+			yield* Deferred.succeed(work_authority_ready, undefined);
+		});
+	const AwaitWorkAuthority = Deferred.await(work_authority_ready).pipe(
+		Effect.timeoutOrElse({
+			duration: "45 seconds",
+			orElse: () =>
+				Effect.fail(
+					new ThreadInteractionError({
+						message: "Thread work state is still synchronizing.",
+					}),
+				),
+		}),
+	);
+	yield* run_usage_lease.Select(undefined);
 	yield* Effect.addFinalizer(run_usage_lease.Release);
 	const initial_snapshot = thread_open.conversation;
 	if (initial_snapshot.thread_id !== thread_id) {
@@ -501,12 +548,53 @@
 	const ReplaceSnapshot = (next: typeof snapshot) =>
 		Effect.gen(function* () {
 			if (!CanReplaceConversationSnapshot(snapshot, next)) return;
+			/** DevTools timing for the open-cost split: projection build vs paint. */
+			performance.mark("conversation-snapshot-initialize:start");
 			const initialized = MakeConversationViewState(next);
+			performance.measure(
+				"conversation-snapshot-initialize",
+				"conversation-snapshot-initialize:start",
+			);
 			snapshot = next;
 			view_state = initialized._tag === "applied" ? initialized.state : undefined;
 			yield* ResolveAcceptedProjectionWaiters(next);
 			yield* checklist_lease.Publish(LatestConversationPlan(next.items, next.turns));
 		});
+
+	/**
+	 * Loads one older history range beneath the current window and merges it
+	 * into the live view. Resolves false when nothing further loaded — a
+	 * caller stops offering remote history — and swallows transport failures
+	 * the same way, because the tail view stays authoritative either way.
+	 */
+	const HydrateOlderConversation = (minimum_turn_ordinal?: number) =>
+		Effect.gen(function* () {
+			const current = view_state;
+			if (current === undefined) return false;
+			const floor = ConversationTurnFloor(current.rebuild.snapshot);
+			if (floor === undefined || floor <= 0) return false;
+			const range = yield* client.GetConversation({
+				thread_id,
+				range: {
+					before_turn_ordinal: floor,
+					maximum_turn_count: conversation_default_window_turn_count,
+					...(minimum_turn_ordinal === undefined ? {} : { minimum_turn_ordinal }),
+				},
+			});
+			const latest = view_state;
+			if (latest === undefined || range.turns.length === 0) return false;
+			const merged = MergeConversationRange(latest, range);
+			if (merged._tag !== "applied" || merged.state === latest) return false;
+			view_state = merged.state;
+			snapshot = merged.state.rebuild.snapshot;
+			return true;
+		}).pipe(
+			Effect.catch(() =>
+				Effect.gen(function* () {
+					return false;
+				}),
+			),
+		);
 
 	yield* ReplaceSnapshot(snapshot);
 
@@ -528,7 +616,12 @@
 		Deferred.Deferred<void, ArtisanClientError> | undefined
 	>(undefined);
 	const ResyncOnce = Effect.gen(function* () {
-		yield* ReplaceSnapshot(yield* client.GetConversation({ thread_id }));
+		yield* ReplaceSnapshot(
+			yield* client.GetConversation({
+				thread_id,
+				window: { maximum_turn_count: conversation_default_window_turn_count },
+			}),
+		);
 	});
 	const CompleteResync = (
 		deferred: Deferred.Deferred<void, ArtisanClientError>,
@@ -590,8 +683,11 @@
 	>(undefined);
 	const RefreshInteractionContextOnce = Effect.gen(function* () {
 		const next_work = yield* client.GetThreadWork(thread_id);
-		work = Option.getOrUndefined(next_work);
-		yield* run_usage_lease.Select(work?.run_id);
+		/**
+		 * A point read is bootstrap/recovery only. Once the ordered subscription
+		 * has spoken, an unversioned query may never overwrite it.
+		 */
+		if (!work_ready) yield* ApplyWorkValue(Option.getOrUndefined(next_work));
 	});
 	const CompleteInteractionRefresh = (
 		deferred: Deferred.Deferred<void, ArtisanClientError>,
@@ -675,7 +771,12 @@
 			(error: ArtisanClientError) =>
 				Effect.gen(function* () {
 					const accepted = yield* ObserveAcceptedProjection(
-						client.GetConversation({ thread_id }),
+						client.GetConversation({
+							thread_id,
+							window: {
+								maximum_turn_count: conversation_default_window_turn_count,
+							},
+						}),
 						(candidate) => HasAcceptedUserMessage(candidate, command_id),
 					);
 					if (Option.isNone(accepted)) return yield* Effect.fail(error);
@@ -690,6 +791,10 @@
 
 	const SendMessage = (submission: ComposerSubmission, command_id?: string) =>
 		Effect.gen(function* () {
+			yield* Effect.all([AwaitSessionAuthority, AwaitWorkAuthority], {
+				concurrency: "unbounded",
+				discard: true,
+			});
 			if (session === undefined) {
 				return yield* Effect.fail(
 					new ThreadInteractionError({ message: "Thread session context is still loading." }),
@@ -745,6 +850,7 @@
 
 	const UpdateSessionPolicy = (policy: ThreadSessionPolicy) =>
 		Effect.gen(function* () {
+			yield* AwaitSessionAuthority;
 			const receipt = yield* client.UpdateThreadSessionPolicy({ policy, thread_id });
 			if (session === undefined) {
 				return yield* Effect.fail(
@@ -867,15 +973,7 @@
 			Effect.asVoid,
 		);
 
-	/**
-	 * Turn outcomes after which no further work lands, whatever the outcome.
-	 * `interrupted` belongs here: nothing more arrives on its own, and the resume
-	 * that could revive it is an explicit act rather than work already in flight.
-	 */
 	const settled_lifecycles = new Set(["completed", "failed", "interrupted", "cancelled"]);
-	const PatchSettlesTurn = (patch: ConversationPatch) =>
-		(patch.type === "turn_lifecycle" && settled_lifecycles.has(patch.lifecycle)) ||
-		(patch.type === "turn_upsert" && settled_lifecycles.has(patch.turn.lifecycle));
 
 	const active_work_statuses = new Set(["queued", "running", "waiting"]);
 	const WorkIsActive = () => work !== undefined && active_work_statuses.has(work.status);
@@ -920,6 +1018,22 @@
 		yield* Resync;
 	});
 
+	const ApplyWorkUpdate = (update: ThreadWorkUpdate) =>
+		Effect.gen(function* () {
+			const next = update.snapshot;
+			if (
+				next.thread_id !== thread_id ||
+				next.journal_sequence < work_journal_sequence
+			)
+				return;
+			work_journal_sequence = next.journal_sequence;
+			yield* ApplyWorkValue(next.work);
+			/** Work settlement now drives transcript reconciliation from retained authority. */
+			if (next.work !== undefined && !active_work_statuses.has(next.work.status)) {
+				yield* Effect.forkIn(EnsureTranscriptSettled, thread_scope);
+			}
+		});
+
 	/**
 	 * A conversation stream that has gone silent is indistinguishable from a
 	 * healthy idle one: the runner only recovers on stream end or error, and
@@ -962,6 +1076,7 @@
 				}
 
 				let failed = false;
+				performance.mark("conversation-patch-batch:start");
 				for (const patch of applicable) {
 					const result = ApplyConversationViewPatch(view_state, patch);
 					if (result._tag === "resync_required" || result._tag === "invariant_error") {
@@ -970,6 +1085,7 @@
 					}
 					view_state = result.state;
 				}
+				performance.measure("conversation-patch-batch", "conversation-patch-batch:start");
 				if (
 					failed ||
 					view_state.rebuild.snapshot.last_patch_sequence !== update.batch.to_sequence
@@ -982,14 +1098,6 @@
 				yield* checklist_lease.Publish(
 					LatestConversationPlan(snapshot.items, snapshot.turns),
 				);
-				/**
-				 * A run reaching a terminal state is only ever announced through the
-				 * projection. Without re-reading the durable work item here the
-				 * transcript shows the turn as finished while `work` still reports
-				 * it running — which leaves the composer stuck offering to stop a
-				 * run that already ended.
-				 */
-				if (applicable.some(PatchSettlesTurn)) yield* RefreshInteractionContext;
 				return;
 			}
 			/**
@@ -1031,27 +1139,25 @@
 	);
 	yield* Effect.forkIn(
 		RunAuthoritativeSubscription(
+			client.SubscribeThreadWork(thread_id),
+			ApplyWorkUpdate,
+			RefreshInteractionContext,
+		),
+		thread_scope,
+	);
+	yield* Effect.forkIn(
+		RunAuthoritativeSubscription(
 			Effect.gen(function* () {
 				return client.Events.pipe(
 					Stream.filter(
 						(event) =>
 							event.thread_id === thread_id &&
-							(event.payload.type === "run.lifecycle" ||
-								event.payload.type === "thread.erased"),
+							event.payload.type === "thread.erased",
 					),
-					Stream.debounce("50 millis"),
 				);
 			}),
-			() =>
-				Effect.gen(function* () {
-					yield* RefreshInteractionContext;
-					/**
-					 * After the refresh, `work` is current: if it settled while the
-					 * transcript did not, the patch stream lost the run's tail.
-					 */
-					yield* Effect.forkIn(EnsureTranscriptSettled, thread_scope);
-				}),
-			RefreshInteractionContext,
+			() => ScheduleConversationAndInteractionReconciliation,
+			ReconcileConversationAndInteraction,
 		),
 		thread_scope,
 	);
@@ -1179,16 +1285,17 @@
 </svelte:head>
 
 <ThreadWorkspace
-	active_run_id={work?.run_id}
-	active_run_status={work?.status}
+	active_run_id={work_ready ? work?.run_id : undefined}
+	active_run_status={work_ready ? work?.status : undefined}
 	{context_usage}
 	conversation_view_state={view_state}
 	{image_sources}
 	{inspection}
 	onreturntoroot={orchestration.ReturnToRoot}
 	onabort={CancelRun}
+	onhydrateolder={HydrateOlderConversation}
 	{snapshot}
-	disabled={session === undefined || first_submission_blocked}
+	disabled={!session_ready || !work_ready || first_submission_blocked}
 	{first_submission_reference}
 	onapproval={RespondApproval}
 	onnewthread={StartThreadWithPrompt}
@@ -1198,6 +1305,7 @@
 	onimagevisibilitychange={UpdateImageAttachmentVisibility}
 	onpolicychange={PersistSessionPolicy}
 	onsubmit={SendMessage}
+	{onvisualsettled}
 	onwithdraw={WithdrawQueuedMessage}
 	policy={session?.policy}
 	project_root_path={thread?.primary_project?.root_path}

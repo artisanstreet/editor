@@ -18,6 +18,11 @@ const ReadSelectorSource = (file: string) =>
 const ReadPolicyControls = () => ReadSelectorSource("policy-controls.svelte");
 const ReadOptionTooltip = () => ReadSelectorSource("option-tooltip.svelte");
 const ReadSelectorView = () => ReadSelectorSource("view.svelte");
+const ReadPresentation = () =>
+	readFileSync(
+		resolve(import.meta.dirname, "../../modules/frontend/src/lib/engine/presentation.ts"),
+		"utf8",
+	);
 
 describe("model effort presentation", () => {
 	it("renders catalog-owned base and special groups with a conditional separator", () => {
@@ -74,6 +79,63 @@ describe("model effort presentation", () => {
 });
 
 describe("model preview configuration", () => {
+	it("gives the OpenAI Codex route the canonical OpenAI catalog mark", () => {
+		const presentation = ReadPresentation();
+
+		expect(presentation).toContain(
+			'openai: { accent: "#10a37f", icon: SvglOpenAILogo, monochrome: true }',
+		);
+		expect(presentation).toContain(
+			'"openai-codex": { accent: "#10a37f", icon: SvglOpenAILogo, monochrome: true }',
+		);
+	});
+
+	it("maps OpenCode model labs to their own provider marks", () => {
+		const presentation = ReadPresentation();
+
+		expect(presentation).toContain(
+			'nvidia: { accent: "#76b900", icon: NvidiaLogo, monochrome: false }',
+		);
+		expect(presentation).toContain(
+			'meta: { accent: "#0081fb", icon: SvglMetaLogo, monochrome: false }',
+		);
+		expect(presentation).toContain(
+			'tencent: { accent: "#006cb6", icon: TencentLogo, monochrome: false }',
+		);
+	});
+
+	it("renders live routes as shared collapsible groups with provider labs", () => {
+		const view = ReadSelectorView();
+		const list = ReadSelectorSource("model-list.svelte");
+
+		expect(view).toContain(
+			"RouteGroupsForModels(effective_catalog, active_engine, active_models)",
+		);
+		expect(view).toContain("{route_groups}");
+		expect(view).not.toContain("unavailable_route_groups");
+		expect(list).toContain("route_groups: ReadonlyArray<ModelRouteGroup>");
+		expect(list).toContain("{#each route_groups as group (group.id)}");
+		expect(list).toContain("<Collapsible open");
+		expect(list).toContain("<CollapsibleTrigger");
+		expect(list).toContain("<ChevronRight");
+		expect(list).toContain("ProviderMarkFor(model.definition.provider)");
+		expect(list).toContain("{model.lab}");
+		expect(list).toContain('group.unavailable_reason ?? "No models available"');
+	});
+
+	it("keeps reported context out of the policy selector stack", () => {
+		const controls = ReadPolicyControls();
+		const summary = ReadSelectorSource("model-preview-summary.svelte");
+		const view = ReadSelectorView();
+
+		expect(controls).not.toContain("formatted_context_tokens");
+		expect(controls).not.toContain("context_window_tokens");
+		expect(view).toContain("<ModelPreviewSummary model={previewed_model} />");
+		expect(summary).toContain("FormatContextWindowTokens");
+		expect(summary).toContain("context_window");
+		expect(summary).toContain("{context_window}");
+	});
+
 	/**
 	 * The panel used to clear the preview the moment the pointer reached it, so
 	 * the settings on screen were always the already-selected model's and a
@@ -95,6 +157,32 @@ describe("model preview configuration", () => {
 
 		expect(view).toContain("permission_options={previewed_permissions?.options ?? []}");
 		expect(view).toContain("permission_default={previewed_permissions?.default}");
+	});
+
+	it("shows the current session permission for models that are only previewed", () => {
+		const controls = ReadPolicyControls();
+
+		expect(controls).toContain(
+			"permission_options.find((option) => option.id === permission_mode)",
+		);
+		expect(controls).not.toMatch(
+			/model\.id === selected_model_id\s*\? permission_options\.find/u,
+		);
+	});
+
+	it("presents provider permissions on one canonical scale", () => {
+		const controls = ReadPolicyControls();
+		const compaction = readFileSync(
+			resolve(
+				process.cwd(),
+				"modules/frontend/src/routes/components/settings/compaction-model.svelte",
+			),
+			"utf8",
+		);
+
+		expect(controls).toContain("PermissionLevelLabel(current_permission)");
+		expect(controls).toContain("PermissionLevelLabel(option)");
+		expect(compaction).toContain("label: PermissionLevelLabel(option)");
 	});
 
 	/**

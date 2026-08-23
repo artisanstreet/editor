@@ -4,10 +4,9 @@
 	import type { ThreadListItem } from "@artisan/protocol";
 	import CodeIcon from "@tabler/icons-svelte/icons/code";
 	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
-	import MessagePlus from "@tabler/icons-svelte/icons/message-plus";
 	import ShoppingBag from "@tabler/icons-svelte/icons/shopping-bag";
 
-	import artisan_star from "$lib/assets/barekey/artisan-star.svg";
+	import artisan_street_jaw_shaded from "$lib/assets/barekey/artisan-street-jaw-shaded.png";
 	import logo_gradient from "$lib/assets/barekey/logo-gradient.svg";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
@@ -41,6 +40,9 @@
 	);
 
 	let command_open = $state(false);
+	let logo_hovered = $state(false);
+	let logo_focused = $state(false);
+	const logo_active = $derived(logo_hovered || logo_focused);
 	/**
 	 * The account menu opens upward across the transcript's left margin, which is
 	 * exactly the band that hosts working threads. Held here because the two live
@@ -173,27 +175,48 @@
 				{#snippet children({ move_hover })}
 					<div class="flex flex-col items-center gap-2">
 						<!--
-							One pill for what is always there: the brand mark, the new-thread
-							action, and the marketplace belong to this edge unconditionally,
-							so they share a housing rather than each floating on their own.
+							One pill for what is always there: the brand mark starts a new
+							thread, and the marketplace sits below it. The logo is the action;
+							a second new-message glyph would only repeat it.
 						-->
 						<div class="w-10 rounded-full bg-surface-125 py-1 card dark:bg-surface-900">
 							<div class="flex w-full flex-col items-center gap-1">
 								<a
-									href="/"
-									aria-label="Artisan Editor home"
-									class="group/artisan-logo relative isolate flex size-8 items-center justify-center overflow-hidden rounded-full outline-none card-plastic focus-visible:ring-2 focus-visible:ring-ring/50"
-									style={`--artisan-logo-gradient: url(${logo_gradient});`}
-									onpointerenter={move_hover}
+									href={new_thread_path}
+									aria-label="New thread"
+									class="relative isolate flex size-8 items-center justify-center overflow-hidden rounded-full outline-none transition-[background-color,box-shadow] duration-(--icon-swap-dur) ease-(--icon-swap-ease) data-[active=true]:bg-foreground data-[active=true]:card-plastic focus-visible:ring-2 focus-visible:ring-ring/50"
+									style={`--artisan-logo-gradient: url(${logo_gradient}); --artisan-logo-mask: url(${artisan_street_jaw_shaded});`}
+									data-active={logo_active}
+									onclick={yield* StartNewThread(event)}
+									onpointerenter={(event) => {
+										logo_hovered = true;
+										move_hover(event);
+									}}
+									onpointerleave={() => (logo_hovered = false)}
 									onpointermove={move_hover}
-									onfocusin={move_hover}
+									onfocusin={(event) => {
+										logo_focused = true;
+										move_hover(event);
+									}}
+									onfocusout={() => (logo_focused = false)}
 								>
 									<span
 										aria-hidden="true"
-										class="absolute inset-0 -z-10 bg-cover bg-center opacity-0 transition-opacity duration-(--duration-quick) ease-in-out group-hover/artisan-logo:opacity-100 group-focus-visible/artisan-logo:opacity-100 motion-reduce:transition-none"
-										style="background-image: var(--artisan-logo-gradient);"
-									></span>
-									<img alt="" src={artisan_star} class="size-5 shrink-0" />
+										class="t-icon-swap size-7"
+										data-state={logo_active ? "b" : "a"}
+									>
+										<span class="t-icon size-7" data-icon="a">
+											<img
+												alt=""
+												src={artisan_street_jaw_shaded}
+												class="size-7 object-cover"
+											/>
+										</span>
+										<span
+											class="t-icon artisan-logo-gradient size-7"
+											data-icon="b"
+										></span>
+									</span>
 								</a>
 
 								<!--
@@ -206,20 +229,6 @@
 								aria-hidden="true"
 								class="h-[2px] w-full shrink-0 border-t border-background bg-border"
 							></span>
-
-								<a
-									href={new_thread_path}
-									aria-label="New thread"
-									class="group/new-thread relative flex size-8 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-									onclick={yield* StartNewThread(event)}
-									onpointerenter={move_hover}
-									onpointermove={move_hover}
-									onfocusin={move_hover}
-								>
-									<MessagePlus
-										class="size-4 text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover/new-thread:text-foreground motion-reduce:transition-none"
-									/>
-								</a>
 
 								<button
 									type="button"
@@ -339,3 +348,19 @@
 </div>
 
 <CommandMenu bind:open={command_open} {threads} />
+
+<style>
+	.artisan-logo-gradient {
+		background-image: var(--artisan-logo-gradient);
+		background-position: center;
+		background-size: cover;
+		mask-image: var(--artisan-logo-mask);
+		mask-position: center;
+		mask-repeat: no-repeat;
+		mask-size: cover;
+		-webkit-mask-image: var(--artisan-logo-mask);
+		-webkit-mask-position: center;
+		-webkit-mask-repeat: no-repeat;
+		-webkit-mask-size: cover;
+	}
+</style>

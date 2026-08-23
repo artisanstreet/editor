@@ -523,7 +523,7 @@ describe("session defaults controller", () => {
 						yield* controller.RememberPolicyDefaults({
 							engine_id: "cursor",
 							model: "gpt-5.6-sol",
-							permission: "supervised",
+							permission: "autonomous",
 							permission_mode: "on_request",
 							reasoning_effort: "xhigh",
 							sandbox_mode: "workspace_write",
@@ -545,7 +545,7 @@ describe("session defaults controller", () => {
 					reasoning_effort: "xhigh",
 					service_tier: "fast",
 				},
-				permission: "supervised",
+				permission: "autonomous",
 			},
 		]);
 	});

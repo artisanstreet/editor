@@ -53,6 +53,7 @@ export const MakeProjectionSubscriptionHandlers = (
 					"thread.list",
 					"conversation",
 					"thread.transcript",
+					"thread.work",
 					"surface.list",
 					"surface.usage.aggregate",
 					"orchestration.graph",

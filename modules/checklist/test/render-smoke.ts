@@ -65,6 +65,13 @@ test("renders the checklist, follows the running step, and handles quit", async 
 		tui.dispatch({ at: 10, node_id: "1", status: "running", type: "status" });
 		/** The renderer follows the deepest running task without being told to. */
 		assert.equal(tui.state().selected_id, "1");
+		await harness.flush();
+		const panel_header = harness
+			.captureCharFrame()
+			.split("\n")
+			.find((line) => line.includes("Steps"));
+		assert.ok(panel_header, "expected the steps panel to render");
+		assert.match(panel_header, /Steps.*native build · running/u);
 
 		tui.dispatch({
 			line: `${escape_character}[32mcompiling${escape_character}[0m artisan-core`,

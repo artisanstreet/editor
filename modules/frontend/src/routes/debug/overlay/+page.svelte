@@ -202,8 +202,9 @@
 	</div>
 {:else if scenario !== undefined && model !== undefined}
 	<!-- Fixed so the production overlay's absolute inset fills the viewport, panel chrome and all. -->
-	<div class="fixed inset-0 z-40">
+		<div class="fixed inset-0 z-40">
 			<ForgeConnectionOverlay
+				failure_visible={true}
 				{model}
 				ondismiss={Dismiss}
 			{read_diagnostics}

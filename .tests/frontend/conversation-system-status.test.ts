@@ -9,22 +9,28 @@ const workspace = resolve(import.meta.dirname, "../..");
 const Read = (path: string) => readFileSync(resolve(workspace, path), "utf8");
 
 describe("conversation system status", () => {
-	it("shows Steering only while a steer awaits provider acknowledgement", () => {
+	it("shows Steering beneath the exact user message awaiting provider acknowledgement", () => {
 		const session = Read(
 			"modules/frontend/src/routes/components/conversation-work-session.svelte",
 		);
+		const message = Read("modules/frontend/src/routes/components/conversation-message.svelte");
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
 
-		expect(session).toContain('? "Steering"');
-		expect(session).toContain("steering_pending ||");
-		/**
-		 * The label belongs to the run the steer targets. Handing it to every
-		 * unsettled session let a run orphaned by a host restart say "Steering"
-		 * above the message while the live run said it again below.
-		 */
-		expect(workspace.replace(/\s+/gu, " ")).toContain(
-			"steering_pending={steering_pending && !session_settled && active_run_id !== undefined && block.session.run_id === active_run_id}",
+		expect(session).not.toContain('"Steering"');
+		expect(message).toContain("{#if steering_pending}");
+		expect(message).toContain('data-conversation-steering-status="true"');
+		expect(message.indexOf("{#if steering_pending}")).toBeGreaterThan(
+			message.indexOf("</article>"),
 		);
+		/**
+		 * The command reference identifies one canonical echo even when several
+		 * steering messages target the same run.
+		 */
+		expect(workspace).toContain(
+			"steering_pending_source_reference = pending ? source_reference : undefined",
+		);
+		expect(workspace).toContain("source.reference === steering_pending_source_reference");
+		expect(workspace).toContain("source.event_id === steering_pending_source_reference");
 	});
 
 	it("names the wait on backgrounded delegated work instead of a thinking verb", () => {
@@ -34,23 +40,26 @@ describe("conversation system status", () => {
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
 
 		expect(session).toContain("background_agent_names,");
-		expect(workspace).toContain("background_agent_names={conversation_background_agent_names(");
+		expect(workspace).toContain("conversation_background_agent_names(");
+		expect(workspace).toContain("const progress_items = block.progress_items ??");
 	});
 
 	it("renders a model transition with both engine marks and catalog model names", () => {
 		const status = Read("modules/frontend/src/routes/components/conversation-status.svelte");
 
 		expect(status).toContain('{#if item.type === "model_transition"}');
-		expect(status).toContain("<span>Changed</span>");
+		expect(status).toContain('{handing_over ? "Changing" : "Changed"}');
 		expect(status).toContain("<span>for</span>");
-		expect(status).toContain("model_name_for(item.source_engine_id, item.source_model_id)");
-		expect(status).toContain("model_name_for(item.target_engine_id, item.target_model_id)");
-		expect(status).toContain("candidate.native_model_id === model_id");
-		expect(status).toContain("EngineMarkFor(item.source_engine_id)");
-		expect(status).toContain("EngineMarkFor(item.target_engine_id)");
+		expect(status).toContain("PresentationForModelInCatalog");
+		expect(status).toContain("effective_catalog");
+		expect(status).toContain("OfflineRuntimeCatalog");
+		expect(status).toContain("SessionDefaultsController");
+		expect(status).toContain("source_presentation.label");
+		expect(status).toContain("target_presentation.label");
+		expect(status).toContain("EngineMarkClass(source_presentation.mark");
+		expect(status).toContain("EngineMarkClass(target_presentation.mark");
 		expect(status).toContain('data-conversation-status="model-transition"');
-		expect(status).toContain("model_transition_presentation(item.state, item.source_model_id)");
-		expect(status).toContain('presentation !== "pending_source"');
+		expect(status).toContain("active={handing_over}");
 	});
 
 	it("shimmers only while compaction is active and yields the generic work status", () => {
@@ -67,7 +76,7 @@ describe("conversation system status", () => {
 		);
 		expect(work_session).toContain(`querySelector('[data-live-work-detail="true"]') !== null`);
 		expect(work_session.replace(/\s+/gu, " ")).toContain(
-			"steering_pending || (!has_live_reply && !has_live_status_detail && !waiting_for_activity)",
+			"!superseded && !has_live_reply && !has_live_status_detail && !waiting_for_activity",
 		);
 		expect(work_session).toContain("{#if renders_status_line}");
 		expect(work_session).toContain(

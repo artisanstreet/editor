@@ -93,7 +93,7 @@ describe("protocol codec", () => {
 		await expect(Effect.runPromise(DecodeInboundControlEnvelope(input))).resolves.toMatchObject(
 			{
 				payload: {
-					policy: { permission: "supervised", service_tier: "standard" },
+					policy: { permission: "autonomous", service_tier: "standard" },
 				},
 			},
 		);

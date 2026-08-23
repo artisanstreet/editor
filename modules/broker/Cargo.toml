@@ -1,0 +1,24 @@
+[package]
+name = "artisan-broker"
+description = "Cross-platform startup jurisdiction heuristics for Artisan Forge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "artisan-broker"
+path = "rust/main.rs"
+
+[lib]
+path = "rust/lib.rs"
+
+[dependencies]
+sys-locale = "0.3.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
+[lints]
+workspace = true

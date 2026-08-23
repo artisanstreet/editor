@@ -13,9 +13,13 @@ const maximum_redirects = 5;
  */
 const allowed_hostnames = new Set([
 	"api.github.com",
+	"cursor.com",
+	"downloads.cursor.com",
 	"github.com",
 	"objects.githubusercontent.com",
+	"registry.npmjs.org",
 	"storage.googleapis.com",
+	"x.ai",
 ]);
 
 const is_allowed_hostname = (hostname: string) =>

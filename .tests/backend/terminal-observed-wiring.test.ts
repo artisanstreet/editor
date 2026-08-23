@@ -1,14 +1,20 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Option } from "effect";
+import { Effect, Option, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { EngineObservation } from "@artisan/engines";
 import type { CommandEnvelope } from "@artisan/protocol";
-import { make_backend_runtime, ProtocolRouter, TerminalRepository } from "@artisan/backend";
+import {
+	make_backend_runtime,
+	ProtocolRouter,
+	TerminalRepository,
+	TerminalSessionService,
+} from "@artisan/backend";
 import { ProjectCatalog } from "../../modules/backend/src/projects/project-catalog";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 import { ObservedTerminalAdoption } from "../../modules/backend/src/terminal/observed-adoption";
@@ -138,6 +144,97 @@ describe("observed terminal wiring", () => {
 			expect(terminals).toHaveLength(1);
 			expect(terminals[0]?.state).toBe("closed");
 			expect(terminals[0]?.exit_code).toBe(0);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("settles a command whose final tool frame was lost when its owning run closes", async () => {
+		const runtime = await make_runtime();
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* OpenThread;
+					const adoption = yield* ObservedTerminalAdoption;
+					yield* adoption.AdoptBatch(run, [started]);
+					yield* adoption.SettleRun(run.run_id, "completed");
+
+					const terminals = yield* TerminalSessionService;
+					const output = yield* terminals.Output({
+						terminal_id: ObservedTerminalId("toolu_dev"),
+						thread_id,
+						workspace_id: project_id,
+					});
+					const repository = yield* TerminalRepository;
+					return {
+						listed: yield* repository.List(thread_id, project_id),
+						output: yield* output.pipe(Stream.decodeText(), Stream.mkString),
+					};
+				}),
+			);
+
+			expect(result.listed).toHaveLength(1);
+			expect(result.listed[0]?.state).toBe("closed");
+			expect(result.listed[0]?.exit_reason).toBe("exited");
+			expect(result.output).toBe("");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("wires the authoritative engine close signal into observed-terminal settlement", () => {
+		const source = readFileSync(
+			fileURLToPath(
+				new URL(
+					"../../modules/backend/src/orchestration/agent-orchestrator.ts",
+					import.meta.url,
+				),
+			),
+			"utf8",
+		);
+
+		expect(source).toContain(
+			"Effect.tap((state) => observed_terminals.SettleRun(work.run_id, state))",
+		);
+	});
+
+	it("streams observed command output through the terminal viewer", async () => {
+		const runtime = await make_runtime();
+		try {
+			const output = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* OpenThread;
+					const adoption = yield* ObservedTerminalAdoption;
+					yield* adoption.AdoptBatch(run, [started]);
+					yield* adoption.AdoptBatch(run, [
+						{
+							...started,
+							observation_id: "observation_2",
+							output: "Building…\n",
+							state: "output",
+						} as EngineObservation,
+					]);
+					yield* adoption.AdoptBatch(run, [
+						{
+							...started,
+							exit_code: 0,
+							observation_id: "observation_3",
+							output: "Building…\nDone\n",
+							state: "completed",
+						} as EngineObservation,
+					]);
+
+					const terminals = yield* TerminalSessionService;
+					const stream = yield* terminals.Output({
+						terminal_id: ObservedTerminalId("toolu_dev"),
+						thread_id,
+						workspace_id: project_id,
+					});
+					return yield* stream.pipe(Stream.decodeText(), Stream.mkString);
+				}),
+			);
+
+			expect(output).toBe("Building…\nDone\n");
 		} finally {
 			await runtime.dispose();
 		}

@@ -1,6 +1,5 @@
 <script lang="ts" effect>
 	import Selector from "@tabler/icons-svelte/icons/selector";
-	import Tool from "@tabler/icons-svelte/icons/tool";
 	import { Effect, Stream } from "effect";
 	import { untrack } from "svelte";
 	import {
@@ -8,7 +7,7 @@
 		type RuntimeCatalog,
 		type ThreadSessionPolicy,
 	} from "@artisan/protocol";
-	import { EngineMarkClass, EngineMarkFor, ProviderMarkFor } from "$lib/engine/presentation";
+	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import { speed_option_presentation } from "$lib/engine/speed-presentation";
 	import {
 		SessionDefaultsController,
@@ -30,6 +29,7 @@
 	import ShaderGlassSurface from "../shader-glass-surface.svelte";
 	import EngineSection from "./engine-section.svelte";
 	import ModelList from "./model-list.svelte";
+	import ModelPreviewSummary from "./model-preview-summary.svelte";
 	import {
 		MakeModelPolicyController,
 		type PolicyFlushResult,
@@ -43,6 +43,9 @@
 		permission_policy_for_harness,
 		permission_reconciliation_for_harness,
 		policy_fields_for_permission,
+		RouteGroupsForModels,
+		VariantLabel,
+		VariantsForModel,
 		type ContextWindowChoice,
 		type EngineChoice,
 		type HarnessId,
@@ -57,14 +60,11 @@
 
 	let {
 		disabled = false,
-		engine_locked = false,
 		onpolicychange,
 		policy,
 		runtime_catalog,
 	}: {
 		disabled?: boolean;
-		/** Prevents a provider change while the current run is still in flight. */
-		engine_locked?: boolean;
 		onpolicychange?: (
 			policy: ThreadSessionPolicy,
 		) => Effect.Effect<ThreadSessionPolicy, { readonly message: string }>;
@@ -108,7 +108,7 @@
 	let thinking_level = $state<ThinkingLevel>("medium");
 	let speed_option_id = $state("standard");
 	let active_engine = $state<HarnessId>(initial_models[0]?.engine ?? "codex");
-	let permission_mode = $state("supervised");
+	let permission_mode = $state("autonomous");
 	let selected_model_id = $state(
 		OfflineRuntimeCatalog.default_model_id ?? initial_models[0]?.id ?? "",
 	);
@@ -130,9 +130,7 @@
 				request.favorite,
 			);
 			favorite_ids = snapshot.favorite_ids;
-		}).pipe(
-		Effect.catch(() => Effect.void),
-	);
+		}).pipe(Effect.catch(() => Effect.void));
 
 	const RequestFavorite = (model_id: string, favorite: boolean) =>
 		Effect.gen(function* () {
@@ -177,10 +175,7 @@
 	const RememberDefaults = (next: ThreadSessionPolicy) =>
 		Effect.gen(function* () {
 			yield* defaults_controller.RememberPolicyDefaults(next).pipe(
-				Effect.catch(() =>
-					Effect.gen(function* () {
-					}),
-				),
+				Effect.catch(() => Effect.void),
 			);
 		});
 
@@ -225,9 +220,19 @@
 	 * agreeing about what is on screen.
 	 */
 	const active_models = $derived.by(() => {
-		return OrderModels(models, active_engine, favorite_ids);
+		return OrderModels(models, active_engine, favorite_ids, selected_model_id);
 	});
-	const selected_model = $derived(models.find((model) => model.id === selected_model_id) ?? models[0]);
+	const route_groups = $derived(
+		RouteGroupsForModels(effective_catalog, active_engine, active_models),
+	);
+	const selected_policy = $derived(displayed_policy ?? policy);
+	const selected_model = $derived(
+		models.find((model) => model.id === selected_model_id) ??
+			(selected_policy === undefined ? models[0] : undefined),
+	);
+	const selected_engine = $derived(
+		selected_model?.engine ?? selected_policy?.engine_id ?? active_engine,
+	);
 	/**
 	 * The speed only earns a word when it is not the model's own default: every
 	 * model would otherwise trail a "Standard" that says nothing.
@@ -243,16 +248,20 @@
 			? thinking_level
 			: undefined,
 	);
-	const selected_engine = $derived(
-		engines.find((engine) => engine.id === selected_model?.engine) ??
-			engines[0] ?? { id: "codex", icon: Tool, monochrome: true, name: "Unavailable" },
+	const selected_variant = $derived(
+		selected_model?.definition.native_selection?.variant_id === undefined
+			? undefined
+			: VariantLabel(selected_model),
 	);
 	const selected_harness = $derived(
-		model_manifest.harnesses.find((harness) => harness.id === selected_model?.engine),
+		model_manifest.harnesses.find((harness) => harness.id === selected_engine),
 	);
 	const selected_permission_options = $derived(selected_harness?.permissions.options ?? []);
 	const previewed_model = $derived(
 		models.find((model) => model.id === previewed_model_id) ?? selected_model,
+	);
+	const previewed_variants = $derived(
+		previewed_model === undefined ? [] : VariantsForModel(models, previewed_model),
 	);
 	const selected_permissions = $derived(
 		selected_model === undefined
@@ -279,7 +288,6 @@
 	const AdoptModel = (model: ModelChoice) =>
 		Effect.gen(function* () {
 			if (model.definition.disabled !== undefined) return false;
-			if (engine_locked && model.engine !== selected_model?.engine) return false;
 
 			selected_model_id = model.id;
 			active_engine = model.engine;
@@ -303,10 +311,30 @@
 
 			const base_policy = yield* policy_controller.Current;
 			if (disabled || base_policy === undefined || onpolicychange === undefined) return true;
-			const { context_window: _reset, ...rest } = base_policy;
+			const {
+				catalog_revision: _catalog_revision,
+				context_window: _reset,
+				model_id: _model_id,
+				profile_id: _profile_id,
+				provider_route_id: _provider_route_id,
+				variant_id: _variant_id,
+				...rest
+			} = base_policy;
+			const native_selection = model.definition.native_selection;
 			yield* ReplacePolicy({
 				...rest,
 				...policy_fields_for_permission(target_permission),
+				...(native_selection === undefined
+					? {}
+					: {
+							catalog_revision: effective_catalog.catalog_revision ?? effective_catalog.manifest.revision,
+							model_id: native_selection.model_id,
+							profile_id: effective_catalog.scope?.profile_id ?? "default",
+							provider_route_id: native_selection.provider_route_id,
+							...(native_selection.variant_id === undefined
+								? {}
+								: { variant_id: native_selection.variant_id }),
+						}),
 				engine_id: model.engine,
 				model: model.definition.native_model_id,
 				reasoning_effort:
@@ -378,16 +406,32 @@
 			yield* FlushPolicy;
 		});
 
+	const ApplyModelVariant = (model: ModelChoice) =>
+		Effect.gen(function* () {
+			if (!(yield* AdoptModel(model))) return;
+			previewed_model_id = model.id;
+			yield* FlushPolicy;
+		});
+
 	const SyncAuthoritativePolicy = (next: ThreadSessionPolicy) =>
 		Effect.gen(function* () {
 			displayed_policy = yield* policy_controller.SetAuthoritative(next);
 			const current = displayed_policy ?? next;
-			const model = models.find(
-				(candidate) =>
-					(candidate.engine === current.engine_id &&
-						candidate.definition.native_model_id === current.model) ||
-					(current.model === undefined && candidate.id === effective_catalog.default_model_id),
-			);
+			const model = models.find((candidate) => {
+				if (current.model === undefined)
+					return candidate.id === effective_catalog.default_model_id;
+				if (
+					candidate.engine !== current.engine_id ||
+					candidate.definition.native_model_id !== current.model
+				)
+					return false;
+				const selection = candidate.definition.native_selection;
+				return selection === undefined
+					? current.provider_route_id === undefined && current.variant_id === undefined
+					: selection.provider_route_id === current.provider_route_id &&
+						selection.model_id === (current.model_id ?? current.model) &&
+						selection.variant_id === current.variant_id;
+			});
 			if (model !== undefined && model.id !== untrack(() => selected_model_id)) {
 				selected_model_id = model.id;
 				active_engine = model.engine;
@@ -410,7 +454,7 @@
 
 	const ReconcilePermission = Effect.gen(function* () {
 		if (selected_permission_options.length === 0) return;
-		const engine = selected_model?.engine ?? "codex";
+		const engine = selected_engine;
 		const current = displayed_policy ?? policy;
 		const resolved =
 			current === undefined
@@ -441,16 +485,21 @@
 							disabled={disabled}
 							class="model-trigger group/model-trigger flex h-8 shrink-0 items-center gap-2 rounded-sm bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none"
 						>
-							{@const trigger_mark = ProviderMarkFor(selected_model?.definition.provider)}
+							{@const trigger_mark = EngineMarkFor(selected_engine)}
 							{@const TriggerMark = trigger_mark.icon}
 							<span class="flex min-w-0 items-center gap-2">
 								<TriggerMark class={EngineMarkClass(trigger_mark, "size-4")} />
 								<span class="flex min-w-0 items-center gap-1 whitespace-nowrap text-sm">
-									<span class="text-foreground">{selected_model?.name ?? "No models"}</span>
+									<span class="text-foreground">
+										{selected_model?.name ?? selected_policy?.model ?? "No model"}
+									</span>
 									{#if selected_thinking_level !== undefined}
 										<span class="text-muted-foreground">
 											{thinking_level_labels[selected_thinking_level]}
 										</span>
+									{/if}
+									{#if selected_variant !== undefined}
+										<span class="text-muted-foreground">{selected_variant}</span>
 									{/if}
 									{#if trigger_speed_presentation !== undefined}
 										<span class={trigger_speed_presentation.class_name}>
@@ -479,27 +528,22 @@
 			align="start"
 			side="top"
 			sideOffset={8}
-			class="t-dropdown w-[min(30rem,calc(100vw-2rem))] rounded-3xl animate-none!"
+			data-strength="strong"
+			class="t-dropdown shader-glass-backdrop w-[min(30rem,calc(100vw-2rem))] rounded-3xl animate-none!"
 		>
 			<ShaderGlassSurface
 				strength="strong"
 				class="t-resize t-resize-auto w-full rounded-3xl"
+				use_backdrop_filter={false}
 			>
 				<Tabs bind:value={active_engine} class="min-h-0 gap-2 p-2">
 				<EngineSection
 					{active_engine}
 					{disabled}
 					{disabled_reason}
-					{engine_locked}
 					{engines}
-					{selected_engine}
 				/>
 				<div class="flex min-w-0 gap-2">
-					<!--
-						No radius of its own: the list is not a card, it is the inside of
-						one. Rounding the scroller only clipped the hover pill's corners
-						against an edge that is never drawn.
-					-->
 					<div class="docs-scroll-fade h-48 min-w-0 grow overflow-y-auto">
 						<ModelList
 							{disabled}
@@ -509,6 +553,7 @@
 							onfavorite={RequestFavorite}
 							onpreview={PreviewModel}
 							onselect={SelectModel}
+							{route_groups}
 							{selected_model_id}
 						/>
 					</div>
@@ -523,14 +568,7 @@
 						-->
 						<div class="h-48 w-56 shrink-0" role="presentation">
 							<div class="flex h-full flex-col justify-between gap-2 overflow-y-auto p-2.5">
-								<div class="flex min-w-0 flex-col gap-1">
-									<span class="truncate text-sm font-semibold text-foreground">{previewed_model.name}</span>
-									{#if previewed_model.definition.description !== undefined}
-										<span class="text-pretty text-xs text-muted-foreground">
-											{previewed_model.definition.description}
-										</span>
-									{/if}
-								</div>
+								<ModelPreviewSummary model={previewed_model} />
 								<PolicyControls
 									{disabled}
 									model={previewed_model}
@@ -545,6 +583,8 @@
 									{selected_model_id}
 									{speed_option_id}
 									{thinking_level}
+									onvariant={ApplyModelVariant}
+									variant_options={previewed_variants}
 								/>
 							</div>
 						</div>

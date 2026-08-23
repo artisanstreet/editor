@@ -4,11 +4,14 @@ import { ConversationPatch, ConversationSnapshot } from "@artisan/protocol";
 import {
 	ApplyConversationViewPatch,
 	CanReplaceConversationSnapshot,
+	ConversationHasRemoteOlderTurns,
 	ConversationOlderGroupCountForItem,
+	ConversationTurnFloor,
 	MakeConversationRenderBlocks,
 	MakeConversationRenderWindow,
 	MakeParticipantConversationRenderWindow,
 	MakeConversationViewState,
+	MergeConversationRange,
 } from "../../modules/frontend/src/lib/conversation/store";
 import { MakeMockConversation } from "../../modules/frontend/src/lib/conversation/mock";
 import { make_conversation_trace_segments } from "../../modules/frontend/src/lib/conversation/trace";
@@ -53,6 +56,111 @@ const snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
 const patch = (value: unknown) => Schema.decodeUnknownSync(ConversationPatch)(value);
 
 describe("conversation view store", () => {
+	it("moves a streaming unspecified reply out of work history and restores it if work resumes", () => {
+		const final_reply_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+			...snapshot,
+			items: [
+				{
+					created_at: "2026-07-24T12:00:00.000Z",
+					id: "work-final",
+					lifecycle: "active",
+					ordinal: 1,
+					references: [],
+					revision: 0,
+					run_id: "run-final",
+					source_refs: [],
+					started_at: "2026-07-24T12:00:00.000Z",
+					status: "active",
+					title: "Agent work",
+					turn_id: "turn-a",
+					type: "work_session",
+					updated_at: "2026-07-24T12:00:00.000Z",
+				},
+				{
+					...snapshot.items[0],
+					id: "streaming-final",
+					ordinal: 2,
+					phase: "unspecified",
+					run_id: "run-final",
+					text: "",
+				},
+			],
+		});
+		const initialized = MakeConversationViewState(final_reply_snapshot);
+		if (initialized._tag !== "applied") throw new Error("fixture must initialize");
+		const appended = ApplyConversationViewPatch(
+			initialized.state,
+			patch({
+				item_id: "streaming-final",
+				patch_id: "first-final-delta",
+				revision: 1,
+				sequence: 1,
+				text: "Wrapping up now…",
+				type: "item_append",
+			}),
+		);
+		if (appended._tag !== "applied") throw new Error("first final delta must apply");
+
+		const blocks = MakeConversationRenderWindow(appended.state, 24).blocks;
+		const work = blocks.find((block) => block.type === "work_group");
+		expect(work).toMatchObject({
+			details: [],
+			progress_phase: "reply",
+			progress_items: expect.arrayContaining([
+				expect.objectContaining({ id: "streaming-final" }),
+			]),
+			type: "work_group",
+		});
+		expect(blocks).toContainEqual(
+			expect.objectContaining({
+				item: expect.objectContaining({ id: "streaming-final", lifecycle: "streaming" }),
+				type: "item",
+			}),
+		);
+
+		const resumed = ApplyConversationViewPatch(
+			appended.state,
+			patch({
+				item: {
+					created_at: "2026-07-24T12:00:01.000Z",
+					id: "activity-after-reply",
+					kind: "terminal_activity",
+					label: "Running another command",
+					lifecycle: "active",
+					ordinal: 3,
+					references: [],
+					revision: 0,
+					run_id: "run-final",
+					source_refs: [],
+					status: "active",
+					turn_id: "turn-a",
+					type: "activity",
+					updated_at: "2026-07-24T12:00:01.000Z",
+				},
+				patch_id: "work-resumed",
+				sequence: 2,
+				type: "item_upsert",
+			}),
+		);
+		if (resumed._tag !== "applied") throw new Error("resumed work must apply");
+		const resumed_blocks = MakeConversationRenderWindow(resumed.state, 24).blocks;
+		const resumed_work = resumed_blocks.find((block) => block.type === "work_group");
+		expect(resumed_work).toMatchObject({
+			progress_phase: "work",
+			type: "work_group",
+		});
+		if (resumed_work?.type !== "work_group") throw new Error("work must render");
+		expect(resumed_work.details.map((item) => item.id)).toEqual([
+			"streaming-final",
+			"activity-after-reply",
+		]);
+		expect(
+			resumed_blocks.some(
+				(block) => block.type === "item" && block.item.id === "streaming-final",
+			),
+		).toBe(false);
+	});
+
 	it("isolates root and adopted child turns while preserving child parent references", () => {
 		const participant_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
 			...snapshot,
@@ -267,7 +375,7 @@ describe("conversation view store", () => {
 		expect(MakeConversationRenderWindow(completed.state, 24).blocks).toHaveLength(1);
 	});
 
-	it("patches a growing active work group without sorting or regenerating its historical details", () => {
+	it("regroups once at reply handoff, then patches streamed words in place", () => {
 		const detail_count = 512;
 		const active_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
 			conversation_id: "conversation-active-group",
@@ -357,6 +465,8 @@ describe("conversation view store", () => {
 			);
 			if (result._tag !== "applied") throw new Error("append must apply");
 			state = result.state;
+			/** The first visible word changes ownership; later words are non-structural. */
+			if (sequence === 1) sort.mockClear();
 		}
 		const lifecycle = ApplyConversationViewPatch(
 			state,
@@ -372,12 +482,12 @@ describe("conversation view store", () => {
 		expect(sort).not.toHaveBeenCalled();
 		sort.mockRestore();
 		if (lifecycle._tag !== "applied") throw new Error("lifecycle must apply");
-		const work_group = MakeConversationRenderWindow(lifecycle.state, 24).blocks.find(
-			(block) => block.type === "work_group",
-		);
+		const blocks = MakeConversationRenderWindow(lifecycle.state, 24).blocks;
+		const work_group = blocks.find((block) => block.type === "work_group");
 		expect(work_group).toMatchObject({
-			details: expect.arrayContaining([
-				expect.objectContaining({ id: "activity-0" }),
+			details: expect.arrayContaining([expect.objectContaining({ id: "activity-0" })]),
+			progress_phase: "reply",
+			progress_items: expect.arrayContaining([
 				expect.objectContaining({
 					id: "streaming-message",
 					lifecycle: "active",
@@ -385,6 +495,16 @@ describe("conversation view store", () => {
 				}),
 			]),
 		});
+		expect(blocks).toContainEqual(
+			expect.objectContaining({
+				item: expect.objectContaining({
+					id: "streaming-message",
+					lifecycle: "active",
+					text: ".".repeat(64),
+				}),
+				type: "item",
+			}),
+		);
 	});
 
 	it("appends and completes the same streaming message", () => {
@@ -1065,13 +1185,13 @@ describe("conversation view store", () => {
 		expect(active_work.details.map((item) => item.id)).toEqual([
 			"unspecified-progress",
 			"legacy-activity",
-			"unspecified-final",
 		]);
+		expect(active_work.progress_phase).toBe("reply");
 		expect(
-			active_blocks.some(
-				(block) => block.type === "item" && block.item.type === "assistant_message",
+			active_blocks.find(
+				(block) => block.type === "item" && block.item.id === "unspecified-final",
 			),
-		).toBe(false);
+		).toBeDefined();
 	});
 
 	it("promotes a settled reply once its own lifecycle completes, even if the turn's completion patch lags", () => {
@@ -1442,5 +1562,380 @@ describe("conversation view store", () => {
 		);
 		const footer_index = blocks.findIndex((block) => block.type === "turn_footer");
 		expect(footer_index).toBe(final_index + 1);
+	});
+});
+
+describe("incremental structural projection", () => {
+	const created_at = "2026-08-22T12:00:00.000Z";
+	const entity = (id: string, ordinal: number) => ({
+		created_at,
+		id,
+		lifecycle: "streaming",
+		ordinal,
+		references: [],
+		revision: 0,
+		source_refs: [],
+		updated_at: created_at,
+	});
+
+	it("matches the canonical full rebuild after every patch of an interleaved session", () => {
+		const empty = Schema.decodeUnknownSync(ConversationSnapshot)({
+			conversation_id: "conversation-incremental",
+			items: [],
+			journal_sequence: 0,
+			last_patch_sequence: 0,
+			schema_version: 1,
+			thread_id: "thread-incremental",
+			turns: [],
+			updated_at: created_at,
+		});
+		const initialized = MakeConversationViewState(empty);
+		if (initialized._tag !== "applied") throw new Error("fixture must initialize");
+		let state = initialized.state;
+		let sequence = 0;
+		/** Every applied patch must leave the cached projection oracle-identical. */
+		const apply = (value: Record<string, unknown>) => {
+			sequence += 1;
+			const result = ApplyConversationViewPatch(
+				state,
+				patch({ ...value, patch_id: `incremental-${sequence}`, sequence }),
+			);
+			if (result._tag !== "applied")
+				throw new Error(`patch ${sequence} must apply, got ${result._tag}`);
+			state = result.state;
+			const oracle = MakeConversationViewState(state.rebuild.snapshot);
+			if (oracle._tag !== "applied") throw new Error("oracle must initialize");
+			expect([...state.projection.ordered_group_ids]).toEqual([
+				...oracle.state.projection.ordered_group_ids,
+			]);
+			expect([...state.projection.root_group_ids]).toEqual([
+				...oracle.state.projection.root_group_ids,
+			]);
+			expect(new Map(state.projection.group_ids_by_participant_agent_id)).toEqual(
+				new Map(oracle.state.projection.group_ids_by_participant_agent_id),
+			);
+			expect(new Map(state.projection.group_id_by_item)).toEqual(
+				new Map(oracle.state.projection.group_id_by_item),
+			);
+			for (const group_id of oracle.state.projection.ordered_group_ids) {
+				expect(state.projection.groups_by_id.get(group_id)?.blocks).toEqual(
+					oracle.state.projection.groups_by_id.get(group_id)?.blocks,
+				);
+			}
+		};
+
+		apply({ turn: { ...entity("turn-1", 0), type: "turn" }, type: "turn_upsert" });
+		apply({
+			item: {
+				...entity("message-user-1", 1),
+				lifecycle: "completed",
+				run_id: "run-1",
+				text: "Make thread rendering incremental",
+				turn_id: "turn-1",
+				type: "user_message",
+			},
+			type: "item_upsert",
+		});
+		apply({
+			item: {
+				...entity("work-1", 2),
+				run_id: "run-1",
+				started_at: created_at,
+				status: "streaming",
+				title: "Agent work",
+				turn_id: "turn-1",
+				type: "work_session",
+			},
+			type: "item_upsert",
+		});
+		apply({
+			item: {
+				...entity("activity-1", 3),
+				kind: "terminal_activity",
+				label: "Ran a command",
+				run_id: "run-1",
+				status: "streaming",
+				turn_id: "turn-1",
+				type: "activity",
+			},
+			type: "item_upsert",
+		});
+		apply({
+			item_id: "activity-1",
+			lifecycle: "completed",
+			revision: 1,
+			type: "item_lifecycle",
+		});
+		apply({
+			item: {
+				...entity("message-1", 4),
+				phase: "unspecified",
+				run_id: "run-1",
+				text: "",
+				turn_id: "turn-1",
+				type: "assistant_message",
+			},
+			type: "item_upsert",
+		});
+		apply({ item_id: "message-1", revision: 1, text: "Progress so far.", type: "item_append" });
+		apply({
+			turn: { ...entity("turn-sub", 5), agent_id: "agent-sub", parent_id: "turn-1", type: "turn" },
+			type: "turn_upsert",
+		});
+
+		const root_segment_id = state.projection.ordered_group_ids.at(0);
+		if (root_segment_id === undefined) throw new Error("root segment must exist");
+		const root_group_before = state.projection.groups_by_id.get(root_segment_id);
+		apply({
+			item: {
+				...entity("subagent-message-1", 6),
+				phase: "unspecified",
+				text: "Scanning the repo",
+				turn_id: "turn-sub",
+				type: "assistant_message",
+			},
+			type: "item_upsert",
+		});
+		/** A subagent patch must not regroup the root turn's cached segment. */
+		expect(state.projection.groups_by_id.get(root_segment_id)).toBe(root_group_before);
+
+		apply({
+			item: {
+				...entity("activity-2", 7),
+				kind: "search",
+				label: "Searched the docs",
+				run_id: "run-1",
+				status: "streaming",
+				turn_id: "turn-1",
+				type: "activity",
+			},
+			type: "item_upsert",
+		});
+		apply({
+			item: {
+				...entity("message-2", 8),
+				phase: "unspecified",
+				run_id: "run-1",
+				text: "",
+				turn_id: "turn-1",
+				type: "assistant_message",
+			},
+			type: "item_upsert",
+		});
+		/** Reply promotion behind a subagent segment must open a new root segment. */
+		apply({ item_id: "message-2", revision: 1, text: "The answer.", type: "item_append" });
+		expect(
+			state.projection.root_group_ids.length,
+		).toBe(2);
+		apply({
+			item_id: "subagent-message-1",
+			lifecycle: "completed",
+			revision: 1,
+			type: "item_lifecycle",
+		});
+		apply({
+			item: {
+				...entity("change-set-1", 9),
+				file_count: 1,
+				file_ids: ["file-change-1"],
+				lifecycle: "completed",
+				state: "applied",
+				summary: "Updated the conversation store",
+				turn_id: "turn-1",
+				type: "change_set",
+			},
+			type: "item_upsert",
+		});
+		apply({
+			item: {
+				...entity("file-change-1", 10),
+				change_set_id: "change-set-1",
+				diff: { additions: 12, deletions: 4, kind: "known" },
+				lifecycle: "completed",
+				operation: "modified",
+				path: "modules/frontend/src/lib/conversation/store.ts",
+				turn_id: "turn-1",
+				type: "file_change",
+			},
+			type: "item_upsert",
+		});
+		apply({
+			item: {
+				...entity("subagent-message-2", 11),
+				lifecycle: "completed",
+				phase: "unspecified",
+				text: "Done scanning",
+				turn_id: "turn-sub",
+				type: "assistant_message",
+			},
+			type: "item_upsert",
+		});
+		apply({
+			lifecycle: "completed",
+			revision: 1,
+			turn_id: "turn-sub",
+			type: "turn_lifecycle",
+		});
+		apply({
+			item_id: "message-2",
+			lifecycle: "completed",
+			revision: 2,
+			type: "item_lifecycle",
+		});
+		apply({
+			item: {
+				...entity("work-1", 2),
+				ended_at: created_at,
+				lifecycle: "completed",
+				revision: 1,
+				run_id: "run-1",
+				started_at: created_at,
+				status: "completed",
+				title: "Agent work",
+				turn_id: "turn-1",
+				type: "work_session",
+			},
+			type: "item_upsert",
+		});
+
+		const participant_segment_ids = [
+			...(state.projection.group_ids_by_participant_agent_id.get("agent-sub") ?? []),
+		];
+		const participant_groups_before = participant_segment_ids.map((group_id) =>
+			state.projection.groups_by_id.get(group_id),
+		);
+		/** The settling turn folds its changes card and footer into its own tail segment. */
+		apply({
+			lifecycle: "completed",
+			revision: 1,
+			turn_id: "turn-1",
+			type: "turn_lifecycle",
+		});
+		expect(participant_segment_ids.length).toBe(2);
+		for (const [index, group_id] of participant_segment_ids.entries()) {
+			expect(state.projection.groups_by_id.get(group_id)).toBe(
+				participant_groups_before[index],
+			);
+		}
+		expect(
+			MakeConversationRenderWindow(state, 24).blocks.map((block) => block.id),
+		).toContain("footer:turn-1");
+
+		/** A steering prompt shifts run-wide inputs and takes the full rebuild. */
+		apply({
+			item: {
+				...entity("message-user-2", 12),
+				lifecycle: "completed",
+				run_id: "run-1",
+				text: "Also handle the subagent case",
+				turn_id: "turn-1",
+				type: "user_message",
+			},
+			type: "item_upsert",
+		});
+	});
+});
+
+describe("windowed snapshot hydration", () => {
+	const created_at = "2026-08-22T12:00:00.000Z";
+	const entity = (id: string, ordinal: number) => ({
+		created_at,
+		id,
+		lifecycle: "completed",
+		ordinal,
+		references: [],
+		revision: 0,
+		source_refs: [],
+		updated_at: created_at,
+	});
+	const exchange = (index: number, parent_id?: string) => {
+		const turn_id = `turn-${index}`;
+		const base = index * 3;
+		return {
+			items: [
+				{
+					...entity(`user-${index}`, base + 1),
+					text: `ask ${index}`,
+					turn_id,
+					type: "user_message",
+				},
+				{
+					...entity(`reply-${index}`, base + 2),
+					phase: "final",
+					text: `answer ${index}`,
+					turn_id,
+					type: "assistant_message",
+				},
+			],
+			turn: {
+				...entity(turn_id, base),
+				...(parent_id === undefined ? {} : { parent_id }),
+				type: "turn",
+			},
+		};
+	};
+	const exchanges = [exchange(0), exchange(1), exchange(2), exchange(3)];
+	const full_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+		conversation_id: "conversation-hydration",
+		items: exchanges.flatMap((value) => value.items),
+		journal_sequence: 0,
+		last_patch_sequence: 12,
+		schema_version: 1,
+		thread_id: "thread-hydration",
+		turns: exchanges.map((value) => value.turn),
+		updated_at: created_at,
+	});
+	const window_markers = exchanges.map((value, index) => ({
+		id: `user-${index}`,
+		label: `ask ${index}`,
+		ordinal: index * 3 + 1,
+		turn_ordinal: index * 3,
+	}));
+	const windowed_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+		...full_snapshot,
+		items: full_snapshot.items.filter((item) => ["turn-2", "turn-3"].includes(item.turn_id)),
+		turns: full_snapshot.turns.filter((turn) => ["turn-2", "turn-3"].includes(turn.id)),
+		window: { markers: window_markers, total_turn_count: 4 },
+	});
+	const range_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+		...full_snapshot,
+		items: full_snapshot.items.filter((item) => ["turn-0", "turn-1"].includes(item.turn_id)),
+		turns: full_snapshot.turns.filter((turn) => ["turn-0", "turn-1"].includes(turn.id)),
+	});
+
+	it("renders the tail window, reports remote history, and merges back to the full thread", () => {
+		const windowed = MakeConversationViewState(windowed_snapshot);
+		if (windowed._tag !== "applied") throw new Error("windowed snapshot must initialize");
+		expect(ConversationHasRemoteOlderTurns(windowed_snapshot)).toBe(true);
+		expect(
+			MakeConversationRenderBlocks(windowed.state).map((block) => block.turn_id),
+		).toEqual(["turn-2", "turn-2", "turn-2", "turn-3", "turn-3", "turn-3"]);
+
+		const merged = MergeConversationRange(windowed.state, range_snapshot);
+		if (merged._tag !== "applied") throw new Error("range must merge");
+		const oracle = MakeConversationViewState(full_snapshot);
+		if (oracle._tag !== "applied") throw new Error("full snapshot must initialize");
+		expect(MakeConversationRenderBlocks(merged.state)).toEqual(
+			MakeConversationRenderBlocks(oracle.state),
+		);
+		expect(merged.state.rebuild.snapshot.last_patch_sequence).toBe(12);
+		expect(ConversationHasRemoteOlderTurns(merged.state.rebuild.snapshot)).toBe(false);
+		/** Merging the same range twice is inert. */
+		expect(MergeConversationRange(merged.state, range_snapshot).state).toBe(merged.state);
+	});
+
+	it("initializes despite parents dangling below the loaded floor", () => {
+		const parented = Schema.decodeUnknownSync(ConversationSnapshot)({
+			...windowed_snapshot,
+			turns: windowed_snapshot.turns.map((turn) =>
+				turn.id === "turn-3" ? { ...turn, parent_id: "turn-0" } : turn,
+			),
+		});
+		expect(MakeConversationViewState(parented)._tag).toBe("applied");
+	});
+
+	it("exposes the loaded floor for range requests", () => {
+		expect(ConversationTurnFloor(windowed_snapshot)).toBe(6);
+		expect(ConversationTurnFloor(full_snapshot)).toBe(0);
 	});
 });

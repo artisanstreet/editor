@@ -10,6 +10,7 @@ import type {
 	TerminalLifecycleAction,
 	TerminalRepositoryError,
 } from "./model";
+import type { ObservedTerminalSettlement } from "./observed";
 
 /** Persists generation-bound terminal claims and atomic lifecycle commits. */
 export class TerminalRepository extends Context.Service<
@@ -80,5 +81,9 @@ export class TerminalRepository extends Context.Service<
 			instance_id: string,
 			failure: string,
 		) => Effect.Effect<number, TerminalRepositoryError>;
+		readonly SettleObservedRun: (
+			run_id: string,
+			settlement: ObservedTerminalSettlement,
+		) => Effect.Effect<ReadonlyArray<TerminalSession>, TerminalRepositoryError>;
 	}
 >()("Artisan/TerminalRepository") {}

@@ -1,6 +1,10 @@
 import type { HarnessDefinition } from "../schema";
 import { permission } from "./options";
 
+/** Big Pickle's stable base-variant identity in OpenCode's Zen catalog. */
+export const opencode2_big_pickle_compaction_model_id =
+	"opencode2:eyJtb2RlbF9pZCI6IngtcHJldmlldy1mLWZyZWUiLCJwcm92aWRlcl9yb3V0ZV9pZCI6Im9wZW5jb2RlIn0";
+
 export const harnesses = [
 	{
 		compaction_default_model_id: "codex-luna",
@@ -8,13 +12,13 @@ export const harnesses = [
 		gateways: [],
 		label: "Codex",
 		permissions: {
-			default: "supervised",
+			default: "autonomous",
 			options: [
 				permission({
 					approval_behavior: "none",
 					availability: "always",
 					description:
-						"Inspect the workspace without writing files; Codex still applies its read-only sandbox.",
+						"Inspect and search without writing files; Codex keeps the read-only sandbox while enabled web search remains available.",
 					edit_scope: "none",
 					id: "restricted",
 					label: "Read only",
@@ -25,22 +29,11 @@ export const harnesses = [
 					approval_behavior: "prompts",
 					availability: "always",
 					description:
-						"Write inside the workspace while Codex decides when an action needs approval.",
-					edit_scope: "workspace",
-					id: "supervised",
-					label: "Supervised",
-					native_value: "workspace-write",
-					safety_boundary: "sandbox",
-				}),
-				permission({
-					approval_behavior: "none",
-					availability: "always",
-					description:
-						"Run without approval prompts while remaining inside Codex's workspace-write sandbox.",
+						"Work autonomously inside the workspace while Codex's sandbox contains writes and its approval policy handles risky actions.",
 					edit_scope: "workspace",
 					id: "autonomous",
-					label: "Auto approve",
-					native_value: "workspace-write-no-prompts",
+					label: "Auto",
+					native_value: "workspace-write",
 					safety_boundary: "sandbox",
 				}),
 				permission({
@@ -50,7 +43,7 @@ export const harnesses = [
 						"Remove Codex's local sandbox and approval prompts, granting access beyond the workspace and to the network; administrator policy may forbid this mode.",
 					edit_scope: "host",
 					id: "unrestricted",
-					label: "Full access",
+					label: "Unrestricted",
 					native_value: "danger-full-access",
 					safety_boundary: "bypassed",
 				}),
@@ -63,40 +56,18 @@ export const harnesses = [
 		gateways: [],
 		label: "Claude",
 		permissions: {
-			default: "supervised",
+			default: "autonomous",
 			options: [
 				permission({
 					approval_behavior: "prompts",
 					availability: "always",
 					description:
-						"Explore and propose a plan without editing source files until the plan is approved.",
+						"Explore, search, and propose a plan without editing source files until leaving plan mode is approved.",
 					edit_scope: "none",
 					id: "restricted",
-					label: "Plan only",
+					label: "Read only",
 					native_value: "plan",
 					safety_boundary: "plan",
-				}),
-				permission({
-					approval_behavior: "prompts",
-					availability: "always",
-					description:
-						"Auto-approve reads and ask before actions that require permission.",
-					edit_scope: "host",
-					id: "supervised",
-					label: "Supervised",
-					native_value: "default",
-					safety_boundary: "rules",
-				}),
-				permission({
-					approval_behavior: "prompts",
-					availability: "always",
-					description:
-						"Auto-approve in-scope edits and common filesystem operations; prompt for other commands.",
-					edit_scope: "host",
-					id: "trusted",
-					label: "Accept edits",
-					native_value: "acceptEdits",
-					safety_boundary: "rules",
 				}),
 				permission({
 					approval_behavior: "classifier",
@@ -116,8 +87,87 @@ export const harnesses = [
 						"Disable ordinary permission prompts and safety checks; administrator policy may forbid this mode.",
 					edit_scope: "host",
 					id: "unrestricted",
-					label: "Bypass permissions",
+					label: "Unrestricted",
 					native_value: "bypassPermissions",
+					safety_boundary: "bypassed",
+				}),
+			],
+		},
+	},
+	{
+		compaction_default_model_id: opencode2_big_pickle_compaction_model_id,
+		id: "opencode2",
+		gateways: [
+			{ id: "opencode", kind: "managed", label: "Zen" },
+			{ id: "opencode-go", kind: "managed", label: "Go" },
+		],
+		label: "OpenCode",
+		permissions: {
+			default: "autonomous",
+			options: [
+				permission({
+					approval_behavior: "none",
+					availability: "always",
+					description:
+						"Inspect the selected workspace without mutation, shell, external-directory, or subagent tools; enabled web search remains available.",
+					edit_scope: "none",
+					id: "restricted",
+					label: "Read only",
+					native_value: "artisan-restricted",
+					safety_boundary: "rules",
+				}),
+				permission({
+					approval_behavior: "prompts",
+					availability: "always",
+					description:
+						"Allow workspace edits automatically while OpenCode continues to ask before shell access and denies external-directory access.",
+					edit_scope: "workspace",
+					id: "autonomous",
+					label: "Auto",
+					native_value: "artisan-auto",
+					safety_boundary: "rules",
+				}),
+				permission({
+					approval_behavior: "none",
+					availability: "dynamic",
+					description:
+						"Allow host-level tools without prompts; shell commands have host filesystem, process, and network authority.",
+					edit_scope: "host",
+					id: "unrestricted",
+					label: "Unrestricted",
+					native_value: "artisan-unrestricted",
+					safety_boundary: "bypassed",
+				}),
+			],
+		},
+	},
+	{
+		id: "hermes",
+		gateways: [],
+		label: "Hermes",
+		permissions: {
+			default: "autonomous",
+			options: [
+				permission({
+					approval_behavior: "prompts",
+					availability: "always",
+					description:
+						"Use the selected Hermes profile's approval rules. Hermes tools run with host filesystem and network access unless that profile configures an isolated backend.",
+					edit_scope: "host",
+					id: "autonomous",
+					label: "Auto",
+					native_value: "profile",
+					safety_boundary: "rules",
+				}),
+				permission({
+					approval_behavior: "none",
+					availability: "dynamic",
+					description:
+						"Enable Hermes YOLO for this session. Host-level tools proceed without ordinary approval prompts; Hermes hardline deny rules may still apply.",
+					edit_scope: "host",
+					id: "unrestricted",
+					label: "Unrestricted",
+					native_value: "yolo",
 					safety_boundary: "bypassed",
 				}),
 			],
@@ -129,17 +179,18 @@ export const harnesses = [
 		gateways: [],
 		label: "Grok Build",
 		permissions: {
-			default: "supervised",
+			default: "autonomous",
 			options: [
 				permission({
 					approval_behavior: "prompts",
 					availability: "always",
-					description: "Prompt for tool calls that are not already allowed by a rule.",
-					edit_scope: "host",
-					id: "supervised",
-					label: "Supervised",
-					native_value: "ask",
-					safety_boundary: "rules",
+					description:
+						"Explore, search, and prepare a plan while Grok keeps edit tools limited until leaving plan mode is approved.",
+					edit_scope: "none",
+					id: "restricted",
+					label: "Read only",
+					native_value: "plan",
+					safety_boundary: "plan",
 				}),
 				permission({
 					approval_behavior: "classifier",
@@ -159,7 +210,7 @@ export const harnesses = [
 						"Auto-approve tool calls while deny rules and pre-tool hooks remain authoritative.",
 					edit_scope: "host",
 					id: "unrestricted",
-					label: "Always approve",
+					label: "Unrestricted",
 					native_value: "always-approve",
 					safety_boundary: "rules",
 				}),
@@ -172,16 +223,27 @@ export const harnesses = [
 		gateways: [],
 		label: "Cursor",
 		permissions: {
-			default: "supervised",
+			default: "autonomous",
 			options: [
+				permission({
+					approval_behavior: "none",
+					availability: "always",
+					description:
+						"Use Cursor's read-only Ask mode for questions, exploration, planning, and enabled web search without edits.",
+					edit_scope: "none",
+					id: "restricted",
+					label: "Read only",
+					native_value: "ask",
+					safety_boundary: "plan",
+				}),
 				permission({
 					approval_behavior: "prompts",
 					availability: "always",
 					description:
 						"Use Cursor's interactive default and ask before terminal commands; configured deny rules remain authoritative.",
 					edit_scope: "host",
-					id: "supervised",
-					label: "Supervised",
+					id: "autonomous",
+					label: "Auto",
 					native_value: "default",
 					safety_boundary: "rules",
 				}),
@@ -192,7 +254,7 @@ export const harnesses = [
 						"Run print mode with --force so commands and writes proceed without prompts; explicit deny rules still win.",
 					edit_scope: "host",
 					id: "unrestricted",
-					label: "Force allow",
+					label: "Unrestricted",
 					native_value: "force",
 					safety_boundary: "rules",
 				}),

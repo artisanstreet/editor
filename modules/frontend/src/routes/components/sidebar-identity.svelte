@@ -1,5 +1,6 @@
 <script lang="ts" effect>
 	import Settings from "@tabler/icons-svelte/icons/settings";
+	import Checklist from "@tabler/icons-svelte/icons/checklist";
 	import { Clock, Effect, Option, Stream } from "effect";
 	import type { EngineUsageSnapshot, HostIdentitySnapshot } from "@artisan/protocol";
 	import { Avatar, AvatarFallback } from "$lib/components/ui/avatar";
@@ -299,6 +300,15 @@
 		<div class="p-1">
 			<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
 				{#snippet children({ move_hover })}
+					<DropdownMenuItem
+						class="rounded-xl focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+						{@attach FollowHighlight(move_hover)}
+					>
+						<a href="/onboarding" class="flex w-full items-center gap-2">
+							<Checklist class="size-4 shrink-0 text-muted-foreground" />
+							Onboarding
+						</a>
+					</DropdownMenuItem>
 					<DropdownMenuItem
 						class="rounded-xl focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
 						{@attach FollowHighlight(move_hover)}

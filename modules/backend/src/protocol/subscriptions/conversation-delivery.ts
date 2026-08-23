@@ -1,4 +1,5 @@
 import { Context, Effect, Option } from "effect";
+import { conversation_default_window_turn_count } from "@artisan/protocol";
 import type { ConversationPatch } from "@artisan/protocol";
 
 import {
@@ -88,7 +89,11 @@ export const MakeConnectionConversationDelivery = Effect.gen(function* () {
 					const key = JSON.stringify(["snapshot", thread_id]);
 					const existing = cached_snapshot_reads.get(key);
 					if (existing !== undefined) return yield* existing;
-					const cached = yield* Effect.cached(conversation.ReadSnapshot(thread_id));
+					const cached = yield* Effect.cached(
+					conversation.ReadSnapshot(thread_id, {
+						window: { maximum_turn_count: conversation_default_window_turn_count },
+					}),
+				);
 					cached_snapshot_reads.set(key, cached);
 					return yield* cached;
 				});

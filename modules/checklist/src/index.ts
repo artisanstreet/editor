@@ -6,6 +6,7 @@ import {
 	create_checklist_state,
 	summarize_checklist,
 	type ChecklistEvent,
+	type ChecklistState,
 	type ChecklistSummary,
 } from "./model.ts";
 import {
@@ -57,6 +58,7 @@ export type {
 	Value,
 } from "./step.ts";
 export { command, is_command_request, task, value } from "./step.ts";
+export { restore_terminal_presentation, terminal_presentation_reset } from "./tui-bridge.ts";
 
 /**
  * Carries the whole summary so a failed run stays reportable, and a message so
@@ -79,6 +81,22 @@ const failure_message = (summary: ChecklistSummary): string => {
 const write_line = (line: string): void => {
 	process.stdout.write(`${line}\n`);
 };
+
+const persistent_failure_log_limit = 80;
+
+/**
+ * Replays the useful tail after a full-screen presenter has been torn down.
+ * Without this, a failed build returns to the shell with only the wrapper's
+ * step name while the compiler diagnostic disappears with the alternate screen.
+ */
+export const format_persistent_failure_report = (state: ChecklistState): ReadonlyArray<string> =>
+	state.nodes
+		.filter((node) => !node.is_group && node.status === "failed")
+		.flatMap((node) => [
+			`── ${node.name} failed`,
+			...node.log_lines.slice(-persistent_failure_log_limit).map((line) => line.text),
+			...(node.failure === undefined ? [] : [node.failure]),
+		]);
 
 const MakePresenter = (options: ChecklistOptions): Effect.Effect<Presenter, never, Scope.Scope> =>
 	Effect.suspend(() => {
@@ -123,6 +141,10 @@ export const make = (
 			const summary = summarize_checklist(state);
 
 			if (!passed) {
+				if (presenter.transient === true) {
+					yield* Effect.promise(async () => await presenter.close());
+					for (const line of format_persistent_failure_report(state)) write_line(line);
+				}
 				return yield* Effect.fail(
 					new ChecklistFailed({ message: failure_message(summary), summary }),
 				);

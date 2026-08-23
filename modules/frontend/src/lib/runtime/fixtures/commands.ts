@@ -336,7 +336,7 @@ export const FixtureClientCommands = {
 						policy: {
 							engine_id: "codex" as const,
 							reasoning_effort: "medium" as const,
-							permission: "supervised",
+							permission: "autonomous",
 							permission_mode: "on_request" as const,
 							sandbox_mode: "workspace_write" as const,
 							service_tier: "standard" as const,
@@ -356,6 +356,23 @@ export const FixtureClientCommands = {
 							reason: "no_active_run" as const,
 							run_id: "run-editor-shell",
 						},
+					},
+				},
+			]);
+		}),
+	SubscribeThreadWork: (thread_id) =>
+		Effect.gen(function* () {
+			const work =
+				thread_id === fixture_artisan_client_data.orchestration_graph.group.thread_id
+					? fixture_artisan_client_data.thread_work
+					: undefined;
+			return Stream.fromIterable([
+				{
+					type: "snapshot" as const,
+					snapshot: {
+						thread_id,
+						journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+						...(work === undefined ? {} : { work }),
 					},
 				},
 			]);
@@ -473,6 +490,7 @@ export const FixtureClientCommands = {
 	| "SubscribeConversation"
 	| "SubscribeThreadTranscript"
 	| "SubscribeThreadSession"
+	| "SubscribeThreadWork"
 	| "SubscribeSurfaceItems"
 	| "SubscribeSurfaceUsageAggregate"
 	| "SubscribeWorkspaceConflicts"

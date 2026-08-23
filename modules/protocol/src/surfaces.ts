@@ -278,6 +278,7 @@ export const SurfaceUsage = Schema.Struct({
 	cached_input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 	context_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 	context_window_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+	cost_usd: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
 	group_id: Schema.optional(Identifier),
 	input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 	output_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
@@ -297,6 +298,7 @@ export const SurfaceUsageAggregate = Schema.Struct({
 	scope: Schema.Literals(["run", "assignment", "group"]),
 	scope_id: Identifier,
 	cached_input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	cost_usd: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
 	/**
 	 * Immutable identity of the run that reported this aggregate's latest
 	 * context-window gauge. The model is intentionally run provenance, not the

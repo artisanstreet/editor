@@ -143,10 +143,14 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 	const renderer =
 		options.renderer ??
 		(await createCliRenderer({
+			autoFocus: false,
 			consoleMode: "disabled",
+			enableMouseMovement: false,
 			exitOnCtrlC: false,
 			exitSignals: [],
 			targetFps: 30,
+			useKittyKeyboard: null,
+			useMouse: false,
 		}));
 	const header = new TextRenderable(renderer, {
 		content: new StyledText([brightCyan(bold("Development"))]),

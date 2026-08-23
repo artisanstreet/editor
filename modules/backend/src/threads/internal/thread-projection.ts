@@ -98,6 +98,7 @@ export const DecodeThreadProjection = (
 			affinity_version: thread.affinity_version,
 			created_at: thread.created_at,
 			last_activity_at: thread.last_activity_at,
+			last_message_at: thread.last_message_at,
 			reader_activity_at: thread.reader_activity_at,
 			reader_acknowledged_activity_at: thread.reader_acknowledged_activity_at,
 			linked_projects,

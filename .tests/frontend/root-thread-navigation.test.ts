@@ -30,6 +30,7 @@ const MakeThread = (
 	created_at: "2026-07-25T10:00:00.000Z",
 	current_goal: undefined,
 	last_activity_at,
+	last_message_at: last_activity_at,
 	reader_activity_at: last_activity_at,
 	reader_acknowledged_activity_at: undefined,
 	live_status: "Idle",
@@ -101,6 +102,44 @@ describe("root thread navigation", () => {
 			type: "upsert",
 		});
 		expect(result.map((thread) => thread.thread_id)).toEqual(["thread-older", "thread-newer"]);
+	});
+
+	it("preserves the given position when non-message activity updates a thread", () => {
+		const first = MakeThread("thread-first", "2026-07-25T12:00:00.000Z");
+		const second = MakeThread("thread-second", "2026-07-25T11:00:00.000Z");
+		const background_update = {
+			...second,
+			last_activity_at: "2026-07-25T13:00:00.000Z",
+			updated_at: "2026-07-25T13:00:00.000Z",
+		};
+
+		const result = ApplyRootThreadListUpdate([first, second], {
+			journal_sequence: 2,
+			thread: background_update,
+			type: "upsert",
+		});
+
+		expect(result.map((thread) => thread.thread_id)).toEqual(["thread-first", "thread-second"]);
+		expect(result[1]).toBe(background_update);
+	});
+
+	it("orders snapshots by the last sent message rather than background activity", () => {
+		const background_newer = {
+			...MakeThread("thread-background", "2026-07-25T13:00:00.000Z"),
+			last_message_at: "2026-07-25T10:00:00.000Z",
+		};
+		const message_newer = MakeThread("thread-message", "2026-07-25T12:00:00.000Z");
+
+		const result = ApplyRootThreadListUpdate([], {
+			journal_sequence: 1,
+			threads: [background_newer, message_newer],
+			type: "snapshot",
+		});
+
+		expect(result.map((thread) => thread.thread_id)).toEqual([
+			"thread-message",
+			"thread-background",
+		]);
 	});
 
 	it("groups recent threads once by their primary project and keeps unassigned threads last", () => {

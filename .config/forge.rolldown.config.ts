@@ -1,11 +1,24 @@
+import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Data, NtExecutable, NtExecutableResource, Resource } from "resedit";
 
 const workspace_root = resolve(import.meta.dirname, "..");
+const release_version = process.env.ARTISAN_RELEASE_VERSION ?? "0.1.0";
+const release_commit = process.env.ARTISAN_RELEASE_COMMIT ?? "development";
+const release_defines = {
+	__ARTISAN_POSTHOG_HOST__: JSON.stringify(process.env.ARTISAN_POSTHOG_HOST ?? ""),
+	__ARTISAN_POSTHOG_PROJECT_KEY__: JSON.stringify(process.env.ARTISAN_POSTHOG_PROJECT_KEY ?? ""),
+	__ARTISAN_SENTRY_FORGE_DSN__: JSON.stringify(process.env.ARTISAN_SENTRY_FORGE_DSN ?? ""),
+	__ARTISAN_TELEMETRY_ENVIRONMENT__: JSON.stringify(
+		process.env.ARTISAN_TELEMETRY_ENVIRONMENT ?? "development",
+	),
+	"process.env.ARTISAN_RELEASE_COMMIT": JSON.stringify(release_commit),
+	"process.env.ARTISAN_RELEASE_VERSION": JSON.stringify(release_version),
+};
 const forge_icon_path = resolve(
 	workspace_root,
-	"modules/frontend/src/lib/assets/barekey/artisan-forge-icon.ico",
+	"modules/frontend/src/lib/assets/barekey/runtime-app-icons/foreground-gradient-symbol.ico",
 );
 
 export type ForgeBuildMode = "production" | "validation";
@@ -78,6 +91,14 @@ const StageForgeRuntime = (
 		const native_runtime_root = resolve(forge_root, "native-runtime");
 		const frontend_source = resolve(workspace_root, ".dist", "frontend");
 		const migrations_source = resolve(workspace_root, "modules/backend/drizzle");
+		const broker_name = process.platform === "win32" ? "artisan-broker.exe" : "artisan-broker";
+		const broker_output_name =
+			process.platform === "win32" ? "Artisan Broker.exe" : "artisan-broker";
+		execFileSync("cargo", ["build", "--package", "artisan-broker"], {
+			cwd: workspace_root,
+			stdio: "inherit",
+		});
+		const broker_source = resolve(workspace_root, "target", "debug", broker_name);
 		if (stage_frontend && !existsSync(frontend_source)) {
 			throw new Error("Build the static frontend before Artisan Forge");
 		}
@@ -94,6 +115,7 @@ const StageForgeRuntime = (
 			throw new Error("node-pty and Koffi are required to package Artisan Forge");
 
 		mkdirSync(forge_root, { recursive: true });
+		stage(broker_source, resolve(forge_root, broker_output_name));
 		const node_pty_destination = resolve(native_runtime_root, "node-pty");
 		mkdirSync(node_pty_destination, { recursive: true });
 		for (const path of ["LICENSE", "package.json", "lib", "prebuilds/win32-x64"]) {
@@ -127,11 +149,8 @@ const StageForgeRuntime = (
 			stage(process.execPath, resolve(forge_root, executable));
 		}
 		if (!watching && process.platform === "win32") {
-			const workspace = JSON.parse(
-				readFileSync(resolve(workspace_root, "package.json"), "utf8"),
-			) as { version: string };
 			try {
-				BrandForgeExecutable(resolve(forge_root, "Artisan Forge.exe"), workspace.version);
+				BrandForgeExecutable(resolve(forge_root, "Artisan Forge.exe"), release_version);
 			} catch (error) {
 				console.warn(`[forge-build] kept the unbranded Artisan Forge.exe (${error})`);
 			}
@@ -200,9 +219,10 @@ export const CreateForgeRolldownConfig = (options: ForgeRolldownOptions = {}) =>
 			dir: forge_root,
 			entryFileNames: "[name].js",
 			format: "es" as const,
+			sourcemap: "hidden" as const,
 		},
 		tsconfig: true,
-		transform: { target: "node22" },
+		transform: { define: release_defines, target: "node22" },
 	};
 };
 
@@ -217,6 +237,7 @@ export const CreateForgeSeaRolldownConfig = () => ({
 		dir: resolve(workspace_root, ".dist", "forge-sea-build"),
 		entryFileNames: "forge-main.cjs",
 		format: "cjs" as const,
+		sourcemap: "hidden" as const,
 	},
 	tsconfig: true,
 	transform: {
@@ -226,7 +247,7 @@ export const CreateForgeSeaRolldownConfig = () => ({
 		 * convenience with `process.env`; replacing only its `env` member keeps
 		 * the Node environment intact and makes the CJS boundary explicit.
 		 */
-		define: { "import.meta.env": "{}" },
+		define: { "import.meta.env": "{}", ...release_defines },
 		target: "node24",
 	},
 });

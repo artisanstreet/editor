@@ -95,6 +95,34 @@ describe("thread interaction commands", () => {
 		});
 	});
 
+	it("queues a newly selected engine instead of steering the active run", () => {
+		const result = BuildThreadMessageCommand(
+			{
+				...Context,
+				session: {
+					...Context.session,
+					policy: { ...Context.session.policy, engine_id: "claude" },
+				},
+				work: {
+					agent_id: "agent-1",
+					engine_id: "codex",
+					run_id: "run-1",
+					status: "running",
+				} as never,
+			},
+			Submission("Continue with Claude"),
+		);
+
+		expect(result).toMatchObject({
+			_tag: "ready",
+			command: { payload: { engine_id: "claude" } },
+		});
+		if (result._tag === "ready") {
+			expect(result.command).not.toHaveProperty("agent_id");
+			expect(result.command).not.toHaveProperty("run_id");
+		}
+	});
+
 	it("rejects a second ordinary message while the current root is queued", () => {
 		expect(
 			BuildThreadMessageCommand(

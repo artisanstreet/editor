@@ -373,12 +373,15 @@ export const MakeReadOperations = Effect.gen(function* () {
 									},
 						source: source
 							? Option.some({
+									catalog_revision: source.catalog_revision,
 									engine_id: source.engine_id,
 									last_native_turn_id: state?.last_native_turn_id,
 									last_observation_sequence:
 										state?.last_observation_sequence ?? 0,
 									model_id: state?.model_id ?? source.model_id,
 									native_thread_id: source.native_thread_id,
+									profile_id: source.profile_id,
+									provider_route_id: source.provider_route_id,
 									resume_token: Option.filter(
 										resume,
 										(token) =>
@@ -388,6 +391,7 @@ export const MakeReadOperations = Effect.gen(function* () {
 									status: source.status,
 									usage_interruption_resume:
 										usage_interruption_authority !== undefined,
+									variant_id: source.variant_id,
 									working_directory: source.working_directory,
 								})
 							: Option.none(),

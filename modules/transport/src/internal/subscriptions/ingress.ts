@@ -3,7 +3,15 @@ import type { EventEnvelope, OutboundControlEnvelope } from "@artisan/protocol";
 import type { ArtisanClientError } from "../../client-api/service";
 import { client_error, cursors_to_record, record_to_cursors } from "../client-common";
 import { SubscriptionContext } from "./context";
-import type { EventApplication, EventTerminal, SubscriptionState } from "./model";
+import type {
+	EventApplication,
+	EventObserverQueue,
+	EventTerminal,
+	SubscriptionState,
+} from "./model";
+
+/** Slow optional observers resynchronize instead of retaining an unbounded journal tail. */
+export const event_observer_queue_capacity = 128;
 
 export const MakeEventIngress = Effect.gen(function* () {
 	const { make_id, state } = yield* SubscriptionContext;
@@ -46,12 +54,17 @@ export const MakeEventIngress = Effect.gen(function* () {
 			}
 
 			/**
-			 * Events are optional hot observations. Each observer has its own lossless
-			 * queue, so renderer speed cannot hold the durable journal cursor or its ACK
-			 * hostage while every accepted fact remains available to that observer.
+			 * Events are optional hot observations. A slow observer is detached and
+			 * failed once its private bound is full, so it can run its authoritative
+			 * recovery without holding the durable cursor or the other observers.
 			 */
-			const observers = [...current.event_observers.values()];
-			for (const observer of observers) Queue.offerUnsafe(observer, event);
+			const event_observers = new Map(current.event_observers);
+			const overflowed_observers: Array<EventObserverQueue> = [];
+			for (const [observer_id, observer] of event_observers) {
+				if (Queue.offerUnsafe(observer, event)) continue;
+				event_observers.delete(observer_id);
+				overflowed_observers.push(observer);
+			}
 
 			const event_cursors = {
 				...current.event_cursors,
@@ -69,14 +82,29 @@ export const MakeEventIngress = Effect.gen(function* () {
 						event_cursors: record_to_cursors(event_cursors),
 						last_journal_sequence,
 					},
+					overflowed_observers,
 				},
-				{ ...current, event_cursors, last_journal_sequence },
+				{ ...current, event_cursors, event_observers, last_journal_sequence },
 			];
 		}).pipe(
 			Effect.flatMap((outcome) => {
 				switch (outcome._tag) {
 					case "Applied":
-						return Effect.succeed(outcome.cursors);
+						return Effect.forEach(
+							outcome.overflowed_observers,
+							(observer) =>
+								Queue.fail(
+									observer,
+									client_error(
+										"event_overflow",
+										"An event observer fell behind its bounded delivery queue.",
+										new Error("event observer queue capacity exceeded"),
+										true,
+										"event.observer_overflow",
+									),
+								),
+							{ discard: true },
+						).pipe(Effect.as(outcome.cursors));
 					case "Duplicate":
 						return cursors;
 					case "Gap":
@@ -131,15 +159,17 @@ export const MakeEventIngress = Effect.gen(function* () {
 
 	/**
 	 * Optional hot observation of accepted events. Each observer holds its own
-	 * lossless queue from the moment it attaches; events applied earlier are
-	 * never retained for it, so attach order is the observer's own contract.
+	 * bounded queue from the moment it attaches; events applied earlier are never
+	 * retained for it, so attach order is the observer's own contract.
 	 */
 	const events = Stream.scoped(
 		Stream.unwrap(
 			Effect.gen(function* () {
 				const observer_id = yield* make_id("event_observer");
 				const observer = yield* Effect.acquireRelease(
-					Queue.unbounded<EventEnvelope, ArtisanClientError | Cause.Done<void>>(),
+					Queue.bounded<EventEnvelope, ArtisanClientError | Cause.Done<void>>(
+						event_observer_queue_capacity,
+					),
 					Queue.shutdown,
 				);
 				const terminal = yield* Ref.modify<SubscriptionState, EventTerminal>(

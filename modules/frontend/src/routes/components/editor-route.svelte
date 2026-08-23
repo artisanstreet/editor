@@ -4,6 +4,8 @@
 	import { Clock, Effect, Schedule } from "effect";
 	import type { WorkspaceChange } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
+	import { FormatPathSeparators } from "$lib/appearance/display-format";
+	import { path_separator } from "$lib/appearance-config";
 	import ArtisanLogo from "$lib/components/artisan-logo.svelte";
 	import { Skeleton } from "$lib/components/ui/skeleton";
 	import { resolve_file_icon } from "$lib/conversation/file-icon";
@@ -38,6 +40,7 @@
 	const client = yield* ArtisanClient;
 	const editor = yield* EditorService;
 	const open_requests = yield* MakeLatestRequestGate;
+	const editor_open_deadline = "20 seconds";
 
 	/**
 	 * Mirrors the editor service's bounded resident set by path. The service owns
@@ -55,13 +58,12 @@
 	let open_failures = $state.raw<ReadonlyMap<string, string>>(new Map());
 
 	const active_path = $derived(page.url.searchParams.get("file") ?? undefined);
+	const display_active_path = $derived(
+		active_path === undefined ? undefined : FormatPathSeparators(active_path, $path_separator),
+	);
 	const active_failure = $derived(
 		active_path === undefined ? undefined : open_failures.get(active_path),
 	);
-	const retained_file = $derived(
-		active_path === undefined ? undefined : retained_files.get(active_path),
-	);
-
 	const ActivateFile = (path: string, file: EditorWorkspaceFile, generation: number) =>
 		Effect.gen(function* () {
 			if (!(yield* open_requests.IsCurrent(generation))) return;
@@ -92,11 +94,6 @@
 					open_failures = new Map(open_failures).set(path, error.message);
 				}),
 			),
-			Effect.andThen(
-				Effect.gen(function* () {
-					if (yield* open_requests.IsCurrent(generation)) opening_path = undefined;
-				}),
-			),
 		);
 
 	/**
@@ -107,7 +104,6 @@
 	const ReconcileOpenPath = (
 		path: string | undefined,
 		target_workspace_id: string | undefined,
-		retained: EditorWorkspaceFile | undefined,
 	) =>
 		Effect.gen(function* () {
 			const generation = yield* open_requests.Begin;
@@ -119,20 +115,32 @@
 			open_failures = new Map(
 				[...open_failures].filter(([failed_path]) => failed_path !== path),
 			);
+			/** Resident state is a snapshot for this URL, never a trigger written by its own open. */
+			const retained = retained_files.get(path);
 			yield* (retained === undefined
 				? OpenPath(path, target_workspace_id, generation)
-				: ActivateFile(path, retained, generation).pipe(
-						Effect.andThen(
+				: ActivateFile(path, retained, generation))
+				.pipe(
+					Effect.timeoutOrElse({
+						duration: editor_open_deadline,
+						orElse: () =>
 							Effect.gen(function* () {
-								if (yield* open_requests.IsCurrent(generation)) {
-									opening_path = undefined;
-								}
+								if (!(yield* open_requests.IsCurrent(generation))) return;
+								open_failures = new Map(open_failures).set(
+									path,
+									"The editor did not finish opening this file before its deadline.",
+								);
 							}),
-						),
-					))
-				.pipe(Effect.forkScoped);
+					}),
+					Effect.ensuring(
+						Effect.gen(function* () {
+							if (yield* open_requests.IsCurrent(generation)) opening_path = undefined;
+						}),
+					),
+					Effect.forkScoped,
+				);
 		});
-	yield* ReconcileOpenPath(active_path, workspace_id, retained_file);
+	yield* ReconcileOpenPath(active_path, workspace_id);
 
 	/**
 	 * The empty state shows the files this thread's runs actually touched,
@@ -185,11 +193,12 @@
 	const route_workspace = $derived(page.params.workspace);
 	const route_thread = $derived(page.params.thread);
 	const file_name = (path: string) => path.split(/[\\/]/u).at(-1) ?? path;
-	const file_parent = (path: string) => path.split(/[\\/]/u).slice(0, -1).join("/");
+	const file_parent = (path: string) =>
+		FormatPathSeparators(path.split(/[\\/]/u).slice(0, -1).join("/"), $path_separator);
 </script>
 
 <svelte:head>
-	<title>{active_path ?? "Editor"} · Artisan Editor</title>
+	<title>{display_active_path ?? "Editor"} · Artisan Editor</title>
 </svelte:head>
 
 <div class="flex h-full min-h-0 min-w-0 flex-col">
@@ -257,7 +266,7 @@
 	{:else if opening_path === active_path}
 		<div
 			class="flex min-h-0 flex-1 flex-col gap-3 p-6"
-			aria-label={`Loading ${active_path}`}
+			aria-label={`Loading ${display_active_path}`}
 			role="status"
 		>
 			<Skeleton class="h-4 w-2/5" />
@@ -277,12 +286,12 @@
 				<FileOff class="size-6 shrink-0 text-muted-foreground" aria-hidden="true" />
 				<p class="text-sm font-medium text-foreground">This file can&rsquo;t be displayed</p>
 				<p class="text-pretty text-xs text-muted-foreground">{active_failure}</p>
-				<p class="truncate text-xs text-muted-foreground/70" title={active_path}>
-					{active_path}
+				<p class="truncate text-xs text-muted-foreground/70" title={display_active_path}>
+					{display_active_path}
 				</p>
 			</div>
 		</div>
 	{:else}
-		<EditorSurface label={active_path} />
+		<EditorSurface label={display_active_path} />
 	{/if}
 </div>

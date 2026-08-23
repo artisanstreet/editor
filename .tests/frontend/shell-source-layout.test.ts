@@ -22,8 +22,16 @@ describe("Barekey docs shell reset", () => {
 		expect(layout).toContain("{#if ForgeShellIsMounted(forge_gate)}");
 		expect(layout).toContain("<ForgeShellPreview />");
 		expect(layout).toContain("<ForgeConnectionOverlay");
-		expect(layout).toContain("inert={ForgeShellIsBlocked(forge_gate)}");
+		expect(layout).toContain("ForgeGateFailureNeedsGrace");
+		expect(layout).toContain('Effect.sleep("4 seconds")');
+		expect(layout).toContain("failure_visible={forge_failure_visible}");
+		expect(layout).toContain("inert={ForgeShellIsBlocked(forge_gate, forge_failure_visible)}");
 		expect(layout).toContain("ondismiss={DismissGate}");
+		/** Debug labs mount outside the Forge shell and its connection overlay. */
+		expect(layout).toContain('page.url.pathname === "/debug"');
+		expect(layout).toContain('page.url.pathname.startsWith("/debug/")');
+		expect(layout).toContain("{#if is_debug_route}");
+		expect(layout).toContain("{:else}\n\t<DevInstanceBadge />");
 		expect(layout).not.toContain("<ForgeConnectionBanner");
 		expect(panel).toContain("primary: Snippet");
 		expect(panel).toContain("secondary?: Snippet");
@@ -51,6 +59,7 @@ describe("Barekey docs shell reset", () => {
 		expect(overlay).toContain("banner-shimmer");
 		expect(overlay).toContain("animate-[reassurance-in_500ms_var(--ease-in-out)_5s_forwards]");
 		expect(overlay).toContain("This is taking more time than expected…");
+		expect(overlay).toContain('presentation.tone !== "error" || failure_visible');
 		/** Settled failures use the structured crash layout with real actions. */
 		expect(overlay).toContain("Artisan Editor ran into a problem and could not continue.");
 		expect(overlay).toContain("What happened?");
@@ -131,12 +140,21 @@ describe("Barekey docs shell reset", () => {
 		expect(composer_controls).toContain("onpolicychange");
 		expect(model_selector).toContain('aria-label="Select model"');
 		/**
-		 * The trigger reads as the model's own row does: its lab mark, its name,
-		 * its supported effort, and its speed only when that is not the default.
+		 * The harness owns the trigger's mark and nothing else: its name would only
+		 * repeat what the icon already says. The model name is the trigger's primary
+		 * text, with effort and speed trailing as qualifiers.
 		 */
 		expect(model_selector).toContain('class="flex min-w-0 items-center gap-2"');
+		expect(model_selector).toContain("{@const trigger_mark = EngineMarkFor(selected_engine)}");
+		expect(model_selector).not.toContain(
+			"ProviderMarkFor(selected_model?.definition.provider)",
+		);
+		expect(model_selector).not.toContain('{selected_harness?.label ?? "No harness"}');
 		expect(model_selector).toContain(
-			"{@const trigger_mark = ProviderMarkFor(selected_model?.definition.provider)}",
+			'{selected_model?.name ?? selected_policy?.model ?? "No model"}',
+		);
+		expect(model_selector).toContain(
+			"selected_model?.engine ?? selected_policy?.engine_id ?? active_engine",
 		);
 		expect(model_selector).toContain(
 			'<TriggerMark class={EngineMarkClass(trigger_mark, "size-4")} />',
@@ -281,8 +299,9 @@ describe("Barekey docs shell reset", () => {
 		expect(controller).not.toContain("Queue.offerUnsafe(action_queue");
 		expect(controller).toContain("Effect.forkIn(");
 		expect(controller).toContain("RunAuthoritativeSubscription(");
+		expect(controller).toContain("client.SubscribeThreadWork(thread_id)");
 		expect(controller).toContain("client.Events.pipe(");
-		expect(controller).toContain('Stream.debounce("50 millis")');
+		expect(controller).not.toContain('Stream.debounce("50 millis")');
 		expect(controller).toContain("update.batch.thread_id !== thread_id");
 		expect(controller).toContain("update.batch.conversation_id !== conversation_id");
 		expect(controller).toContain("!CanReplaceConversationSnapshot(snapshot, next)");
@@ -399,10 +418,10 @@ describe("Barekey docs shell reset", () => {
 		expect(ReadStylesheets()).toContain("@keyframes settle-underline-grow");
 		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
 		expect(work_session).toContain("hidden={disclosure.details_hidden}");
-		expect(workspace).toContain("has_live_reply={conversation_reply_is_live(block.details)}");
-		expect(workspace).toContain(
-			"waiting_for_activity={conversation_waiting_for_activity(block.details)}",
-		);
+		expect(workspace).toContain('has_live_reply={block.progress_phase === "reply" &&');
+		expect(workspace).toContain("conversation_reply_is_live(progress_items)");
+		expect(workspace).toContain("conversation_waiting_for_activity(");
+		expect(workspace).toContain("const progress_items = block.progress_items ??");
 		/**
 		 * The engine came back as a word, never as a mark. Before anything has
 		 * come back there is no thought to name, so the status says which side the
@@ -555,10 +574,9 @@ describe("Barekey docs shell reset", () => {
 		expect(layout).toContain("catalog_state = yield* workspace_catalog.Current;");
 		expect(menu).not.toContain("ArtisanClient");
 		/**
-		 * The root page is a new thread and nothing else — it holds no picker of
-		 * its own, because the project is a word inside the sentence the composer
-		 * sits under. Both it and a routed workspace mount the same surface; the
-		 * only difference is where that word's answer comes from.
+		 * The root page is a new thread and nothing else. It uses the preferred
+		 * recent project; a routed workspace mounts the same surface with the URL
+		 * supplying its project instead.
 		 */
 		expect(existsSync(resolve("modules/frontend/src/routes/threads/+page.svelte"))).toBe(false);
 		expect(home).toContain("<NewThreadRoute />");
@@ -575,14 +593,14 @@ describe("Barekey docs shell reset", () => {
 			"<NewThreadRoute {workspace_id} />",
 		);
 		expect(workspace).toContain("<ThreadComposer");
-		expect(workspace).toContain("<ProjectSelector");
+		expect(workspace).not.toContain("<ProjectSelector");
 		expect(workspace).toContain("SubmitFirstMessage");
 		expect(workspace).toContain("yield* SubmitNewThreadDraft(draft_key, submission)");
 		expect(workspace).toContain("{#key draft_revision}");
 		expect(workspace).toContain(
 			"NavigateCreatedDraft(\n\t\t\t\tThreadRoutePath(created.project.project_id, created.thread_id)",
 		);
-		/** The draft is aimed at the sentence's project, off the reactive mirror. */
+		/** The draft is aimed at the route's resolved project, off the reactive mirror. */
 		expect(workspace).toContain("const current = yield* draft_thread.Current;");
 		expect(workspace).toContain("SeededDraftPolicy(snapshot.catalog, snapshot.defaults)");
 		/**
@@ -600,21 +618,14 @@ describe("Barekey docs shell reset", () => {
 		expect(workspace).not.toContain(
 			"yield* draft_thread.AlignAtRevision(revision, target, policy)",
 		);
-		/** A send is gated on the draft holding a project, not on the sentence naming one. */
+		/** A send is gated on the draft holding the project resolved by the surface. */
 		expect(workspace).toContain(
 			"const draft_ready = $derived(project !== undefined && draft_aligned);",
 		);
 		expect(workspace).toContain("disabled={!draft_ready || locked}");
-		/**
-		 * Changing the word is a plain state change where the URL says nothing
-		 * about the project, and a navigation where it does — a route that named
-		 * one project while composing into another would be lying.
-		 */
-		expect(workspace).toContain("if (workspace_id === undefined) {");
-		expect(workspace).toContain("chosen_project_id = next.project_id;");
-		expect(workspace).toContain("yield* Navigate(WorkspaceRoutePath(next.project_id));");
-		/** Word animation spans retain real text separators for wrapping and copying. */
-		expect(workspace).toContain('{#if word.leading_space}{" "}{/if}');
+		expect(workspace).toContain("PreferredProject(recents, opening_project_id)");
+		expect(workspace).not.toContain('trigger_label="New thread"');
+		expect(workspace).not.toContain("NewThreadSentenceWords");
 	});
 
 	/**
@@ -626,7 +637,8 @@ describe("Barekey docs shell reset", () => {
 		const selector = Read("modules/frontend/src/routes/components/project-selector.svelte");
 		const picker = Read("modules/frontend/src/routes/components/project-folder-picker.svelte");
 
-		expect(selector).toContain("underline decoration-muted-foreground decoration-dotted");
+		expect(selector).toContain("trigger?: Snippet");
+		expect(selector).toContain("{@render trigger()}");
 		expect(selector).toContain(
 			'<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">',
 		);
@@ -634,6 +646,7 @@ describe("Barekey docs shell reset", () => {
 			'<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">',
 		);
 		expect(selector).toContain('class="pointer-events-none -mx-1 my-1 h-px bg-border/50"');
+		expect(selector).not.toContain("{#if projects.length > 0}");
 		expect(selector).toContain("New project");
 		expect(selector).toContain("yield* onnewproject");
 
@@ -642,27 +655,23 @@ describe("Barekey docs shell reset", () => {
 		expect(picker).not.toMatch(/root_path|artisanDesktop/u);
 	});
 
-	it("locks engine switching only during an active run and routes it through policy", () => {
-		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
-		const composer = Read("modules/frontend/src/routes/components/thread-composer.svelte");
+	it("keeps engine switching available during an active run and routes it through policy", () => {
 		const controls = Read("modules/frontend/src/routes/components/composer/controls.svelte");
 		const selector = Read("modules/frontend/src/routes/components/model-selector/view.svelte");
 		const engine_section = Read(
 			"modules/frontend/src/routes/components/model-selector/engine-section.svelte",
 		);
 
-		expect(workspace).toContain("const engine_locked = $derived(run_active);");
-		expect(workspace).not.toContain("run_active || snapshot.items.length > 0");
-		expect(composer).toContain("<ComposerControls");
 		expect(controls).toContain("<ModelSelector");
-		expect(controls).toContain("{engine_locked}");
 		expect(controls).toContain("{runtime_catalog}");
 		expect(selector).toContain("engine_id: model.engine,");
 		expect(selector).toContain("model.id !== untrack(() => selected_model_id)");
-		expect(selector).toContain("candidate.engine === current.engine_id");
+		expect(selector).toContain("candidate.engine !== current.engine_id");
+		expect(selector).toContain("selection.provider_route_id === current.provider_route_id");
 		expect(selector).toContain("<EngineSection");
-		expect(engine_section).toContain("engine_locked && engine.id !== selected_engine.id");
-		expect(engine_section).toContain("finish the active run before switching engines");
+		expect(engine_section).toContain("disabled={disabled}");
+		expect(engine_section).not.toContain("engine_locked");
+		expect(engine_section).not.toContain("finish the active run before switching engines");
 	});
 
 	/**
@@ -692,8 +701,8 @@ describe("Barekey docs shell reset", () => {
 		expect(
 			selector.match(/if \(!\(yield\* AdoptForConfiguration\(model\)\)\) return;/gu) ?? [],
 		).toHaveLength(4);
-		/** Row click and control touch are the two doors, and they share one adopt. */
-		expect(selector.match(/yield\* AdoptModel\(model/gmu) ?? []).toHaveLength(2);
+		/** Row click, control touch, and variant choice share one adopter. */
+		expect(selector.match(/yield\* AdoptModel\(model/gmu) ?? []).toHaveLength(3);
 	});
 
 	it("stars models from the picker and floats favorites to the top of their engine", () => {
@@ -723,7 +732,8 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).toContain("{runtime_catalog}");
 		/** Favorites sort within the active engine, never across engine tabs. */
 		expect(selection).toContain("models.filter((model) => model.engine === engine)");
-		expect(selection).toContain("favorites.indexOf(left.id) - favorites.indexOf(right.id)");
+		expect(selection).toContain("const favorite_rank = new Map(");
+		expect(selection).toContain("rank < favorite_index");
 		/** One stable SVG stays mounted; gold fill is what starring earns. */
 		expect(model_list).toContain('import Star from "@tabler/icons-svelte/icons/star"');
 		expect(model_list).not.toContain("StarFilled");
@@ -757,6 +767,9 @@ describe("Barekey docs shell reset", () => {
 		);
 		expect(panel).toContain("min-w-0 flex-col p-1");
 		expect(panel).toContain("Checklist");
+		expect(panel).toContain("const plan_entries = $derived(plan?.entries ?? []);");
+		expect(panel).toContain("{#each plan_entries as entry (entry.id)}");
+		expect(panel).not.toContain("{#each plan.entries");
 		expect(panel).toContain("<ul");
 		expect(panel).toContain("<li");
 		expect(panel).toContain("rounded-lg px-2 py-2 text-sm");

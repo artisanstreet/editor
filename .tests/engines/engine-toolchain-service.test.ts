@@ -29,6 +29,7 @@ interface ReleaseFixture {
 
 interface ServiceFixtureOptions {
 	readonly fail_credential_copy?: boolean;
+	readonly health_output_prefix?: string;
 	readonly releases: Readonly<Record<string, ReleaseFixture>>;
 }
 
@@ -67,9 +68,8 @@ const MakeService = (root: string, options: ServiceFixtureOptions): ServiceFixtu
 			Effect.sync(() => {
 				spawns.push(input);
 				const version =
-					Object.keys(options.releases).find((candidate) =>
-						input.command.includes(candidate),
-					) ?? "";
+					Object.keys(options.releases).find((candidate) => input.command.includes(candidate)) ??
+					"";
 				const remaining_failures = health_failures.get(version) ?? 0;
 				if (remaining_failures > 0) health_failures.set(version, remaining_failures - 1);
 				return {
@@ -79,7 +79,7 @@ const MakeService = (root: string, options: ServiceFixtureOptions): ServiceFixtu
 					Kill: () => Effect.void,
 					Stderr: (async function* () {})(),
 					Stdout: (async function* () {
-						yield bytes(`${version}\n`);
+						yield bytes(`${options.health_output_prefix ?? ""}${version}\n`);
 					})(),
 					Write: () => Effect.gen(function* () {}),
 				};
@@ -106,10 +106,7 @@ const MakeService = (root: string, options: ServiceFixtureOptions): ServiceFixtu
 						return FileSystem.FileSystem.of({
 							...file_system,
 							copyFile: (_source, destination) =>
-								file_system.copyFile(
-									join(root, "missing-credential-source"),
-									destination,
-								),
+								file_system.copyFile(join(root, "missing-credential-source"), destination),
 						});
 					}),
 				).pipe(Layer.provide(NodeFileSystem.layer));
@@ -178,6 +175,114 @@ const ExpectEmptyStaging = (root: string) =>
 	});
 
 describe("engine toolchain service", () => {
+	it.effect("runs a verified staged installer into an owned Hermes generation", () =>
+		Effect.acquireUseRelease(
+			Effect.promise(() => mkdtemp(join(tmpdir(), "artisan-hermes-toolchain-"))),
+			(root) =>
+				Effect.gen(function* () {
+					const installer = bytes("pinned hermes installer");
+					const spawns: Array<EngineProcessSpawnInput> = [];
+					const distribution: EngineDistribution = {
+						credential_files: [".env", "auth.json"],
+						display_name: "Hermes",
+						engine_id: "hermes",
+						home_environment_variable: "HERMES_HOME",
+						login_args: ["setup"],
+						LatestVersion: Effect.succeed("0.20.5"),
+						recommended_version: "0.20.5",
+						ResolveRelease: () =>
+							Effect.succeed({
+								artifact_kind: "staged-installer" as const,
+								binary: "hermes-agent/bin/hermes.exe",
+								commit: "a".repeat(40),
+								installer_sha256: digest("pinned hermes installer"),
+								stages: ["repository", "bootstrap-marker"],
+								url: "https://example.invalid/install.ps1",
+								version: "0.20.5",
+							}),
+						vendor_home_directory: "AppData/Local/hermes",
+					};
+					const factory = EngineProcessFactory.of({
+						Spawn: (input) =>
+							Effect.promise(async () => {
+								spawns.push(input);
+								if (input.command === "powershell.exe") {
+									const install_index = input.args.indexOf("-InstallDir");
+									const stage_index = input.args.indexOf("-Stage");
+									const install_directory = input.args[install_index + 1]!;
+									const stage = input.args[stage_index + 1]!;
+									if (stage === "bootstrap-marker") {
+										await mkdir(join(install_directory, "bin"), { recursive: true });
+										await writeFile(join(install_directory, "bin", "hermes.exe"), "hermes");
+									}
+								}
+								return {
+									Close: Effect.void,
+									EndInput: Effect.void,
+									Exit: Effect.succeed({ code: 0, signal: null }),
+									Kill: () => Effect.void,
+									Stderr: (async function* () {})(),
+									Stdout: (async function* () {
+										yield bytes(
+											input.command === "powershell.exe"
+												? '{"ok":true}\n'
+												: "Hermes Agent v0.20.5\n",
+										);
+									})(),
+									Write: () => Effect.void,
+								};
+							}),
+					});
+					const http = ToolchainReleaseHttp.of({
+						Get: () => Effect.die("metadata is not used"),
+						GetStream: () => Stream.succeed(installer),
+					});
+					const layer = make_engine_toolchain_layer({
+						distributions: [distribution],
+						platform: { architecture: "x64", platform: "win32" },
+						root,
+						user_home_directory: join(root, "vendor"),
+					}).pipe(
+						Layer.provideMerge(NodeFileSystem.layer),
+						Layer.provideMerge(NodePath.layer),
+						Layer.provideMerge(Layer.succeed(EngineProcessFactory, factory)),
+						Layer.provideMerge(Layer.succeed(ToolchainReleaseHttp, http)),
+					);
+
+					return yield* Effect.gen(function* () {
+						const service = yield* EngineToolchain;
+						const installed = yield* service.Install("hermes");
+						const spawn = yield* service.ResolveSpawn("hermes");
+						expect(installed.active_version).toBe("0.20.5");
+						expect(spawn.executable.replaceAll("\\", "/")).toContain(
+							"/hermes-agent/bin/hermes.exe",
+						);
+						expect(spawn.environment.HERMES_HOME).toBe(join(root, "hermes", "home"));
+						expect(
+							spawns
+								.filter((spawn) => spawn.command === "powershell.exe")
+								.map((spawn) => spawn.args[spawn.args.indexOf("-Stage") + 1]),
+						).toEqual(["repository", "bootstrap-marker"]);
+					}).pipe(Effect.provide(layer));
+				}),
+			(root) => Effect.promise(() => rm(root, { force: true, recursive: true })),
+		),
+	);
+
+	it.effect("accepts a labeled version with the conventional v prefix", () =>
+		WithService(
+			{
+				health_output_prefix: "opencode2 v",
+				releases: { "0.0.0-beta-17778": { body: "opencode2" } },
+			},
+			(service) =>
+				Effect.gen(function* () {
+					const installed = yield* service.Install("claude", "0.0.0-beta-17778").pipe(Effect.orDie);
+					expect(installed.active_version).toBe("0.0.0-beta-17778");
+				}),
+		),
+	);
+
 	it.effect("installs immutable generations, rolls back, and preserves managed Claude env", () =>
 		WithService(
 			{
@@ -190,9 +295,9 @@ describe("engine toolchain service", () => {
 				Effect.gen(function* () {
 					yield* service.Install("claude", "1.0.0").pipe(Effect.orDie);
 					yield* service.Install("claude", "2.0.0").pipe(Effect.orDie);
-					expect(
-						(yield* service.Rollback("claude").pipe(Effect.orDie)).active_version,
-					).toBe("1.0.0");
+					expect((yield* service.Rollback("claude").pipe(Effect.orDie)).active_version).toBe(
+						"1.0.0",
+					);
 					yield* service.Install("claude", "2.0.0").pipe(Effect.orDie);
 					const state = yield* ReadState(root);
 					expect(state.active.version).toBe("2.0.0");
@@ -202,8 +307,7 @@ describe("engine toolchain service", () => {
 							(spawn) =>
 								(spawn.env as Record<string, string>).CLAUDE_CONFIG_DIR ===
 									join(root, "claude", "home") &&
-								(spawn.env as Record<string, string>)
-									.DISABLE_INSTALLATION_CHECKS === "1" &&
+								(spawn.env as Record<string, string>).DISABLE_INSTALLATION_CHECKS === "1" &&
 								(spawn.env as Record<string, string>).DISABLE_UPDATES === "1",
 						),
 					).toBe(true);
@@ -226,9 +330,7 @@ describe("engine toolchain service", () => {
 					Effect.gen(function* () {
 						yield* service.Install("claude", "1.0.0").pipe(Effect.orDie);
 						const before = yield* ReadStateText(root);
-						const overflow = yield* service
-							.Install("claude", "2.0.0")
-							.pipe(Effect.exit);
+						const overflow = yield* service.Install("claude", "2.0.0").pipe(Effect.exit);
 						expect(FailureFrom(overflow)).toMatchObject({
 							_tag: "ToolchainHttpFailure",
 							code: "body_too_large",
@@ -236,9 +338,7 @@ describe("engine toolchain service", () => {
 						expect(yield* ReadStateText(root)).toBe(before);
 						yield* ExpectEmptyStaging(root);
 
-						const checksum = yield* service
-							.Install("claude", "3.0.0")
-							.pipe(Effect.exit);
+						const checksum = yield* service.Install("claude", "3.0.0").pipe(Effect.exit);
 						expect(FailureFrom(checksum)).toMatchObject({
 							_tag: "EngineToolchainVerificationError",
 						});

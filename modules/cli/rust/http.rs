@@ -18,6 +18,7 @@ pub struct PairResponse {
 
 #[derive(Deserialize)]
 pub struct StatusResponse {
+    pub active_work_count: Option<usize>,
     pub instance_id: String,
     pub pid: u32,
 }

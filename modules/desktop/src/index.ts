@@ -5,6 +5,14 @@ export {
 	attention_overlay_sources,
 } from "./badge/catalog";
 export type { AttentionOverlayLabel, AttentionOverlaySource } from "./badge/catalog";
+export {
+	desktop_app_icon_assets,
+	HandleDesktopAppIconRequest,
+	LoadDesktopAppIconPreference,
+	MaterializeWindowsAppIcon,
+	SaveDesktopAppIconPreference,
+} from "./app-icon";
+export type { DesktopAppIconAssets, DesktopAppIconController } from "./app-icon";
 export { resolve_desktop_paths } from "./paths";
 export type { ResolvedDesktopPaths } from "./paths";
 export {

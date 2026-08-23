@@ -147,6 +147,18 @@ describe("thread orchestration inspector", () => {
 		expect(pill).toContain("getBoundingClientRect");
 	});
 
+	it("uses the standard Tabler selector chrome for environment pickers", () => {
+		const environment = Read(
+			"modules/frontend/src/routes/components/thread-environment-card.svelte",
+		);
+
+		expect(environment).toContain(
+			'import Selector from "@tabler/icons-svelte/icons/selector"',
+		);
+		expect(environment.match(/<Selector\s/gu)).toHaveLength(3);
+		expect(environment).not.toContain("ChevronDown");
+	});
+
 	it("labels each agent with its dispatched model in the model picker's vocabulary", () => {
 		const agents = Read("modules/frontend/src/routes/components/thread-agents.svelte");
 		const presentation = Read("modules/frontend/src/lib/engine/dispatch-presentation.ts");

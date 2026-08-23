@@ -2,9 +2,15 @@
 	import Refresh from "@tabler/icons-svelte/icons/refresh";
 	import { Effect, Stream } from "effect";
 	import type { EngineUsageReport } from "@artisan/protocol";
+	import { FormatLocalDateTime } from "$lib/appearance/display-format";
+	import { time_format } from "$lib/appearance-config";
 	import { Button } from "$lib/components/ui/button";
 	import { EngineMarkClass, EngineMarkFor, ProviderMarkFor } from "$lib/engine/presentation";
-	import { ModelsFromCatalog } from "$lib/engine/model-selection";
+	import {
+		ModelsFromCatalog,
+		OrderModels,
+		VariantsForModel,
+	} from "$lib/engine/model-selection";
 	import {
 		EngineInstallationsController,
 		type EngineInstallationsState,
@@ -71,7 +77,9 @@
 			);
 		});
 	const engine_mark = $derived(EngineMarkFor(engine_id));
-	const engine_models = $derived(catalog_models.filter((model) => model.engine === engine_id));
+	const engine_models = $derived(
+		harness === undefined ? [] : OrderModels(catalog_models, harness.id, []),
+	);
 	const compaction_default = $derived(
 		catalog_models.find((model) => model.id === harness?.compaction_default_model_id),
 	);
@@ -107,7 +115,8 @@
 		installation_pending ||
 			current_installation?.activity === "installing" ||
 			current_installation?.activity === "authenticating"
-			? (installation_phase_labels[current_installation?.activity_phase ?? ""] ??
+			? (current_installation?.activity_detail ??
+				installation_phase_labels[current_installation?.activity_phase ?? ""] ??
 				"Installing…")
 			: current_installation?.activity === "failed"
 				? (installation_error ??
@@ -194,6 +203,25 @@
 		usage_refreshing = true;
 		yield* LoadUsage(engine_id, true);
 	});
+	let observed_authentication_pending = false;
+	/** A completed service-owned OAuth flow changes both account state and live model inventory. */
+	const RefreshAfterAuthentication = (next: EngineInstallationsState) =>
+		Effect.gen(function* () {
+			const report = next.reports[engine_id];
+			const pending = report?.activity === "authenticating";
+			const completed =
+				observed_authentication_pending && !pending && report?.credentials_present === true;
+			observed_authentication_pending = pending;
+			if (!completed) return;
+			yield* Effect.all(
+				[defaults_controller.Refresh, LoadUsage(engine_id, true)],
+				{ concurrency: 2, discard: true },
+			).pipe(Effect.ignore);
+		});
+	yield* installations_controller.Changes.pipe(
+		Stream.runForEach(RefreshAfterAuthentication),
+		Effect.forkScoped,
+	);
 	const AuthenticateInstallation = (current_engine_id: string) =>
 		Effect.gen(function* () {
 			return yield* installations_controller.Authenticate(current_engine_id).pipe(
@@ -237,7 +265,7 @@
 	const window_reset_label = (resets_at: string | undefined) =>
 		resets_at === undefined
 			? undefined
-			: `Resets ${new Date(resets_at).toLocaleString(undefined, {
+			: `Resets ${FormatLocalDateTime(resets_at, $time_format, {
 					day: "numeric",
 					hour: "numeric",
 					minute: "2-digit",
@@ -321,7 +349,8 @@
 				current_installation.activity === "authenticating"}
 				<div class="flex flex-col gap-2 px-5 py-5">
 					<span class="text-sm text-foreground">
-						{installation_phase_labels[current_installation.activity_phase ?? ""] ??
+						{current_installation.activity_detail ??
+							installation_phase_labels[current_installation.activity_phase ?? ""] ??
 							"Installing…"}
 					</span>
 					<p class="text-xs text-muted-foreground">
@@ -478,6 +507,23 @@
 								</Button>
 							{/if}
 						</div>
+						{#if current_installation?.authorization !== undefined}
+							<div class="flex flex-col items-start gap-2 rounded-md border border-border/60 p-3">
+								<a
+									class="text-sm font-medium text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground"
+									href={current_installation.authorization.url}
+									rel="noreferrer"
+									target="_blank"
+								>
+									Open OpenCode Console
+								</a>
+								{#if current_installation.authorization.instructions.length > 0}
+									<p class="text-pretty text-xs text-muted-foreground">
+										{current_installation.authorization.instructions}
+									</p>
+								{/if}
+							</div>
+						{/if}
 					{:else}
 						<span class="text-sm text-muted-foreground">Sign-in status unknown</span>
 					{/if}
@@ -518,7 +564,11 @@
 						</div>
 					{:else if current_usage !== undefined && current_usage.authentication === "authenticated"}
 						<p class="text-xs text-muted-foreground">
-							This provider does not expose a quota surface.
+							{current_usage.quota_surface === "unsupported"
+								? "This provider does not expose a quota surface."
+								: current_usage.quota_surface === "supported"
+									? "No usage limit is configured for this account."
+									: "No quota windows were reported for this account."}
 						</p>
 					{/if}
 					</div>
@@ -531,19 +581,21 @@
 				{#each engine_models as model (model.id)}
 					{@const lab_mark = ProviderMarkFor(model.definition.provider)}
 					{@const LabIcon = lab_mark.icon}
+					{@const variants = VariantsForModel(catalog_models, model)}
 					<div class="flex items-center justify-between gap-4 px-4 py-2.5">
 						<span class="flex min-w-0 items-center gap-2.5">
 							<LabIcon class={EngineMarkClass(lab_mark, "size-4 shrink-0")} />
 							<span class="flex min-w-0 flex-col">
 								<span class="truncate text-sm text-foreground">{model.name}</span>
-								{#if model.definition.description !== undefined}
-									<span class="truncate text-xs text-muted-foreground">
-										{model.definition.description}
-									</span>
-								{/if}
+								<span class="truncate text-xs text-muted-foreground">
+									{model.definition.description ?? model.lab}
+								</span>
 							</span>
 						</span>
 						<span class="flex shrink-0 items-center gap-1.5">
+							{#if variants.length > 1}
+								<Badge variant="outline">{variants.length} variants</Badge>
+							{/if}
 							{#if model.id === compaction_default?.id}
 								<Badge variant="outline">Compaction default</Badge>
 							{/if}

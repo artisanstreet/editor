@@ -137,6 +137,11 @@ describe("thread terminals card", () => {
 
 	it("opens output read-only and never writes to the PTY", () => {
 		expect(card).toContain("OpenTerminalOutput");
+		expect(card).toContain('viewer_state = "ready"');
+		expect(card).toContain('viewer_state = "failed"');
+		expect(card).toContain("AppendOutput(decoder.decode())");
+		expect(card).toContain('"Waiting for output…"');
+		expect(card).toContain('"Terminal output is unavailable."');
 		/** Replacing or closing a viewer owns interruption, not merely stale rendering. */
 		expect(card).toContain("Scope.close(scope, Exit.void)");
 		expect(card).toContain(

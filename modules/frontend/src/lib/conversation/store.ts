@@ -9,6 +9,8 @@ import {
 	type ConversationTurn,
 } from "@artisan/protocol";
 
+import { conversation_progress_phase, type ConversationProgressPhase } from "./activity-status";
+
 export interface ConversationViewState {
 	readonly items_by_id: ReadonlyMap<string, ConversationItem>;
 	readonly ordered_item_ids: ReadonlyArray<string>;
@@ -45,6 +47,10 @@ export type ConversationRenderBlock =
 			readonly details: ReadonlyArray<ConversationItem>;
 			readonly duration_kind: "thought" | "worked";
 			readonly id: string;
+			/** Newest prose-or-work phase before detail visibility is projected. */
+			readonly progress_phase: ConversationProgressPhase;
+			/** Full source group retained for status facts after reply prose is reparented. */
+			readonly progress_items?: ReadonlyArray<ConversationItem>;
 			readonly session: ConversationWorkSession;
 			/**
 			 * Whether later blocks of the same turn render below this session. A
@@ -96,8 +102,12 @@ interface ConversationRenderProjection {
 	readonly groups_by_id: Map<string, ConversationRenderGroup>;
 	readonly group_id_by_item: Map<string, string>;
 	readonly group_ids_by_participant_agent_id: ReadonlyMap<string, ReadonlyArray<string>>;
+	/** A turn's segments in timeline order, so patches touch only their own turn. */
+	readonly group_ids_by_turn_key: Map<string, Array<string>>;
 	readonly ordered_group_ids: ReadonlyArray<string>;
 	readonly root_group_ids: ReadonlyArray<string>;
+	/** Legacy provider-turn aliases, retained so patches can find their render key. */
+	readonly turn_aliases: ReadonlyMap<string, string>;
 	readonly turns_by_id: Map<string, ConversationTurn>;
 }
 
@@ -131,6 +141,65 @@ export const CanReplaceConversationSnapshot = (
 	current.thread_id === next.thread_id &&
 	current.conversation_id === next.conversation_id &&
 	next.last_patch_sequence >= current.last_patch_sequence;
+
+/** The lowest loaded turn ordinal — the floor an older hydration range starts below. */
+export const ConversationTurnFloor = (snapshot: ConversationSnapshot): number | undefined =>
+	snapshot.turns.reduce<number | undefined>(
+		(floor, turn) => (floor === undefined || turn.ordinal < floor ? turn.ordinal : floor),
+		undefined,
+	);
+
+/** Whether the durable thread still holds turns older than the loaded window. */
+export const ConversationHasRemoteOlderTurns = (snapshot: ConversationSnapshot): boolean => {
+	const window = snapshot.window;
+	if (window === undefined) return false;
+	if (snapshot.turns.length < window.total_turn_count) return true;
+	const floor = ConversationTurnFloor(snapshot);
+	return floor !== undefined && window.markers.some((marker) => marker.turn_ordinal < floor);
+};
+
+/**
+ * Merges one hydrated older range beneath the loaded window and rebuilds the
+ * view. Only entities the view does not hold join, so a range read that raced
+ * live patches can never regress a newer entity, and the view keeps its own
+ * patch cursor — hydration never disturbs streaming continuity.
+ */
+export const MergeConversationRange = (
+	state: ConversationViewState,
+	range: ConversationSnapshot,
+): ConversationViewPatchResult => {
+	const current = state.rebuild.snapshot;
+	if (
+		range.thread_id !== current.thread_id ||
+		range.conversation_id !== current.conversation_id
+	) {
+		return {
+			_tag: "invariant_error",
+			message: "Range belongs to another conversation",
+			state,
+		};
+	}
+	const known_turn_ids = new Set(current.turns.map((turn) => turn.id));
+	const added_turns = range.turns.filter((turn) => !known_turn_ids.has(turn.id));
+	const merged_turn_ids = new Set([...known_turn_ids, ...added_turns.map((turn) => turn.id)]);
+	const known_item_ids = new Set(current.items.map((item) => item.id));
+	const added_items = range.items.filter(
+		(item) => !known_item_ids.has(item.id) && merged_turn_ids.has(item.turn_id),
+	);
+	if (added_turns.length === 0 && added_items.length === 0) {
+		return { _tag: "applied", state };
+	}
+	const merged: ConversationSnapshot = {
+		...current,
+		items: [...current.items, ...added_items].sort(
+			(left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id),
+		),
+		turns: [...current.turns, ...added_turns].sort(
+			(left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id),
+		),
+	};
+	return MakeConversationViewState(merged);
+};
 
 const MakeViewState = (
 	rebuild: ConversationRebuildState,
@@ -204,10 +273,10 @@ const ApplyViewCollections = (
 	const projection = state.projection;
 	if (patch.type === "turn_upsert" || patch.type === "turn_lifecycle") {
 		const turn_id = patch.type === "turn_upsert" ? patch.turn.id : patch.turn_id;
+		const previous_turn = projection.turns_by_id.get(turn_id);
 		let turn: ConversationTurn;
 		if (patch.type === "turn_upsert") turn = patch.turn;
 		else {
-			const previous_turn = projection.turns_by_id.get(turn_id);
 			if (previous_turn === undefined) return MakeViewState(rebuild);
 			turn = {
 				...previous_turn,
@@ -216,11 +285,17 @@ const ApplyViewCollections = (
 			};
 		}
 		projection.turns_by_id.set(turn_id, turn);
-		return {
-			...state,
-			rebuild,
-			projection: MakeConversationRenderProjection({ ...state, rebuild }),
-		};
+		const next = { ...state, rebuild };
+		/** A turn arriving ahead of its items renders nothing; only the index changes. */
+		if (previous_turn === undefined) return next;
+		const stable_identity =
+			previous_turn.parent_id === turn.parent_id &&
+			previous_turn.agent_id === turn.agent_id;
+		const render_key = projection.turn_aliases.get(turn_id) ?? turn_id;
+		if (stable_identity && TryUpdateStructuralRenderTurn(next, render_key, undefined)) {
+			return next;
+		}
+		return { ...next, projection: MakeConversationRenderProjection(next) };
 	}
 
 	const previous =
@@ -254,12 +329,19 @@ const ApplyViewCollections = (
 		return next;
 	}
 	/**
-	 * A new source item can split an existing turn into two timeline segments.
-	 * Rebuild only at that structural boundary; streamed appends retain their
-	 * direct item-to-segment route below.
+	 * A structural item patch reshapes at most its own turn's segments unless it
+	 * moves run-wide grouping inputs. The dirty-turn path rebuilds only that
+	 * turn; anything it cannot prove safe falls through to the canonical full
+	 * rebuild.
 	 */
-	if (patch.type === "item_upsert" && previous === undefined) {
-		return { ...next, projection: MakeConversationRenderProjection(next) };
+	const render_key = projection.turn_aliases.get(item.turn_id) ?? item.turn_id;
+	const appended_item =
+		patch.type === "item_upsert" && previous === undefined ? item : undefined;
+	if (
+		CanUpdateStructuralRenderItem(item, previous, ordered_item_ids) &&
+		TryUpdateStructuralRenderTurn(next, render_key, appended_item)
+	) {
+		return next;
 	}
 	return { ...next, projection: MakeConversationRenderProjection(next) };
 };
@@ -287,8 +369,10 @@ const MakeEmptyConversationViewState = (snapshot: ConversationSnapshot): Convers
 		groups_by_id: new Map(),
 		group_id_by_item: new Map(),
 		group_ids_by_participant_agent_id: new Map(),
+		group_ids_by_turn_key: new Map(),
 		ordered_group_ids: [],
 		root_group_ids: [],
+		turn_aliases: new Map(),
 		turns_by_id: new Map(),
 	},
 	rebuild: { applied_patch_ids: new Set(), snapshot },
@@ -496,7 +580,7 @@ const settled_turn_lifecycles: ReadonlySet<ConversationLifecycle> = new Set([
 
 const MakeConversationRenderBlocksForItems = (
 	source_ordered_items: ReadonlyArray<ConversationItem>,
-	turns: ReadonlyArray<ConversationRebuildState["snapshot"]["turns"][number]>,
+	turns_by_id: ReadonlyMap<string, ConversationTurn>,
 	first_steering_ordinal_by_run = MakeFirstSteeringOrdinalByRun(source_ordered_items),
 	fragments = FragmentAssistantMessages(source_ordered_items),
 ): ReadonlyArray<ConversationRenderBlock> => {
@@ -513,10 +597,14 @@ const MakeConversationRenderBlocksForItems = (
 	const transition_by_turn = new Map<string, ConversationModelTransition>();
 	const concrete_work_turns = new Set<string>();
 	const final_message_by_turn = new Map<string, ConversationAssistantMessage>();
-	const turns_by_id = new Map(turns.map((turn) => [turn.id, turn] as const));
+	const latest_reply_by_turn = new Map<string, ConversationAssistantMessage>();
+	const items_by_turn = new Map<string, Array<ConversationItem>>();
 
 	for (const item of ordered_items) {
 		const group_key = ConversationRenderKey(item, legacy_work.turn_aliases);
+		const turn_items = items_by_turn.get(group_key) ?? [];
+		turn_items.push(item);
+		items_by_turn.set(group_key, turn_items);
 		if (item.type === "activity" || item_is_change(item)) {
 			concrete_work_turns.add(group_key);
 		}
@@ -538,10 +626,11 @@ const MakeConversationRenderBlocksForItems = (
 		if (
 			item.type === "assistant_message" &&
 			!fragments.frozen_fragment_ids.has(item.id) &&
-			item.phase === "final" &&
+			item.phase !== "commentary" &&
 			item.text.length > 0
 		) {
-			final_message_by_turn.set(group_key, item);
+			latest_reply_by_turn.set(group_key, item);
+			if (item.phase === "final") final_message_by_turn.set(group_key, item);
 		}
 	}
 
@@ -559,6 +648,17 @@ const MakeConversationRenderBlocksForItems = (
 		const steering_ordinal = first_steering_ordinal_by_run.get(item.run_id);
 		return steering_ordinal !== undefined && item.ordinal > steering_ordinal;
 	};
+	/**
+	 * The latest model prose is the visible reply while it remains the newest
+	 * phase, even for providers that call every message `unspecified`. If a tool
+	 * or reasoning item lands afterwards, the next rebuild returns that prose to
+	 * work history and reopens the disclosure.
+	 */
+	for (const [group_key, candidate] of latest_reply_by_turn) {
+		if (conversation_progress_phase(items_by_turn.get(group_key) ?? []) === "reply") {
+			final_message_by_turn.set(group_key, candidate);
+		}
+	}
 
 	/**
 	 * Historical exec projections can label every assistant message as final. In
@@ -646,11 +746,15 @@ const MakeConversationRenderBlocksForItems = (
 				const session = work_session_by_turn.get(group_key);
 				if (session === undefined || session.id !== item.id) return [];
 				const transition = transition_by_turn.get(group_key);
+				const turn_items = items_by_turn.get(group_key) ?? [];
+				const progress_phase = conversation_progress_phase(turn_items);
 				return [
 					{
 						details: details_by_turn.get(group_key) ?? [],
 						duration_kind: concrete_work_turns.has(group_key) ? "worked" : "thought",
 						id: `work:${item.id}`,
+						progress_phase,
+						progress_items: turn_items,
 						session,
 						...(transition === undefined ? {} : { transition }),
 						turn_id: group_key,
@@ -726,7 +830,7 @@ export const MakeConversationRenderBlocks = (
 		state.ordered_item_ids
 			.map((item_id) => state.items_by_id.get(item_id))
 			.filter((item): item is ConversationItem => item !== undefined),
-		state.rebuild.snapshot.turns,
+		new Map(state.rebuild.snapshot.turns.map((turn) => [turn.id, turn])),
 	);
 
 /** Builds durable, state-owned group indexes once for a snapshot replacement. */
@@ -779,12 +883,13 @@ const MakeConversationRenderProjection = (
 	const ordered_group_ids: Array<string> = [];
 	const root_group_ids: Array<string> = [];
 	const group_ids_by_participant_agent_id = new Map<string, Array<string>>();
+	const group_ids_by_turn_key = new Map<string, Array<string>>();
 	const turns_by_id = new Map(state.rebuild.snapshot.turns.map((turn) => [turn.id, turn]));
 	const first_steering_ordinal_by_run = MakeFirstSteeringOrdinalByRun(ordered_items);
 	const fragments = FragmentAssistantMessages(ordered_items);
 	const blocks = MakeConversationRenderBlocksForItems(
 		ordered_items,
-		state.rebuild.snapshot.turns,
+		turns_by_id,
 		first_steering_ordinal_by_run,
 		fragments,
 	);
@@ -806,6 +911,9 @@ const MakeConversationRenderProjection = (
 		);
 		groups_by_id.set(segment_id, group);
 		ordered_group_ids.push(segment_id);
+		const key_group_ids = group_ids_by_turn_key.get(first_block.turn_id) ?? [];
+		key_group_ids.push(segment_id);
+		group_ids_by_turn_key.set(first_block.turn_id, key_group_ids);
 		for (const item_id of group.item_locations.keys())
 			group_id_by_item.set(item_id, segment_id);
 		const source_turns = [...group.source_turn_ids].map((turn_id) => turns_by_id.get(turn_id));
@@ -837,8 +945,10 @@ const MakeConversationRenderProjection = (
 		groups_by_id,
 		group_id_by_item,
 		group_ids_by_participant_agent_id,
+		group_ids_by_turn_key,
 		ordered_group_ids,
 		root_group_ids,
+		turn_aliases: legacy_work.turn_aliases,
 		turns_by_id,
 	};
 };
@@ -866,11 +976,11 @@ const UpdateNonStructuralRenderItem = (
 	if (group === undefined) return false;
 	if (
 		patch.type === "item_append" &&
-		item.type === "assistant_message" &&
-		previous.type === "assistant_message" &&
-		item.phase === "final" &&
+		(item.type === "assistant_message" || item.type === "reasoning_summary") &&
+		(previous.type === "assistant_message" || previous.type === "reasoning_summary") &&
 		previous.text.length === 0
 	)
+		/** First visible text can change both disclosure phase and item ownership. */
 		return false;
 	if (
 		patch.type === "item_lifecycle" &&
@@ -905,6 +1015,270 @@ const UpdateNonStructuralRenderItem = (
 		blocks[location.block_index] = { ...block, details };
 	} else return false;
 	state.projection.groups_by_id.set(group.id, { ...group, blocks });
+	/**
+	 * Status metadata retains the full group after visible prose moves outside
+	 * its details — including a work group split into an earlier segment than
+	 * the promoted reply it narrates, so every segment of the turn is checked.
+	 */
+	const key_group_ids = state.projection.group_ids_by_turn_key.get(group.turn_id) ?? [
+		group.id,
+	];
+	for (const key_group_id of key_group_ids) {
+		const key_group = state.projection.groups_by_id.get(key_group_id);
+		if (key_group === undefined) continue;
+		let progress_blocks: Array<ConversationRenderBlock> | undefined;
+		for (const [block_index, candidate] of key_group.blocks.entries()) {
+			if (candidate.type !== "work_group") continue;
+			const prior_progress_items = candidate.progress_items ?? [
+				candidate.session,
+				...candidate.details,
+			];
+			const progress_index = prior_progress_items.findIndex(
+				(progress_item) =>
+					progress_item.id === item.id || progress_item.id === rendered_item.id,
+			);
+			if (progress_index < 0) continue;
+			const progress_items = [...prior_progress_items];
+			progress_items[progress_index] = rendered_item;
+			progress_blocks = progress_blocks ?? [...key_group.blocks];
+			progress_blocks[block_index] = { ...candidate, progress_items };
+		}
+		if (progress_blocks !== undefined)
+			state.projection.groups_by_id.set(key_group_id, {
+				...key_group,
+				blocks: progress_blocks,
+			});
+	}
+	return true;
+};
+
+/**
+ * Whether a structural item patch is provably confined to its own turn.
+ * A new steering prompt or work session moves run-wide grouping inputs, a
+ * pre-fragmented new message can anchor outside its arrival order, and only a
+ * tail arrival keeps every earlier segment's global position. Replacements
+ * keep type, ordinal, and turn by protocol invariant; a changed run identity
+ * would stale the cached steering ordinals.
+ */
+const CanUpdateStructuralRenderItem = (
+	item: ConversationItem,
+	previous: ConversationItem | undefined,
+	ordered_item_ids: ReadonlyArray<string>,
+): boolean => {
+	if (previous !== undefined) return item.run_id === previous.run_id;
+	if (item.type === "user_message" || item.type === "work_session") return false;
+	if (
+		(item.type === "assistant_message" || item.type === "reasoning_summary") &&
+		(item.steering_fragment_boundaries?.length ?? 0) > 0
+	)
+		return false;
+	return ordered_item_ids.at(-1) === item.id;
+};
+
+/**
+ * Rebuilds one turn's blocks and splices them into that turn's existing
+ * segments, leaving every other cached group untouched. Segment identities are
+ * anchored to their first block, so the rebuilt blocks are partitioned at the
+ * previous first-block ids — sound because a turn's blocks map onto its
+ * segments monotonically and other turns' interleave points cannot move while
+ * only this turn changes. Any shape this partition cannot prove — a vanished
+ * boundary, a first render landing mid-history, a steering boundary anchored
+ * outside the turn — returns false and the caller performs the canonical full
+ * rebuild.
+ */
+const TryUpdateStructuralRenderTurn = (
+	state: ConversationViewState,
+	render_key: string,
+	appended_item: ConversationItem | undefined,
+): boolean => {
+	const projection = state.projection;
+	const turn_items: Array<ConversationItem> = [];
+	const turn_item_ids = new Set<string>();
+	for (const item_id of state.ordered_item_ids) {
+		const candidate = state.items_by_id.get(item_id);
+		if (candidate === undefined) continue;
+		if ((projection.turn_aliases.get(candidate.turn_id) ?? candidate.turn_id) !== render_key)
+			continue;
+		turn_items.push(candidate);
+		turn_item_ids.add(candidate.id);
+	}
+	const previous_segment_ids = projection.group_ids_by_turn_key.get(render_key) ?? [];
+	if (turn_items.length === 0) return previous_segment_ids.length === 0;
+	for (const item of turn_items) {
+		if (item.type !== "assistant_message" && item.type !== "reasoning_summary") continue;
+		const boundaries = item.steering_fragment_boundaries ?? [];
+		/** A boundary anchored outside this turn regroups across segments. */
+		if (boundaries.some((boundary) => !turn_item_ids.has(boundary.after_item_id)))
+			return false;
+	}
+	const fragments = FragmentAssistantMessages(turn_items);
+	const blocks = MakeConversationRenderBlocksForItems(
+		turn_items,
+		projection.turns_by_id,
+		projection.first_steering_ordinal_by_run,
+		fragments,
+	);
+	if (blocks.length === 0) return previous_segment_ids.length === 0;
+
+	const previous_groups: Array<ConversationRenderGroup> = [];
+	for (const group_id of previous_segment_ids) {
+		const group = projection.groups_by_id.get(group_id);
+		if (group === undefined) return false;
+		previous_groups.push(group);
+	}
+	const segments: Array<ReadonlyArray<ConversationRenderBlock>> = [];
+	let created_segment_blocks: ReadonlyArray<ConversationRenderBlock> | undefined;
+	if (previous_groups.length === 0) {
+		/** A first render for this turn is positionally valid only at the global tail. */
+		if (appended_item === undefined) return false;
+		created_segment_blocks = blocks;
+	} else {
+		const boundary_ids = previous_groups.map((group) => group.blocks.at(0)?.id);
+		if (boundary_ids.some((id) => id === undefined)) return false;
+		if (blocks.at(0)?.id !== boundary_ids.at(0)) return false;
+		let cursor = 0;
+		let current: Array<ConversationRenderBlock> = [];
+		for (const block of blocks) {
+			if (cursor + 1 < boundary_ids.length && block.id === boundary_ids[cursor + 1]) {
+				segments.push(current);
+				current = [];
+				cursor += 1;
+			}
+			current.push(block);
+		}
+		segments.push(current);
+		/** A vanished segment boundary means this turn's interleave shape changed. */
+		if (segments.length !== previous_groups.length) return false;
+		const last_owns_global_tail =
+			projection.ordered_group_ids.at(-1) === previous_segment_ids.at(-1);
+		if (appended_item !== undefined && !last_owns_global_tail) {
+			/**
+			 * Another turn owns the global tail, so the appended item cannot extend
+			 * this turn's last segment in place — its own block must open a new
+			 * tail segment, and everything before it must be shape-identical to
+			 * the previous last segment.
+			 */
+			const last_segment = segments.at(-1) ?? [];
+			const previous_last_blocks = previous_groups.at(-1)?.blocks ?? [];
+			const split_index = last_segment.findIndex(
+				(block) => block.id === appended_item.id,
+			);
+			const retained =
+				split_index < 0 ? last_segment : last_segment.slice(0, split_index);
+			if (
+				retained.length !== previous_last_blocks.length ||
+				retained.some(
+					(block, index) => block.id !== previous_last_blocks[index]?.id,
+				)
+			)
+				return false;
+			if (split_index >= 0) {
+				segments[segments.length - 1] = retained;
+				created_segment_blocks = last_segment.slice(split_index);
+			}
+		}
+		/**
+		 * A patch on an existing item can still materialize a block that never
+		 * rendered before — reply promotion pulls a message out of its work
+		 * details. Such a block is positionally safe only where its global
+		 * placement is provable: trailing turn summaries follow the turn's last
+		 * content block, and anything else must land in the turn's final segment
+		 * while that segment owns the global tail. Every other new id may belong
+		 * between other turns' groups, which only the full rebuild can see.
+		 */
+		const previous_block_ids = new Set(
+			previous_groups.flatMap((group) => group.blocks.map((block) => block.id)),
+		);
+		const trailing_ids = new Set([`changes:${render_key}`, `footer:${render_key}`]);
+		for (const [index, segment_blocks] of segments.entries()) {
+			const is_last = index === segments.length - 1;
+			for (const block of segment_blocks) {
+				if (previous_block_ids.has(block.id)) continue;
+				if (is_last && trailing_ids.has(block.id)) continue;
+				if (is_last && block.id === appended_item?.id) continue;
+				if (is_last && last_owns_global_tail) continue;
+				return false;
+			}
+		}
+		if (created_segment_blocks !== undefined) {
+			for (const block of created_segment_blocks) {
+				if (block.id === appended_item?.id || trailing_ids.has(block.id)) continue;
+				return false;
+			}
+		}
+	}
+	const created_first_block = created_segment_blocks?.at(0);
+	const created_segment_id =
+		created_first_block === undefined
+			? undefined
+			: JSON.stringify([render_key, created_first_block.id]);
+	if (created_segment_id !== undefined && projection.groups_by_id.has(created_segment_id))
+		return false;
+
+	const source_turn_ids = new Set(turn_items.map((item) => item.turn_id));
+	for (const group of previous_groups) {
+		for (const item_id of group.item_locations.keys())
+			projection.group_id_by_item.delete(item_id);
+	}
+	const replace_group = (
+		segment_blocks: ReadonlyArray<ConversationRenderBlock>,
+		segment_id: string,
+	) => {
+		const group = MakeConversationRenderGroup(
+			segment_blocks,
+			segment_id,
+			fragments.latest_fragment_by_source_id,
+			source_turn_ids,
+			render_key,
+		);
+		projection.groups_by_id.set(segment_id, group);
+		for (const item_id of group.item_locations.keys())
+			projection.group_id_by_item.set(item_id, segment_id);
+	};
+	for (const [index, segment_blocks] of segments.entries()) {
+		const segment_id = previous_segment_ids[index];
+		if (segment_id === undefined) return false;
+		replace_group(segment_blocks, segment_id);
+	}
+	if (created_segment_blocks !== undefined && created_segment_id !== undefined) {
+		replace_group(created_segment_blocks, created_segment_id);
+		(projection.ordered_group_ids as Array<string>).push(created_segment_id);
+		const key_group_ids = projection.group_ids_by_turn_key.get(render_key);
+		if (key_group_ids === undefined)
+			projection.group_ids_by_turn_key.set(render_key, [created_segment_id]);
+		else key_group_ids.push(created_segment_id);
+		const source_turns = [...source_turn_ids].map((turn_id) =>
+			projection.turns_by_id.get(turn_id),
+		);
+		if (
+			source_turns.length > 0 &&
+			source_turns.every((turn) => turn !== undefined && turn.parent_id === undefined)
+		) {
+			(projection.root_group_ids as Array<string>).push(created_segment_id);
+		} else {
+			const participant_agent_id = source_turns[0]?.agent_id;
+			if (
+				participant_agent_id !== undefined &&
+				source_turns.every(
+					(turn) =>
+						turn !== undefined &&
+						turn.parent_id !== undefined &&
+						turn.agent_id === participant_agent_id,
+				)
+			) {
+				const group_ids =
+					projection.group_ids_by_participant_agent_id.get(participant_agent_id);
+				if (group_ids === undefined) {
+					(
+						projection.group_ids_by_participant_agent_id as Map<
+							string,
+							Array<string>
+						>
+					).set(participant_agent_id, [created_segment_id]);
+				} else (group_ids as Array<string>).push(created_segment_id);
+			}
+		}
+	}
 	return true;
 };
 

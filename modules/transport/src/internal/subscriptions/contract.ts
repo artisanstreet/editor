@@ -20,6 +20,7 @@ import type {
 	SurfaceUsageAggregateUpdate,
 	ThreadListUpdate,
 	ThreadSessionUpdate,
+	ThreadWorkUpdate,
 	ThreadTranscriptUpdate,
 	WorkspaceConflictListUpdate,
 } from "../../client-api/service";
@@ -95,6 +96,13 @@ export interface ClientSubscriptionCoordinator {
 		thread_id: string,
 	) => Effect.Effect<
 		Stream.Stream<ThreadSessionUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
+	readonly SubscribeThreadWork: (
+		thread_id: string,
+	) => Effect.Effect<
+		Stream.Stream<ThreadWorkUpdate, ArtisanClientError>,
 		ArtisanClientError,
 		Scope.Scope
 	>;

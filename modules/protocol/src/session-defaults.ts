@@ -106,6 +106,8 @@ export const SessionDefaults = Schema.Struct({
 	disabled_engines: Schema.optional(Schema.Array(Identifier).check(Schema.isMaxLength(32))),
 	/** The exact catalog model id most recently chosen, including its harness identity. */
 	last_model_id: Schema.optional(Schema.NonEmptyString),
+	/** Whether the first-run harness setup has been explicitly completed. */
+	onboarding_completed: Schema.optional(Schema.Boolean),
 	models: Schema.Array(SessionModelDefaults).check(
 		Schema.isMaxLength(session_defaults_maximum_models),
 	),
@@ -139,6 +141,7 @@ export const SessionDefaultsUpdateInput = Schema.Struct({
 		}),
 	),
 	last_model_id: Schema.optional(Schema.NonEmptyString),
+	onboarding_completed: Schema.optional(Schema.Boolean),
 	model: Schema.optional(SessionModelDefaultsUpdate),
 	permission: Schema.optional(Identifier),
 	thread_title_mode: Schema.optional(ThreadTitleMode),

@@ -7,6 +7,9 @@ modules/frontend/.svelte-kit/
 coverage/
 target/
 bazel-*/
+.tmp/
+.hermes/tmp/
+.tests/suite-run.log
 .env
 .env.*
 !.env.example

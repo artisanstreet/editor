@@ -35,6 +35,7 @@
 	let surface = $state<HTMLElement>();
 	let animated = $state(false);
 	let active_target: HTMLElement | undefined;
+	let focus_clear_frame = 0;
 	let height = $state(0);
 	let has_seen_focus = false;
 	let left = $state(0);
@@ -42,7 +43,14 @@
 	let visible = $state(false);
 	let width = $state(0);
 
+	const cancel_deferred_focus_clear = () => {
+		if (focus_clear_frame === 0) return;
+		cancelAnimationFrame(focus_clear_frame);
+		focus_clear_frame = 0;
+	};
+
 	const clear_hover = () => {
+		cancel_deferred_focus_clear();
 		active_target = undefined;
 		animated = false;
 		visible = false;
@@ -73,6 +81,7 @@
 			clear_hover();
 			return;
 		}
+		cancel_deferred_focus_clear();
 		const offset = offset_within_surface(target);
 
 		active_target = target;
@@ -104,7 +113,21 @@
 	const clear_departed_focus = (event: FocusEvent) => {
 		if (hold) return;
 		if (event.relatedTarget instanceof Node && surface?.contains(event.relatedTarget)) return;
-		clear_hover();
+
+		/**
+		 * Bits menus focus their content element between sibling items: leaving one
+		 * item focuses the menu, then entering the next item focuses that row. The
+		 * menu is outside this nested surface, so clearing synchronously here made
+		 * every row look like a fresh hover and the pill snapped instead of sliding.
+		 * Keep the previous geometry for one frame; a real next row cancels this from
+		 * `apply_hover`, while a genuine departure still clears before the next paint.
+		 */
+		cancel_deferred_focus_clear();
+		focus_clear_frame = requestAnimationFrame(() => {
+			focus_clear_frame = 0;
+			if (surface?.matches(":focus-within") || active_target?.matches(":hover")) return;
+			clear_hover();
+		});
 	};
 
 	/**
@@ -131,6 +154,7 @@
 		resize_observer.observe(element);
 
 		return () => {
+			cancel_deferred_focus_clear();
 			mutation_observer.disconnect();
 			resize_observer.disconnect();
 		};

@@ -150,7 +150,7 @@ export const FixtureClientQueries = {
 					policy: {
 						engine_id: "codex" as const,
 						reasoning_effort: "medium" as const,
-						permission: "supervised",
+						permission: "autonomous",
 						permission_mode: "on_request" as const,
 						sandbox_mode: "workspace_write" as const,
 						service_tier: "standard" as const,
@@ -216,7 +216,7 @@ export const FixtureClientQueries = {
 				policy: {
 					engine_id: "codex" as const,
 					reasoning_effort: "medium" as const,
-					permission: "supervised",
+					permission: "autonomous",
 					permission_mode: "on_request" as const,
 					sandbox_mode: "workspace_write" as const,
 					service_tier: "standard" as const,
@@ -353,6 +353,7 @@ export const FixtureClientQueries = {
 	GetSessionDefaults: Effect.gen(function* () {
 		return {
 			last_model_id: "claude-sonnet-5",
+			onboarding_completed: true,
 			models: [
 				{
 					context_window: "[1m]",
@@ -360,7 +361,7 @@ export const FixtureClientQueries = {
 					reasoning_effort: "high" as const,
 				},
 			],
-			permission: "supervised",
+			permission: "autonomous",
 		};
 	}),
 	UpdateSessionDefaults: () =>

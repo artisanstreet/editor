@@ -9,6 +9,8 @@
 	import X from "@tabler/icons-svelte/icons/x";
 	import { Button } from "$lib/components/ui/button";
 	import { GetApprovalPresentation } from "$lib/conversation/approval-presentation";
+	import { FormatPathSeparators } from "$lib/appearance/display-format";
+	import { path_separator } from "$lib/appearance-config";
 
 	let {
 		item,
@@ -89,9 +91,9 @@
 						{#if presentation.cwd !== undefined}
 							<p
 								class="truncate border-t border-foreground/10 px-3 py-2 font-mono text-xs text-muted-foreground"
-								title={presentation.cwd}
+								title={FormatPathSeparators(presentation.cwd, $path_separator)}
 							>
-								{presentation.cwd}
+								{FormatPathSeparators(presentation.cwd, $path_separator)}
 							</p>
 						{/if}
 					</div>

@@ -10,8 +10,12 @@
 		class: class_name,
 		children,
 		content_column = false,
+		ray_offset_x = 0,
+		ray_offset_y = 0,
+		ray_time_offset = 0,
 		strength = "quiet",
 		use_card = true,
+		use_backdrop_filter = true,
 		use_rays = true,
 		use_material = true,
 		...rest_props
@@ -24,8 +28,19 @@
 		 * and clip against its overflow instead of scrolling.
 		 */
 		content_column?: boolean;
+		/** Per-surface ray origin adjustments, layered over the global shader tuning. */
+		ray_offset_x?: number;
+		ray_offset_y?: number;
+		/** Per-surface clock phase in seconds. */
+		ray_time_offset?: number;
 		strength?: "quiet" | "strong";
 		use_card?: boolean;
+		/**
+		 * Lets a transformed host carry the backdrop filter itself. Chromium cannot
+		 * sample the page for a descendant backdrop filter while an ancestor is
+		 * transformed, but the tint and highlight can remain on this surface.
+		 */
+		use_backdrop_filter?: boolean;
 		use_rays?: boolean;
 		/**
 		 * Off leaves the surface unglazed: the rays still light it, but the frosted
@@ -52,15 +67,22 @@
 	-->
 	{#if use_rays && $shader_enabled}
 		<div aria-hidden="true" class="pointer-events-none absolute inset-0 z-0 overflow-hidden">
-			<PaperGodRays />
+			<PaperGodRays
+				offset_x={ray_offset_x}
+				offset_y={ray_offset_y}
+				time_offset={ray_time_offset}
+			/>
 		</div>
 	{/if}
 	{#if use_material}
-		<div aria-hidden="true" class="shader-glass-material"></div>
+		<div
+			aria-hidden="true"
+			class="shader-glass-material"
+			class:shader-glass-backdrop={use_backdrop_filter}
+		></div>
 		<div aria-hidden="true" class="shader-glass-highlight"></div>
 	{/if}
 	<div class={content_column ? "relative z-10 flex size-full min-h-0 flex-col" : "relative z-10 size-full"}>
 		{@render children()}
 	</div>
 </div>
-

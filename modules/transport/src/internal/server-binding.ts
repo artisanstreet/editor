@@ -1,4 +1,4 @@
-import { Effect, Option, Ref, Stream } from "effect";
+import { Effect, Option, Queue, Ref, Stream } from "effect";
 
 import {
 	DecodeInboundControlEnvelope,
@@ -27,6 +27,14 @@ import {
 } from "../wire";
 import { map_server_port_error, server_error } from "./server-common";
 import { make_server_stream_channel } from "./server-stream-channel";
+
+/**
+ * Maximum durable events handed to a peer without their ACKs advancing.
+ * Projection frames remain independent; this window specifically prevents a
+ * journal resume from dumping an arbitrarily large retained history into a
+ * browser faster than its renderer can decode it.
+ */
+export const reliable_event_window_capacity = 32;
 
 /** Builds the server binding implementation from protocol and stream services. */
 export const make_server_binding = (options: Required<MessagePortTransportServerOptions>) =>
@@ -93,6 +101,31 @@ export const make_server_binding = (options: Required<MessagePortTransportServer
 					const connection = yield* protocol_server.Open;
 					const stream_ticket = yield* Ref.make(Option.none<string>());
 					const seen_control_ids = new Set<string>();
+					const pending_event_sequences = yield* Ref.make<ReadonlyArray<number>>([]);
+					const event_window_changed = yield* Effect.acquireRelease(
+						Queue.sliding<void>(1),
+						Queue.shutdown,
+					);
+					const AcknowledgeEventWindow = (journal_sequence: number) =>
+						Ref.update(pending_event_sequences, (pending) =>
+							pending.filter((sequence) => sequence > journal_sequence),
+						).pipe(
+							Effect.andThen(Queue.offer(event_window_changed, undefined)),
+							Effect.asVoid,
+						);
+					const ReserveEventWindow = (journal_sequence: number) =>
+						Effect.gen(function* () {
+							while (
+								(yield* Ref.get(pending_event_sequences)).length >=
+								reliable_event_window_capacity
+							) {
+								yield* Queue.take(event_window_changed);
+							}
+							yield* Ref.update(pending_event_sequences, (pending) => [
+								...pending,
+								journal_sequence,
+							]);
+						});
 					const stream_channel = yield* make_server_stream_channel(
 						connection_id,
 						ports.stream_port,
@@ -212,7 +245,18 @@ export const make_server_binding = (options: Required<MessagePortTransportServer
 
 												seen_control_ids.add(envelope.message_id);
 
-												return connection.Receive(envelope);
+												return connection
+													.Receive(envelope)
+													.pipe(
+														envelope.kind === "ack"
+															? Effect.andThen(
+																	AcknowledgeEventWindow(
+																		envelope.payload
+																			.journal_sequence,
+																	),
+																)
+															: (effect) => effect,
+													);
 											}),
 										),
 							),
@@ -222,6 +266,9 @@ export const make_server_binding = (options: Required<MessagePortTransportServer
 					const control_outbound = connection.Outbound.pipe(
 						Stream.runForEach((envelope: OutboundControlEnvelope) =>
 							Effect.gen(function* () {
+								if (envelope.kind === "event") {
+									yield* ReserveEventWindow(envelope.journal_sequence);
+								}
 								if (envelope.kind === "welcome") {
 									yield* Ref.set(
 										stream_ticket,

@@ -61,7 +61,8 @@
 
 <span
 	aria-hidden="true"
-	class="grid size-6 shrink-0 place-items-center overflow-hidden rounded-lg bg-surface-875 text-muted-foreground"
+	class="card-plastic grid size-6 shrink-0 place-items-center overflow-hidden rounded-sm text-muted-foreground"
+	class:bg-card={Option.isNone(image_source) && repository_mark === undefined}
 >
 	{#if Option.isSome(image_source)}
 		<img

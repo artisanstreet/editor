@@ -176,6 +176,7 @@ export const ApplyEngineObservationWithChange = (
 					input,
 					turn_id,
 					observation.observation_id,
+					observation.state,
 				);
 				yield* SettleStreamingBodies(
 					transaction,

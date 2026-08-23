@@ -338,17 +338,91 @@
 	}
 }
 
+/** A status label exits upward, then its replacement enters from below. */
+.t-text-swap {
+	display: inline-block;
+	transform: translateY(0);
+	filter: blur(0);
+	opacity: 1;
+	transition:
+		transform var(--text-swap-dur) var(--text-swap-ease),
+		filter var(--text-swap-dur) var(--text-swap-ease),
+		opacity var(--text-swap-dur) var(--text-swap-ease);
+	will-change: transform, filter, opacity;
+}
+
+.t-text-swap.is-exit {
+	transform: translateY(calc(var(--text-swap-translate-y) * -1));
+	filter: blur(var(--text-swap-blur));
+	opacity: 0;
+}
+
+.t-text-swap.is-enter-start {
+	transform: translateY(var(--text-swap-translate-y));
+	filter: blur(var(--text-swap-blur));
+	opacity: 0;
+	transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.t-text-swap {
+		transition: none !important;
+	}
+}
+
+.t-success-check {
+	display: inline-block;
+	transform-origin: center;
+	opacity: 0;
+	will-change: transform, opacity, filter;
+}
+
+.t-success-check svg {
+	display: block;
+	overflow: visible;
+}
+
+.t-success-check svg path {
+	stroke-dasharray: 14;
+	stroke-dashoffset: 14;
+}
+
+.t-success-check[data-state="in"] {
+	animation:
+		t-check-fade var(--check-opacity-dur) var(--check-ease-opacity) forwards,
+		t-check-rotate var(--check-rotate-dur) var(--check-ease-rotate) forwards,
+		t-check-blur var(--check-blur-dur) var(--check-ease-out) forwards,
+		t-check-bob var(--check-bob-dur) var(--check-ease-bob) forwards;
+}
+
+.t-success-check[data-state="in"] svg path {
+	animation: t-check-draw var(--check-path-dur) var(--check-ease-path)
+		var(--check-path-delay, 0ms) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.t-success-check {
+		animation: none !important;
+		opacity: 1;
+	}
+
+	.t-success-check svg path {
+		animation: none !important;
+		stroke-dashoffset: 0 !important;
+	}
+}
+
 /**
  * Tooltip open / close (transitions.dev), worn by hover cards the component
  * keeps mounted itself: `data-shown` drives the reveal. The entrance is an
  * animation rather than a transition because the first engagement mounts the
  * card already shown — a transition has no earlier frame to leave from there
  * and pops, where an animation replays every time the rule starts matching.
- * The delay is the surface's hover dwell, named per card through `--tt-delay`;
- * `backwards` is what makes the dwell real, holding the from-frame through the
- * delay. Concealing is the transition on the base rule, undelayed and short —
- * the dwell guards against accidental reveals, and a card that lingered after
- * the pointer left would read as stuck.
+ * The short beat before it (`--tt-delay`, overridable per surface) filters
+ * drive-by pointer crossings; `backwards` is what makes the beat real, holding
+ * the from-frame through the delay. Concealing is the transition on the base
+ * rule, undelayed and short — a card that lingered after the pointer left
+ * would read as stuck.
  *
  * Shown is statically scaleless for the same reason the dropdown's open state
  * is: a transform makes the card a backdrop root and the glass inside it
@@ -740,11 +814,31 @@
 /* ── Surfaces that need a layer of their own ──────────────────── */
 
 /**
- * The glass material and its top highlight. Both are painted layers rather than
- * properties of the surface, and the fallbacks below them are feature and
- * preference queries Tailwind has no variant for, so the whole material is one
- * utility rather than a class list on two divs.
+ * The filter is separable from the material so an animated popover can host the
+ * backdrop sampling on its transformed element while its nested glass surface
+ * continues to own tint, clipping, highlight, and light. Chromium cannot sample
+ * outside a transformed ancestor for a descendant backdrop filter.
  */
+@utility shader-glass-backdrop {
+	/**
+	 * A material child reads strength from its surface ancestor; a popover host
+	 * carries the same attribute itself.
+	 */
+	-webkit-backdrop-filter: blur(12px) saturate(115%) brightness(102%);
+	backdrop-filter: blur(12px) saturate(115%) brightness(102%);
+
+	[data-strength="strong"] &,
+	&[data-strength="strong"] {
+		-webkit-backdrop-filter: blur(20px) saturate(120%) brightness(103%);
+		backdrop-filter: blur(20px) saturate(120%) brightness(103%);
+	}
+
+	@media (prefers-reduced-transparency: reduce) {
+		-webkit-backdrop-filter: none;
+		backdrop-filter: none;
+	}
+}
+
 @utility shader-glass-material {
 	position: absolute;
 	inset: 0;
@@ -757,13 +851,9 @@
 	 */
 	border-radius: inherit;
 	background: linear-gradient(145deg, rgb(82 82 91 / 0.2), rgb(39 39 42 / 0.14));
-	-webkit-backdrop-filter: blur(12px) saturate(115%) brightness(102%);
-	backdrop-filter: blur(12px) saturate(115%) brightness(102%);
 
 	[data-strength="strong"] & {
 		background: linear-gradient(145deg, rgb(82 82 91 / 0.28), rgb(39 39 42 / 0.2));
-		-webkit-backdrop-filter: blur(20px) saturate(120%) brightness(103%);
-		backdrop-filter: blur(20px) saturate(120%) brightness(103%);
 	}
 
 	@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
@@ -772,8 +862,6 @@
 
 	@media (prefers-reduced-transparency: reduce) {
 		background: var(--surface-825);
-		-webkit-backdrop-filter: none;
-		backdrop-filter: none;
 	}
 }
 

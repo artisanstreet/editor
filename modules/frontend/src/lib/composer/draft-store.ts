@@ -57,6 +57,12 @@ export interface ComposerDraftWriteResult {
 	readonly evicted: ReadonlyArray<ComposerDraft>;
 }
 
+export interface ComposerDraftMoveResult {
+	readonly moved: boolean;
+	/** Attachments displaced by the destination draft and no longer retained anywhere. */
+	readonly orphaned: ReadonlyArray<ComposerImageAttachment>;
+}
+
 /** Selects each evicted preview exactly once without releasing a currently active attachment. */
 export const SelectComposerDraftAttachmentsToRelease = (
 	evicted: ReadonlyArray<ComposerDraft>,
@@ -86,7 +92,14 @@ export class ComposerDraftStore extends Context.Service<
 	ComposerDraftStore,
 	{
 		readonly Clear: (draft_key: string) => Effect.Effect<void>;
+		readonly Move: (
+			from_draft_key: string,
+			to_draft_key: string,
+		) => Effect.Effect<ComposerDraftMoveResult>;
 		readonly Read: (draft_key: string) => Effect.Effect<Option.Option<ComposerDraft>>;
+		readonly RetainedAttachmentIds: (
+			attachment_ids: ReadonlySet<string>,
+		) => Effect.Effect<ReadonlySet<string>>;
 		readonly Write: (
 			draft_key: string,
 			draft: ComposerDraft,
@@ -108,8 +121,53 @@ export const ComposerDraftStoreLive = Layer.effect(
 				});
 			});
 
+		const RetainedAttachmentIds = (attachment_ids: ReadonlySet<string>) =>
+			Effect.gen(function* () {
+				const current = yield* Ref.get(drafts);
+				const retained = new Set<string>();
+				for (const draft of current.values()) {
+					for (const attachment of draft.attachments) {
+						if (attachment_ids.has(attachment.id)) retained.add(attachment.id);
+					}
+				}
+				return retained;
+			});
+
+		const Move = (from_draft_key: string, to_draft_key: string) =>
+			Effect.gen(function* () {
+				if (from_draft_key === to_draft_key) return { moved: false, orphaned: [] };
+				return yield* Ref.modify(drafts, (current) => {
+					const moving = current.get(from_draft_key);
+					if (moving === undefined)
+						return [{ moved: false, orphaned: [] }, current] as const;
+
+					const displaced = current.get(to_draft_key);
+					const next = new Map(current);
+					next.delete(from_draft_key);
+					next.delete(to_draft_key);
+					/** Reinsertion makes the actively handed-off draft the newest LRU entry. */
+					next.set(to_draft_key, moving);
+
+					if (displaced === undefined)
+						return [{ moved: true, orphaned: [] }, next] as const;
+					const retained_ids = new Set(
+						[...next.values()].flatMap((draft) =>
+							draft.attachments.map((attachment) => attachment.id),
+						),
+					);
+					const orphaned = displaced.attachments.filter(
+						(attachment, index, attachments) =>
+							!retained_ids.has(attachment.id) &&
+							attachments.findIndex((candidate) => candidate.id === attachment.id) ===
+								index,
+					);
+					return [{ moved: true, orphaned }, next] as const;
+				});
+			});
+
 		return ComposerDraftStore.of({
 			Clear,
+			Move,
 			Read: (draft_key) =>
 				Effect.gen(function* () {
 					const draft = yield* Ref.modify(drafts, (current) => {
@@ -123,6 +181,7 @@ export const ComposerDraftStoreLive = Layer.effect(
 					});
 					return Option.fromUndefinedOr(draft);
 				}),
+			RetainedAttachmentIds,
 			Write: (draft_key, draft) =>
 				Effect.gen(function* () {
 					if (draft.text.length === 0 && draft.attachments.length === 0) {

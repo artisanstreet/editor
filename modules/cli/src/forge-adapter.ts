@@ -5,6 +5,7 @@ import { Config, Effect, FileSystem, Option } from "effect";
 
 /** The packaged host and `ae` executable deliberately share one Forge directory. */
 export interface ForgeArtifact {
+	readonly broker_executable_path: string;
 	readonly executable_path: string;
 	readonly host_entry_path: string;
 	readonly migrations_path: string;
@@ -34,6 +35,7 @@ export const ResolveForgeArtifact = Effect.gen(function* () {
 			: resolve(bundle_directory, "..", "..", "..", ".dist", "forge"),
 	);
 	const [
+		broker_executable_path,
 		executable_path,
 		host_entry_path,
 		migrations_path,
@@ -42,6 +44,7 @@ export const ResolveForgeArtifact = Effect.gen(function* () {
 		static_frontend_root,
 		windows_process_host_path,
 	] = yield* Effect.all([
+		OptionalString("ARTISAN_BROKER_PATH"),
 		OptionalString("ARTISAN_FORGE_EXECUTABLE"),
 		OptionalString("ARTISAN_FORGE_HOST"),
 		OptionalString("ARTISAN_FORGE_MIGRATIONS"),
@@ -51,6 +54,13 @@ export const ResolveForgeArtifact = Effect.gen(function* () {
 		OptionalString("ARTISAN_WINDOWS_PROCESS_HOST"),
 	]);
 	return {
+		broker_executable_path: ConfigValueOr(
+			broker_executable_path,
+			resolve(
+				runtime_directory,
+				process.platform === "win32" ? "Artisan Broker.exe" : "artisan-broker",
+			),
+		),
 		executable_path: ConfigValueOr(
 			executable_path,
 			resolve(runtime_directory, "Artisan Forge.exe"),

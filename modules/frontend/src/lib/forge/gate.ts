@@ -130,6 +130,14 @@ export const IsForgeGateDismissible = (model: ForgeGateModel): boolean =>
 	model.state.phase === "exhausted" || model.state.phase === "hydration-failed";
 
 /**
+ * A previously hydrated shell can remain useful through a short exhausted
+ * transport epoch. Give its automatic health retry time to succeed before
+ * replacing the entire window with a terminal-looking failure scene.
+ */
+export const ForgeGateFailureNeedsGrace = (model: ForgeGateModel): boolean =>
+	!model.dismissed && model.has_hydrated_shell && model.state.phase === "exhausted";
+
+/**
  * Dismissal trades the remedy screen for the shell itself: the client stays
  * disconnected, so nothing loads and no command lands, but every surface,
  * control, and route remains open to inspection. It lasts for the current
@@ -157,8 +165,9 @@ export const ForgeGateIsVisible = (model: ForgeGateModel): boolean =>
 	model.state.phase !== "ready" &&
 	(!model.has_hydrated_shell || IsForgeGateDismissible(model));
 
-/** Input stays blocked while the gate is on screen, and only while it is. */
-export const ForgeShellIsBlocked = (model: ForgeGateModel): boolean => ForgeGateIsVisible(model);
+/** Input stays blocked while the gate is actually on screen, and only while it is. */
+export const ForgeShellIsBlocked = (model: ForgeGateModel, failure_visible = true): boolean =>
+	ForgeGateIsVisible(model) && (!ForgeGateFailureNeedsGrace(model) || failure_visible);
 
 export const BeginForgeHydration = (model: ForgeGateModel): ForgeGateModel => {
 	const generation = model.hydration_generation + 1;

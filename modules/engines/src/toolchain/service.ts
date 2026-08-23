@@ -19,6 +19,7 @@ import {
 
 import { EngineProcessFactory } from "../process/process";
 import type { EngineSpawnOverride } from "../process/spawn-override";
+import { OpenCode2ManagedConfigContent } from "../opencode2/config";
 import {
 	engine_distributions,
 	maximum_engine_binary_bytes,
@@ -28,12 +29,15 @@ import {
 	type ToolchainReleaseError,
 } from "./distribution";
 import { ToolchainHttpFailure, ToolchainReleaseHttp } from "./http";
+import { ExtractNpmTarballExecutable } from "./npm-tarball";
+import { ExtractZipBundle } from "./zip-bundle";
 import {
 	make_toolchain_layout,
 	PruneToolchainVersions,
 	default_toolchain_profile_id,
 	ReadToolchainState,
 	ValidateToolchainPathComponent,
+	ValidateToolchainRelativePath,
 	WriteToolchainState,
 	type ToolchainInstallationState,
 	type ToolchainLayout,
@@ -127,7 +131,9 @@ export const describe_engine_toolchain_failure = (failure: EngineToolchainFailur
 		case "EngineToolchainRollbackUnavailableError":
 			return "No previous version is retained to roll back to.";
 		case "EngineToolchainStagingError":
-			return "The downloaded binary could not be written into the toolchain.";
+			return failure.engine_id === "hermes"
+				? "The Hermes installer did not complete."
+				: "The downloaded binary could not be written into the toolchain.";
 		case "EngineToolchainUnavailableError":
 			return "Engine installs are not available in this composition.";
 		case "EngineToolchainUnknownEngineError":
@@ -160,6 +166,7 @@ export type EngineToolchainActivity =
 	| { readonly _tag: "failed"; readonly message: string }
 	| {
 			readonly _tag: "installing";
+			readonly detail?: string;
 			readonly phase: EngineToolchainInstallPhase;
 			readonly version?: string;
 	  }
@@ -411,6 +418,15 @@ export const make_engine_toolchain_layer = (options: EngineToolchainOptions) =>
 			const ProvisionHome = (distribution: EngineDistribution, layout: ToolchainLayout) =>
 				Effect.gen(function* () {
 					yield* EnsureHome(layout);
+					if (distribution.engine_id === "opencode2") {
+						for (const directory of ["cache", "config", "data", "state", "tmp"])
+							yield* file_system.makeDirectory(
+								path.join(layout.home_path, directory),
+								{
+									recursive: true,
+								},
+							);
+					}
 					/**
 					 * Only the default profile inherits the ambient vendor sign-in.
 					 * Seeding an added profile would clone one account into every
@@ -498,7 +514,7 @@ export const make_engine_toolchain_layer = (options: EngineToolchainOptions) =>
 							});
 						if (
 							!new RegExp(
-								`(?:^|\\s)${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`,
+								`(?:^|\\s)v?${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`,
 							).test(stdout)
 						)
 							return yield* new EngineToolchainHealthError({
@@ -536,12 +552,36 @@ export const make_engine_toolchain_layer = (options: EngineToolchainOptions) =>
 				distribution: EngineDistribution,
 				layout: ToolchainLayout,
 			): Readonly<Record<string, string>> => ({
-				[distribution.home_environment_variable]: layout.home_path,
+				[distribution.home_environment_variable]:
+					distribution.engine_id === "opencode2"
+						? path.join(layout.home_path, "config")
+						: layout.home_path,
 				/** Claude's supported update disablement applies to all managed spawns. */
 				...(distribution.engine_id === "claude"
 					? {
 							DISABLE_INSTALLATION_CHECKS: "1",
 							DISABLE_UPDATES: "1",
+						}
+					: {}),
+				...(distribution.engine_id === "opencode2"
+					? {
+							OPENCODE_CLIENT: "artisan-editor",
+							OPENCODE_CONFIG_CONTENT: OpenCode2ManagedConfigContent(),
+							OPENCODE_CONFIG_PROJECT_DISABLE: "1",
+							OPENCODE_DB: path.join(layout.home_path, "data", "opencode.db"),
+							OPENCODE_FILEWATCHER_DISABLE: "1",
+							TMP: path.join(layout.home_path, "tmp"),
+							TEMP: path.join(layout.home_path, "tmp"),
+							XDG_CACHE_HOME: path.join(layout.home_path, "cache"),
+							XDG_CONFIG_HOME: path.join(layout.home_path, "config"),
+							XDG_DATA_HOME: path.join(layout.home_path, "data"),
+							XDG_STATE_HOME: path.join(layout.home_path, "state"),
+						}
+					: {}),
+				...(distribution.engine_id === "cursor"
+					? {
+							CURSOR_CONFIG_DIR: layout.home_path,
+							CURSOR_DATA_DIR: layout.home_path,
 						}
 					: {}),
 			});
@@ -696,8 +736,13 @@ export const make_engine_toolchain_layer = (options: EngineToolchainOptions) =>
 			) =>
 				Effect.gen(function* () {
 					const engine_id = distribution.engine_id;
-					const Phase = (phase: EngineToolchainInstallPhase) =>
-						SetActivity(engine_id, { _tag: "installing", phase, version });
+					const Phase = (phase: EngineToolchainInstallPhase, detail?: string) =>
+						SetActivity(engine_id, {
+							_tag: "installing",
+							...(detail === undefined ? {} : { detail }),
+							phase,
+							version,
+						});
 					const prior = yield* CachedState(engine_id, layout);
 					const rollback_candidate =
 						prior?.active.version === version ? prior.previous : prior?.active;
@@ -737,7 +782,7 @@ export const make_engine_toolchain_layer = (options: EngineToolchainOptions) =>
 							engine_id,
 							version,
 						});
-					yield* ValidateToolchainPathComponent(release.binary).pipe(
+					yield* ValidateToolchainRelativePath(release.binary).pipe(
 						Effect.mapError(
 							(cause) =>
 								new EngineToolchainStagingError({ cause, engine_id, version }),
@@ -749,12 +794,22 @@ export const make_engine_toolchain_layer = (options: EngineToolchainOptions) =>
 					const version_path = layout.generation_path(generation_directory);
 					const staging_generation = path.join(layout.staging_path, randomUUID());
 					const staged_file = path.join(staging_generation, release.binary);
+					const downloaded_file =
+						release.artifact_kind === "npm-tarball"
+							? path.join(staging_generation, "package.tgz")
+							: release.artifact_kind === "archive-bundle"
+								? path.join(staging_generation, "package.zip")
+								: release.artifact_kind === "staged-installer"
+									? path.join(staging_generation, "installer.ps1")
+									: staged_file;
 					let actual = "";
 					yield* Effect.gen(function* () {
 						yield* file_system.makeDirectory(layout.versions_path, { recursive: true });
 						yield* file_system.makeDirectory(staging_generation, { recursive: true });
 						let downloaded_bytes = 0;
-						const hash = createHash("sha256");
+						const hash = createHash(
+							release.artifact_kind === "npm-tarball" ? "sha512" : "sha256",
+						);
 						const maximum_bytes = Math.min(
 							release.size_bytes ?? maximum_engine_binary_bytes,
 							maximum_engine_binary_bytes,
@@ -771,32 +826,198 @@ export const make_engine_toolchain_layer = (options: EngineToolchainOptions) =>
 									hash.update(chunk);
 								}),
 							),
-							Stream.run(file_system.sink(staged_file)),
+							Stream.run(file_system.sink(downloaded_file)),
 						);
 						yield* Phase("verifying");
-						actual = hash.digest("hex");
-						if (actual !== release.sha256)
-							return yield* new EngineToolchainVerificationError({
-								actual,
-								engine_id,
-								expected: release.sha256,
-								version,
+						if (release.artifact_kind === "staged-installer") {
+							const installer_sha256 = hash.digest("hex");
+							if (installer_sha256 !== release.installer_sha256)
+								return yield* new EngineToolchainVerificationError({
+									actual: installer_sha256,
+									engine_id,
+									expected: release.installer_sha256,
+									version,
+								});
+							const existing = yield* file_system
+								.exists(version_path)
+								.pipe(Effect.orElseSucceed(() => false));
+							if (existing)
+								return yield* new EngineToolchainStagingError({
+									cause: new Error(`Toolchain version already exists: ${version}`),
+									engine_id,
+									version,
+								});
+							yield* file_system.makeDirectory(version_path, { recursive: true });
+							const install_directory = path.join(version_path, "hermes-agent");
+							/** Seed the owned Hermes profile before its template stage observes it. */
+							yield* ProvisionHome(distribution, layout);
+							const stage_labels: Readonly<Record<string, string>> = {
+								"bootstrap-marker": "Finalizing Hermes installation…",
+								"config-templates": "Writing Hermes configuration…",
+								dependencies: "Installing Python dependencies…",
+								git: "Checking Git…",
+								node: "Checking Node.js…",
+								"node-deps": "Installing Node.js dependencies…",
+								path: "Creating the Hermes launcher…",
+								"platform-sdks": "Installing Hermes platform SDKs…",
+								python: "Preparing Python…",
+								repository: "Downloading Hermes…",
+								"system-packages": "Installing system tools…",
+								uv: "Preparing the Python package manager…",
+								venv: "Creating the Hermes environment…",
+							};
+							const RunStage = (stage: string) =>
+								Effect.scoped(
+									Effect.gen(function* () {
+										yield* Phase(
+											stage === "repository" || stage === "venv" || stage === "dependencies"
+												? "staging"
+												: "provisioning",
+											stage_labels[stage] ?? "Preparing Hermes…",
+										);
+										const handle = yield* factory.Spawn({
+											args: [
+												"-NoLogo",
+												"-NoProfile",
+												"-NonInteractive",
+												"-ExecutionPolicy",
+												"Bypass",
+												"-File",
+												downloaded_file,
+												"-NonInteractive",
+												"-Json",
+												"-Stage",
+												stage,
+												"-SkipSetup",
+												"-SkipComputerUse",
+												"-HermesHome",
+												layout.home_path,
+												"-InstallDir",
+												install_directory,
+												"-Commit",
+												release.commit,
+												"-ForceCommit",
+											],
+											command: "powershell.exe",
+											cwd: user_home,
+											env: { ...process.env },
+										});
+										const [stdout, stderr, exit] = yield* Effect.all(
+											[
+												ReadHealthOutput(handle.Stdout, 16 * 1024 * 1024),
+												ReadHealthOutput(handle.Stderr, 16 * 1024 * 1024),
+												handle.Exit,
+											],
+											{ concurrency: "unbounded" },
+										).pipe(Effect.ensuring(handle.Close));
+										if (exit.code !== 0)
+											return yield* new EngineToolchainStagingError({
+												cause: new Error(
+													`Hermes installer stage ${stage} failed: ${(stderr || stdout).trim().slice(-2_048)}`,
+												),
+												engine_id,
+												version,
+											});
+									}),
+								).pipe(
+									Effect.timeoutOrElse({
+										duration: "20 minutes",
+										orElse: () =>
+											Effect.fail(
+												new EngineToolchainStagingError({
+													cause: new Error(`Hermes installer stage ${stage} timed out`),
+													engine_id,
+													version,
+												}),
+											),
+									}),
+								);
+							yield* Effect.forEach(release.stages, RunStage, {
+								concurrency: 1,
+								discard: true,
+							}).pipe(
+								Effect.catch((failure) =>
+									file_system
+										.remove(version_path, { recursive: true })
+										.pipe(Effect.ignore, Effect.andThen(Effect.fail(failure))),
+								),
+							);
+							actual = yield* HashFile(file_system, path.join(version_path, release.binary));
+						} else if (release.artifact_kind === "npm-tarball") {
+							const archive_integrity = hash.digest("base64");
+							if (archive_integrity !== release.integrity_sha512)
+								return yield* new EngineToolchainVerificationError({
+									actual: `sha512-${archive_integrity}`,
+									engine_id,
+									expected: `sha512-${release.integrity_sha512}`,
+									version,
+								});
+							const archive = yield* file_system.readFile(downloaded_file);
+							const executable = yield* Effect.try({
+								try: () =>
+									ExtractNpmTarballExecutable(
+										archive,
+										release.archive_member,
+										maximum_engine_binary_bytes,
+									),
+								catch: (cause) => cause,
 							});
-						yield* Phase("staging");
-						if (platform.platform !== "win32")
-							yield* file_system.chmod(staged_file, 0o755);
-						const existing = yield* file_system
-							.exists(version_path)
-							.pipe(Effect.orElseSucceed(() => false));
-						if (existing)
-							return yield* new EngineToolchainStagingError({
-								cause: new Error(`Toolchain version already exists: ${version}`),
-								engine_id,
-								version,
+							actual = createHash("sha256").update(executable).digest("hex");
+							yield* file_system.writeFile(staged_file, executable);
+							yield* file_system.remove(downloaded_file);
+						} else if (release.artifact_kind === "archive-bundle") {
+							const archive_sha256 = hash.digest("hex");
+							if (archive_sha256 !== release.sha256)
+								return yield* new EngineToolchainVerificationError({
+									actual: archive_sha256,
+									engine_id,
+									expected: release.sha256,
+									version,
+								});
+							yield* Effect.tryPromise({
+								try: () =>
+									ExtractZipBundle({
+										archive_path: downloaded_file,
+										archive_root: release.archive_root,
+										destination: staging_generation,
+										maximum_output_bytes: release.expanded_size_bytes,
+									}),
+								catch: (cause) => cause,
 							});
-						yield* file_system.rename(staging_generation, version_path);
+							yield* file_system.remove(downloaded_file);
+							actual = yield* HashFile(file_system, staged_file);
+						} else {
+							actual = hash.digest("hex");
+							if (actual !== release.sha256)
+								return yield* new EngineToolchainVerificationError({
+									actual,
+									engine_id,
+									expected: release.sha256,
+									version,
+								});
+						}
+						if (release.artifact_kind !== "staged-installer") {
+							yield* Phase("staging");
+							if (platform.platform !== "win32")
+								yield* file_system.chmod(staged_file, 0o755);
+							const existing = yield* file_system
+								.exists(version_path)
+								.pipe(Effect.orElseSucceed(() => false));
+							if (existing)
+								return yield* new EngineToolchainStagingError({
+									cause: new Error(`Toolchain version already exists: ${version}`),
+									engine_id,
+									version,
+								});
+							yield* file_system.rename(staging_generation, version_path);
+						}
 					}).pipe(
 						Effect.mapError((cause) => AsToolchainFailure(cause, engine_id, version)),
+						Effect.tapError(() =>
+							release.artifact_kind === "staged-installer"
+								? file_system.remove(version_path, { recursive: true }).pipe(Effect.ignore)
+								: Effect.void,
+						),
 						Effect.ensuring(
 							file_system
 								.remove(staging_generation, { recursive: true })
@@ -1045,6 +1266,12 @@ export const make_engine_toolchain_layer = (options: EngineToolchainOptions) =>
 			const StartAuthentication = (engine_id: string, profile_id?: string) =>
 				Effect.gen(function* () {
 					const distribution = yield* Distribution(engine_id);
+					if (distribution.authentication === "service-api")
+						return yield* new EngineToolchainAuthenticationError({
+							engine_id,
+							message:
+								"This engine authenticates through its local service integration API, not a CLI login command.",
+						});
 					const layout = Layout(engine_id, profile_id);
 					yield* AcquireInstallSlot(engine_id);
 					yield* SetActivity(engine_id, { _tag: "authenticating" });

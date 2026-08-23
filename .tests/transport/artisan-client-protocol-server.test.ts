@@ -54,11 +54,13 @@ import {
 	AgentRuns,
 	OrchestrationGroups,
 	OrchestrationCoordinators,
+	OrchestrationRuns,
 	SurfaceUsageTotals,
 	SurfaceItems,
 } from "../../modules/backend/src/persistence/tables";
 import { ConversationReadModel } from "../../modules/backend/src/conversation";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
+import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration/repository";
 
 import {
 	make_transport_test_harness_with_protocol_server,
@@ -774,6 +776,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const runtime = make_backend_runtime({ database_path, migrations_path });
 		const protocol_server = await runtime.runPromise(ProtocolServer);
 		const database = await runtime.runPromise(Database);
+		const journal = await runtime.runPromise(JournalStore);
+		const orchestration = await runtime.runPromise(OrchestrationRepository);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
 			client: { reconnect_delay_ms: 5 },
 		});
@@ -799,6 +803,9 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				Effect.scoped(
 					Effect.gen(function* () {
 						const session_stream = yield* harness.client.SubscribeThreadSession(
+							created_thread_surface_session.thread_id,
+						);
+						const work_stream = yield* harness.client.SubscribeThreadWork(
 							created_thread_surface_session.thread_id,
 						);
 						const surface_stream = yield* harness.client.SubscribeSurfaceItems({
@@ -829,6 +836,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								scope_id: "run_surface_session",
 							}),
 							usage_update: yield* usage_stream.pipe(Stream.take(1), Stream.runHead),
+							work_update: yield* work_stream.pipe(Stream.take(1), Stream.runHead),
 						};
 					}),
 				),
@@ -859,6 +867,13 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						type: "snapshot",
 					},
 				},
+				work_update: {
+					_tag: "Some",
+					value: {
+						snapshot: { thread_id: created_thread_surface_session.thread_id },
+						type: "snapshot",
+					},
+				},
 			});
 
 			const live_session_updates = await Effect.runPromise(
@@ -885,6 +900,76 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				snapshot: {
 					auto_steer_enabled: false,
 					thread_id: created_thread_surface_session.thread_id,
+				},
+				type: "snapshot",
+			});
+
+			const work_snapshot_read = await Effect.runPromise(Deferred.make<void>());
+			const release_work_snapshot = await Effect.runPromise(Deferred.make<void>());
+			const original_get_work = orchestration.GetWork;
+			let delay_next_work_snapshot = true;
+			Object.assign(orchestration, {
+				GetWork: (thread_id: string) =>
+					original_get_work(thread_id).pipe(
+						Effect.flatMap((work) => {
+							if (!delay_next_work_snapshot) return Effect.succeed(work);
+							delay_next_work_snapshot = false;
+							return Deferred.succeed(work_snapshot_read, undefined).pipe(
+								Effect.andThen(Deferred.await(release_work_snapshot)),
+								Effect.as(work),
+							);
+						}),
+					),
+			});
+			const live_work_updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const subscriber = yield* harness.client
+							.SubscribeThreadWork(created_thread_surface_session.thread_id)
+							.pipe(Effect.forkScoped);
+						yield* Deferred.await(work_snapshot_read);
+						const run_id = "run_surface_session_live";
+						const now = "2026-07-18T10:00:01.000Z";
+						yield* database.client.insert(OrchestrationRuns).values({
+							agent_id: "agent_surface_session",
+							created_at: now,
+							engine_id: "fake",
+							run_id,
+							status: "running",
+							thread_id: created_thread_surface_session.thread_id,
+							updated_at: now,
+							working_directory: "C:/work/surface-session",
+						});
+						yield* database.client
+							.update(OrchestrationCoordinators)
+							.set({ active_run_id: run_id, updated_at: now });
+						yield* journal.AppendEvent({
+							agent_id: "agent_surface_session",
+							causation_id: "surface_session_work_started",
+							correlation_id: run_id,
+							payload: {
+								state: "running",
+								type: "run.lifecycle",
+								working_directory: "C:/work/surface-session",
+							},
+							run_id,
+							thread_id: created_thread_surface_session.thread_id,
+						});
+						yield* Deferred.succeed(release_work_snapshot, undefined);
+						const stream = yield* Fiber.join(subscriber);
+						return yield* stream.pipe(Stream.take(2), Stream.runCollect);
+					}),
+				),
+			);
+			expect(live_work_updates[0]).toMatchObject({
+				snapshot: { thread_id: created_thread_surface_session.thread_id },
+				type: "snapshot",
+			});
+			expect(live_work_updates[0]?.snapshot).not.toHaveProperty("work");
+			expect(live_work_updates.at(-1)).toMatchObject({
+				snapshot: {
+					thread_id: created_thread_surface_session.thread_id,
+					work: { run_id: "run_surface_session_live", status: "running" },
 				},
 				type: "snapshot",
 			});

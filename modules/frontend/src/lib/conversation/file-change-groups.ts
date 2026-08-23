@@ -1,6 +1,24 @@
 import type { ConversationItem } from "@artisan/protocol";
+import {
+	FormatPathSeparators,
+	PathSeparatorCharacter,
+	type PathSeparator,
+} from "../appearance/display-format";
 
 type FileChange = Extract<ConversationItem, { type: "file_change" }>;
+
+export type AggregateFileChangeDiff =
+	| FileChange["diff"]
+	| {
+			readonly additions: number;
+			readonly deletions: number;
+			readonly kind: "partial";
+			readonly unavailable_files: number;
+	  };
+
+type PresentedFileChange = Omit<FileChange, "diff"> & {
+	readonly diff: AggregateFileChangeDiff;
+};
 
 const is_windows_path = (path: string): boolean =>
 	/^[A-Za-z]:[\\/]/.test(path) || path.includes("\\");
@@ -36,11 +54,23 @@ const contained_relative_path = (path: string): string | undefined => {
  * filesystem root. The project path identifies the Forge host's platform, so
  * paired browsers retain that host's native separator too.
  */
-export const display_file_change_path = (path: string, project_root_path?: string): string => {
-	if (project_root_path === undefined) return path;
+export const display_file_change_path = (
+	path: string,
+	project_root_path?: string,
+	separator_preference?: PathSeparator,
+): string => {
+	if (project_root_path === undefined)
+		return separator_preference === undefined
+			? path
+			: FormatPathSeparators(path, separator_preference);
 
 	const windows_path = is_windows_path(project_root_path);
-	const separator = windows_path ? "\\" : "/";
+	const separator =
+		separator_preference === undefined
+			? windows_path
+				? "\\"
+				: "/"
+			: PathSeparatorCharacter(separator_preference);
 	const project_root = normalized_path(project_root_path);
 	const file_path = normalized_path(path);
 	const comparable_root = windows_path ? project_root.toLowerCase() : project_root;
@@ -70,23 +100,37 @@ export const display_file_change_path = (path: string, project_root_path?: strin
 		: `${project_name}${separator}${relative_path.replaceAll("/", separator)}`;
 };
 
-/** Produces an all-or-nothing diff total for the visible file rows. */
+/** Totals every known row while keeping incomplete aggregates visibly honest. */
 export const aggregate_file_change_diff = (
-	files: ReadonlyArray<FileChange>,
-): FileChange["diff"] => {
-	if (files.length === 0 || !files.every((file) => file.diff.kind === "known")) {
+	files: ReadonlyArray<{ readonly diff: AggregateFileChangeDiff }>,
+): AggregateFileChangeDiff => {
+	if (files.length === 0) {
 		return { kind: "unavailable" };
 	}
 
+	let additions = 0;
+	let deletions = 0;
+	let unavailable_files = 0;
+	let has_counts = false;
+	for (const file of files) {
+		if (file.diff.kind === "unavailable") {
+			unavailable_files += 1;
+			continue;
+		}
+		has_counts = true;
+		additions += file.diff.additions;
+		deletions += file.diff.deletions;
+		if (file.diff.kind === "partial") unavailable_files += file.diff.unavailable_files;
+	}
+	if (!has_counts) return { kind: "unavailable" };
+
+	if (unavailable_files > 0) {
+		return { additions, deletions, kind: "partial", unavailable_files };
+	}
+
 	return {
-		additions: files.reduce(
-			(total, file) => total + (file.diff.kind === "known" ? file.diff.additions : 0),
-			0,
-		),
-		deletions: files.reduce(
-			(total, file) => total + (file.diff.kind === "known" ? file.diff.deletions : 0),
-			0,
-		),
+		additions,
+		deletions,
 		kind: "known",
 	};
 };
@@ -101,7 +145,7 @@ export const canonical_file_change_path = (path: string): string => {
 		.toLowerCase();
 };
 
-const merge_file_changes = (entries: ReadonlyArray<FileChange>): FileChange => {
+const merge_file_changes = (entries: ReadonlyArray<FileChange>): PresentedFileChange => {
 	const first = entries[0];
 	const latest = entries.at(-1);
 	if (first === undefined || latest === undefined) {
@@ -119,7 +163,9 @@ const merge_file_changes = (entries: ReadonlyArray<FileChange>): FileChange => {
 };
 
 /** Groups duplicate file-change rows while preserving their first-seen order. */
-export const group_file_changes = (files: ReadonlyArray<FileChange>): ReadonlyArray<FileChange> => {
+export const group_file_changes = (
+	files: ReadonlyArray<FileChange>,
+): ReadonlyArray<PresentedFileChange> => {
 	const groups = new Map<string, Array<FileChange>>();
 
 	for (const file of files) {

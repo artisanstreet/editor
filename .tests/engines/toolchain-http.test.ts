@@ -80,6 +80,23 @@ describe("toolchain release HTTP", () => {
 		),
 	);
 
+	it.effect("allows the fixed Grok and Cursor release origins", () =>
+		WithHttp(
+			(request) => Effect.sync(() => response(request, ["ok"])),
+			(http) =>
+				Effect.gen(function* () {
+					for (const url of [
+						"https://x.ai/cli/stable",
+						"https://cursor.com/install?win32=true",
+						"https://downloads.cursor.com/lab/release/windows/x64/agent-cli-package.zip",
+					]) {
+						const result = yield* http.Get(url, 8).pipe(Effect.orDie);
+						expect(new TextDecoder().decode(result.bytes)).toBe("ok");
+					}
+				}),
+		),
+	);
+
 	it.effect("follows only allowlisted redirect hops", () => {
 		const requested: Array<string> = [];
 		return WithHttp(

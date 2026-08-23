@@ -46,7 +46,9 @@ function capability(state: EngineCapability["state"], reason?: string): EngineCa
 	return reason ? { reason, state } : { state };
 }
 
-function command_capability(command: EngineCommand): EngineCapabilityName {
+function command_capability(
+	command: EngineCommand,
+): Exclude<EngineCapabilityName, "model_catalog"> {
 	if (command._tag === "respond_approval") {
 		return "approval";
 	}
@@ -92,6 +94,7 @@ function make_capabilities(
 		close: command_capability_state("close"),
 		events: capability("supported"),
 		global_guidance: capability("supported"),
+		model_catalog: capability("unsupported", "Scenarios use the curated test catalog"),
 		model_selection: capability("supported"),
 		native_continuation: capability(
 			"unsupported",

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect } from "effect";
+import { Cause, Effect, Exit } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { make_backend_runtime } from "@artisan/backend";
@@ -37,20 +37,95 @@ afterEach(async () => {
 	);
 });
 
-const Delta = (observation_id: string, sequence: number, delta: string): EngineObservation =>
-	({
-		_tag: "agent_message_delta",
-		artisan_run_id: "run_1",
-		delta,
-		item_id: "assistant_1",
-		observation_id,
-		phase: "unspecified",
-		raw: { engine_id: "codex", frame: {}, transport: "test" },
-		sequence,
-		turn_id: "turn_1",
-	}) as EngineObservation;
+const Delta = (
+	observation_id: string,
+	sequence: number,
+	delta: string,
+): Extract<EngineObservation, { readonly _tag: "agent_message_delta" }> => ({
+	_tag: "agent_message_delta",
+	artisan_run_id: "run_1",
+	delta,
+	item_id: "assistant_1",
+	observation_id,
+	phase: "unspecified",
+	raw: { engine_id: "codex", frame: {}, transport: "test" },
+	sequence,
+	turn_id: "turn_1",
+});
 
 describe("conversation projection", () => {
+	it("rejects an item identity reused by another run or entity type", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					yield* database.client.transaction(
+						(transaction) =>
+							ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "reasoning_summary_completed",
+									artisan_run_id: "run_1",
+									item_id: "provider_collision",
+									observation_id: "reasoning_completed",
+									raw: { engine_id: "test", frame: {}, transport: "test" },
+									sequence: 1,
+									text: "Public summary",
+									turn_id: "provider_turn_1",
+								},
+								{
+									occurred_at: "2026-07-24T00:00:01.000Z",
+									run_id: "run_1",
+									thread_id: "thread_1",
+								},
+							) as Effect.Effect<unknown, unknown, never>,
+					);
+					return yield* database.client
+						.transaction(
+							(transaction) =>
+								ApplyEngineObservation(
+									transaction,
+									{
+										_tag: "agent_message_completed",
+										artisan_run_id: "run_2",
+										item_id: "provider_collision",
+										message: "This must not overwrite the summary",
+										observation_id: "message_completed",
+										phase: "final",
+										raw: { engine_id: "test", frame: {}, transport: "test" },
+										sequence: 1,
+										turn_id: "provider_turn_2",
+									},
+									{
+										occurred_at: "2026-07-24T00:00:02.000Z",
+										run_id: "run_2",
+										thread_id: "thread_1",
+									},
+								) as Effect.Effect<unknown, unknown, never>,
+						)
+						.pipe(Effect.exit);
+				}),
+			);
+
+			expect(Exit.isFailure(result)).toBe(true);
+			const failure = Exit.isFailure(result) ? Cause.squash(result.cause) : undefined;
+			expect(failure).toMatchObject({
+				_tag: "ConversationProjectionError",
+				message: "Conversation item identity collision",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("merges terminal, tool, and search lifecycle frames onto their provider activity", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {
@@ -403,6 +478,58 @@ describe("conversation projection", () => {
 		}
 	});
 
+	it("keeps the provider-declared final phase while phase-less text deltas stream", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const snapshot = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							const context = {
+								occurred_at: "2026-07-24T00:00:01.000Z",
+								run_id: "run_1",
+								thread_id: "thread_1",
+							};
+							yield* ApplyEngineObservation(
+								transaction,
+								{ ...Delta("message_started", 1, ""), phase: "final" },
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								Delta("message_delta", 2, "Wrapping up now…"),
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
+			);
+
+			expect(snapshot.status).toBe("available");
+			if (snapshot.status !== "available") return;
+			expect(snapshot.snapshot.items.find((item) => item.id === "assistant_1")).toMatchObject(
+				{
+					lifecycle: "streaming",
+					phase: "final",
+					text: "Wrapping up now…",
+					type: "assistant_message",
+				},
+			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("projects a queued user message once with its accepted command identity", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {
@@ -732,6 +859,19 @@ describe("conversation projection", () => {
 							yield* ApplyEngineObservation(
 								transaction,
 								{
+									_tag: "compaction",
+									artisan_run_id: "run_1",
+									compaction_id: "compaction_1",
+									observation_id: "compaction_started",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 2,
+									state: "started",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
 									_tag: "run_terminal",
 									artisan_run_id: "run_1",
 									error_ref: {
@@ -740,7 +880,7 @@ describe("conversation projection", () => {
 									},
 									observation_id: "run_failed",
 									raw: { engine_id: "codex", frame: {}, transport: "test" },
-									sequence: 2,
+									sequence: 3,
 									state: "failed",
 								},
 								context,
@@ -763,6 +903,71 @@ describe("conversation projection", () => {
 				status: "failed",
 				type: "work_session",
 			});
+			expect(
+				availability.snapshot.items.find((item) => item.type === "compaction"),
+			).toMatchObject({ lifecycle: "failed", state: "failed", type: "compaction" });
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("settles a pending compaction as completed when its run recovers successfully", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_success",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					const context = {
+						occurred_at: "2026-07-24T00:00:01.000Z",
+						run_id: "run_success",
+						thread_id: "thread_success",
+					};
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "compaction",
+									artisan_run_id: "run_success",
+									compaction_id: "compaction_success",
+									observation_id: "compaction_started",
+									raw: { engine_id: "opencode2", frame: {}, transport: "test" },
+									sequence: 1,
+									state: "started",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "run_terminal",
+									artisan_run_id: "run_success",
+									observation_id: "run_completed",
+									raw: { engine_id: "opencode2", frame: {}, transport: "test" },
+									sequence: 2,
+									state: "completed",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return yield* read_model.ReadSnapshot("thread_success");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			expect(
+				availability.snapshot.items.find((item) => item.type === "compaction"),
+			).toMatchObject({ lifecycle: "completed", state: "completed", type: "compaction" });
 		} finally {
 			await runtime.dispose();
 		}
@@ -1034,6 +1239,75 @@ describe("conversation projection", () => {
 				lifecycle: "cancelled",
 				resolution: "Cancelled",
 				state: "cancelled",
+				type: "approval",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	/**
+	 * Provider approval ids are only unique within one engine process — Codex
+	 * numbers its JSON-RPC requests from zero every run. Two threads whose runs
+	 * both raise "approval 0" must project two items, not an identity collision
+	 * that abandons the second run's persistence.
+	 */
+	it("keeps identical provider approval ids from different runs apart", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					for (const thread_id of ["thread_1", "thread_2"]) {
+						yield* database.client.insert(Threads).values({
+							created_at: "2026-07-24T00:00:00.000Z",
+							last_activity_at: "2026-07-24T00:00:00.000Z",
+							thread_id,
+							title: "Conversation",
+							updated_at: "2026-07-24T00:00:00.000Z",
+						});
+					}
+					for (const [index, thread_id] of ["thread_1", "thread_2"].entries()) {
+						yield* database.client.transaction((transaction) =>
+							Effect.gen(function* () {
+								yield* ApplyEngineObservation(
+									transaction,
+									{
+										_tag: "approval",
+										approval_id: "0",
+										artisan_run_id: `run_${index + 1}`,
+										description: "Run the build",
+										observation_id: `approval_requested_${index + 1}`,
+										raw: { engine_id: "codex", frame: {}, transport: "test" },
+										request: {
+											command: "pnpm build",
+											kind: "command",
+											reason: "Run the build",
+										},
+										sequence: 1,
+										state: "requested",
+									},
+									{
+										occurred_at: "2026-07-24T00:00:01.000Z",
+										run_id: `run_${index + 1}`,
+										thread_id,
+									},
+								) as Effect.Effect<unknown, unknown, never>;
+							}),
+						);
+					}
+					return yield* read_model.ReadSnapshot("thread_2");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			expect(
+				availability.snapshot.items.find((item) => item.type === "approval"),
+			).toMatchObject({
+				interaction_id: "0",
+				state: "requested",
 				type: "approval",
 			});
 		} finally {

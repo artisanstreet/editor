@@ -12,7 +12,7 @@ use crate::{
     CliError, Result,
     error::io,
     http,
-    instance::{InstanceConfig, InstancePaths, Secrets, State},
+    instance::{ForgeMode, InstanceConfig, InstancePaths, Secrets, State},
     manifest::InstallationManifest,
 };
 
@@ -91,12 +91,19 @@ fn start_foreground(
     secrets: &Secrets,
 ) -> Result<StartResult> {
     let executable = manifest.forge_executable();
+    let broker = manifest.broker_executable();
     let forge_root = manifest.version_root().join("forge");
     let legacy_host_entry = forge_root.join("host.js");
     if !executable.is_file() {
         return Err(CliError::Installation(format!(
             "Forge binary is missing at {}",
             executable.display()
+        )));
+    }
+    if !broker.is_file() {
+        return Err(CliError::Installation(format!(
+            "Artisan Broker is missing at {}",
+            broker.display()
         )));
     }
     fs::create_dir_all(&config.data_root).map_err(io("create Forge data directory"))?;
@@ -113,6 +120,7 @@ fn start_foreground(
         &forge_root,
         legacy_launcher,
     );
+    configure_broker_environment(&mut command, &broker);
     let status = command.status().map_err(io("start Forge"))?;
     if status.success() {
         Ok(StartResult::ForegroundExited)
@@ -128,12 +136,19 @@ fn spawn_background_forge(
     secrets: &Secrets,
 ) -> Result<u32> {
     let executable = manifest.forge_executable();
+    let broker = manifest.broker_executable();
     let forge_root = manifest.version_root().join("forge");
     let legacy_host_entry = forge_root.join("host.js");
     if !executable.is_file() {
         return Err(CliError::Installation(format!(
             "Forge binary is missing at {}",
             executable.display()
+        )));
+    }
+    if !broker.is_file() {
+        return Err(CliError::Installation(format!(
+            "Artisan Broker is missing at {}",
+            broker.display()
         )));
     }
     fs::create_dir_all(&config.data_root).map_err(io("create Forge data directory"))?;
@@ -155,6 +170,7 @@ fn spawn_background_forge(
         &forge_root,
         legacy_launcher,
     );
+    configure_broker_environment(&mut command, &broker);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().map_err(io("clone Forge log"))?))
@@ -284,6 +300,17 @@ fn configure_forge_environment(
         .env("CODEX_SQLITE_HOME", config.data_root.join("codex-sqlite"))
         .env("ARTISAN_FORGE_STATE_PATH", &paths.state)
         .env("ARTISAN_FORGE_LOG_PATH", &paths.log)
+        .env(
+            "ARTISAN_TELEMETRY_CONFIG_PATH",
+            paths.config.with_file_name("telemetry.json"),
+        )
+        .env(
+            "ARTISAN_FORGE_MODE",
+            match config.mode {
+                ForgeMode::Local => "local",
+                ForgeMode::Headless => "headless",
+            },
+        )
         .env("ARTISAN_LISTEN_HOST", &config.listen_host)
         .env("ARTISAN_LISTEN_PORT", config.listen_port.to_string());
     if legacy_launcher {
@@ -294,6 +321,12 @@ fn configure_forge_environment(
     if config.serve_frontend {
         command.env("ARTISAN_STATIC_FRONTEND_ROOT", forge_root.join("frontend"));
     }
+}
+
+fn configure_broker_environment(command: &mut Command, broker: &Path) {
+    command
+        .env("ARTISAN_BROKER_PATH", broker)
+        .env("ARTISAN_BROKER_REQUIRED", "1");
 }
 
 /// Supports installations from before Forge became a self-contained Node SEA.
@@ -375,6 +408,42 @@ pub fn stop_with_pid(paths: &InstancePaths, secrets: &Secrets, expected_pid: u32
         return Err(CliError::NotRunning);
     };
     stop_state(&state, secrets, deadline)
+}
+
+/// Stops an installer-selected Forge only when its authenticated control
+/// status proves that no model run would be interrupted.
+pub fn stop_with_pid_if_idle(
+    paths: &InstancePaths,
+    secrets: &Secrets,
+    expected_pid: u32,
+) -> Result<()> {
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    let selected = live_state_selected_until(paths, secrets, None, Some(expected_pid), deadline);
+    let Some(state) = (match selected {
+        Err(CliError::NotRunning) => return Err(CliError::ForgeActivityUnavailable),
+        Err(error) => return Err(error),
+        Ok(state) => state,
+    }) else {
+        return Err(CliError::ForgeActivityUnavailable);
+    };
+    let status = http::status_until(
+        &state.endpoint,
+        &secrets.auth_token,
+        probe_deadline(deadline, SHUTDOWN_PROBE_TIMEOUT),
+    )?;
+    if !state_matches_status(&state, &status) {
+        return Err(CliError::ForgeActivityUnavailable);
+    }
+    ensure_idle_for_shutdown(&status)?;
+    stop_state(&state, secrets, deadline)
+}
+
+fn ensure_idle_for_shutdown(status: &http::StatusResponse) -> Result<()> {
+    match status.active_work_count {
+        None => Err(CliError::ForgeActivityUnavailable),
+        Some(0) => Ok(()),
+        Some(active_work_count) => Err(CliError::ForgeBusy { active_work_count }),
+    }
 }
 
 fn stop_state(state: &State, secrets: &Secrets, deadline: Instant) -> Result<()> {
@@ -650,11 +719,13 @@ mod tests {
     use super::{
         Command, InstanceConfig, InstancePaths, SHUTDOWN_POLL_INTERVAL, SHUTDOWN_PROBE_TIMEOUT,
         SHUTDOWN_TIMEOUT, START_READY_POLL_INTERVAL, START_READY_TIMEOUT, Secrets,
-        background_start_can_continue, configure_forge_environment, live_state_selected_until,
-        live_state_until, prelaunch_discovery_deadline, registered_states, should_stop_instance,
+        background_start_can_continue, configure_broker_environment, configure_forge_environment,
+        ensure_idle_for_shutdown, live_state_selected_until, live_state_until,
+        prelaunch_discovery_deadline, registered_states, should_stop_instance,
         with_start_coordination,
     };
     use crate::instance::ForgeMode;
+    use crate::{CliError, http::StatusResponse};
 
     fn test_instance(serve_frontend: bool) -> (InstancePaths, InstanceConfig, Secrets) {
         let home = PathBuf::from("C:/artisan-home");
@@ -725,6 +796,21 @@ mod tests {
     }
 
     #[test]
+    fn installed_launch_requires_the_versioned_broker() {
+        let mut command = Command::new("forge");
+        let broker = Path::new("C:/Artisan/forge/Artisan Broker.exe");
+        configure_broker_environment(&mut command, broker);
+        assert!(command.get_envs().any(|(key, value)| {
+            key == OsStr::new("ARTISAN_BROKER_PATH")
+                && value.is_some_and(|path| path == broker.as_os_str())
+        }));
+        assert!(command.get_envs().any(|(key, value)| {
+            key == OsStr::new("ARTISAN_BROKER_REQUIRED")
+                && value.is_some_and(|marker| marker == OsStr::new("1"))
+        }));
+    }
+
+    #[test]
     fn legacy_host_installations_keep_their_node_launcher_environment() {
         let mut command = Command::new("forge");
         let forge_root = Path::new("C:/Artisan/forge");
@@ -746,6 +832,52 @@ mod tests {
         assert!(should_stop_instance(None, "current"));
         assert!(should_stop_instance(Some("current"), "current"));
         assert!(!should_stop_instance(Some("editor-owned"), "replacement"));
+    }
+
+    #[test]
+    fn legacy_status_cannot_authorize_an_idle_only_shutdown() {
+        let status = StatusResponse {
+            active_work_count: None,
+            instance_id: "forge-1".into(),
+            pid: 6172,
+        };
+
+        assert!(matches!(
+            ensure_idle_for_shutdown(&status),
+            Err(CliError::ForgeActivityUnavailable)
+        ));
+    }
+
+    #[test]
+    fn busy_status_uses_the_safe_shutdown_refusal_exit_code() {
+        let status = StatusResponse {
+            active_work_count: Some(2),
+            instance_id: "forge-1".into(),
+            pid: 6172,
+        };
+
+        assert!(matches!(
+            ensure_idle_for_shutdown(&status),
+            Err(CliError::ForgeBusy {
+                active_work_count: 2
+            })
+        ));
+        assert!(
+            ensure_idle_for_shutdown(&StatusResponse {
+                active_work_count: Some(0),
+                instance_id: "forge-1".into(),
+                pid: 6172,
+            })
+            .is_ok()
+        );
+        assert_eq!(
+            CliError::ForgeBusy {
+                active_work_count: 1
+            }
+            .exit_code(),
+            5
+        );
+        assert_eq!(CliError::ForgeActivityUnavailable.exit_code(), 6);
     }
 
     #[test]

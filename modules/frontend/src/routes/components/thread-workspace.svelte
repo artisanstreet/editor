@@ -16,8 +16,9 @@
 	import { Button } from "$lib/components/ui/button";
 	import {
 		conversation_background_agent_names,
-		conversation_progress_phase,
+		conversation_reply_is_confirmed,
 		conversation_reply_is_live,
+		conversation_run_presentation_is_active,
 		conversation_waiting_for_activity,
 		work_session_is_settled,
 	} from "$lib/conversation/activity-status";
@@ -42,11 +43,18 @@
 		ConversationUserMessageWithSourceReference,
 	} from "$lib/conversation/scroll-position";
 	import {
+		ConversationHasRemoteOlderTurns,
 		ConversationOlderGroupCountForItem,
 		MakeParticipantConversationRenderWindow,
 		type ConversationRenderBlock,
 		type ConversationViewState,
 	} from "$lib/conversation/store";
+	import {
+		ConversationVisualSettlementDeadlineMillis,
+		ConversationVisualSettlementDecision,
+		ConversationVisualSettlementSampleMillis,
+		type ConversationVisualSettlementMeasurement,
+	} from "$lib/conversation/visual-settlement";
 	import ConversationChangesCard from "./conversation-changes-card.svelte";
 	import ConversationItem from "./conversation-item.svelte";
 	import ConversationTurnNavigator from "./conversation-turn-navigator.svelte";
@@ -72,6 +80,7 @@
 		inspection,
 		onreturntoroot,
 		onabort,
+		onhydrateolder,
 		onapproval,
 		onnewthread,
 		onpolicychange,
@@ -80,6 +89,7 @@
 		onusageinterruptionresolve,
 		onimagevisibilitychange,
 		onsubmit,
+		onvisualsettled,
 		onwithdraw,
 		policy,
 		project_root_path,
@@ -104,6 +114,11 @@
 		/** The roster owns this Effect; the workspace only yields it at navigation events. */
 		onreturntoroot?: Effect.Effect<void>;
 		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
+		/**
+		 * Loads one older durable-history range beneath the loaded window,
+		 * optionally down to a target turn. False means nothing further loaded.
+		 */
+		onhydrateolder?: (minimum_turn_ordinal?: number) => Effect.Effect<boolean>;
 		onapproval?: (
 			approval_id: string,
 			approved: boolean,
@@ -143,6 +158,9 @@
 			ThreadMessageSubmissionOutcome,
 			{ readonly message: string }
 		>;
+		onvisualsettled?: (
+			measurement: ConversationVisualSettlementMeasurement,
+		) => Effect.Effect<void>;
 		/** Recalls one queued steer by the send's own command id, while Forge still holds it. */
 		onwithdraw?: (command_id: string) => Effect.Effect<void, { readonly message: string }>;
 		policy?: ThreadSessionPolicy;
@@ -150,9 +168,18 @@
 		run_active?: boolean;
 		snapshot: ConversationSnapshot;
 	} = $props();
-	/** A settled thread may switch engines; only an in-flight run owns the current engine. */
-	const engine_locked = $derived(run_active);
-
+	let visual_settlement_started_at = 0;
+	if (untrack(() => onvisualsettled !== undefined)) {
+		visual_settlement_started_at = yield* RunBrowserDom(() =>
+			globalThis.performance.now(),
+		).pipe(
+			Effect.catch(() =>
+				Effect.gen(function* () {
+					return 0;
+				}),
+			),
+		);
+	}
 	/**
 	 * The catalog is read here, and not left to the composer that also reads it,
 	 * because the window size answers a question about the transcript: whether
@@ -245,6 +272,37 @@
 			fold_resolved_approvals_into_work(render_window.blocks),
 		),
 	);
+	/** Transcript authority can retain the live session while work authority crosses settlement. */
+	const transcript_live_run_id = $derived(
+		snapshot.items.findLast(
+			(item) => item.type === "work_session" && !work_session_is_settled(item.status),
+		)?.run_id,
+	);
+	const presentation_run_id = $derived(
+		run_active && active_run_id !== undefined
+			? active_run_id
+			: (transcript_live_run_id ?? active_run_id),
+	);
+	/**
+	 * Controls follow the work subscription immediately; transcript chrome does
+	 * not. Keep the latter live until its own session settles, so an earlier work
+	 * settlement cannot erase the summary before the final-message patch lands.
+	 */
+	const presentation_run_active = $derived(
+		conversation_run_presentation_is_active(
+			snapshot.items,
+			presentation_run_id,
+			run_active && presentation_run_id === active_run_id,
+		),
+	);
+	/** Only a currently live owning turn may opt prose into word-by-word reveal. */
+	const streaming_turn_ids = $derived(
+		new Set(
+			snapshot.turns
+				.filter((turn) => turn.lifecycle === "active" || turn.lifecycle === "streaming")
+				.map((turn) => turn.id),
+		),
+	);
 	/**
 	 * What the active run's thinking line says. A model that streams raw
 	 * chain-of-thought publishes no summary to say, so its turns keep the
@@ -253,15 +311,11 @@
 	const live_reasoning_summary = $derived(
 		policy_reasoning_display(policy) === "trace"
 			? undefined
-			: conversation_live_reasoning_summary(render_blocks, active_run_id, run_active),
-	);
-	/**
-	 * The transcript's freshest session, which the durable work item may not
-	 * describe yet: run authority treats exactly that one as pending rather
-	 * than settled while the work item catches up.
-	 */
-	const newest_session_run_id = $derived(
-		snapshot.items.findLast((item) => item.type === "work_session")?.run_id,
+			: conversation_live_reasoning_summary(
+					render_blocks,
+					presentation_run_id,
+					presentation_run_active,
+				),
 	);
 
 	const visible_render_groups = $derived.by(() => {
@@ -288,9 +342,9 @@
 	});
 	const hidden_render_group_count = $derived(render_window.hidden_group_count);
 	const inspecting_agent = $derived(inspection !== undefined);
-	let steering_pending = $state(false);
-	const SetSteeringPending = (pending: boolean) => {
-		steering_pending = pending;
+	let steering_pending_source_reference = $state<string | undefined>();
+	const SetSteeringPending = (pending: boolean, source_reference?: string) => {
+		steering_pending_source_reference = pending ? source_reference : undefined;
 	};
 	const ReturnToRoot = Effect.gen(function* () {
 		if (onreturntoroot !== undefined) yield* onreturntoroot;
@@ -300,10 +354,24 @@
 			if (event.key === "Escape" && inspecting_agent) yield* ReturnToRoot;
 		});
 
+	let remote_history_exhausted = $state(false);
+	const has_remote_older_turns = $derived(
+		!remote_history_exhausted && ConversationHasRemoteOlderTurns(snapshot),
+	);
+
 	const ShowEarlierTurns = Effect.gen(function* () {
 		if (loading_older_turns) return;
 		loading_older_turns = true;
 		yield* Effect.gen(function* () {
+			/** Refill the hidden pool from durable history before revealing it. */
+			if (
+				hidden_render_group_count < ConversationTurnPageSize &&
+				has_remote_older_turns &&
+				onhydrateolder !== undefined
+			) {
+				const hydrated = yield* onhydrateolder();
+				if (!hydrated) remote_history_exhausted = true;
+			}
 			const current_viewport = viewport;
 			const previous_scroll_height =
 				current_viewport === null
@@ -324,31 +392,40 @@
 		);
 	});
 
+	let workspace_surface = $state<HTMLElement | null>(null);
 	let viewport = $state<HTMLElement | null>(null);
 	let transcript_content = $state<HTMLElement | null>(null);
 	let end_space = $state<HTMLElement | null>(null);
 	let end_space_height = $state(ConversationBaseEndSpacePixels);
+	const initial_submission_reference = untrack(() => first_submission_reference);
 	/** Seeded with a claimed first submission so a new thread's opening turn anchors like any other send. */
-	let pending_user_message_reference = $state<string | undefined>(first_submission_reference);
+	let pending_user_message_reference = $state<string | undefined>(initial_submission_reference);
 	let anchored_user_item_id = $state<string | undefined>();
 	/**
 	 * Whether new content should pull the viewport down with it. Derived from
-	 * scroll position on every scroll, so the reader is never in a mode they did
+	 * scroll position on every unowned scroll, so the reader is never in a mode they did
 	 * not put themselves in — scrolling away turns it off, returning to the
 	 * bottom turns it back on. A seeded first submission starts it off, exactly
-	 * as an ordinary send switches it off at acceptance, so the tail cannot pull
+	 * as an ordinary send switches it off at submission, so the tail cannot pull
 	 * the reader while that turn's anchor is still on its way.
 	 */
-	let following = $state(first_submission_reference === undefined);
+	let following = $state(initial_submission_reference === undefined);
 	/**
-	 * Set while the anchor animates a submitted turn into place. A smooth scroll
-	 * emits scroll events the whole way down, and reading follow state out of
-	 * those intermediate positions would let a frame that happens to pass near
-	 * the bottom re-arm following mid-animation and yank the reader away from
-	 * the turn being anchored.
+	 * Set while the anchor's visual correction animates. The viewport itself is
+	 * already at the authoritative destination, so its programmatic event must
+	 * not re-arm following before the pixels catch up.
 	 */
 	let anchor_scroll_active = $state(false);
 	let anchor_scroll_generation = 0;
+	/**
+	 * True while Artisan still owns the sent turn's reading position. A wheel or
+	 * touch gesture gives that position back to the reader; layout corrections
+	 * must never pull them back after that.
+	 */
+	let anchor_position_owned = false;
+	let anchor_initial_layout_pending = false;
+	let pending_anchor_owned = initial_submission_reference !== undefined;
+	let anchor_scroll_releases_on_scroll_end = false;
 	let anchor_layout_frame = 0;
 	let anchor_layout_pending = false;
 	let anchor_layout_pending_smooth = false;
@@ -399,7 +476,7 @@
 
 	/** Reads follow state back from wherever the viewport actually settled. */
 	const SyncFollowing = (element: HTMLElement) => {
-		if (anchor_scroll_active) return;
+		if (anchor_scroll_active || pending_anchor_owned) return;
 		following = ConversationIsFollowing(
 			element.scrollTop,
 			element.scrollHeight,
@@ -408,9 +485,20 @@
 	};
 
 	const release_anchor_scroll = (element: HTMLElement) => {
+		const sync_following = anchor_scroll_releases_on_scroll_end;
 		anchor_scroll_generation += 1;
 		anchor_scroll_active = false;
-		SyncFollowing(element);
+		anchor_scroll_releases_on_scroll_end = false;
+		if (sync_following) SyncFollowing(element);
+		else if (anchor_position_owned) RequestAnchorLayoutUnsafe(false);
+	};
+
+	const ReleaseAnchorPosition = () => {
+		pending_anchor_owned = false;
+		pending_user_message_reference = undefined;
+		anchor_position_owned = false;
+		anchor_initial_layout_pending = false;
+		if (anchor_scroll_active && viewport !== null) release_anchor_scroll(viewport);
 	};
 
 	/**
@@ -455,20 +543,40 @@
 	};
 
 	/**
-	 * Guards smooth-scroll intermediate positions, but never relies exclusively
-	 * on `scrollend`: no-movement, interrupted, and older runtimes can omit it.
+	 * Moves the transcript visually after the viewport has already landed at the
+	 * sent turn. Unlike a native smooth scroll, this cannot be abandoned at an
+	 * arbitrary intermediate scrollTop when streaming content changes layout.
+	 */
+	const GlideAnchorCorrection = (content: HTMLElement, delta: number) => {
+		if (delta === 0 || reduced_motion) return;
+		content.style.transition = "none";
+		content.style.transform = `translateY(${delta}px)`;
+		void content.offsetHeight;
+		content.style.transition = "transform var(--duration-fast) var(--ease-smooth-out)";
+		content.style.transform = "translateY(0px)";
+	};
+
+	/**
+	 * Guards programmatic movement, but never relies exclusively on `scrollend`:
+	 * no-movement, visual-only glides, and older runtimes can omit it.
 	 * The generation fence makes a newer scroll own the one-second fallback.
 	 */
-	const ArmAnchorScroll = (element: HTMLElement, next_following: boolean) =>
+	const ArmAnchorScroll = (
+		element: HTMLElement,
+		next_following: boolean,
+		release_on_scroll_end = true,
+		fallback_millis = 1_000,
+	) =>
 		Effect.gen(function* () {
 			const generation = (anchor_scroll_generation += 1);
-			/** Forked into the component scope: the fallback must outlive the statement rerun that armed it. */
-			yield* Effect.gen(function* () {
-				yield* Effect.sleep("1 second");
-				if (generation === anchor_scroll_generation) release_anchor_scroll(element);
-			}).pipe(Effect.forkIn(anchor_scope));
 			following = next_following;
 			anchor_scroll_active = true;
+			anchor_scroll_releases_on_scroll_end = release_on_scroll_end;
+			/** Forked into the component scope: the fallback must outlive the statement rerun that armed it. */
+			yield* Effect.gen(function* () {
+				yield* Effect.sleep(fallback_millis);
+				if (generation === anchor_scroll_generation) release_anchor_scroll(element);
+			}).pipe(Effect.forkIn(anchor_scope));
 		});
 
 	/**
@@ -479,7 +587,7 @@
 	 * are few, and a measurement taken on the spot cannot drift out of step with
 	 * a transcript that grows and reflows underneath it.
 	 */
-	const turn_markers = $derived(ConversationTurnMarkers(snapshot.items));
+	const turn_markers = $derived(ConversationTurnMarkers(snapshot));
 	let active_turn_id = $state<string | undefined>(undefined);
 
 	/** Synchronous scroll ingress, so it measures and assigns without yielding. */
@@ -509,6 +617,22 @@
 	const SelectTurn = (marker: ConversationTurnMarker) =>
 		Effect.gen(function* () {
 			let item = yield* FindConversationItem(marker.id);
+			/** A marker below the loaded floor hydrates durable history first. */
+			if (
+				item === undefined &&
+				onhydrateolder !== undefined &&
+				marker.turn_ordinal !== undefined
+			) {
+				let attempts = 0;
+				while (
+					attempts < 32 &&
+					conversation_view_state?.items_by_id.has(marker.id) !== true
+				) {
+					attempts += 1;
+					const hydrated = yield* onhydrateolder(marker.turn_ordinal);
+					if (!hydrated) break;
+				}
+			}
 			if (item === undefined && conversation_view_state !== undefined) {
 				const required_older_groups = ConversationOlderGroupCountForItem(
 					conversation_view_state,
@@ -573,6 +697,8 @@
 		if (
 			!smooth &&
 			next_end_space_height <= ConversationBaseEndSpacePixels &&
+			anchor_position_owned &&
+			!anchor_initial_layout_pending &&
 			!following &&
 			!anchor_scroll_active &&
 			Math.abs(
@@ -580,28 +706,54 @@
 					viewport_scroll_top,
 			) <= 32
 		) {
+			anchor_position_owned = false;
 			following = true;
 		}
 		if (next_end_space_height !== end_space_height) {
 			end_space_height = next_end_space_height;
 			yield* Effect.promise(() => tick());
 		}
-		if (!smooth || viewport === null) return;
+		if (
+			viewport === null ||
+			anchored_user_item_id !== item_id ||
+			!anchor_position_owned ||
+			(!smooth && (anchor_initial_layout_pending || anchor_scroll_active))
+		)
+			return;
 
 		const current_item = yield* FindConversationItem(item_id);
 		if (current_item === undefined) return;
+		if (smooth) {
+			/**
+			 * Own the scroll before assigning it. Programmatic scroll events are
+			 * queued by Chromium, but an already-pending scrollend can otherwise
+			 * release a newly armed move before its first painted frame.
+			 */
+			yield* ArmAnchorScroll(
+				viewport,
+				false,
+				false,
+				reduced_motion ? 0 : 350,
+			);
+		}
 		yield* RunBrowserDom(() => {
+			const previous_scroll_top = viewport.scrollTop;
 			viewport.scrollTo({
-				behavior: globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+				behavior: "auto",
 				top: ConversationAlignedScrollTop(
 					viewport.scrollTop,
 					viewport.getBoundingClientRect().top,
 					current_item.getBoundingClientRect().top,
 				),
 			});
+			if (smooth && transcript_content !== null) {
+				GlideAnchorCorrection(
+					transcript_content,
+					viewport.scrollTop - previous_scroll_top,
+				);
+			}
 		});
-		/** The anchor parks the reader at this turn's top, which is not the bottom. */
-		yield* ArmAnchorScroll(viewport, false);
+		if (smooth && anchored_user_item_id === item_id) anchor_initial_layout_pending = false;
 	});
 
 	const ScheduleAnchorLayout = Effect.gen(function* () {
@@ -631,8 +783,13 @@
 		const submit = onsubmit;
 		if (submit === undefined) return;
 		pending_user_message_reference = undefined;
+		pending_anchor_owned = true;
+		/** Freeze the old tail before the accepted message can race its receipt. */
+		following = false;
 		const ClearPendingUserMessage = Effect.gen(function* () {
 			pending_user_message_reference = undefined;
+			pending_anchor_owned = false;
+			if (viewport !== null) SyncFollowing(viewport);
 		});
 
 		/**
@@ -644,8 +801,14 @@
 		return yield* submit(submission).pipe(
 			Effect.tap((outcome) =>
 				Effect.gen(function* () {
-					pending_user_message_reference = outcome.user_message_reference;
-					if (outcome.user_message_reference !== undefined) following = false;
+					pending_user_message_reference =
+						outcome.user_message_reference !== undefined && pending_anchor_owned
+							? outcome.user_message_reference
+							: undefined;
+					if (outcome.user_message_reference === undefined && viewport !== null) {
+						pending_anchor_owned = false;
+						SyncFollowing(viewport);
+					}
 				}),
 			),
 			Effect.tapError(() =>
@@ -666,9 +829,13 @@
 		const current_viewport = viewport;
 		if (current_viewport === null) return;
 		pending_user_message_reference = undefined;
+		pending_anchor_owned = false;
 		anchored_user_item_id = undefined;
+		anchor_position_owned = false;
+		anchor_initial_layout_pending = false;
 		end_space_height = ConversationBaseEndSpacePixels;
 		yield* Effect.promise(() => tick());
+		yield* ArmAnchorScroll(current_viewport, true);
 		yield* RunBrowserDom(() => {
 			current_viewport.scrollTo({
 				behavior: globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -680,7 +847,6 @@
 				),
 			});
 		});
-		yield* ArmAnchorScroll(current_viewport, true);
 	});
 
 	/**
@@ -736,8 +902,15 @@
 			);
 			if (item_id !== undefined) {
 				/** The same send resolving twice must not scroll the reader twice. */
-				if (anchored_user_item_id === item_id) return;
+				if (anchored_user_item_id === item_id) {
+					pending_anchor_owned = false;
+					pending_user_message_reference = undefined;
+					return;
+				}
 				anchored_user_item_id = item_id;
+				anchor_position_owned = true;
+				anchor_initial_layout_pending = true;
+				pending_anchor_owned = false;
 				/**
 				 * Forked into `anchor_scope` rather than run inline or `forkScoped`,
 				 * and the pending reference cleared only after.
@@ -830,20 +1003,278 @@
 				yield* Effect.never;
 			}),
 	);
-	const SyncTranscriptSizeObserver = Effect.gen(function* () {
-		const content = transcript_content;
-		const current_viewport = viewport;
-		const supports_resize_observer = yield* RunBrowserDom(() => "ResizeObserver" in globalThis);
-		if (content === null || current_viewport === null || !supports_resize_observer) {
-			yield* transcript_size_observers.Release("transcript-size");
-			return;
-		}
-		yield* transcript_size_observers.Replace("transcript-size", {
-			content,
-			current_viewport,
+	/**
+	 * The bound elements are arguments, not reads hidden inside the Effect. SER
+	 * derives a yielded program's reactive inputs from its call expression; when
+	 * this took no arguments it ran once with both bindings null and never
+	 * attached after mount. The opening bottom assignment then lost every race
+	 * with Markdown, highlighting, images, and cards that grew afterwards.
+	 */
+	const SyncTranscriptSizeObserver = (
+		content: HTMLElement | null,
+		current_viewport: HTMLElement | null,
+	) =>
+		Effect.gen(function* () {
+			const supports_resize_observer = yield* RunBrowserDom(
+				() => "ResizeObserver" in globalThis,
+			);
+			if (content === null || current_viewport === null || !supports_resize_observer) {
+				yield* transcript_size_observers.Release("transcript-size");
+				return;
+			}
+			yield* transcript_size_observers.Replace("transcript-size", {
+				content,
+				current_viewport,
+			});
 		});
-	});
-	yield* SyncTranscriptSizeObserver;
+	yield* SyncTranscriptSizeObserver(transcript_content, viewport);
+
+	type LayoutShiftEntry = PerformanceEntry & {
+		readonly hadRecentInput: boolean;
+		readonly sources?: ReadonlyArray<{ readonly node?: Node | null }>;
+		readonly value: number;
+	};
+	type VisualSettlementTarget = {
+		readonly content: HTMLElement;
+		readonly current_viewport: HTMLElement;
+		readonly onsettled: (
+			measurement: ConversationVisualSettlementMeasurement,
+		) => Effect.Effect<void>;
+		readonly started_at: number;
+		readonly surface: HTMLElement;
+		readonly thread_id: string;
+	};
+	type VisualSettlementDomSample = {
+		readonly content_height: number;
+		readonly content_width: number;
+		readonly fonts_loaded: boolean;
+		readonly now: number;
+		readonly pending_transforms: boolean;
+		readonly positioned: boolean;
+		readonly viewport_height: number;
+		readonly viewport_width: number;
+	};
+
+	let visual_settlement_reported = false;
+	const RoundVisualMeasurement = (value: number): number =>
+		Math.round(value * 1_000) / 1_000;
+
+	/**
+	 * The snapshot is only data-ready. This observer measures the rendered
+	 * transcript through Markdown/highlighting/math/Mermaid upgrades, font loads,
+	 * and the opening scroll assignment. The route remains mounted behind its
+	 * spinner during this one-shot pass, then reveals on a quiet paint boundary.
+	 */
+	const ObserveInitialVisualSettlement = (target: VisualSettlementTarget) =>
+		Effect.gen(function* () {
+			yield* Effect.scoped(
+				Effect.gen(function* () {
+					let layout_revision = 0;
+					let layout_shift_score = 0;
+					let mutation_count = 0;
+					let resize_count = 0;
+
+					const observers = yield* RunBrowserDom(() => {
+						const resize_observer = new ResizeObserver(() => {
+							resize_count += 1;
+							layout_revision += 1;
+						});
+						resize_observer.observe(target.content);
+						resize_observer.observe(target.current_viewport);
+
+						const mutation_observer = new MutationObserver((records) => {
+							mutation_count += records.length;
+							layout_revision += 1;
+						});
+						mutation_observer.observe(target.surface, {
+							attributes: true,
+							characterData: true,
+							childList: true,
+							subtree: true,
+						});
+
+						let layout_shift_observer: PerformanceObserver | undefined;
+						if (
+							typeof globalThis.PerformanceObserver === "function" &&
+							globalThis.PerformanceObserver.supportedEntryTypes.includes("layout-shift")
+						) {
+							layout_shift_observer = new PerformanceObserver((list) => {
+								for (const candidate of list.getEntries()) {
+									const entry = candidate as LayoutShiftEntry;
+									if (entry.hadRecentInput || entry.startTime < target.started_at) continue;
+									const belongs_to_workspace =
+										entry.sources?.some(
+											(source) =>
+												source.node !== null &&
+												source.node !== undefined &&
+												target.surface.contains(source.node),
+										) ?? false;
+									if (belongs_to_workspace) layout_shift_score += entry.value;
+								}
+							});
+							layout_shift_observer.observe({ buffered: true, type: "layout-shift" });
+						}
+
+						return { layout_shift_observer, mutation_observer, resize_observer };
+					});
+					yield* Effect.addFinalizer(() =>
+						RunBrowserDom(() => {
+							observers.layout_shift_observer?.disconnect();
+							observers.mutation_observer.disconnect();
+							observers.resize_observer.disconnect();
+						}).pipe(Effect.ignore),
+					);
+
+					const ReadSample = () =>
+						RunBrowserDom((): VisualSettlementDomSample => {
+							const bounds = target.content.getBoundingClientRect();
+							return {
+								content_height: bounds.height,
+								content_width: bounds.width,
+								fonts_loaded: globalThis.document.fonts.status === "loaded",
+								now: globalThis.performance.now(),
+								pending_transforms:
+									target.content.querySelector(
+										'[data-thread-content-transforming="true"], [aria-busy="true"]',
+									) !== null,
+								positioned,
+								viewport_height: target.current_viewport.clientHeight,
+								viewport_width: target.current_viewport.clientWidth,
+							};
+						});
+
+					let previous = yield* ReadSample();
+					let observed_revision = layout_revision;
+					let stable_sample_count = 0;
+					let last_change_at = previous.now;
+					let content_height_shift_px = 0;
+					let largest_content_height_shift_px = 0;
+					let reason: "stable" | "deadline" | undefined;
+
+					while (reason === undefined) {
+						yield* Effect.sleep(ConversationVisualSettlementSampleMillis);
+						const current = yield* ReadSample();
+						const height_shift = Math.abs(current.content_height - previous.content_height);
+						const sample_changed =
+							layout_revision !== observed_revision ||
+							height_shift > 0.25 ||
+							Math.abs(current.content_width - previous.content_width) > 0.25 ||
+							current.viewport_height !== previous.viewport_height ||
+							current.viewport_width !== previous.viewport_width ||
+							current.pending_transforms !== previous.pending_transforms ||
+							current.fonts_loaded !== previous.fonts_loaded ||
+							current.positioned !== previous.positioned;
+
+						if (height_shift > 0.25) {
+							content_height_shift_px += height_shift;
+							largest_content_height_shift_px = Math.max(
+								largest_content_height_shift_px,
+								height_shift,
+							);
+						}
+						if (sample_changed) {
+							last_change_at = current.now;
+							stable_sample_count = 0;
+						} else {
+							stable_sample_count += 1;
+						}
+
+						observed_revision = layout_revision;
+						previous = current;
+						reason = ConversationVisualSettlementDecision({
+							elapsed_ms: current.now - target.started_at,
+							fonts_loaded: current.fonts_loaded,
+							maximum_wait_ms: ConversationVisualSettlementDeadlineMillis(run_active),
+							pending_transforms:
+								current.pending_transforms || !current.positioned,
+							quiet_ms: current.now - last_change_at,
+							stable_sample_count,
+						});
+					}
+
+					const measurement: ConversationVisualSettlementMeasurement = {
+						content_height_shift_px: RoundVisualMeasurement(content_height_shift_px),
+						duration_ms: RoundVisualMeasurement(previous.now - target.started_at),
+						largest_content_height_shift_px: RoundVisualMeasurement(
+							largest_content_height_shift_px,
+						),
+						layout_shift_score: RoundVisualMeasurement(layout_shift_score),
+						mutation_count,
+						pending_transforms_at_reveal: previous.pending_transforms,
+						reason,
+						resize_count,
+					};
+					yield* RunBrowserDom(() => {
+						globalThis.performance.measure("artisan.thread.visual-settlement", {
+							detail: { ...measurement, thread_id: target.thread_id },
+							end: previous.now,
+							start: target.started_at,
+						});
+					}).pipe(Effect.ignore);
+					if (visual_settlement_reported) return;
+					visual_settlement_reported = true;
+					yield* target.onsettled(measurement);
+				}),
+			);
+		}).pipe(
+			Effect.catch(() =>
+				Effect.gen(function* () {
+					if (visual_settlement_reported) return;
+					visual_settlement_reported = true;
+					yield* target.onsettled({
+						content_height_shift_px: 0,
+						duration_ms: 0,
+						largest_content_height_shift_px: 0,
+						layout_shift_score: 0,
+						mutation_count: 0,
+						pending_transforms_at_reveal: true,
+						reason: "measurement_unavailable",
+						resize_count: 0,
+					});
+				}),
+			),
+		);
+
+	const visual_settlement_observers = yield* MakeScopedAttachmentRunner(
+		ObserveInitialVisualSettlement,
+	);
+	const SyncVisualSettlementObserver = (
+		surface: HTMLElement | null,
+		content: HTMLElement | null,
+		current_viewport: HTMLElement | null,
+		view_ready: boolean,
+		onsettled:
+			| ((measurement: ConversationVisualSettlementMeasurement) => Effect.Effect<void>)
+			| undefined,
+	) =>
+		Effect.gen(function* () {
+			if (
+				surface === null ||
+				content === null ||
+				current_viewport === null ||
+				!view_ready ||
+				onsettled === undefined
+			) {
+				yield* visual_settlement_observers.Release("initial-visual-settlement");
+				return;
+			}
+			if (visual_settlement_reported) return;
+			yield* visual_settlement_observers.Replace("initial-visual-settlement", {
+				content,
+				current_viewport,
+				onsettled,
+				started_at: visual_settlement_started_at,
+				surface,
+				thread_id: snapshot.thread_id,
+			});
+		});
+	yield* SyncVisualSettlementObserver(
+		workspace_surface,
+		transcript_content,
+		viewport,
+		conversation_view_state !== undefined,
+		onvisualsettled,
+	);
 
 	/**
 	 * Listeners rather than markup handlers: the viewport belongs to `ScrollArea`
@@ -860,36 +1291,64 @@
 							SyncActiveTurn();
 						};
 						/** `scrollend` is what releases the anchor guard once its animation settles. */
-						const on_scroll_end = () => release_anchor_scroll(current_viewport);
+						const on_scroll_end = () => {
+							if (anchor_scroll_releases_on_scroll_end)
+								release_anchor_scroll(current_viewport);
+						};
+						const on_user_scroll_intent = () => {
+							if (anchor_scroll_active && !anchor_scroll_releases_on_scroll_end) {
+								const content = transcript_content;
+								if (content !== null) {
+									content.style.transition = "none";
+									content.style.transform = "translateY(0px)";
+								}
+							}
+							ReleaseAnchorPosition();
+						};
 						current_viewport.addEventListener("scroll", on_scroll, { passive: true });
 						current_viewport.addEventListener("scrollend", on_scroll_end, {
 							passive: true,
 						});
-						return { on_scroll, on_scroll_end };
+						current_viewport.addEventListener("touchstart", on_user_scroll_intent, {
+							passive: true,
+						});
+						current_viewport.addEventListener("wheel", on_user_scroll_intent, {
+							passive: true,
+						});
+						return { on_scroll, on_scroll_end, on_user_scroll_intent };
 					}),
 					(handlers) =>
 						RunBrowserDom(() => {
 							current_viewport.removeEventListener("scroll", handlers.on_scroll);
 							current_viewport.removeEventListener("scrollend", handlers.on_scroll_end);
+							current_viewport.removeEventListener(
+								"touchstart",
+								handlers.on_user_scroll_intent,
+							);
+							current_viewport.removeEventListener("wheel", handlers.on_user_scroll_intent);
 						}),
 				);
 				yield* Effect.never;
 			}),
 	);
-	const SyncFollowListeners = Effect.gen(function* () {
-		const current_viewport = viewport;
-		if (current_viewport === null) {
-			yield* follow_listeners.Release("follow");
-			return;
-		}
-		yield* follow_listeners.Replace("follow", { current_viewport });
-	});
-	yield* SyncFollowListeners;
+	const SyncFollowListeners = (current_viewport: HTMLElement | null) =>
+		Effect.gen(function* () {
+			if (current_viewport === null) {
+				yield* follow_listeners.Release("follow");
+				return;
+			}
+			yield* follow_listeners.Replace("follow", { current_viewport });
+		});
+	yield* SyncFollowListeners(viewport);
 </script>
 
 <svelte:window onkeydown={yield* ReturnToRootOnEscape(event)} />
 
-<main class="relative h-full min-h-0 overflow-hidden" aria-label={inspecting_agent ? "Agent conversation" : "Thread workspace"}>
+<main
+	bind:this={workspace_surface}
+	class="relative h-full min-h-0 overflow-hidden"
+	aria-label={inspecting_agent ? "Agent conversation" : "Thread workspace"}
+>
 	<ConversationTurnNavigator
 		active_id={active_turn_id}
 		markers={turn_markers}
@@ -918,7 +1377,7 @@
 					</header>
 				{/if}
 				{#if conversation_view_state !== undefined}
-					{#if hidden_render_group_count > 0}
+					{#if hidden_render_group_count > 0 || has_remote_older_turns}
 						<div class="flex justify-center pb-2">
 							<Button
 								variant="ghost"
@@ -926,7 +1385,9 @@
 								disabled={loading_older_turns}
 								onclick={yield* ShowEarlierTurns}
 							>
-								Show earlier turns ({hidden_render_group_count})
+								{hidden_render_group_count > 0
+									? `Show earlier turns (${hidden_render_group_count})`
+									: "Show earlier turns"}
 							</Button>
 						</div>
 					{/if}
@@ -948,52 +1409,71 @@
 										stays collapsible, while diagnostics remain hidden unless the trace
 										explicitly exposes them.
 									-->
+									{@const block_run_active = run_active &&
+										block.items.some((item) => item.run_id === active_run_id)}
 									<ConversationTrace
 										items={visible_trace_items}
-										work_active={run_active &&
-											block.items.some((item) => item.run_id === active_run_id)}
+										message_streaming={block_run_active &&
+											streaming_turn_ids.has(block.turn_id)}
+										work_active={block_run_active}
 									/>
 								{:else if block.type === "item"}
 									<ConversationItem
 										{image_sources}
 										item={block.item}
+										message_streaming={run_active &&
+											block.item.run_id === active_run_id &&
+											streaming_turn_ids.has(block.turn_id)}
 										{onapproval}
 										{onimagevisibilitychange}
 										{onquestion}
 										{onusageinterruptionresolve}
+										steering_pending={steering_pending_source_reference !== undefined &&
+											block.item.type === "user_message" &&
+											block.item.source_refs.some(
+												(source) =>
+													source.reference === steering_pending_source_reference ||
+													source.event_id === steering_pending_source_reference,
+											)}
 									/>
 								{:else if block.type === "work_group"}
 									{@const session_settled = work_session_is_settled(block.session.status)}
 									{@const visible_details = strip_conversation_trace_reasoning(block.details)}
+									{@const progress_items = block.progress_items ?? [block.session, ...block.details]}
 									<ConversationWorkSession
 										awaiting_compaction={awaiting_compaction &&
 											block.session.run_id === active_run_id}
 										background_agent_names={conversation_background_agent_names(
-											block.details,
+											progress_items,
 										)}
 										duration_kind={block.duration_kind}
 										engine_id={policy?.engine_id}
 										has_details={visible_details.length > 0}
-										has_live_reply={conversation_reply_is_live(block.details)}
+										has_live_reply={block.progress_phase === "reply" &&
+											conversation_reply_is_live(progress_items)}
 										item={block.session}
 										onretry={block.session.status === "failed" ? onretry : undefined}
-										progress_phase={conversation_progress_phase(block.details)}
-										reasoning_summary={block.session.run_id === active_run_id
+										progress_phase={block.progress_phase}
+										reply_confirmed={conversation_reply_is_confirmed(progress_items)}
+										reasoning_summary={block.session.run_id === presentation_run_id
 											? live_reasoning_summary
 											: undefined}
-										steering_pending={steering_pending &&
-											!session_settled &&
-											active_run_id !== undefined &&
-											block.session.run_id === active_run_id}
 										superseded={block.superseded === true}
 										transition={block.transition}
-										waiting_for_activity={conversation_waiting_for_activity(block.details)}
+										waiting_for_activity={conversation_waiting_for_activity(
+											progress_items,
+										)}
 									>
 									{#snippet details(session_failed: boolean)}
 										<!-- Stopping is the user's own act, not a failure the trace must explain. -->
 										<ConversationTrace
 											failed={session_failed}
 											items={visible_details}
+											message_streaming={run_active &&
+												block.session.run_id === active_run_id &&
+												!session_settled &&
+												block.session.ended_at === undefined &&
+												streaming_turn_ids.has(block.turn_id)}
 											work_active={!session_settled &&
 												block.session.ended_at === undefined}
 										/>
@@ -1033,7 +1513,6 @@
 			{context_usage}
 			{disabled}
 			draft_key={snapshot.thread_id}
-			{engine_locked}
 			{onabort}
 			onjumptolatest={JumpToLatest}
 			{onnewthread}

@@ -147,6 +147,75 @@ describe("Forge WebSocket binding lifecycle", () => {
 		await closed;
 	});
 
+	it("resolves an endpoint send through the real ws success callback", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-forge-websocket-send-"));
+		const authority_runtime = ManagedRuntime.make(make_forge_control_authority_layer());
+		const authority = await authority_runtime.runPromise(ForgeControlAuthority);
+		const config = decode_forge_config({
+			database_path: join(directory, "artisan.sqlite"),
+			instance_id: "websocket-send-test",
+			migrations_path: join(directory, "migrations"),
+		});
+		const http = await Effect.runPromise(start_forge_http(config, authority));
+		/**
+		 * `ws` reports a successful send by invoking the callback with `null`.
+		 * A strict `undefined` comparison once rejected every delivered frame,
+		 * which killed each session immediately after transport negotiation.
+		 */
+		let serve_websocket!: (
+			endpoint: Parameters<
+				Parameters<typeof BindForgeWebSocket>[0]["ServeWebSocket"]
+			>[0],
+		) => Effect.Effect<void, unknown>;
+		const delivered = new Promise<void>((accept, fail) => {
+			const timer = setTimeout(() => fail(new Error("send never settled")), 10_000);
+			serve_websocket = (endpoint) =>
+				Effect.tryPromise(async () => {
+					await endpoint.send(new Uint8Array([1, 2, 3]));
+					clearTimeout(timer);
+					accept();
+				}).pipe(
+					Effect.tapCause(() =>
+						Effect.sync(() => {
+							clearTimeout(timer);
+							fail(new Error("send rejected for a delivered frame"));
+						}),
+					),
+					Effect.andThen(Effect.never),
+				);
+		});
+		const binding = await Effect.runPromise(
+			BindForgeWebSocket({
+				authority,
+				config,
+				http,
+				ServeWebSocket: (endpoint) => serve_websocket(endpoint),
+			}),
+		);
+		closers.push(async () => {
+			await Effect.runPromise(binding.Close.pipe(Effect.ignore));
+			await Effect.runPromise(http.Close.pipe(Effect.ignore));
+			await authority_runtime.dispose();
+			await rm(directory, { force: true, recursive: true });
+		});
+
+		const session = await Effect.runPromise(
+			authority.ConsumePair(await Effect.runPromise(authority.RequestPair)),
+		);
+		const websocket_url = new URL(config.websocket_path, http.endpoint);
+		websocket_url.protocol = "ws:";
+		const socket = new WebSocket(websocket_url, {
+			headers: { cookie: `artisan_forge_session=${Option.getOrThrow(session)}` },
+		});
+		const received = once(socket, "message");
+		await once(socket, "open");
+
+		await delivered;
+		const [frame] = (await received) as [Buffer];
+		expect([...frame]).toEqual([1, 2, 3]);
+		socket.close();
+	});
+
 	it("destroys a pending upgrade when session authorization is interrupted", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "artisan-forge-upgrade-"));
 		const authority_runtime = ManagedRuntime.make(make_forge_control_authority_layer());

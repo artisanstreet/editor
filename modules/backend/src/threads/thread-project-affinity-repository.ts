@@ -259,6 +259,9 @@ const MakeProjection = (
 		created_at: current.created_at,
 		...(current.current_goal === undefined ? {} : { current_goal: current.current_goal }),
 		last_activity_at: current.last_activity_at,
+		...(current.last_message_at === undefined
+			? {}
+			: { last_message_at: current.last_message_at }),
 		...(current.reader_activity_at === undefined
 			? {}
 			: { reader_activity_at: current.reader_activity_at }),

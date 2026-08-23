@@ -24,6 +24,7 @@ import { ThreadTranscriptSnapshot, TranscriptEntry } from "../transcript";
 import { WorkspaceConflictListQueryResult } from "../workspace-changes";
 
 import { OrchestrationGraph, ThreadSessionSnapshot } from "./lifecycle";
+import { ThreadWorkSnapshot } from "./inspection";
 
 import { Schema } from "effect";
 
@@ -49,6 +50,7 @@ export const SubscribeEnvelope = Schema.Struct({
 			include_terminal: Schema.Boolean,
 		}),
 		Schema.Struct({ type: Schema.Literal("thread.session"), thread_id: Identifier }),
+		Schema.Struct({ type: Schema.Literal("thread.work"), thread_id: Identifier }),
 		Schema.Struct({ type: Schema.Literal("surface.list"), query: SurfaceListQuery }),
 		Schema.Struct({ type: Schema.Literal("workspace.conflict.list"), thread_id: Identifier }),
 		Schema.Struct({
@@ -261,6 +263,18 @@ export const ThreadSessionSnapshotEnvelope = Schema.Struct({
 	subscription_id: Identifier,
 });
 export type ThreadSessionSnapshotEnvelope = typeof ThreadSessionSnapshotEnvelope.Type;
+
+/** Provides the current coordinator-owned work pointer for one ordered subscription. */
+export const ThreadWorkSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("thread.work.snapshot"),
+	payload: ThreadWorkSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type ThreadWorkSnapshotEnvelope = typeof ThreadWorkSnapshotEnvelope.Type;
 export const SurfaceListSnapshotEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
 	journal_sequence: JournalSequence,

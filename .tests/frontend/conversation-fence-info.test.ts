@@ -41,7 +41,7 @@ describe("conversation code-fence info strings", () => {
 		const styles = ReadStylesheets();
 
 		expect(content).toContain("ProsePre: CodeSnippet");
-		expect(content).toContain("tree={rendered_tree}");
+		expect(content).toContain("tree={visible_tree}");
 		expect(styles).toContain(".docs-code-snippet-body .line.highlight");
 		expect(styles).toContain("display: inline-block !important");
 		expect(styles).toContain("color: var(--shiki-dark) !important");

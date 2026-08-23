@@ -14,14 +14,17 @@
 	let {
 		item,
 		image_sources,
+		message_streaming = false,
 		onapproval,
 		onimagevisibilitychange,
 		onquestion,
 		onusageinterruptionresolve,
+		steering_pending = false,
 		trailing,
 	}: {
 		item: ConversationItem;
 		image_sources?: ReadonlyMap<string, string>;
+		message_streaming?: boolean;
 		onapproval?: (
 			approval_id: string,
 			approved: boolean,
@@ -46,12 +49,20 @@
 				  }
 				| { readonly type: "cancel" },
 		) => Effect.Effect<void, { readonly message: string }>;
+		steering_pending?: boolean;
 		trailing?: Snippet;
 	} = $props();
 </script>
 
 {#if item.type === "user_message" || item.type === "assistant_message" || item.type === "reasoning_summary"}
-	<ConversationMessage {image_sources} {item} {onimagevisibilitychange} {trailing} />
+	<ConversationMessage
+		{image_sources}
+		{item}
+		{message_streaming}
+		{onimagevisibilitychange}
+		{steering_pending}
+		{trailing}
+	/>
 {:else if item.type === "work_session"}
 	<ConversationWorkSession {item} />
 {:else if item.type === "activity"}

@@ -1,4 +1,4 @@
-import { Context, Deferred, Effect, Layer, Ref } from "effect";
+import { Context, Deferred, Effect, Layer, Ref, Schedule } from "effect";
 
 import type { ThreadOpenSnapshot } from "@artisan/protocol";
 import { ArtisanClient, type ArtisanClientError } from "@artisan/transport/client";
@@ -15,6 +15,12 @@ import { ThreadRouteId } from "../root/thread-navigation";
  * already materialised once.
  */
 const maximum_retained_threads = 6;
+
+/** One fresh correlation after the unanswered request has retired its suspect session. */
+const thread_open_retry_schedule = Schedule.spaced("50 millis").pipe(Schedule.upTo({ times: 1 }));
+
+const thread_open_failure_is_unanswered = (error: ArtisanClientError) =>
+	error.retryable && error.code === "connection" && error.protocol_code === "request.timeout";
 
 type ThreadOpenFlight = Deferred.Deferred<ThreadOpenSnapshot, ArtisanClientError>;
 
@@ -92,6 +98,10 @@ export const ThreadOpenControllerLive = Layer.effect(
 
 		const Complete = (key: string, deferred: ThreadOpenFlight) =>
 			client.GetThreadOpen(key).pipe(
+				Effect.retry({
+					schedule: thread_open_retry_schedule,
+					while: thread_open_failure_is_unanswered,
+				}),
 				Effect.flatMap(Publish),
 				Effect.exit,
 				Effect.flatMap((exit) =>

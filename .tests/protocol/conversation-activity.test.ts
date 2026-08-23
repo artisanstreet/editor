@@ -7,8 +7,11 @@ import {
 	GetConversationActivityPresentation,
 } from "@artisan/protocol";
 
-const Present = (kind: string, status: "active" | "completed" | "failed" = "completed") =>
-	GetConversationActivityPresentation({ kind, label: "Provider fallback", status }).label;
+const Present = (
+	kind: string,
+	status: "active" | "completed" | "failed" = "completed",
+	label = "Provider fallback",
+) => GetConversationActivityPresentation({ kind, label, status }).label;
 
 const Counted = (kind: string, count: number) =>
 	GetConversationActivityCountLabel(GetConversationActivityCategory(kind), count);
@@ -20,7 +23,7 @@ describe("conversation activity presentation", () => {
 		expect(Present("file")).toBe("Read a file");
 		expect(Present("workspace.read")).toBe("Read a file");
 		expect(Present("search")).toBe("Searched the web");
-		expect(Present("tool")).toBe("Used a tool");
+		expect(Present("tool", "completed", "Tool")).toBe("Used a tool");
 		expect(Present("test.run")).toBe("Ran tests");
 	});
 
@@ -52,6 +55,12 @@ describe("conversation activity presentation", () => {
 
 	it("preserves a safe normalized label for unknown future semantics", () => {
 		expect(Present("future.provider.action")).toBe("Provider fallback");
+	});
+
+	it("keeps a concrete generic tool name in its lifecycle copy", () => {
+		expect(Present("tool", "active", "skill_view")).toBe("Using skill view");
+		expect(Present("tool", "completed", "skill_view")).toBe("Used skill view");
+		expect(Present("tool", "failed", "skill_view")).toBe("Skill view failed");
 	});
 
 	/**

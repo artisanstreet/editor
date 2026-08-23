@@ -1,5 +1,6 @@
 import { Effect, Option, Ref } from "effect";
 
+import { conversation_default_window_turn_count } from "@artisan/protocol";
 import type { SubscribeEnvelope } from "@artisan/protocol";
 
 import { ConversationReadModel } from "../../conversation/index.ts";
@@ -133,7 +134,11 @@ export const MakeConversationProjectionHandler = Effect.gen(function* () {
 						);
 						if (cursor_handled) return;
 					}
-					yield* conversation.ReadSnapshot(thread_id).pipe(
+					yield* conversation
+					.ReadSnapshot(thread_id, {
+						window: { maximum_turn_count: conversation_default_window_turn_count },
+					})
+					.pipe(
 						Effect.flatMap((availability) => {
 							if (availability.status !== "available")
 								return EnqueueProjectionError(

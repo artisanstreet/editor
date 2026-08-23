@@ -17,8 +17,10 @@ import type { Presentation } from "./step.ts";
  */
 
 export interface Presenter {
-	readonly close: () => void;
+	readonly close: () => void | Promise<void>;
 	readonly emit: (event: ChecklistEvent) => void;
+	/** True when the presenter disappears on close and needs a persistent failure report. */
+	readonly transient?: boolean;
 }
 
 const presentation_flags: Readonly<Record<string, Exclude<Presentation, "auto">>> = {

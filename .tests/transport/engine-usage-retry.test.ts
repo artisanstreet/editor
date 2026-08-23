@@ -74,7 +74,7 @@ describe("engine usage read retry", () => {
 
 					yield* Deferred.succeed(landed, envelope.message_id);
 
-					return RequestDelivered;
+					return RequestDelivered("connection_usage_retry");
 				}),
 			);
 			const pending = yield* Effect.forkScoped(api.get_engine_usage());
@@ -104,7 +104,7 @@ describe("engine usage read retry", () => {
 					attempted.push(envelope.message_id);
 					yield* Deferred.succeed(landed, envelope.message_id);
 
-					return RequestDelivered;
+					return RequestDelivered("connection_usage_rejection");
 				}),
 			);
 			const pending = yield* Effect.forkScoped(Effect.exit(api.get_engine_usage()));

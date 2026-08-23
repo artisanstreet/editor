@@ -28,7 +28,6 @@
 		context_usage,
 		context_window_tokens,
 		disabled,
-		engine_locked,
 		new_thread_ready = false,
 		onpolicychange,
 		onprimaryaction,
@@ -45,7 +44,6 @@
 		context_usage?: SurfaceUsageAggregate;
 		context_window_tokens?: number;
 		disabled: boolean;
-		engine_locked: boolean;
 		new_thread_ready?: boolean;
 		onpolicychange?: (
 			policy: ThreadSessionPolicy,
@@ -101,7 +99,6 @@
 	<div class="flex min-w-0 items-center gap-0.5">
 		<ModelSelector
 			{disabled}
-			{engine_locked}
 			{onpolicychange}
 			{policy}
 			{runtime_catalog}
@@ -186,4 +183,3 @@
 		</TooltipProvider>
 	</div>
 </div>
-

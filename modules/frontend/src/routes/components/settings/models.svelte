@@ -3,7 +3,7 @@
 	import X from "@tabler/icons-svelte/icons/x";
 	import { Effect, Stream } from "effect";
 	import { EngineMarkClass, ProviderMarkFor } from "$lib/engine/presentation";
-	import { ModelsFromCatalog } from "$lib/engine/model-selection";
+	import { ModelsFromCatalog, VariantLabel } from "$lib/engine/model-selection";
 	import { Button } from "$lib/components/ui/button";
 	import {
 		SessionDefaultsController,
@@ -70,13 +70,17 @@
 			{#each favorites as model (model.id)}
 				{@const lab_mark = ProviderMarkFor(model.definition.provider)}
 				{@const LabIcon = lab_mark.icon}
+				{@const variant_id = model.definition.native_selection?.variant_id}
 				<div class="flex items-center justify-between gap-4 px-4 py-2.5">
 					<span class="flex min-w-0 items-center gap-2.5">
 						<LabIcon class={EngineMarkClass(lab_mark, "size-4 shrink-0")} />
 						<span class="flex min-w-0 flex-col">
 							<span class="flex items-center gap-1.5 truncate text-sm text-foreground">
-								<StarFilled class="size-3 shrink-0 text-favorite" aria-hidden="true" />
-								{model.name}
+							<StarFilled class="size-3 shrink-0 text-favorite" aria-hidden="true" />
+							{model.name}
+							{#if variant_id !== undefined}
+								<span class="text-muted-foreground">{VariantLabel(model)}</span>
+							{/if}
 							</span>
 							<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
 						</span>

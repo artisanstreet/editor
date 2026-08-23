@@ -125,7 +125,22 @@ describe("thread metadata subagent isolation", () => {
 					yield* coordinator.WaitForIdle;
 					const after_group = (yield* threads.Snapshot()).threads[0]!;
 
-					return { after_child, after_group, before_child };
+					yield* journal.AppendEvent({
+						agent_id: "agent-root",
+						causation_id: "assistant-complete",
+						correlation_id: "root-run",
+						payload: {
+							message_id: "assistant-message",
+							text: "The delegated review is complete.",
+							type: "assistant.message_completed",
+						},
+						run_id: "root-run",
+						thread_id: "thread-subagent-status",
+					});
+					yield* coordinator.WaitForIdle;
+					const after_assistant = (yield* threads.Snapshot()).threads[0]!;
+
+					return { after_assistant, after_child, after_group, before_child };
 				}),
 			);
 
@@ -134,6 +149,7 @@ describe("thread metadata subagent isolation", () => {
 			expect(states.after_child.last_activity_at).not.toBe(
 				states.before_child.last_activity_at,
 			);
+			expect(states.after_child.last_message_at).toBe(states.before_child.last_message_at);
 			expect(states.after_child.reader_activity_at).toBe(
 				states.before_child.reader_activity_at,
 			);
@@ -141,7 +157,14 @@ describe("thread metadata subagent isolation", () => {
 			expect(states.after_group.reader_activity_at).not.toBe(
 				states.after_child.reader_activity_at,
 			);
-			expect(seen).toEqual(["user_message", "run_completed"]);
+			expect(states.after_group.last_message_at).toBe(states.before_child.last_message_at);
+			expect(states.after_assistant.last_message_at).not.toBe(
+				states.after_group.last_message_at,
+			);
+			expect(states.after_assistant.last_activity_at).toBe(
+				states.after_group.last_activity_at,
+			);
+			expect(seen).toEqual(["user_message", "run_completed", "assistant_message"]);
 		} finally {
 			await runtime.dispose();
 			await rm(directory, { force: true, recursive: true });

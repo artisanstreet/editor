@@ -6,7 +6,10 @@ import { ThreadReadModel } from "../../persistence/thread-read-model";
 import { TranscriptReadModel } from "../../persistence/transcript-read-model";
 import { RuntimeMetadata } from "../../runtime/metadata";
 import { SurfaceService } from "../../surfaces/service";
-import { thread_activity_kind_from_event } from "../../threads/internal/thread-activity";
+import {
+	thread_activity_kind_from_event,
+	thread_message_sent_from_event,
+} from "../../threads/internal/thread-activity";
 import { WorkspaceChangeRepository } from "../../workspace/changes/repository";
 import type { PendingSubscription, ProjectionSubscription, ReadyState } from "../connection-state";
 import { ConnectionSubscriptionControl } from "./control";
@@ -105,7 +108,8 @@ export const MakeConnectionProjectionPatches = Effect.gen(function* () {
 					 * retention activity, so the list re-reads on it explicitly.
 					 */
 					event.payload.type === "interaction.question" ||
-					thread_activity_kind_from_event(event.payload) !== undefined)
+					thread_activity_kind_from_event(event.payload) !== undefined ||
+					thread_message_sent_from_event(event.payload))
 			) {
 				const embedded = thread_patch;
 				/** A failed coordinator join degrades to the embedded patch; it must not starve every projection this wake. */
@@ -308,6 +312,39 @@ export const MakeConnectionProjectionPatches = Effect.gen(function* () {
 							stream_id: subscription.stream_id,
 							subscription_id,
 						});
+					} else if (subscription._tag === "thread.work") {
+						if (
+							event.journal_sequence <= subscription.journal_sequence ||
+							event.thread_id !== subscription.thread_id
+						)
+							return undefined;
+						/**
+						 * Work is cheap to read and too important to predicate on event
+						 * taxonomy. Any fact for this thread may have moved coordinator
+						 * ownership; an unchanged snapshot is harmless, a skipped one is
+						 * the client/server split this subscription exists to prevent.
+						 */
+						const work = yield* CachedRead(
+							ProjectionKey("work", subscription.thread_id),
+							orchestration.GetWork(subscription.thread_id),
+						);
+						yield* Enqueue({
+							journal_sequence: event.journal_sequence,
+							kind: "thread.work.snapshot",
+							message_id,
+							origin: "backend",
+							payload: {
+								journal_sequence: event.journal_sequence,
+								thread_id: subscription.thread_id,
+								...(work === undefined ? {} : { work }),
+							},
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at: event.sent_at,
+							sequence,
+							stream_id: subscription.stream_id,
+							subscription_id,
+						});
 					} else if (subscription._tag === "surface.list") {
 						if (
 							event.journal_sequence <= subscription.journal_sequence ||
@@ -455,6 +492,7 @@ export const MakeConnectionProjectionPatches = Effect.gen(function* () {
 						subscription._tag === "thread.transcript" ||
 						subscription._tag === "orchestration.group.list" ||
 						subscription._tag === "thread.session" ||
+						subscription._tag === "thread.work" ||
 						subscription._tag === "surface.list" ||
 						subscription._tag === "surface.usage.aggregate" ||
 						subscription._tag === "workspace.conflict.list"

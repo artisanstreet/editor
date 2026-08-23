@@ -4,6 +4,17 @@
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { shader_config, type ShaderConfig, type SurfaceToken } from "$lib/shader-config";
 
+	let {
+		offset_x = 0,
+		offset_y = 0,
+		time_offset = 0,
+	}: {
+		offset_x?: number;
+		offset_y?: number;
+		/** Seconds added to this surface's shader clock so sibling rays do not mirror. */
+		time_offset?: number;
+	} = $props();
+
 	const vertex_shader = `#version 300 es
 		in vec2 a_position;
 		uniform vec2 u_resolution;
@@ -283,8 +294,8 @@
 				gl.uniform1f(gl.getUniformLocation(program, "u_midIntensity"), config.mid_intensity);
 				gl.uniform1f(gl.getUniformLocation(program, "u_scale"), config.scale);
 				gl.uniform1f(gl.getUniformLocation(program, "u_rotation"), config.rotation);
-				gl.uniform1f(gl.getUniformLocation(program, "u_offsetX"), config.offset_x);
-				gl.uniform1f(gl.getUniformLocation(program, "u_offsetY"), config.offset_y);
+				gl.uniform1f(gl.getUniformLocation(program, "u_offsetX"), config.offset_x + offset_x);
+				gl.uniform1f(gl.getUniformLocation(program, "u_offsetY"), config.offset_y + offset_y);
 			});
 			yield* SetColor("u_color1", config.color_1, 0.64);
 			yield* SetColor("u_color2", config.color_2, 0.78);
@@ -401,7 +412,10 @@
 					gl.viewport(0, 0, width, height);
 				}
 				gl.uniform2f(resolution, width, height);
-				gl.uniform1f(time, reduced_motion ? 1.8 : now * 0.00012 * current_config.speed);
+				gl.uniform1f(
+					time,
+					(reduced_motion ? 1.8 : now * 0.00012 * current_config.speed) + time_offset,
+				);
 				gl.clearColor(0, 0, 0, 0);
 				gl.clear(gl.COLOR_BUFFER_BIT);
 				gl.drawArrays(gl.TRIANGLES, 0, 6);

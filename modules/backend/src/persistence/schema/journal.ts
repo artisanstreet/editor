@@ -115,6 +115,7 @@ export const Threads = sqliteTable(
 		last_assistant_message: text("last_assistant_message"),
 		rename_suggestion: text("rename_suggestion"),
 		last_activity_at: text("last_activity_at").notNull().default("1970-01-01T00:00:00.000Z"),
+		last_message_at: text("last_message_at").notNull().default("1970-01-01T00:00:00.000Z"),
 		reader_activity_at: text("reader_activity_at")
 			.notNull()
 			.default("1970-01-01T00:00:00.000Z"),

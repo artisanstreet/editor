@@ -49,6 +49,16 @@ describe("Windows process visibility", () => {
 		expect(launcher).toMatch(/stdio: "inherit",\s+windowsHide: false/u);
 	});
 
+	it("keeps runner and checklist helpers inside the existing terminal surface", () => {
+		const runner = Read(".scripts/dev/runner.ts");
+		const checklist = Read("modules/checklist/src/tui-bridge.ts");
+
+		expect(runner).not.toContain("windowsHide: false");
+		expect(checklist).not.toContain("windowsHide: false");
+		expect(runner.match(/windowsHide: true/gu)?.length).toBeGreaterThanOrEqual(7);
+		expect(checklist).toContain("windowsHide: true");
+	});
+
 	it("routes native installer helpers through the no-console command boundary", () => {
 		const boundary = Read("modules/installer/rust/background_process.rs");
 

@@ -57,6 +57,37 @@ export const cursor_core_models = [
 		},
 	},
 	{
+		id: "cursor-grok-4-6",
+		name: "Grok 4.6",
+		native_model_id: "cursor-grok-4.6",
+		description:
+			"A frontier model from Cursor and SpaceXAI for long-running agents and ambitious interactive work.",
+		harness: "cursor",
+		provider: "cursor",
+		routing: { kind: "default" },
+		status: "prototype",
+		capabilities: {
+			thinking: {
+				availability: "supported",
+				default: "high",
+				options: [
+					standard("light", "low"),
+					standard("medium", "medium"),
+					standard("high", "high"),
+					standard("xhigh", "xhigh"),
+				],
+			},
+			speed_options: [
+				cursor_grok_standard_speed("Grok 4.6"),
+				cursor_grok_fast_speed("Grok 4.6", 2),
+			],
+			image_input: false,
+			local_tools: true,
+			mcp: true,
+			web_search: false,
+		},
+	},
+	{
 		id: "cursor-grok-4-5",
 		name: "Grok 4.5",
 		native_model_id: "cursor-grok-4.5",

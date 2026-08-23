@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-	model_transition_presentation,
 	work_session_disclosure,
 	work_session_initially_open,
 } from "../../modules/frontend/src/lib/conversation/presentation";
@@ -81,11 +80,5 @@ describe("conversation presentation", () => {
 			details_hidden: true,
 			details_mounted: false,
 		});
-	});
-
-	it("holds a started handoff until its source model is known", () => {
-		expect(model_transition_presentation("started", undefined)).toBe("pending_source");
-		expect(model_transition_presentation("completed", undefined)).toBe("target_only");
-		expect(model_transition_presentation("started", "old-model")).toBe("source_and_target");
 	});
 });

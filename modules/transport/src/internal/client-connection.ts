@@ -43,6 +43,7 @@ import {
 	RequestDelivered,
 	RequestHeld,
 	type FrontendTrace,
+	type RequestDelivery,
 	type SendCurrent,
 	type SendRequest,
 } from "./client-common";
@@ -75,6 +76,7 @@ export interface ClientConnectionLifecycle {
 	readonly Dispose: Effect.Effect<void>;
 	readonly MakeTrace: Effect.Effect<FrontendTrace>;
 	readonly RetryConnection: Effect.Effect<void>;
+	readonly RetireTimedOutRequest: (delivery: RequestDelivery) => Effect.Effect<void>;
 	readonly SendCurrent: SendCurrent;
 	readonly SendRequest: SendRequest;
 	readonly Start: (handlers: ClientConnectionHandlers) => Effect.Effect<void, never, Scope.Scope>;
@@ -104,6 +106,12 @@ export const make_client_connection_lifecycle = (
 			phase: "connecting",
 		});
 		const ever_connected = yield* Ref.make(false);
+		/**
+		 * Monotonic evidence that the active transport is still delivering. A
+		 * request deadline may retire a genuinely silent socket, but must not turn
+		 * one slow RPC on an otherwise busy session into a reconnect loop.
+		 */
+		const inbound_generation = yield* Ref.make(0);
 		const initial_retry_gate = yield* Deferred.make<void>();
 		const retry_gate = yield* Ref.make(initial_retry_gate);
 		/**
@@ -173,10 +181,55 @@ export const make_client_connection_lifecycle = (
 					Option.match(current.active, {
 						onNone: () => Effect.succeed(RequestHeld),
 						onSome: (active) =>
-							send_active(active, envelope).pipe(Effect.as(RequestDelivered)),
+							send_active(active, envelope).pipe(
+								Effect.andThen(Ref.get(inbound_generation)),
+								Effect.map((generation) =>
+									RequestDelivered(active.connection_id, generation),
+								),
+							),
 					}),
 				),
 			);
+
+		/**
+		 * A local query deadline is a control-channel health failure. Close only the
+		 * session that actually carried it: a replacement may already be ready by
+		 * the time the deadline fiber runs, and retiring that healthy epoch would
+		 * turn recovery into a reconnect loop.
+		 */
+		const retire_timed_out_request = (delivery: RequestDelivery) =>
+			Effect.gen(function* () {
+				if (
+					delivery._tag === "Held" ||
+					delivery.connection_id === undefined ||
+					delivery.inbound_generation === undefined
+				)
+					return;
+				const current = yield* Ref.get(state);
+				if (current.disposed || Option.isNone(current.active)) return;
+				const active = current.active.value;
+				if (delivery.connection_id !== active.connection_id) return;
+				/** Any later inbound frame proves the session, rather than the RPC, is live. */
+				if ((yield* Ref.get(inbound_generation)) !== delivery.inbound_generation) return;
+				const retired_connection_id = active.connection_id;
+				yield* Effect.all(
+					[active.ports.control_port.Close, active.ports.stream_port.Close],
+					{ concurrency: "unbounded", discard: true },
+				);
+				/** Do not let the caller race a fresh request into the just-closed epoch. */
+				yield* Effect.gen(function* () {
+					while (true) {
+						const latest = yield* Ref.get(state);
+						if (
+							latest.disposed ||
+							Option.isNone(latest.active) ||
+							latest.active.value.connection_id !== retired_connection_id
+						)
+							return;
+						yield* Effect.sleep("5 millis");
+					}
+				}).pipe(Effect.timeoutOption("1 second"), Effect.asVoid);
+			});
 
 		const send_current = (envelope: InboundControlEnvelope) =>
 			send_request(envelope).pipe(Effect.asVoid);
@@ -499,6 +552,7 @@ export const make_client_connection_lifecycle = (
 					case "orchestration.group.list.snapshot":
 					case "orchestration.group.list.patch":
 					case "thread.session.snapshot":
+					case "thread.work.snapshot":
 					case "surface.list.snapshot":
 					case "surface.usage.aggregate.snapshot":
 					case "workspace.conflict.list.snapshot":
@@ -674,8 +728,19 @@ export const make_client_connection_lifecycle = (
 						): Effect.Effect<A, E, R> =>
 							receive.pipe(
 								Effect.tap(() =>
-									runtime.Now.pipe(
-										Effect.flatMap((now) => Ref.set(last_inbound_at, now)),
+									Effect.all(
+										[
+											runtime.Now.pipe(
+												Effect.flatMap((now) =>
+													Ref.set(last_inbound_at, now),
+												),
+											),
+											Ref.update(
+												inbound_generation,
+												(generation) => generation + 1,
+											),
+										],
+										{ discard: true },
 									),
 								),
 							);
@@ -989,6 +1054,7 @@ export const make_client_connection_lifecycle = (
 			Dispose: dispose,
 			MakeTrace: make_trace,
 			RetryConnection: retry_connection,
+			RetireTimedOutRequest: retire_timed_out_request,
 			SendCurrent: send_current,
 			SendRequest: send_request,
 			Start: start,

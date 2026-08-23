@@ -18,7 +18,9 @@
 	let {
 		image_sources,
 		item,
+		message_streaming = false,
 		onimagevisibilitychange,
+		steering_pending = false,
 		trailing,
 	}: {
 		image_sources?: ReadonlyMap<string, string>;
@@ -26,10 +28,12 @@
 			ConversationItem,
 			{ type: "user_message" | "assistant_message" | "reasoning_summary" }
 		>;
+		message_streaming?: boolean;
 		onimagevisibilitychange?: (
 			attachments: ReadonlyArray<ImageAttachmentReference>,
 			visible: boolean,
 		) => Effect.Effect<void>;
+		steering_pending?: boolean;
 		trailing?: Snippet;
 	} = $props();
 
@@ -178,46 +182,69 @@
 </script>
 
 {#if item.type === "user_message"}
-	<article
-		class="ml-auto flex max-w-xl flex-col items-end gap-2"
-		aria-label="Your message"
-		data-conversation-item-id={item.id}
-	>
-		{#if (item.attachments?.length ?? 0) > 0}
+	<div class="flex w-full flex-col gap-2">
+		<article
+			class="ml-auto flex max-w-xl flex-col items-end gap-2"
+			aria-label="Your message"
+			data-conversation-item-id={item.id}
+		>
+			{#if (item.attachments?.length ?? 0) > 0}
+				<div
+					use:observe_image_visibility
+					class="flex max-w-full flex-wrap justify-end gap-2"
+					aria-label="Attached images"
+				>
+					{#each item.attachments ?? [] as attachment (attachment.id)}
+						{@const image = resolved_images.find((candidate) => candidate.attachment.id === attachment.id)}
+						{#if image === undefined}
+							<div class="card size-24 overflow-hidden rounded-xl bg-muted/60 p-0 animate-pulse" aria-hidden="true"></div>
+						{:else}
+							<button
+								type="button"
+								class="card size-24 cursor-pointer overflow-hidden rounded-xl bg-transparent p-0 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&>img]:size-full [&>img]:object-cover"
+								aria-label={`View ${image.attachment.name}`}
+								onclick={yield* ViewImage(image)}
+							>
+								<img src={image.source} alt={image.attachment.name} />
+							</button>
+						{/if}
+					{/each}
+				</div>
+			{/if}
 			<div
-				use:observe_image_visibility
-				class="flex max-w-full flex-wrap justify-end gap-2"
-				aria-label="Attached images"
+				class="max-w-full rounded-2xl bg-linear-to-t from-(--user-message-from) to-(--user-message-to) px-4 py-3"
+				class:card={$user_message_style_config.use_card}
+				style:--user-message-from={`var(--${$user_message_style_config.from})`}
+				style:--user-message-to={`var(--${$user_message_style_config.to})`}
 			>
-				{#each item.attachments ?? [] as attachment (attachment.id)}
-					{@const image = resolved_images.find((candidate) => candidate.attachment.id === attachment.id)}
-					{#if image === undefined}
-						<div class="card size-24 overflow-hidden rounded-xl bg-muted/60 p-0 animate-pulse" aria-hidden="true"></div>
-					{:else}
-						<button
-							type="button"
-							class="card size-24 cursor-pointer overflow-hidden rounded-xl bg-transparent p-0 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&>img]:size-full [&>img]:object-cover"
-							aria-label={`View ${image.attachment.name}`}
-							onclick={yield* ViewImage(image)}
-						>
-							<img src={image.source} alt={image.attachment.name} />
-						</button>
-					{/if}
-				{/each}
+				{#if item.text.length > 0}
+					<!-- Anywhere-wrapping keeps pasted tokens and URLs inside the bubble's width. -->
+					<p class="whitespace-pre-wrap text-base leading-7 [overflow-wrap:anywhere] text-foreground">
+						{item.text}
+					</p>
+				{/if}
+				{#if trailing !== undefined}{@render trailing()}{/if}
+			</div>
+		</article>
+		{#if steering_pending}
+			<div
+				class="animate-[status-swap-enter_var(--text-swap-dur)_var(--ease-in-out)_both] flex max-w-(--prose-body-width) items-center"
+				role="status"
+				aria-label="Steering"
+				data-conversation-steering-status="true"
+			>
+				<span class="trace-command-label min-w-0 truncate" aria-hidden="true">
+					<ShimmerText
+						class="text-base leading-7 text-muted-foreground"
+						delay={1.5}
+						duration={3}
+					>
+						Steering
+					</ShimmerText>
+				</span>
 			</div>
 		{/if}
-		<div
-			class="max-w-full rounded-2xl bg-linear-to-t from-(--user-message-from) to-(--user-message-to) px-4 py-3"
-			class:card={$user_message_style_config.use_card}
-			style:--user-message-from={`var(--${$user_message_style_config.from})`}
-			style:--user-message-to={`var(--${$user_message_style_config.to})`}
-		>
-			{#if item.text.length > 0}
-				<p class="whitespace-pre-wrap text-base leading-7 text-foreground">{item.text}</p>
-			{/if}
-			{#if trailing !== undefined}{@render trailing()}{/if}
-		</div>
-	</article>
+	</div>
 {:else}
 	<article class="max-w-(--prose-body-width)" aria-label={item.type === "reasoning_summary" ? "Reasoning summary" : "Assistant message"}>
 		{#if item.type === "reasoning_summary"}
@@ -231,7 +258,10 @@
 				<InlineCodeText text={item.text} />
 			</ShimmerText>
 		{:else}
-			<MarkdownContent streaming={item.lifecycle === "streaming"} text={item.text} />
+			<MarkdownContent
+				streaming={message_streaming && item.lifecycle === "streaming"}
+				text={item.text}
+			/>
 			{#if trailing !== undefined}{@render trailing()}{/if}
 		{/if}
 	</article>

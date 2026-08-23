@@ -1,18 +1,17 @@
 import type { EngineUsageWindow } from "@artisan/protocol";
 
 /**
- * Summarizes the point by which every disclosed weekly bucket for one provider
+ * Summarizes the point by which every disclosed bucket in one cadence group
  * has reset. Missing or stale timestamps stay silent rather than turning an
  * incomplete provider report into a made-up countdown.
  */
-export const weekly_reset_duration = (
+export const usage_reset_duration = (
 	windows: ReadonlyArray<EngineUsageWindow>,
 	at_ms: number,
 ): string | undefined => {
-	const weekly_windows = windows.filter((usage_window) => usage_window.kind === "weekly");
-	if (weekly_windows.length === 0) return undefined;
+	if (windows.length === 0) return undefined;
 
-	const future_resets = weekly_windows.map((usage_window) =>
+	const future_resets = windows.map((usage_window) =>
 		usage_window.resets_at === undefined ? Number.NaN : Date.parse(usage_window.resets_at),
 	);
 	if (future_resets.some((reset_at_ms) => !Number.isFinite(reset_at_ms) || reset_at_ms <= at_ms))

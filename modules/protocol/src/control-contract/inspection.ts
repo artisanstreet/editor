@@ -1,6 +1,6 @@
 import { MessageImageAttachmentQuery, MessageImageAttachmentQueryResult } from "../attachments";
 
-import { Identifier } from "../common";
+import { Identifier, JournalSequence } from "../common";
 
 import { ConversationQuery, ConversationSnapshot } from "../conversation";
 import { ThreadListItem } from "../thread";
@@ -95,6 +95,19 @@ export const ThreadWorkItem = Schema.Struct({
 });
 
 export type ThreadWorkItem = typeof ThreadWorkItem.Type;
+
+/**
+ * One ordered reading of the coordinator-owned work pointer for a thread.
+ * `work` is absent when no run currently owns the thread; the watermark lets
+ * consumers compare retained and live readings without inventing freshness
+ * from the work item's status.
+ */
+export const ThreadWorkSnapshot = Schema.Struct({
+	journal_sequence: JournalSequence,
+	thread_id: Identifier,
+	work: Schema.optional(ThreadWorkItem),
+});
+export type ThreadWorkSnapshot = typeof ThreadWorkSnapshot.Type;
 
 /** Requests the current durable coordinator work for one thread. */
 export const ThreadWorkQueryEnvelope = Schema.Struct({

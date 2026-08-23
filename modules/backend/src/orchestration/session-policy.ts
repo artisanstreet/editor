@@ -1,5 +1,10 @@
 import { ComposeNativeModelId, ContextWindowNativeConfig, model_manifest } from "@artisan/catalog";
-import type { EnginePermissionPolicy, EngineRunMetadata } from "@artisan/engines";
+import {
+	OpenCode2AgentId,
+	type EnginePermissionPolicy,
+	type EngineRunMetadata,
+	type OpenCode2PermissionLevel,
+} from "@artisan/engines";
 import { SessionPolicyPermission, type ThreadSessionPolicy } from "@artisan/protocol";
 
 /** Returns whether a requested executable is permitted by the thread policy. */
@@ -161,6 +166,72 @@ export const MakeSessionPolicyRunMetadata = (
 				};
 
 	/**
+	 * OpenCode keeps route, model, and variant as separate API fields. Its
+	 * provider rules are not a sandbox, so the adapter receives the narrowed
+	 * canonical axes and owns the final ordered OpenCode rule document.
+	 */
+	if (policy.engine_id === "opencode2") {
+		const model_id = policy.model_id ?? policy.model;
+		return {
+			...(policy.catalog_revision === undefined
+				? {}
+				: { catalog_revision: policy.catalog_revision }),
+			...(model_id === undefined ? {} : { model: model_id, model_id }),
+			permission_policy: {
+				approval,
+				...(edit_scope === "host" ? { edit_scope } : {}),
+				network_access,
+				write_access,
+			},
+			...(policy.profile_id === undefined ? {} : { profile_id: policy.profile_id }),
+			...(policy.provider_route_id === undefined
+				? {}
+				: { provider_route_id: policy.provider_route_id }),
+			provider_options: {
+				"opencode2.agent": OpenCode2AgentId(
+					chosen_permission as OpenCode2PermissionLevel,
+					network_access,
+					policy.web_search_enabled,
+				),
+				"opencode2.project_config": false,
+				"opencode2.web_search_enabled": policy.web_search_enabled,
+			},
+			...(policy.variant_id === undefined ? {} : { variant_id: policy.variant_id }),
+		};
+	}
+
+	/**
+	 * Hermes also keeps route, model, and profile identity separate. Its profile
+	 * owns the concrete tool policy; Artisan only toggles the session-scoped
+	 * YOLO override for the explicit unrestricted option.
+	 */
+	if (policy.engine_id === "hermes") {
+		const model_id = policy.model_id ?? policy.model;
+		return {
+			...(policy.catalog_revision === undefined
+				? {}
+				: { catalog_revision: policy.catalog_revision }),
+			...(model_id === undefined ? {} : { model: model_id, model_id }),
+			permission_policy: {
+				approval,
+				...(edit_scope === "host" ? { edit_scope } : {}),
+				network_access,
+				write_access,
+			},
+			...(policy.profile_id === undefined ? {} : { profile_id: policy.profile_id }),
+			...(policy.provider_route_id === undefined
+				? {}
+				: { provider_route_id: policy.provider_route_id }),
+			provider_options: {
+				"hermes.fast": policy.service_tier === "fast",
+				"hermes.permission_mode": native_permission_mode("hermes", chosen_permission),
+				"hermes.reasoning_effort": policy.reasoning_effort,
+			},
+			...(policy.variant_id === undefined ? {} : { variant_id: policy.variant_id }),
+		};
+	}
+
+	/**
 	 * The Claude adapter has no native mapping for a canonical permission
 	 * policy and accepts only its own permission-mode vocabulary, so the
 	 * narrowed neutral outcome is translated through the catalog instead.
@@ -184,6 +255,36 @@ export const MakeSessionPolicyRunMetadata = (
 			provider_options: {
 				...(effort === undefined ? {} : { "claude.effort": effort }),
 				"claude.permission_mode": native_permission_mode("claude", narrowed_option),
+			},
+		};
+	}
+
+	if (policy.engine_id === "grok" || policy.engine_id === "cursor") {
+		const effort = catalog_native_effort(
+			policy.engine_id,
+			resolved_model,
+			policy.reasoning_effort,
+		);
+		const narrowed_option = !write_access
+			? "restricted"
+			: policy_approval !== "never" && approval === "never"
+				? "unrestricted"
+				: chosen_permission;
+		const prefix = policy.engine_id;
+		return {
+			...model_metadata,
+			permission_policy: {
+				approval,
+				...(edit_scope === "host" ? { edit_scope } : {}),
+				network_access,
+				write_access,
+			},
+			provider_options: {
+				...(effort === undefined ? {} : { [`${prefix}.reasoning_effort`]: effort }),
+				[`${prefix}.permission_mode`]: native_permission_mode(prefix, narrowed_option),
+				...(prefix === "cursor"
+					? { "cursor.speed": policy.service_tier ?? "standard" }
+					: {}),
 			},
 		};
 	}

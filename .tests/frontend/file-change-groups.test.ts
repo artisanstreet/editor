@@ -63,6 +63,23 @@ describe("file-change presentation grouping", () => {
 		).toBe("artisan-editor/README.md");
 	});
 
+	it("honours the selected separator instead of the source platform", () => {
+		expect(
+			display_file_change_path(
+				"C:\\projects\\artisan\\src\\file.ts",
+				"C:\\projects\\artisan",
+				"forward-slash",
+			),
+		).toBe("artisan/src/file.ts");
+		expect(
+			display_file_change_path(
+				"/projects/artisan/src/file.ts",
+				"/projects/artisan",
+				"backslash",
+			),
+		).toBe("artisan\\src\\file.ts");
+	});
+
 	it("prefixes project-relative paths and keeps outside or unknown paths truthful", () => {
 		expect(
 			display_file_change_path(
@@ -149,7 +166,7 @@ describe("file-change presentation grouping", () => {
 		expect(grouped[1]).toMatchObject({ id: "file-3", path: "/project/README.md" });
 	});
 
-	it("does not fabricate totals when any duplicate has unavailable counts", () => {
+	it("keeps known duplicate totals as a lower bound when one edit lacks counts", () => {
 		const grouped = group_file_changes([
 			file_change("file-1", "C:\\Project\\src\\file.ts", "modified", {
 				additions: 2,
@@ -159,7 +176,12 @@ describe("file-change presentation grouping", () => {
 			file_change("file-2", "c:/project/src/file.ts", "modified", { kind: "unavailable" }),
 		]);
 
-		expect(grouped[0]?.diff).toEqual({ kind: "unavailable" });
+		expect(grouped[0]?.diff).toEqual({
+			additions: 2,
+			deletions: 1,
+			kind: "partial",
+			unavailable_files: 1,
+		});
 	});
 
 	it("aggregates grouped file counts only when every visible file has known data", () => {
@@ -188,7 +210,7 @@ describe("file-change presentation grouping", () => {
 		});
 	});
 
-	it("keeps the aggregate unavailable when any visible file lacks diff data", () => {
+	it("keeps known aggregate counts as a lower bound when some files lack diff data", () => {
 		expect(aggregate_file_change_diff([])).toEqual({ kind: "unavailable" });
 		expect(
 			aggregate_file_change_diff([
@@ -197,6 +219,20 @@ describe("file-change presentation grouping", () => {
 					deletions: 1,
 					kind: "known",
 				}),
+				file_change("file-2", "src/readme.md", "modified", { kind: "unavailable" }),
+			]),
+		).toEqual({
+			additions: 2,
+			deletions: 1,
+			kind: "partial",
+			unavailable_files: 1,
+		});
+	});
+
+	it("keeps the aggregate unavailable when no file has line counts", () => {
+		expect(
+			aggregate_file_change_diff([
+				file_change("file-1", "src/file.ts", "modified", { kind: "unavailable" }),
 				file_change("file-2", "src/readme.md", "modified", { kind: "unavailable" }),
 			]),
 		).toEqual({ kind: "unavailable" });

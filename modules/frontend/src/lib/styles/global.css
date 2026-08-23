@@ -30,7 +30,9 @@
 	}
 
 	html {
-		@apply font-sans;
+		/** Keep document chrome on the runtime-selected text family; Tailwind's
+		 * font-sans utility inlines the build-time default under `@theme inline`. */
+		font-family: var(--font-sans);
 		min-width: 20rem;
 		min-height: 100%;
 		font-synthesis-weight: none;

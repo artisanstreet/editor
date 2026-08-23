@@ -1,27 +1,30 @@
 {
-	"name": "@artisan/forge",
-	"private": true,
-	"type": "module",
-	"exports": {
-		".": {
-			"types": "./src/index.ts",
-			"development": "./src/index.ts",
-			"default": "./.dist/index.mjs"
-		},
-		"./entry": {
-			"types": "./src/entry.ts",
-			"development": "./src/entry.ts",
-			"default": "./.dist/entry.mjs"
-		}
-	},
-	"dependencies": {
-		"@artisan/backend": "workspace:*",
-		"@artisan/engines": "workspace:*",
-		"@artisan/protocol": "workspace:*",
-		"@artisan/transport": "workspace:*",
-		"@effect/platform-node-shared": "4.0.0-beta.97",
-		"@types/ws": "8.18.1",
-		"effect": "4.0.0-beta.97",
-		"ws": "8.21.0"
-	}
+  "name": "@artisan/forge",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./.dist/index.mjs"
+    },
+    "./entry": {
+      "types": "./src/entry.ts",
+      "development": "./src/entry.ts",
+      "default": "./.dist/entry.mjs"
+    }
+  },
+  "dependencies": {
+    "@artisan/backend": "workspace:*",
+    "@artisan/engines": "workspace:*",
+    "@artisan/observability": "workspace:*",
+    "@artisan/protocol": "workspace:*",
+    "@artisan/transport": "workspace:*",
+    "@effect/platform-node-shared": "4.0.0-beta.97",
+    "@sentry/node-core": "10.70.0",
+    "@types/ws": "8.18.1",
+    "effect": "4.0.0-beta.97",
+    "posthog-node": "5.50.0",
+    "ws": "8.21.0"
+  }
 }

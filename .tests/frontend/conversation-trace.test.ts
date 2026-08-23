@@ -63,9 +63,8 @@ describe("conversation trace", () => {
 		expect(group_header).not.toContain('class="text-foreground"');
 		expect(group_header).not.toContain('class="text-muted-foreground"');
 		expect(workspace).toContain("group_conversation_trace_blocks(");
-		expect(workspace).toContain(
-			"conversation_live_reasoning_summary(render_blocks, active_run_id, run_active)",
-		);
+		expect(workspace).toContain("presentation_run_id,");
+		expect(workspace).toContain("presentation_run_active,");
 		expect(workspace).not.toContain("<ConversationTrace items={[block.item]}");
 	});
 
@@ -255,9 +254,8 @@ describe("conversation trace", () => {
 		expect(trace).not.toContain("ConversationReasoningSummary");
 		expect(trace).not.toContain("reasoning_group");
 		expect(trace).not.toContain("open_groups[segment.id] ?? work_active");
-		expect(workspace).toContain(
-			"conversation_live_reasoning_summary(render_blocks, active_run_id, run_active)",
-		);
+		expect(workspace).toContain("conversation_live_reasoning_summary(");
+		expect(workspace).toContain("presentation_run_active,");
 		expect(workspace).toContain("has_details={visible_details.length > 0}");
 	});
 
@@ -522,13 +520,18 @@ describe("conversation trace", () => {
 		expect(work_session).toContain("const phase_changed = phase !== previous_progress_phase;");
 		expect(work_session).toContain("const settled = previous_working && !working;");
 		expect(work_session).toContain('if (phase === "work" && working) open = true;');
+		/** Streaming prose may still turn out to be tool narration; only a confirmed reply folds. */
+		expect(work_session).toContain("const confirmed = confirmed_reply || !working;");
+		expect(work_session).toContain('phase === "reply" &&');
+		expect(work_session).toContain("confirmed &&");
+		expect(work_session).toContain("(phase_changed || settled || confirmed_changed)");
 		expect(work_session).toContain(
-			'else if (phase === "reply" && (phase_changed || settled)) open = false;',
+			"yield* ReconcileReplyDisclosure(progress_phase, is_working, item.status, reply_confirmed);",
 		);
-		expect(work_session).toContain(
-			"yield* ReconcileReplyDisclosure(progress_phase, is_working, item.status);",
+		expect(workspace).toContain("progress_phase={block.progress_phase}");
+		expect(workspace).toContain(
+			"reply_confirmed={conversation_reply_is_confirmed(progress_items)}",
 		);
-		expect(workspace).toContain("progress_phase={conversation_progress_phase(block.details)}");
 	});
 
 	it("reads resumed work off ordinals, not off a text lifecycle an engine may dangle", () => {
@@ -538,7 +541,7 @@ describe("conversation trace", () => {
 				id: `assistant_${ordinal}`,
 				lifecycle: "streaming",
 				ordinal,
-				phase: "commentary",
+				phase: "unspecified",
 				text,
 				type: "assistant_message",
 			});

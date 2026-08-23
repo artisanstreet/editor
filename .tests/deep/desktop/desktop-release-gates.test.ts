@@ -90,6 +90,7 @@ describe("deep desktop release gates", () => {
 		);
 		expect(builder).toContain("- dir");
 		expect(builder).toContain("- frontend/**");
+		expect(builder).toContain("- app-icons/**");
 		expect(builder).not.toContain("nsis");
 		expect(builder).not.toContain("signExecutable: false");
 		expect(builder).not.toContain("extraResources:");
@@ -105,6 +106,8 @@ describe("deep desktop release gates", () => {
 		expect(verifier).toContain("Packaged desktop renderer evidence");
 		/** The verifier now proves the honest renderer shape, not a launcher-only ASAR. */
 		expect(verifier).toContain('"/frontend/index.html"');
+		expect(verifier).toContain('"/app-icons/plastic-jaw-shading.png"');
+		expect(verifier).toContain('"/app-icons/foreground-gradient-symbol.png"');
 		expect(verifier).toContain("loopback Forge CSP allowance");
 		expect(verifier).toContain('"/preload.cjs"');
 		expect(verifier).not.toContain("ARTISAN_PACKAGED_SMOKE");

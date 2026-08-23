@@ -329,20 +329,32 @@ export const MakeProjectQueryHandler = Effect.gen(function* () {
 				),
 			),
 		"runtime.catalog.query": (query: RuntimeCatalogQueryEnvelope, current: ReadyState) =>
-			runtime.Get.pipe(
-				Effect.flatMap((payload) =>
-					Respond(query, { kind: "runtime.catalog.query.result", payload }),
-				),
-				Effect.catchCause(() =>
-					Recover(
-						query,
-						current,
-						"runtime_catalog.unavailable",
-						"The Forge runtime catalog could not be read.",
-						true,
+			runtime
+				.GetScoped({
+					...(query.payload.profile_id === undefined
+						? {}
+						: { profile_id: query.payload.profile_id }),
+					...(query.payload.working_directory === undefined
+						? {}
+						: { working_directory: query.payload.working_directory }),
+					...(query.payload.workspace_trust === undefined
+						? {}
+						: { workspace_trust: query.payload.workspace_trust }),
+				})
+				.pipe(
+					Effect.flatMap((payload) =>
+						Respond(query, { kind: "runtime.catalog.query.result", payload }),
+					),
+					Effect.catchCause(() =>
+						Recover(
+							query,
+							current,
+							"runtime_catalog.unavailable",
+							"The Forge runtime catalog could not be read.",
+							true,
+						),
 					),
 				),
-			),
 	};
 
 	return (query: ProjectQueryEnvelope, current: ReadyState): Effect.Effect<void> => {

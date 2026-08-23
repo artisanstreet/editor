@@ -443,6 +443,58 @@ describe("agent orchestrator lifecycle supervision", () => {
 		}
 	});
 
+	it("settles a classified startup model rejection as model unavailable", async () => {
+		const instrumented = make_engine({
+			open_failure: {
+				_tag: "EngineUnavailableError",
+				artisan_code: "AE-PROVIDER-206",
+				message: "The selected provider model is unavailable",
+			},
+		});
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			engines: [instrumented.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(runtime);
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("unavailable_model", {
+						engine_id: "instrumented",
+						text: "first",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await expect
+				.poll(() => instrumented.instrumentation.opened(), { timeout: 2_000 })
+				.toBe(1);
+			const snapshot = await runtime.runPromise(
+				Effect.gen(function* () {
+					const conversations = yield* ConversationReadModel;
+					return yield* conversations.ReadSnapshot("thread_1");
+				}),
+			);
+			expect(snapshot.status).toBe("available");
+			if (snapshot.status !== "available") throw new Error("Expected a durable snapshot");
+			expect(snapshot.snapshot.items).toContainEqual(
+				expect.objectContaining({
+					failure: expect.objectContaining({
+						code: "AE-PROVIDER-206",
+						detail: "The selected model configuration is not available to this account.",
+					}),
+					status: "failed",
+					type: "work_session",
+				}),
+			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("explicitly retries a failed root through Engine.Open without duplicating its user turn", async () => {
 		const instrumented = make_engine({ die_open_attempts: 1 });
 		const original_image = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);

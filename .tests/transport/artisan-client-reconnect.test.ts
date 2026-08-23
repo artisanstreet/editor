@@ -87,6 +87,66 @@ describe("Artisan client reconnect policy", () => {
 		}
 	});
 
+	it("retires a silent ready session when a local query reaches its deadline", async () => {
+		const harness = await make_transport_test_harness();
+
+		try {
+			await Effect.runPromise(harness.client.ListThreads.pipe(Effect.timeout("2 seconds")));
+			harness.mute_current_connection();
+
+			const failure = await Effect.runPromise(harness.client.ListThreads.pipe(Effect.flip));
+			expect(failure).toMatchObject({
+				code: "connection",
+				protocol_code: "request.timeout",
+				retryable: true,
+			});
+
+			await wait_for(() => harness.connector_snapshot().connections >= 2, 5_000);
+			await Effect.runPromise(await_phase(harness.client, "ready"));
+			await Effect.runPromise(harness.client.ListThreads.pipe(Effect.timeout("2 seconds")));
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("keeps a busy session when only one local query misses its deadline", async () => {
+		const harness = await make_transport_test_harness({
+			protocol: { query_delay_ms: 2_500 },
+		});
+
+		try {
+			const thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Slow query, live session" }),
+			);
+			const delayed = Effect.runPromise(harness.client.ListThreads.pipe(Effect.flip));
+			await wait_for(() =>
+				harness.protocol_snapshot().received_kinds.includes("thread.list.query"),
+			);
+
+			/**
+			 * Durable ingress proves this exact connection is still carrying frames
+			 * while the query handler is slow. Retiring it here would replay the whole
+			 * journal and amplify renderer pressure for a request-level delay.
+			 */
+			await Effect.runPromise(harness.erase_thread(thread.thread_id));
+			const failure = await delayed;
+
+			expect(failure).toMatchObject({ protocol_code: "request.timeout" });
+			expect(harness.connector_snapshot().connections).toBe(1);
+			expect(await Effect.runPromise(harness.client.ConnectionState)).toEqual({
+				phase: "ready",
+			});
+			await new Promise((resolve) => setTimeout(resolve, 600));
+			expect(
+				await Effect.runPromise(
+					harness.client.CreateThread({ title: "Connection stayed ready" }),
+				),
+			).toMatchObject({ title: "Connection stayed ready" });
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("survives a session that dies inside its readiness window", async () => {
 		const harness = await make_transport_test_harness({
 			client: { reconnect_delay_ms: 5 },

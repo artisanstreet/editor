@@ -58,8 +58,37 @@ describe("desktop guidance composition", () => {
 				),
 			).rejects.toMatchObject({
 				_tag: "DesktopEngineConfigurationError",
-				message: "Desktop production accepts only the Codex and Claude engines.",
+				message:
+					"Desktop production accepts only the Codex, Claude, OpenCode, Grok, Cursor, and Hermes engines.",
 			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("accepts every engine composed by the production Forge", async () => {
+		const paths = await make_paths();
+		const runtime = make_desktop_backend_runtime({
+			database_path: paths.database,
+			engines: ["codex", "claude", "opencode2", "grok", "cursor", "hermes"].map((engine_id) =>
+				make_fake_engine({ engine_id }),
+			),
+			guidance: { canonical_path: paths.canonical },
+			guidance_platform: {
+				codex_home: paths.codex_home,
+				home_directory: paths.root,
+			},
+			migrations_path,
+		});
+
+		try {
+			await expect(
+				runtime.runPromise(
+					Effect.gen(function* () {
+						yield* GlobalGuidanceService;
+					}),
+				),
+			).resolves.toBeUndefined();
 		} finally {
 			await runtime.dispose();
 		}
