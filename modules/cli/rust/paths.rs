@@ -104,7 +104,11 @@ mod tests {
             Err(CliError::DebugBuildGuard(message)) if message.contains("pnpm run dev:ae")
         ));
         assert!(forbid_installed_home(&installed.join("data")).is_err());
-        assert!(forbid_installed_home(&std::env::temp_dir().join("artisan-dev-home")).is_ok());
+        let elsewhere = installed
+            .parent()
+            .map(|base| base.join("artisan-guard-test-outside-home"))
+            .expect("installed home has a parent");
+        assert!(forbid_installed_home(&elsewhere).is_ok());
     }
 
     #[cfg(all(debug_assertions, windows))]
