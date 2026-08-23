@@ -12,6 +12,7 @@ import type {
 import {
 	EngineToolchain,
 	EngineToolchainBusyError,
+	EngineProtocolError,
 	EngineToolchainRollbackUnavailableError,
 	EngineToolchainUnknownEngineError,
 	make_engine_registry_layer,
@@ -84,6 +85,7 @@ const handler = (toolchain: typeof EngineToolchain.Service) =>
 describe("engine installation handler", () => {
 	it.effect("starts and retains OpenCode Console OAuth through the engine service API", () =>
 		Effect.gen(function* () {
+			let lose_authorization_attempt = false;
 			const toolchain = EngineToolchain.of({
 				Install: () => Effect.die("install not used"),
 				List: () =>
@@ -131,7 +133,15 @@ describe("engine installation handler", () => {
 								name: "OpenCode Console",
 							},
 						]),
-					OAuthStatus: () => Effect.succeed({ status: "pending" as const }),
+					OAuthStatus: () =>
+						lose_authorization_attempt
+							? Effect.fail(
+									new EngineProtocolError({
+										engine_id: "opencode2",
+										message: "Authorization attempt was lost",
+									}),
+								)
+							: Effect.succeed({ status: "pending" as const }),
 				},
 				Descriptor: { id: "opencode2" },
 			} as unknown as Engine;
@@ -165,6 +175,21 @@ describe("engine installation handler", () => {
 			expect(polled.payload.engines[0]).toMatchObject({
 				activity: "authenticating",
 				authorization: { attempt_id: "con_test" },
+			});
+
+			lose_authorization_attempt = true;
+			for (let index = 0; index < 7; index += 1) {
+				const retry = (yield* Handle(
+					installation_query("opencode2"),
+				)) as EngineInstallationQueryResultEnvelope;
+				expect(retry.payload.engines[0]?.activity).toBe("authenticating");
+			}
+			const interrupted = (yield* Handle(
+				installation_query("opencode2"),
+			)) as EngineInstallationQueryResultEnvelope;
+			expect(interrupted.payload.engines[0]).toMatchObject({
+				activity: "failed",
+				failure: "The OpenCode sign-in session was interrupted. Try again.",
 			});
 		}),
 	);

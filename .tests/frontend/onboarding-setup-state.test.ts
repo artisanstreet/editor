@@ -76,7 +76,7 @@ describe("onboarding setup state", () => {
 			action: "open_authorization",
 			authorization_url: "https://example.invalid/authorize",
 			busy: true,
-			label: "Open sign-in…",
+			label: "Waiting for sign-in…",
 		});
 	});
 

@@ -29,7 +29,10 @@ interface PendingEngineAuthorization {
   readonly action: EngineOAuthAttempt;
   readonly integration_id: string;
   readonly scope: EngineCatalogScope;
+  readonly status_failures: number;
 }
+
+const maximum_authorization_status_failures = 8;
 
 function to_installation_report(status: EngineToolchainStatus): EngineInstallationReport {
   const update_target = status.recommended_version ?? status.latest_version;
@@ -89,12 +92,48 @@ export const MakeEngineInstallationHandler = Effect.gen(function* () {
         const attempt_status = yield* connections
           .OAuthStatus(pending.scope, pending.integration_id, pending.action.attempt_id)
           .pipe(Effect.result);
-        if (attempt_status._tag === "Failure")
+        if (attempt_status._tag === "Failure") {
+          /**
+           * A completed device flow may persist its connection immediately
+           * before the attempt-status response becomes unavailable. Prefer
+           * that durable connection state over the ephemeral attempt handle.
+           */
+          const listed = yield* connections.List(pending.scope).pipe(Effect.result);
+          if (
+            listed._tag === "Success" &&
+            listed.success.some(
+              (item) => item.id === pending.integration_id && item.connected,
+            )
+          ) {
+            yield* Ref.update(authorizations, (current) => {
+              const next = new Map(current);
+              next.delete(status.engine_id);
+              return next;
+            });
+            return { ...base, credentials_present: true };
+          }
+          const status_failures = pending.status_failures + 1;
+          if (status_failures >= maximum_authorization_status_failures) {
+            yield* Ref.update(authorizations, (current) => {
+              const next = new Map(current);
+              next.delete(status.engine_id);
+              return next;
+            });
+            return {
+              ...base,
+              activity: "failed" as const,
+              failure: "The OpenCode sign-in session was interrupted. Try again.",
+            };
+          }
+          yield* Ref.update(authorizations, (current) =>
+            new Map(current).set(status.engine_id, { ...pending, status_failures }),
+          );
           return {
             ...base,
             activity: "authenticating" as const,
             authorization: pending.action,
           };
+        }
         if (attempt_status.success.status === "pending")
           return {
             ...base,
@@ -291,6 +330,7 @@ export const MakeEngineInstallationHandler = Effect.gen(function* () {
               action: attempt.success,
               integration_id: integration.id,
               scope,
+              status_failures: 0,
             }),
           );
           return yield* MutationResult(request, {

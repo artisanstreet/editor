@@ -193,7 +193,7 @@ describe("engine toolchain service", () => {
 						ResolveRelease: () =>
 							Effect.succeed({
 								artifact_kind: "staged-installer" as const,
-								binary: "hermes-agent/bin/hermes.exe",
+								binary: "hermes-agent/venv/Scripts/hermes.exe",
 								commit: "a".repeat(40),
 								installer_sha256: digest("pinned hermes installer"),
 								stages: ["repository", "bootstrap-marker"],
@@ -212,8 +212,13 @@ describe("engine toolchain service", () => {
 									const install_directory = input.args[install_index + 1]!;
 									const stage = input.args[stage_index + 1]!;
 									if (stage === "bootstrap-marker") {
-										await mkdir(join(install_directory, "bin"), { recursive: true });
-										await writeFile(join(install_directory, "bin", "hermes.exe"), "hermes");
+										await mkdir(join(install_directory, "venv", "Scripts"), {
+											recursive: true,
+										});
+										await writeFile(
+											join(install_directory, "venv", "Scripts", "hermes.exe"),
+											"hermes",
+										);
 									}
 								}
 								return {
@@ -255,7 +260,7 @@ describe("engine toolchain service", () => {
 						const spawn = yield* service.ResolveSpawn("hermes");
 						expect(installed.active_version).toBe("0.20.5");
 						expect(spawn.executable.replaceAll("\\", "/")).toContain(
-							"/hermes-agent/bin/hermes.exe",
+							"/hermes-agent/venv/Scripts/hermes.exe",
 						);
 						expect(spawn.environment.HERMES_HOME).toBe(join(root, "hermes", "home"));
 						expect(

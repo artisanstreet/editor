@@ -85,10 +85,7 @@ export const ProjectManagedHarnessSetup = (input: {
 				: {
 						authorization_url: report.authorization.url,
 					}),
-			label:
-				report.authorization === undefined
-					? "Waiting for sign-in…"
-					: "Open sign-in…",
+			label: "Waiting for sign-in…",
 			ready: false,
 			status: "waiting_for_sign_in",
 		};

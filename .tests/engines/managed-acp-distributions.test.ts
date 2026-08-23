@@ -76,7 +76,7 @@ describe("managed ACP distributions", () => {
 			});
 			expect(release).toMatchObject({
 				artifact_kind: "staged-installer",
-				binary: "hermes-agent/bin/hermes.exe",
+				binary: "hermes-agent/venv/Scripts/hermes.exe",
 				commit: hermes_certified_commit,
 				installer_sha256:
 					"e7521626d40f2d9fc2c51968244f22b3441dc4d5efebb28a0af4b335e91aecdf",

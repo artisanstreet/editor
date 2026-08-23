@@ -29,20 +29,35 @@ const map_api = <A, R>(effect: Effect.Effect<A, OpenCode2ApiError, R>) =>
 		),
 	);
 
+/**
+ * The certified OpenCode build joins the Console base path to the device
+ * endpoint even when that endpoint already begins with `/console`. The
+ * resulting `/console/console/device` URL redirects to the account overview
+ * instead of authorizing the pending CLI device. Repair that one upstream
+ * shape at our trust boundary before exposing the URL to the renderer.
+ */
+export const normalize_opencode2_authorization_url = (value: string) => {
+	const url = new URL(value);
+	const local_http =
+		url.protocol === "http:" && new Set(["127.0.0.1", "[::1]"]).has(url.hostname);
+	if (
+		(url.protocol !== "https:" && !local_http) ||
+		url.username.length > 0 ||
+		url.password.length > 0
+	)
+		throw new Error("Unsafe authorization URL");
+	if (
+		url.protocol === "https:" &&
+		url.hostname === "opencode.ai" &&
+		url.pathname.startsWith("/console/console/")
+	)
+		url.pathname = url.pathname.replace(/^\/console\/console(?=\/)/, "/console");
+	return url.toString();
+};
+
 const authorization_url = (value: string) =>
 	Effect.try({
-		try: () => {
-			const url = new URL(value);
-			const local_http =
-				url.protocol === "http:" && new Set(["127.0.0.1", "[::1]"]).has(url.hostname);
-			if (
-				(url.protocol !== "https:" && !local_http) ||
-				url.username.length > 0 ||
-				url.password.length > 0
-			)
-				throw new Error("Unsafe authorization URL");
-			return url.toString();
-		},
+		try: () => normalize_opencode2_authorization_url(value),
 		catch: () =>
 			new EngineProtocolError({
 				engine_id: "opencode2",

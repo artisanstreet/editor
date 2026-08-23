@@ -9,6 +9,7 @@ import {
 	OpenCode2PermissionRules,
 	RecoverOpenCode2Projection,
 	make_opencode2_engine_layer,
+	normalize_opencode2_authorization_url,
 	type OpenCode2PrivateService,
 } from "@artisan/engines";
 
@@ -181,6 +182,17 @@ const OpenTestRun = (artisan_run_id: string) =>
 	});
 
 describe("OpenCode engine", () => {
+	it("repairs the duplicated Console base path in device authorization URLs", () => {
+		expect(
+			normalize_opencode2_authorization_url(
+				"https://opencode.ai/console/console/device?user_code=test-code",
+			),
+		).toBe("https://opencode.ai/console/device?user_code=test-code");
+		expect(normalize_opencode2_authorization_url("https://console.opencode.ai/device")).toBe(
+			"https://console.opencode.ai/device",
+		);
+	});
+
 	it("keeps reasoning and response identities distinct when live events omit ordinals", () => {
 		const normalizer = new OpenCode2EventNormalizer({
 			artisan_run_id: "run_parts",
