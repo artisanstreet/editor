@@ -248,7 +248,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Autostart { disable } => autostart(disable),
         Commands::Update => delegate_installer(&layout, "update", false),
-        Commands::Telemetry { command } => telemetry_command(&layout, command),
+        Commands::Telemetry { command } => telemetry_command(&layout, &command),
         Commands::Uninstall { remove_data } => {
             match stop(&layout, None) {
                 Ok(()) | Err(CliError::NotRunning | CliError::MissingInstance) => {}
@@ -260,11 +260,11 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
-fn telemetry_command(layout: &Layout, command: TelemetryCommand) -> Result<()> {
+fn telemetry_command(layout: &Layout, command: &TelemetryCommand) -> Result<()> {
     match command {
         TelemetryCommand::Status { json } => {
             let preferences = telemetry::load_or_create(layout)?;
-            if json {
+            if *json {
                 println!(
                     "{}",
                     serde_json::json!({
@@ -282,12 +282,12 @@ fn telemetry_command(layout: &Layout, command: TelemetryCommand) -> Result<()> {
             Ok(())
         }
         TelemetryCommand::Analytics { choice } => {
-            let updated = telemetry::set_usage_analytics(layout, choice.into())?;
+            let updated = telemetry::set_usage_analytics(layout, (*choice).into())?;
             println!("Usage analytics: {}", updated.usage_analytics.as_str());
             Ok(())
         }
         TelemetryCommand::CrashReports { choice } => {
-            let updated = telemetry::set_crash_reports(layout, choice.into())?;
+            let updated = telemetry::set_crash_reports(layout, (*choice).into())?;
             println!("Crash reports: {}", updated.crash_reports.as_str());
             Ok(())
         }
