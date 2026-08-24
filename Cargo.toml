@@ -9,6 +9,7 @@ members = [
     "modules/protocol",
     "modules/transport",
     "modules/ui",
+    "scripts/capnp_codegen",
 ]
 resolver = "3"
 
@@ -20,6 +21,8 @@ rust-version = "1.98.0"
 version = "0.0.0"
 
 [workspace.dependencies]
+capnp = "=0.27.0"
+capnpc = "=0.27.0"
 quinn = { version = "=0.11.11", default-features = false, features = [
     "runtime-tokio",
     "rustls-ring",

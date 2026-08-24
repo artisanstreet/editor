@@ -5,6 +5,19 @@ module(
 
 bazel_dep(name = "rules_rust", version = "0.73.0")
 
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "capnp_tools_windows_x86_64",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+exports_files(["capnp.exe"])
+""",
+    sha256 = "21501909dc051347563d4e83394eb848204f558e959501c8061dbeaaf0651988",
+    strip_prefix = "capnproto-tools-win32-1.5.0",
+    urls = ["https://capnproto.org/capnproto-c++-win32-1.5.0.zip"],
+)
+
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",

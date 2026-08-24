@@ -34,9 +34,11 @@ rust_clippy(
         "//modules/protocol:protocol",
         "//modules/transport:transport",
         "//modules/ui:ui",
+        "//scripts/capnp_codegen:capnpc_rust",
         "//tests/database:seaorm_sqlite_proof",
         "//tests/domain:workspace_id_test",
         "//tests/policy:dependency_policy_test",
+        "//tests/protocol:phase1_proof_test",
         "//tests/transport:loopback_test",
     ],
 )
@@ -47,9 +49,11 @@ rustfmt_test(
     targets = [
         "//modules/backend:forge",
         "//modules/frontend:editor",
+        "//scripts/capnp_codegen:capnpc_rust",
         "//tests/database:seaorm_sqlite_proof",
         "//tests/domain:workspace_id_test",
         "//tests/policy:dependency_policy_test",
+        "//tests/protocol:phase1_proof_test",
         "//tests/transport:loopback_test",
     ],
     transitive = True,
@@ -62,6 +66,7 @@ test_suite(
         "//tests/database:seaorm_sqlite_proof",
         "//tests/domain:workspace_id_test",
         "//tests/policy:dependency_policy_test",
+        "//tests/protocol:phase1_proof_test",
         "//tests/transport:loopback_test",
     ],
 )

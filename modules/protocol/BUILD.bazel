@@ -1,12 +1,32 @@
 load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//scripts/capnp_codegen:capnp_codegen.bzl", "capnp_codegen")
 
 exports_files(["Cargo.toml"])
 
+# Phase 1 feasibility fixture: schema compilation as an explicit Bazel action.
+# `compiler`/`plugin` labels are controller-owned wiring per the work packet;
+# analysis until then fails fast with instructions from the rule.
+capnp_codegen(
+    name = "phase1_proof_codegen",
+    compiler = "@capnp_tools_windows_x86_64//:capnp.exe",
+    plugin = "//scripts/capnp_codegen:capnpc_rust",
+    srcs = ["schema/phase1_proof.capnp"],
+    out_dir = "src",
+)
+
 rust_library(
     name = "protocol",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(
+        ["src/**/*.rs"],
+        # Generated bindings arrive as action outputs, never as source-tree
+        # files; excluding the pattern keeps provisioning unambiguous.
+        exclude = ["src/*_capnp.rs"],
+    ) + [":phase1_proof_codegen"],
     crate_name = "artisan_protocol",
-    deps = ["//modules/domain:domain"],
+    deps = [
+        "//modules/domain:domain",
+        "@crates//:capnp",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],
