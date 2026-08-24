@@ -1,3 +1,2 @@
-//! `MessagePack` `WebSocket` framing, control and stream lanes, bounded queues, and reconnection.
-//!
-//! Skeleton crate for the native port; ownership lands packet by packet.
+//! Bounded Cap'n Proto framing for the Artisan WebSocket lanes.
+pub mod frame;
