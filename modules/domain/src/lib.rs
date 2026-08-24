@@ -26,6 +26,7 @@
 
 pub mod bounds;
 pub mod commands;
+pub mod conversation;
 pub mod events;
 pub mod identifiers;
 mod legacy_workspace_id;
@@ -34,16 +35,29 @@ pub mod text;
 pub mod time;
 
 pub use bounds::{
-    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES,
-    IDENTIFIER_MAX_BYTES, MESSAGE_BODY_MAX_BYTES, ROOT_PATH_MAX_BYTES, THREAD_LISTING_MAX_THREADS,
+    CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
+    CONVERSATION_TEXT_FRAGMENT_MAX_BYTES, DIRECTORY_LISTING_MAX_ENTRIES,
+    DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, IDENTIFIER_MAX_BYTES,
+    MESSAGE_BODY_MAX_BYTES, ROOT_PATH_MAX_BYTES, THREAD_LISTING_MAX_THREADS,
     THREAD_TITLE_MAX_BYTES,
 };
 pub use commands::{
     AttachProject, Command, CreateThread, ListDirectories, ListProjectThreads, Query,
     QueueFirstMessage,
 };
+pub use conversation::{
+    ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
+    ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
+    ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
+    ConversationTurn, ConversationUnsubscribe, CounterError, IncrementalText, IncrementalTextError,
+    ItemOrdinal, PatchBatch, PatchBatchError, PatchSequence, QueryTurnCount, QueryTurnCountError,
+    Revision, TurnOrdinal, UserMessageItem,
+};
 pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
-pub use identifiers::{DirectoryId, IdentifierError, MessageId, ProjectId, RequestId, ThreadId};
+pub use identifiers::{
+    DirectoryId, IdentifierError, ItemId, MessageId, PatchId, ProjectId, RequestId, ThreadId,
+    TurnId,
+};
 pub use model::{
     CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,
     DirectoryPlace, PlaceKind, ProjectSummary, QueuedMessage, ReceiptDisposition, ThreadListing,

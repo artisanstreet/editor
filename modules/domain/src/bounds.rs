@@ -76,3 +76,23 @@ pub const DIRECTORY_LISTING_MAX_PLACES: usize = 16;
 /// unbounded. 256 aligns with the collection caps the legacy service applies
 /// elsewhere and keeps list responses bounded end to end.
 pub const THREAD_LISTING_MAX_THREADS: usize = 256;
+
+/// Maximum UTF-8 byte length of one incremental renderer text fragment.
+///
+/// Preserves `ConversationText`'s 4,096-unit legacy ceiling while making the
+/// native unit unambiguous. Full stored messages use
+/// [`MESSAGE_BODY_MAX_BYTES`]; this smaller bound applies only to one streamed
+/// append patch and permits the empty fragment used to open a stream.
+pub const CONVERSATION_TEXT_FRAGMENT_MAX_BYTES: usize = 4_096;
+
+/// Maximum patches returned by one replay read.
+///
+/// Matches `conversation_patch_replay_batch_size` in the legacy conversation
+/// projection. A caller advances its cursor and asks again when more patches
+/// remain.
+pub const CONVERSATION_PATCH_BATCH_MAX_PATCHES: usize = 64;
+
+/// Maximum turns returned by one bounded conversation query.
+///
+/// Matches `conversation_query_maximum_turn_count` in the legacy protocol.
+pub const CONVERSATION_QUERY_MAX_TURNS: u16 = 512;
