@@ -1,0 +1,58 @@
+{
+	"version": 1,
+	"description": "NATIVE-0001 scenario registry. `kind` is `automated` (Record-Baseline.ps1 can run it as-is), `assisted` (launch or seed by hand, then measure with -AttachPid), or `manual` (needs in-app instrumentation that does not exist yet; see README coverage matrix).",
+	"scenarios": [
+		{
+			"id": "harness-selftest",
+			"kind": "automated",
+			"command": [
+				"pwsh",
+				"-NoProfile",
+				"-Command",
+				"$blob = [byte[]]::new(120MB); $blob[0] = 1; Start-Sleep -Seconds 30"
+			],
+			"durationSeconds": 12,
+			"intervalSeconds": 2,
+			"notes": ["Synthetic load validating the sampler itself: expect peak commit of at least ~120 MB from a single pwsh process."]
+		},
+		{
+			"id": "forge-idle",
+			"kind": "assisted",
+			"attach": {
+				"prepare": "pnpm build:forge:sea (or pnpm dev:forge for a dev build)",
+				"launch": "ae start --print-handoff",
+				"findRoot": "Get-Process ae | Sort-Object StartTime -Descending | Select-Object -First 1",
+				"settleSeconds": 10,
+				"durationSeconds": 120
+			},
+			"notes": ["Forge idle memory is a Phase-0 required baseline; record on the named Windows test machine after a fresh start, no threads open."]
+		},
+		{
+			"id": "desktop-cold-startup",
+			"kind": "assisted",
+			"attach": {
+				"prepare": "pnpm build:desktop",
+				"launch": "electron .dist/desktop/main.js (cold: clear %LOCALAPPDATA% artisan home first per README procedure)",
+				"findRoot": "the electron root pid spawned by the launch",
+				"settleSeconds": 0,
+				"durationSeconds": 45
+			},
+			"notes": ["Cold/warm distinction comes from whether the Forge home existed before launch. Startup wall-clock to first interactive frame needs the desktop instrumentation tracked in the README coverage matrix."]
+		},
+		{
+			"id": "desktop-idle-home-screen",
+			"kind": "manual",
+			"blockedBy": "frame/input instrumentation hooks in the desktop shell"
+		},
+		{
+			"id": "loaded-thread-memory",
+			"kind": "manual",
+			"blockedBy": "scripted thread-fixture seeding and desktop instrumentation"
+		},
+		{
+			"id": "stream-throughput-and-event-latency",
+			"kind": "manual",
+			"blockedBy": "protocol-level probe client emitting timestamped events through the real transport"
+		}
+	]
+}
