@@ -1,3 +1,28 @@
-load("//tools/bazel:defs.bzl", "workspace_package")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 
-workspace_package()
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "frontend",
+    srcs = ["src/lib.rs"],
+    crate_name = "artisan_frontend",
+    deps = [
+        "//modules/assets:assets",
+        "//modules/domain:domain",
+        "//modules/transport:transport",
+        "//modules/ui:ui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    visibility = ["//visibility:public"],
+)
+
+rust_binary(
+    name = "editor",
+    srcs = ["src/main.rs"],
+    crate_name = "artisan_editor",
+    deps = [":frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    visibility = ["//visibility:public"],
+)

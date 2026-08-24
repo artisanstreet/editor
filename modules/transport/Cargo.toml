@@ -1,0 +1,13 @@
+[package]
+name = "artisan-transport"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+artisan-domain = { path = "../domain" }
+artisan-protocol = { path = "../protocol" }
+
+[lints]
+workspace = true

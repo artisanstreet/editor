@@ -1,0 +1,15 @@
+[package]
+name = "artisan-backend"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+artisan-database = { path = "../database" }
+artisan-domain = { path = "../domain" }
+artisan-migrations = { path = "../migrations" }
+artisan-transport = { path = "../transport" }
+
+[lints]
+workspace = true

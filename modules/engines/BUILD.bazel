@@ -1,3 +1,0 @@
-load("//tools/bazel:defs.bzl", "workspace_package")
-
-workspace_package()
