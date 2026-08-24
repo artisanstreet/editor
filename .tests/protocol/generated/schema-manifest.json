@@ -1,7 +1,8 @@
 {
-	"schema": "artisan.protocol.schema-manifest/1",
+	"schema": "artisan.protocol.schema-manifest/2",
 	"digestAlgorithm": "sha256-canonical-json-ast",
-	"gitRevision": "53380d54faf906bde3dec6bcda87e67caf8e0937",
+	"capnpDigestAlgorithm": "sha256-schema-text",
+	"gitRevision": "193a414c0b67d92ae34c76e60b65baeb02b04f29",
 	"schemaCount": 433,
 	"families": {
 		"artisan-tools.ts": [
@@ -2231,6 +2232,42 @@
 				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
 			}
 		]
+	},
+	"capnp": {
+		"files": [
+			{
+				"file": "common.capnp",
+				"id": "0x9e4d2c7a5b3f4816",
+				"nodes": [
+					"Origin",
+					"RawOrigin",
+					"StreamCursor"
+				],
+				"digest": "e862927c2fd7f58f453e5bb4d579951906ada69a7e3607e4ca2d4b3d497cb6b7"
+			},
+			{
+				"file": "handshake.capnp",
+				"id": "0xc2d85e6f1a94b703",
+				"nodes": [
+					"ProtocolErrorDetail",
+					"HelloEnvelope",
+					"WelcomeEnvelope",
+					"ProtocolErrorEnvelope",
+					"PreNegotiationProtocolErrorEnvelope",
+					"ControlFrame"
+				],
+				"digest": "3c54c553a9c3583def0fe54f62c64c51db26a3addf3d8fa89e2b7c657ddcfcf8"
+			},
+			{
+				"file": "stream.capnp",
+				"id": "0xb7f1a93d2e8c4057",
+				"nodes": [
+					"StreamFrame"
+				],
+				"digest": "fd1c63a4fe1b1cdd9364229fbf219d8c2921933c841012992174b14287f3a828"
+			}
+		],
+		"nodeCount": 10
 	},
 	"unresolved": [
 		{

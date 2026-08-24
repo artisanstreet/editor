@@ -18,11 +18,12 @@
 
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const protocolSourceDirectory = join(repositoryRoot, "modules/protocol/src");
+const capnpSchemaDirectory = join(repositoryRoot, "crates/artisan-protocol/schema");
 const outputPath = join(repositoryRoot, ".tests/protocol/generated/schema-manifest.json");
 
 /** Finds exported schema declarations and their owning file via source scan. */
@@ -124,9 +125,42 @@ for (const exportsList of families.values()) {
 	exportsList.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Inventories the canonical Cap'n Proto schemas: one entry per file with its
+ * top-level nodes and a sha256 digest over the raw schema text. These are the
+ * wire definitions for transport version 2; the Effect families above remain
+ * their validation layer.
+ */
+function scanCapnpSchemas() {
+	if (!existsSync(capnpSchemaDirectory)) {
+		return { files: [], nodeCount: 0 };
+	}
+	const files = readdirSync(capnpSchemaDirectory)
+		.filter((name) => name.endsWith(".capnp"))
+		.sort();
+	const entries = files.map((file) => {
+		const text = readFileSync(join(capnpSchemaDirectory, file), "utf8");
+		const nodes = [...text.matchAll(/^(?:struct|enum|union|interface|const)\s+(\w+)/gm)].map(
+			(match) => match[1],
+		);
+		const id = /@0x([0-9a-f]{16})\s*;/.exec(text)?.[1] ?? null;
+		return {
+			file,
+			id: id === null ? null : `0x${id}`,
+			nodes,
+			digest: createHash("sha256").update(text).digest("hex"),
+		};
+	});
+	const nodeCount = entries.reduce((sum, entry) => sum + entry.nodes.length, 0);
+	return { files: entries, nodeCount };
+}
+
+const capnp = scanCapnpSchemas();
+
 const manifest = {
-	schema: "artisan.protocol.schema-manifest/1",
+	schema: "artisan.protocol.schema-manifest/2",
 	digestAlgorithm: "sha256-canonical-json-ast",
+	capnpDigestAlgorithm: "sha256-schema-text",
 	// Deliberately omitted: timestamps. Re-running against identical sources
 	// must produce an identical, diff-clean file.
 	gitRevision: (() => {
@@ -138,6 +172,7 @@ const manifest = {
 	})(),
 	schemaCount: [...families.values()].reduce((sum, list) => sum + list.length, 0),
 	families: Object.fromEntries([...families.entries()].sort()),
+	capnp,
 	unresolved,
 };
 
@@ -147,6 +182,7 @@ writeFileSync(outputPath, `${JSON.stringify(manifest, null, "\t")}\n`);
 console.log(
 	`inventoried ${manifest.schemaCount} schemas across ${families.size} files -> ${outputPath}`,
 );
+console.log(`cap'n proto: ${capnp.files.length} schema files, ${capnp.nodeCount} nodes`);
 if (unresolved.length > 0) {
 	console.log(`${unresolved.length} declarations skipped (see manifest.unresolved)`);
 }
