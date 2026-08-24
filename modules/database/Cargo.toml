@@ -7,6 +7,15 @@ version.workspace = true
 
 [dependencies]
 artisan-domain = { path = "../domain" }
+sea-orm.workspace = true
+# Crate Universe resolves SQLx's target-specific `sqlx-core/offline` edge on
+# Windows. Enabling the driver's paired feature keeps its `Executor` impl and
+# optional serde edge coherent in the Bazel graph.
+sqlx-sqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

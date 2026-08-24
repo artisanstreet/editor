@@ -1,0 +1,16 @@
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+rust_test(
+    name = "seaorm_sqlite_proof",
+    srcs = ["seaorm_sqlite.rs"],
+    crate_name = "seaorm_sqlite_proof",
+    deps = [
+        "//modules/database:database",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
