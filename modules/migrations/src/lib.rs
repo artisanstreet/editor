@@ -5,6 +5,7 @@
 //! implicit startup migration.
 
 mod m20260824_000001_initial_native_schema;
+mod m20260824_000002_global_command_receipts;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseConnection;
@@ -16,7 +17,10 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20260824_000001_initial_native_schema::Migration)]
+        vec![
+            Box::new(m20260824_000001_initial_native_schema::Migration),
+            Box::new(m20260824_000002_global_command_receipts::Migration),
+        ]
     }
 }
 
