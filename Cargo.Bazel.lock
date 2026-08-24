@@ -1,5 +1,5 @@
 {
-  "checksum": "c339653554fc78e31b528b6e4adc57effd8d387e153f5e31c03cd1aa0d47c3b7",
+  "checksum": "33acb199b7c52bb7004e79cc697c23a51ee276eb33a475aa9e0766128a90408e",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -2018,6 +2018,10 @@
             {
               "id": "capnp 0.27.0",
               "target": "capnp"
+            },
+            {
+              "id": "thiserror 2.0.20",
+              "target": "thiserror"
             },
             {
               "id": "zeroize 1.9.0",
