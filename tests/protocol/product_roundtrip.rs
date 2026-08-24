@@ -2,20 +2,21 @@
 //!
 //! Exercises every message family of `schema/artisan.capnp` through its
 //! Bazel-generated bindings (`artisan_protocol::artisan_capnp`): hello and
-//! welcome negotiation including the one-time client capability, all five
-//! request/response pairs with optional-parent, place, and entry listings,
-//! all three events, both receipt dispositions, correlated and uncorrelated
-//! protocol errors, and deterministic framing. Wire shape only; owned domain
-//! conversions arrive in a later packet.
+//! welcome negotiation including the one-time client capability, all six
+//! request/response pairs with optional-parent, place, entry, and
+//! attached-project listings, all three events, both receipt dispositions,
+//! correlated and uncorrelated protocol errors, and deterministic framing.
+//! Wire shape only; owned domain conversions arrive in a later packet.
 //!
 //! Identifier vocabulary matches the schema header: opaque text ids of at
 //! most 128 UTF-8 bytes, nonblank, without Unicode whitespace or control
 //! characters. All string bounds are UTF-8 bytes.
 
+use artisan_domain::PROJECT_LISTING_MAX_PROJECTS;
 use artisan_protocol::artisan_capnp::{
     DirectoryEntryKind, ErrorCode, PlaceKind, QueuedState, ReceiptDisposition, directory_listing,
-    envelope, event, list_directories_request, project, protocol_error, request, response,
-    thread_summary,
+    envelope, event, list_attached_projects_request, list_directories_request, project,
+    project_list, protocol_error, request, response, thread_summary,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -39,6 +40,7 @@ const ROOT_DIRECTORY_ID: &str = "root_home";
 const DESKTOP_DIRECTORY_ID: &str = "root_desktop";
 const DIRECTORY_ID: &str = "directory_4a5b6c";
 const PROJECT_ID: &str = "project_1123581321";
+const SECOND_PROJECT_ID: &str = "project_22446688";
 const FORGE_MESSAGE_ID: &str = "forge-msg-9f8e7d";
 const THREAD_ID: &str = "thread_2718281828";
 const DISPLAY_NAME: &str = "artisan-editor";
@@ -46,6 +48,8 @@ const HOME_DISPLAY_NAME: &str = "home";
 const ROOT_PATH: &str = "\\\\?\\C:\\Users\\sander\\source\\artisan-editor";
 const THREAD_TITLE: &str = "New thread";
 const MESSAGE_BODY: &str = "Fix the flaky QUIC reconnect test.";
+/// A second attachment instant so catalog rows are distinguishable.
+const SECOND_ATTACHED_AT_MILLIS: i64 = 1_777_778_100_789;
 
 const WELCOME_FRAME_ID: &str = "server-frame-000001";
 const ROOTS_LISTING_FRAME_ID: &str = "server-frame-000002";
@@ -57,6 +61,7 @@ const THREAD_CREATE_RESPONSE_ID: &str = "server-frame-000006";
 const THREAD_CREATE_DUPLICATE_RESPONSE_ID: &str = "server-frame-000006-duplicate";
 const RECEIPT_ACCEPTED_RESPONSE_ID: &str = "server-frame-000007";
 const RECEIPT_DUPLICATE_RESPONSE_ID: &str = "server-frame-000008";
+const PROJECT_LIST_RESPONSE_ID: &str = "server-frame-000009";
 const CORRELATED_ERROR_FRAME_ID: &str = "server-error-000001";
 const VERSION_REJECTION_FRAME_ID: &str = "server-error-000002";
 const PROJECT_ATTACHED_EVENT_ID: &str = "server-event-000001";
@@ -131,6 +136,28 @@ fn assert_thread(thread: thread_summary::Reader<'_>) -> capnp::Result<()> {
     assert_eq!(thread.get_title()?, THREAD_TITLE);
     assert_eq!(thread.get_created_at_millis(), CREATED_AT_MILLIS);
     assert_eq!(thread.get_updated_at_millis(), UPDATED_AT_MILLIS);
+    Ok(())
+}
+
+/// Stamps one complete catalog row; a listing row carries the full existing
+/// `Project` shape, never a thinner projection.
+fn set_project_row(mut row: project::Builder<'_>, project_id: &str, attached_at_millis: i64) {
+    row.set_project_id(project_id);
+    row.set_display_name(DISPLAY_NAME);
+    row.set_root_path(ROOT_PATH);
+    row.set_attached_at_millis(attached_at_millis);
+}
+
+/// Asserts one complete catalog row survived the round trip field for field.
+fn assert_project_row(
+    row: project::Reader<'_>,
+    project_id: &str,
+    attached_at_millis: i64,
+) -> capnp::Result<()> {
+    assert_eq!(row.get_project_id()?, project_id);
+    assert_eq!(row.get_display_name()?, DISPLAY_NAME);
+    assert_eq!(row.get_root_path()?, ROOT_PATH);
+    assert_eq!(row.get_attached_at_millis(), attached_at_millis);
     Ok(())
 }
 
@@ -491,6 +518,105 @@ fn round_trips_project_attachment_dispositions() -> capnp::Result<()> {
         ATTACH_DUPLICATE_RESPONSE_FRAME_ID,
         ReceiptDisposition::Duplicate,
     )?;
+    Ok(())
+}
+
+#[test]
+fn round_trips_attached_project_listing_request() -> capnp::Result<()> {
+    let encoded = {
+        let mut message = frame();
+        init_envelope(&mut message, CLIENT_REQUEST_ID)
+            .init_body()
+            .init_request()
+            .init_list_attached_projects();
+        encode(&message)
+    };
+
+    let decoded = decode(&encoded)?;
+    let envelope: envelope::Reader = decoded.get_root()?;
+    match envelope.get_body().which()? {
+        envelope::body::Which::Request(request) => match request?.which()? {
+            request::Which::ListAttachedProjects(request) => {
+                let _: list_attached_projects_request::Reader<'_> = request?;
+            }
+            _ => panic!("expected listAttachedProjects request"),
+        },
+        _ => panic!("expected request body"),
+    }
+
+    Ok(())
+}
+
+fn assert_project_listing_round_trip(project_count: usize) -> capnp::Result<()> {
+    let encoded = {
+        let mut message = frame();
+        let mut response = init_envelope(&mut message, PROJECT_LIST_RESPONSE_ID)
+            .init_body()
+            .init_response();
+        response.set_request_id(CLIENT_REQUEST_ID);
+        let mut projects = response
+            .init_project_list()
+            .init_projects(u32::try_from(project_count).expect("fixture count fits u32"));
+
+        for index in 0..project_count {
+            let project_id = if index == 1 {
+                SECOND_PROJECT_ID
+            } else {
+                PROJECT_ID
+            };
+            let attached_at = if index == 1 {
+                SECOND_ATTACHED_AT_MILLIS
+            } else {
+                ATTACHED_AT_MILLIS
+            };
+            set_project_row(
+                projects
+                    .reborrow()
+                    .get(u32::try_from(index).expect("fixture index fits u32")),
+                project_id,
+                attached_at,
+            );
+        }
+        encode(&message)
+    };
+
+    let decoded = decode(&encoded)?;
+    let envelope: envelope::Reader = decoded.get_root()?;
+    assert_server_envelope(envelope, PROJECT_LIST_RESPONSE_ID)?;
+    match envelope.get_body().which()? {
+        envelope::body::Which::Response(response) => {
+            let response = response?;
+            assert_eq!(response.get_request_id()?, CLIENT_REQUEST_ID);
+            match response.which()? {
+                response::Which::ProjectList(listing) => {
+                    let listing: project_list::Reader<'_> = listing?;
+                    let projects = listing.get_projects()?;
+                    assert_eq!(projects.len() as usize, project_count);
+                    if project_count > 0 {
+                        assert_project_row(projects.get(0), PROJECT_ID, ATTACHED_AT_MILLIS)?;
+                    }
+                    if project_count > 1 {
+                        assert_project_row(
+                            projects.get(1),
+                            SECOND_PROJECT_ID,
+                            SECOND_ATTACHED_AT_MILLIS,
+                        )?;
+                    }
+                }
+                _ => panic!("expected projectList response"),
+            }
+        }
+        _ => panic!("expected response body"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn round_trips_empty_representative_and_maximum_project_listings() -> capnp::Result<()> {
+    assert_project_listing_round_trip(0)?;
+    assert_project_listing_round_trip(2)?;
+    assert_project_listing_round_trip(PROJECT_LISTING_MAX_PROJECTS)?;
     Ok(())
 }
 

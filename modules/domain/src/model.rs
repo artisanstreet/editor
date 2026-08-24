@@ -9,7 +9,8 @@
 use thiserror::Error;
 
 use crate::bounds::{
-    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, THREAD_LISTING_MAX_THREADS,
+    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, PROJECT_LISTING_MAX_PROJECTS,
+    THREAD_LISTING_MAX_THREADS,
 };
 use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, ThreadId};
 use crate::text::{DisplayName, MessageBody, RootPath, ThreadTitle};
@@ -179,6 +180,53 @@ pub struct ProjectSummary {
     pub root_path: RootPath,
     /// Moment the project was attached, as signed Unix epoch millis.
     pub attached_at: UnixMillis,
+}
+
+/// Failure raised when a project listing would exceed its documented bound.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum ProjectListingError {
+    /// Too many project summaries were supplied.
+    #[error("project listing holds {count} projects; the maximum is {maximum}")]
+    TooManyProjects {
+        /// Offending number of projects.
+        count: usize,
+        /// Documented ceiling ([`PROJECT_LISTING_MAX_PROJECTS`]).
+        maximum: usize,
+    },
+}
+
+/// One bounded listing of every currently attached project.
+///
+/// This is the rediscovery read of the milestone: a returning client asks
+/// once and receives the complete attached-project catalog in Forge-supplied
+/// order, never an unbounded array.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectListing(Vec<ProjectSummary>);
+
+impl ProjectListing {
+    /// Builds a listing after enforcing the documented collection bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectListingError::TooManyProjects`] when more than
+    /// [`PROJECT_LISTING_MAX_PROJECTS`] summaries are supplied.
+    pub fn new(projects: Vec<ProjectSummary>) -> Result<Self, ProjectListingError> {
+        let count = projects.len();
+        if count > PROJECT_LISTING_MAX_PROJECTS {
+            return Err(ProjectListingError::TooManyProjects {
+                count,
+                maximum: PROJECT_LISTING_MAX_PROJECTS,
+            });
+        }
+
+        Ok(Self(projects))
+    }
+
+    /// Returns the bounded attached-project summaries.
+    #[must_use]
+    pub fn projects(&self) -> &[ProjectSummary] {
+        &self.0
+    }
 }
 
 /// One project-scoped thread as the list surfaces need it.

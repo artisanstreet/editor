@@ -96,3 +96,12 @@ pub const CONVERSATION_PATCH_BATCH_MAX_PATCHES: usize = 64;
 ///
 /// Matches `conversation_query_maximum_turn_count` in the legacy protocol.
 pub const CONVERSATION_QUERY_MAX_TURNS: u16 = 512;
+
+/// Maximum number of summaries in one attached-project listing.
+///
+/// Deliberate improvement over legacy, whose project catalog array was
+/// unbounded (`ProjectCatalogSnapshot.projects` in
+/// `modules/protocol/src/project.ts`). 256 aligns with
+/// [`DIRECTORY_LISTING_MAX_ENTRIES`] and [`THREAD_LISTING_MAX_THREADS`] and
+/// keeps the rediscovery response bounded end to end.
+pub const PROJECT_LISTING_MAX_PROJECTS: usize = 256;

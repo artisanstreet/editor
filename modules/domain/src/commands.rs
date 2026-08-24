@@ -5,8 +5,8 @@
 //! second effect. Forge-minted identities never appear as creation inputs:
 //! attaching names only an opaque directory, thread creation names only the
 //! project it belongs to, and queueing names only the existing target thread.
-//! Queries cover exactly what this milestone selects: directory browsing and
-//! project-scoped thread listing.
+//! Queries cover exactly what this milestone selects: attached-project
+//! rediscovery, directory browsing, and project-scoped thread listing.
 
 use crate::identifiers::{DirectoryId, ProjectId, RequestId, ThreadId};
 use crate::text::{MessageBody, ThreadTitle};
@@ -89,6 +89,15 @@ pub struct ListProjectThreads {
     pub project_id: ProjectId,
 }
 
+/// Lists every currently attached project.
+///
+/// The rediscovery read of the milestone: a returning client asks once,
+/// carrying no identity at all, and Forge answers with the complete
+/// attached-project catalog. Legacy analogue: `ProjectCatalogSnapshot`
+/// served on session start (`modules/protocol/src/project.ts`).
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ListAttachedProjects;
+
 /// Every query of the first native workflow.
 ///
 /// Queries carry no [`RequestId`]: they are pure reads with no durable effect
@@ -99,4 +108,6 @@ pub enum Query {
     ListDirectories(ListDirectories),
     /// See [`ListProjectThreads`].
     ListProjectThreads(ListProjectThreads),
+    /// See [`ListAttachedProjects`].
+    ListAttachedProjects(ListAttachedProjects),
 }
