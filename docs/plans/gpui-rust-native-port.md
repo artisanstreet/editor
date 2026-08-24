@@ -291,11 +291,25 @@ During dual-frontend migration, add an extractor that reads the current Tabler/S
 
 ### Amendment (2026-08-24): Cap'n Proto replaces MessagePack
 
-Decision (full swap, both sides move together in-tree): the wire serialization
-switches from MessagePack to Cap'n Proto. Because Artisan has not shipped to
-users, there is no released-client compatibility burden; the transport schema
-version bumps `1` -> `2`, the TypeScript Forge and every client adopt framing
-version `2` together, and no long-lived dual-stack window is maintained.
+Decision (full swap, native-only): the wire serialization switches from
+MessagePack to Cap'n Proto. Because Artisan has not shipped to users, there is
+no released-client compatibility burden; the transport schema version bumps
+`1` -> `2`, and version `2` is implemented by the Rust Forge and the GPUI
+editor only.
+
+Consequences accepted by this decision:
+
+- The TypeScript Forge and Svelte client are never migrated to version `2`.
+  They remain on MessagePack version `1` as the behavioral reference — the
+  executable specification — until they are deleted at cutover.
+- The interim compatibility quadrants (native client against the TypeScript
+  Forge, legacy client against the Rust Forge) are dropped. Live end-to-end
+  work begins when the Rust Forge can serve version `2`; until then the GPUI
+  client develops against fixture mode.
+- No TypeScript Cap'n Proto codec is written. Cross-validation comes instead
+  from the JSON schema corpus, recorded provider fixtures, and the database
+  fixture matrix, all of which treat the TypeScript tree as specification,
+  not as a peer runtime.
 
 Binding rules for the swap:
 
@@ -305,30 +319,34 @@ Binding rules for the swap:
    definition.
 2. MessagePack carried field names on the wire; Cap'n Proto carries field
    ordinals. Parity therefore means: documented ordinal layout plus an explicit
-   name map per struct, checked by cross-language frame fixtures — not string
-   names on the wire.
+   name map per struct, checked by golden frame fixtures — not string names on
+   the wire.
 3. Frame-decoded input is size-bounded before allocation, exactly as
    MessagePack bytes were. Traversal limits are enforced at decode time.
-4. Frames use unpacked serialization initially (`capnp-ts` does not implement
-   packed encoding); packing is revisited only as a coordinated post-cutover
-   optimization.
-5. Validation refinements stay application-side in both languages; Cap'n Proto
-   conveys structure and defaults only.
-6. Cross-runtime golden frame fixtures replace MessagePack round-trip fixtures:
-   bytes produced by one implementation must decode in the other.
+4. Frames use unpacked serialization initially; packing is revisited later as
+   a coordinated optimization across the Rust Forge and the editor.
+5. Validation refinements stay application-side in the native crates;
+   Cap'n Proto conveys structure and defaults only.
+6. Golden frame fixtures lock the Rust codec byte-for-byte across releases;
+   cross-language round-trip checking is retired along with the TypeScript
+   runtime.
 
 The legacy MessagePack path may exist briefly inside each implementation's
 codec module behind the negotiated transport version, and is deleted once both
 sides speak version `2` exclusively.
 
-The protocol is the migration hinge. Both replacement tracks must interoperate with the legacy opposite side:
+The protocol is the migration hinge. Under the native-only decision, the
+legacy four-quadrant matrix collapses to a single supported pairing:
 
-| Client | Forge | Required during migration |
+| Client | Forge | Status |
 | --- | --- | --- |
-| Svelte/Electron | TypeScript | Current baseline |
-| GPUI/Rust | TypeScript | Required before UI feature migration |
-| Svelte/Electron | Rust | Required before Forge cutover |
-| GPUI/Rust | Rust | Final product |
+| Svelte/Electron | TypeScript | Legacy baseline; behavioral reference only |
+| GPUI/Rust | TypeScript | Retired by this amendment — never built |
+| Svelte/Electron | Rust | Retired by this amendment — never built |
+| GPUI/Rust | Rust | The product |
+
+The TypeScript implementation is consulted as specification (fixtures,
+recorded behavior, database matrices) for as long as it exists in the tree.
 
 ### Protocol work
 
@@ -341,6 +359,11 @@ The protocol is the migration hinge. Both replacement tracks must interoperate w
 7. Fuzz both decoders with malformed tags, extra properties, oversized buffers, invalid UTF-8, invalid sequence values, and truncated frames.
 8. Preserve transport version `1` until a deliberate protocol change requires version `2`.
 9. Do not use a protocol version change to hide migration incompatibility.
+
+Amendment adjustments: items 4-6 are satisfied by the `.capnp` definitions,
+committed generated bindings, and golden frame fixtures instead of a
+TypeScript codec; item 8's deliberate change is this amendment itself;
+item 9 is satisfied because no shipped users exist to strand.
 
 ### Contract generation
 
