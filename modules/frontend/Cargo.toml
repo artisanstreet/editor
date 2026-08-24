@@ -10,6 +10,7 @@ artisan-assets = { path = "../assets" }
 artisan-domain = { path = "../domain" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
+gpui.workspace = true
 
 [lints]
 workspace = true

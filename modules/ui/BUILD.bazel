@@ -6,7 +6,12 @@ rust_library(
     name = "ui",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "artisan_ui",
-    deps = ["//modules/assets:assets"],
+    deps = [
+        "//modules/assets:assets",
+        "@crates//:pulldown-cmark",
+        "@crates//:syntect",
+        "@crates//:thiserror",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],

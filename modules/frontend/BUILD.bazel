@@ -4,13 +4,17 @@ exports_files(["Cargo.toml"])
 
 rust_library(
     name = "frontend",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/lib.rs",
+        "src/proof.rs",
+    ],
     crate_name = "artisan_frontend",
     deps = [
         "//modules/assets:assets",
         "//modules/domain:domain",
         "//modules/transport:transport",
         "//modules/ui:ui",
+        "@crates//:gpui",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",

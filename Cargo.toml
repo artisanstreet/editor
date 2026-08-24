@@ -23,6 +23,8 @@ version = "0.0.0"
 [workspace.dependencies]
 capnp = "=0.27.0"
 capnpc = "=0.27.0"
+gpui = { version = "=0.2.2", features = ["inspector"] }
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 quinn = { version = "=0.11.11", default-features = false, features = [
     "runtime-tokio",
     "rustls-ring",
@@ -45,6 +47,11 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
 ] }
 sqlx-sqlite = { version = "=0.9.0", default-features = false, features = [
     "offline",
+] }
+syntect = { version = "=5.3.0", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
 ] }
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", default-features = false }
