@@ -1,0 +1,35 @@
+# cargo-deny policy for the Artisan native workspace.
+#
+# The plan's dependency rule: license and advisory checks exist before the
+# first dependency lands, and the full transitive graph is audited rather than
+# trusting GPUI's package license alone. Extend `allow` deliberately, one
+# exception at a time, with a comment naming why.
+
+[licenses]
+version = 2
+allow = [
+	"Apache-2.0",
+	"Apache-2.0 WITH LLVM-exception",
+	"BSD-2-Clause",
+	"BSD-3-Clause",
+	"ISC",
+	"MIT",
+	"Unicode-3.0",
+	"Zlib",
+	# webpki-roots ships Mozilla's root certificate store as data, not code,
+	# under the permissive Community Data License Agreement.
+	"CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+version = 2
+yanked = "warn"
