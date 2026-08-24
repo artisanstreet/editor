@@ -40,6 +40,7 @@ rust_library(
     deps = [
         "//modules/domain:domain",
         "@crates//:capnp",
+        "@crates//:zeroize",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
