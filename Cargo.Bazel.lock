@@ -1,5 +1,5 @@
 {
-  "checksum": "6c06a1ce00d54f82c7ee92ef422de3027e91be19b39c5b3288e87d58ea95ee92",
+  "checksum": "c339653554fc78e31b528b6e4adc57effd8d387e153f5e31c03cd1aa0d47c3b7",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -1703,6 +1703,19 @@
         "compile_data_glob": [
           "**"
         ],
+        "deps_dev": {
+          "common": [
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
+            },
+            {
+              "id": "toml 1.1.4+spec-1.1.0",
+              "target": "toml"
+            }
+          ],
+          "selects": {}
+        },
         "edition": "2024",
         "version": "0.0.0"
       },
@@ -42868,25 +42881,35 @@
         "crate_features": {
           "common": [
             "alloc",
-            "default",
+            "serde",
             "std"
           ],
           "selects": {
+            "aarch64-apple-darwin": [
+              "default"
+            ],
+            "aarch64-unknown-linux-gnu": [
+              "default"
+            ],
             "x86_64-pc-windows-msvc": [
-              "serde"
+              "default"
+            ],
+            "x86_64-unknown-linux-gnu": [
+              "default"
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              "default"
             ]
           }
         },
         "deps": {
-          "common": [],
-          "selects": {
-            "x86_64-pc-windows-msvc": [
-              {
-                "id": "serde_core 1.0.229",
-                "target": "serde_core"
-              }
-            ]
-          }
+          "common": [
+            {
+              "id": "serde_core 1.0.229",
+              "target": "serde_core"
+            }
+          ],
+          "selects": {}
         },
         "edition": "2024",
         "version": "1.1.1+spec-1.1.0"
@@ -43072,10 +43095,25 @@
         "crate_features": {
           "common": [
             "alloc",
-            "default",
             "std"
           ],
-          "selects": {}
+          "selects": {
+            "aarch64-apple-darwin": [
+              "default"
+            ],
+            "aarch64-unknown-linux-gnu": [
+              "default"
+            ],
+            "x86_64-pc-windows-msvc": [
+              "default"
+            ],
+            "x86_64-unknown-linux-gnu": [
+              "default"
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              "default"
+            ]
+          }
         },
         "deps": {
           "common": [
@@ -50878,15 +50916,49 @@
           "**"
         ],
         "crate_features": {
-          "common": [
-            "alloc",
-            "ascii",
-            "binary",
-            "default",
-            "parser",
-            "std"
-          ],
-          "selects": {}
+          "common": [],
+          "selects": {
+            "aarch64-apple-darwin": [
+              "alloc",
+              "ascii",
+              "binary",
+              "default",
+              "parser",
+              "std"
+            ],
+            "aarch64-unknown-linux-gnu": [
+              "alloc",
+              "ascii",
+              "binary",
+              "default",
+              "parser",
+              "std"
+            ],
+            "x86_64-pc-windows-msvc": [
+              "alloc",
+              "ascii",
+              "binary",
+              "default",
+              "parser",
+              "std"
+            ],
+            "x86_64-unknown-linux-gnu": [
+              "alloc",
+              "ascii",
+              "binary",
+              "default",
+              "parser",
+              "std"
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              "alloc",
+              "ascii",
+              "binary",
+              "default",
+              "parser",
+              "std"
+            ]
+          }
         },
         "edition": "2021",
         "version": "1.0.4"
@@ -55144,7 +55216,9 @@
     "zeroize 1.9.0"
   ],
   "direct_dev_deps": [
-    "rcgen 0.14.9"
+    "rcgen 0.14.9",
+    "sha2 0.11.0",
+    "toml 1.1.4+spec-1.1.0"
   ],
   "unused_patches": []
 }
