@@ -9,6 +9,7 @@ rust_library(
     deps = [
         "//modules/domain:domain",
         "@crates//:sea-orm",
+        "@crates//:sqlx-sqlite",
         "@crates//:thiserror",
     ],
     edition = "2024",
