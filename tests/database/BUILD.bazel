@@ -1,6 +1,22 @@
 load("@rules_rust//rust:defs.bzl", "rust_test")
 
 rust_test(
+    name = "migrations",
+    srcs = ["migrations.rs"],
+    crate_name = "migrations",
+    deps = [
+        "//modules/database:database",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm-migration",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "file_connection",
     srcs = ["file_connection.rs"],
     crate_name = "file_connection",
