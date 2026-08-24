@@ -5,6 +5,7 @@
 //! repositories, and transaction boundaries.
 
 mod connection;
+pub mod entities;
 
 pub use artisan_domain::WorkspaceId;
 pub use connection::{ConnectError, SqliteConfig, connect};
