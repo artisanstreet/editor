@@ -102,7 +102,7 @@ Additional migration assets:
 - 47 Drizzle schema snapshots containing approximately 354,155 JSON lines, which are migration metadata rather than implementation;
 - a standalone Forge process and existing process handoff;
 - a versioned protocol and versioned transport;
-- MessagePack WebSocket framing with distinct control and stream lanes;
+- MessagePack WebSocket framing with distinct control and stream lanes (wire superseded by Cap'n Proto per the 2026-08-24 amendment; retained as the behavioral reference for lanes and bounds);
 - an event journal with replay cursors and projections;
 - SQLite WAL persistence and migration SQL;
 - existing Rust CLI, installer, and broker foundations;
@@ -136,7 +136,7 @@ The following decisions are already correct and should remain:
 flowchart LR
     UI[artisan-editor / GPUI] --> VM[GPUI entities and view models]
     VM --> CLIENT[artisan-client]
-    CLIENT -->|MessagePack WebSocket| TRANSPORT[artisan-transport]
+    CLIENT -->|"Cap'n Proto frames over WebSocket"| TRANSPORT[artisan-transport]
     TRANSPORT --> FORGE[artisan-forge]
     FORGE --> DOMAIN[artisan-domain]
     DOMAIN --> STORE[artisan-store / SQLite WAL]
@@ -162,7 +162,7 @@ crates/
   artisan-svg-assets/          Generated, licensed SVG catalog for every shipped icon/logo
   artisan-client/              Native Forge client and subscription projections
   artisan-protocol/            Shared envelopes, commands, events, queries, validation
-  artisan-transport/           MessagePack, WebSocket, lanes, queue bounds, reconnect
+  artisan-transport/           "Cap'n Proto frames, WebSocket, lanes, queue bounds, reconnect"
   artisan-catalog/             Engine/model/catalog manifests and presentation metadata
   artisan-domain/              Commands, orchestration, sessions, policies, services
   artisan-store/               SQLite actor, migrations, repositories, projections
@@ -285,9 +285,41 @@ During dual-frontend migration, add an extractor that reads the current Tabler/S
 - Identifiers, revisions, paths, cursor sequences, URLs, and bounded strings use newtypes with validating constructors.
 - Numeric bounds remain explicit; do not rely on Rust integer types alone when the wire accepts JavaScript-safe integers.
 - Persisted JSON is decoded through versioned enums before entering domain code.
-- MessagePack byte fixtures are tested in both directions against the TypeScript implementation until TypeScript is retired.
+- Cap'n Proto frame fixtures are tested in both directions against the TypeScript implementation until TypeScript is retired.
 
 ## Protocol-first compatibility strategy
+
+### Amendment (2026-08-24): Cap'n Proto replaces MessagePack
+
+Decision (full swap, both sides move together in-tree): the wire serialization
+switches from MessagePack to Cap'n Proto. Because Artisan has not shipped to
+users, there is no released-client compatibility burden; the transport schema
+version bumps `1` -> `2`, the TypeScript Forge and every client adopt framing
+version `2` together, and no long-lived dual-stack window is maintained.
+
+Binding rules for the swap:
+
+1. Canonical wire shapes live in `.capnp` schema files under
+   `crates/artisan-protocol/schema/`. Effect Schema definitions remain the
+   validation layer (refinements, bounds, patterns) but stop being the wire
+   definition.
+2. MessagePack carried field names on the wire; Cap'n Proto carries field
+   ordinals. Parity therefore means: documented ordinal layout plus an explicit
+   name map per struct, checked by cross-language frame fixtures — not string
+   names on the wire.
+3. Frame-decoded input is size-bounded before allocation, exactly as
+   MessagePack bytes were. Traversal limits are enforced at decode time.
+4. Frames use unpacked serialization initially (`capnp-ts` does not implement
+   packed encoding); packing is revisited only as a coordinated post-cutover
+   optimization.
+5. Validation refinements stay application-side in both languages; Cap'n Proto
+   conveys structure and defaults only.
+6. Cross-runtime golden frame fixtures replace MessagePack round-trip fixtures:
+   bytes produced by one implementation must decode in the other.
+
+The legacy MessagePack path may exist briefly inside each implementation's
+codec module behind the negotiated transport version, and is deleted once both
+sides speak version `2` exclusively.
 
 The protocol is the migration hinge. Both replacement tracks must interoperate with the legacy opposite side:
 
@@ -301,12 +333,12 @@ The protocol is the migration hinge. Both replacement tracks must interoperate w
 ### Protocol work
 
 1. Inventory every exported schema in `modules/protocol/src` and every transport frame in `modules/transport/src`.
-2. Produce canonical JSON and MessagePack fixtures for every command, event, query, mutation result, stream frame, error, and version-negotiation frame.
+2. Produce canonical JSON and Cap'n Proto frame fixtures for every command, event, query, mutation result, stream frame, error, and version-negotiation frame.
 3. Generate a manifest containing schema name, discriminator, version, fixture digest, and owning TypeScript file.
 4. Implement Rust structs and enums with exact serialized field names and omission behavior.
 5. Decode TypeScript-produced bytes in Rust.
 6. Decode Rust-produced bytes in TypeScript.
-7. Fuzz both decoders with malformed tags, extra properties, oversized buffers, invalid UTF-8, invalid sequence values, and truncated MessagePack.
+7. Fuzz both decoders with malformed tags, extra properties, oversized buffers, invalid UTF-8, invalid sequence values, and truncated frames.
 8. Preserve transport version `1` until a deliberate protocol change requires version `2`.
 9. Do not use a protocol version change to hide migration incompatibility.
 
@@ -856,7 +888,7 @@ Runs TypeScript and Rust codecs against the same fixture corpus and compares:
 
 - successful values;
 - rejected values;
-- MessagePack bytes where canonical encoding is required;
+- frame bytes where canonical encoding is required;
 - semantic round trips where map ordering is irrelevant;
 - omitted optional fields;
 - byte arrays;
@@ -929,7 +961,7 @@ If this phase fails, stop before mass translation. Do not let model throughput c
 ### Work
 
 - Port all protocol envelopes and refinements.
-- Port MessagePack framing.
+- Port Cap'n Proto framing and the version-2 transport handshake.
 - Port control and stream lanes.
 - Port queue bounds and failure semantics.
 - Port pairing, session authentication, origin policy, reconnection, cursors, and stream tickets.
@@ -1222,7 +1254,7 @@ Performance failures block cutover; they are not deferred as polish.
 - Forge remains bound to loopback unless an explicit reviewed remote mode is enabled.
 - Origin, session, and pairing checks remain fail-closed.
 - Session digests and secrets are never logged.
-- MessagePack and streamed bytes are bounded before allocation.
+- Frame-decoded input and streamed bytes are bounded before allocation.
 - Workspace paths are validated against canonical roots and symlink policy.
 - Preview fetching retains DNS rebinding and private-address defenses.
 - Managed downloads retain host allowlists, size bounds, checksums, extraction boundaries, and atomic activation.
@@ -1310,7 +1342,7 @@ Windows packaged smoke test when platform code changes
 
 Nightly:
 
-- fuzz protocol, MessagePack, persisted JSON, JSONL, archive extraction, paths, and provider decoders;
+- fuzz protocol frames, persisted JSON, JSONL, archive extraction, paths, and provider decoders;
 - run eight-hour memory/CPU soak;
 - run all historical database migrations;
 - run live provider certification against dedicated test accounts;
@@ -1365,7 +1397,7 @@ The first packets should be created in this exact dependency-aware order:
 11. `NATIVE-0011`: Rust common protocol newtypes and envelope headers.
 12. `NATIVE-0012`: Rust control envelope fixtures.
 13. `NATIVE-0013`: Rust stream envelope fixtures.
-14. `NATIVE-0014`: Rust MessagePack codec compatibility.
+14. `NATIVE-0014`: Rust Cap'n Proto codec compatibility.
 15. `NATIVE-0015`: Rust WebSocket multiplexer and queue bounds.
 16. `NATIVE-0016`: Rust pairing/session authentication client.
 17. `NATIVE-0017`: GPUI `AppModel`, route enum, and fixture runtime.
