@@ -13,10 +13,12 @@ export interface BundledModule {
 	readonly directory: string;
 	/** Export subpath to the source file behind it, mirroring package.json. */
 	readonly entries: Readonly<Record<string, string>>;
+	/** Build-only entry points used by a public entry at runtime. */
+	readonly internal_entries?: Readonly<Record<string, string>>;
 	readonly name: string;
 	/**
-	 * Editor modules resolve to their bundle by default. The two terminal
-	 * dashboards stay on source: their consumers are the plain Node scripts in
+	 * Editor modules resolve to their bundle by default. Terminal dashboard
+	 * packages stay on source: their consumers are the plain Node scripts in
 	 * `.scripts`, including the one that produces these bundles.
 	 */
 	readonly ships_in_editor: boolean;
@@ -115,6 +117,16 @@ export const bundled_modules: ReadonlyArray<BundledModule> = [
 			"./model": "src/model.ts",
 		},
 		name: "@artisanstreet/checklist",
+		ships_in_editor: false,
+	},
+	{
+		directory: "modules/runner",
+		entries: {
+			".": "src/index.ts",
+			"./testing": "src/testing.ts",
+		},
+		internal_entries: { "./tui/worker": "src/tui/worker.ts" },
+		name: "@artisanstreet/runner",
 		ships_in_editor: false,
 	},
 ];

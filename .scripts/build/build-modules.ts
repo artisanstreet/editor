@@ -33,10 +33,9 @@ export const build_module = async (module: BundledModule): Promise<void> => {
 	await build({
 		external: is_external,
 		input: Object.fromEntries(
-			Object.entries(module.entries).map(([subpath, file]) => [
-				entry_output_name(subpath),
-				resolve(module_root, file),
-			]),
+			Object.entries({ ...module.entries, ...module.internal_entries }).map(
+				([subpath, file]) => [entry_output_name(subpath), resolve(module_root, file)],
+			),
 		),
 		output: {
 			chunkFileNames: "shared-[hash].mjs",
@@ -61,7 +60,9 @@ export const module_build_steps = (): ReadonlyArray<Step> =>
 		name: module.name,
 		run: async (step) => {
 			await build_module(module);
-			step.detail(`${Object.keys(module.entries).length} entries`);
+			step.detail(
+				`${Object.keys(module.entries).length + Object.keys(module.internal_entries ?? {}).length} entries`,
+			);
 		},
 	}));
 

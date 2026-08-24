@@ -19,6 +19,8 @@
       "@artisan/distribution": ["./modules/distribution/src/index.ts"],
       "@artisanstreet/checklist": ["./modules/checklist/src/index.ts"],
       "@artisanstreet/checklist/model": ["./modules/checklist/src/model.ts"],
+      "@artisanstreet/runner": ["./modules/runner/src/index.ts"],
+      "@artisanstreet/runner/testing": ["./modules/runner/src/testing.ts"],
       "@artisan/engines": ["./modules/engines/src/index.ts"],
       "@artisan/forge": ["./modules/forge/src/index.ts"],
       "@artisan/observability": ["./modules/observability/src/index.ts"],
