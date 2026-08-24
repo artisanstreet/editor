@@ -848,15 +848,18 @@ The controlling agent always retains final integration and verification. Subagen
 
 ## Open decisions
 
-These are intentionally unresolved and should be decided when their phase needs them:
+The product scope, first workflow, initial local QUIC trust posture, native
+database disposition, default process ownership, and proof-package shape are
+resolved by [`docs/decisions/NATIVE_PRODUCT_SCOPE.md`](decisions/NATIVE_PRODUCT_SCOPE.md).
+The remaining decisions are intentionally deferred until their phase has the
+evidence required to choose them:
 
-1. The first native end-to-end product workflow.
-2. The QUIC certificate, peer-trust, pairing, and authentication model for local and any future remote use.
-3. Whether legacy SQLite data is imported, selectively migrated, or left with the legacy product.
-4. The remote-cache provider and trust/credential policy.
-5. Installer format, signing, updater, and distribution.
-6. Desktop platforms after the initial native-host proof.
-7. Whether and when Nix is useful for Forge deployment or non-Windows development.
+1. Remote QUIC pairing, durable peer identity, and certificate rotation if
+   remote access is approved later.
+2. The remote-cache provider and trust/credential policy.
+3. Installer format, signing, updater, release channel, and distribution.
+4. Desktop platforms after the initial Windows product.
+5. Whether and when Nix is useful for Forge deployment or non-Windows development.
 
 Mobile remains outside this plan unless it becomes a separately approved product target.
 
