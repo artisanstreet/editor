@@ -4,8 +4,6 @@ rust_test(
     name = "dependency_policy_test",
     srcs = ["dependencies.rs"],
     compile_data = [
-        "//:Cargo.Bazel.lock",
-        "//:Cargo.lock",
         "//:Cargo.toml",
         "//modules/assets:Cargo.toml",
         "//modules/backend:Cargo.toml",

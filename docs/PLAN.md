@@ -44,7 +44,7 @@ Shader-backed effects are explicitly deferred. Do not build a custom shader or r
 - Tests live under root `tests/`, not beside production source and not under `.tests/`.
 - A root `scripts/` package is created only if project-specific executable tooling becomes necessary. It is not created merely to wrap ordinary Bazel commands.
 - `thiserror` is used for explicit error types.
-- `anyhow` is prohibited.
+- `anyhow` is prohibited in first-party packages owned by this repository.
 - Every static SVG source referenced by the old frontend is vendored into a first-party Rust assets crate.
 - Reusable native visual and interaction primitives live in a first-party shared GPUI framework crate under `modules/ui/`.
 - Bits UI and the local Svelte wrappers are behavioral references for that framework, not dependencies or architectural templates for the native product.
@@ -329,10 +329,10 @@ Snapshot or mocking libraries are not baseline dependencies. Add them only for a
 
 ## Error policy
 
-- `anyhow` is forbidden in first-party manifests and source.
-- The resolved dependency graph must also be audited for `anyhow` before the baseline stack is accepted.
-- Current GPUI releases declare `anyhow`, so a literal graph-wide ban requires selecting a version without it or maintaining a patch/fork that removes it. The GPUI proof phase cannot declare the dependency set accepted until this conflict is resolved.
-- Libraries expose narrow `thiserror` enums at meaningful boundaries.
+- `anyhow` is forbidden in manifests and source owned by this repository.
+- Third-party dependencies may use `anyhow` internally. Their implementation choices do not require a fork, patch, or policy exception, and the dependency lockfiles are not checked for transitive `anyhow` packages.
+- First-party libraries expose narrow typed errors at meaningful boundaries rather than adding or re-exporting `anyhow` themselves.
+- Libraries use `thiserror` for explicit error enums where it improves the boundary.
 - Errors retain their sources when a lower-level cause is useful.
 - External input, protocol decoding, and database data return errors rather than panicking.
 - Binary entry points log typed failures and return explicit exit codes.
@@ -468,8 +468,6 @@ Prove separately that Bazel can:
 - run one external `rust_test` from `tests/`;
 - run rustfmt, Clippy, and dependency-policy targets.
 
-Resolve the GPUI/`anyhow` conflict during this phase. Do not begin product work on top of an unaccepted dependency graph.
-
 The proof must exercise GPUI's proc macros, native platform dependencies, and build-script behavior, plus SeaORM's derive macros. A trivial dependency fetch or unused library target is not sufficient evidence that Bazel can own these crates.
 
 Completion evidence:
@@ -478,7 +476,7 @@ Completion evidence:
 - `bazel test //...` succeeds;
 - a clean repeat demonstrates cache reuse;
 - rust-analyzer can understand first-party crates, root-level test targets, and the chosen generated-code arrangement;
-- dependency checks show no forbidden `anyhow` package.
+- dependency checks show that no first-party manifest declares `anyhow`.
 
 ### Phase 2: domain and application protocol
 
@@ -774,11 +772,10 @@ These are intentionally unresolved and should be decided when their phase needs 
 1. The first native end-to-end product workflow.
 2. The QUIC certificate, peer-trust, pairing, and authentication model for local and any future remote use.
 3. Whether legacy SQLite data is imported, selectively migrated, or left with the legacy product.
-4. The GPUI version/fork strategy needed to satisfy the `anyhow` prohibition.
-5. The remote-cache provider and trust/credential policy.
-6. Installer format, signing, updater, and distribution.
-7. Desktop platforms after the initial native-host proof.
-8. Whether and when Nix is useful for Forge deployment or non-Windows development.
+4. The remote-cache provider and trust/credential policy.
+5. Installer format, signing, updater, and distribution.
+6. Desktop platforms after the initial native-host proof.
+7. Whether and when Nix is useful for Forge deployment or non-Windows development.
 
 Mobile remains outside this plan unless it becomes a separately approved product target.
 
@@ -797,7 +794,7 @@ The port plan has been executed when:
 - shaders remain explicitly deferred rather than being partially implemented or treated as a hidden completion gate;
 - tests are organized under `tests/` and run as cacheable Bazel targets;
 - any project-specific tooling lives under `scripts/` and does not duplicate the build graph;
-- first-party and resolved dependencies satisfy the `anyhow` prohibition;
+- first-party packages satisfy the `anyhow` prohibition;
 - the shipping native product contains no browser frontend or TypeScript Forge;
 - intentionally unresolved product choices have been decided only when their work is approved;
 - completion is based on the selected native scope, not exact TypeScript parity.
