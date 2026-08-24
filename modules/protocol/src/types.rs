@@ -8,8 +8,8 @@
 use std::fmt;
 
 use artisan_domain::{
-    Command, DirectoryListing, Event, IdentifierError, MessageId, ProjectSummary, Query, RequestId,
-    ThreadId, ThreadListing, ThreadSummary, UnixMillis,
+    Command, DirectoryListing, Event, IdentifierError, MessageId, ProjectListing, ProjectSummary,
+    Query, RequestId, ThreadId, ThreadListing, ThreadSummary, UnixMillis,
 };
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -198,6 +198,13 @@ impl LocalCapability {
         })?;
         Ok(Self(value))
     }
+
+    /// Borrows the secret solely for serialization or constant-time
+    /// authentication at a restricted boundary. Callers must never format it.
+    #[must_use]
+    pub(crate) const fn expose_for_wire(&self) -> &[u8; LOCAL_CAPABILITY_BYTES] {
+        &self.0
+    }
 }
 
 impl Drop for LocalCapability {
@@ -367,6 +374,8 @@ pub struct FirstMessageReceipt {
 pub enum ResponsePayload {
     /// Forge-visible directory listing.
     DirectoryListing(DirectoryListing),
+    /// Complete bounded catalog of attached projects.
+    ProjectListing(ProjectListing),
     /// Idempotent project attachment result.
     AttachedProject {
         /// Original durable project summary.

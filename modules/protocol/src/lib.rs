@@ -24,8 +24,13 @@ pub mod phase1_proof_capnp;
 #[allow(clippy::pedantic)]
 pub mod artisan_capnp;
 
+mod codec;
 mod types;
 
+pub use codec::{
+    CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ProtocolDecodeError, ProtocolEncodeError,
+    decode_envelope, encode_envelope,
+};
 pub use types::{
     APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ERROR_DETAIL_MAX_BYTES, ErrorCode,
     ErrorDetail, FirstMessageReceipt, FrameId, HELLO_VERSION_MAX_ENTRIES, Hello,
