@@ -1,0 +1,2282 @@
+{
+	"schema": "artisan.protocol.schema-manifest/1",
+	"digestAlgorithm": "sha256-canonical-json-ast",
+	"gitRevision": "53380d54faf906bde3dec6bcda87e67caf8e0937",
+	"schemaCount": 433,
+	"families": {
+		"artisan-tools.ts": [
+			{
+				"name": "ArtisanApprovalListQuery",
+				"kind": "object",
+				"digest": "fda1df6e16e9051ae25219ea25ff7764c6c7e72c5ece744cd76bcbb135cb7a04"
+			},
+			{
+				"name": "ArtisanApprovalListQueryResult",
+				"kind": "object",
+				"digest": "740a4a16a57e0dbe3cf19facc69dff13ea678144bd4d72acd2e5cf9a7209d060"
+			},
+			{
+				"name": "ArtisanApprovalProjection",
+				"kind": "object",
+				"digest": "ed06c83c7bd532d13ca55039c58bcce71c784eab5eb40af3b640693990c7e97f"
+			},
+			{
+				"name": "ArtisanApprovalRequest",
+				"kind": "object",
+				"digest": "772c55c805c9c590d88f37bdf9b9dc087fdf5460ef2c62a91677c184fffa1fe3"
+			},
+			{
+				"name": "ArtisanApprovalResolution",
+				"kind": "object",
+				"digest": "c1ce00992a8666ab1e009038d60938a3e6eac8dac0625c58feda59814216ae9e"
+			},
+			{
+				"name": "ArtisanApprovalResolveRequest",
+				"kind": "object",
+				"digest": "ee11f09d7484e90fa3a5842f200d4141a6ae37c16e5b26836d85653dbbdb269f"
+			},
+			{
+				"name": "ArtisanApprovalUpdatedEvent",
+				"kind": "object",
+				"digest": "9153c10e9ed1e63f8047956ab63a72634c35ed088e6dc172637c5ba4e8fc972b"
+			},
+			{
+				"name": "ArtisanAssumptionEvent",
+				"kind": "object",
+				"digest": "9ab8587fcd7c944803aaab07ec88f6e9ae88b9f09390d69656cf0880dcd834b5"
+			},
+			{
+				"name": "ArtisanNativeActionEvent",
+				"kind": "object",
+				"digest": "1d1b3c52bca22b220c55749791a67f1791223e2528a618d1a5922e535b6c8560"
+			},
+			{
+				"name": "ArtisanQuestionField",
+				"kind": "object",
+				"digest": "2c24e37424ff829c73011759b1172297f4990220243e72f84c294894f40f8d7c"
+			},
+			{
+				"name": "ArtisanQuestionRequest",
+				"kind": "object",
+				"digest": "1e9c46cc085a8898d14fa34fdd8802854f341fa0c7f817f13a69e4e9ff3f7435"
+			},
+			{
+				"name": "ArtisanToolAvailability",
+				"kind": "object",
+				"digest": "a59cd53bd5cec7f82fb4282ce4b19f7ac8f17a90b3355967e82b52102983c202"
+			},
+			{
+				"name": "ArtisanToolDeclaration",
+				"kind": "object",
+				"digest": "2a47b50c83d4322144c28b23add0422f12763da4e9f89da11e71aaeea9b5fd12"
+			},
+			{
+				"name": "ArtisanToolDescriptor",
+				"kind": "object",
+				"digest": "767e7954c453b6e15631199334ceec023edf4401eaa153cb6df7d88a772bab50"
+			},
+			{
+				"name": "ArtisanToolExecutionInput",
+				"kind": "union",
+				"digest": "d14844e36a8f8947ea1238fc8e7874421194518747462c5989889f70067e3abb"
+			},
+			{
+				"name": "ArtisanToolExecutionRequest",
+				"kind": "object",
+				"digest": "56f88dbc5299e45b15b27d15535a245dd68e83b4d4f21804444e13a7699e44e4"
+			},
+			{
+				"name": "ArtisanToolId",
+				"kind": "union",
+				"digest": "1b8c58542045057aec85e03516b918d2c7c0a4ebf6ad1c2bffcb090c9a1e6400"
+			},
+			{
+				"name": "ArtisanToolInvocation",
+				"kind": "object",
+				"digest": "4cb5483e0521746aa87a9c5f1b282d57d57c8c666d43a0b34684df711fca42ae"
+			},
+			{
+				"name": "ArtisanToolInvocationEvent",
+				"kind": "object",
+				"digest": "4a6dfaf0562a949a032bc2f604ef7997d45272187d7b57fbdccb544ee9d5fe90"
+			},
+			{
+				"name": "ArtisanToolInvocationLifecycle",
+				"kind": "union",
+				"digest": "743c7ba89ca9024bab069d34ba288074f5c3343d487b084405835569957dc834"
+			},
+			{
+				"name": "ArtisanToolInvocationListQuery",
+				"kind": "object",
+				"digest": "67dbcc46818d8b2e02f0402b47b278f369aeacd224df04528f7685fafed2d7fe"
+			},
+			{
+				"name": "ArtisanToolInvocationListQueryResult",
+				"kind": "object",
+				"digest": "fa982c872b2e62d5be07ccc0927439602e3bbbd4b2622e3542fb3a5aedbfdf59"
+			},
+			{
+				"name": "ArtisanToolInvocationOutcome",
+				"kind": "object",
+				"digest": "9bf5bebbe53dd04881fee3d3c29ce5ae7b41606d64367ad3343451236c97d18b"
+			},
+			{
+				"name": "ArtisanToolKind",
+				"kind": "union",
+				"digest": "1e1b659f5e44eaecda0e62aa02b12ae9990e706002fca5ea7030a2dff2990e01"
+			},
+			{
+				"name": "ArtisanToolPermissionDecision",
+				"kind": "object",
+				"digest": "b8e78f04bea91bd3f3ac0a79d537803db93af637d9f2ebd5994b5d6061130bd4"
+			},
+			{
+				"name": "ArtisanToolPermissionPolicy",
+				"kind": "object",
+				"digest": "81a4904d789f421da1de7cbafad9b0ce1abe635afb787768012a14d76fb8cb1b"
+			},
+			{
+				"name": "ArtisanToolRegistryListQuery",
+				"kind": "object",
+				"digest": "dfe4a2d8cee95b9f411d799aa8e6d9fbb3a27e6ad2c99d779e49199b3488b6fb"
+			},
+			{
+				"name": "ArtisanToolRegistryListQueryResult",
+				"kind": "object",
+				"digest": "cfe151e4bb8bcc97b8edf0cfb9c3a3c1f02ed9edd96086482d401d985b01d207"
+			},
+			{
+				"name": "ArtisanToolUsage",
+				"kind": "object",
+				"digest": "f4969cdfc1cd03124d7892136ccc0e30729843382f14f5dbec435b81d6daf71b"
+			},
+			{
+				"name": "ArtisanToolWorkspaceFileTarget",
+				"kind": "object",
+				"digest": "354c35a62b29949cde688ef09811f6b3bf605c5aedf408f53537d72dc52e7f0f"
+			},
+			{
+				"name": "PermissionRequirement",
+				"kind": "union",
+				"digest": "09f2eecd245240af96b598c8074a3960f28c43d1c426d20d44052ccd309d3862"
+			},
+			{
+				"name": "WorkspaceEvidenceBinding",
+				"kind": "object",
+				"digest": "b60183d11500a9aac68df89c82252f722d1e958f20c85e1344d088c763c7b6c9"
+			},
+			{
+				"name": "WorkspaceFileDiscoveryEntry",
+				"kind": "object",
+				"digest": "512b4c938d654cf6d01d6bece0ef43c1fc31941d48751f166a7e4a31894499de"
+			},
+			{
+				"name": "WorkspaceFileDiscoveryQuery",
+				"kind": "object",
+				"digest": "df604c1211f44ec2abe8c423d146cd18776cfc523dcc7cd06d7a468a6e9eeee1"
+			},
+			{
+				"name": "WorkspaceFileDiscoveryQueryResult",
+				"kind": "object",
+				"digest": "92c970d6a8fe7425a7e6e47e8260a7d2a1817847ec9b1bfb6b0da0fcd3cf826b"
+			},
+			{
+				"name": "WorkspaceLanguageCapabilitiesQuery",
+				"kind": "object",
+				"digest": "da62d294fe79e60b8ca6a475cb5fe2b06746bbaadeb658768e28c33d674afd7f"
+			},
+			{
+				"name": "WorkspaceLanguageCapabilitiesQueryResult",
+				"kind": "object",
+				"digest": "82f5f28150bf36f8e0480d91324fa65e251f889193af54aa89cd0958c7a34109"
+			},
+			{
+				"name": "WorkspaceLanguageCapability",
+				"kind": "object",
+				"digest": "448f581f34f48c3f3387ee5640144ab905002823560a6ac5c33e283909583e43"
+			}
+		],
+		"attachments.ts": [
+			{
+				"name": "ImageAttachmentBytes",
+				"kind": "declaration",
+				"digest": "98ebb65aff16abdf184dc27b833a33cba69e27004af2422a83a3b956b060b896"
+			},
+			{
+				"name": "ImageAttachmentReference",
+				"kind": "object",
+				"digest": "6deeae92dfd6aa0da0cb532f0c5863988b2075161b1c52d48ca3580d95d7c2ba"
+			},
+			{
+				"name": "ImageAttachmentUpload",
+				"kind": "object",
+				"digest": "9bfbca26dbc13bc4a381c6f48ae15cd7c758ff240fcf6642605f3f76f5740356"
+			},
+			{
+				"name": "ImageMediaType",
+				"kind": "union",
+				"digest": "11d210d819afbb42cf56f98650871b3457e4efa6036886adad3d9aa6da8b935f"
+			},
+			{
+				"name": "MessageImageAttachment",
+				"kind": "object",
+				"digest": "2debf116f81810134b84046d8a2c71c422457b7f7d6de4ff15ad31fd55152647"
+			},
+			{
+				"name": "MessageImageAttachmentQuery",
+				"kind": "object",
+				"digest": "fdedff609263cbb0667ef41ae3b0569ae60db5aca2752e425d4b98eab3a7d8bd"
+			},
+			{
+				"name": "MessageImageAttachmentQueryResult",
+				"kind": "union",
+				"digest": "c3902ac4f91adddda418f0224a6002a0c3c33e03f2cffcc5c071575c1cdda2a9"
+			},
+			{
+				"name": "UserMessageContentPart",
+				"kind": "union",
+				"digest": "1c08e2ecfc15212b9b20313ff08395adabb316c7c4652f2ddf94eab491f88884"
+			},
+			{
+				"name": "UserMessageInputContentPart",
+				"kind": "union",
+				"digest": "16c5a5cbc1b7a1dac1d5eb96c083092a49cff7d8d9930affed408193c8c3865d"
+			}
+		],
+		"common.ts": [
+			{
+				"name": "Identifier",
+				"kind": "scalar",
+				"digest": "a7813d3ff60a9ca14d19a886b1fbf7ba7b226b730d815c583bbc6c57e37e82ec"
+			},
+			{
+				"name": "IsoDateTime",
+				"kind": "scalar",
+				"digest": "c82e6b23154f3e8170f2d12d889c30ab89b595aeefd7ea19fb283b53d18a9b6c"
+			},
+			{
+				"name": "JournalSequence",
+				"kind": "scalar",
+				"digest": "e6d17b6b696b2e02edbf01b2357a773bfa799b43a31b564ff616515e1cf78fc2"
+			},
+			{
+				"name": "NegotiatedProtocolVersion",
+				"kind": "union",
+				"digest": "5c7a42e20781fb1adad38079e29156fa0ef77ca38b9438f8fe10231343372970"
+			},
+			{
+				"name": "PositiveInt",
+				"kind": "scalar",
+				"digest": "90a1e26c60d6108766fb6f2113563e05456306bba32e618ac42a5b0ddffa4233"
+			},
+			{
+				"name": "ProtocolVersion",
+				"kind": "scalar",
+				"digest": "3cbf8320be673fd491204a31a9051afb8bddf5a45bfc32457b7e480eaf87dad4"
+			},
+			{
+				"name": "RawOrigin",
+				"kind": "object",
+				"digest": "f3641be17e76f9423fd6bdf4aac0b002ee3128c3657a2c71fe5981c99da89e68"
+			},
+			{
+				"name": "SchemaVersion",
+				"kind": "scalar",
+				"digest": "026acbc4adc1519a5fffa8606b205485456f3a11084be574350985a1cd85e608"
+			},
+			{
+				"name": "StreamCursor",
+				"kind": "object",
+				"digest": "b2552104401e544215e1ea745c27d89c5a8138ecb791cd796fe613215e31d88c"
+			},
+			{
+				"name": "StreamSequence",
+				"kind": "scalar",
+				"digest": "d8a071cd4ea5c69280ef3080eea003ece744661d0e02f41ae2f4b9484ff759ae"
+			}
+		],
+		"conversation.ts": [
+			{
+				"name": "ConversationActivitySubagent",
+				"kind": "object",
+				"digest": "ab0d0c578530411fdd08d9e01c724f748e0105433d12012094c7ca1c0115f833"
+			},
+			{
+				"name": "ConversationApprovalRequest",
+				"kind": "union",
+				"digest": "4781d83e005d99d879749f65bdbf9e4996cbd51d69fe92ab0971e20f9bb5c0ef"
+			},
+			{
+				"name": "ConversationAssistantMessagePhase",
+				"kind": "union",
+				"digest": "9fe6b9b340c5e15777f34ccedaa6a07b3c61b4792629fdf4ca5f7bbe4b8e6ffc"
+			},
+			{
+				"name": "ConversationBodyText",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "ConversationEntityBase",
+				"kind": "object",
+				"digest": "720db2769e78195bd858539d8167433002e9c65b276eeeff9775b4f74b837c91"
+			},
+			{
+				"name": "ConversationErrorRef",
+				"kind": "object",
+				"digest": "6b2f32f0bbdbc3c46d5501d06493c880c27007ba2868d9be20e865b1ba8af70e"
+			},
+			{
+				"name": "ConversationItem",
+				"kind": "union",
+				"digest": "ae58caf98eb297ef127f2b7418b3e1f3fd1dbb977ca8474ee8761944059604f6"
+			},
+			{
+				"name": "ConversationLifecycle",
+				"kind": "union",
+				"digest": "c724fc761b284e352e73e8d5679f020a0689c991afa6bbd2a5fea427815ee7c2"
+			},
+			{
+				"name": "ConversationPatch",
+				"kind": "union",
+				"digest": "42f0d304b0c152ede70a7b873f9f4598ff10322da896b321e76332d8afdb057c"
+			},
+			{
+				"name": "ConversationPatchBatch",
+				"kind": "object",
+				"digest": "349614d9746facf8c9480b2601a90c68b3cc04c6798a79828361020cf343a469"
+			},
+			{
+				"name": "ConversationQuery",
+				"kind": "object",
+				"digest": "2c021bfff5f0118696b78574fc26d0051851dca57d268b8528b37b85369e7adb"
+			},
+			{
+				"name": "ConversationQueryRange",
+				"kind": "object",
+				"digest": "9471d654c730ec6f60b2eebcb61dad1d6f30af0a195d252c5a4c35399e292f7f"
+			},
+			{
+				"name": "ConversationQueryWindow",
+				"kind": "object",
+				"digest": "109b6973edfccea245b4e230c19e5f3e733aa943db42a558f9f6cbc1c1537434"
+			},
+			{
+				"name": "ConversationQuestionOption",
+				"kind": "object",
+				"digest": "8c7c220860d75c86c4cb1786cf8815ff337bd082e0feaa48079368046d47b382"
+			},
+			{
+				"name": "ConversationSafeBodyText",
+				"kind": "scalar",
+				"digest": "7b36b418dbe9cac38c500a9e64dcc4284d4d12ea02273739d98f45d64b0f788e"
+			},
+			{
+				"name": "ConversationSafeText",
+				"kind": "scalar",
+				"digest": "7b36b418dbe9cac38c500a9e64dcc4284d4d12ea02273739d98f45d64b0f788e"
+			},
+			{
+				"name": "ConversationSnapshot",
+				"kind": "object",
+				"digest": "01be22e3931f8bb639d1f0c835463bce177c655f1f6a00555b81b2965bb34e90"
+			},
+			{
+				"name": "ConversationSnapshotWindow",
+				"kind": "object",
+				"digest": "319c158d66558909d5d6f11f12b1690282f730baa11f9168bfb8087e5942a4ad"
+			},
+			{
+				"name": "ConversationSourceRef",
+				"kind": "object",
+				"digest": "815d79b3e0f2c4344baaf71d23058634ff50b0e232ec7142eef966b3c3727eb4"
+			},
+			{
+				"name": "ConversationSteeringFragmentBoundary",
+				"kind": "object",
+				"digest": "e427484e5b08007c2c3ab183525417925975a224004364aa48109a769ef2def9"
+			},
+			{
+				"name": "ConversationSubscriptionCursor",
+				"kind": "object",
+				"digest": "572e5f204c44d6b6964a734da056748ae91e220ae05f15465254a5ab7e5eaf46"
+			},
+			{
+				"name": "ConversationTerminalLifecycle",
+				"kind": "union",
+				"digest": "db6843e6adeeeff1f127479844bc34cfe0d5ea2919e43d6849481a2061c8474b"
+			},
+			{
+				"name": "ConversationText",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "ConversationTurn",
+				"kind": "object",
+				"digest": "ceb62411d312f30b226ff7e04ca5dba79f86b72028cbd9c20da0154d18c99a3d"
+			},
+			{
+				"name": "ConversationWindowMarker",
+				"kind": "object",
+				"digest": "3bbdd36b0a559b11e866aeb881ff522c1b9f18a449737963465563fc58bc179f"
+			}
+		],
+		"desktop-app-icon.ts": [
+			{
+				"name": "DesktopAppIconPreference",
+				"kind": "union",
+				"digest": "41e1884ee2957fffab4b8ca44dc54e0918abc3c81601796d98a72f27c2de10de"
+			},
+			{
+				"name": "DesktopAppIconSelection",
+				"kind": "object",
+				"digest": "9f8d057d3f13959e4d445f5aa11e2b4d0dbb0b617c5f6c83b132f4d615e55337"
+			}
+		],
+		"engine-installation.ts": [
+			{
+				"name": "EngineAuthenticationRequest",
+				"kind": "object",
+				"digest": "4237abe9a2b55c8dfc23ef880bc1f3199e89cd1727330ab7ef1388e920587074"
+			},
+			{
+				"name": "EngineInstallationActivity",
+				"kind": "union",
+				"digest": "bdc17207259a77655a2357bb9bc86ff30dfa800c3c4888180e5638f7b42dbf69"
+			},
+			{
+				"name": "EngineInstallationMutationResult",
+				"kind": "union",
+				"digest": "10e5b2d0918ce7fc77b406662153b151eaa849f44ce18560838d7613868ca2d4"
+			},
+			{
+				"name": "EngineInstallationPhase",
+				"kind": "union",
+				"digest": "7ee68d2ff425984d1270b7c87fbe6112e3ef34da19ed68ce77ec29ce713796b7"
+			},
+			{
+				"name": "EngineInstallationQuery",
+				"kind": "object",
+				"digest": "aba9467c5098dcee2c18c8237476bb0f0623b8c8101e8f8296f29638e1425ab4"
+			},
+			{
+				"name": "EngineInstallationReport",
+				"kind": "object",
+				"digest": "331e4765ca337a02ccb218bbf53e8fbeedc14fed84210e023e6e3b0c0b4ceb70"
+			},
+			{
+				"name": "EngineInstallationSnapshot",
+				"kind": "object",
+				"digest": "6f583e1589831475c7d67a2b6d6f8318f0ee43732c24a8f4d607a4077c23a2e4"
+			},
+			{
+				"name": "EngineInstallRequest",
+				"kind": "object",
+				"digest": "7e4f21c771721ace1ce6ec00b49c4bd7518b689ebfd99344f80da1f49cd9971f"
+			},
+			{
+				"name": "EngineRollbackRequest",
+				"kind": "object",
+				"digest": "3f82fced6ca10fbf0fda53e672cbaf86a75ac3ab3191d71c430fd6acf3758c22"
+			}
+		],
+		"engine-usage.ts": [
+			{
+				"name": "EngineUsageAuthentication",
+				"kind": "union",
+				"digest": "b787f0b57934d9c543659242259686bad90cb3eebd643e7410cfc7845c03d75b"
+			},
+			{
+				"name": "EngineUsageQuery",
+				"kind": "object",
+				"digest": "4166825314ca4da600231c9e1fa164e8e85fb6724b0c7348d6874ce0e5c3599d"
+			},
+			{
+				"name": "EngineUsageReport",
+				"kind": "object",
+				"digest": "92bfc3772ba9f56da133e276625014a97480110520befb9aa325a546856a5079"
+			},
+			{
+				"name": "EngineUsageSnapshot",
+				"kind": "object",
+				"digest": "4d5773a02b34161328849b6e032c0a1ce45bbf54bbc027f2d39c7913cee3935c"
+			},
+			{
+				"name": "EngineUsageWindow",
+				"kind": "object",
+				"digest": "95ea09b6ed6380dcec9ed7176c190bad0953821235720524e0e34173ce03cb60"
+			},
+			{
+				"name": "EngineUsageWindowKind",
+				"kind": "union",
+				"digest": "0bf60a4b3b1cf6ee87dd80b0d18f1e3dbbc48cb8bb277df29e4aade83f309acc"
+			}
+		],
+		"forge-launch-request.ts": [
+			{
+				"name": "ForgeStartLaunchRequest",
+				"kind": "object",
+				"digest": "40b7e8b0ac0e98475f229cffd63dce2b68eab0b175ac6b4c403b790eb6df279a"
+			}
+		],
+		"git.ts": [
+			{
+				"name": "GitBranchName",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "GitBranchState",
+				"kind": "union",
+				"digest": "bac25964de497ffc9aab924b58f0141e5aac97f15de23caae793d34bca02f2fe"
+			},
+			{
+				"name": "GitDiffPatch",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "GitDiffQuery",
+				"kind": "object",
+				"digest": "d5939442d3021c97094725e3770d6bfc180c887c49cb46f553f1168bed3ba24a"
+			},
+			{
+				"name": "GitDiffQueryResult",
+				"kind": "object",
+				"digest": "8f4c0237e6258efc0f72af072a438d8b3fbf5c7bd415639d77a36a23f51a487c"
+			},
+			{
+				"name": "GitDiffScope",
+				"kind": "union",
+				"digest": "9060dccde5839c562510b2c16e542c1b7d4f2c1f9ddf32f572bfc552977b4937"
+			},
+			{
+				"name": "GitDiffSummary",
+				"kind": "object",
+				"digest": "dbace505abeeb4263562036813ae4eddad5332f810e22800b18cb5a90e72b661"
+			},
+			{
+				"name": "GitFileChange",
+				"kind": "object",
+				"digest": "b7104235922662f9b3de7b04e9181f2287502cb26ef377842035949a040e289c"
+			},
+			{
+				"name": "GitFileChangeFlags",
+				"kind": "object",
+				"digest": "763a5426ba2b290aae7abe458dae4e5b4d7f34ae3f9fb2cda881bc43551b79e2"
+			},
+			{
+				"name": "GitIndexStageRequest",
+				"kind": "object",
+				"digest": "0a5f9bfcf059e86effcb22617726f71a36d1c5c98b4b092a27320347c27d324a"
+			},
+			{
+				"name": "GitIndexUnstageRequest",
+				"kind": "object",
+				"digest": "0a5f9bfcf059e86effcb22617726f71a36d1c5c98b4b092a27320347c27d324a"
+			},
+			{
+				"name": "GitMutationFailure",
+				"kind": "object",
+				"digest": "53035c2f5fe608a9eb795bcfbde1648bb3a059ec0bf47e7b4bd75ac80716095d"
+			},
+			{
+				"name": "GitMutationKind",
+				"kind": "union",
+				"digest": "bd60e17173d8b31512cf3d6ddbfbab2a506d1f82501e00d923ddd70fa1ee222a"
+			},
+			{
+				"name": "GitMutationLifecycle",
+				"kind": "union",
+				"digest": "4cc15790f9dbfa5293af66deec2c54b53ec1c642d95f9247cb72eb1c10f096e8"
+			},
+			{
+				"name": "GitMutationPaths",
+				"kind": "scalar",
+				"digest": "86e728165206bd4a1abf5ece638596cd70f1d345ea90bcb6efa7cf949dbb4a8b"
+			},
+			{
+				"name": "GitMutationProjection",
+				"kind": "object",
+				"digest": "66343caa1e109dba6b3d67769eaaaa71fedeb163aace152fb2622aaca9dd460d"
+			},
+			{
+				"name": "GitMutationResolveRequest",
+				"kind": "object",
+				"digest": "b0ca8f8833157d3f143afd9c812a148250c8115a60c20a76f55a50a703012231"
+			},
+			{
+				"name": "GitMutationUpdatedEvent",
+				"kind": "object",
+				"digest": "b7bef90bfe65656508ca5a987746e5d4af43f91d97e28c07626aea3e675f7bbb"
+			},
+			{
+				"name": "GitNotRepositoryProjection",
+				"kind": "object",
+				"digest": "555904e1d7e303966337a0310d7fad0cd935d864a558d97dfdbf1d183f9137cd"
+			},
+			{
+				"name": "GitObjectId",
+				"kind": "scalar",
+				"digest": "8b2e5fcedf63354843f28322287e7af0dd5d77c10d5931e9900ca3bd35ce46b5"
+			},
+			{
+				"name": "GitPath",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "GitPorcelainStatus",
+				"kind": "scalar",
+				"digest": "41691b3c9e0743146c45e840df4b87b9bd225a8ca512173502fce48651d6e8d1"
+			},
+			{
+				"name": "GitRepositoryProjection",
+				"kind": "object",
+				"digest": "688c40d07db6883f86be19bd5c8df642880a2eb46a7079c33ef9481b8b687ec0"
+			},
+			{
+				"name": "GitSnapshotId",
+				"kind": "scalar",
+				"digest": "09428ff87b56ed974a9cb0bd7051d8761f689d3c43081f5e3068138fadaa9370"
+			},
+			{
+				"name": "GitWorkspaceProjection",
+				"kind": "union",
+				"digest": "62d8e274f15c882d32f0fd23023dbce8dca1566e1a03f9511f02efe1b74e6fd3"
+			},
+			{
+				"name": "GitWorkspaceQuery",
+				"kind": "object",
+				"digest": "89f341bc92456fc0eaccd6fd5dbe38e96bc74d9daa0fdc2f50ca0dc2843c55f9"
+			},
+			{
+				"name": "GitWorkspaceQueryResult",
+				"kind": "object",
+				"digest": "1dd9c12da46faed92dd2de5d0f9d68fb9b34f73c2cbbf8befd2da624378b7f04"
+			},
+			{
+				"name": "GitWorkspaceUpdatedEvent",
+				"kind": "object",
+				"digest": "fefdf5a8306e674a1d3feecc16ba93c96d836d6d161dc603c328f7b95787be95"
+			},
+			{
+				"name": "GitWorktree",
+				"kind": "object",
+				"digest": "2546c4a34287ee824a9d52df8b152539af98def43afa0a1232350cfe1dd9a9fa"
+			},
+			{
+				"name": "GitWorktreePath",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			}
+		],
+		"guidance.ts": [
+			{
+				"name": "GlobalGuidanceCandidate",
+				"kind": "object",
+				"digest": "5eda4ef2ad4bdc3e8543b3f68944ff74c500cab1265989d32b87fc9ab96b8aed"
+			},
+			{
+				"name": "GlobalGuidanceCanonicalCommitIntent",
+				"kind": "object",
+				"digest": "ebf6be0480965a87737d8f6e783bf65c9abfc3b55800baecf786d0375b1d800d"
+			},
+			{
+				"name": "GlobalGuidanceCanonicalMetadata",
+				"kind": "object",
+				"digest": "56d7e0a6d0bb9ca9b4e2f52c4031e22a9552e8763739b3572e849d869e37f578"
+			},
+			{
+				"name": "GlobalGuidanceCanonicalUpdatedEvent",
+				"kind": "object",
+				"digest": "5f3704b832cc7bde11562ecb8edf0aea9f29c06811458d2cd27bf4f68e354c42"
+			},
+			{
+				"name": "GlobalGuidanceCommitReason",
+				"kind": "union",
+				"digest": "f58c7c8277ebf9a2c6fb069902143879567cfdb807c990fae4e67df2dc1e3352"
+			},
+			{
+				"name": "GlobalGuidanceContent",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "GlobalGuidanceDriftResolutionRequest",
+				"kind": "object",
+				"digest": "cd3c014bc3c7665f068dc4b51e89b4f7c1ff614069885c5eb58f66dcf96bd736"
+			},
+			{
+				"name": "GlobalGuidanceMetadata",
+				"kind": "object",
+				"digest": "ff98615ae93fc1be49f3e32f37c3bb90460b1c6da6799e10d1a1508b60eed8a9"
+			},
+			{
+				"name": "GlobalGuidanceProvider",
+				"kind": "union",
+				"digest": "f7a625d9e9e3044f844b7f9c6787b59e0dfa3b40477736979e079daa3fcf5efb"
+			},
+			{
+				"name": "GlobalGuidanceProviderMetadata",
+				"kind": "object",
+				"digest": "8c6d9a4cf7e7647e6d67e02f86add6818ae0b5159710e251d9366c2ea42fd91c"
+			},
+			{
+				"name": "GlobalGuidanceProviderReconciledEvent",
+				"kind": "object",
+				"digest": "fe9471694211e31ee7d0a0ecfe8c8855d360fe7f756945286ce8103ea8894dbb"
+			},
+			{
+				"name": "GlobalGuidanceProviderReconciliation",
+				"kind": "object",
+				"digest": "520660fd7e837013d3f595a87470e5f45b426ffeb16d9a1c9c1e98d5d81baa96"
+			},
+			{
+				"name": "GlobalGuidanceRetryRequest",
+				"kind": "object",
+				"digest": "96791e1f41b050cc4f17ffc3dfe726a9f894bd851c9b230b6dc413bbb327dc32"
+			},
+			{
+				"name": "GlobalGuidanceSelectionRequest",
+				"kind": "object",
+				"digest": "4f25bc061180cdf142cd559f87476b9f8f935254c04eb7be196ec8be6325baea"
+			},
+			{
+				"name": "GlobalGuidanceSelectionRequiredEvent",
+				"kind": "object",
+				"digest": "eb6d31510a6de541ace09785e73a8489778876934f691280b4c4a1598bc4ea82"
+			},
+			{
+				"name": "GlobalGuidanceSelectionRequiredIntent",
+				"kind": "object",
+				"digest": "b5fd43b8b9d5b9d83816f910602ef511fb6b64315cc00a4d4dcd31ef9ef321f4"
+			},
+			{
+				"name": "GlobalGuidanceSnapshot",
+				"kind": "object",
+				"digest": "0f5f83697b7a8c8ddece869a234319006ceb0bf8175b45ae2b766fd4c6872644"
+			},
+			{
+				"name": "GlobalGuidanceUpdateRequest",
+				"kind": "object",
+				"digest": "7f0eb1c8474887ed0b69be6b5753fc0c072d981f44028eec97209e6162f89318"
+			},
+			{
+				"name": "GuidanceByteCount",
+				"kind": "scalar",
+				"digest": "f9e4f2660c5a3692653067cbe517f912c8ec1ea98023bfbce87d3492972d8972"
+			},
+			{
+				"name": "GuidanceHash",
+				"kind": "scalar",
+				"digest": "fc4205900a16e77334d7c6b5bd13fb06e0a9773fc862b33cd2fb33876225aaf0"
+			},
+			{
+				"name": "GuidanceProviderSyncStatus",
+				"kind": "union",
+				"digest": "b4d9fee27293b94784596675b9ac5ad3d2fafb3cd849a04c1e7d4cb04022ff4c"
+			}
+		],
+		"host-identity.ts": [
+			{
+				"name": "HostIdentitySnapshot",
+				"kind": "object",
+				"digest": "f96edd72329931e692114d556defcf4945a0d40f7133632b8521643dd9aca7b3"
+			},
+			{
+				"name": "HostMachineConnectFailureReason",
+				"kind": "union",
+				"digest": "46ce613d5e48f1fc8f86ba92e65bdce047a91265ee261c91a365d58239650104"
+			},
+			{
+				"name": "HostMachineConnectOutcome",
+				"kind": "union",
+				"digest": "c5b4b45b25b0e7d2e36627e14b82c8d2661ce063b9bf6fac32dde9369f4bc962"
+			},
+			{
+				"name": "HostMachineConnectRequest",
+				"kind": "object",
+				"digest": "44230dd71ea8382a8d70ff5f1eed217d49570892593f726ccf03dfeaec1538c6"
+			},
+			{
+				"name": "HostMachineKind",
+				"kind": "union",
+				"digest": "5e2d74507fedfd575f6239da0867c4f77d5843a8e5880b2fdf2ce99ac139250c"
+			},
+			{
+				"name": "HostMachineSnapshot",
+				"kind": "object",
+				"digest": "c1abbe7b7c8735eecc5c52b700d4d76f16ad046221f99550650691e872bbeff9"
+			},
+			{
+				"name": "HostMachinesSnapshot",
+				"kind": "object",
+				"digest": "4ab2fd748485d65ead8cf02ce467e546ec3e83244e373b525e7891a7081c0ade"
+			},
+			{
+				"name": "HostPlatform",
+				"kind": "union",
+				"digest": "713d8005fd2386dc9ca5d809a1a2b6a87b1bbbb0ed8a34316ceee39e3567bd95"
+			}
+		],
+		"marketplace.ts": [
+			{
+				"name": "CapabilityConnectPreview",
+				"kind": "object",
+				"digest": "57deb53192b8bbbeb45b780fcc1959d6f7a41d84a89c5623c01ac6032e4a73e9"
+			},
+			{
+				"name": "CapabilityConnectPreviewRequest",
+				"kind": "object",
+				"digest": "f2bea723dd6c0c96b40ad5eb0c6284be74d1bbad59cef3c14f5cdda916d638c1"
+			},
+			{
+				"name": "CapabilityConnectRequest",
+				"kind": "object",
+				"digest": "b0ed33dfc563e30329436ca070c7360014b1aaf9d18164e76119849482680249"
+			},
+			{
+				"name": "CapabilityDetail",
+				"kind": "object",
+				"digest": "909c21a1f09a98759bc3f477988811a29baa8cb16492b56f19066f26a33161d4"
+			},
+			{
+				"name": "CapabilityDriftOverwriteDecision",
+				"kind": "object",
+				"digest": "880452724c7c29dabbbee5a82851b82af3ad02c155970c108ff0bc96785b0e8b"
+			},
+			{
+				"name": "CapabilityDriftOverwriteRequest",
+				"kind": "object",
+				"digest": "99826754b653914dd1b5ffaae22e08057abf28b9124155b4fa9f9838e6e3995f"
+			},
+			{
+				"name": "CapabilityDriftResolutionRequest",
+				"kind": "object",
+				"digest": "a914167a1f56209ff901a91d3fdede47e474a16a156ba715840c2cb99bf0ae45"
+			},
+			{
+				"name": "CapabilityHealth",
+				"kind": "object",
+				"digest": "7344788140ab3b8e6258fa153c3e089c946daeb61ab58e562f45be6821f33fd9"
+			},
+			{
+				"name": "CapabilityHealthRequest",
+				"kind": "object",
+				"digest": "e13f7eb4425d235940618761fcca64a607d9d08ce9e7366b648aebdf6f5be954"
+			},
+			{
+				"name": "CapabilityInvocationApprovalDecision",
+				"kind": "object",
+				"digest": "90ef328a60de38cbf2694e10113aa0a8afb884fa16a949c2e00ffc7f2bbfdffe"
+			},
+			{
+				"name": "CapabilityInvocationApprovalRequest",
+				"kind": "object",
+				"digest": "050043b507ab62ff51bc60e4fc55053c929cd4051f0860bac2e5d1ad53f44822"
+			},
+			{
+				"name": "CapabilityInvocationMetadata",
+				"kind": "object",
+				"digest": "c4083bc1715786f73581c479c19edadcac6c0e034d09b2a3d6ad4a19ee8837ec"
+			},
+			{
+				"name": "CapabilityInvocationRequest",
+				"kind": "object",
+				"digest": "a227e3432919f155f3b87a314de32a4429b395210585cc32e967f2401a5d6c87"
+			},
+			{
+				"name": "CapabilityLifecycle",
+				"kind": "union",
+				"digest": "3e38c904336ca90766f9123ffa6a72c764ffa0ff3ed8a5e71603e0697f41720c"
+			},
+			{
+				"name": "CapabilityLifecycleRequest",
+				"kind": "object",
+				"digest": "e13f7eb4425d235940618761fcca64a607d9d08ce9e7366b648aebdf6f5be954"
+			},
+			{
+				"name": "CapabilityOAuthBeginResult",
+				"kind": "object",
+				"digest": "f8598aadec326dbf689fad8138b38844e29f433678ec460f1bbf99c6164a0ea8"
+			},
+			{
+				"name": "CapabilityOAuthCompleteRequest",
+				"kind": "object",
+				"digest": "cc0370ccf6ca1ad9a7aad6d06e7599fa1e10d5970881b23ba091814100490cc5"
+			},
+			{
+				"name": "CapabilityOAuthRequest",
+				"kind": "object",
+				"digest": "e13f7eb4425d235940618761fcca64a607d9d08ce9e7366b648aebdf6f5be954"
+			},
+			{
+				"name": "CapabilityOAuthTokenStatus",
+				"kind": "object",
+				"digest": "bbabb88faa94d017e20e675c9aa5e9418369f0c09f60aaa7106400191586dfb9"
+			},
+			{
+				"name": "CapabilityRegistrySnapshot",
+				"kind": "object",
+				"digest": "5e2ca902ea6141425ae45899686ba280323d1a575af480bd62e15f28b0e0f9ca"
+			},
+			{
+				"name": "CapabilitySummary",
+				"kind": "object",
+				"digest": "c772c07a046ec84c889bdd4bc2c6e2e2e47623b7e76f7968c53a465c326831a8"
+			},
+			{
+				"name": "DriftResolution",
+				"kind": "union",
+				"digest": "cea17d54c9d8f56209184394d59b2b8fa36a9d8c2040f6ae7f806fd22ac20146"
+			},
+			{
+				"name": "EngineCompatibility",
+				"kind": "object",
+				"digest": "cd29df6cbc93f686293ebdef5a28070f99a23822e588c5d5f9a41ca9c7522b08"
+			},
+			{
+				"name": "MarketplaceApprovalDecision",
+				"kind": "object",
+				"digest": "dabb04f267298f6a88777762f2c34ff1cbaab397e5092e43b95f2e43c1e67d96"
+			},
+			{
+				"name": "MarketplaceBrowseQuery",
+				"kind": "object",
+				"digest": "bc8a42fbd262ec72d053201c5c66db175597b716dd23e4122449190985b33ca3"
+			},
+			{
+				"name": "MarketplaceEnableRequest",
+				"kind": "object",
+				"digest": "a0c6f426502f8ed7eeb617c043e472d74ed79370f7a4dfe2d06864ab21fc2e4a"
+			},
+			{
+				"name": "MarketplaceItemStatus",
+				"kind": "union",
+				"digest": "4126852fe1c53ad579cb91561033d1c31f092537f26524571957a3feec4d1725"
+			},
+			{
+				"name": "MarketplaceLedgerEvent",
+				"kind": "object",
+				"digest": "eab288737b05cb6a6a43b51d7bb69b1dd679c54c6fa1938a67515c0fe2d14717"
+			},
+			{
+				"name": "MarketplacePermission",
+				"kind": "object",
+				"digest": "1d64c01de3db30676369298e8d04a55a52579fc2c5310fdbbb8c2e5a622850de"
+			},
+			{
+				"name": "MarketplaceRemoveRequest",
+				"kind": "object",
+				"digest": "a0c6f426502f8ed7eeb617c043e472d74ed79370f7a4dfe2d06864ab21fc2e4a"
+			},
+			{
+				"name": "MarketplaceScope",
+				"kind": "union",
+				"digest": "74b21cb2ce9ed800755605bff207abb53b6f7fa19279923709435fa3fa1ba36e"
+			},
+			{
+				"name": "MarketplaceSourceKind",
+				"kind": "union",
+				"digest": "aea26b2254938269e30723b5e238255690979b4a68fa27dad5cf39df2dbc97c0"
+			},
+			{
+				"name": "MarketplaceSyncRequest",
+				"kind": "object",
+				"digest": "ec7f466c3afae3c8671da4dc27c9bc4f1b4c3826df47cde5298d1fdceccbfa58"
+			},
+			{
+				"name": "MarketplaceTrust",
+				"kind": "union",
+				"digest": "1949a107e1664fed59f25e8adb346691af5db10732d29d5e92cbc2bd032836ff"
+			},
+			{
+				"name": "McpAuth",
+				"kind": "union",
+				"digest": "749be9ab56c9d3e8e3b38fc93b3acec011066b10257686d51cd526a803ad2989"
+			},
+			{
+				"name": "McpResourceSummary",
+				"kind": "object",
+				"digest": "ee5111acfb63d48a92a67e360b7bd63de526bf2ee3057cbce0f7e7d6ceffc8c3"
+			},
+			{
+				"name": "McpToolPolicy",
+				"kind": "object",
+				"digest": "a9cc89abbb8eee5860acd1333414ec26a03f3f42175e694b52be35e546eced96"
+			},
+			{
+				"name": "McpToolSummary",
+				"kind": "object",
+				"digest": "90a670929bd77cef745f4eccd0926536de16447b7bd8d7ace8a9b224d20f4c0d"
+			},
+			{
+				"name": "McpTransport",
+				"kind": "union",
+				"digest": "48ceda9e0b899f567549d00e4b7bca346c1958770eef96785a25d3c85d2f0438"
+			},
+			{
+				"name": "NpxSkillsCandidate",
+				"kind": "object",
+				"digest": "d2325d649aeaf40c33f1cff7ac96697bab2e2ff6c3ee63981f695e1ab6f1f999"
+			},
+			{
+				"name": "NpxSkillsDiscoveryRequest",
+				"kind": "object",
+				"digest": "4785e04266d88efd9e740bbb485aa41b770195ff867d73f2716091e3df758596"
+			},
+			{
+				"name": "NpxSkillsDiscoveryResult",
+				"kind": "object",
+				"digest": "2bccf0e1c1513236b2065cef89b9da6a9fd451c21182f985e94225401601d9ab"
+			},
+			{
+				"name": "NpxSkillsImportRequest",
+				"kind": "object",
+				"digest": "a8abe96f602c7a69fb1c3cb80331f22a3d4daf46360bea7439c28ebf9276c4e9"
+			},
+			{
+				"name": "ProviderSyncState",
+				"kind": "object",
+				"digest": "92998438fbe00230f8e03f40b886b366d7c01099b6df016ca13718f821bdf7e7"
+			},
+			{
+				"name": "ProviderSyncStatus",
+				"kind": "union",
+				"digest": "a1ea5f7d65d964fe5fc239a6c63de395e9ef67da48a4ce65e7a884f59907a623"
+			},
+			{
+				"name": "RoutineCommand",
+				"kind": "object",
+				"digest": "43b38d9473a27f8fed55e3004c85ddccec92bae603424528361d51b3f52903a1"
+			},
+			{
+				"name": "RoutineDetail",
+				"kind": "object",
+				"digest": "a489e29dc08b83c415fde60197eb77b386d5b184d40406f173a35f0a1025c687"
+			},
+			{
+				"name": "RoutineDriftOverwriteDecision",
+				"kind": "object",
+				"digest": "cfb7c752d0166bf3d3574ebcb49aa47e59cb1ff4c3330586139871b1be4e41b4"
+			},
+			{
+				"name": "RoutineDriftOverwriteRequest",
+				"kind": "object",
+				"digest": "8139d9007ceb8179fe183aef04a6adb68f0281ce6301f718d89aa0f3f57b9d9d"
+			},
+			{
+				"name": "RoutineDriftResolutionRequest",
+				"kind": "object",
+				"digest": "3a58493d1662eb8fc92c7e8d8648c5c40168f762a361d36f339611a56015e410"
+			},
+			{
+				"name": "RoutineFile",
+				"kind": "object",
+				"digest": "484ca6adc66b7ff71d3b4fd2217f6a14a767d80cf24f6435a96e45388ad7da29"
+			},
+			{
+				"name": "RoutineInstallPreview",
+				"kind": "object",
+				"digest": "4d4ea356c91d9c1ae954bd7b848b7d562291c94d420526c05a471234e10730f2"
+			},
+			{
+				"name": "RoutineInstallPreviewRequest",
+				"kind": "object",
+				"digest": "9a4689b2a49abdd3b37d2c972a6dd7b08fb9b9fdf83edf27bb6979eb68b4250b"
+			},
+			{
+				"name": "RoutineInstallRequest",
+				"kind": "object",
+				"digest": "dd62717fd1f066f8512c5d3317e3e65619d0dcea5fed1b71cf33924240f4ea8a"
+			},
+			{
+				"name": "RoutineInvocationMetadata",
+				"kind": "object",
+				"digest": "c8775844d3be0ccfa624f3d3c0a84d34b13a712adaed2aa311193a97b5489a89"
+			},
+			{
+				"name": "RoutineInvocationRequest",
+				"kind": "object",
+				"digest": "8725d31be8a378fc81bc544daef371147492e2741e0f42acd425ee308cc4aac4"
+			},
+			{
+				"name": "RoutineRegistrySnapshot",
+				"kind": "object",
+				"digest": "d35033ad999e953d67ae41543adce36bdc066688643fcecdca6530c9f4c41174"
+			},
+			{
+				"name": "RoutineRollbackRequest",
+				"kind": "object",
+				"digest": "023d5dd1e35e4ff0992b50f76311bc382336d70af95ecde31b99b8e951426001"
+			},
+			{
+				"name": "RoutineSource",
+				"kind": "object",
+				"digest": "48c6679ae16f3ce8347a8d151b774b583a4d216929b6150463c09192a13e8f32"
+			},
+			{
+				"name": "RoutineSummary",
+				"kind": "object",
+				"digest": "2dc7ddcf512ca1c0d7831c5366e9a568cd7abf2adc186536f5e2079c474e47dc"
+			},
+			{
+				"name": "SecretReference",
+				"kind": "object",
+				"digest": "d9c70d6a650f7a73846c130c099e11de2991f420cfcfb3f45bf901e73ea1696a"
+			}
+		],
+		"model-behaviour.ts": [
+			{
+				"name": "AutoCompactionTriggerTokens",
+				"kind": "scalar",
+				"digest": "2b19baed884389b4ed934058b49b01523dba56f4bf120add1d1d3ccf55ff01ec"
+			},
+			{
+				"name": "ModelBehaviourActivationTiming",
+				"kind": "union",
+				"digest": "843f70f6d04362a99b1adeffd8376a477bdd6d2e707dc0583eb39b8d7d2b8f92"
+			},
+			{
+				"name": "ModelBehaviourCapability",
+				"kind": "object",
+				"digest": "d898a065f34e41620707b2fcfcdde21f6c2a7e01d01aa26d1521f31addc7ae4e"
+			},
+			{
+				"name": "ModelBehaviourDriftResolutionRequest",
+				"kind": "object",
+				"digest": "3f0cf13dedc62d7ad7f796ae6ce50135ed1a6c4e21def888c44bf1044d8d1cd5"
+			},
+			{
+				"name": "ModelBehaviourIntegerControl",
+				"kind": "object",
+				"digest": "57c21858fc9cf018490b34019421d5738474f9300e51dca878db8f067117b033"
+			},
+			{
+				"name": "ModelBehaviourProviderCapability",
+				"kind": "object",
+				"digest": "f6f846d46d9dbc25d6c2b88bf7b0dbc05f5a4f96c82d040f91d4624ff02b5859"
+			},
+			{
+				"name": "ModelBehaviourProviderReconciledEvent",
+				"kind": "object",
+				"digest": "0f04c01cbc8df8558b4e0daf35dc8d61630240b9611f9cbb2f7b9220f281bad1"
+			},
+			{
+				"name": "ModelBehaviourProviderState",
+				"kind": "object",
+				"digest": "af5e85ae3d3b6dab30d379f41ba549a0c77b9776d3b4acd8b89ca65ac0eda430"
+			},
+			{
+				"name": "ModelBehaviourRetryRequest",
+				"kind": "object",
+				"digest": "12aa7f3f4c81e4240e51842deafa857110d13235bee7537ed8da36bb866a7f65"
+			},
+			{
+				"name": "ModelBehaviourSetting",
+				"kind": "object",
+				"digest": "35c2ea431c2d565d656d3844c2c82c9a43ca1b5260ffa4e399278538c3966895"
+			},
+			{
+				"name": "ModelBehaviourSettingId",
+				"kind": "scalar",
+				"digest": "607d75a99a33ea3e590e8e025e65cce5a6980edf8698930f48e07850d4620c61"
+			},
+			{
+				"name": "ModelBehaviourSettingUpdatedEvent",
+				"kind": "object",
+				"digest": "4510c83cbf14d9599ab05364a8417eb17713d85d4c3b1e914e7c7b3bdd3cd3a7"
+			},
+			{
+				"name": "ModelBehaviourSnapshot",
+				"kind": "object",
+				"digest": "0240d7eaa8804920764aaaf1e135f46833be49948b7d680d1986eef2142a8c31"
+			},
+			{
+				"name": "ModelBehaviourSupportState",
+				"kind": "union",
+				"digest": "3a3ff5b13407341e0857d0d96093f71faa37758275f99da4f89e0c9a798c2e21"
+			},
+			{
+				"name": "ModelBehaviourUpdateRequest",
+				"kind": "object",
+				"digest": "07376a72204a66649b96fc28ad0e1d11efd4f0bc43e24b65c21dd36506df55c3"
+			},
+			{
+				"name": "ModelBehaviourValue",
+				"kind": "union",
+				"digest": "5258d4669ccffe2406ed7ed225fe52ce89c06454b24d6051761585abc26d280d"
+			}
+		],
+		"model-favorites.ts": [
+			{
+				"name": "ModelFavoriteId",
+				"kind": "scalar",
+				"digest": "25811c4c2228f2997ade2e6d7d5a10ca02523eac04574a8a5a9e43e55dc5aaa4"
+			},
+			{
+				"name": "ModelFavoritesSnapshot",
+				"kind": "object",
+				"digest": "d102276ec07fea7724d72206dd27fedff76a575ee60e11670c4635c787293610"
+			},
+			{
+				"name": "ModelFavoritesUpdatedEvent",
+				"kind": "object",
+				"digest": "f1d3961af811c9f9bff9e54156c49e30e3a3b06d3f02150f5b3f6ffdb56ba9ad"
+			},
+			{
+				"name": "ModelFavoriteUpdateCommand",
+				"kind": "object",
+				"digest": "0891a8597abf8eb2e71faf5a7ad34a1b6c8e7c1a2365bf5d93610be2c0857498"
+			}
+		],
+		"orchestration-groups.ts": [
+			{
+				"name": "OrchestrationGroupListQuery",
+				"kind": "object",
+				"digest": "8613ff95d1e18ad417f21d5ce54edeaec5a0046b05ed2fd83062b4bafc7103e2"
+			},
+			{
+				"name": "OrchestrationGroupListSnapshot",
+				"kind": "object",
+				"digest": "093de5189bdba2f17fa78326678738ce40a362df341c1dd3dbd261ead77580c8"
+			},
+			{
+				"name": "OrchestrationGroupSummary",
+				"kind": "object",
+				"digest": "1317c11e496ae33c2eae9d28365c734699b94ecbdb5aa5a93b212f40aad30287"
+			}
+		],
+		"preview.ts": [
+			{
+				"name": "LocalPreviewUrl",
+				"kind": "scalar",
+				"digest": "7b36b418dbe9cac38c500a9e64dcc4284d4d12ea02273739d98f45d64b0f788e"
+			},
+			{
+				"name": "PreviewAssetId",
+				"kind": "scalar",
+				"digest": "b83c461e6bc713b9f427f3d2621b6ca86ec845b146a8fd11488ab4eaca09b5d9"
+			},
+			{
+				"name": "PreviewAssetMetadataQuery",
+				"kind": "object",
+				"digest": "163b6d83264c9c2d12715c5e2d7274e2685ef6c6c57f410733ade9bf4f21a19e"
+			},
+			{
+				"name": "PreviewBrowserLaunch",
+				"kind": "object",
+				"digest": "ee1178646c32884a332a79bb5bc2dcd16d99633ec59357b617bc44c57d30b90a"
+			},
+			{
+				"name": "PreviewBrowserLaunchRequest",
+				"kind": "object",
+				"digest": "dc35fa15fdd0e9dec47d6b526561312902ce337031cb823bfc111de5967fb20c"
+			},
+			{
+				"name": "PreviewInspectionRequest",
+				"kind": "object",
+				"digest": "f4b2f161704616e4710dff8a417f3c3b3b9e9fdb949ea9056935e1773fcd9c01"
+			},
+			{
+				"name": "PreviewInspectionResult",
+				"kind": "union",
+				"digest": "ac2787511943ddf9afaf54a2a8e52794da77ee12a353fbdfad6857e4bde1dbdb"
+			},
+			{
+				"name": "PreviewInspectionSession",
+				"kind": "object",
+				"digest": "39f79a3841525202d62c9731572dbb86c9fe8ed85c704eeb9da8a5c5f1c69e42"
+			},
+			{
+				"name": "PreviewInspectionSessionCloseRequest",
+				"kind": "object",
+				"digest": "4bfdab84a74c72d224d4e83bc060024c9a46e1a8a133300758c7e81d44357bae"
+			},
+			{
+				"name": "PreviewInspectionSessionOpenRequest",
+				"kind": "object",
+				"digest": "4fb120cf2289c08692f6486b6b27c11cd58ea04c3b6c88d23d2a3ed78f0f8db5"
+			},
+			{
+				"name": "PreviewInspectionSessionUpdatedEvent",
+				"kind": "object",
+				"digest": "bcd3077f9ca48d88bd5338e01d36ff8fab138bf570e82219d0a97a048bdec3af"
+			},
+			{
+				"name": "PreviewLaunchState",
+				"kind": "union",
+				"digest": "319b3381fd5de9ea7b50ab992c305ec247a64e157815c07d8cb456a171fe437e"
+			},
+			{
+				"name": "PreviewRoute",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "PreviewTarget",
+				"kind": "object",
+				"digest": "709fb4ac9f3ff0db5255e6cde51152992e8d6a635bc2ffc08d1c4bc819d4486f"
+			},
+			{
+				"name": "PreviewTargetGetQuery",
+				"kind": "object",
+				"digest": "dc35fa15fdd0e9dec47d6b526561312902ce337031cb823bfc111de5967fb20c"
+			},
+			{
+				"name": "PreviewTargetHealth",
+				"kind": "object",
+				"digest": "79e0caacdaec07e4d8c6cb453527a33f1f57c97812161bf850d89738c16c60d6"
+			},
+			{
+				"name": "PreviewTargetListQuery",
+				"kind": "object",
+				"digest": "94ee16a85b34ad91f915a96cc14f8d94a02a940bb88f04895779c4ac09422381"
+			},
+			{
+				"name": "PreviewTargetRegistration",
+				"kind": "object",
+				"digest": "6df006945a7062f4ad2aa615644ee3086ebef1c7ff552529bd6887ae1f08cc04"
+			},
+			{
+				"name": "PreviewTargetRemoveRequest",
+				"kind": "object",
+				"digest": "dc35fa15fdd0e9dec47d6b526561312902ce337031cb823bfc111de5967fb20c"
+			},
+			{
+				"name": "PreviewTargetSource",
+				"kind": "union",
+				"digest": "3ed6a642d4ac2b4df0ebe162826244d965dca528bd042e72e5afc21886cd4eca"
+			},
+			{
+				"name": "PreviewTargetState",
+				"kind": "union",
+				"digest": "f0ea67c1dea3710687ba9b715064bd8a55572c20dc5ad9ecd410598845aad8cf"
+			},
+			{
+				"name": "PreviewTargetStateRequest",
+				"kind": "object",
+				"digest": "13eb3d1c725609973ae00cbc8464bca7a8da84a2bc88cce687e389e04094656c"
+			},
+			{
+				"name": "PreviewTargetUpdatedEvent",
+				"kind": "object",
+				"digest": "77a4287ab4670595724ee3caac13ba010fea5051d123d66d99cd2d74ad4096a3"
+			},
+			{
+				"name": "RichLinkAssetMetadata",
+				"kind": "object",
+				"digest": "5670f953429307fe469d0f34f961042eccccaa253ccd4a005b2f13bf6e4fd0f0"
+			},
+			{
+				"name": "RichLinkFavicon",
+				"kind": "object",
+				"digest": "4195c76e0e173b98dcf9bc5fe963e5001d1ddbc4d712a40e7913199a9bd64704"
+			},
+			{
+				"name": "RichLinkResolution",
+				"kind": "object",
+				"digest": "524640868fb39bb9a9cc3503e061322d1a60a75d639a335954d79767a27ae1cb"
+			},
+			{
+				"name": "RichLinkResolveQuery",
+				"kind": "object",
+				"digest": "c7936fa7cc01dc785531fe87d1281a1ba2e68ce70a0a5790ea1ca41dc7cb02fa"
+			}
+		],
+		"project-directory.ts": [
+			{
+				"name": "ProjectDirectoryCreateInput",
+				"kind": "object",
+				"digest": "2a7f6ec4a1bc2744ac220bfc6a2605055c910b7d1aa36920d6989420323b95eb"
+			},
+			{
+				"name": "ProjectDirectoryEntry",
+				"kind": "object",
+				"digest": "a32eadd2706a46e4e42c34be5cf38a01818060d5d58dc4039b01344cc72ad6e0"
+			},
+			{
+				"name": "ProjectDirectoryList",
+				"kind": "object",
+				"digest": "236081d5d43e5219a2338cffa62947000b3ec429a214bdb7e4e5de2d7ea5101e"
+			},
+			{
+				"name": "ProjectDirectoryListInput",
+				"kind": "object",
+				"digest": "426e89c1b62c002e5410d80ca1a7b9e990cebdb31be00ccc7273d3a0e6948591"
+			},
+			{
+				"name": "ProjectDirectoryPickResult",
+				"kind": "union",
+				"digest": "8359c10639ddfd8bf2ae88a0c7d6ae03f34b5b5fb57fbbda9a76daa6e3e820e7"
+			},
+			{
+				"name": "ProjectDirectoryPlace",
+				"kind": "object",
+				"digest": "4f055da6d249ce5b6f3a5e0c905c4b811d037a5913e27e45f77e64d1360e14f5"
+			},
+			{
+				"name": "ProjectDirectoryPlaceKind",
+				"kind": "union",
+				"digest": "389fd3dea7a3593e9cd9baf1c3d544b096b4a31b8d2f1ddef0d521a9055d4be8"
+			},
+			{
+				"name": "ProjectDirectorySelectInput",
+				"kind": "object",
+				"digest": "047b81c4d13621372aa692e63836d68d9923cf9c2db86f30026cddaaa6e95f04"
+			}
+		],
+		"project-identity.ts": [
+			{
+				"name": "ProjectIdentityImage",
+				"kind": "object",
+				"digest": "25c64786b0f54b6e5788e613573641e8a0d4e1c5e908e0a2c02b74034ccc2954"
+			},
+			{
+				"name": "ProjectIdentityQuery",
+				"kind": "object",
+				"digest": "58b245b0dd2db7758024360be88be5f29f9720b0ec5982b45646e9c2201d5a90"
+			},
+			{
+				"name": "ProjectIdentityQueryResult",
+				"kind": "object",
+				"digest": "f9269f94e5b715b860aa26b652216c8626376a029c8db7a3818142c1a13e7935"
+			},
+			{
+				"name": "ProjectIdentitySource",
+				"kind": "union",
+				"digest": "7ee3a3f11ddc0c877d254699117e768b50dcf6a973db5e293edc5c58e2cedf2c"
+			}
+		],
+		"project.ts": [
+			{
+				"name": "Project",
+				"kind": "object",
+				"digest": "e6710513d51e7f52caf7be7b299ad4c3e0d2f5be08a1c56824722b367d10fbf0"
+			},
+			{
+				"name": "ProjectCatalogSnapshot",
+				"kind": "object",
+				"digest": "ba9edebbcae92c1c92a468288917aab2766a44e80a72d51dbdf3eaf879d79ef5"
+			},
+			{
+				"name": "ProjectDetachInput",
+				"kind": "object",
+				"digest": "25d631d5b31ba254db3172ec94509d919c364bbbe353bc836561347b130b6ca1"
+			}
+		],
+		"repository.ts": [
+			{
+				"name": "NotRepositorySnapshot",
+				"kind": "object",
+				"digest": "07e6d98a4d9aa579d874326ba71505f52c7e5addfb2db05d74a5a15138e3cd75"
+			},
+			{
+				"name": "ProjectDiff",
+				"kind": "union",
+				"digest": "c5abde034388cf840729f13bf3611d5428c1bbb9d8ac452cd3771431ccd3239a"
+			},
+			{
+				"name": "ProjectDiffEntry",
+				"kind": "object",
+				"digest": "e7b9f23cfc2d7a4f007a68fa2bfc0329109e1a620186dff64ed41af61777554d"
+			},
+			{
+				"name": "ProjectDiffQuery",
+				"kind": "object",
+				"digest": "58b245b0dd2db7758024360be88be5f29f9720b0ec5982b45646e9c2201d5a90"
+			},
+			{
+				"name": "ProjectDiffQueryResult",
+				"kind": "object",
+				"digest": "09ca7377fb76e8d5bd2810d4af21af29dab21bfc0e3a46de74583370d858e403"
+			},
+			{
+				"name": "ProjectRepository",
+				"kind": "union",
+				"digest": "c8dfc2f7e44400187ac091ebf6b504cf181b430cc2209b0a90165b37ca33c70d"
+			},
+			{
+				"name": "ProjectRepositoryEntry",
+				"kind": "object",
+				"digest": "393bee7cac7c9f8985035e703bc5adf8f8b6759a0e73309c9b9ca5175996b301"
+			},
+			{
+				"name": "ProjectRepositoryQuery",
+				"kind": "object",
+				"digest": "58b245b0dd2db7758024360be88be5f29f9720b0ec5982b45646e9c2201d5a90"
+			},
+			{
+				"name": "ProjectRepositoryQueryResult",
+				"kind": "object",
+				"digest": "881758745a474afe8f9c88a4befc0d8c109108dceede50dd3691e64c9db3d2e4"
+			},
+			{
+				"name": "RepositoryBranchComparison",
+				"kind": "object",
+				"digest": "967ff8eed56209790a94ab435723d2238ef1f313c5534df47827601121473e75"
+			},
+			{
+				"name": "RepositoryDiffCounts",
+				"kind": "object",
+				"digest": "e8a5c8d72459472f2bc193fa0704ebb58345a8d199fa0e86642eb5ecc29e232f"
+			},
+			{
+				"name": "RepositoryDiffSnapshot",
+				"kind": "object",
+				"digest": "8ce001623c45b9f439cdf25573f11dceacb09c2c90be29c8f395f7c999f53cf3"
+			},
+			{
+				"name": "RepositoryHost",
+				"kind": "union",
+				"digest": "84fdf5b3ccb5c8a7b644c24205f12622d23aeb7b8742bf54a49557bb4acdd1aa"
+			},
+			{
+				"name": "RepositoryRemote",
+				"kind": "object",
+				"digest": "f4e79bce0a23a4f5add02a94f1c2e5e817ea798668c6bd0a60c35e3d4b3a50dc"
+			},
+			{
+				"name": "RepositorySnapshot",
+				"kind": "object",
+				"digest": "219f848d76158b67fd8e0e1b32a550a95f763953115be47836181bf3b19cabaf"
+			}
+		],
+		"runtime-catalog.ts": [
+			{
+				"name": "RuntimeCatalog",
+				"kind": "object",
+				"digest": "aea0178402223befc1277823dfe7f8493eb009df3d59d082dd0de0c4bb6f7d1b"
+			},
+			{
+				"name": "RuntimeCatalogRoute",
+				"kind": "object",
+				"digest": "e8ad11d702fbd8286cae4a741a8c547dff1f69c1280ab76482db83e52310bead"
+			},
+			{
+				"name": "RuntimeCatalogScope",
+				"kind": "object",
+				"digest": "4a5018dbe63e27d15a9680584248bbe659f63b479af352c8c48744466009f65a"
+			}
+		],
+		"session-defaults.ts": [
+			{
+				"name": "AgentNameDataset",
+				"kind": "union",
+				"digest": "36db7abfbfeb0a13f743ade8ae35ea7e774deb63c1bd8e8308bf9f21e51dbe99"
+			},
+			{
+				"name": "SessionDefaults",
+				"kind": "object",
+				"digest": "572eb268dec8cd19ded00dd463d25b484378841e17c78d2d998f7c737863be3b"
+			},
+			{
+				"name": "SessionDefaultsUpdateCommand",
+				"kind": "object",
+				"digest": "f376b5d335f91b63ea2e3cf741d2fec90fcd15e036e6c77dd6cfc4e809c89512"
+			},
+			{
+				"name": "SessionDefaultsUpdatedEvent",
+				"kind": "object",
+				"digest": "d523201af80abdf8258b637de1cc7941f0d4de111cecb31c39e6a17e384c4797"
+			},
+			{
+				"name": "SessionDefaultsUpdateInput",
+				"kind": "object",
+				"digest": "b848178c63c48ff2618305e88830d095c30a9c5f1595105ce30e8097d9944a9e"
+			},
+			{
+				"name": "SessionModelDefaults",
+				"kind": "object",
+				"digest": "242570b71583739ce00dcc4768c3821303c5d72e98ca72604ab2dbff24f3b1ff"
+			},
+			{
+				"name": "SessionModelDefaultsUpdate",
+				"kind": "object",
+				"digest": "9011dd96aa3fd4517b18cc6828a29f98f91b3241d61241781862a06115c3c712"
+			},
+			{
+				"name": "ThreadTitleMode",
+				"kind": "union",
+				"digest": "3b19657494d6d9dfd555e96c5620b0774cd103f9d1ec27738b022feb43fcd043"
+			}
+		],
+		"stream.ts": [
+			{
+				"name": "StreamBindEnvelope",
+				"kind": "object",
+				"digest": "3ea358dcdb62522fec7f7f8f132c6accab03ed9fe0cf9e899035fb3c0be2babc"
+			},
+			{
+				"name": "StreamChunkEnvelope",
+				"kind": "object",
+				"digest": "462409d495eae7d5e5f01f685c419d3e2e543127f4bcf407acf0abf83cdb6ace"
+			},
+			{
+				"name": "StreamEndEnvelope",
+				"kind": "object",
+				"digest": "de62d39cbd9f8915a03b7c55074c62e5456b7349215adbbdb29d1ea64fa4d0cc"
+			},
+			{
+				"name": "StreamEnvelope",
+				"kind": "union",
+				"digest": "552fcf6139bf82c429af848698fbedc09aa2b8340e895aedd23ebad02ef28de0"
+			},
+			{
+				"name": "StreamPayload",
+				"kind": "union",
+				"digest": "a3beb0cc9b94f248270d7d5889b147ef5fa08eda76403cbbad3a21f7ea4193b0"
+			},
+			{
+				"name": "StreamReadyEnvelope",
+				"kind": "object",
+				"digest": "07f9ca8941aeb54da8df71a97711f48a62b0b92f98ca7902cfba27f3b12bc93c"
+			}
+		],
+		"surfaces.ts": [
+			{
+				"name": "CapabilitySurfaceItem",
+				"kind": "object",
+				"digest": "2f1be07de301a4bfa8e0a088093f40bc823e7fb1aed37bdcdfba1776b667587b"
+			},
+			{
+				"name": "CapabilitySurfaceKind",
+				"kind": "union",
+				"digest": "d47f04260f8fda61d4b4cfb4a4c6e9d25ad24e6f6a4f917da0d999efe4aad7ea"
+			},
+			{
+				"name": "ChangeSurfaceItem",
+				"kind": "object",
+				"digest": "bd69a9ae7a2609efbb47c1d9538a8f1f273f762fbd4981a816898744d8e67560"
+			},
+			{
+				"name": "ChangeSurfaceKind",
+				"kind": "union",
+				"digest": "f670e854aa23d8758083f1f6d681160aad6c2a442faf51a67d1dfa1f45ed76bc"
+			},
+			{
+				"name": "GuidanceSurfaceItem",
+				"kind": "object",
+				"digest": "5501cf66f8803f78f7eb15f46e31f200468e168c7b60740f2ac1df351c5a88c8"
+			},
+			{
+				"name": "GuidanceSurfaceKind",
+				"kind": "union",
+				"digest": "872d856c794c271bd5f3e4be210f6fc8dbd5aa5aef5de6b46a460142cf928d08"
+			},
+			{
+				"name": "IsoDate",
+				"kind": "scalar",
+				"digest": "e11208e25b85569a771f4ce403fe65b731260edb553ae12fb5a029750692d90a"
+			},
+			{
+				"name": "NativeActionSurfaceItem",
+				"kind": "object",
+				"digest": "c7a0e541359086ec86663c2451dcef28b83cf208399f8aa9d5a9c27ed3ac9bc6"
+			},
+			{
+				"name": "NativeActionSurfaceKind",
+				"kind": "union",
+				"digest": "bd0b1d54789d1f59582286264613540efa2ccf4005ea861e95996832ae4bed28"
+			},
+			{
+				"name": "PermissionSurfaceItem",
+				"kind": "object",
+				"digest": "c86491609b807e8b8f106b6418cc01186555b320bed99979d485984190b0316a"
+			},
+			{
+				"name": "PermissionSurfaceKind",
+				"kind": "union",
+				"digest": "2c37ae7d1c9eafa07636378d8b793a6b2e44d00b2bb4386658cc953d42efcfe6"
+			},
+			{
+				"name": "ProcessSurfaceItem",
+				"kind": "object",
+				"digest": "a72f340e590e5521e76d480b2539183292681004d88df010e638c35c2b095cd7"
+			},
+			{
+				"name": "ProcessSurfaceKind",
+				"kind": "union",
+				"digest": "b0899560150e8a65e3a67dce80e5bab2e894a17bb8c328eef2f6aabde06f2ebe"
+			},
+			{
+				"name": "RoutineSurfaceItem",
+				"kind": "object",
+				"digest": "95e17ddf374e1c9c9e6eb178138a99233b44f2daf03bd2d39e97db035911bab9"
+			},
+			{
+				"name": "RoutineSurfaceKind",
+				"kind": "union",
+				"digest": "234ca9ac3729efa03980bd919b77fc9cb86f46ca4db65c92048c5b14a94d657e"
+			},
+			{
+				"name": "SurfaceAttribution",
+				"kind": "object",
+				"digest": "2566cd24695c6fd283bf147b3ffb2de3094b3aad7ebda0fe6a039b5c17bd798f"
+			},
+			{
+				"name": "SurfaceCategory",
+				"kind": "union",
+				"digest": "7ca742a610353d91045a67316794103c9dd2397e2d44fab80054023edcd061a2"
+			},
+			{
+				"name": "SurfaceItem",
+				"kind": "union",
+				"digest": "7001363bbd1981cfee1d913afa5ee0a5f7c060cdbb6f88c73f426f249b368d34"
+			},
+			{
+				"name": "SurfaceListQuery",
+				"kind": "object",
+				"digest": "a727666c3db01cb69c07d2063346ef7056eaae10e8febfb57c837e750c84b8f6"
+			},
+			{
+				"name": "SurfaceRawObservationReference",
+				"kind": "object",
+				"digest": "11c84488e8d047a68a60078914372dca22d4a21584c914dab1ab11792c6922d3"
+			},
+			{
+				"name": "SurfaceSafeSummary",
+				"kind": "object",
+				"digest": "f19a7ff3445dace47cc0da57c62c033dc962cddc31ca8a6bfaa7b280d4f16629"
+			},
+			{
+				"name": "SurfaceSafeText",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "SurfaceSnapshot",
+				"kind": "object",
+				"digest": "cbd93c8e316771a3d30c16001bea37e3e5c0c2643dc176b5dbcff5aeecda01fe"
+			},
+			{
+				"name": "SurfaceUsage",
+				"kind": "object",
+				"digest": "f2f8e18a309a44752e4c227a0a0a38b9af49d140ddd11d42a01bda76951822bd"
+			},
+			{
+				"name": "SurfaceUsageAggregate",
+				"kind": "object",
+				"digest": "7a8e0b3c1811bcd60d89c791f475cb53ba8034020fba484b60ed65899a2cd94b"
+			},
+			{
+				"name": "SurfaceUsageAggregateQuery",
+				"kind": "object",
+				"digest": "9b04b02edd6f4c48cd3a74f20439888e1656dbf81a0ae415e65aad501b9dfaad"
+			},
+			{
+				"name": "SurfaceUsageAggregateSnapshot",
+				"kind": "object",
+				"digest": "087722e8dc07c33947f897d89b9a33aa98a8d6147711d87778ed5123ec54cd4e"
+			},
+			{
+				"name": "SurfaceUsageDailyBucket",
+				"kind": "object",
+				"digest": "d43204351fcfe9630d3dfac29de73eaf9af8e42d9a5e5a24d9a834d3016cffd6"
+			},
+			{
+				"name": "SurfaceUsageDailyEngineSlice",
+				"kind": "object",
+				"digest": "9da7fca48cf1592a036b74b424c07c506e7279690eaa7c3f0f63f87b971a7be0"
+			},
+			{
+				"name": "SurfaceUsageDailyQuery",
+				"kind": "object",
+				"digest": "cf09d26ef191ebfae575e77c273ff9785d56c4a9acc750ea7ccc7fd3e406b6b1"
+			},
+			{
+				"name": "SurfaceUsageDailySnapshot",
+				"kind": "object",
+				"digest": "b3be8a3dbf7c5557c6978409adcc39647257e5660a2eb96ee2f10e2504b8347f"
+			},
+			{
+				"name": "TimeSurfaceItem",
+				"kind": "object",
+				"digest": "3fd556ab5897c3ea11094f42f4a74e9adfb08d06dd6dd369334bb93f24145175"
+			},
+			{
+				"name": "TimeSurfaceKind",
+				"kind": "union",
+				"digest": "f5a10007947c1d70fdeb36c654e9ef668486d76181c80224507121edaaaf304e"
+			},
+			{
+				"name": "WorkSurfaceItem",
+				"kind": "object",
+				"digest": "7627302918f170b91e6cbbdc10c3c0275d69b3e3f75d8298d914f5a15ef145f4"
+			},
+			{
+				"name": "WorkSurfaceKind",
+				"kind": "union",
+				"digest": "48b9bc373c309dcc2859d1017b5f9c40e31ed889cccba3c10af8b5e3af87dc94"
+			}
+		],
+		"telemetry.ts": [
+			{
+				"name": "EditorSessionStartedTelemetryIntent",
+				"kind": "object",
+				"digest": "1892be41892233220b42a69abdc605398bf16e2536e83ab467e93bae4a338a08"
+			},
+			{
+				"name": "FeatureUsedTelemetryIntent",
+				"kind": "object",
+				"digest": "c3de6bdc4de6d631715074f16748cf655f3be52000c960408cc7f2348bf452dd"
+			},
+			{
+				"name": "ForgeConnectionFailedTelemetryIntent",
+				"kind": "object",
+				"digest": "01fc827897d9943c6ed53b3f698716bffc588ec71920e4b33b7416ee31f5d267"
+			},
+			{
+				"name": "ForgeConnectionSucceededTelemetryIntent",
+				"kind": "object",
+				"digest": "3ff7ec3716bd7bb3fa98a8662126e5037f9de4270c3656ce9ad21a5bb9d9441f"
+			},
+			{
+				"name": "RendererTelemetrySurface",
+				"kind": "union",
+				"digest": "c6dedf5feef3e2720b00988f5ef1d683cb99a1791f97cc97139d7912cf8c1ee7"
+			},
+			{
+				"name": "TelemetryIntent",
+				"kind": "union",
+				"digest": "dcd96aed0737cef9ef6b7acb7226630a63a352947b4a8676524b1686d149b9cd"
+			},
+			{
+				"name": "TelemetryPreference",
+				"kind": "union",
+				"digest": "02ae8ca870eb427dbc446e2a932ccad176955c56650003e2542d8052ee3bdc17"
+			},
+			{
+				"name": "TelemetryPreferences",
+				"kind": "object",
+				"digest": "903daaf333fadf8ee90d6ee8f9aa38f4608f919797513c7f8bce52e52ab4b7cf"
+			},
+			{
+				"name": "TelemetryPreferencesUpdate",
+				"kind": "object",
+				"digest": "f47184cb309915d8ee8a80ac0ec37039149d687bd83d022693d73d5b9a60fdca"
+			}
+		],
+		"thread-session-policy.ts": [
+			{
+				"name": "ThreadSessionPolicy",
+				"kind": "object",
+				"digest": "aab5a7eff2b5556b6ad6dd2db49be70f937c1b037a3e2e0c61a5925356fed9e9"
+			}
+		],
+		"thread-usage-series.ts": [
+			{
+				"name": "ThreadUsagePoint",
+				"kind": "object",
+				"digest": "e3cf39cd292fea1432ca01315b061d3f1e868c81a8a4a8141347496c9ed10048"
+			},
+			{
+				"name": "ThreadUsageSeries",
+				"kind": "object",
+				"digest": "6452ece52759f839ae524a3a6c616c680944d478eac0f961b9a061a0ae4e8b83"
+			},
+			{
+				"name": "ThreadUsageSeriesQuery",
+				"kind": "object",
+				"digest": "0cc8bdc443aeaaa58f9e0e9615b1268e37d551b3676b800adc9072e4bf803728"
+			}
+		],
+		"thread.ts": [
+			{
+				"name": "ProjectAffinityEvidenceCount",
+				"kind": "object",
+				"digest": "73dbcb587cc8a135a90652363b65ca6266258db4565a8a06050801847d0e4ab7"
+			},
+			{
+				"name": "ProjectAffinityEvidenceKind",
+				"kind": "union",
+				"digest": "5c9465f855b4eaa7065b4841ace28ad9dfa155abc8a5717f59d142ac453ec053"
+			},
+			{
+				"name": "ProjectAffinityScore",
+				"kind": "object",
+				"digest": "3921776280dd6c2a2799521771068210a1f2b46676104e4e918dfe103936d463"
+			},
+			{
+				"name": "ProjectRef",
+				"kind": "object",
+				"digest": "48fc0147b01a3d6266274d670b46b7b2f470e9dda430f6ed99c6e57635daf263"
+			},
+			{
+				"name": "ThreadActivityKind",
+				"kind": "union",
+				"digest": "5c8472727347384025a212bba94cdf1fd0c01f27bd84ee83d321ab61c34c572e"
+			},
+			{
+				"name": "ThreadActivityRecordCommand",
+				"kind": "object",
+				"digest": "60a38d1e199400941fa53e37e083baf8ed2c80f44b0404994a2f085e129645e6"
+			},
+			{
+				"name": "ThreadArchiveCommand",
+				"kind": "object",
+				"digest": "4633c6757873a305cb837aee5aa284a94b521b78d06bbadc9292e1409a15be61"
+			},
+			{
+				"name": "ThreadAssistantMessagePreview",
+				"kind": "scalar",
+				"digest": "f2eebcb025ef5cee00b92411cc5ee94c427d34045b711ecf05617efdb1f71b0e"
+			},
+			{
+				"name": "ThreadAttentionAcknowledgeCommand",
+				"kind": "object",
+				"digest": "01982661ab044f3dd18811acb5935f0b28ace9091d8ad3ea49bcdd46257e9c10"
+			},
+			{
+				"name": "ThreadAttentionAcknowledgedEvent",
+				"kind": "object",
+				"digest": "81aa5eb76df3990b132c86a414ab939d76d7de631808480e315092d802aa9cea"
+			},
+			{
+				"name": "ThreadContentErasedEvent",
+				"kind": "object",
+				"digest": "fb01e436ce3fd5cb802512895275ef094f310e2559b2ca04271587f65831c212"
+			},
+			{
+				"name": "ThreadCreateCommand",
+				"kind": "object",
+				"digest": "9f34c09c043dfe88eab874fee2460e7a186ca212da70fd3b23ba062b1735305a"
+			},
+			{
+				"name": "ThreadCreatedEvent",
+				"kind": "object",
+				"digest": "c03bd0b6694299aa0082c26e23a681702a79537753a53fbd6ae921e7bef446e2"
+			},
+			{
+				"name": "ThreadCreateInput",
+				"kind": "object",
+				"digest": "055ab1611931d29b83d4898c87b9e4cde62d8195c12546776189ac0085d1dfcb"
+			},
+			{
+				"name": "ThreadErasedEvent",
+				"kind": "object",
+				"digest": "c08f09132a8c015e0ecf78fb4be8b985b89a3659e969711b5e9186814db0687b"
+			},
+			{
+				"name": "ThreadListItem",
+				"kind": "object",
+				"digest": "66ae3dd9c77aff584cb82671d06d9d5cd661f2a33976fc53b958d1844edc5e47"
+			},
+			{
+				"name": "ThreadMetadataRefineCommand",
+				"kind": "object",
+				"digest": "66f157d4dae7d6f5514fd81151e49bd89e36492e9c535920b601c42da10911c8"
+			},
+			{
+				"name": "ThreadMetadataUpdatedEvent",
+				"kind": "object",
+				"digest": "9800ed73f2ca4fcb14b8bca3a335674f81fd3042a9529aa89288acfe033e9976"
+			},
+			{
+				"name": "ThreadPinCommand",
+				"kind": "object",
+				"digest": "6dae7752deac5149cb10e932dd6317721354eaa6a87ce30aab8054bfbab59d60"
+			},
+			{
+				"name": "ThreadProjectAffinityIgnoredEvent",
+				"kind": "object",
+				"digest": "67bf320b605af9b37d9fb13d804137455342fdea0021726bfd414c0492cc3932"
+			},
+			{
+				"name": "ThreadProjectAffinityUpdatedEvent",
+				"kind": "object",
+				"digest": "a8104867c7e5f09f6a6ba48ba708446a3dfeed1f367b32e0ecf446e0ebcab441"
+			},
+			{
+				"name": "ThreadProjectAssignCommand",
+				"kind": "object",
+				"digest": "7236ee51b32a386076cae4c6c453e711957d045ca3e35ed3804ca3cd109df550"
+			},
+			{
+				"name": "ThreadProjectRehomeSuggestion",
+				"kind": "object",
+				"digest": "b9685b15994c60736f7edd2b497f0ef8c4cbe1be05b2dca6b00b7639f7c74044"
+			},
+			{
+				"name": "ThreadProjectUnlockCommand",
+				"kind": "object",
+				"digest": "006ac4886ab290bf3f1ff34ca13a94c86060d8d4eca3d8b5c5417b50494b2c49"
+			},
+			{
+				"name": "ThreadRefinementIgnoredEvent",
+				"kind": "object",
+				"digest": "a1b911ef66ff57a9634816a6f699d9661cdcc8a1e6ba787b050bd18871211ac7"
+			},
+			{
+				"name": "ThreadRenameCommand",
+				"kind": "object",
+				"digest": "996117327a6bbaa6a05fe61261dd76136def50c8695abe8ced7442afa38cfc90"
+			},
+			{
+				"name": "ThreadRestoreCommand",
+				"kind": "object",
+				"digest": "598a2a71d2aca0dd510b8e54251fc23dcde49fd34aa624aa14f308c01e4f11f8"
+			},
+			{
+				"name": "ThreadRetentionInactivityDays",
+				"kind": "scalar",
+				"digest": "115a08c06b6c9d64a165208fa3681fc8f32735260f5d3178c479ef892335339e"
+			},
+			{
+				"name": "ThreadRetentionPolicy",
+				"kind": "object",
+				"digest": "a72f586cbacf788c00ee909e94fe4df1adcb865a5bacd7f1f1cb7673589ae080"
+			},
+			{
+				"name": "ThreadRetentionPolicyUpdatedEvent",
+				"kind": "object",
+				"digest": "54868419142b1c6ad591feae96eaef96971f7cc16d2ca49acd4e78ebee99334a"
+			},
+			{
+				"name": "ThreadRetentionUpdateCommand",
+				"kind": "object",
+				"digest": "ec6fd0abdcf09dfe43a31aa415180e41a6418183a84a88b8319e91024c360491"
+			},
+			{
+				"name": "ThreadTitleSource",
+				"kind": "union",
+				"digest": "13ec0c3f8233a10e982e3f7acd7489635581445f1c1ad86edac61d828557215d"
+			},
+			{
+				"name": "ThreadUnpinCommand",
+				"kind": "object",
+				"digest": "d0e2a4125b37a82ad78597adcfa6eca0a1287865f25294e2fc454b4a5c756d47"
+			}
+		],
+		"transcript.ts": [
+			{
+				"name": "ThreadTranscriptQuery",
+				"kind": "object",
+				"digest": "feab27bc57fc9e381e372b9cf7a60887e9032765bb056f659e9c772617ec12b4"
+			},
+			{
+				"name": "ThreadTranscriptSnapshot",
+				"kind": "union",
+				"digest": "62fc8c8f7d5e6e33e573c57e60c28f2a8df9e2af3dbe2dd56a718f2b11c0b35a"
+			},
+			{
+				"name": "TranscriptEntry",
+				"kind": "object",
+				"digest": "42dce787e8887822d74ac33581e3f8b310ad7dd03530dcaadcb76eb8a0d6d77e"
+			}
+		],
+		"usage-interruption.ts": [
+			{
+				"name": "UsageInterruption",
+				"kind": "object",
+				"digest": "629ac6a72e85e9f1c771be63dde812a1c6334243463574b27b999e4a79e57179"
+			},
+			{
+				"name": "UsageInterruptionAlternative",
+				"kind": "object",
+				"digest": "92a45ad907cf86e24bb9a090f0d972225f092d1c2a70b45fae7c2543f2a0772e"
+			},
+			{
+				"name": "UsageInterruptionResolveCommand",
+				"kind": "object",
+				"digest": "673b8b81de9dd4b8e5d7a4c243b9f4fbb699e2f8b2100a6223dfa9d4e934dbef"
+			},
+			{
+				"name": "UsageInterruptionState",
+				"kind": "union",
+				"digest": "59111de13a04a18fa84c73106ed7989a57e47439c5145596c8af42988859ab79"
+			},
+			{
+				"name": "UsageInterruptionUpdatedEvent",
+				"kind": "object",
+				"digest": "0e3cfaecfd8d3bdd1fd04e957b9235d303b901f32abec09b864f213efb146de2"
+			}
+		],
+		"workspace-changes.ts": [
+			{
+				"name": "ContentIdentity",
+				"kind": "object",
+				"digest": "7ed56f0b5517a4ab582d3b88ac3e8ce57d178b4e3cb4dc1f71c66a01091b0fbe"
+			},
+			{
+				"name": "WorkspaceChange",
+				"kind": "object",
+				"digest": "f9d8291fd8511dd03160ab5ac0502c6d9fa8a99e80bc8f7aeb5aa314c07435c9"
+			},
+			{
+				"name": "WorkspaceChangeDiffQuery",
+				"kind": "object",
+				"digest": "c952450f5e222a088adb2beefc0ef34a01c1fb083be8528f7ffe534a8d8c8289"
+			},
+			{
+				"name": "WorkspaceChangeDiffQueryResult",
+				"kind": "object",
+				"digest": "f4b2bee0a37e950e154441ebcee1871d5c13454652921b0521a2acc0dbec1ad2"
+			},
+			{
+				"name": "WorkspaceChangeListQuery",
+				"kind": "object",
+				"digest": "b94d49a846b4712abc1e15e38cefa704ca5f8a12b882a17913376723b35d53b2"
+			},
+			{
+				"name": "WorkspaceChangeListQueryResult",
+				"kind": "object",
+				"digest": "be8e26d321325ee31727cde7b2235021d6c46c13d266f4f0997dad3172c36c4f"
+			},
+			{
+				"name": "WorkspaceChangeReview",
+				"kind": "object",
+				"digest": "3529963e63e1f6a22adf1b4e9ca6d61e4a5aed2191706715fd8ef2c8bfaeeeaa"
+			},
+			{
+				"name": "WorkspaceChangeReviewRequest",
+				"kind": "object",
+				"digest": "44352da87aeb3c962ad9c22e349ab3ddaa56c1425d4294868f2b3d9039f072b4"
+			},
+			{
+				"name": "WorkspaceChangeReviewState",
+				"kind": "union",
+				"digest": "3aaa67368aa7b8199b4c77327e0e4f480a6c22ca8b03d406c5b2f03c06788535"
+			},
+			{
+				"name": "WorkspaceChangeRollbackRequest",
+				"kind": "object",
+				"digest": "860de3b550f6e9ba968421b6d83698f4315c560849cde43de0f3d7ed52dbb99b"
+			},
+			{
+				"name": "WorkspaceChangeRollbackState",
+				"kind": "union",
+				"digest": "cb9edacd00b2fadaa820bc0a7a151395acf4a77df3e0604ef80662fa734f50cf"
+			},
+			{
+				"name": "WorkspaceChangeUpdatedEvent",
+				"kind": "object",
+				"digest": "87bc2f7c07de2306a9f394b9f0247973491de56e5f0ae225e7ca959f4996f119"
+			},
+			{
+				"name": "WorkspaceConflict",
+				"kind": "object",
+				"digest": "df8d6bf5baea84fe320bac993073d32785921dc57751bc921421c219208afb52"
+			},
+			{
+				"name": "WorkspaceConflictListQuery",
+				"kind": "object",
+				"digest": "0cc8bdc443aeaaa58f9e0e9615b1268e37d551b3676b800adc9072e4bf803728"
+			},
+			{
+				"name": "WorkspaceConflictListQueryResult",
+				"kind": "object",
+				"digest": "a68cc5a2a8a0574d7f48824a14374906e8f849ae50ed2b13989bd55c3e05f79d"
+			},
+			{
+				"name": "WorkspaceConflictResolution",
+				"kind": "union",
+				"digest": "3ee7c4f1a15b56b1677632568a47f085d202157ac37a70e7d7a3f944e5ad99bc"
+			},
+			{
+				"name": "WorkspaceConflictUpdatedEvent",
+				"kind": "object",
+				"digest": "67afdcb4207766bafef0bc8c5539fb2f27195627c62f679d6cbc27492a129f4a"
+			},
+			{
+				"name": "WorkspaceDiffIdentity",
+				"kind": "object",
+				"digest": "6d3baaff2cdd197c51283bbba7f1bd62aec56b32008797814ffb27cbcb066605"
+			},
+			{
+				"name": "WorkspaceDiffPatch",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "WorkspaceFileReadQuery",
+				"kind": "object",
+				"digest": "354c35a62b29949cde688ef09811f6b3bf605c5aedf408f53537d72dc52e7f0f"
+			},
+			{
+				"name": "WorkspaceFileReadQueryResult",
+				"kind": "object",
+				"digest": "b10f4bc745d20af4fde392d38ed68c19682db53f38c50472f4afd46416239a6f"
+			},
+			{
+				"name": "WorkspaceFileReplaceRequest",
+				"kind": "object",
+				"digest": "46e69cc24760f4011eb980da7ab1bf2e851651172f7552cce40be2e47e8ff937"
+			},
+			{
+				"name": "WorkspacePath",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "WorkspaceReviewerKind",
+				"kind": "union",
+				"digest": "e70439657f0bbf6665c675642bb81e14d6459c0eef2ee529dbbe012a59d8a488"
+			},
+			{
+				"name": "WorkspaceReviewOutcome",
+				"kind": "union",
+				"digest": "6e34493a0acdc19a553baf1a9d46da836197eb28b1732bc4346c7909781a0ffa"
+			},
+			{
+				"name": "WorkspaceReviewText",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			},
+			{
+				"name": "WorkspaceTextContent",
+				"kind": "scalar",
+				"digest": "1739f1cd26c9a565bf34739d23f973de6c57d2a32791d12b21385f2a856ead12"
+			}
+		]
+	},
+	"unresolved": [
+		{
+			"name": "DecodeInboundControlEnvelope",
+			"file": "codec.ts",
+			"reason": "not-a-schema"
+		},
+		{
+			"name": "DecodeCommandEnvelope",
+			"file": "codec.ts",
+			"reason": "not-a-schema"
+		},
+		{
+			"name": "DecodeOutboundControlEnvelope",
+			"file": "codec.ts",
+			"reason": "not-a-schema"
+		},
+		{
+			"name": "EncodeOutboundControlEnvelope",
+			"file": "codec.ts",
+			"reason": "not-a-schema"
+		},
+		{
+			"name": "DecodeStreamEnvelope",
+			"file": "codec.ts",
+			"reason": "not-a-schema"
+		},
+		{
+			"name": "EncodeStreamEnvelope",
+			"file": "codec.ts",
+			"reason": "not-a-schema"
+		},
+		{
+			"name": "ThreadTitleModes",
+			"file": "session-defaults.ts",
+			"reason": "not-a-schema"
+		},
+		{
+			"name": "DecodeTelemetryPreferencesUpdate",
+			"file": "telemetry.ts",
+			"reason": "not-a-schema"
+		},
+		{
+			"name": "DecodeTelemetryIntent",
+			"file": "telemetry.ts",
+			"reason": "not-a-schema"
+		}
+	]
+}

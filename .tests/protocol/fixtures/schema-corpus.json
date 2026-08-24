@@ -1,0 +1,221 @@
+{
+	"schema": "artisan.protocol.schema-corpus/1",
+	"description": "NATIVE-0002 starter fixture corpus. Each entry names an exported @artisan/protocol schema and asserts whether strict decoding (excess properties rejected) accepts or rejects the JSON value. The Rust protocol oracle consumes this same file; extend it per protocol family rather than editing entries in place.",
+	"entries": [
+		{
+			"id": "common/Identifier/accept-simple",
+			"schema": "Identifier",
+			"expect": "accept",
+			"json": "workspace_12"
+		},
+		{
+			"id": "common/Identifier/reject-empty",
+			"schema": "Identifier",
+			"expect": "reject",
+			"json": ""
+		},
+		{
+			"id": "common/Identifier/reject-whitespace",
+			"schema": "Identifier",
+			"expect": "reject",
+			"json": "thread 9"
+		},
+		{
+			"id": "common/ProtocolVersion/accept-positive-int",
+			"schema": "ProtocolVersion",
+			"expect": "accept",
+			"json": 3
+		},
+		{
+			"id": "common/ProtocolVersion/reject-zero",
+			"schema": "ProtocolVersion",
+			"expect": "reject",
+			"json": 0
+		},
+		{
+			"id": "common/ProtocolVersion/reject-fractional",
+			"schema": "ProtocolVersion",
+			"expect": "reject",
+			"json": 2.5
+		},
+		{
+			"id": "common/PositiveInt/reject-zero",
+			"schema": "PositiveInt",
+			"expect": "reject",
+			"json": 0
+		},
+		{
+			"id": "common/NegotiatedProtocolVersion/accept-v1",
+			"schema": "NegotiatedProtocolVersion",
+			"expect": "accept",
+			"json": 1
+		},
+		{
+			"id": "common/NegotiatedProtocolVersion/reject-unknown-version",
+			"schema": "NegotiatedProtocolVersion",
+			"expect": "reject",
+			"json": 2
+		},
+		{
+			"id": "common/SchemaVersion/accept-1",
+			"schema": "SchemaVersion",
+			"expect": "accept",
+			"json": 1
+		},
+		{
+			"id": "common/SchemaVersion/reject-2",
+			"schema": "SchemaVersion",
+			"expect": "reject",
+			"json": 2
+		},
+		{
+			"id": "common/IsoDateTime/accept-milliseconds",
+			"schema": "IsoDateTime",
+			"expect": "accept",
+			"json": "2026-08-24T10:00:00.123Z"
+		},
+		{
+			"id": "common/IsoDateTime/accept-whole-seconds",
+			"schema": "IsoDateTime",
+			"expect": "accept",
+			"json": "2026-08-24T10:00:00Z"
+		},
+		{
+			"id": "common/IsoDateTime/reject-impossible-date",
+			"schema": "IsoDateTime",
+			"expect": "reject",
+			"json": "2026-02-30T00:00:00Z"
+		},
+		{
+			"id": "common/JournalSequence/accept-zero",
+			"schema": "JournalSequence",
+			"expect": "accept",
+			"json": 0
+		},
+		{
+			"id": "common/JournalSequence/reject-negative",
+			"schema": "JournalSequence",
+			"expect": "reject",
+			"json": -1
+		},
+		{
+			"id": "common/StreamSequence/accept-positive",
+			"schema": "StreamSequence",
+			"expect": "accept",
+			"json": 42
+		},
+		{
+			"id": "common/RawOrigin/accept",
+			"schema": "RawOrigin",
+			"expect": "accept",
+			"json": { "provider": "codex", "reference": "turn-17" }
+		},
+		{
+			"id": "common/RawOrigin/reject-excess-property",
+			"schema": "RawOrigin",
+			"expect": "reject",
+			"json": { "provider": "codex", "reference": "turn-17", "extra": true }
+		},
+		{
+			"id": "common/RawOrigin/reject-missing-reference",
+			"schema": "RawOrigin",
+			"expect": "reject",
+			"json": { "provider": "codex" }
+		},
+		{
+			"id": "common/StreamCursor/accept",
+			"schema": "StreamCursor",
+			"expect": "accept",
+			"json": { "sequence": 7, "stream_id": "stream-a1" }
+		},
+		{
+			"id": "common/StreamCursor/reject-negative-sequence",
+			"schema": "StreamCursor",
+			"expect": "reject",
+			"json": { "sequence": -4, "stream_id": "stream-a1" }
+		},
+		{
+			"id": "stream/StreamBindEnvelope/accept",
+			"schema": "StreamBindEnvelope",
+			"expect": "accept",
+			"json": {
+				"message_id": "msg-1",
+				"origin": "frontend",
+				"protocol_version": 1,
+				"schema_version": 1,
+				"sent_at": "2026-08-24T10:00:00.000Z",
+				"channel_id": "channel-7",
+				"channel_sequence": 0,
+				"kind": "stream.bind",
+				"payload": { "stream_id": "terminal-out" }
+			}
+		},
+		{
+			"id": "stream/StreamBindEnvelope/reject-wrong-kind",
+			"schema": "StreamBindEnvelope",
+			"expect": "reject",
+			"json": {
+				"message_id": "msg-1",
+				"origin": "frontend",
+				"protocol_version": 1,
+				"schema_version": 1,
+				"sent_at": "2026-08-24T10:00:00.000Z",
+				"channel_id": "channel-7",
+				"channel_sequence": 0,
+				"kind": "stream.chunk",
+				"payload": { "stream_id": "terminal-out" }
+			}
+		},
+		{
+			"id": "stream/StreamChunkEnvelope/accept-utf8",
+			"schema": "StreamChunkEnvelope",
+			"expect": "accept",
+			"json": {
+				"message_id": "msg-2",
+				"origin": "backend",
+				"protocol_version": 1,
+				"schema_version": 1,
+				"sent_at": "2026-08-24T10:00:01.000Z",
+				"channel_id": "channel-7",
+				"channel_sequence": 1,
+				"kind": "stream.chunk",
+				"payload": { "data": "hello", "encoding": "utf8" },
+				"stream_id": "terminal-out"
+			}
+		},
+		{
+			"id": "stream/StreamChunkEnvelope/accept-base64",
+			"schema": "StreamChunkEnvelope",
+			"expect": "accept",
+			"json": {
+				"message_id": "msg-2",
+				"origin": "backend",
+				"protocol_version": 1,
+				"schema_version": 1,
+				"sent_at": "2026-08-24T10:00:01.000Z",
+				"channel_id": "channel-7",
+				"channel_sequence": 2,
+				"kind": "stream.chunk",
+				"payload": { "data": "aGVsbG8=", "encoding": "base64" },
+				"stream_id": "terminal-out"
+			}
+		},
+		{
+			"id": "stream/StreamChunkEnvelope/reject-unknown-encoding",
+			"schema": "StreamChunkEnvelope",
+			"expect": "reject",
+			"json": {
+				"message_id": "msg-2",
+				"origin": "backend",
+				"protocol_version": 1,
+				"schema_version": 1,
+				"sent_at": "2026-08-24T10:00:01.000Z",
+				"channel_id": "channel-7",
+				"channel_sequence": 3,
+				"kind": "stream.chunk",
+				"payload": { "data": "hello", "encoding": "utf16" },
+				"stream_id": "terminal-out"
+			}
+		}
+	]
+}
