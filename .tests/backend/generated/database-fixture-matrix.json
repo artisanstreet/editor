@@ -1,0 +1,1329 @@
+{
+	"schema": "artisan.database.fixture-matrix/1",
+	"migrationDirectoryCount": 66,
+	"appliedMigrationsAtHead": 64,
+	"headDigest": "943c7dee0eb359ab156ef0dbec5f12b194ccf289d0862e493c04bca0328da8b5",
+	"sqliteVersion": "3.53.1",
+	"checkpoints": [
+		{
+			"index": 0,
+			"id": "20260710061100_cloudy_squirrel_girl",
+			"appliedMigrations": 1,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 12,
+			"digest": "7bc10843c4736266578cb87f812bd6614cdc20ce7bcb61477deb5dccc5a828e3",
+			"fileBytes": 57344,
+			"file": "20260710061100_cloudy_squirrel_girl.db"
+		},
+		{
+			"index": 1,
+			"id": "20260710103752_serious_imperial_guard",
+			"appliedMigrations": 2,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 29,
+			"digest": "4370aa3474e321f5ad1c2204cc8b2caf4ce1d7e409178fe3f5481f3ed9ef03a1",
+			"fileBytes": 135168,
+			"file": "20260710103752_serious_imperial_guard.db"
+		},
+		{
+			"index": 2,
+			"id": "20260710133000_terminal_sessions",
+			"appliedMigrations": 3,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 35,
+			"digest": "578928b10a3cdc1737f18bb5dc59c4193a1e474ac218ac82195265acadff2344",
+			"fileBytes": 159744,
+			"file": "20260710133000_terminal_sessions.db"
+		},
+		{
+			"index": 3,
+			"id": "20260710150000_agent_graph",
+			"appliedMigrations": 4,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 68,
+			"digest": "3dc3d0fa3ec56038834bbd6a6b60150c4473109d4d4792d222101be061e3af88",
+			"fileBytes": 303104,
+			"file": "20260710150000_agent_graph.db"
+		},
+		{
+			"index": 4,
+			"id": "20260710173000_thread_identity_retention",
+			"appliedMigrations": 5,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 77,
+			"digest": "8fe6f7fe3e85a824e760c5f62ab99e4e716288058af2f0c21ca4a83c12bde847",
+			"fileBytes": 331776,
+			"file": "20260710173000_thread_identity_retention.db"
+		},
+		{
+			"index": 5,
+			"id": "20260710190000_global_guidance_metadata",
+			"appliedMigrations": 6,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 80,
+			"digest": "558f9a3e62b461e566c0bc75d0f50ec45131d1af9c104d36754bdf518745fdf2",
+			"fileBytes": 344064,
+			"file": "20260710190000_global_guidance_metadata.db"
+		},
+		{
+			"index": 6,
+			"id": "20260710193000_project_affinity",
+			"appliedMigrations": 7,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 85,
+			"digest": "331b662593d067db9bfc1dd01b25c7151397d67f44ac14121bdad6160fc225c4",
+			"fileBytes": 364544,
+			"file": "20260710193000_project_affinity.db"
+		},
+		{
+			"index": 7,
+			"id": "20260711113000_thread_metadata_refinement",
+			"appliedMigrations": 8,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 86,
+			"digest": "a04653855872a3fd075250ac2aaccc255867b8512d5316af08d811d5d4fe3087",
+			"fileBytes": 368640,
+			"file": "20260711113000_thread_metadata_refinement.db"
+		},
+		{
+			"index": 8,
+			"id": "20260711160000_model_behaviour",
+			"appliedMigrations": 9,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 90,
+			"digest": "dd945cc99dafa1a282a6b8eae88485b2319fd69d56412f38ac2237beebcb1775",
+			"fileBytes": 389120,
+			"file": "20260711160000_model_behaviour.db"
+		},
+		{
+			"index": 9,
+			"id": "20260711184512_majestic_screwball",
+			"appliedMigrations": 10,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 99,
+			"digest": "ba15f8730883cbdac5df0f5441d671854e8ae109626cab94f80386e04fb8707f",
+			"fileBytes": 425984,
+			"file": "20260711184512_majestic_screwball.db"
+		},
+		{
+			"index": 10,
+			"id": "20260711194258_slim_young_avengers",
+			"appliedMigrations": 11,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 102,
+			"digest": "65109369d234afd176dffc4d84b5f8ca00293e1728d0f999605b603182b9d35d",
+			"fileBytes": 438272,
+			"file": "20260711194258_slim_young_avengers.db"
+		},
+		{
+			"index": 11,
+			"id": "20260712005540_steady_surge",
+			"appliedMigrations": 12,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 107,
+			"digest": "25671d85571debe0df4b0a65a65f98cdaa6a6b6306882933e872b6c61c244167",
+			"fileBytes": 462848,
+			"file": "20260712005540_steady_surge.db"
+		},
+		{
+			"index": 12,
+			"id": "20260712123708_lush_talisman",
+			"appliedMigrations": 13,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 110,
+			"digest": "f0dfa946c5db1b167a3c1757e60f0712a07b40a4a175b89f052cad3c1f295604",
+			"fileBytes": 479232,
+			"file": "20260712123708_lush_talisman.db"
+		},
+		{
+			"index": 13,
+			"id": "20260713083812_workspace-evidence-idempotency",
+			"appliedMigrations": 14,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 111,
+			"digest": "c3c3a342b765b8f01273e981d6f95132aef8d8927b654e8d020cbb8bf91e137f",
+			"fileBytes": 483328,
+			"file": "20260713083812_workspace-evidence-idempotency.db"
+		},
+		{
+			"index": 14,
+			"id": "20260713095034_lively_betty_brant",
+			"appliedMigrations": 15,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 115,
+			"digest": "e6169e06efc2ba2561a2daa3c81d4328b0b321b0ba418c7b07b0ee07499cc954",
+			"fileBytes": 503808,
+			"file": "20260713095034_lively_betty_brant.db"
+		},
+		{
+			"index": 15,
+			"id": "20260718161132_regular_maria_hill",
+			"appliedMigrations": 16,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 125,
+			"digest": "0abe6c876a2309ad5e97ee8f8d2f426b42227b4e6f82e8182b965d678040f546",
+			"fileBytes": 544768,
+			"file": "20260718161132_regular_maria_hill.db"
+		},
+		{
+			"index": 16,
+			"id": "20260718170344_clean_luminals",
+			"appliedMigrations": 17,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 125,
+			"digest": "a6c492926d216670f3fa106277113be253057258797d9780aefda83cc9d9fe05",
+			"fileBytes": 544768,
+			"file": "20260718170344_clean_luminals.db"
+		},
+		{
+			"index": 17,
+			"id": "20260718175934_classy_alex_wilder",
+			"appliedMigrations": 18,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 129,
+			"digest": "09dc2d27b4baff90a8bb8142cdb2a55f22a47f5585991bd6edcd46ba907b2e16",
+			"fileBytes": 565248,
+			"file": "20260718175934_classy_alex_wilder.db"
+		},
+		{
+			"index": 18,
+			"id": "20260718175936_fine_starjammers",
+			"appliedMigrations": 19,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 140,
+			"digest": "0802f3d4e26f0da01f1f6ec3c38c5147599ada728e7de26d29db875eca1225af",
+			"fileBytes": 614400,
+			"file": "20260718175936_fine_starjammers.db"
+		},
+		{
+			"index": 19,
+			"id": "20260718180457_sudden_korvac",
+			"appliedMigrations": 20,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 140,
+			"digest": "56168fce7b9297b8aca919260cc32e052937e800db3b8bde97a031c51f641b96",
+			"fileBytes": 614400,
+			"file": "20260718180457_sudden_korvac.db"
+		},
+		{
+			"index": 20,
+			"id": "20260718180744_nervous_betty_brant",
+			"appliedMigrations": 21,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 150,
+			"digest": "2d114bd060a2842933f2dd9a04bde926bea8f1c4f190631317e8d826fe9cc17d",
+			"fileBytes": 659456,
+			"file": "20260718180744_nervous_betty_brant.db"
+		},
+		{
+			"index": 21,
+			"id": "20260718181637_sour_gorgon",
+			"appliedMigrations": 22,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 150,
+			"digest": "c16d345b08aa70898f3033e88ab9ab666e2438edf1e60f7704c47df670289cb1",
+			"fileBytes": 663552,
+			"file": "20260718181637_sour_gorgon.db"
+		},
+		{
+			"index": 22,
+			"id": "20260718182557_ambiguous_cannonball",
+			"appliedMigrations": 23,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 151,
+			"digest": "342811d8609c34619d8de696e241fc8b1c4bf41f04e8175f40723e123c2d342f",
+			"fileBytes": 663552,
+			"file": "20260718182557_ambiguous_cannonball.db"
+		},
+		{
+			"index": 23,
+			"id": "20260718183054_red_wildside",
+			"appliedMigrations": 24,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 161,
+			"digest": "e7f7f72575852b0a91f27f212c0fc15c3a4a5a92b8c10d1f807419d12ec43ea7",
+			"fileBytes": 704512,
+			"file": "20260718183054_red_wildside.db"
+		},
+		{
+			"index": 24,
+			"id": "20260718183112_long_living_lightning",
+			"appliedMigrations": 25,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 167,
+			"digest": "2819d4c16f8147e7edf9cd414989d4a68284aa04a5e0275d326cef1143bc6949",
+			"fileBytes": 733184,
+			"file": "20260718183112_long_living_lightning.db"
+		},
+		{
+			"index": 25,
+			"id": "20260718184616_sloppy_madrox",
+			"appliedMigrations": 26,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 169,
+			"digest": "18070fa59369de52e178bc94782f5051d5b7f9d5d73b5ffda758b3aee71c92c4",
+			"fileBytes": 741376,
+			"file": "20260718184616_sloppy_madrox.db"
+		},
+		{
+			"index": 26,
+			"id": "20260718200853_amazing_green_goblin",
+			"appliedMigrations": 27,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 173,
+			"digest": "0d76592f3893086333c2709a285f1a50b202a4ba49dd99f9487228e0cb0e56f4",
+			"fileBytes": 757760,
+			"file": "20260718200853_amazing_green_goblin.db"
+		},
+		{
+			"index": 27,
+			"id": "20260718210443_m5_orchestration_surfaces",
+			"appliedMigrations": 28,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 178,
+			"digest": "793182b8d34b46e0730dc0731dc323e2c7b78dcac22a47a891a5ed57de4a8b00",
+			"fileBytes": 782336,
+			"file": "20260718210443_m5_orchestration_surfaces.db"
+		},
+		{
+			"index": 28,
+			"id": "20260718212139_previous_night_thrasher",
+			"appliedMigrations": 29,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 193,
+			"digest": "71c8e7f32860f00a39b0e21f5588855eddef282c3562f5e6ed2a554462842387",
+			"fileBytes": 847872,
+			"file": "20260718212139_previous_night_thrasher.db"
+		},
+		{
+			"index": 29,
+			"id": "20260721200003_acoustic_shadow_king",
+			"appliedMigrations": 30,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 193,
+			"digest": "93616995caf776b3f0b92c30f0271864ca14813fbfb1a5ba4939d4a54443c9c6",
+			"fileBytes": 856064,
+			"file": "20260721200003_acoustic_shadow_king.db"
+		},
+		{
+			"index": 30,
+			"id": "20260721205442_crazy_cargill",
+			"appliedMigrations": 31,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 193,
+			"digest": "7d989c3c94f9beb7534ca23c1b457139888fd97e9c2451afcd039814324f3d36",
+			"fileBytes": 868352,
+			"file": "20260721205442_crazy_cargill.db"
+		},
+		{
+			"index": 31,
+			"id": "20260724212529_slim_psylocke",
+			"appliedMigrations": 32,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 209,
+			"digest": "6966540c44abe4452d1e696a2fc355aaede89e83a72fc883087988b1f259bf4d",
+			"fileBytes": 933888,
+			"file": "20260724212529_slim_psylocke.db"
+		},
+		{
+			"index": 32,
+			"id": "20260725025828_clever_boom_boom",
+			"appliedMigrations": 33,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 209,
+			"digest": "2594c8c29b5a3dd040916fac53cff47984c7d70bdcee6730ed57e48829ff168d",
+			"fileBytes": 933888,
+			"file": "20260725025828_clever_boom_boom.db"
+		},
+		{
+			"index": 33,
+			"id": "20260726120000_message-image-attachments",
+			"appliedMigrations": 34,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 212,
+			"digest": "0b4d97a5a9fdaa3d34f1f0d2e15a3e808bd1fa650f345e0244daa377f0bc10cb",
+			"fileBytes": 946176,
+			"file": "20260726120000_message-image-attachments.db"
+		},
+		{
+			"index": 34,
+			"id": "20260727090000_forge-project-catalog",
+			"appliedMigrations": 35,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 215,
+			"digest": "63da6b56809a5d9b944e0e1b95f99d8c1f8a2ac824f1885ee064ef7148d75632",
+			"fileBytes": 958464,
+			"file": "20260727090000_forge-project-catalog.db"
+		},
+		{
+			"index": 35,
+			"id": "20260729072707_talented_echo",
+			"appliedMigrations": 36,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 215,
+			"digest": "8aaef96b182244aa07ad54b2fc6baba8255951c386d831e55536d42922047704",
+			"fileBytes": 958464,
+			"file": "20260729072707_talented_echo.db"
+		},
+		{
+			"index": 36,
+			"id": "20260729084837_lovely_sleeper",
+			"appliedMigrations": 37,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 215,
+			"digest": "577887dfced5eb398485f7b3bb3e1729f2e602304d76e35337fb26d4d3e1dc7b",
+			"fileBytes": 958464,
+			"file": "20260729084837_lovely_sleeper.db"
+		},
+		{
+			"index": 37,
+			"id": "20260729132743_mute_northstar",
+			"appliedMigrations": 38,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 217,
+			"digest": "73530fd556b66340df3364800dbcba8f7bc9ba1712350090548d5e834f8428f7",
+			"fileBytes": 966656,
+			"file": "20260729132743_mute_northstar.db"
+		},
+		{
+			"index": 38,
+			"id": "20260729141622_safe_outlaw_kid",
+			"appliedMigrations": 39,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 220,
+			"digest": "7f253cb3bee3ac9500d7208c99ebff2f49246b27866210b3a47a36e88d075990",
+			"fileBytes": 978944,
+			"file": "20260729141622_safe_outlaw_kid.db"
+		},
+		{
+			"index": 39,
+			"id": "20260730093655_shallow_agent_brand",
+			"appliedMigrations": 40,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 220,
+			"digest": "6f80a1e9e0356d97f70a6c368eaed166bdcd871aff6358fec867d65edf6e93ad",
+			"fileBytes": 978944,
+			"file": "20260730093655_shallow_agent_brand.db"
+		},
+		{
+			"index": 40,
+			"id": "20260730110447_project_identities",
+			"appliedMigrations": 41,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 223,
+			"digest": "616477282b40d70a90db3b89f4ec35abba3a6414de55ac47d3cffd21bbe6d67f",
+			"fileBytes": 991232,
+			"file": "20260730110447_project_identities.db"
+		},
+		{
+			"index": 41,
+			"id": "20260730121130_chilly_tarot",
+			"appliedMigrations": 42,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 234,
+			"digest": "e84f46ab68843b3267d04013a0e8b1c6d65b7b3e8d5f1ee65fa9b491f699ab6d",
+			"fileBytes": 1040384,
+			"file": "20260730121130_chilly_tarot.db"
+		},
+		{
+			"index": 42,
+			"id": "20260730161038_silky_stingray",
+			"appliedMigrations": 43,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 234,
+			"digest": "c53e854162f1043e362fdffe1afd553b44210ded8d7d2cdbbc77ebddd7b1258a",
+			"fileBytes": 1044480,
+			"file": "20260730161038_silky_stingray.db"
+		},
+		{
+			"index": 43,
+			"id": "20260731100810_panoramic_power_man",
+			"appliedMigrations": 44,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 234,
+			"digest": "e2c3b4d4f593d368cf21597622d1e41822ebfb0e5803331ac3e44096a3caf3be",
+			"fileBytes": 1044480,
+			"file": "20260731100810_panoramic_power_man.db"
+		},
+		{
+			"index": 44,
+			"id": "20260805180123_brave_ben_urich",
+			"appliedMigrations": 45,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 236,
+			"digest": "d15893df5c14f3b491202aae8f32a1f8137b7d2b647eb4bdd1988e8cc13ee42f",
+			"fileBytes": 1048576,
+			"file": "20260805180123_brave_ben_urich.db"
+		},
+		{
+			"index": 45,
+			"id": "20260809161048_stormy_madrox",
+			"appliedMigrations": 46,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 241,
+			"digest": "66fa5589b7e618171e475491977d2e3a6627811698cb963e49c1091e3643020f",
+			"fileBytes": 1073152,
+			"file": "20260809161048_stormy_madrox.db"
+		},
+		{
+			"index": 46,
+			"id": "20260809162506_blushing_squadron_sinister",
+			"appliedMigrations": 47,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 244,
+			"digest": "1d7ab6eb00da44694120b10456335afe89f9f9a7638da1eecf3c303287773605",
+			"fileBytes": 1085440,
+			"file": "20260809162506_blushing_squadron_sinister.db"
+		},
+		{
+			"index": 47,
+			"id": "20260809215409_amusing_shinobi_shaw",
+			"appliedMigrations": 48,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 247,
+			"digest": "42dcf482063b19a837242ca6db8d9e47f1b721f1ac6888c69989ef1d1cfc13ed",
+			"fileBytes": 1097728,
+			"file": "20260809215409_amusing_shinobi_shaw.db"
+		},
+		{
+			"index": 48,
+			"id": "20260809234227_yummy_shinobi_shaw",
+			"appliedMigrations": 49,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 247,
+			"digest": "29bf90f473769727c85ded159b5a1678efb38b5ffba0a427f6a2f115307effa1",
+			"fileBytes": 1097728,
+			"file": "20260809234227_yummy_shinobi_shaw.db"
+		},
+		{
+			"index": 49,
+			"id": "20260809235453_careful_slipstream",
+			"appliedMigrations": 50,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 247,
+			"digest": "3cf7cc95655a6ceb7a0cb2d3409c1cccd77d7328493725c5f9c2308a9793da0c",
+			"fileBytes": 1097728,
+			"file": "20260809235453_careful_slipstream.db"
+		},
+		{
+			"index": 50,
+			"id": "20260810203620_daily_mojo",
+			"appliedMigrations": 51,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 247,
+			"digest": "a1caede4dddc297693972d22575e977d51d0660c79cf722ed1d511ee198d0bc5",
+			"fileBytes": 1097728,
+			"file": "20260810203620_daily_mojo.db"
+		},
+		{
+			"index": 51,
+			"id": "20260810204211_slow_valeria_richards",
+			"appliedMigrations": 52,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 247,
+			"digest": "f2cefecb79649f100385af56087418995809e9d685d01a192839fe65b0cc009f",
+			"fileBytes": 1097728,
+			"file": "20260810204211_slow_valeria_richards.db"
+		},
+		{
+			"index": 52,
+			"id": "20260810210000_agent_name_dataset",
+			"appliedMigrations": 52,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 247,
+			"digest": "f2cefecb79649f100385af56087418995809e9d685d01a192839fe65b0cc009f",
+			"fileBytes": 1097728,
+			"file": "20260810210000_agent_name_dataset.db"
+		},
+		{
+			"index": 53,
+			"id": "20260811010433_empty_prism",
+			"appliedMigrations": 53,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 247,
+			"digest": "0e2d2bbad8b36ff51622e1e5b3de189f5e46a7e565d5177549a110eec243f74c",
+			"fileBytes": 1097728,
+			"file": "20260811010433_empty_prism.db"
+		},
+		{
+			"index": 54,
+			"id": "20260811035058_striped_chimera",
+			"appliedMigrations": 54,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 246,
+			"digest": "b91aaede922077f445655ca72e1327383977d8619927ecb673110a725065e1ab",
+			"fileBytes": 1105920,
+			"file": "20260811035058_striped_chimera.db"
+		},
+		{
+			"index": 55,
+			"id": "20260811040527_broken_la_nuit",
+			"appliedMigrations": 55,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 246,
+			"digest": "37a79e8f07d40f9d86195d892c7095d1f17a1004c5b516ee346335f440eaa7da",
+			"fileBytes": 1105920,
+			"file": "20260811040527_broken_la_nuit.db"
+		},
+		{
+			"index": 56,
+			"id": "20260811040651_graceful_warlock",
+			"appliedMigrations": 56,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 247,
+			"digest": "fc1b0b65899708c133a5aa800a356ac36e9cd6c40c48e26417dcc8b5e051f3ee",
+			"fileBytes": 1105920,
+			"file": "20260811040651_graceful_warlock.db"
+		},
+		{
+			"index": 57,
+			"id": "20260814130000_usage_interruptions",
+			"appliedMigrations": 57,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 252,
+			"digest": "4ebb1e1d1d90b92d3827d09574b09df1fbf1b5b47e597ee9393bf1d28fab728e",
+			"fileBytes": 1122304,
+			"file": "20260814130000_usage_interruptions.db"
+		},
+		{
+			"index": 58,
+			"id": "20260814140000_data_loading_indexes",
+			"appliedMigrations": 58,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 260,
+			"digest": "62f7d879835ad1ab53fc8391176c2ce76a7920e5d115dde2062bf99ea295ad26",
+			"fileBytes": 1155072,
+			"file": "20260814140000_data_loading_indexes.db"
+		},
+		{
+			"index": 59,
+			"id": "20260815000000_journal_consumer_checkpoint",
+			"appliedMigrations": 59,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 262,
+			"digest": "3bf71929e04351c33de9a79262001132ded8863910b0341e7f1d59bd2b25efe6",
+			"fileBytes": 1167360,
+			"file": "20260815000000_journal_consumer_checkpoint.db"
+		},
+		{
+			"index": 60,
+			"id": "20260815010000_terminal_stop_receipts",
+			"appliedMigrations": 60,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 262,
+			"digest": "57cd70e9039c9c38644c5e98ac612fae6d9e9e5d74834a5557378c80411dd16b",
+			"fileBytes": 1167360,
+			"file": "20260815010000_terminal_stop_receipts.db"
+		},
+		{
+			"index": 61,
+			"id": "20260820130000_thread_summary_titles",
+			"appliedMigrations": 61,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 262,
+			"digest": "995a06ece1e99fbda31b0ae7c1c3d82578478e48473fcc863fe4cc38b3667274",
+			"fileBytes": 1167360,
+			"file": "20260820130000_thread_summary_titles.db"
+		},
+		{
+			"index": 62,
+			"id": "20260821075226_mature_mikhail_rasputin",
+			"appliedMigrations": 61,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 262,
+			"digest": "995a06ece1e99fbda31b0ae7c1c3d82578478e48473fcc863fe4cc38b3667274",
+			"fileBytes": 1167360,
+			"file": "20260821075226_mature_mikhail_rasputin.db"
+		},
+		{
+			"index": 63,
+			"id": "20260821080000_opencode2_identity",
+			"appliedMigrations": 62,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 262,
+			"digest": "7b211bdc1305f97fd7d887562acd5406788a0556e2872aaac00f18f6efec0be9",
+			"fileBytes": 1167360,
+			"file": "20260821080000_opencode2_identity.db"
+		},
+		{
+			"index": 64,
+			"id": "20260821150000_thread_message_recency",
+			"appliedMigrations": 63,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 262,
+			"digest": "6ec7dcf44222534cc38442e4c042627cbdc8b335e057ee22dde370858d344d98",
+			"fileBytes": 1167360,
+			"file": "20260821150000_thread_message_recency.db"
+		},
+		{
+			"index": 65,
+			"id": "20260823130000_onboarding_completion",
+			"appliedMigrations": 64,
+			"forwardMigratedToHead": true,
+			"sqliteVersion": "3.53.1",
+			"pragmas": {
+				"journal_mode": "wal",
+				"synchronous": "1",
+				"temp_store": "2",
+				"auto_vacuum": "2",
+				"cache_size": "-65536",
+				"journal_size_limit": "8388608",
+				"wal_autocheckpoint": "1000"
+			},
+			"schemaObjects": 262,
+			"digest": "943c7dee0eb359ab156ef0dbec5f12b194ccf289d0862e493c04bca0328da8b5",
+			"fileBytes": 1167360,
+			"file": "20260823130000_onboarding_completion.db"
+		}
+	]
+}
