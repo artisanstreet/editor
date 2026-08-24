@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 artisan-assets = { path = "../assets" }
+gpui.workspace = true
 pulldown-cmark.workspace = true
 syntect.workspace = true
 thiserror.workspace = true
