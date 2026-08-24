@@ -48,6 +48,8 @@ Shader-backed effects are explicitly deferred. Do not build a custom shader or r
 - Every static SVG source referenced by the old frontend is vendored into a first-party Rust assets crate.
 - Reusable native visual and interaction primitives live in a first-party shared GPUI framework crate under `modules/ui/`.
 - Bits UI and the local Svelte wrappers are behavioral references for that framework, not dependencies or architectural templates for the native product.
+- Streaming Markdown uses `pulldown-cmark` for parsing and `syntect` for fenced-code syntax highlighting; Artisan does not implement a Markdown grammar or programming-language grammars.
+- Artisan owns the streaming coordinator, owned Markdown document model, bounded highlight cache, theme mapping, and native GPUI renderer rather than adopting a third-party styled Markdown component.
 - Shader implementation is deferred and is not part of the current port.
 - Mobile applications are not in the current scope.
 - Nix is not part of the initial toolchain.
@@ -297,9 +299,33 @@ Feature-level behavior such as transcript scroll anchoring, model-selector previ
 Initial dependencies:
 
 - `gpui`, pinned exactly after the Bazel/native-host proof succeeds;
+- `pulldown-cmark` for CommonMark/GFM event parsing;
+- `syntect` for fenced-code syntax parsing and highlighting;
 - the first-party `assets` crate.
 
 No browser DOM, CSS runtime, Svelte runtime, or Bits UI dependency is introduced. The exact legacy sources remain evidence for behavior and appearance, while the implementation is native GPUI.
+
+#### Streaming Markdown and text highlighting
+
+Markdown is split at an engine boundary. Third-party crates own grammar correctness: `pulldown-cmark` emits CommonMark/GFM events and `syntect` produces syntax-highlight ranges for fenced source. First-party code under `ui` converts those events into an owned `MarkdownDocument`, maps semantic and syntax styles through Artisan theme tokens, and renders native GPUI elements. It owns headings, paragraphs, lists, tables, quotes, links, inline code, code-block chrome, selection, copy actions, safe link and image behavior, layout, accessibility, and stable element identity. Raw HTML is inert and is never introduced into a browser or HTML renderer.
+
+The transcript's stream lifecycle remains in `frontend`, because pacing and correction behavior are product policy rather than a generic visual primitive. QUIC supplies application text deltas only. The frontend maintains the canonical message, detects append-only growth versus correction/replacement, applies the audited reveal cadence, bypasses pacing for reduced motion, and submits visible-prefix snapshots to the Markdown worker. Work is coalesced rather than spawned for every network chunk, runs away from the GPUI thread, and carries a monotonically increasing generation so stale parse or highlight results cannot overwrite newer text.
+
+The first implementation reparses the currently visible prefix with `pulldown-cmark` at most once per scheduled presentation update. Optimize only after measurement. If profiling proves this insufficient, retain completed block nodes with stable IDs and reparse only the live tail; do not replace the parser with a first-party grammar. A settled message always receives a final full parse because later reference definitions and similar Markdown constructs can affect earlier content.
+
+Streaming preserves the useful behavior established by the current frontend:
+
+- plain text can paint before the first parsed document is ready;
+- an open fenced-code block remains plain while its language definition may be prepared in the background;
+- a fence is highlighted and cached as soon as it closes, even while later message content continues streaming;
+- non-append corrections replace the visible content immediately instead of replaying old pacing;
+- math and Mermaid do not perform expensive rich rendering on a live partial construct; their settled renderers are selected and proven separately when those capabilities enter a native workflow.
+
+The code-fence cache is bounded and keyed by source body, normalized language, and syntax-theme revision. A theme change invalidates or remaps affected entries. `syntect` output is converted into GPUI styled-text ranges; ordinary Markdown colors and typography always come from the same first-party theme tokens as the rest of the application.
+
+Zed's Markdown implementation and `gpui-component` may be audited as native reference implementations, but neither is adopted wholesale or used to bypass the first-party Artisan framework. Tree-sitter remains a separate later decision for real editor buffers, where incremental syntax trees and semantic-token integration may justify it; the editor language stack is not pulled into transcript rendering merely to color fenced examples.
+
+External tests under `tests/ui/` cover partial constructs, append/correction transitions, reduced motion, stale-generation rejection, stable completed blocks, open and closed fences, language fallback, theme invalidation, raw HTML inertness, links, selection, copy behavior, and final-settle correctness.
 
 ### `frontend`
 
@@ -643,6 +669,8 @@ Add:
 - frontend application state;
 - a Quinn client service outside the UI thread;
 - explicit conversion from transport events into GPUI state updates;
+- transcript stream coordination with canonical text, append/correction handling, reveal pacing, and stale-work rejection;
+- native Markdown presentation through the shared `ui` document and renderer, including fenced-code highlighting;
 - loading, connected, failed, and disconnected states required by the workflow;
 - GPUI tests for the actions and state transitions introduced.
 
@@ -654,6 +682,7 @@ Completion evidence:
 - transport work does not block the GPUI thread;
 - frontend behavior is testable without a live backend where appropriate;
 - screens use the shared `ui` crate rather than introducing private, behaviorally divergent copies of its primitives;
+- streaming Markdown remains responsive, never commits stale parse/highlight work, and reaches the same final document as a full settled parse;
 - a side-by-side review confirms close layout, typography, color, icon, state, and interaction treatment for the selected non-shader UI;
 - shader fidelity is not claimed and does not block the slice;
 - the implementation contains no browser surface or compatibility layer.
