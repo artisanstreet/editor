@@ -1,3 +1,9 @@
-//! Standalone Forge host executable: HTTP/`WebSocket` binding, database lease, shutdown.
+//! Library surface of the standalone Forge host.
 //!
-//! Skeleton crate for the native port; ownership lands packet by packet.
+//! The binary in `main.rs` is thin; every behavior lives here so the host is
+//! testable in-process against real sockets.
+
+pub mod config;
+pub mod host;
+pub mod lease;
+pub mod state;
