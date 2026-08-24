@@ -119,9 +119,13 @@ mod tests {
                 if message.contains("ARTISAN_INSTALL_ROOT")
         ));
         assert!(forbid_default_install_root(&installed.join("versions")).is_err());
+        let elsewhere = installed
+            .parent()
+            .map(|base| base.join("artisan-guard-test-outside-root"))
+            .expect("install root has a parent");
         assert!(
-            forbid_default_install_root(&std::env::temp_dir().join("artisan-dev-install-root"))
-                .is_ok()
+            forbid_default_install_root(&elsewhere).is_ok(),
+            "a sibling of the install root must remain writable"
         );
     }
 
