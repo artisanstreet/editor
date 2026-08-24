@@ -1,3 +1,4 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 exports_files(["Cargo.toml"])
@@ -5,12 +6,10 @@ exports_files(["Cargo.toml"])
 rust_library(
     name = "transport",
     srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
     crate_name = "artisan_transport",
-    deps = [
-        "//modules/domain:domain",
-        "//modules/protocol:protocol",
-    ],
-    edition = "2024",
+    deps = all_crate_deps(normal = True),
+    edition = crate_edition(),
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],
 )
