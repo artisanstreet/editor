@@ -34,5 +34,9 @@ path = "../../tests/database/command_receipt_entities.rs"
 name = "project_threads"
 path = "../../tests/database/project_threads.rs"
 
+[[test]]
+name = "queue_first_message"
+path = "../../tests/database/queue_first_message.rs"
+
 [lints]
 workspace = true

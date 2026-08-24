@@ -1,12 +1,16 @@
 //! Domain-typed repositories for the native schema.
 
+mod first_message;
 mod project_threads;
 
 use sea_orm::{DatabaseConnection, DbErr};
 use thiserror::Error;
 
-use artisan_domain::{ProjectId, RequestId, RootPath, ThreadId, ThreadListingError, UnixMillis};
+use artisan_domain::{
+    MessageId, ProjectId, RequestId, RootPath, ThreadId, ThreadListingError, UnixMillis,
+};
 
+pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
 };
@@ -31,6 +35,17 @@ pub enum RepositoryError {
 
     #[error("thread `{thread_id}` already exists with different persisted values")]
     ThreadConflict { thread_id: ThreadId },
+
+    #[error("message id `{message_id}` already identifies a different message")]
+    MessageConflict { message_id: MessageId },
+
+    #[error(
+        "thread `{thread_id}` already has first message `{existing_message_id}` from another request"
+    )]
+    FirstMessageAlreadyExists {
+        thread_id: ThreadId,
+        existing_message_id: MessageId,
+    },
 
     #[error("request id `{request_id}` was already used for a different command")]
     IdempotencyConflict { request_id: RequestId },
