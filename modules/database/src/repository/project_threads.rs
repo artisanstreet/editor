@@ -500,7 +500,9 @@ async fn thread_row_by_id(
         .map_err(|source| database_error("find thread by id", source))
 }
 
-fn project_summary(row: entities::AttachedProject) -> Result<ProjectSummary, RepositoryError> {
+pub(super) fn project_summary(
+    row: entities::AttachedProject,
+) -> Result<ProjectSummary, RepositoryError> {
     Ok(ProjectSummary {
         project_id: ProjectId::parse(row.project_id)
             .map_err(|error| corrupt_data("attached_projects", "project_id", &error))?,

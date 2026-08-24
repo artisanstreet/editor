@@ -38,5 +38,9 @@ path = "../../tests/database/project_threads.rs"
 name = "queue_first_message"
 path = "../../tests/database/queue_first_message.rs"
 
+[[test]]
+name = "project_catalog"
+path = "../../tests/database/project_catalog.rs"
+
 [lints]
 workspace = true

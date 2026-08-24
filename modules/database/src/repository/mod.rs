@@ -1,13 +1,15 @@
 //! Domain-typed repositories for the native schema.
 
 mod first_message;
+mod project_catalog;
 mod project_threads;
 
 use sea_orm::{DatabaseConnection, DbErr};
 use thiserror::Error;
 
 use artisan_domain::{
-    MessageId, ProjectId, RequestId, RootPath, ThreadId, ThreadListingError, UnixMillis,
+    MessageId, ProjectId, ProjectListingError, RequestId, RootPath, ThreadId, ThreadListingError,
+    UnixMillis,
 };
 
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
@@ -67,6 +69,12 @@ pub enum RepositoryError {
     ThreadListing {
         #[source]
         source: ThreadListingError,
+    },
+
+    #[error("persisted project listing exceeds its domain bound")]
+    ProjectListing {
+        #[source]
+        source: ProjectListingError,
     },
 
     #[error("native database invariant failed: {reason}")]
