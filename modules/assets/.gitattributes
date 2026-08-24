@@ -1,0 +1,5 @@
+# Raw-byte identity for the vendored asset corpus: SVG sources and this
+# manifest are pinned to LF so recorded sha256 digests over the exact raw
+# checked-in bytes hold on every platform. Subtree-scoped by design.
+svg/**/*.svg text eol=lf
+manifest.toml text eol=lf
