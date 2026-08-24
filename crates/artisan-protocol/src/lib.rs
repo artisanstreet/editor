@@ -17,9 +17,12 @@
 //! digests in `.tests/protocol/generated/schema-manifest.json` in the same
 //! commit.
 
-#[allow(clippy::all, clippy::pedantic)] // machine-generated capnpc-rust output is lint-frozen upstream
+#[allow(clippy::all, clippy::pedantic)]
+// machine-generated capnpc-rust output is lint-frozen upstream
 pub mod common_capnp;
-#[allow(clippy::all, clippy::pedantic)] // machine-generated capnpc-rust output is lint-frozen upstream
+#[allow(clippy::all, clippy::pedantic)]
+// machine-generated capnpc-rust output is lint-frozen upstream
 pub mod handshake_capnp;
-#[allow(clippy::all, clippy::pedantic)] // machine-generated capnpc-rust output is lint-frozen upstream
+#[allow(clippy::all, clippy::pedantic)]
+// machine-generated capnpc-rust output is lint-frozen upstream
 pub mod stream_capnp;
