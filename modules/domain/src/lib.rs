@@ -1,54 +1,58 @@
 //! Product concepts that do not depend on transport, storage, or presentation.
+//!
+//! This crate owns the application-domain vocabulary of the first native
+//! end-to-end workflow: attach one Forge-visible directory by opaque identity,
+//! create a project-scoped thread, and durably queue the first bounded text
+//! message behind an accepted-or-duplicate receipt. Engine dispatch is
+//! explicitly outside this milestone, so no engine, run, or provider concept
+//! appears anywhere in the crate.
+//!
+//! Structure:
+//!
+//! - [`bounds`] documents every ceiling and its unit (UTF-8 bytes throughout);
+//! - [`identifiers`] validates the wire-facing identities, split by who mints
+//!   them: clients mint only [`RequestId`], Forge mints everything else;
+//! - [`text`] holds bounded display and message values;
+//! - [`model`] holds listed and durable state values;
+//! - [`commands`] and [`events`] hold the workflow's mutations with their
+//!   request correlation and its durable facts;
+//! - [`time`] carries the schema's signed Unix epoch milliseconds.
+//!
+//! The domain is independent of Cap'n Proto, Quinn, `SeaORM`, GPUI, Tokio,
+//! filesystem APIs, and wall-clock acquisition; it depends only on
+//! `thiserror`. External values return typed errors instead of panicking.
+//! Filesystem paths are carried as opaque descriptions without
+//! canonicalization.
 
-use std::{fmt, str::FromStr};
+pub mod bounds;
+pub mod commands;
+pub mod events;
+pub mod identifiers;
+mod legacy_workspace_id;
+pub mod model;
+pub mod text;
+pub mod time;
 
-use thiserror::Error;
+pub use bounds::{
+    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES,
+    IDENTIFIER_MAX_BYTES, MESSAGE_BODY_MAX_BYTES, ROOT_PATH_MAX_BYTES, THREAD_LISTING_MAX_THREADS,
+    THREAD_TITLE_MAX_BYTES,
+};
+pub use commands::{
+    AttachProject, Command, CreateThread, ListDirectories, ListProjectThreads, Query,
+    QueueFirstMessage,
+};
+pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
+pub use identifiers::{DirectoryId, IdentifierError, MessageId, ProjectId, RequestId, ThreadId};
+pub use model::{
+    CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,
+    DirectoryPlace, PlaceKind, ProjectSummary, QueuedMessage, ReceiptDisposition, ThreadListing,
+    ThreadListingError, ThreadSummary,
+};
+pub use text::{
+    DisplayName, DisplayNameError, MessageBody, MessageBodyError, RootPath, RootPathError,
+    ThreadTitle, ThreadTitleError,
+};
+pub use time::UnixMillis;
 
-/// Stable identity for an Artisan workspace.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct WorkspaceId(String);
-
-impl WorkspaceId {
-    /// Creates an identifier after validating the external value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`WorkspaceIdError::Empty`] when the value has no non-whitespace
-    /// characters.
-    pub fn parse(value: impl Into<String>) -> Result<Self, WorkspaceIdError> {
-        let value = value.into();
-        if value.trim().is_empty() {
-            return Err(WorkspaceIdError::Empty);
-        }
-
-        Ok(Self(value))
-    }
-
-    /// Returns the validated identifier text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for WorkspaceId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl FromStr for WorkspaceId {
-    type Err = WorkspaceIdError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::parse(value)
-    }
-}
-
-/// Validation failure for [`WorkspaceId`].
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-pub enum WorkspaceIdError {
-    /// The supplied value contained no non-whitespace characters.
-    #[error("workspace identifier must not be empty")]
-    Empty,
-}
+pub use legacy_workspace_id::{WorkspaceId, WorkspaceIdError};
