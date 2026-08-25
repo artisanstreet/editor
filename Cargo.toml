@@ -23,7 +23,7 @@ version = "0.0.0"
 [workspace.dependencies]
 capnp = "=0.27.0"
 capnpc = "=0.27.0"
-gpui = { version = "=0.2.2", features = ["inspector"] }
+gpui = { version = "=0.2.2", features = ["inspector", "test-support"] }
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 quinn = { version = "=0.11.11", default-features = false, features = [
     "runtime-tokio",
