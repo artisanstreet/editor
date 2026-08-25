@@ -4,12 +4,15 @@
 //! ([`frame`]), typed transport failures ([`TransportError`]), endpoint
 //! construction with deterministic lifecycle helpers ([`endpoint`]), and the
 //! sole conversion seam between bounded streams and owned application
-//! envelopes ([`application`]). Session authentication, request coordination,
-//! reconnect policy, and frontend-facing channels build above these layers.
+//! envelopes ([`application`]), plus contiguous per-session ordering for
+//! Forge-originated server events ([`event_sequence`]). Session
+//! authentication, request coordination, reconnect policy, and
+//! frontend-facing channels build above these layers.
 
 pub mod application;
 pub mod endpoint;
 pub mod error;
+pub mod event_sequence;
 pub mod frame;
 pub mod handshake;
 
@@ -19,6 +22,7 @@ pub use endpoint::{
     connect, server_config, shutdown,
 };
 pub use error::TransportError;
+pub use event_sequence::{EventSequenceError, EventSequenceTracker, validate_event_successor};
 pub use frame::{FrameError, MAX_FRAME_LEN, read_frame, write_frame};
 pub use handshake::{
     ClientHello, HandshakeError, HandshakeMessageKind, ServerWelcome, client_handshake,
