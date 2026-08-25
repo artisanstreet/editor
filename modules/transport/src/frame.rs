@@ -57,32 +57,77 @@ pub enum FrameError {
     Write(#[from] WriteError),
 }
 
-/// Reads one framed message from `stream`, refusing anything above `bound`.
+/// How one graceful-EOF-aware frame read resolved.
 ///
-/// Callers pass an explicit bound at every site so the limit stays visible
-/// where it is enforced; production readers use [`MAX_FRAME_LEN`] unless a
-/// tighter application bound applies. The announced length is validated
-/// before the payload buffer is allocated, and zero-length prefixes are
-/// rejected because a frame always carries exactly one non-empty message.
+/// A peer that finishes its stream between frames signals "no more frames",
+/// not "bytes went missing": QUIC delivers ordered reliable bytes, so a
+/// finish observed before any byte of the next four-byte length prefix can
+/// only mean the sender ended the stream cleanly. This type carries that
+/// distinction out of the framing layer without attaching any higher-layer
+/// meaning to a finish; reconnects, retries, and close codes remain caller
+/// policy.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum FrameOutcome {
+    /// One complete frame body, read to its announced length.
+    Frame(Vec<u8>),
+
+    /// The peer finished the stream before any byte of the next
+    /// four-byte length prefix arrived.
+    Finished,
+}
+
+/// Reads one framed message from `stream`, classifying a clean pre-frame
+/// finish.
+///
+/// This is [`read_frame`] with one refinement: when the peer finishes the
+/// stream before any byte of the next four-byte length prefix arrives, the
+/// outcome is [`FrameOutcome::Finished`] instead of a truncation error, so a
+/// caller can treat "no more frames" as an outcome rather than as a failure.
+/// Every other terminal condition keeps the exact [`FrameError`] shape of
+/// [`read_frame`]: a finish after one to three prefix bytes is
+/// [`FrameError::Truncated`] with `expected` of four and the exact received
+/// count, a finish after a validated prefix but before the announced body is
+/// [`FrameError::Truncated`] with the body counts, and
+/// resets or connection loss surface as [`FrameError::Read`] preserving the
+/// Quinn source.
 ///
 /// # Errors
 ///
 /// Returns [`FrameError::Empty`] for zero-length prefixes,
 /// [`FrameError::TooLarge`] when the announced length exceeds `bound`,
-/// [`FrameError::Truncated`] when the stream finishes mid-frame, and
-/// [`FrameError::Read`] when the QUIC receive side fails.
-pub async fn read_frame(stream: &mut RecvStream, bound: u32) -> Result<Vec<u8>, FrameError> {
-    let mut prefix = [0u8; PREFIX_LEN];
-    match stream.read_exact(&mut prefix).await {
+/// [`FrameError::Truncated`] when the stream finishes mid-prefix or mid-body,
+/// and [`FrameError::Read`] when the QUIC receive side fails. Only the
+/// zero-prefix-byte finish becomes [`FrameOutcome::Finished`].
+pub async fn read_next_frame(
+    stream: &mut RecvStream,
+    bound: u32,
+) -> Result<FrameOutcome, FrameError> {
+    // The first prefix byte decides between graceful finish and truncation:
+    // a one-byte read yields `None` exactly when the finish carries no
+    // prefix bytes at all. The buffer holds one byte, so `Some` always means
+    // exactly one byte arrived.
+    let mut first = [0u8; 1];
+    match stream.read(&mut first).await {
+        Ok(None) => return Ok(FrameOutcome::Finished),
+        Ok(Some(_)) => {}
+        Err(source) => return Err(FrameError::Read(source)),
+    }
+
+    let mut rest = [0u8; PREFIX_LEN - 1];
+    match stream.read_exact(&mut rest).await {
         Ok(()) => {}
         Err(ReadExactError::FinishedEarly(received)) => {
             return Err(FrameError::Truncated {
                 expected: PREFIX_LEN,
-                received,
+                received: received + 1,
             });
         }
         Err(ReadExactError::ReadError(source)) => return Err(source.into()),
     }
+
+    let mut prefix = [0u8; PREFIX_LEN];
+    prefix[0] = first[0];
+    prefix[1..].copy_from_slice(&rest);
 
     let length = u32::from_le_bytes(prefix);
     if length == 0 {
@@ -94,12 +139,42 @@ pub async fn read_frame(stream: &mut RecvStream, bound: u32) -> Result<Vec<u8>, 
 
     let mut body = vec![0u8; length as usize];
     match stream.read_exact(&mut body).await {
-        Ok(()) => Ok(body),
+        Ok(()) => Ok(FrameOutcome::Frame(body)),
         Err(ReadExactError::FinishedEarly(received)) => Err(FrameError::Truncated {
             expected: body.len(),
             received,
         }),
         Err(ReadExactError::ReadError(source)) => Err(source.into()),
+    }
+}
+
+/// Reads one framed message from `stream`, refusing anything above `bound`.
+///
+/// Callers pass an explicit bound at every site so the limit stays visible
+/// where it is enforced; production readers use [`MAX_FRAME_LEN`] unless a
+/// tighter application bound applies. The announced length is validated
+/// before the payload buffer is allocated, and zero-length prefixes are
+/// rejected because a frame always carries exactly one non-empty message.
+///
+/// This wrapper preserves the historical classification: a clean peer finish
+/// observed before any prefix byte is reported as [`FrameError::Truncated`]
+/// with `expected` of four and `received` of zero, so existing dispatch and
+/// session loops keep their current policy decisions. New callers that must
+/// distinguish a graceful end of stream use [`read_next_frame`] directly.
+///
+/// # Errors
+///
+/// Returns [`FrameError::Empty`] for zero-length prefixes,
+/// [`FrameError::TooLarge`] when the announced length exceeds `bound`,
+/// [`FrameError::Truncated`] when the stream finishes before the frame is
+/// complete, and [`FrameError::Read`] when the QUIC receive side fails.
+pub async fn read_frame(stream: &mut RecvStream, bound: u32) -> Result<Vec<u8>, FrameError> {
+    match read_next_frame(stream, bound).await? {
+        FrameOutcome::Frame(body) => Ok(body),
+        FrameOutcome::Finished => Err(FrameError::Truncated {
+            expected: PREFIX_LEN,
+            received: 0,
+        }),
     }
 }
 

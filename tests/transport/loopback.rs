@@ -14,6 +14,7 @@ mod harness;
 mod resource_budget;
 
 use artisan_transport as transport;
+use artisan_transport::frame::{FrameOutcome, read_next_frame};
 use harness::{
     FRAME_BOUND, Loopback, TEST_DEADLINE, connect_client, deterministic_payload, server_connection,
     spawn_echo, spawn_loopback,
@@ -251,6 +252,116 @@ async fn truncated_frame_surfaces_a_typed_error() {
 
     drop(send);
     drop(recv);
+    drop(client_connection);
+    drop(server_connection);
+    loopback.drain(VarInt::from_u32(0), b"proof complete").await;
+}
+
+/// Sequential stream ends on one connection classify exactly as typed
+/// outcomes: a finish before any prefix byte reads as
+/// [`FrameOutcome::Finished`], a complete frame yields its owned bytes, a
+/// finish inside the prefix stays exact [`transport::FrameError::Truncated`],
+/// and the legacy [`transport::read_frame`] keeps reporting a clean pre-frame
+/// finish as truncation of the whole prefix.
+///
+/// The four scenarios deliberately share one loopback pair and run strictly
+/// in sequence: classification is per-stream state, and consolidating the
+/// endpoint pairs keeps the suite deterministic under the parallel test
+/// runner's bind pressure.
+#[tokio::test]
+async fn sequential_stream_ends_classify_as_finished_frames_or_truncation() {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+
+    // A finish carrying no prefix bytes at all is a graceful end of stream,
+    // not a truncation.
+    {
+        let (mut send, _recv) = client_connection.open_bi().await.expect("bidi stream");
+        send.finish().expect("stream finished without any byte");
+        drop(send);
+
+        let (_send, mut recv) = server_connection
+            .accept_bi()
+            .await
+            .expect("first stream accepted");
+        let outcome = tokio::time::timeout(TEST_DEADLINE, read_next_frame(&mut recv, SMALL_BOUND))
+            .await
+            .expect("finish observed within deadline");
+        assert_eq!(outcome, Ok(FrameOutcome::Finished));
+    }
+
+    // A complete frame still yields its owned body bytes afterwards.
+    {
+        let payload = deterministic_payload(96);
+        let (mut send, _recv) = client_connection.open_bi().await.expect("bidi stream");
+        transport::write_frame(&mut send, &payload)
+            .await
+            .expect("frame written");
+        send.finish().expect("frame finished");
+
+        let (_send, mut recv) = server_connection
+            .accept_bi()
+            .await
+            .expect("second stream accepted");
+        let outcome = tokio::time::timeout(TEST_DEADLINE, read_next_frame(&mut recv, SMALL_BOUND))
+            .await
+            .expect("frame arrives within deadline");
+        assert_eq!(outcome, Ok(FrameOutcome::Frame(payload)));
+    }
+
+    // A finish partway through the four-byte prefix stays typed truncation
+    // with the full expected length and the exact received count.
+    {
+        let announced_length = 64u32;
+        let delivered_prefix_bytes = 2usize;
+        let (mut send, _recv) = client_connection.open_bi().await.expect("bidi stream");
+        send.write_all(&announced_length.to_le_bytes()[..delivered_prefix_bytes])
+            .await
+            .expect("partial prefix written");
+        send.finish().expect("stream finished mid-prefix");
+
+        let (_send, mut recv) = server_connection
+            .accept_bi()
+            .await
+            .expect("third stream accepted");
+        let outcome = tokio::time::timeout(TEST_DEADLINE, read_next_frame(&mut recv, SMALL_BOUND))
+            .await
+            .expect("truncation observed within deadline");
+        assert_eq!(
+            outcome,
+            Err(transport::FrameError::Truncated {
+                expected: 4,
+                received: delivered_prefix_bytes,
+            })
+        );
+    }
+
+    // The legacy reader keeps mapping a clean pre-frame finish to truncation
+    // of the whole prefix, preserving existing dispatch-loop policy.
+    {
+        let (mut send, _recv) = client_connection.open_bi().await.expect("bidi stream");
+        send.finish()
+            .expect("fourth stream finished without any byte");
+        drop(send);
+
+        let (_send, mut recv) = server_connection
+            .accept_bi()
+            .await
+            .expect("fourth stream accepted");
+        let outcome =
+            tokio::time::timeout(TEST_DEADLINE, transport::read_frame(&mut recv, SMALL_BOUND))
+                .await
+                .expect("legacy truncation observed within deadline");
+        assert_eq!(
+            outcome,
+            Err(transport::FrameError::Truncated {
+                expected: 4,
+                received: 0,
+            })
+        );
+    }
+
     drop(client_connection);
     drop(server_connection);
     loopback.drain(VarInt::from_u32(0), b"proof complete").await;
