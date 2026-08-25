@@ -2,12 +2,23 @@
 
 pub mod attached_project;
 pub mod command_receipt;
+pub mod conversation_ordinal;
+pub mod conversation_state;
+pub mod conversation_turn;
+pub mod execution_value;
 pub mod message;
 pub mod message_dispatch;
 pub mod thread;
 
 pub use attached_project::Model as AttachedProject;
 pub use command_receipt::{CommandKind, Model as CommandReceipt};
+pub use conversation_ordinal::Model as ConversationOrdinal;
+pub use conversation_state::Model as ConversationState;
+pub use conversation_turn::Model as ConversationTurn;
+pub use execution_value::{
+    AssistantRunLifecycle, ConversationItemKind, ConversationPatchKind, EntityLifecycle,
+    OpaqueBytes, OrdinalKind, RenderPhase,
+};
 pub use message::Model as Message;
 pub use message_dispatch::{DispatchState, Model as MessageDispatch};
 pub use thread::Model as Thread;
