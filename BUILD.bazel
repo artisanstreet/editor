@@ -36,6 +36,7 @@ rust_clippy(
         "//modules/ui:ui",
         "//scripts/capnp_codegen:capnpc_rust",
         "//tests/assets:assets_validation_test",
+        "//tests/backend:credential_authority_test",
         "//tests/database:command_receipt_entities",
         "//tests/database:conversation_execution_core_entities",
         "//tests/database:conversation_execution_patch_checkpoint_entities",
@@ -79,6 +80,7 @@ rustfmt_test(
         "//modules/frontend:editor",
         "//scripts/capnp_codegen:capnpc_rust",
         "//tests/assets:assets_validation_test",
+        "//tests/backend:credential_authority_test",
         "//tests/database:command_receipt_entities",
         "//tests/database:conversation_execution_core_entities",
         "//tests/database:conversation_execution_patch_checkpoint_entities",
@@ -120,6 +122,7 @@ test_suite(
     tests = [
         ":format_test",
         "//tests/assets:assets_validation_test",
+        "//tests/backend:credential_authority_test",
         "//tests/database:command_receipt_entities",
         "//tests/database:conversation_execution_core_entities",
         "//tests/database:conversation_execution_patch_checkpoint_entities",
