@@ -22,5 +22,9 @@ rcgen.workspace = true
 name = "server_dispatch"
 path = "../../tests/transport/server_dispatch.rs"
 
+[[test]]
+name = "request_lifecycle"
+path = "../../tests/transport/request_lifecycle.rs"
+
 [lints]
 workspace = true
