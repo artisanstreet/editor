@@ -20,6 +20,8 @@ pub const APPLICATION_PROTOCOL_VERSION: u32 = 1;
 pub const HELLO_VERSION_MAX_ENTRIES: usize = 8;
 /// Required byte length of the one-time local capability.
 pub const LOCAL_CAPABILITY_BYTES: usize = 32;
+/// Required byte length of a rotated reconnect capability.
+pub const RECONNECT_CAPABILITY_BYTES: usize = 32;
 /// Maximum UTF-8 byte length of a protocol error detail.
 pub const ERROR_DETAIL_MAX_BYTES: usize = 1_024;
 
@@ -213,6 +215,70 @@ impl Drop for LocalCapability {
     }
 }
 
+/// Validation failure for rotated reconnect capability material.
+///
+/// Errors report only lengths and never include secret bytes.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum ReconnectCapabilityError {
+    /// Capability data had the wrong length.
+    #[error("reconnect capability is {length} bytes; exactly {expected} bytes are required")]
+    InvalidLength {
+        /// Received length.
+        length: usize,
+        /// Required length.
+        expected: usize,
+    },
+}
+
+/// High-entropy rotated single-use reconnect capability.
+///
+/// Deliberately distinct from [`LocalCapability`] so the two credential
+/// vocabularies can never be confused. Deliberately implements neither
+/// [`fmt::Debug`] nor [`fmt::Display`] nor [`Clone`], so ordinary tracing,
+/// error formatting, and accidental duplication cannot expose or copy its
+/// bytes. Single-use/session enforcement is Phase 3 work and intentionally
+/// absent here.
+#[derive(Eq, PartialEq)]
+pub struct ReconnectCapability([u8; RECONNECT_CAPABILITY_BYTES]);
+
+impl ReconnectCapability {
+    /// Owns an already length-safe reconnect capability.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; RECONNECT_CAPABILITY_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    /// Copies reconnect capability bytes after checking the exact length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReconnectCapabilityError::InvalidLength`] without including
+    /// any byte content in the error.
+    pub fn try_from_slice(bytes: &[u8]) -> Result<Self, ReconnectCapabilityError> {
+        let length = bytes.len();
+        let value = <[u8; RECONNECT_CAPABILITY_BYTES]>::try_from(bytes).map_err(|_| {
+            ReconnectCapabilityError::InvalidLength {
+                length,
+                expected: RECONNECT_CAPABILITY_BYTES,
+            }
+        })?;
+        Ok(Self(value))
+    }
+
+    /// Borrows the secret solely for serialization or constant-time
+    /// authentication at a restricted boundary. Callers must never format it.
+    #[must_use]
+    pub(crate) const fn expose_for_wire(&self) -> &[u8; RECONNECT_CAPABILITY_BYTES] {
+        &self.0
+    }
+}
+
+impl Drop for ReconnectCapability {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// Validation failure for a hello version offer.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum VersionOfferError {
@@ -329,22 +395,37 @@ impl ErrorDetail {
     }
 }
 
+/// Owned credential presented inside a hello.
+///
+/// Deliberately implements neither [`fmt::Debug`] nor [`fmt::Display`] and is
+/// not [`Clone`], so its secret bytes can never be formatted, logged, or
+/// duplicated past the handshake boundary.
+#[derive(Eq, PartialEq)]
+pub enum HelloCredential {
+    /// First-contact one-time launcher capability.
+    Initial(LocalCapability),
+    /// Rotated reconnect credential from the previous successful welcome.
+    Reconnect(ReconnectCapability),
+}
+
 /// Authenticated client hello.
 #[derive(Eq, PartialEq)]
 pub struct Hello {
     /// Bounded supported revision offer.
     pub supported_versions: VersionOffer,
-    /// One-time secret capability proving the intended local launcher.
-    pub capability: LocalCapability,
+    /// Owned single-use credential proving this session's right to connect.
+    pub credential: HelloCredential,
 }
 
 /// Successful application protocol negotiation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Welcome {
     /// Selected revision, which must have appeared in the hello offer.
     pub negotiated_version: ProtocolVersion,
     /// Opaque connection-scoped diagnostic identity.
     pub connection_id: ConnectionId,
+    /// Rotated single-use reconnect credential for resuming a later session.
+    pub reconnect_capability: ReconnectCapability,
 }
 
 /// First-workflow request payload after frame correlation is separated out.

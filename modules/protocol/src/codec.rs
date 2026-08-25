@@ -21,9 +21,9 @@ use crate::artisan_capnp::{
 };
 use crate::types::{
     ClientRequest, ConnectionId, ErrorCode, ErrorDetail, FirstMessageReceipt, FrameId, Hello,
-    LocalCapability, LocalCapabilityError, ProtocolFailure, ProtocolValueError, ProtocolVersion,
-    ResponsePayload, ServerResponse, VersionOffer, VersionOfferError, Welcome, WireEnvelope,
-    WireEnvelopeBody,
+    HelloCredential, LocalCapability, LocalCapabilityError, ProtocolFailure, ProtocolValueError,
+    ProtocolVersion, ReconnectCapability, ReconnectCapabilityError, ResponsePayload,
+    ServerResponse, VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 
 /// Maximum Cap'n Proto graph traversal for one already-framed application
@@ -96,6 +96,13 @@ pub enum ProtocolDecodeError {
         /// Length-only validation failure.
         #[source]
         source: LocalCapabilityError,
+    },
+    /// Rotated reconnect capability length failed without exposing its bytes.
+    #[error("invalid reconnect capability: {source}")]
+    ReconnectCapability {
+        /// Length-only validation failure.
+        #[source]
+        source: ReconnectCapabilityError,
     },
     /// Hello version list failed bounded negotiation validation.
     #[error("invalid hello version offer: {source}")]
@@ -193,6 +200,12 @@ impl From<ProtocolValueError> for ProtocolDecodeError {
 impl From<LocalCapabilityError> for ProtocolDecodeError {
     fn from(source: LocalCapabilityError) -> Self {
         Self::LocalCapability { source }
+    }
+}
+
+impl From<ReconnectCapabilityError> for ProtocolDecodeError {
+    fn from(source: ReconnectCapabilityError) -> Self {
+        Self::ReconnectCapability { source }
     }
 }
 
@@ -318,12 +331,24 @@ fn encode_body(
             for (index, version) in value.supported_versions.versions().iter().enumerate() {
                 versions.set(list_index("hello.supportedVersions", index)?, version.get());
             }
-            hello.set_capability(value.capability.expose_for_wire());
+            match &value.credential {
+                HelloCredential::Initial(capability) => {
+                    hello
+                        .init_credential()
+                        .set_initial(capability.expose_for_wire());
+                }
+                HelloCredential::Reconnect(capability) => {
+                    hello
+                        .init_credential()
+                        .set_reconnect(capability.expose_for_wire());
+                }
+            }
         }
         WireEnvelopeBody::Welcome(value) => {
             let mut welcome = root.reborrow().init_body().init_welcome();
             welcome.set_negotiated_version(value.negotiated_version.get());
             welcome.set_connection_id(value.connection_id.as_str());
+            welcome.set_reconnect_capability(value.reconnect_capability.expose_for_wire());
         }
         WireEnvelopeBody::Request(value) => {
             encode_request(root.reborrow().init_body().init_request(), value);
@@ -607,10 +632,17 @@ fn decode_hello(value: artisan_capnp::hello::Reader<'_>) -> Result<Hello, Protoc
         .into());
     }
     let supported_versions = VersionOffer::new(versions.iter().collect())?;
-    let capability = LocalCapability::try_from_slice(value.get_capability()?)?;
+    let credential = match value.get_credential().which()? {
+        artisan_capnp::hello::credential::Which::Initial(capability) => {
+            HelloCredential::Initial(LocalCapability::try_from_slice(capability?)?)
+        }
+        artisan_capnp::hello::credential::Which::Reconnect(capability) => {
+            HelloCredential::Reconnect(ReconnectCapability::try_from_slice(capability?)?)
+        }
+    };
     Ok(Hello {
         supported_versions,
-        capability,
+        credential,
     })
 }
 
@@ -623,6 +655,9 @@ fn decode_welcome(
             value.get_connection_id(),
             "welcome.connectionId",
         )?)?,
+        reconnect_capability: ReconnectCapability::try_from_slice(
+            value.get_reconnect_capability()?,
+        )?,
     })
 }
 

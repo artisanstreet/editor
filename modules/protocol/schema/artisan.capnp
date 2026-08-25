@@ -281,29 +281,40 @@ struct FirstMessageQueued {
 # ---------------------------------------------------------------------------
 
 # Client offer: the application protocol versions it can speak plus the
-# one-time capability proving it was the intended launcher of this Forge.
+# single-use credential proving it may open (or resume) this Forge session.
 struct Hello {
   # Offered versions, ascending, unique, each >= 1. At most 8 entries.
   # Revision 1 supports exactly [1].
   supportedVersions @0 :List(UInt32);
 
-  # High-entropy one-time local client capability: exactly 32 bytes of secret
-  # authentication material received out-of-band via the restricted
-  # parent-child handoff that launched this Forge process. Authenticates the
-  # editor to Forge (transport fingerprint pinning covers the reverse
-  # direction). Never displayed, logged, formatted, or persisted beyond the
-  # handshake decision. Owned conversion enforces the exact 32-byte length;
-  # the Data wire type alone does not.
-  capability @1 :Data;
+  credential :union {
+    # First contact: exactly 32 secret bytes received out-of-band via the
+    # restricted parent-child launcher handoff.
+    initial @1 :Data;
+
+    # Reconnection: exactly 32 secret bytes rotated by the previous
+    # successful Welcome. A second presentation fails once session
+    # enforcement lands in Phase 3.
+    reconnect @2 :Data;
+  }
 }
 
-# Server answer: the single negotiated application protocol version.
+# Server answer: the single negotiated application protocol version plus the
+# next rotated reconnect credential.
 struct Welcome {
   # Exactly one of the versions offered by the triggering hello.
   negotiatedVersion @0 :UInt32;
 
   # Opaque connection-scoped id for diagnostics. Identifier rule.
   connectionId @1 :Text;
+
+  # Rotated single-use reconnect credential for resuming a later session:
+  # exactly 32 secret bytes, replacing whatever credential authenticated the
+  # triggering hello. Every successful Welcome carries one. Never displayed,
+  # logged, or formatted. Owned conversion enforces the exact byte length;
+  # the Data wire type alone does not. Appended at a fresh ordinal so existing
+  # readers see empty bytes and reject them at the owned boundary.
+  reconnectCapability @2 :Data;
 }
 
 # ---------------------------------------------------------------------------
