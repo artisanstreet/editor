@@ -11,6 +11,7 @@ mod repository;
 pub use artisan_domain::WorkspaceId;
 pub use connection::{ConnectError, SqliteConfig, connect};
 pub use repository::{
-    AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
+    AttachProjectInput, AttachProjectResult, ClaimMessageDispatch, ClaimedMessageDispatch,
+    CreateThreadInput, CreateThreadResult, DispatchLeaseOwner, DispatchLeaseOwnerError,
     QueueFirstMessageInput, QueueFirstMessageResult, Repository, RepositoryError,
 };

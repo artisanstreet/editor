@@ -1,6 +1,7 @@
 //! Domain-typed repositories for the native schema.
 
 mod first_message;
+mod message_dispatch;
 mod project_catalog;
 mod project_threads;
 
@@ -13,6 +14,9 @@ use artisan_domain::{
 };
 
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
+pub use message_dispatch::{
+    ClaimMessageDispatch, ClaimedMessageDispatch, DispatchLeaseOwner, DispatchLeaseOwnerError,
+};
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
 };
@@ -51,6 +55,17 @@ pub enum RepositoryError {
 
     #[error("request id `{request_id}` was already used for a different command")]
     IdempotencyConflict { request_id: RequestId },
+
+    #[error(
+        "dispatch lease expiry {lease_expires_at_ms} must be later than claim time {claimed_at_ms}"
+    )]
+    InvalidDispatchLeaseWindow {
+        claimed_at_ms: i64,
+        lease_expires_at_ms: i64,
+    },
+
+    #[error("message dispatch for `{message_id}` exhausted its persisted attempt counter")]
+    DispatchAttemptLimit { message_id: MessageId },
 
     #[error("{later_field} timestamp precedes {earlier_field} timestamp")]
     InvalidChronology {
