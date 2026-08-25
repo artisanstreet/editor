@@ -31,6 +31,12 @@ pub enum Relation {
         to = "(super::conversation_turn::Column::ThreadId, super::conversation_turn::Column::Ordinal, super::conversation_turn::Column::TurnId, super::conversation_turn::Column::Kind)"
     )]
     Turn,
+    #[sea_orm(
+        has_one = "super::conversation_item::Entity",
+        from = "(Column::ThreadId, Column::Ordinal, Column::EntityId, Column::Kind)",
+        to = "(super::conversation_item::Column::ThreadId, super::conversation_item::Column::Ordinal, super::conversation_item::Column::ItemId, super::conversation_item::Column::Kind)"
+    )]
+    Item,
 }
 
 impl Related<super::thread::Entity> for Entity {
@@ -42,6 +48,12 @@ impl Related<super::thread::Entity> for Entity {
 impl Related<super::conversation_turn::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Turn.def()
+    }
+}
+
+impl Related<super::conversation_item::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Item.def()
     }
 }
 
