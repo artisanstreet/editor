@@ -102,7 +102,7 @@ fn negotiated_alpn(connection: &Connection) -> Option<Vec<u8>> {
 /// connection error. Deliberately variant-loose inside `Connection`:
 /// whether the local verifier, the local TLS stack, or the peer's alert
 /// surfaces first is not stable across failure orders.
-fn assert_handshake_rejected(outcome: Result<Connection, transport::TransportError>) {
+fn assert_handshake_rejected(outcome: &Result<Connection, transport::TransportError>) {
     assert!(
         matches!(outcome, Err(transport::TransportError::Connection(_))),
         "handshake must be rejected at the transport boundary"
@@ -181,10 +181,9 @@ impl PinFixture {
                             if let Ok(Ok(connection)) =
                                 tokio::time::timeout(TEST_DEADLINE, incoming).await
                             {
-                                if connections_tx.send(connection).await.is_err() {
-                                    // The test already moved on; keep draining
-                                    // accepts so teardown stays deterministic.
-                                }
+                                // The test may already have moved on. Keep
+                                // draining accepts so teardown stays deterministic.
+                                let _delivery_result = connections_tx.send(connection).await;
                             }
                         }
                     }
@@ -375,13 +374,13 @@ async fn valid_webpki_chain_with_wrong_pin_is_rejected() -> Result<(), Box<dyn E
         transport::client_config(authority.certificate.clone(), decoy_pin)?,
     );
 
-    assert_handshake_rejected(bounded_connect(&fixture).await);
+    assert_handshake_rejected(&bounded_connect(&fixture).await);
     fixture.drain().await;
     Ok(())
 }
 
 /// The same authority issued both leaves; serving the sibling while
-/// pinning the first fails even though the sibling passes WebPKI against
+/// pinning the first fails even though the sibling passes `WebPKI` against
 /// the trusted CA. This is the exact-leaf proof beyond root trust.
 #[tokio::test]
 async fn sibling_leaf_from_same_authority_fails_the_exact_leaf_pin() -> Result<(), Box<dyn Error>> {
@@ -401,7 +400,7 @@ async fn sibling_leaf_from_same_authority_fails_the_exact_leaf_pin() -> Result<(
         )?,
     );
 
-    assert_handshake_rejected(bounded_connect(&fixture).await);
+    assert_handshake_rejected(&bounded_connect(&fixture).await);
     fixture.drain().await;
     Ok(())
 }
@@ -421,7 +420,7 @@ async fn matching_pin_cannot_rescue_a_wrong_san_leaf() -> Result<(), Box<dyn Err
         )?,
     );
 
-    assert_handshake_rejected(bounded_connect(&fixture).await);
+    assert_handshake_rejected(&bounded_connect(&fixture).await);
     fixture.drain().await;
     Ok(())
 }
@@ -442,7 +441,7 @@ async fn matching_pin_cannot_rescue_an_unrelated_issuer_leaf() -> Result<(), Box
         )?,
     );
 
-    assert_handshake_rejected(bounded_connect(&fixture).await);
+    assert_handshake_rejected(&bounded_connect(&fixture).await);
     fixture.drain().await;
     Ok(())
 }
@@ -460,7 +459,7 @@ async fn matching_trust_and_pin_still_fail_on_alpn_mismatch() -> Result<(), Box<
         transport::client_config(authority.certificate.clone(), pin)?,
     );
 
-    assert_handshake_rejected(bounded_connect(&fixture).await);
+    assert_handshake_rejected(&bounded_connect(&fixture).await);
     fixture.drain().await;
     Ok(())
 }
