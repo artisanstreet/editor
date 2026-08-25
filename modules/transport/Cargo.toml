@@ -18,5 +18,9 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 [dev-dependencies]
 rcgen.workspace = true
 
+[[test]]
+name = "server_dispatch"
+path = "../../tests/transport/server_dispatch.rs"
+
 [lints]
 workspace = true
