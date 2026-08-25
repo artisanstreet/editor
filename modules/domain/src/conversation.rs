@@ -311,6 +311,14 @@ impl ConversationItem {
 /// Structural failure in a conversation snapshot.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ConversationSnapshotError {
+    /// A snapshot exceeded the bounded query-turn ceiling.
+    #[error("conversation snapshot holds {count} turns; the maximum is {maximum}")]
+    TooManyTurns {
+        /// Offending number of turns.
+        count: usize,
+        /// Shared snapshot/query ceiling.
+        maximum: usize,
+    },
     /// Two turns reused the same Forge identity.
     #[error("conversation snapshot contains duplicate turn id {turn_id}")]
     DuplicateTurnId {
@@ -355,8 +363,9 @@ impl ConversationSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns [`ConversationSnapshotError`] for duplicate identities,
-    /// duplicate globally allocated ordinals, or an item whose turn is absent.
+    /// Returns [`ConversationSnapshotError`] for too many turns, duplicate
+    /// identities, duplicate globally allocated ordinals, or an item whose
+    /// turn is absent.
     pub fn new(
         thread_id: ThreadId,
         cursor: ConversationCursor,
@@ -364,6 +373,15 @@ impl ConversationSnapshot {
         mut items: Vec<ConversationItem>,
         updated_at: UnixMillis,
     ) -> Result<Self, ConversationSnapshotError> {
+        let turn_count = turns.len();
+        let maximum_turn_count = usize::from(CONVERSATION_QUERY_MAX_TURNS);
+        if turn_count > maximum_turn_count {
+            return Err(ConversationSnapshotError::TooManyTurns {
+                count: turn_count,
+                maximum: maximum_turn_count,
+            });
+        }
+
         let mut turn_ids = HashSet::with_capacity(turns.len());
         let mut ordinals = HashSet::with_capacity(turns.len() + items.len());
         for turn in &turns {
