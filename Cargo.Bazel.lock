@@ -1,5 +1,5 @@
 {
-  "checksum": "781303ac9d7368f8464846f01045142fc756a432045d40bccb3567113f5f8f68",
+  "checksum": "45f6d6b6bd1fe10d6678fc6dcee3c7467c90dd6c49ee8ede45032ccb9d3e3a87",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1803,6 +1803,10 @@
         ],
         "deps": {
           "common": [
+            {
+              "id": "getrandom 0.4.3",
+              "target": "getrandom"
+            },
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
@@ -55905,6 +55909,7 @@
   "direct_deps": [
     "capnp 0.27.0",
     "capnpc 0.27.0",
+    "getrandom 0.4.3",
     "gpui 0.2.2",
     "pulldown-cmark 0.13.4",
     "quinn 0.11.11",
