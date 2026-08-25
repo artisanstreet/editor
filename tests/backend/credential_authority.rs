@@ -123,3 +123,21 @@ fn rotation_cannot_commit_before_the_welcome_copy_is_taken() {
         Err(CredentialAuthenticationError::AwaitingRotation)
     ));
 }
+
+#[test]
+fn system_entropy_mints_matching_client_and_server_reconnect_copies() {
+    let mut authority = CredentialAuthority::new(LocalCapability::from_bytes(INITIAL));
+    let grant = authority
+        .authenticate(initial(INITIAL))
+        .expect("matching initial capability authenticates");
+    let mut pending = grant
+        .prepare_system_reconnect()
+        .expect("operating-system entropy should be available");
+    let delivered = pending
+        .take_for_welcome()
+        .expect("minted Welcome capability is available exactly once");
+    pending.commit().expect("minted rotation commits");
+
+    let reconnect_grant = authority.authenticate(HelloCredential::Reconnect(delivered));
+    assert!(reconnect_grant.is_ok());
+}
