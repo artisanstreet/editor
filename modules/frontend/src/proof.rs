@@ -1,19 +1,19 @@
-//! Phase 1 native-host feasibility proof window.
+//! Native-host feasibility window and first workflow-leaf proof surface.
 //!
-//! FEASIBILITY ONLY: every value below (window size, colors, copy, click
-//! counter) exists solely to prove that upstream GPUI compiles, links, and
-//! runs against the real Windows platform stack — DirectWrite/DirectX
-//! initialization, the `windows` import libraries, `ctor`/`inventory`
-//! section registration, and the `actions!` macro expansion included. This is
-//! not Artisan visual or interaction design; those follow UI archaeology.
+//! The host chrome values below (window size, colors, copy, and click counter)
+//! remain feasibility-only proof material for the real Windows GPUI stack.
+//! The embedded project picker is the first product-specific native leaf and
+//! follows the audited interaction contract in `docs/ui/INVENTORY.md` §6.2.
 
 use std::cell::Cell;
 use std::process::ExitCode;
 use std::rc::Rc;
 
+use crate::project_picker;
 use gpui::{
-    App, AppContext as _, Application, Bounds, Context, FocusHandle, KeyBinding, MouseButton,
-    MouseDownEvent, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
+    App, AppContext as _, Application, Bounds, Context, Entity, FocusHandle, KeyBinding,
+    MouseButton, MouseDownEvent, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
+    div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _},
     px, rgb, size,
 };
@@ -38,6 +38,8 @@ const MUTED: u32 = 0x8A_93_9E;
 struct ProofSurface {
     focus_handle: FocusHandle,
     clicks: usize,
+    /// The native project-picker leaf hosted by this feasibility surface.
+    picker: Entity<project_picker::ProjectPickerView>,
 }
 
 impl Render for ProofSurface {
@@ -61,6 +63,14 @@ impl Render for ProofSurface {
                     .text_color(rgb(MUTED))
                     .child("Feasibility-only presentation · quit with cmd-q / ctrl-q"),
             )
+            // The first real native workflow leaf: the project picker.
+            .child(self.picker.clone())
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child(picker_summary(self.picker.read(cx).last_action())),
+            )
     }
 }
 
@@ -69,6 +79,32 @@ impl ProofSurface {
     fn handle_press(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.clicks += 1;
         cx.notify();
+    }
+}
+
+/// Proof catalog for the picker leaf: three demo attachments with the first
+/// one current, so the leaf's current-row focus behavior is observable.
+fn proof_catalog() -> (
+    Vec<project_picker::ProjectOption>,
+    Option<artisan_domain::ProjectId>,
+) {
+    use artisan_domain::ProjectId;
+
+    let option = |name: &str| project_picker::ProjectOption {
+        id: ProjectId::parse(format!("proof-{name}")).expect("proof ids are valid"),
+        name: name.to_string().into(),
+    };
+
+    let projects = vec![option("core"), option("docs-site"), option("playground")];
+    let current = ProjectId::parse("proof-core").expect("proof id is valid");
+    (projects, Some(current))
+}
+
+/// One-line observation of what the picker leaf has done so far.
+fn picker_summary(action: Option<project_picker::ProjectPickerAction>) -> String {
+    match action {
+        Some(chosen) => format!("picker: {chosen:?}"),
+        None => "picker: no action yet".to_string(),
     }
 }
 
@@ -107,9 +143,19 @@ pub fn run() -> ExitCode {
                 cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window);
+                    let (projects, current) = proof_catalog();
+                    let picker = cx.new(|picker_cx| {
+                        project_picker::ProjectPickerView::new(
+                            projects,
+                            current,
+                            artisan_ui::theme::ThemeMode::Dark,
+                            picker_cx,
+                        )
+                    });
                     ProofSurface {
                         focus_handle,
                         clicks: 0,
+                        picker,
                     }
                 })
             },
