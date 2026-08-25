@@ -12,5 +12,13 @@ artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
 
+[[test]]
+name = "thread_list_navigation"
+path = "../../tests/frontend/thread_list_navigation.rs"
+
+[[test]]
+name = "transcript"
+path = "../../tests/frontend/transcript.rs"
+
 [lints]
 workspace = true
