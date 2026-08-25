@@ -2,6 +2,7 @@
 
 pub mod asset_seam;
 pub mod markdown;
+pub mod motion;
 pub mod theme;
 
 pub use artisan_assets::AssetId;
