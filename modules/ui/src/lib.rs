@@ -6,6 +6,7 @@ pub mod button;
 pub mod card;
 pub mod markdown;
 pub mod motion;
+pub mod progress;
 pub mod separator;
 pub mod theme;
 pub mod tooltip;
