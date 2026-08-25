@@ -59,6 +59,12 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Run,
+    #[sea_orm(
+        has_many = "super::conversation_patch::Entity",
+        from = "(Column::ItemId, Column::ThreadId)",
+        to = "(super::conversation_patch::Column::ItemId, super::conversation_patch::Column::ThreadId)"
+    )]
+    Patches,
 }
 
 impl Related<super::conversation_ordinal::Entity> for Entity {
@@ -82,6 +88,12 @@ impl Related<super::message::Entity> for Entity {
 impl Related<super::assistant_run::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Run.def()
+    }
+}
+
+impl Related<super::conversation_patch::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Patches.def()
     }
 }
 

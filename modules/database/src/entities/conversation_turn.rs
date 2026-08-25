@@ -40,6 +40,12 @@ pub enum Relation {
         to = "(super::conversation_item::Column::TurnId, super::conversation_item::Column::ThreadId)"
     )]
     Items,
+    #[sea_orm(
+        has_many = "super::conversation_patch::Entity",
+        from = "(Column::TurnId, Column::ThreadId)",
+        to = "(super::conversation_patch::Column::TurnId, super::conversation_patch::Column::ThreadId)"
+    )]
+    Patches,
 }
 
 impl Related<super::conversation_ordinal::Entity> for Entity {
@@ -57,6 +63,12 @@ impl Related<super::assistant_run::Entity> for Entity {
 impl Related<super::conversation_item::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Items.def()
+    }
+}
+
+impl Related<super::conversation_patch::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Patches.def()
     }
 }
 

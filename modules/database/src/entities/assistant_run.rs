@@ -52,6 +52,24 @@ pub enum Relation {
         to = "(super::conversation_item::Column::RunId, super::conversation_item::Column::ThreadId)"
     )]
     Items,
+    #[sea_orm(
+        has_many = "super::conversation_patch::Entity",
+        from = "(Column::RunId, Column::ThreadId)",
+        to = "(super::conversation_patch::Column::RunId, super::conversation_patch::Column::ThreadId)"
+    )]
+    Patches,
+    #[sea_orm(
+        has_one = "super::run_checkpoint::Entity",
+        from = "Column::RunId",
+        to = "super::run_checkpoint::Column::RunId"
+    )]
+    Checkpoint,
+    #[sea_orm(
+        has_many = "super::run_batch_receipt::Entity",
+        from = "Column::RunId",
+        to = "super::run_batch_receipt::Column::RunId"
+    )]
+    BatchReceipts,
 }
 
 impl Related<super::message::Entity> for Entity {
@@ -69,6 +87,24 @@ impl Related<super::conversation_turn::Entity> for Entity {
 impl Related<super::conversation_item::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Items.def()
+    }
+}
+
+impl Related<super::conversation_patch::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Patches.def()
+    }
+}
+
+impl Related<super::run_checkpoint::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Checkpoint.def()
+    }
+}
+
+impl Related<super::run_batch_receipt::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::BatchReceipts.def()
     }
 }
 
