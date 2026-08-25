@@ -44,6 +44,20 @@ fn project_listing_enforces_its_deliberate_bound() {
 }
 
 #[test]
+fn project_listing_rejects_a_repeated_project_identity() {
+    // Each row projects one durable attached-project primary key, so a
+    // catalog naming one project twice is corrupt input, not a longer list.
+    let duplicated = vec![project_summary(5), project_summary(3), project_summary(5)];
+    assert_eq!(
+        ProjectListing::new(duplicated),
+        Err(ProjectListingError::DuplicateProject {
+            project_id: ProjectId::parse("proj-5").expect("the fixture is valid"),
+        }),
+        "the first repeated identity is named"
+    );
+}
+
+#[test]
 fn project_listing_preserves_forge_supplied_order() {
     let listing = ProjectListing::new(vec![project_summary(7), project_summary(3)])
         .expect("two summaries fit");
