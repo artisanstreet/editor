@@ -378,6 +378,7 @@ version = "0.0.0"
 dependencies = [
  "artisan-domain",
  "capnp",
+ "subtle",
  "thiserror 2.0.20",
  "zeroize",
 ]
