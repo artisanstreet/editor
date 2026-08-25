@@ -4,10 +4,11 @@
 //! ([`frame`]), typed transport failures ([`TransportError`]), endpoint
 //! construction with deterministic lifecycle helpers ([`endpoint`]), and the
 //! sole conversion seam between bounded streams and owned application
-//! envelopes ([`application`]), plus contiguous per-session ordering for
-//! Forge-originated server events ([`event_sequence`]). Session
-//! authentication, request coordination, reconnect policy, and
-//! frontend-facing channels build above these layers.
+//! envelopes ([`application`]), contiguous per-session ordering for
+//! Forge-originated server events ([`event_sequence`]), and the
+//! exact-leaf pinned identity enforced on every client configuration
+//! ([`identity`]). Session authentication, request coordination, reconnect
+//! policy, and frontend-facing channels build above these layers.
 
 pub mod application;
 pub mod deadline;
@@ -16,6 +17,7 @@ pub mod error;
 pub mod event_sequence;
 pub mod frame;
 pub mod handshake;
+pub mod identity;
 pub mod request_correlation;
 
 pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
@@ -31,4 +33,5 @@ pub use handshake::{
     ClientHello, HandshakeError, HandshakeMessageKind, ServerWelcome, client_handshake,
     receive_client_hello, send_server_welcome,
 };
+pub use identity::{PinnedIdentity, PinnedIdentityError};
 pub use request_correlation::{RequestCorrelationError, RequestCorrelationRegistry};

@@ -103,6 +103,28 @@ rust_test(
 )
 
 rust_test(
+    name = "pinning_test",
+    srcs = [
+        "harness.rs",
+        "pinning.rs",
+    ],
+    crate_name = "pinning_test",
+    crate_root = "pinning.rs",
+    deps = [
+        "//modules/transport:transport",
+        "@crates//:quinn",
+        "@crates//:rcgen",
+        "@crates//:rustls",
+        "@crates//:rustls-pki-types",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "deadline_test",
     srcs = [
         "deadline.rs",
