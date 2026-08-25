@@ -11,6 +11,7 @@ artisan-protocol = { path = "../protocol" }
 quinn.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 

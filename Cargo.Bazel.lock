@@ -1,5 +1,5 @@
 {
-  "checksum": "45f6d6b6bd1fe10d6678fc6dcee3c7467c90dd6c49ee8ede45032ccb9d3e3a87",
+  "checksum": "62aab9284d26368024e296ddf8b37fa362c8e506d90ed26671d9ad8598f63530",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2157,6 +2157,10 @@
             {
               "id": "rustls-pki-types 1.15.1",
               "target": "rustls_pki_types"
+            },
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
             },
             {
               "id": "thiserror 2.0.20",
@@ -55917,6 +55921,7 @@
     "rustls-pki-types 1.15.1",
     "sea-orm 2.0.2",
     "sea-orm-migration 2.0.2",
+    "sha2 0.11.0",
     "sqlx-sqlite 0.9.0",
     "subtle 2.6.1",
     "syntect 5.3.0",
@@ -55927,7 +55932,6 @@
   "direct_dev_deps": [
     "rcgen 0.14.9",
     "roxmltree 0.20.0",
-    "sha2 0.11.0",
     "toml 1.1.4+spec-1.1.0"
   ],
   "unused_patches": []
