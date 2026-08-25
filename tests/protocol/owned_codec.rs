@@ -15,11 +15,12 @@ use artisan_domain::{
 use artisan_protocol::artisan_capnp::{ErrorCode as WireErrorCode, envelope};
 use artisan_protocol::{
     CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ClientRequest, ConnectionId, ErrorCode,
-    ErrorDetail, FirstMessageReceipt, FrameId, Hello, HelloCredential, LocalCapability,
-    LocalCapabilityError, ProtocolDecodeError, ProtocolEncodeError, ProtocolFailure,
-    ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
-    ReconnectCapabilityError, ResponsePayload, ServerResponse, VersionOffer, VersionOfferError,
-    Welcome, WireEnvelope, WireEnvelopeBody, decode_envelope, encode_envelope,
+    ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello, HelloCredential,
+    LocalCapability, LocalCapabilityError, ProtocolDecodeError, ProtocolEncodeError,
+    ProtocolFailure, ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES,
+    ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse,
+    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody, decode_envelope,
+    encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -448,24 +449,31 @@ fn nested_receipt_correlation_cannot_disagree() {
 fn every_event_and_error_family_roundtrips() -> Result<(), Box<dyn Error>> {
     assert_roundtrip(&envelope(
         "server-event-project",
-        WireEnvelopeBody::Event(Event::ProjectAttached(ProjectAttached {
-            project: project(),
-        })),
+        WireEnvelopeBody::Event(ServerEvent {
+            cursor: EventCursor::new(1)?,
+            event: Event::ProjectAttached(ProjectAttached { project: project() }),
+        }),
     ))?;
     assert_roundtrip(&envelope(
         "server-event-thread",
-        WireEnvelopeBody::Event(Event::ThreadCreated(ThreadCreated { thread: thread() })),
+        WireEnvelopeBody::Event(ServerEvent {
+            cursor: EventCursor::new(2)?,
+            event: Event::ThreadCreated(ThreadCreated { thread: thread() }),
+        }),
     ))?;
     assert_roundtrip(&envelope(
         "server-event-message",
-        WireEnvelopeBody::Event(Event::FirstMessageQueued(FirstMessageQueued {
-            message: QueuedMessage {
-                request_id: request_id("request-message"),
-                message_id: MessageId::parse("message-1")?,
-                thread_id: ThreadId::parse("thread-1")?,
-                body: MessageBody::parse("The event retains this complete body.")?,
-            },
-        })),
+        WireEnvelopeBody::Event(ServerEvent {
+            cursor: EventCursor::new(3)?,
+            event: Event::FirstMessageQueued(FirstMessageQueued {
+                message: QueuedMessage {
+                    request_id: request_id("request-message"),
+                    message_id: MessageId::parse("message-1")?,
+                    thread_id: ThreadId::parse("thread-1")?,
+                    body: MessageBody::parse("The event retains this complete body.")?,
+                },
+            }),
+        }),
     ))?;
 
     assert_roundtrip(&envelope(
@@ -728,6 +736,31 @@ fn oversized_wire_collections_fail_before_element_conversion() {
                 maximum: PROJECT_LISTING_MAX_PROJECTS
             }
         }) if count == PROJECT_LISTING_MAX_PROJECTS + 1
+    ));
+}
+
+fn raw_event(cursor: u64) -> Vec<u8> {
+    let mut message = raw_envelope();
+    let mut root = message.init_root::<envelope::Builder>();
+    root.set_protocol_version(1);
+    root.set_message_id("server-event-frame");
+    let mut event = root.reborrow().init_body().init_event();
+    event.set_cursor(cursor);
+    event.init_project_attached();
+    serialize::write_message_to_words(&message)
+}
+
+#[test]
+fn zero_server_event_cursor_is_rejected_before_payload_conversion() {
+    assert!(matches!(
+        EventCursor::new(0),
+        Err(ProtocolValueError::ZeroEventCursor)
+    ));
+    assert!(matches!(
+        decode_envelope(&raw_event(0)),
+        Err(ProtocolDecodeError::ProtocolValue {
+            source: ProtocolValueError::ZeroEventCursor
+        })
     ));
 }
 

@@ -8,8 +8,10 @@
 use std::fmt;
 
 use artisan_domain::{
-    Command, DirectoryListing, Event, IdentifierError, MessageId, ProjectListing, ProjectSummary,
-    Query, RequestId, ThreadId, ThreadListing, ThreadSummary, UnixMillis,
+    Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
+    ConversationSubscriptionStart, DirectoryListing, Event, IdentifierError, MessageId, PatchBatch,
+    ProjectListing, ProjectSummary, Query, RequestId, ThreadId, ThreadListing, ThreadSummary,
+    UnixMillis,
 };
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -34,6 +36,9 @@ pub enum ProtocolValueError {
         /// Unsupported integer revision.
         version: u32,
     },
+    /// Server event zero is reserved and cannot identify a delivered event.
+    #[error("server event cursor must be greater than zero")]
+    ZeroEventCursor,
     /// A frame identity failed the shared identifier rule.
     #[error("invalid frame id: {source}")]
     FrameId {
@@ -88,6 +93,34 @@ impl ProtocolVersion {
     /// Returns the wire integer.
     #[must_use]
     pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// One-based sequence assigned to a Forge-originated server event.
+///
+/// Unlike a conversation replay cursor, zero is not a meaningful starting
+/// sentinel: every delivered event has an explicit positive sequence.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EventCursor(u64);
+
+impl EventCursor {
+    /// Creates a one-based server event cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::ZeroEventCursor`] for zero.
+    pub const fn new(value: u64) -> Result<Self, ProtocolValueError> {
+        if value == 0 {
+            Err(ProtocolValueError::ZeroEventCursor)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the wire integer.
+    #[must_use]
+    pub const fn get(self) -> u64 {
         self.0
     }
 }
@@ -435,6 +468,8 @@ pub enum ClientRequest {
     Query(Query),
     /// Idempotent domain mutation.
     Command(Command),
+    /// Bounded conversation read or subscription control.
+    Conversation(ConversationRequest),
 }
 
 /// Receipt returned when a first message is durably queued.
@@ -448,6 +483,27 @@ pub struct FirstMessageReceipt {
     pub thread_id: ThreadId,
     /// Accepted or exact duplicate replay.
     pub disposition: artisan_domain::ReceiptDisposition,
+}
+
+/// Successful start of authoritative conversation delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConversationSubscriptionStarted {
+    /// Fresh delivery begins with a complete validated snapshot.
+    Fresh(ConversationSubscriptionStart),
+    /// Resumed delivery continues strictly after an already-applied cursor.
+    Resumed {
+        /// Thread whose delivery is resuming.
+        thread_id: ThreadId,
+        /// Last patch already applied by the subscriber.
+        cursor: ConversationCursor,
+    },
+}
+
+/// Successful stop of authoritative conversation delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationSubscriptionStopped {
+    /// Thread no longer being delivered.
+    pub thread_id: ThreadId,
 }
 
 /// Successful first-workflow response payload.
@@ -475,6 +531,12 @@ pub enum ResponsePayload {
     },
     /// Durable first-message receipt.
     FirstMessageQueued(FirstMessageReceipt),
+    /// Complete bounded conversation projection.
+    ConversationSnapshot(ConversationSnapshot),
+    /// Fresh snapshot-first or resumed subscription acknowledgement.
+    ConversationSubscriptionStarted(ConversationSubscriptionStarted),
+    /// Clean conversation subscription stop acknowledgement.
+    ConversationSubscriptionStopped(ConversationSubscriptionStopped),
 }
 
 /// Successful response correlated to a client request frame.
@@ -484,6 +546,15 @@ pub struct ServerResponse {
     pub request_id: RequestId,
     /// Successful result.
     pub payload: ResponsePayload,
+}
+
+/// Durable Forge-originated event with its connection replay sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerEvent {
+    /// One-based sequence used to detect duplicate, missing, or regressed events.
+    pub cursor: EventCursor,
+    /// Domain event delivered at this sequence.
+    pub event: Event,
 }
 
 /// Stable protocol rejection classification.
@@ -527,10 +598,12 @@ pub enum WireEnvelopeBody {
     Request(ClientRequest),
     /// Successful correlated server response.
     Response(ServerResponse),
-    /// Durable Forge-originated event.
-    Event(Event),
+    /// Durable Forge-originated event with its replay sequence.
+    Event(ServerEvent),
     /// Typed rejection or failure.
     ProtocolError(ProtocolFailure),
+    /// Contiguous conversation replay after a known cursor.
+    PatchBatch(PatchBatch),
 }
 
 /// One fully owned application-protocol frame.
