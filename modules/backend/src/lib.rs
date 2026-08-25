@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 pub mod app;
 pub mod credential_authority;
+pub mod request_handler;
 pub mod storage;
 
 pub use app::{ForgeApp, ForgeConfig, ForgeShutdownError, ForgeStartupError};
@@ -11,6 +12,7 @@ pub use credential_authority::{
     AuthenticatedCredential, CredentialAuthenticationError, CredentialAuthority,
     CredentialEntropyError, CredentialKind, PendingReconnect, ReconnectRotationError,
 };
+pub use request_handler::RequestHandler;
 pub use storage::{ForgeStorage, ForgeStorageCloseError, ForgeStorageOpenError};
 
 /// Runs the currently implemented Forge process boundary.

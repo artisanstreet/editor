@@ -7,6 +7,7 @@ rust_library(
     srcs = [
         "src/app.rs",
         "src/lib.rs",
+        "src/request_handler.rs",
         "src/storage.rs",
     ],
     crate_name = "artisan_backend",
