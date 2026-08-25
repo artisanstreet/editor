@@ -33,10 +33,10 @@ pub use codec::{
 };
 pub use types::{
     APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ConversationSubscriptionStarted,
-    ConversationSubscriptionStopped, ERROR_DETAIL_MAX_BYTES, ErrorCode, ErrorDetail, EventCursor,
-    FirstMessageReceipt, FrameId, HELLO_VERSION_MAX_ENTRIES, Hello, HelloCredential,
-    LOCAL_CAPABILITY_BYTES, LocalCapability, LocalCapabilityError, ProtocolFailure,
-    ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
-    ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse, VersionOffer,
-    VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    ConversationSubscriptionStopped, DispatchFailure, ERROR_DETAIL_MAX_BYTES, ErrorCode,
+    ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, HELLO_VERSION_MAX_ENTRIES, Hello,
+    HelloCredential, LOCAL_CAPABILITY_BYTES, LocalCapability, LocalCapabilityError,
+    ProtocolFailure, ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES,
+    ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse,
+    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };

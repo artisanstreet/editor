@@ -625,6 +625,90 @@ pub struct ProtocolFailure {
     pub request_id: Option<RequestId>,
 }
 
+/// Failure settling exactly one dispatched client request.
+///
+/// The wire keeps the general [`ProtocolFailure`] shape because hello-time
+/// version rejections legitimately implicate no request. A received client
+/// request, however, must always be settled by a failure that names it: this
+/// owned value makes that correlation mandatory. The triggering
+/// [`RequestId`] is derived from the settled frame itself rather than passed
+/// separately, so a dispatch failure can never disagree with the request it
+/// answers, the fields stay private so the correlation cannot be mutated
+/// afterwards, and conversion into [`ProtocolFailure`] always selects the
+/// correlated arm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchFailure {
+    code: ErrorCode,
+    detail: ErrorDetail,
+    retryable: bool,
+    request_id: RequestId,
+}
+
+impl DispatchFailure {
+    /// Builds the rejection that settles the client request carried by
+    /// `frame`.
+    ///
+    /// The correlation identity comes from the frame's own client-minted id
+    /// -- the same id every conforming response echoes -- never from a
+    /// second argument that could drift from the settled request. Returns
+    /// [`None`] when the frame carries no client request body (hello,
+    /// welcome, response, event, protocol error, patch batch): those
+    /// failures stay uncorrelated on the wire.
+    #[must_use]
+    pub fn settling(
+        frame: &WireEnvelope,
+        code: ErrorCode,
+        detail: ErrorDetail,
+        retryable: bool,
+    ) -> Option<Self> {
+        if !matches!(frame.body, WireEnvelopeBody::Request(_)) {
+            return None;
+        }
+        let request_id = frame.frame_id.to_request_id().ok()?;
+        Some(Self {
+            code,
+            detail,
+            retryable,
+            request_id,
+        })
+    }
+
+    /// Stable classification of the failure.
+    #[must_use]
+    pub const fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    /// Bounded human-readable evidence.
+    #[must_use]
+    pub const fn detail(&self) -> &ErrorDetail {
+        &self.detail
+    }
+
+    /// Whether repeating the identical request later may succeed.
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    /// Mandatory triggering request identity.
+    #[must_use]
+    pub const fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+}
+
+impl From<DispatchFailure> for ProtocolFailure {
+    fn from(value: DispatchFailure) -> Self {
+        Self {
+            code: value.code,
+            detail: value.detail,
+            retryable: value.retryable,
+            request_id: Some(value.request_id),
+        }
+    }
+}
+
 /// Owned application frame body.
 #[derive(Eq, PartialEq)]
 pub enum WireEnvelopeBody {
