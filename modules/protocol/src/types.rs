@@ -13,6 +13,7 @@ use artisan_domain::{
     ProjectListing, ProjectSummary, Query, RequestId, ThreadId, ThreadListing, ThreadSummary,
     UnixMillis,
 };
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use zeroize::Zeroize;
 
@@ -207,7 +208,6 @@ pub enum LocalCapabilityError {
 ///
 /// Deliberately implements neither [`fmt::Debug`] nor [`fmt::Display`], so
 /// ordinary tracing and error formatting cannot expose its bytes.
-#[derive(Eq, PartialEq)]
 pub struct LocalCapability([u8; LOCAL_CAPABILITY_BYTES]);
 
 impl LocalCapability {
@@ -234,6 +234,15 @@ impl LocalCapability {
         Ok(Self(value))
     }
 
+    /// Compares capability bytes without data-dependent early exit.
+    ///
+    /// Both operands have the same fixed length by construction, so the
+    /// comparison time does not disclose a matching prefix.
+    #[must_use]
+    pub fn constant_time_eq(&self, candidate: &Self) -> bool {
+        bool::from(self.0.ct_eq(&candidate.0))
+    }
+
     /// Borrows the secret solely for serialization or constant-time
     /// authentication at a restricted boundary. Callers must never format it.
     #[must_use]
@@ -241,6 +250,14 @@ impl LocalCapability {
         &self.0
     }
 }
+
+impl PartialEq for LocalCapability {
+    fn eq(&self, other: &Self) -> bool {
+        self.constant_time_eq(other)
+    }
+}
+
+impl Eq for LocalCapability {}
 
 impl Drop for LocalCapability {
     fn drop(&mut self) {
@@ -271,7 +288,6 @@ pub enum ReconnectCapabilityError {
 /// error formatting, and accidental duplication cannot expose or copy its
 /// bytes. Single-use/session enforcement is Phase 3 work and intentionally
 /// absent here.
-#[derive(Eq, PartialEq)]
 pub struct ReconnectCapability([u8; RECONNECT_CAPABILITY_BYTES]);
 
 impl ReconnectCapability {
@@ -298,6 +314,15 @@ impl ReconnectCapability {
         Ok(Self(value))
     }
 
+    /// Compares capability bytes without data-dependent early exit.
+    ///
+    /// Both operands have the same fixed length by construction, so the
+    /// comparison time does not disclose a matching prefix.
+    #[must_use]
+    pub fn constant_time_eq(&self, candidate: &Self) -> bool {
+        bool::from(self.0.ct_eq(&candidate.0))
+    }
+
     /// Borrows the secret solely for serialization or constant-time
     /// authentication at a restricted boundary. Callers must never format it.
     #[must_use]
@@ -305,6 +330,14 @@ impl ReconnectCapability {
         &self.0
     }
 }
+
+impl PartialEq for ReconnectCapability {
+    fn eq(&self, other: &Self) -> bool {
+        self.constant_time_eq(other)
+    }
+}
+
+impl Eq for ReconnectCapability {}
 
 impl Drop for ReconnectCapability {
     fn drop(&mut self) {
