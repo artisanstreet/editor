@@ -323,6 +323,7 @@ dependencies = [
  "artisan-migrations",
  "artisan-protocol",
  "artisan-transport",
+ "thiserror 2.0.20",
  "zeroize",
 ]
 

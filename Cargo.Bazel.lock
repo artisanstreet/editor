@@ -1,5 +1,5 @@
 {
-  "checksum": "d454283b640ef7c56e367d38f2ef895e7f1eff83bea54f03c871043d7b52bf64",
+  "checksum": "e0bcb9837d1eb860e540424acbb61fb0d1057d727db981a14c7e2449e5ecad8a",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1803,6 +1803,10 @@
         ],
         "deps": {
           "common": [
+            {
+              "id": "thiserror 2.0.20",
+              "target": "thiserror"
+            },
             {
               "id": "zeroize 1.9.0",
               "target": "zeroize"
