@@ -130,7 +130,7 @@ fn parse_hex(fingerprint: &str) -> Result<[u8; DIGEST_LEN], PinnedIdentityError>
         return Err(PinnedIdentityError::WrongLength);
     }
     let mut digest = [0u8; DIGEST_LEN];
-    for (pair, slot) in bytes.chunks_exact(2).zip(&mut digest) {
+    for (pair, slot) in bytes.as_chunks::<2>().0.iter().zip(&mut digest) {
         *slot = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
     }
     Ok(digest)
