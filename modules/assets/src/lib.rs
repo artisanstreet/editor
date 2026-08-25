@@ -159,6 +159,53 @@ impl fmt::Display for Family {
     }
 }
 
+/// How a vendored asset is presented natively.
+///
+/// This is catalog-owned rendering policy, deliberately independent of
+/// [`Asset::monochrome`], which stays the validator-derived artwork property
+/// (docs/ui/ASSETS.md §10). Legacy call sites carried a second, different
+/// predicate: `EngineMark.monochrome` / `RepositoryMark.monochrome` meant "a
+/// single-color logo that must invert with the theme". Artwork-mono agrees
+/// with that policy everywhere except the marks whose legacy call sites flag
+/// non-inverting while their artwork is single-paint, because alpha-mask
+/// tinting would flatten their authored brand colors. Exactly two such marks
+/// exist in this catalog and they override the default:
+///
+/// - `svgl.claude-ai` — Claude clay `#D97757`, served for engine `claude`
+///   and provider `anthropic`;
+/// - `svgl.deepseek` — `DeepSeek` blue `#4D6BFE`, served for provider
+///   `deepseek`.
+///
+/// Everything else follows the monochrome-derived default. Notably,
+/// currentColor artwork (`svgl.qwen`, `lobe.*`, `simple-icons.*`,
+/// `brands.hermes`) stays [`Presentation::Tinted`]: painting with text color
+/// is the native equivalent of its theme-adaptive or chip-whitened legacy
+/// rendering, whereas full-color raster would pin the glyph to black.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Presentation {
+    /// Alpha-mask rendering painted in GPUI text color; the asset tints and
+    /// inverts with the theme.
+    Tinted,
+    /// Authored-color rendering over the embedded bytes; nothing recolored.
+    FullColor,
+}
+
+/// Resolves a catalog row's presentation: the monochrome-derived default,
+/// overridden by exactly the brand marks whose legacy call sites proved their
+/// authored single-hue colors must survive (see [`Presentation`]).
+///
+/// Key comparison goes through [`str_eq`] because string-literal match
+/// patterns are not yet allowed in const functions.
+const fn presentation_policy(id: &str, monochrome: bool) -> Presentation {
+    if str_eq(id, "svgl.claude-ai") || str_eq(id, "svgl.deepseek") {
+        Presentation::FullColor
+    } else if monochrome {
+        Presentation::Tinted
+    } else {
+        Presentation::FullColor
+    }
+}
+
 /// One vendored SVG asset: manifest metadata plus embedded source text.
 #[derive(Clone, Copy, Debug)]
 pub struct Asset {
@@ -171,6 +218,9 @@ pub struct Asset {
     /// Whether the artwork's paint derives from a single color (see
     /// `docs/ui/ASSETS.md` §10 for the derivation rule).
     pub monochrome: bool,
+    /// Catalog-owned presentation route; see [`Presentation`] for the policy
+    /// and its evidenced exceptions to the monochrome default.
+    pub presentation: Presentation,
     /// Checked-in location relative to `modules/assets/`.
     pub source_path: &'static str,
     /// Embedded standalone SVG source, byte-identical to the checked-in file.
@@ -201,6 +251,7 @@ macro_rules! catalog {
                     family: $family,
                     view_box: $view_box,
                     monochrome: $monochrome,
+                    presentation: presentation_policy($id, $monochrome),
                     source_path: $path,
                     source: include_str!(concat!("../", $path)),
                 },

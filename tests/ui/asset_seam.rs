@@ -2,9 +2,10 @@
 //! `artisan_ui`.
 //!
 //! These tests exercise only the public `artisan_ui::asset_seam` API and pin
-//! what this packet requires without a GPUI runtime: metadata-derived mono
-//! versus multicolor routing over representative ids and the whole catalog,
-//! adapter round trips with borrowed byte identity and determinism,
+//! what this packet requires without a GPUI runtime: catalog presentation
+//! policy routing (including the authored single-hue brand marks preserved
+//! despite monochrome artwork) over representative ids and the whole
+//! catalog, adapter round trips with borrowed byte identity and determinism,
 //! rejection of unknown, empty, and path-shaped inputs, empty `list`
 //! behavior, and why the multicolor route must construct
 //! `ImageSource::Resource(Resource::Embedded(..))` explicitly instead of
@@ -37,17 +38,54 @@ fn routes_representative_ids_by_catalog_metadata() {
 }
 
 #[test]
-fn derives_the_route_for_every_catalog_id_from_monochrome_metadata() {
+fn authored_single_hue_brand_marks_keep_full_color_despite_monochrome_artwork() {
+    // Legacy evidence (docs/ui/ASSETS.md §10, engine/presentation.ts): engine
+    // `claude` and provider `anthropic` flag `SvglClaudeAILogo` non-inverting,
+    // and provider `deepseek` flags `SvglDeepSeekLogo` non-inverting. Both
+    // artworks are single-paint (#D97757 / #4D6BFE), so the structural
+    // `monochrome` property stays true; presentation policy is independent of
+    // it and preserves the authored colors through the FullColor route.
+    for id in [AssetId::SVGL_CLAUDE_AI, AssetId::SVGL_DEEPSEEK] {
+        let asset = get(id);
+        assert!(
+            asset.monochrome,
+            "{}: artwork-derived monochrome must stay true",
+            id.as_str()
+        );
+        assert_eq!(
+            asset.presentation,
+            Presentation::FullColor,
+            "{}: catalog policy must preserve the authored brand color",
+            id.as_str()
+        );
+        assert_eq!(
+            asset_glyph(id).presentation(),
+            Presentation::FullColor,
+            "{}: seam must route the authored-color mark full-color",
+            id.as_str()
+        );
+    }
+
+    // Control: an ordinary Tabler glyph shares `monochrome == true` with the
+    // exceptions yet stays tinted — proving the two properties diverge.
+    assert!(get(AssetId::TABLER_CHECK).monochrome);
+    assert_eq!(
+        asset_glyph(AssetId::TABLER_CHECK).presentation(),
+        Presentation::Tinted
+    );
+}
+
+#[test]
+fn derives_the_route_for_every_catalog_id_from_presentation_metadata() {
+    // The seam observes `Asset::presentation`; it never re-derives policy
+    // from artwork structure. Every one of the 104 ids routes exactly as its
+    // catalog record says.
+    assert_eq!(AssetId::CONSTANTS.len(), 104);
     for id in AssetId::CONSTANTS {
-        let expected = if get(*id).monochrome {
-            Presentation::Tinted
-        } else {
-            Presentation::FullColor
-        };
         assert_eq!(
             asset_glyph(*id).presentation(),
-            expected,
-            "route for `{}` must derive from Asset::monochrome",
+            get(*id).presentation,
+            "route for `{}` must come from Asset::presentation",
             id.as_str()
         );
     }
