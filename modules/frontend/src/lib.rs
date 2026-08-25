@@ -3,11 +3,12 @@
 //! Phase 1 feasibility state: the binary launches the minimal GPUI proof
 //! window so the upstream native toolchain can be exercised end to end.
 //! Product assembly, navigation, and screens arrive in later phases. Beyond
-//! that window, the library now hosts narrow product presentation-model
-//! leaves that record audited semantics without rendering them:
-//! [`attention`], [`transcript`], and [`thread_list_selection`].
+//! that window, the library hosts narrow product-state models without
+//! rendering them: [`attention`], [`composer`], [`transcript`], and
+//! [`thread_list_selection`].
 
 pub mod attention;
+pub mod composer;
 pub mod proof;
 pub mod thread_list_selection;
 pub mod transcript;

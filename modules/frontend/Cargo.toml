@@ -17,6 +17,10 @@ name = "attention"
 path = "../../tests/frontend/attention.rs"
 
 [[test]]
+name = "composer_state"
+path = "../../tests/ui/composer_state.rs"
+
+[[test]]
 name = "thread_list_navigation"
 path = "../../tests/frontend/thread_list_navigation.rs"
 
