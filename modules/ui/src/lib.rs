@@ -6,6 +6,7 @@ pub mod button;
 pub mod card;
 pub mod markdown;
 pub mod motion;
+pub mod separator;
 pub mod theme;
 
 pub use artisan_assets::AssetId;
