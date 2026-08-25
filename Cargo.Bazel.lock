@@ -1,5 +1,5 @@
 {
-  "checksum": "bf3417425beb252ab941fb1ec9bc63af5b03e3a461a7c6d201e21b6353b5bbfa",
+  "checksum": "d454283b640ef7c56e367d38f2ef895e7f1eff83bea54f03c871043d7b52bf64",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1801,6 +1801,15 @@
         "compile_data_glob": [
           "**"
         ],
+        "deps": {
+          "common": [
+            {
+              "id": "zeroize 1.9.0",
+              "target": "zeroize"
+            }
+          ],
+          "selects": {}
+        },
         "edition": "2024",
         "version": "0.0.0"
       },
