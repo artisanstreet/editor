@@ -15,6 +15,7 @@ use super::{Repository, RepositoryError, corrupt_data, database_error, millis};
 
 const OWNER_BYTES: usize = 32;
 const OWNER_STORAGE_BYTES: usize = OWNER_BYTES * 2;
+const MAX_DISPATCH_ATTEMPTS: i32 = i32::MAX;
 
 const CLAIM_NEXT_SQL: &str = r"
 UPDATE message_dispatches
@@ -27,8 +28,9 @@ SET state = 'leased',
 WHERE message_id = (
     SELECT message_id
     FROM message_dispatches
-    WHERE (state = 'queued' AND available_at_ms <= ?)
-       OR (state = 'leased' AND lease_expires_at_ms <= ?)
+    WHERE ((state = 'queued' AND available_at_ms <= ?)
+       OR (state = 'leased' AND lease_expires_at_ms <= ?))
+      AND attempt_count < ?
     ORDER BY available_at_ms ASC, queued_at_ms ASC, message_id ASC
     LIMIT 1
 )
@@ -314,7 +316,10 @@ impl Repository {
     /// The transaction's first statement both selects and updates one row.
     /// SQLite therefore serializes competing writers before either can
     /// observe a claimable result. A leased row becomes eligible again only
-    /// when its persisted expiry is at or before `claimed_at`.
+    /// when its persisted expiry is at or before `claimed_at`. Dispatches at
+    /// the attempt ceiling are excluded from candidate selection so they do
+    /// not block later work; when every eligible row is exhausted, the oldest
+    /// exhausted dispatch produces [`RepositoryError::DispatchAttemptLimit`].
     ///
     /// # Errors
     ///
@@ -349,9 +354,10 @@ impl Repository {
                 claimed_at_ms.into(),
                 claimed_at_ms.into(),
                 claimed_at_ms.into(),
+                i64::from(MAX_DISPATCH_ATTEMPTS).into(),
                 claimed_at_ms.into(),
                 claimed_at_ms.into(),
-                i64::from(i32::MAX).into(),
+                i64::from(MAX_DISPATCH_ATTEMPTS).into(),
             ],
         );
         let returned = transaction
@@ -713,7 +719,38 @@ async fn classify_unclaimed(
     claimed_at: UnixMillis,
 ) -> Result<(), RepositoryError> {
     let claimed_at_ms = millis(claimed_at);
-    let eligible = Condition::any()
+    let claimable = entities::message_dispatch::Entity::find()
+        .filter(eligible_dispatch_condition(claimed_at_ms))
+        .filter(entities::message_dispatch::Column::AttemptCount.lt(MAX_DISPATCH_ATTEMPTS))
+        .one(database)
+        .await
+        .map_err(|source| database_error("classify claimable message dispatch", source))?;
+    if claimable.is_some() {
+        return Err(RepositoryError::Invariant {
+            reason: "eligible dispatch was not changed by its atomic claim statement",
+        });
+    }
+
+    let exhausted = entities::message_dispatch::Entity::find()
+        .filter(eligible_dispatch_condition(claimed_at_ms))
+        .filter(entities::message_dispatch::Column::AttemptCount.eq(MAX_DISPATCH_ATTEMPTS))
+        .order_by_asc(entities::message_dispatch::Column::AvailableAtMs)
+        .order_by_asc(entities::message_dispatch::Column::QueuedAtMs)
+        .order_by_asc(entities::message_dispatch::Column::MessageId)
+        .one(database)
+        .await
+        .map_err(|source| database_error("classify exhausted message dispatch", source))?;
+
+    let Some(exhausted) = exhausted else {
+        return Ok(());
+    };
+    let message_id = MessageId::parse(exhausted.message_id)
+        .map_err(|error| corrupt_data("message_dispatches", "message_id", &error))?;
+    Err(RepositoryError::DispatchAttemptLimit { message_id })
+}
+
+fn eligible_dispatch_condition(claimed_at_ms: i64) -> Condition {
+    Condition::any()
         .add(
             Condition::all()
                 .add(entities::message_dispatch::Column::State.eq(DispatchState::Queued))
@@ -723,27 +760,7 @@ async fn classify_unclaimed(
             Condition::all()
                 .add(entities::message_dispatch::Column::State.eq(DispatchState::Leased))
                 .add(entities::message_dispatch::Column::LeaseExpiresAtMs.lte(claimed_at_ms)),
-        );
-    let candidate = entities::message_dispatch::Entity::find()
-        .filter(eligible)
-        .order_by_asc(entities::message_dispatch::Column::AvailableAtMs)
-        .order_by_asc(entities::message_dispatch::Column::QueuedAtMs)
-        .order_by_asc(entities::message_dispatch::Column::MessageId)
-        .one(database)
-        .await
-        .map_err(|source| database_error("classify unclaimed message dispatch", source))?;
-
-    let Some(candidate) = candidate else {
-        return Ok(());
-    };
-    let message_id = MessageId::parse(candidate.message_id)
-        .map_err(|error| corrupt_data("message_dispatches", "message_id", &error))?;
-    if candidate.attempt_count == i32::MAX {
-        return Err(RepositoryError::DispatchAttemptLimit { message_id });
-    }
-    Err(RepositoryError::Invariant {
-        reason: "eligible dispatch was not changed by its atomic claim statement",
-    })
+        )
 }
 
 async fn finish_unclaimed(
