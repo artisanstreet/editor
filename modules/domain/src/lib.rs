@@ -50,8 +50,8 @@ pub use conversation::{
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
     ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
     ConversationTurn, ConversationUnsubscribe, CounterError, IncrementalText, IncrementalTextError,
-    ItemOrdinal, PatchBatch, PatchBatchError, PatchSequence, QueryTurnCount, QueryTurnCountError,
-    Revision, TurnOrdinal, UserMessageItem,
+    ItemOrdinal, LifecycleTransitionError, PatchBatch, PatchBatchError, PatchSequence,
+    QueryTurnCount, QueryTurnCountError, Revision, TurnOrdinal, UserMessageItem,
 };
 pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
 pub use identifiers::{

@@ -206,6 +206,22 @@ impl IncrementalText {
     }
 }
 
+/// Failure to advance out of a sealed terminal lifecycle.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum LifecycleTransitionError {
+    /// A sealed terminal state rejected a move to a different state.
+    ///
+    /// Replaying the identical terminal state never fails, so duplicate
+    /// delivery stays harmless.
+    #[error("conversation lifecycle {from:?} is sealed against transitioning to {to:?}")]
+    Sealed {
+        /// Terminal lifecycle that refuses further movement.
+        from: ConversationLifecycle,
+        /// Proposed next lifecycle.
+        to: ConversationLifecycle,
+    },
+}
+
 /// Renderer-visible lifecycle shared by conversation turns and items.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ConversationLifecycle {
@@ -234,6 +250,29 @@ impl ConversationLifecycle {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    /// Validates advancing from this lifecycle to `next`.
+    ///
+    /// [`Self::Completed`], [`Self::Failed`], and [`Self::Cancelled`] are
+    /// sealed: they reject every different state while replaying the identical
+    /// state succeeds, so a duplicate delivery stays harmless.
+    /// [`Self::Interrupted`] is deliberately resumable because only terminal
+    /// states seal. No other rule exists yet; nonterminal states may move
+    /// freely until a stricter transition graph proves necessary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleTransitionError::Sealed`] carrying the exact from
+    /// and to lifecycles when this state is sealed and `next` differs.
+    pub fn validate_transition(self, next: Self) -> Result<(), LifecycleTransitionError> {
+        if self.is_terminal() && self != next {
+            return Err(LifecycleTransitionError::Sealed {
+                from: self,
+                to: next,
+            });
+        }
+        Ok(())
     }
 }
 

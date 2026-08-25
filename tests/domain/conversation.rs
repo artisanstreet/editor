@@ -6,9 +6,9 @@ use artisan_domain::{
     ConversationLifecycle, ConversationPatch, ConversationQuery, ConversationQueryBounds,
     ConversationRequest, ConversationSnapshot, ConversationSnapshotError, ConversationSubscribe,
     ConversationSubscriptionStart, ConversationUnsubscribe, CounterError, IncrementalText,
-    IncrementalTextError, ItemId, ItemOrdinal, MessageBody, PatchBatch, PatchBatchError, PatchId,
-    PatchSequence, QueryTurnCount, QueryTurnCountError, Revision, ThreadId, TurnId, TurnOrdinal,
-    UnixMillis, UserMessageItem,
+    IncrementalTextError, ItemId, ItemOrdinal, LifecycleTransitionError, MessageBody, PatchBatch,
+    PatchBatchError, PatchId, PatchSequence, QueryTurnCount, QueryTurnCountError, Revision,
+    ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
 
 fn turn(id: &str, ordinal: u64) -> artisan_domain::ConversationTurn {
@@ -411,4 +411,73 @@ fn bounded_query_turn_count_preserves_legacy_edges() {
         ConversationRequest::Query(query),
         ConversationRequest::Query(_)
     ));
+}
+
+#[test]
+fn sealed_terminal_lifecycles_reject_distinct_next_states_with_exact_context() {
+    assert_eq!(
+        ConversationLifecycle::Completed.validate_transition(ConversationLifecycle::Streaming),
+        Err(LifecycleTransitionError::Sealed {
+            from: ConversationLifecycle::Completed,
+            to: ConversationLifecycle::Streaming,
+        })
+    );
+    assert_eq!(
+        ConversationLifecycle::Failed.validate_transition(ConversationLifecycle::Active),
+        Err(LifecycleTransitionError::Sealed {
+            from: ConversationLifecycle::Failed,
+            to: ConversationLifecycle::Active,
+        })
+    );
+    assert_eq!(
+        ConversationLifecycle::Cancelled.validate_transition(ConversationLifecycle::Pending),
+        Err(LifecycleTransitionError::Sealed {
+            from: ConversationLifecycle::Cancelled,
+            to: ConversationLifecycle::Pending,
+        })
+    );
+}
+
+#[test]
+fn terminal_same_state_replay_is_harmless() {
+    for lifecycle in [
+        ConversationLifecycle::Completed,
+        ConversationLifecycle::Failed,
+        ConversationLifecycle::Cancelled,
+    ] {
+        assert!(lifecycle.is_terminal());
+        assert_eq!(lifecycle.validate_transition(lifecycle), Ok(()));
+    }
+}
+
+#[test]
+fn interrupted_stays_resumable_and_open_transitions_remain_permitted() {
+    assert!(!ConversationLifecycle::Interrupted.is_terminal());
+    assert_eq!(
+        ConversationLifecycle::Interrupted.validate_transition(ConversationLifecycle::Active),
+        Ok(())
+    );
+    assert_eq!(
+        ConversationLifecycle::Interrupted.validate_transition(ConversationLifecycle::Streaming),
+        Ok(())
+    );
+
+    // Representative nonterminal progress and completion stay permitted; only
+    // the documented terminal seal constrains transitions today.
+    assert_eq!(
+        ConversationLifecycle::Pending.validate_transition(ConversationLifecycle::Streaming),
+        Ok(())
+    );
+    assert_eq!(
+        ConversationLifecycle::Streaming.validate_transition(ConversationLifecycle::Waiting),
+        Ok(())
+    );
+    assert_eq!(
+        ConversationLifecycle::Active.validate_transition(ConversationLifecycle::Completed),
+        Ok(())
+    );
+    assert_eq!(
+        ConversationLifecycle::Waiting.validate_transition(ConversationLifecycle::Failed),
+        Ok(())
+    );
 }
