@@ -1,0 +1,49 @@
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rust_test", "rustfmt_test")
+
+# Focused Phase 9 leaf: validates the layout-only portable runtime metadata
+# contract against the existing Bazel-built Windows editor and Forge binaries.
+#
+# - `compile_data` embeds //packaging/portable:portable_layout.txt, so schema
+#   drift fails compilation of this validator.
+# - `data` wires //modules/frontend:editor and //modules/backend:forge as
+#   runfiles; resolution is test-only (manifest or directory layout) with no
+#   production fallback.
+# - The test never launches either executable, touches no network, writes no
+#   installer or user state, and claims no end-to-end workflow coverage:
+#   installer, archive producer, updater, signing, distribution, supervisor,
+#   authenticated handoff, and clean-host smoke remain deferred decisions.
+rust_test(
+    name = "portable_layout_test",
+    srcs = ["portable_layout.rs"],
+    compile_data = ["//packaging/portable:portable_layout.txt"],
+    crate_name = "portable_layout_test",
+    data = [
+        "//modules/backend:forge",
+        "//modules/frontend:editor",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+# Package-local focused gates so this leaf stays self-contained. Root-level
+# aggregate registration (// clippy / format_test / tests) remains a
+# controller integration step and is intentionally not done here.
+rust_clippy(
+    name = "clippy",
+    testonly = True,
+    deps = [":portable_layout_test"],
+)
+
+rustfmt_test(
+    name = "format_test",
+    size = "small",
+    targets = [":portable_layout_test"],
+    transitive = True,
+)
+
+test_suite(
+    name = "tests",
+    tests = [":portable_layout_test"],
+)
