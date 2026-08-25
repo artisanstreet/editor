@@ -386,6 +386,7 @@ dependencies = [
 name = "artisan-transport"
 version = "0.0.0"
 dependencies = [
+ "artisan-protocol",
  "quinn",
  "rcgen",
  "rustls",
