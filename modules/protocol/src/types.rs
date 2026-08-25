@@ -605,6 +605,11 @@ pub enum ErrorCode {
     ThreadUnknown,
     /// Forge failed internally; retry may later succeed.
     Internal,
+    /// The same stable request identity was previously accepted for a
+    /// different command kind or immutable payload. The originally accepted
+    /// outcome stands, and repeating the conflicting request is never
+    /// retryable.
+    IdempotencyConflict,
 }
 
 /// Typed application-protocol rejection or failure.

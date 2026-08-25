@@ -145,6 +145,12 @@ enum ErrorCode {
   threadUnknown @4;
   # Forge-side failure (storage, listing); retry may succeed later.
   internal @5;
+  # The client's stable request identity was already accepted for a different
+  # command kind or immutable payload. The originally accepted outcome stands,
+  # and repeating this conflicting request is never retryable. Appended after
+  # the six-code contract was committed; fresh ordinal, existing ordinals
+  # frozen.
+  idempotencyConflict @6;
 }
 
 # One Forge-visible directory in a listing.
