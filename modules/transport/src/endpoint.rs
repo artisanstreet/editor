@@ -2,13 +2,13 @@
 //!
 //! The trust model behind these builders is deliberately narrow: callers
 //! hand over DER material plus the pinned end-entity fingerprint, and this
-//! module wires ring-backed rustls with a fixed ALPN onto Quinn endpoints
-//! bound to `127.0.0.1:0`. Every client configuration runs ordinary chain,
-//! validity, name, and signature verification first, then requires the
-//! SHA-256 fingerprint of the full end-entity DER to equal
-//! [`PinnedIdentity`] exactly. Certificate provisioning, pairing, and
-//! reconnection remain the production trust decision (an open plan
-//! decision) and are not invented here.
+//! module wires ring-backed rustls with a fixed ALPN and explicit resource
+//! budgets onto Quinn endpoints bound to `127.0.0.1:0`. Every client
+//! configuration runs ordinary chain, validity, name, and signature
+//! verification first, then requires the SHA-256 fingerprint of the full
+//! end-entity DER to equal [`PinnedIdentity`] exactly. Certificate
+//! provisioning, pairing, and reconnection remain the production trust
+//! decision (an open plan decision) and are not invented here.
 
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -43,14 +43,44 @@ pub const LOOPBACK_SERVER_NAME: &str = "localhost";
 /// from reaching idle state on its own.
 const IDLE_TIMEOUT_MS: u32 = 30_000;
 
+/// Maximum peer-initiated bidirectional streams admitted concurrently.
+const MAX_INCOMING_BIDI_STREAMS: u32 = 16;
+
+/// Artisan currently carries every application exchange on bidirectional
+/// streams, so peers receive no unidirectional-stream credit.
+const MAX_INCOMING_UNI_STREAMS: u32 = 0;
+
+/// Per-stream receive credit. Quinn replenishes this window as consumers
+/// read, so it deliberately need not equal the maximum framed payload.
+const STREAM_RECEIVE_WINDOW_BYTES: u32 = 1_250_000;
+
+/// Aggregate receive credit shared by all streams on one connection.
+const CONNECTION_RECEIVE_WINDOW_BYTES: u32 = 20_000_000;
+
+/// Maximum unacknowledged outbound data retained for one connection.
+const SEND_WINDOW_BYTES: u64 = 10_000_000;
+
+/// The editor keeps an otherwise idle local session alive. The server does
+/// not duplicate these probes because one side is sufficient.
+const CLIENT_KEEP_ALIVE_SECONDS: u64 = 15;
+
 fn ring_provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-fn transport_config() -> TransportConfig {
+fn transport_config(keep_alive_interval: Option<Duration>) -> TransportConfig {
     let mut transport = TransportConfig::default();
     let idle_timeout = IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT_MS));
-    transport.max_idle_timeout(Some(idle_timeout));
+    transport
+        .max_concurrent_bidi_streams(VarInt::from_u32(MAX_INCOMING_BIDI_STREAMS))
+        .max_concurrent_uni_streams(VarInt::from_u32(MAX_INCOMING_UNI_STREAMS))
+        .max_idle_timeout(Some(idle_timeout))
+        .stream_receive_window(VarInt::from_u32(STREAM_RECEIVE_WINDOW_BYTES))
+        .receive_window(VarInt::from_u32(CONNECTION_RECEIVE_WINDOW_BYTES))
+        .send_window(SEND_WINDOW_BYTES)
+        .send_fairness(true)
+        .keep_alive_interval(keep_alive_interval)
+        .datagram_receive_buffer_size(None);
     transport
 }
 
@@ -77,7 +107,7 @@ pub fn server_config(
 
     let crypto = QuicServerConfig::try_from(tls)?;
     let mut config = ServerConfig::with_crypto(Arc::new(crypto));
-    config.transport_config(Arc::new(transport_config()));
+    config.transport_config(Arc::new(transport_config(None)));
     Ok(config)
 }
 
@@ -129,7 +159,9 @@ pub fn client_config(
 
     let crypto = QuicClientConfig::try_from(tls)?;
     let mut config = ClientConfig::new(Arc::new(crypto));
-    config.transport_config(Arc::new(transport_config()));
+    config.transport_config(Arc::new(transport_config(Some(Duration::from_secs(
+        CLIENT_KEEP_ALIVE_SECONDS,
+    )))));
     Ok(config)
 }
 

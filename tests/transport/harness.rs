@@ -29,7 +29,7 @@ pub(crate) const TEST_DEADLINE: Duration = Duration::from_secs(5);
 /// Frame bound used by test readers; deliberately tighter than
 /// [`transport::MAX_FRAME_LEN`] so oversized rejection needs no large
 /// allocations.
-pub(crate) const FRAME_BOUND: u32 = 1024 * 1024;
+pub(crate) const FRAME_BOUND: u32 = 2 * 1024 * 1024;
 
 /// A Quinn server on a dedicated thread plus a Quinn client on the test
 /// runtime, both bound to loopback with fresh test PKI.
@@ -87,6 +87,17 @@ fn ephemeral_certificate() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'stat
     )
 }
 
+/// Builds a matching server/client configuration pair with fresh test PKI.
+pub(crate) fn endpoint_configs() -> (quinn::ServerConfig, quinn::ClientConfig) {
+    let (certificate, private_key) = ephemeral_certificate();
+    let pinned_identity = transport::PinnedIdentity::from_certificate(&certificate);
+    let server_config = transport::server_config(vec![certificate.clone()], private_key)
+        .expect("server configuration");
+    let client_config =
+        transport::client_config(certificate, pinned_identity).expect("client configuration");
+    (server_config, client_config)
+}
+
 /// Spawns a fresh loopback endpoint pair with its own certificate.
 ///
 /// # Panics
@@ -94,12 +105,7 @@ fn ephemeral_certificate() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'stat
 /// Panics when the server thread cannot start or bind within
 /// [`TEST_DEADLINE`].
 pub(crate) fn spawn_loopback() -> Loopback {
-    let (certificate, private_key) = ephemeral_certificate();
-    let pinned_identity = transport::PinnedIdentity::from_certificate(&certificate);
-    let server_config = transport::server_config(vec![certificate.clone()], private_key)
-        .expect("server configuration");
-    let client_config =
-        transport::client_config(certificate, pinned_identity).expect("client configuration");
+    let (server_config, client_config) = endpoint_configs();
 
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
     let (connections_tx, connections_rx) = tokio::sync::mpsc::channel(1);
