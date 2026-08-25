@@ -12,6 +12,8 @@ pub use artisan_domain::WorkspaceId;
 pub use connection::{ConnectError, SqliteConfig, connect};
 pub use repository::{
     AttachProjectInput, AttachProjectResult, ClaimMessageDispatch, ClaimedMessageDispatch,
-    CreateThreadInput, CreateThreadResult, DispatchLeaseOwner, DispatchLeaseOwnerError,
+    CompleteMessageDispatch, CreateThreadInput, CreateThreadResult, DispatchFailureReason,
+    DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,
     QueueFirstMessageInput, QueueFirstMessageResult, Repository, RepositoryError,
+    RequeueMessageDispatch, TransitionedMessageDispatch,
 };

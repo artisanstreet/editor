@@ -15,7 +15,9 @@ use artisan_domain::{
 
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
 pub use message_dispatch::{
-    ClaimMessageDispatch, ClaimedMessageDispatch, DispatchLeaseOwner, DispatchLeaseOwnerError,
+    ClaimMessageDispatch, ClaimedMessageDispatch, CompleteMessageDispatch, DispatchFailureReason,
+    DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,
+    RequeueMessageDispatch, TransitionedMessageDispatch,
 };
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
@@ -66,6 +68,29 @@ pub enum RepositoryError {
 
     #[error("message dispatch for `{message_id}` exhausted its persisted attempt counter")]
     DispatchAttemptLimit { message_id: MessageId },
+
+    #[error("message dispatch `{message_id}` does not exist")]
+    DispatchNotFound { message_id: MessageId },
+
+    #[error(
+        "message dispatch `{message_id}` is {state}; only a live leased dispatch accepts lifecycle transitions"
+    )]
+    InvalidDispatchState {
+        message_id: MessageId,
+        state: &'static str,
+    },
+
+    #[error("message dispatch `{message_id}` belongs to a different lease owner")]
+    DispatchOwnerMismatch { message_id: MessageId },
+
+    #[error(
+        "lease on message dispatch `{message_id}` expired at {lease_expires_at_ms}, no later than the operation time {operated_at_ms}"
+    )]
+    DispatchLeaseExpired {
+        message_id: MessageId,
+        lease_expires_at_ms: i64,
+        operated_at_ms: i64,
+    },
 
     #[error("{later_field} timestamp precedes {earlier_field} timestamp")]
     InvalidChronology {
