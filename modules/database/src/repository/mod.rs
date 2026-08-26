@@ -5,6 +5,7 @@ mod first_message;
 mod message_dispatch;
 mod project_catalog;
 mod project_threads;
+mod run_launch;
 
 use sea_orm::{DatabaseConnection, DbErr};
 use thiserror::Error;
@@ -23,6 +24,10 @@ pub use message_dispatch::{
 };
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
+};
+pub use run_launch::{
+    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, RunLaunchCredentials,
+    RunLaunchError, RunStartKey,
 };
 
 /// Typed failures at the native persistence boundary.
