@@ -64,10 +64,10 @@ pub struct CommandOriginClockError;
 ///
 /// Implementations answer two questions only: which opaque identity text a
 /// fresh thread or message carries, and which signed Unix-millisecond
-/// instant accepted it. They hold no state between calls, keep no borrow
-/// alive across an await, and never observe request payloads, receipts, or
-/// persisted state: the request handler consults an origin only after
-/// correlation validation and a receipt-lookup miss, so queries, exact
+/// instant accepted it. An origin may retain acquisition state, but keeps
+/// no borrow alive across an await and receives no request payloads,
+/// receipts, or persisted state: the request handler consults an origin only
+/// after correlation validation and a receipt-lookup miss, so queries, exact
 /// replays, and persisted conflicts never reach it.
 pub trait CommandOrigin: fmt::Debug + Send + Sync {
     /// Mints one bounded opaque identity for a fresh thread or message.
@@ -90,8 +90,8 @@ pub trait CommandOrigin: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`CommandOriginClockError`] when the reading cannot convert
-    /// into the complete signed range without narrowing.
+    /// Returns [`CommandOriginClockError`] when the clock difference's
+    /// millisecond magnitude exceeds `i64::MAX`.
     fn acceptance_instant(&self) -> Result<UnixMillis, CommandOriginClockError>;
 }
 

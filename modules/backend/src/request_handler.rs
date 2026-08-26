@@ -18,8 +18,9 @@
 //! the authoritative repository transaction. Responses are built exclusively
 //! from repository-returned identities, summaries, and receipt dispositions,
 //! including raced duplicate outcomes; replay lookups always precede origin
-//! access, so replays, queries, conflicts, and unsupported capabilities
-//! never consult it.
+//! access, so exact replays, queries, persisted lookup conflicts, and
+//! unsupported capabilities never consult it. Conflicts discovered by the
+//! later transaction can follow fresh origin acquisition.
 
 use artisan_database::{CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError};
 use artisan_domain::{
