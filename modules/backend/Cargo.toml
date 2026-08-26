@@ -38,6 +38,10 @@ name = "directory_selection"
 path = "../../tests/backend/directory_selection.rs"
 
 [[test]]
+name = "listener"
+path = "../../tests/backend/listener.rs"
+
+[[test]]
 name = "request_handler"
 path = "../../tests/backend/request_handler.rs"
 
