@@ -9,9 +9,12 @@
 //! server-side dispatch over one accepted stream ([`server_dispatch`]), and
 //! the exact-leaf pinned identity enforced on every client configuration
 //! ([`identity`]). Session authentication, request coordination, reconnect
-//! policy, and frontend-facing channels build above these layers.
+//! policy, and frontend-facing channels build above these layers. The
+//! sequential caller-driven client session leaf ([`client_session`]) owns
+//! one pinned loopback connection and its request lifecycle above them.
 
 pub mod application;
+pub mod client_session;
 pub mod deadline;
 pub mod endpoint;
 pub mod error;
@@ -24,6 +27,10 @@ pub mod request_lifecycle;
 pub mod server_dispatch;
 
 pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
+pub use client_session::{
+    ClientRequestError, ClientSession, ClientSessionError, ClientSessionLimits, ExchangeError,
+    HandshakeStageError, LoopbackTarget, PENDING_CAPACITY, ReplyRejection, SessionTargetError,
+};
 pub use deadline::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 pub use endpoint::{
     ALPN_PROTOCOL, LOOPBACK_SERVER_NAME, bind_loopback_client, bind_loopback_server, client_config,
