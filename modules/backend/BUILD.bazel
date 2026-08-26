@@ -13,11 +13,13 @@ rust_library(
         "src/directory_helper_codec.rs",
         "src/directory_selection.rs",
         "src/lib.rs",
+        "src/listener.rs",
         "src/request_handler.rs",
         "src/storage.rs",
         "//tests/backend:directory_helper.rs",
         "//tests/backend:directory_helper_fixture.rs",
         "//tests/backend:directory_helper_unit.rs",
+        "//tests/backend:listener_configuration.rs",
     ],
     crate_name = "artisan_backend",
     deps = [
