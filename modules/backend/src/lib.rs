@@ -10,6 +10,7 @@ pub mod directory_controller;
 pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
+pub mod engine_owner;
 pub mod listener;
 pub mod request_handler;
 pub mod storage;
