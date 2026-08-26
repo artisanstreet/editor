@@ -1,6 +1,14 @@
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 
-exports_files(["Cargo.toml"])
+# The exact shared private codec source is exported so the TEST-ONLY
+# directory-controller fixture can path-link it without duplicating the
+# encoder or depending on the backend library.
+exports_files(
+    [
+        "Cargo.toml",
+        "src/directory_helper_codec.rs",
+    ],
+)
 
 rust_library(
     name = "backend",
@@ -9,6 +17,9 @@ rust_library(
         "src/connection.rs",
         "src/credential_authority.rs",
         "src/command_admission.rs",
+        "src/directory_controller.rs",
+        "src/directory_controller/operation.rs",
+        "src/directory_controller/process.rs",
         "src/directory_helper.rs",
         "src/directory_helper_codec.rs",
         "src/directory_selection.rs",
@@ -16,6 +27,7 @@ rust_library(
         "src/listener.rs",
         "src/request_handler.rs",
         "src/storage.rs",
+        "//tests/backend:directory_controller.rs",
         "//tests/backend:directory_helper.rs",
         "//tests/backend:directory_helper_fixture.rs",
         "//tests/backend:directory_helper_unit.rs",

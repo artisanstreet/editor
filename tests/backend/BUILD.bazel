@@ -1,14 +1,38 @@
-load("@rules_rust//rust:defs.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 
-# Contract-named helper test sources are exported so the backend package can
-# declare them as library source inputs; they compile as private cfg(test)
-# modules of the backend crate, not as standalone integration crates.
+# Contract-named helper/controller test sources are exported so the backend
+# package can declare them as library source inputs; they compile as private
+# cfg(test) modules of the backend crate, not as standalone integration
+# crates.
 exports_files([
+    "directory_controller.rs",
     "directory_helper.rs",
     "directory_helper_fixture.rs",
     "directory_helper_unit.rs",
     "listener_configuration.rs",
 ])
+
+# TEST-ONLY protocol child fixture: one ordinary main, no libtest harness,
+# no banner. It path-links the ACTUAL shared private codec source exported
+# by //modules/backend and depends on domain plus the codec's own pinned
+# thiserror macro dependency. Never shipped; exactly two shipping binaries
+# remain (editor frontend + forge).
+rust_binary(
+    name = "directory_controller_fixture",
+    srcs = [
+        "//modules/backend:src/directory_helper_codec.rs",
+        "directory_controller_fixture.rs",
+    ],
+    crate_name = "directory_controller_fixture",
+    deps = [
+        "//modules/domain:domain",
+        "@crates//:thiserror",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    testonly = True,
+    visibility = ["//:__pkg__"],
+)
 
 rust_test(
     name = "listener_test",
@@ -51,14 +75,21 @@ rust_test(
 # Private backend tests compile as cfg(test) modules of the backend crate
 # itself (including the helper's path-linked tests), so this target builds
 # the backend crate root in test mode with no separate sources: rules_rust
-# crate and srcs are incompatible.
+# crate and srcs are incompatible. The TEST-ONLY fixture executable rides
+# along as declared data, resolved through the pinned official runfiles
+# library via its exact rlocationpath.
 rust_test(
     name = "backend_unit_test",
     crate = "//modules/backend:backend",
+    data = [":directory_controller_fixture"],
     deps = [
         "@crates//:rcgen",
         "@crates//:rustls-pki-types",
+        "@rules_rust//rust/runfiles",
     ],
+    env = {
+        "ARTISAN_DIRECTORY_CONTROLLER_FIXTURE": "$(rlocationpath :directory_controller_fixture)",
+    },
     lint_config = "//:workspace_lints",
     size = "small",
     visibility = ["//:__pkg__"],
