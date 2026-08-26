@@ -26,3 +26,7 @@ path = "../../tests/ui/progress.rs"
 [[test]]
 name = "icon"
 path = "../../tests/ui/icon.rs"
+
+[[test]]
+name = "input_state"
+path = "../../tests/ui/input_state.rs"
