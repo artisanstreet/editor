@@ -25,12 +25,12 @@ rust_test(
     visibility = ["//:__pkg__"],
 )
 
-# The helper tests compile as private cfg(test) modules of the backend crate
-# itself (path-linked from src/directory_helper.rs), so this target builds
+# Private backend tests compile as cfg(test) modules of the backend crate
+# itself (including the helper's path-linked tests), so this target builds
 # the backend crate root in test mode with no separate sources: rules_rust
 # crate and srcs are incompatible.
 rust_test(
-    name = "directory_helper_test",
+    name = "backend_unit_test",
     crate = "//modules/backend:backend",
     lint_config = "//:workspace_lints",
     size = "small",
