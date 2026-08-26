@@ -5,7 +5,10 @@
 //! thread composer: derived send readiness, typed refusals for blank,
 //! over-ceiling, disabled, and already-in-flight attempts, draft preservation
 //! across refused and accepted begins, and single-flight exclusion with a
-//! successful retry after finish.
+//! successful retry after finish. They also pin flight-identity fencing:
+//! every begun flight carries an opaque token required for completion, so a
+//! late, duplicated, or foreign completion cannot consume a newer flight,
+//! disturb its draft, or rearm submission.
 
 use artisan_domain::bounds::MESSAGE_BODY_MAX_BYTES;
 use artisan_domain::text::MessageBodyError;
@@ -53,7 +56,7 @@ fn readiness_follows_draft_visibility_disabled_and_flight_state() {
     );
 
     composer.set_disabled(false);
-    composer
+    let (_body, _token) = composer
         .begin_submission()
         .expect("the fixture begins a flight");
     assert!(
@@ -126,7 +129,7 @@ fn disabled_surfaces_refuse_submission_but_keep_the_draft() {
     assert_eq!(composer.draft(), PADDED_DRAFT);
 
     composer.set_disabled(false);
-    let body = composer
+    let (body, _token) = composer
         .begin_submission()
         .expect("re-enabling restores sending");
     assert_eq!(body.as_str(), PADDED_DRAFT);
@@ -137,7 +140,7 @@ fn an_active_flight_excludes_further_submissions_and_mutates_nothing() {
     let mut composer = ComposerState::new();
     composer.set_draft(PADDED_DRAFT);
 
-    let body = composer
+    let (body, _token) = composer
         .begin_submission()
         .expect("the first begin acquires the flight");
     assert_eq!(body.as_str(), PADDED_DRAFT);
@@ -159,11 +162,11 @@ fn an_active_flight_excludes_further_submissions_and_mutates_nothing() {
 fn an_accepted_finish_resets_the_draft_and_allows_the_next_send() {
     let mut composer = ComposerState::new();
     composer.set_draft(PADDED_DRAFT);
-    composer
+    let (_body, token) = composer
         .begin_submission()
         .expect("the fixture begins a flight");
 
-    composer.finish_submission(DraftDisposition::Accepted);
+    composer.finish_submission(token, DraftDisposition::Accepted);
     assert!(!composer.is_submitting());
     assert_eq!(
         composer.draft(),
@@ -172,7 +175,7 @@ fn an_accepted_finish_resets_the_draft_and_allows_the_next_send() {
     );
 
     composer.set_draft("Next message");
-    let next = composer
+    let (next, _token) = composer
         .begin_submission()
         .expect("a finished flight frees the gate");
     assert_eq!(next.as_str(), "Next message");
@@ -182,11 +185,11 @@ fn an_accepted_finish_resets_the_draft_and_allows_the_next_send() {
 fn a_retained_finish_keeps_every_character_for_retry() {
     let mut composer = ComposerState::new();
     composer.set_draft(PADDED_DRAFT);
-    composer
+    let (_body, token) = composer
         .begin_submission()
         .expect("the fixture begins a flight");
 
-    composer.finish_submission(DraftDisposition::Retained);
+    composer.finish_submission(token, DraftDisposition::Retained);
     assert!(!composer.is_submitting());
     assert_eq!(
         composer.draft(),
@@ -195,26 +198,35 @@ fn a_retained_finish_keeps_every_character_for_retry() {
     );
     assert!(composer.send_ready(), "the retained draft rearms the send");
 
-    let retried = composer
+    let (retried_body, retried_token) = composer
         .begin_submission()
         .expect("retry after finish succeeds");
     assert_eq!(
-        retried.as_str(),
+        retried_body.as_str(),
         PADDED_DRAFT,
         "the retried body is the same untrimmed content"
     );
     assert!(composer.is_submitting());
 
-    composer.finish_submission(DraftDisposition::Retained);
+    composer.finish_submission(retried_token, DraftDisposition::Retained);
     assert!(!composer.is_submitting());
 }
 
 #[test]
-fn finishing_without_an_active_flight_cannot_clobber_a_fresh_draft() {
+fn a_duplicate_completion_after_the_flight_ended_cannot_clobber_a_fresh_draft() {
     let mut composer = ComposerState::new();
+    composer.set_draft("First message");
+    let (_body, token) = composer
+        .begin_submission()
+        .expect("the fixture begins a flight");
+    composer.finish_submission(token, DraftDisposition::Retained);
+    assert!(!composer.is_submitting(), "the fixture ends idle");
+
+    // The retired token replays twice while nothing is in flight; neither
+    // disposition may discard text typed after its flight finished.
     composer.set_draft("Typed after the race");
-    composer.finish_submission(DraftDisposition::Accepted);
-    composer.finish_submission(DraftDisposition::Retained);
+    composer.finish_submission(token, DraftDisposition::Accepted);
+    composer.finish_submission(token, DraftDisposition::Retained);
 
     assert_eq!(
         composer.draft(),
@@ -228,7 +240,7 @@ fn finishing_without_an_active_flight_cannot_clobber_a_fresh_draft() {
 fn an_accepted_finish_cannot_erase_text_entered_after_its_flight_began() {
     let mut composer = ComposerState::new();
     composer.set_draft("First message");
-    let begun = composer
+    let (begun, token) = composer
         .begin_submission()
         .expect("the fixture begins a flight");
     assert_eq!(begun.as_str(), "First message");
@@ -237,7 +249,7 @@ fn an_accepted_finish_cannot_erase_text_entered_after_its_flight_began() {
     // the legacy editor disabled them; the older accepted completion must
     // clear only the body it actually sent.
     composer.set_draft("Second message drafted mid-flight");
-    composer.finish_submission(DraftDisposition::Accepted);
+    composer.finish_submission(token, DraftDisposition::Accepted);
 
     assert!(!composer.is_submitting(), "the flight itself still ends");
     assert_eq!(
@@ -249,4 +261,169 @@ fn an_accepted_finish_cannot_erase_text_entered_after_its_flight_began() {
     composer
         .begin_submission()
         .expect("the freed gate sends the surviving draft");
+}
+
+#[test]
+fn a_stale_accepted_completion_from_an_older_flight_cannot_consume_a_newer_one() {
+    let mut composer = ComposerState::new();
+    composer.set_draft("First message");
+    let (_first_body, first_token) = composer.begin_submission().expect("flight A begins");
+    composer.finish_submission(first_token, DraftDisposition::Accepted);
+    assert!(!composer.is_submitting(), "flight A completed cleanly");
+
+    composer.set_draft("Second message");
+    let (_second_body, second_token) = composer
+        .begin_submission()
+        .expect("flight B begins while A is already settled");
+
+    // The late or duplicated completion of A replays while B owns the gate.
+    composer.finish_submission(first_token, DraftDisposition::Accepted);
+
+    assert!(
+        composer.is_submitting(),
+        "A's stale token must not consume B's flight"
+    );
+    assert_eq!(
+        composer.draft(),
+        "Second message",
+        "A's stale accepted replay must not clear B's draft"
+    );
+
+    let refusal = composer
+        .begin_submission()
+        .expect_err("A's stale replay must not rearm the gate either");
+    assert_eq!(refusal, SubmissionBlocked::InFlight);
+
+    composer.finish_submission(second_token, DraftDisposition::Accepted);
+    assert!(
+        !composer.is_submitting(),
+        "B still completes under its own token"
+    );
+    assert_eq!(
+        composer.draft(),
+        "",
+        "B's own accepted send clears the body B actually sent"
+    );
+}
+
+#[test]
+fn a_stale_retained_completion_from_an_older_flight_cannot_release_a_newer_gate() {
+    let mut composer = ComposerState::new();
+    composer.set_draft("First message");
+    let (_first_body, first_token) = composer.begin_submission().expect("flight A begins");
+    composer.finish_submission(first_token, DraftDisposition::Retained);
+
+    composer.set_draft("Second message");
+    let (_second_body, second_token) = composer.begin_submission().expect("flight B begins");
+
+    // Replaying A's retained outcome while B is live must neither end B nor
+    // free the single-flight gate early.
+    composer.finish_submission(first_token, DraftDisposition::Retained);
+
+    assert!(
+        composer.is_submitting(),
+        "A's stale token must not release B's flight"
+    );
+    assert_eq!(
+        composer.draft(),
+        "Second message",
+        "B's draft survives A's stale retained replay verbatim"
+    );
+
+    let refusal = composer
+        .begin_submission()
+        .expect_err("a third begin stays excluded: the gate was never released by A's replay");
+    assert_eq!(refusal, SubmissionBlocked::InFlight);
+
+    composer.finish_submission(second_token, DraftDisposition::Retained);
+    assert!(!composer.is_submitting(), "B completes under its own token");
+    assert_eq!(
+        composer.draft(),
+        "Second message",
+        "B's own retained finish keeps every character for retry"
+    );
+}
+
+#[test]
+fn an_identical_body_retry_mints_distinct_identity_the_old_token_cannot_complete() {
+    let mut composer = ComposerState::new();
+    composer.set_draft(PADDED_DRAFT);
+    let (_first_body, first_token) = composer
+        .begin_submission()
+        .expect("the first attempt begins");
+    composer.finish_submission(first_token, DraftDisposition::Retained);
+
+    // The identical authored text is retried: byte-equal body, brand-new
+    // flight identity.
+    let (retry_body, retry_token) = composer
+        .begin_submission()
+        .expect("the identical-body retry begins");
+    assert_eq!(
+        retry_body.as_str(),
+        PADDED_DRAFT,
+        "the retry sends the same untrimmed content"
+    );
+    assert_ne!(
+        retry_token, first_token,
+        "identity is per attempt, not per body; retired identity is never reused"
+    );
+
+    // Replaying the first attempt's token against the equal-bodied retry —
+    // even as an accepted send of exactly that text — must be inert.
+    composer.finish_submission(first_token, DraftDisposition::Accepted);
+    assert!(
+        composer.is_submitting(),
+        "the older flight's token cannot complete the identical-body retry"
+    );
+    assert_eq!(
+        composer.draft(),
+        PADDED_DRAFT,
+        "...and cannot clear the retry's draft either"
+    );
+
+    composer.finish_submission(retry_token, DraftDisposition::Accepted);
+    assert!(
+        !composer.is_submitting(),
+        "the retry's own token completes it"
+    );
+    assert_eq!(
+        composer.draft(),
+        "",
+        "its accepted send clears the text it actually sent"
+    );
+}
+
+#[test]
+fn a_foreign_composers_token_completes_nothing_here() {
+    let mut mine = ComposerState::new();
+    let mut other = ComposerState::new();
+
+    other.set_draft("Another surface's message");
+    let (_other_body, other_token) = other
+        .begin_submission()
+        .expect("the foreign surface begins its flight");
+
+    mine.set_draft(PADDED_DRAFT);
+    let (_mine_body, mine_token) = mine
+        .begin_submission()
+        .expect("my surface begins its own flight");
+
+    mine.finish_submission(other_token, DraftDisposition::Accepted);
+
+    assert!(
+        mine.is_submitting(),
+        "another composer's token cannot end my flight"
+    );
+    assert_eq!(mine.draft(), PADDED_DRAFT, "my draft is untouched");
+
+    let refusal = mine
+        .begin_submission()
+        .expect_err("the gate stays held by my real flight");
+    assert_eq!(refusal, SubmissionBlocked::InFlight);
+
+    mine.finish_submission(mine_token, DraftDisposition::Accepted);
+    assert!(
+        !mine.is_submitting(),
+        "my own matching completion still works"
+    );
 }
