@@ -30,6 +30,7 @@ rust_library(
         "@crates//:quinn",
         "@crates//:sea-orm",
         "@crates//:thiserror",
+        "@crates//:tokio",
         "@crates//:zeroize",
     ] + select({
         "@platforms//os:windows": ["@crates//:native-dialog"],

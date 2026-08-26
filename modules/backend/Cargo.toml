@@ -15,6 +15,7 @@ getrandom.workspace = true
 quinn.workspace = true
 sea-orm.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 zeroize.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -23,7 +24,6 @@ native-dialog.workspace = true
 [dev-dependencies]
 rcgen.workspace = true
 rustls-pki-types.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 
 [[test]]
 name = "app_test"

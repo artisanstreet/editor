@@ -1,5 +1,5 @@
 {
-  "checksum": "3a35b739fc6e48ab3f3833df6731b79f7fcef91ec535ce8dadedeac7a68d5018",
+  "checksum": "18c6a61858eea5eef52047a9829f159a841378f1101898c8eff9857c0071deaa",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1820,6 +1820,10 @@
               "target": "thiserror"
             },
             {
+              "id": "tokio 1.53.1",
+              "target": "tokio"
+            },
+            {
               "id": "zeroize 1.9.0",
               "target": "zeroize"
             }
@@ -1842,10 +1846,6 @@
             {
               "id": "rustls-pki-types 1.15.1",
               "target": "rustls_pki_types"
-            },
-            {
-              "id": "tokio 1.53.1",
-              "target": "tokio"
             }
           ],
           "selects": {}
@@ -43263,7 +43263,9 @@
             "macros",
             "mio",
             "net",
+            "process",
             "rt",
+            "signal-hook-registry",
             "socket2",
             "sync",
             "time",
@@ -43297,6 +43299,10 @@
                 "target": "libc"
               },
               {
+                "id": "signal-hook-registry 1.4.8",
+                "target": "signal_hook_registry"
+              },
+              {
                 "id": "socket2 0.6.5",
                 "target": "socket2"
               }
@@ -43305,6 +43311,10 @@
               {
                 "id": "libc 0.2.189",
                 "target": "libc"
+              },
+              {
+                "id": "signal-hook-registry 1.4.8",
+                "target": "signal_hook_registry"
               },
               {
                 "id": "socket2 0.6.5",
@@ -43333,6 +43343,10 @@
                 "target": "libc"
               },
               {
+                "id": "signal-hook-registry 1.4.8",
+                "target": "signal_hook_registry"
+              },
+              {
                 "id": "socket2 0.6.5",
                 "target": "socket2"
               }
@@ -43341,6 +43355,10 @@
               {
                 "id": "libc 0.2.189",
                 "target": "libc"
+              },
+              {
+                "id": "signal-hook-registry 1.4.8",
+                "target": "signal_hook_registry"
               },
               {
                 "id": "socket2 0.6.5",
