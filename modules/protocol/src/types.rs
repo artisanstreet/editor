@@ -9,9 +9,9 @@ use std::fmt;
 
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
-    ConversationSubscriptionStart, DirectoryListing, Event, IdentifierError, MessageId, PatchBatch,
-    ProjectListing, ProjectSummary, Query, RequestId, ThreadId, ThreadListing, ThreadSummary,
-    UnixMillis,
+    ConversationSubscriptionStart, DirectoryId, DirectoryListing, Event, IdentifierError,
+    MessageId, PatchBatch, ProjectListing, ProjectSummary, Query, RequestId, ThreadId,
+    ThreadListing, ThreadSummary, UnixMillis,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -503,6 +503,14 @@ pub enum ClientRequest {
     Command(Command),
     /// Bounded conversation read or subscription control.
     Conversation(ConversationRequest),
+    /// Explicit host interaction: ask the local Forge process to show its
+    /// native directory picker once. Deliberately outside the pure domain
+    /// [`Query`] and durable [`Command`] vocabularies: nothing durable is
+    /// created or mutated, the request must not be automatically replayed,
+    /// and every deliberate new attempt uses a fresh frame identity. This
+    /// schema slice implements neither duplicate-request suppression nor
+    /// cancellation propagation.
+    PickDirectory,
 }
 
 /// Receipt returned when a first message is durably queued.
@@ -539,6 +547,22 @@ pub struct ConversationSubscriptionStopped {
     pub thread_id: ThreadId,
 }
 
+/// Validated outcome of one explicit directory-picker interaction.
+///
+/// [`DirectoryPickOutcome::Selected`] carries only the opaque, validated
+/// [`DirectoryId`] of the chosen directory: never a filesystem path, label,
+/// enumeration, or child flag. [`DirectoryPickOutcome::Cancelled`] reports
+/// an actual user dismissal of the picker rather than a request cancellation
+/// or a dropped frame; cancellation propagation and late-response handling
+/// stay explicitly outside this slice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DirectoryPickOutcome {
+    /// The user chose a directory.
+    Selected(DirectoryId),
+    /// The user dismissed the picker.
+    Cancelled,
+}
+
 /// Successful first-workflow response payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResponsePayload {
@@ -570,6 +594,8 @@ pub enum ResponsePayload {
     ConversationSubscriptionStarted(ConversationSubscriptionStarted),
     /// Clean conversation subscription stop acknowledgement.
     ConversationSubscriptionStopped(ConversationSubscriptionStopped),
+    /// Outcome of one explicit native directory-picker interaction.
+    DirectoryPicked(DirectoryPickOutcome),
 }
 
 /// Successful response correlated to a client request frame.
