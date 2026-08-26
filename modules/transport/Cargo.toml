@@ -26,5 +26,9 @@ path = "../../tests/transport/server_dispatch.rs"
 name = "request_lifecycle"
 path = "../../tests/transport/request_lifecycle.rs"
 
+[[test]]
+name = "request_correlation"
+path = "../../tests/transport/request_correlation.rs"
+
 [lints]
 workspace = true
