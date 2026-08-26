@@ -25,7 +25,10 @@ rust_library(
         "@crates//:sea-orm",
         "@crates//:thiserror",
         "@crates//:zeroize",
-    ],
+    ] + select({
+        "@platforms//os:windows": ["@crates//:native-dialog"],
+        "//conditions:default": [],
+    }),
     edition = "2024",
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],
