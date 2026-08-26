@@ -34,6 +34,30 @@ rust_binary(
     visibility = ["//:__pkg__"],
 )
 
+# Independent TEST-ONLY engine protocol child and its pure helper tests.
+# No backend crate dependency: later owner tests consume the binary as data.
+rust_binary(
+    name = "engine_owner_fixture",
+    srcs = ["engine_owner_fixture.rs"],
+    crate_name = "engine_owner_fixture",
+    deps = ["@crates//:serde_json"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    testonly = True,
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "engine_owner_fixture_test",
+    srcs = ["engine_owner_fixture.rs"],
+    crate_name = "engine_owner_fixture_test",
+    deps = ["@crates//:serde_json"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
 rust_test(
     name = "listener_test",
     srcs = ["listener.rs"],

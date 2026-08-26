@@ -1,5 +1,5 @@
 {
-  "checksum": "18c6a61858eea5eef52047a9829f159a841378f1101898c8eff9857c0071deaa",
+  "checksum": "34bb9eda5f36c885050d67ce33a21009d0c72e4dc060df9e7a73c8ba98ce39a9",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1846,6 +1846,10 @@
             {
               "id": "rustls-pki-types 1.15.1",
               "target": "rustls_pki_types"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
             }
           ],
           "selects": {}
@@ -56486,6 +56490,7 @@
   "direct_dev_deps": [
     "rcgen 0.14.9",
     "roxmltree 0.20.0",
+    "serde_json 1.0.151",
     "toml 1.1.4+spec-1.1.0"
   ],
   "unused_patches": []
