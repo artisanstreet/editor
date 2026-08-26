@@ -13,7 +13,9 @@ it is absent from a worker checkout, obtain the current checkpoint from VP.
 2. Implement and verify the packet there. Preserve unrelated work, review the
    actual changes, and record the checks run on the final source bytes.
 3. Publish the verified branch and open a PR targeting the immediately
-   preceding branch in the existing stack. Verify the remote head and base.
+   preceding branch in the existing stack. Register the PR in the managed
+   GitHub stack as well: a correct base branch alone is not enough. Verify
+   the remote head, base, and managed-stack membership before proceeding.
 4. When the packet is acceptable, merge it into this project's **local
    `master`**. Prefer a fast-forward of the verified stack branch. This local
    integration is not a remote merge and does not wait for a remote merge.
@@ -29,6 +31,30 @@ Shared-interface/manifest integration and its combined checks may be done
 serially on a candidate stack branch. Do not advance local `master` with
 that candidate before its PR is published. Preserve small, coherent commits;
 do not batch completed packets into a giant PR.
+
+## Managed stack registration
+
+Read `docs/STACK.md` and the latest handoff for the active stack number.
+When publishing through plain `gh pr create`, immediately append the new
+PR with `gh stack link <active-stack-number> <new-PR-number>`. Import the
+new PR's tracking with `gh stack checkout <new-PR-number>` and verify
+`gh stack view --json` before local integration or worktree retirement.
+Neither command is permission to rewrite commits or merge remotely.
+
+The installed CLI rejects checkout when an already-tracked stack has fewer
+entries than the remote stack. If this happens, back up the common Git
+directory's `gh-stack` file, verify the active stack number, and remove
+ONLY its local tracking with `gh stack unstack <active-stack-number>
+--local`. Then repeat checkout and readback. The `--local` flag is mandatory:
+never unstack remotely. Confirm all local branch refs are unchanged and the
+other managed stacks remain tracked after the refresh.
+
+If GitHub rejects a stack-size increase, preserve the existing stack and
+start a managed continuation based on its last PR branch. Record both
+stack numbers and that dependency; do not retarget to remote `master` or
+silently omit registration. Do not run `gh stack sync` against local
+`master` merely to refresh metadata: local `master` is the deliberately
+integrated stack tip, not the remote trunk.
 
 ## Orchestration and machine limits
 
