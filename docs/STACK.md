@@ -4,12 +4,14 @@ The native Artisan Editor port is a full product rewrite delivered as a long sta
 
 ## Stack rules
 
+- Required delivery order: create an isolated worktree, implement and verify, publish the branch and stacked PR, merge the accepted branch into LOCAL `master`, then remove the completed inactive worktree. Sander confirmed this exact order on 2026-08-26. See root `AGENTS.md` for safe retirement checks.
+- Local integration is not remote integration. Continue publishing stacked PRs; never merge a GitHub PR, enable auto-merge, or push local `master` to remote `master` without a new explicit request. Keep the branch refs needed by open PRs after deleting their worktrees.
 - Each PR implements one reviewable work packet or one tightly coupled proof.
 - A PR targets the branch immediately below it in the stack. It targets `master` only when it is the bottom of a new stack after the prior stack has been merged by the maintainer.
 - Sequence numbers in branch names express ordering, not a final total. Use names such as `port/04-protocol-transport-proof` without labels such as `4/70`.
 - PRs remain drafts until their own implementation and evidence are ready. Automation never merges them; the maintainer decides when and how to merge.
 - The controlling agent creates, edits, inspects, and closes PRs with `gh`. Git remains responsible for local commits, branches, rebases, and pushes.
-- Parallel work happens in isolated worktrees with disjoint ownership. Its commits are reviewed and integrated serially into the active stack so shared manifests and interfaces keep one history.
+- Parallel work happens in isolated worktrees with disjoint ownership. Its commits are reviewed and integrated serially on candidate stack branches so shared manifests and interfaces keep one history. Verify and publish each candidate PR before advancing local `master` to it.
 - Root Bazel/Cargo state, lockfiles, shared schemas, and public crate interfaces have one integrating writer at a time.
 - Every PR body names its immediate dependency, scope, exclusions, tests, and remaining known work. A later PR must not hide an unfinished requirement in an earlier one.
 - When the maintainer merges a lower PR, rebase the next live branch onto the new `master`, retarget its PR with `gh`, and then repair the branches above it in order.
