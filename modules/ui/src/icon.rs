@@ -29,7 +29,11 @@
 //!   (`project-selector.svelte:151,212,236`); **inherit** keeps the legacy
 //!   `currentColor` behavior where call sites let the surrounding control
 //!   paint its own color (`controls.svelte:135–172`,
-//!   `attachment-tray.svelte:44`).
+//!   `attachment-tray.svelte:44`). Inherited tints are resolved from the
+//!   live GPUI Window text-style stack at the paint phase by the shared
+//!   seam ([`crate::asset_seam`]), falling back to the resolved default
+//!   Window text style when no ancestor refines one, so recolored parents
+//!   always repaint their glyphs without caller workarounds.
 //!
 //! Multicolor artwork is never tinted: the route choice belongs to catalog
 //! metadata (`docs/ui/ASSETS.md` §10 monochrome derivation; seam module
@@ -87,7 +91,10 @@ impl IconSize {
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum IconTint {
     /// Inherit the ambient GPUI text color, matching the legacy
-    /// `currentColor` inheritance inside colored controls.
+    /// `currentColor` inheritance inside colored controls. Resolved from
+    /// the actual Window text-style stack at the paint phase (with the
+    /// resolved default text style as the fallback), never frozen into an
+    /// explicit color by recipe construction.
     #[default]
     Inherit,
     /// The mode-resolved `--muted-foreground` token used by decorative

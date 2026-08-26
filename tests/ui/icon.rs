@@ -5,8 +5,9 @@
 //! documented asset identities resolving byte-identical tintable sources,
 //! spacing-token-derived square edges, mode-resolved tints, the never-tint
 //! rule for multicolor artwork, and rendered layout proof through the pinned
-//! GPUI test harness (including the boundary where an inherited-tint glyph
-//! keeps its layout even when no ambient text color exists to paint it).
+//! GPUI test harness. Ambient color-forwarding behavior of inherited tints
+//! is covered by the lifecycle suite in `tests/ui/asset_seam.rs`; the bounds
+//! assertions here are geometry evidence only.
 
 use artisan_ui::AssetId;
 use artisan_ui::asset_seam::{CatalogAssetSource, Presentation};
@@ -293,7 +294,7 @@ fn assert_square(bounds: gpui::Bounds<gpui::Pixels>, edge: gpui::Pixels, selecto
 
 #[gpui::test]
 fn icons_lay_out_at_their_documented_square_edges(cx: &mut TestAppContext) {
-    let (_view, cx) = cx.add_window_view(|_, cx| IconProbe);
+    let (_view, cx) = cx.add_window_view(|_, _| IconProbe);
 
     let default_bounds = cx
         .debug_bounds(DEFAULT_ICON_SELECTOR)
@@ -312,13 +313,15 @@ fn icons_lay_out_at_their_documented_square_edges(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn inherit_tinted_icons_keep_layout_when_no_ambient_color_exists(cx: &mut TestAppContext) {
-    let (_view, cx) = cx.add_window_view(|_, cx| IconProbe);
+fn inherit_tinted_icons_keep_their_layout_box_without_ancestors(cx: &mut TestAppContext) {
+    let (_view, cx) = cx.add_window_view(|_, _| IconProbe);
 
-    // Pinned upstream behavior (`gpui-0.2.2/src/elements/svg.rs` paints only
-    // when both path and text color resolve): an inherit-tinted glyph outside
-    // any colored control defers painting, but its documented layout box is
-    // unconditional.
+    // Geometry evidence ONLY: this asserts the documented 16 px layout box
+    // of an inherit-tinted glyph rendered outside any colored ancestor. It
+    // does not pin painting; paint-color forwarding is covered by the
+    // precedence and lifecycle suites in `tests/ui/asset_seam.rs` (under
+    // the repaired semantics, such a glyph resolves the default Window
+    // text style when painted).
     let bounds = cx
         .debug_bounds(INHERIT_ICON_SELECTOR)
         .expect("inherit-tinted icon must still lay out");

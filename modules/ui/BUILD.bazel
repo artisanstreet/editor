@@ -1,10 +1,16 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
 
 rust_library(
     name = "ui",
-    srcs = glob(["src/**/*.rs"]),
+    # `tinted_svg.rs` holds the white-box unit tests for the private
+    # tinted-route helper; it is compiled only under `cfg(test)` via the
+    # module linkage in src/asset_seam.rs and the tinted_svg_unit_test
+    # target below.
+    srcs = glob(["src/**/*.rs"]) + [
+        "//tests/ui:tinted_svg.rs",
+    ],
     crate_name = "artisan_ui",
     deps = [
         "//modules/assets:assets",
@@ -16,4 +22,16 @@ rust_library(
     edition = "2024",
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],
+)
+
+# White-box unit tests: compiles the ui library itself in test mode, so the
+# cfg(test) child module declared in src/asset_seam.rs can reach private
+# items. See tests/ui/tinted_svg.rs.
+rust_test(
+    name = "tinted_svg_unit_test",
+    crate = ":ui",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
 )
