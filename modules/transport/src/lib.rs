@@ -39,8 +39,8 @@ pub use handshake::{
 pub use identity::{PinnedIdentity, PinnedIdentityError};
 pub use request_correlation::{RequestCorrelationError, RequestCorrelationRegistry};
 pub use request_lifecycle::{
-    ClientRequestLifecycle, OutcomeDelivery, OutcomeWaiter, OutcomeWaiterError,
-    RequestLifecycleError, RequestOutcome, ResolvedRequest,
+    ClientRequestLifecycle, OutcomeDelivery, OutcomeWaiter, OutcomeWaiterError, RequestOutcome,
+    ResolvedRequest,
 };
 pub use server_dispatch::{
     IncomingRequest, ReplyValidationError, ServerDispatchError, dispatch_server_request,

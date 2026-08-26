@@ -1,36 +1,42 @@
 //! Client-side lifecycle from an outgoing request to its settled outcome.
 //!
-//! Where [`RequestCorrelationRegistry`](crate::request_correlation::RequestCorrelationRegistry)
-//! tracks which [`RequestId`]s are merely pending, this layer binds each
-//! admitted request to exactly one client-side waiter:
-//! [`ClientRequestLifecycle::admit`] reserves a bounded slot and hands back
-//! a single-owner [`OutcomeWaiter`], and every later
-//! [`ServerResponse`] or correlated [`ProtocolFailure`] settles exactly
-//! that one pending request by depositing a [`ResolvedRequest`] into its
-//! waiter.
+//! All correlation decisions — identity admission, pending state, and
+//! retirement — belong to the single-owner
+//! [`RequestCorrelationRegistry`](crate::request_correlation::RequestCorrelationRegistry).
+//! This layer binds each admitted request to exactly one client-side
+//! waiter: [`ClientRequestLifecycle::admit`] first asks the registry to
+//! admit the id, then hands back a single-owner [`OutcomeWaiter`], and
+//! every later [`ServerResponse`] or correlated [`ProtocolFailure`] is
+//! first gated by the registry's completion rules before being deposited
+//! as a [`ResolvedRequest`] into exactly that one waiter.
 //!
 //! Lifecycle rules:
 //!
-//! * Capacity is fixed at construction, must be nonzero, and bounds every
-//!   internal collection; admission beyond capacity fails deterministically
-//!   without mutation. Duplicate admission fails before capacity is
-//!   consulted, identically at any occupancy.
-//! * Completion removes exactly one pending entry and frees its capacity;
-//!   unknown, replayed, and uncorrelated completions are typed rejections
-//!   that leave every other pending request untouched.
+//! * Construction takes two explicit nonzero limits — maximum
+//!   simultaneously pending requests and total successful admissions for
+//!   the owner's entire lifetime — and delegates them unchanged to the
+//!   registry; see its documentation for the single-use correlation
+//!   contract, the retirement rule, and the one-authenticated-connection
+//!   lifetime boundary.
+//! * Admission and resolution are all-or-nothing: the registry rejects
+//!   before this layer mutates any waiter bookkeeping, so every rejected
+//!   operation returns a typed error and leaves every pending request and
+//!   waiter unchanged.
 //! * Delivered outcomes carry their settling [`RequestId`], so correlation
 //!   identity survives past the resolution call.
 //! * Dropping a waiter abandons only the delivery of its future outcome,
 //!   never the session's correlation bookkeeping: when the completion later
 //!   arrives, the pending request still settles exactly once and frees its
-//!   capacity, reported as [`OutcomeDelivery::Abandoned`]. State therefore
-//!   stays bounded whether or not any waiter outlives admission.
+//!   pending capacity, reported as [`OutcomeDelivery::Abandoned`]. State
+//!   therefore stays bounded whether or not any waiter outlives admission.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use artisan_domain::RequestId;
 use artisan_protocol::{ProtocolFailure, ServerResponse};
 use thiserror::Error;
+
+use crate::request_correlation::{RequestCorrelationError, RequestCorrelationRegistry};
 
 /// Locks one waiter slot, recovering the data even from poisoning.
 ///
@@ -39,34 +45,6 @@ use thiserror::Error;
 /// applied state; the slot contents stay usable either way.
 fn lock_slot(slot: &Mutex<WaiterSlot>) -> MutexGuard<'_, WaiterSlot> {
     slot.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Failure while admitting a request or resolving its completion.
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-pub enum RequestLifecycleError {
-    /// The requested lifecycle capacity was zero, so no request could ever
-    /// have been admitted.
-    #[error("client request lifecycle capacity must be nonzero")]
-    ZeroCapacity,
-    /// The request id already holds a waiter, so admitting it again would
-    /// let one completion settle the same request twice.
-    #[error("request is already pending a client-side outcome")]
-    Duplicate,
-    /// Every lifecycle slot held an unresolved request, so the request
-    /// cannot be admitted until one completes.
-    #[error("client request lifecycle reached its capacity of {capacity} pending requests")]
-    AtCapacity {
-        /// Fixed lifecycle capacity that was exhausted.
-        capacity: usize,
-    },
-    /// The failure carried no request id, so it correlates to no pending
-    /// request.
-    #[error("protocol failure carries no request id to correlate")]
-    Uncorrelated,
-    /// The request id is not pending, because it was never admitted or was
-    /// already settled.
-    #[error("completion does not match any pending client request")]
-    Unknown,
 }
 
 /// Failure while reading a settled outcome out of an [`OutcomeWaiter`].
@@ -179,10 +157,15 @@ impl OutcomeWaiter {
     }
 }
 
-/// One admitted request awaiting its completion.
+/// One admitted request's delivery plumbing: the shared slot its waiter
+/// reads from.
+///
+/// Correlation identity itself lives only in the delegated
+/// [`RequestCorrelationRegistry`]; this entry exists solely so a completion
+/// can find the exact waiter to deposit into.
 #[derive(Debug)]
-struct PendingRequest {
-    /// Admitted correlation identity.
+struct PendingWaiter {
+    /// Admitted request whose waiter shares this slot.
     request_id: RequestId,
     /// Slot shared with this request's waiter.
     slot: Arc<Mutex<WaiterSlot>>,
@@ -199,88 +182,106 @@ struct WaiterSlot {
 }
 
 /// Bounded owner of one client session's pending requests and their
-/// waiters.
+/// waiters, delegating correlation to
+/// [`RequestCorrelationRegistry`].
 ///
-/// Admission and resolution are all-or-nothing: every rejected operation
-/// returns a typed error and leaves every pending request unchanged.
-/// Capacity is explicit at construction and enforced before insertion.
-/// Deliberately implements neither [`Clone`] nor [`Copy`]: the lifecycle is
-/// the single mutable owner of the session's pending correlations, and
-/// duplicating it could let two owners settle the same request.
+/// Admission and resolution are all-or-nothing: the registry gates every
+/// decision, and every rejected operation returns a typed error leaving
+/// every pending request and waiter unchanged. Deliberately implements
+/// neither [`Clone`] nor [`Copy`]: the lifecycle is the single mutable
+/// owner of the session's waiters, and duplicating it could let two owners
+/// settle the same request. Like the registry, one instance serves exactly
+/// one authenticated connection for that live connection's whole lifetime.
 #[derive(Debug)]
 pub struct ClientRequestLifecycle {
-    /// Maximum number of simultaneously pending requests.
-    capacity: usize,
-    /// Pending requests in admission order.
-    pending: Vec<PendingRequest>,
+    /// Single owner of identity admission, pending state, and retirement.
+    registry: RequestCorrelationRegistry,
+    /// Delivery entries mirroring exactly the registry's pending requests:
+    /// pushed only after a successful admission, removed only after a
+    /// successful completion.
+    waiters: Vec<PendingWaiter>,
 }
 
 impl ClientRequestLifecycle {
-    /// Creates a lifecycle admitting at most `capacity` pending requests.
+    /// Creates a lifecycle admitting at most `pending_capacity`
+    /// simultaneously pending requests and at most `admission_budget`
+    /// successful requests over the owning connection's entire lifetime.
     ///
     /// # Errors
     ///
-    /// Returns [`RequestLifecycleError::ZeroCapacity`] when `capacity` is
-    /// zero.
-    pub fn new(capacity: usize) -> Result<Self, RequestLifecycleError> {
-        if capacity == 0 {
-            return Err(RequestLifecycleError::ZeroCapacity);
-        }
+    /// Returns the registry's construction errors:
+    /// [`RequestCorrelationError::ZeroPendingLimit`] and
+    /// [`RequestCorrelationError::ZeroLifetimeBudget`].
+    pub fn new(
+        pending_capacity: usize,
+        admission_budget: usize,
+    ) -> Result<Self, RequestCorrelationError> {
         Ok(Self {
-            capacity,
-            pending: Vec::new(),
+            registry: RequestCorrelationRegistry::new(pending_capacity, admission_budget)?,
+            waiters: Vec::new(),
         })
     }
 
-    /// Returns the fixed maximum number of pending requests.
+    /// Returns the fixed maximum number of simultaneously pending requests.
     #[must_use]
-    pub const fn capacity(&self) -> usize {
-        self.capacity
+    pub const fn pending_capacity(&self) -> usize {
+        self.registry.pending_capacity()
+    }
+
+    /// Returns the fixed total number of successful admissions allowed
+    /// during the owning connection's entire lifetime.
+    #[must_use]
+    pub const fn admission_budget(&self) -> usize {
+        self.registry.admission_budget()
+    }
+
+    /// Returns how many distinct requests were successfully admitted during
+    /// the owning connection's entire lifetime.
+    ///
+    /// This counts consumed lifetime budget, not pending occupancy; see
+    /// [`len`](Self::len) for the latter. It never decreases.
+    #[must_use]
+    pub fn admitted(&self) -> usize {
+        self.registry.admitted()
     }
 
     /// Returns the number of currently pending requests.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.pending.len()
+        self.registry.len()
     }
 
     /// Returns whether no request is currently pending.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+        self.registry.is_empty()
     }
 
     /// Returns whether `request_id` currently awaits completion.
     #[must_use]
     pub fn is_pending(&self, request_id: &RequestId) -> bool {
-        self.pending
-            .iter()
-            .any(|pending| &pending.request_id == request_id)
+        self.registry.is_pending(request_id)
     }
 
     /// Admits one outgoing request as pending and returns its waiter.
     ///
-    /// Duplicate detection precedes capacity enforcement, so a repeated id
-    /// is diagnosed identically at any occupancy. On success exactly one
-    /// new waiter exists for `request_id`; on failure the lifecycle is
-    /// unchanged and no waiter is created.
+    /// The registry decides admission — duplicate, retired-identity,
+    /// lifetime-budget, and capacity diagnoses in its documented precedence
+    /// — before this layer creates anything, so a rejected admission
+    /// changes no waiter state and creates no waiter. On success exactly
+    /// one new waiter exists for `request_id`.
     ///
     /// # Errors
     ///
-    /// Returns [`RequestLifecycleError::Duplicate`] when `request_id` is
-    /// already pending, and [`RequestLifecycleError::AtCapacity`] when
-    /// every slot holds an unresolved request.
-    pub fn admit(&mut self, request_id: RequestId) -> Result<OutcomeWaiter, RequestLifecycleError> {
-        if self.is_pending(&request_id) {
-            return Err(RequestLifecycleError::Duplicate);
-        }
-        if self.pending.len() >= self.capacity {
-            return Err(RequestLifecycleError::AtCapacity {
-                capacity: self.capacity,
-            });
-        }
+    /// Returns the registry's admission errors; see
+    /// [`RequestCorrelationRegistry::register`].
+    pub fn admit(
+        &mut self,
+        request_id: RequestId,
+    ) -> Result<OutcomeWaiter, RequestCorrelationError> {
+        self.registry.register(request_id.clone())?;
         let slot = Arc::new(Mutex::new(WaiterSlot::default()));
-        self.pending.push(PendingRequest {
+        self.waiters.push(PendingWaiter {
             request_id: request_id.clone(),
             slot: Arc::clone(&slot),
         });
@@ -290,67 +291,74 @@ impl ClientRequestLifecycle {
     /// Settles the pending request answered by a successful server
     /// response, depositing the outcome into its waiter.
     ///
-    /// On success exactly the response's request stops pending and its
-    /// capacity is freed, whatever the waiter's liveness; on failure the
-    /// lifecycle is unchanged.
+    /// On success exactly the response's request stops pending, its
+    /// pending capacity is freed, and its identity retires against any
+    /// further use, whatever the waiter's liveness; on failure nothing
+    /// changes, including every other waiter.
     ///
     /// # Errors
     ///
-    /// Returns [`RequestLifecycleError::Unknown`] when the response's
-    /// request id is not pending.
+    /// Returns [`RequestCorrelationError::Unknown`] when the response's
+    /// request id is not pending, as with a late replay of an already
+    /// retired completion.
     pub fn resolve_on_response(
         &mut self,
         response: &ServerResponse,
-    ) -> Result<OutcomeDelivery, RequestLifecycleError> {
-        self.resolve(&response.request_id, || {
-            RequestOutcome::Response(response.clone())
-        })
+    ) -> Result<OutcomeDelivery, RequestCorrelationError> {
+        self.registry.complete_on_response(response)?;
+        Ok(self.deliver(
+            |pending: &PendingWaiter| pending.request_id == response.request_id,
+            || RequestOutcome::Response(response.clone()),
+        ))
     }
 
     /// Settles the pending request carried by a protocol failure,
     /// depositing the outcome into its waiter.
     ///
-    /// On success exactly the failure's request stops pending and its
-    /// capacity is freed, whatever the waiter's liveness; on failure the
-    /// lifecycle is unchanged.
+    /// On success exactly the failure's request stops pending, its pending
+    /// capacity is freed, and its identity retires against any further
+    /// use, whatever the waiter's liveness; on failure nothing changes,
+    /// including every other waiter.
     ///
     /// # Errors
     ///
-    /// Returns [`RequestLifecycleError::Uncorrelated`] when the failure
-    /// carries no request id, and [`RequestLifecycleError::Unknown`] when
-    /// the carried request id is not pending.
+    /// Returns [`RequestCorrelationError::Uncorrelated`] when the failure
+    /// carries no request id, and [`RequestCorrelationError::Unknown`]
+    /// when the carried request id is not pending.
     pub fn resolve_on_failure(
         &mut self,
         failure: &ProtocolFailure,
-    ) -> Result<OutcomeDelivery, RequestLifecycleError> {
-        match &failure.request_id {
-            Some(request_id) => {
-                self.resolve(request_id, || RequestOutcome::Failure(failure.clone()))
-            }
-            None => Err(RequestLifecycleError::Uncorrelated),
-        }
+    ) -> Result<OutcomeDelivery, RequestCorrelationError> {
+        self.registry.complete_on_failure(failure)?;
+        Ok(self.deliver(
+            |pending: &PendingWaiter| {
+                failure
+                    .request_id
+                    .as_ref()
+                    .is_some_and(|request_id| pending.request_id == *request_id)
+            },
+            || RequestOutcome::Failure(failure.clone()),
+        ))
     }
 
     /// Deposits one outcome into exactly one pending request's waiter and
-    /// removes that request.
+    /// removes that delivery entry.
     ///
-    /// The delivery verdict distinguishes a live waiter from one dropped
-    /// between admission and settlement; both settle the request exactly
-    /// once and free its capacity.
-    fn resolve<F>(
-        &mut self,
-        request_id: &RequestId,
-        build_outcome: F,
-    ) -> Result<OutcomeDelivery, RequestLifecycleError>
+    /// Called only after the registry accepted the completion, so exactly
+    /// one mirrored entry correlates. The delivery verdict distinguishes a
+    /// live waiter from one dropped between admission and settlement; both
+    /// settle the request exactly once and free its pending capacity.
+    fn deliver<M, F>(&mut self, correlates: M, build_outcome: F) -> OutcomeDelivery
     where
+        M: Fn(&PendingWaiter) -> bool,
         F: FnOnce() -> RequestOutcome,
     {
         let position = self
-            .pending
+            .waiters
             .iter()
-            .position(|pending| &pending.request_id == request_id)
-            .ok_or(RequestLifecycleError::Unknown)?;
-        let pending = self.pending.remove(position);
+            .position(correlates)
+            .expect("waiter entries mirror the registry's accepted pending requests");
+        let pending = self.waiters.remove(position);
         {
             let mut slot = lock_slot(&pending.slot);
             slot.settled = true;
@@ -360,9 +368,9 @@ impl ClientRequestLifecycle {
             });
         }
         if Arc::strong_count(&pending.slot) == 1 {
-            Ok(OutcomeDelivery::Abandoned)
+            OutcomeDelivery::Abandoned
         } else {
-            Ok(OutcomeDelivery::Delivered)
+            OutcomeDelivery::Delivered
         }
     }
 }
