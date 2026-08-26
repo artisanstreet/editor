@@ -6,7 +6,10 @@ rust_test(
     name = "attention_test",
     srcs = ["attention.rs"],
     crate_name = "attention_test",
-    deps = ["//modules/frontend:frontend"],
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",

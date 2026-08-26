@@ -21,10 +21,6 @@ fn cursor(millis: i64) -> UnixMillis {
     UnixMillis::from_millis(millis)
 }
 
-fn acknowledge(millis: i64) -> Option<UnixMillis> {
-    Some(cursor(millis))
-}
-
 #[test]
 fn an_absent_acknowledgement_is_unread_in_every_run_state() {
     for run_state in RUN_STATES {
@@ -41,7 +37,8 @@ fn exact_cursor_equality_is_read_in_every_run_state() {
     // Signed epoch extremes settle exactly like ordinary instants.
     for millis in [-62_167_219_200_000, READER_MILLIS] {
         for run_state in RUN_STATES {
-            let attention = ThreadAttention::derive(run_state, cursor(millis), acknowledge(millis));
+            let attention =
+                ThreadAttention::derive(run_state, cursor(millis), Some(cursor(millis)));
             assert!(
                 !attention.is_unread(),
                 "{run_state:?} acknowledged at its own cursor {millis} must present as read"
@@ -58,7 +55,7 @@ fn exact_cursor_equality_is_read_in_every_run_state() {
 fn a_stale_acknowledgement_is_unread_without_consulting_ordering() {
     for run_state in RUN_STATES {
         // The stamp lost the race against newer visible activity...
-        let behind = ThreadAttention::derive(run_state, cursor(READER_MILLIS), acknowledge(-5));
+        let behind = ThreadAttention::derive(run_state, cursor(READER_MILLIS), Some(cursor(-5)));
         assert!(
             behind.is_unread(),
             "{run_state:?} behind the cursor is unread"
@@ -66,7 +63,7 @@ fn a_stale_acknowledgement_is_unread_without_consulting_ordering() {
 
         // ...and a stamp ahead of the visible cursor is still not a read:
         // only exact equality settles, never relative time.
-        let ahead = ThreadAttention::derive(run_state, cursor(READER_MILLIS), acknowledge(2_000));
+        let ahead = ThreadAttention::derive(run_state, cursor(READER_MILLIS), Some(cursor(2_000)));
         assert!(
             ahead.is_unread(),
             "{run_state:?} ahead of the cursor is unread"
@@ -76,7 +73,7 @@ fn a_stale_acknowledgement_is_unread_without_consulting_ordering() {
 
 #[test]
 fn active_work_keeps_authority_even_while_unread() {
-    for acknowledged in [None, acknowledge(-5), acknowledge(2_000)] {
+    for acknowledged in [None, Some(cursor(-5)), Some(cursor(2_000))] {
         let attention =
             ThreadAttention::derive(RunState::Active, cursor(READER_MILLIS), acknowledged);
         assert!(
@@ -89,7 +86,7 @@ fn active_work_keeps_authority_even_while_unread() {
     let settled = ThreadAttention::derive(
         RunState::Active,
         cursor(READER_MILLIS),
-        acknowledge(READER_MILLIS),
+        Some(cursor(READER_MILLIS)),
     );
     assert!(!settled.is_unread());
     assert!(!settled.needs_attention());
@@ -97,7 +94,7 @@ fn active_work_keeps_authority_even_while_unread() {
 
 #[test]
 fn an_inactive_idle_thread_can_be_unread_without_needing_attention() {
-    for acknowledged in [None, acknowledge(-5), acknowledge(2_000)] {
+    for acknowledged in [None, Some(cursor(-5)), Some(cursor(2_000))] {
         let attention =
             ThreadAttention::derive(RunState::Idle, cursor(READER_MILLIS), acknowledged);
         assert!(attention.is_unread());
@@ -111,7 +108,7 @@ fn an_inactive_idle_thread_can_be_unread_without_needing_attention() {
 #[test]
 fn only_an_inactive_unread_terminal_outcome_needs_attention() {
     for run_state in [RunState::Completed, RunState::Failed] {
-        for acknowledged in [None, acknowledge(-5), acknowledge(2_000)] {
+        for acknowledged in [None, Some(cursor(-5)), Some(cursor(2_000))] {
             let attention = ThreadAttention::derive(run_state, cursor(READER_MILLIS), acknowledged);
             assert!(attention.is_unread());
             assert!(
@@ -122,8 +119,11 @@ fn only_an_inactive_unread_terminal_outcome_needs_attention() {
 
         // Once the acknowledgement catches up to the cursor, the outcome
         // stops asking.
-        let settled =
-            ThreadAttention::derive(run_state, cursor(READER_MILLIS), acknowledge(READER_MILLIS));
+        let settled = ThreadAttention::derive(
+            run_state,
+            cursor(READER_MILLIS),
+            Some(cursor(READER_MILLIS)),
+        );
         assert!(!settled.is_unread());
         assert!(!settled.needs_attention());
     }

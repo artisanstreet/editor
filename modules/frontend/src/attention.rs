@@ -62,9 +62,10 @@ pub enum RunState {
 ///
 /// Constructed only through [`ThreadAttention::derive`]; the fields are
 /// private so callers cannot assemble contradictory states. The two
-/// observations stay independently observable because neither implies the
-/// other: unread spans every run state, while needs-attention covers only
-/// the inactive unread terminal outcomes.
+/// observations stay independently accessible and relate one way only:
+/// needs-attention implies unread, but unread alone does not imply
+/// needs-attention — unread spans every run state, while needs-attention
+/// covers only the inactive unread terminal outcomes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ThreadAttention {
     unread: bool,
