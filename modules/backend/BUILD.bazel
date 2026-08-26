@@ -11,6 +11,7 @@ rust_library(
         "src/command_admission.rs",
         "src/directory_helper.rs",
         "src/directory_helper_codec.rs",
+        "src/directory_selection.rs",
         "src/lib.rs",
         "src/request_handler.rs",
         "src/storage.rs",

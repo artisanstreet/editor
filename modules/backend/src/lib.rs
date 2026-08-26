@@ -8,6 +8,7 @@ pub mod connection;
 pub mod credential_authority;
 pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
+pub mod directory_selection;
 pub mod request_handler;
 pub mod storage;
 
@@ -25,6 +26,10 @@ pub use credential_authority::{
 };
 // The directory helper keeps its surface private to this crate: only
 // `directory_helper::run_if_requested` is public, for `main` composition.
+pub use directory_selection::{
+    DirectorySelectionAdmissionError, IssuedDirectory, MAX_LIFETIME_ISSUED_IDENTITIES,
+    MAX_LIVE_SELECTIONS, SELECTION_TIME_TO_LIVE, SelectedDirectory, SelectedDirectoryAuthority,
+};
 pub use request_handler::RequestHandler;
 pub use storage::{ForgeStorage, ForgeStorageCloseError, ForgeStorageOpenError};
 
