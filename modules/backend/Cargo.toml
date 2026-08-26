@@ -23,5 +23,9 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 name = "app_test"
 path = "../../tests/backend/app.rs"
 
+[[test]]
+name = "request_handler"
+path = "../../tests/backend/request_handler.rs"
+
 [lints]
 workspace = true
