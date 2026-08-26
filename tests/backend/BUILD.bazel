@@ -59,6 +59,25 @@ rust_test(
 )
 
 rust_test(
+    name = "engine_owner_fixture_smoke_test",
+    srcs = ["engine_owner_fixture_smoke.rs"],
+    crate_name = "engine_owner_fixture_smoke_test",
+    data = [":engine_owner_fixture"],
+    deps = [
+        "@crates//:serde_json",
+        "@crates//:tokio",
+        "@rules_rust//rust/runfiles",
+    ],
+    env = {
+        "ARTISAN_ENGINE_OWNER_FIXTURE": "$(rlocationpath :engine_owner_fixture)",
+    },
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "medium",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "listener_test",
     srcs = ["listener.rs"],
     crate_name = "listener_test",
