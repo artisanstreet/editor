@@ -733,6 +733,14 @@ struct ItemAppend {
   # because a stream may open before its first visible token. Owned
   # conversion enforces the byte ceiling.
   text @2 :Text;
+
+  # Authoritative entity update time supplied by Forge. Signed Unix epoch
+  # milliseconds; every i64 value including MIN, MAX, negative and zero is
+  # legal here. An absent field decodes as exactly 0 -- indistinguishable
+  # from a sender-supplied epoch zero, since an Int64 has no presence
+  # information. No zero sentinel, clock fallback, or older-peer
+  # compatibility claim exists at this boundary.
+  updatedAtMillis @3 :Int64;
 }
 
 # Lifecycle transition applied to one renderer-visible item.
@@ -745,6 +753,14 @@ struct ItemLifecyclePatch {
 
   # New lifecycle.
   lifecycle @2 :ConversationLifecycle;
+
+  # Authoritative entity update time supplied by Forge. Signed Unix epoch
+  # milliseconds; every i64 value including MIN, MAX, negative and zero is
+  # legal here. An absent field decodes as exactly 0 -- indistinguishable
+  # from a sender-supplied epoch zero, since an Int64 has no presence
+  # information. No zero sentinel, clock fallback, or older-peer
+  # compatibility claim exists at this boundary.
+  updatedAtMillis @3 :Int64;
 }
 
 # Lifecycle transition applied to one canonical turn.
@@ -757,6 +773,14 @@ struct TurnLifecyclePatch {
 
   # New lifecycle.
   lifecycle @2 :ConversationLifecycle;
+
+  # Authoritative entity update time supplied by Forge. Signed Unix epoch
+  # milliseconds; every i64 value including MIN, MAX, negative and zero is
+  # legal here. An absent field decodes as exactly 0 -- indistinguishable
+  # from a sender-supplied epoch zero, since an Int64 has no presence
+  # information. No zero sentinel, clock fallback, or older-peer
+  # compatibility claim exists at this boundary.
+  updatedAtMillis @3 :Int64;
 }
 
 # One sequenced mutation against a conversation snapshot.
