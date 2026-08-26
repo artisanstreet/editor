@@ -30,8 +30,8 @@ use artisan_frontend::proof::{ProofSurface, bind_proof_actions};
 use artisan_ui::theme::ThemeMode;
 use gpui::{
     AppContext as _, Bounds, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyBinding, KeyUpEvent, Keystroke, Modifiers, ParentElement as _, Pixels, Render, Styled as _,
-    TestAppContext, VisualTestContext, Window, actions, div, point, px, size,
+    KeyBinding, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ParentElement as _, Pixels, Render,
+    Styled as _, TestAppContext, VisualTestContext, Window, actions, div, point, px, size,
 };
 
 /// Selector painted by the leaf on its trigger row.
@@ -943,6 +943,161 @@ fn open_menu_follows_host_reflow_and_stays_clickable(cx: &mut TestAppContext) {
                 ProjectId::parse("proof-docs-site").expect("proof ids are valid")
             )),
             "the post-reflow click must choose docs-site exactly once"
+        );
+    });
+}
+
+#[gpui::test]
+fn modified_closing_release_leaves_no_fence_for_the_next_genuine_open(cx: &mut TestAppContext) {
+    bind_fixture_tab_actions(cx);
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        PickerHost::new(
+            window,
+            cx,
+            (0..3).map(catalog_entry).collect(),
+            Some(catalog_entry_id(0)),
+            240.0,
+        )
+    });
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.run_until_parked();
+
+    // 1. Tab-traverse onto the trigger and open with a complete plain press,
+    //    then move Down onto the non-current docs-site row.
+    open_menu_from_keyboard(&host, cx);
+    press_down(cx, "down");
+    cx.run_until_parked();
+
+    // 2. Ctrl+Enter DOWN while the menu is open: selects the non-current
+    //    docs-site row, closes, and emits exactly Choose. Pinned GPUI
+    //    synthesizes keyboard clicks only from UNMODIFIED Enter/Space
+    //    releases, so this modified press must not arm the release fence.
+    let mut ctrl_enter = Keystroke::parse("enter").expect("known key");
+    ctrl_enter.modifiers.control = true;
+    cx.simulate_event(KeyDownEvent {
+        keystroke: ctrl_enter.clone(),
+        is_held: false,
+    });
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(!picker.read(app).state().is_open(), "ctrl-enter closes");
+        assert_eq!(
+            picker.read(app).last_action(),
+            Some(ProjectPickerAction::Choose(catalog_entry_id(1))),
+        );
+        let trigger = picker.read(app).trigger_focus().clone();
+        assert!(trigger.is_focused(window), "trigger focus is restored");
+    });
+
+    // 3. The full matching MODIFIED release synthesizes no click: the menu
+    //    stays closed and no duplicate action appears.
+    cx.simulate_event(KeyUpEvent {
+        keystroke: ctrl_enter,
+    });
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            !picker.read(app).state().is_open(),
+            "modified release must stay closed"
+        );
+        assert_eq!(
+            picker.read(app).last_action(),
+            Some(ProjectPickerAction::Choose(catalog_entry_id(1))),
+            "modified release must not emit a duplicate action"
+        );
+    });
+
+    // 4. The next genuine plain Enter DOWN+UP opens exactly once: no stale
+    //    fence may swallow its synthesized click.
+    press_down(cx, "enter");
+    release_key(cx, "enter");
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            picker.read(app).state().is_open(),
+            "a fresh plain Enter must open exactly once"
+        );
+        assert_eq!(
+            picker.read(app).state().highlighted_row(),
+            Some(PickerRow::Project(1)),
+            "the reopened menu addresses the repointed current row"
+        );
+    });
+}
+
+#[gpui::test]
+fn ctrl_released_first_close_fences_its_plain_up_and_still_opens_fresh(cx: &mut TestAppContext) {
+    bind_fixture_tab_actions(cx);
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        PickerHost::new(
+            window,
+            cx,
+            (0..3).map(catalog_entry).collect(),
+            Some(catalog_entry_id(0)),
+            240.0,
+        )
+    });
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.run_until_parked();
+
+    // Open through traversal, move onto the non-current docs-site row.
+    open_menu_from_keyboard(&host, cx);
+    press_down(cx, "down");
+    cx.run_until_parked();
+
+    // Ctrl+Enter DOWN selects/closes and restores the trigger.
+    let mut ctrl_enter = Keystroke::parse("enter").expect("known key");
+    ctrl_enter.modifiers.control = true;
+    cx.simulate_event(KeyDownEvent {
+        keystroke: ctrl_enter,
+        is_held: false,
+    });
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(!picker.read(app).state().is_open());
+        assert_eq!(
+            picker.read(app).last_action(),
+            Some(ProjectPickerAction::Choose(catalog_entry_id(1))),
+        );
+    });
+
+    // Ctrl is released BEFORE Enter, so the physical release arrives as a
+    // plain Enter key-up and DOES synthesize a focused-trigger click. The
+    // unconditional closing fence must swallow it: menu stays closed and no
+    // duplicate action is emitted.
+    release_key(cx, "enter");
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            !picker.read(app).state().is_open(),
+            "the same-press synthetic release must stay fenced"
+        );
+        assert_eq!(
+            picker.read(app).last_action(),
+            Some(ProjectPickerAction::Choose(catalog_entry_id(1))),
+            "the fenced release must not emit a duplicate action"
+        );
+        let trigger = picker.read(app).trigger_focus().clone();
+        assert!(trigger.is_focused(window));
+    });
+
+    // A subsequent genuine NEW plain Enter DOWN+UP opens exactly once.
+    complete_press(cx, "enter");
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            picker.read(app).state().is_open(),
+            "a genuine new plain Enter must open exactly once"
+        );
+        assert_eq!(
+            picker.read(app).state().highlighted_row(),
+            Some(PickerRow::Project(1)),
         );
     });
 }

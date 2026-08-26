@@ -668,6 +668,24 @@ impl ProjectPickerView {
         cx.notify();
     }
 
+    /// Retires a stale release-suppression fence at the first genuine
+    /// (non-auto-repeat) key-down on the refocused trigger. Pinned GPUI
+    /// synthesizes clicks only for unmodified Enter/Space releases; a
+    /// modified closing press (e.g. ctrl-enter) arms nothing to suppress,
+    /// but without this retirement an armed fence would swallow the next
+    /// legitimate opening click. `is_held` keeps held-key autorepeats from
+    /// being mistaken for a new interaction.
+    fn disarm_stale_release_fence(
+        &mut self,
+        event: &KeyDownEvent,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        if !event.is_held {
+            self.suppress_trigger_release = false;
+        }
+    }
+
     fn handle_menu_key(
         &mut self,
         event: &KeyDownEvent,
@@ -696,10 +714,13 @@ impl ProjectPickerView {
                 self.state.activate_highlighted();
                 self.drain_actions();
                 self.sync_focus_after_transition(window);
-                // Focus is back on the trigger, so this keypress's release
-                // will synthesize a focused-trigger click (pinned key-up
-                // synthesis). Swallow exactly that one click so a complete
-                // activation press closes the menu and it stays closed.
+                // Unconditionally fence this closing press: pinned GPUI
+                // decides whether to synthesize a focused-trigger click from
+                // the ACTUAL key-up modifiers (Ctrl may be released first),
+                // so arming cannot be decided from the down half alone. A
+                // fence left stale by a modified release is retired by the
+                // trigger's genuine-key-down disarm below, and pointer
+                // interaction clears it directly.
                 self.suppress_trigger_release = true;
                 true
             }
@@ -840,6 +861,10 @@ impl ProjectPickerView {
             .id("project-picker-trigger")
             .track_focus(&self.trigger_focus)
             .debug_selector(|| TRIGGER_SELECTOR.to_string())
+            // A fresh (non-auto-repeat) key-down on the re-focused trigger is
+            // a genuine new keyboard interaction: it retires any stale
+            // release fence left behind by a previous closing press.
+            .on_key_down(cx.listener(Self::disarm_stale_release_fence))
             // Keyboard activation rides GPUI's synthesized unmodified
             // Enter/Space clicks for the focused element (the same channel
             // the audited Button uses), so pointer and keyboard share one
