@@ -49,6 +49,10 @@ name = "engine_owner_fixture"
 path = "../../tests/backend/engine_owner_fixture.rs"
 
 [[test]]
+name = "engine_owner_fixture_smoke"
+path = "../../tests/backend/engine_owner_fixture_smoke.rs"
+
+[[test]]
 name = "listener"
 path = "../../tests/backend/listener.rs"
 
