@@ -21,6 +21,10 @@ name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 
 [[test]]
+name = "conversation_projection"
+path = "../../tests/frontend/conversation_projection.rs"
+
+[[test]]
 name = "project_picker"
 path = "../../tests/frontend/project_picker.rs"
 
