@@ -29,9 +29,10 @@
 //! initial process budgets, not claims of limitless service: lifetime
 //! exhaustion is permanent for one authority instance, while live capacity
 //! returns when selections are consumed or expire. An unexpired entry is
-//! never evicted to admit another selection, and only the retired identity
-//! text is retained — consumed and expired entries drop their paths and
-//! names immediately.
+//! never evicted to admit another selection. Consumption transfers its path
+//! and name out of the authority; expired payloads are removed at the next
+//! successful registration or consumption. Only identity text is retained
+//! permanently in the bounded issuance history.
 //!
 //! # Publication and consumption
 //!
@@ -62,8 +63,9 @@
 //! both returned values implement neither [`Debug`](std::fmt::Debug) nor
 //! [`Clone`](std::clone::Clone), and the typed admission error carries no
 //! payload text, so failures describe shape without ever exposing a raw path
-//! or name. A consumed identity answers unknown forever afterwards, so
-//! probing the authority reveals nothing about its history.
+//! or name. Consumption returns the same unknown result for never-issued,
+//! consumed, and expired identities. Registration still rejects every
+//! previously issued identity with a collision error.
 //!
 //! This foundation is not yet wired into
 //! [`crate::request_handler::RequestHandler`]; `PickDirectory` stays
@@ -163,7 +165,7 @@ pub struct SelectedDirectory {
 
 /// Process-owned registry of freshly picked directories awaiting attachment.
 ///
-/// Forge assembly constructs exactly one instance shared by its request
+/// Future Forge assembly must construct one instance shared by its request
 /// admission. The owner maps each issued [`DirectoryId`] to its canonical
 /// [`RootPath`], derived [`DisplayName`], and checked monotonic expiry, and
 /// remembers every identity it has ever issued so no identity — live,
@@ -279,10 +281,10 @@ impl SelectedDirectoryAuthority {
     ///
     /// `now` is the caller's monotonic observation; expired entries are
     /// pruned first, and observing never extends a deadline. A successful
-    /// lookup removes the entry — dropping its path and name permanently —
-    /// and returns the owned selection for the request's future validation
-    /// and database work. The identity itself stays retired in the
-    /// authority's history and can never be issued again.
+    /// lookup removes the entry and transfers its path and name to the
+    /// returned selection for the request's future validation and database
+    /// work. The identity itself stays retired in the authority's history
+    /// and can never be issued again.
     ///
     /// Unknown answers are uniform by design: a never-registered, already
     /// consumed, and expired identity are indistinguishable, matching the
@@ -377,8 +379,8 @@ const VERBATIM_PREFIX: &str = r"\\?\";
 
 /// Slices the drive-letter label from the ORIGINAL UTF-8 prefix text.
 ///
-/// [`PrefixComponent::as_os_str`] yields the prefix exactly as written in
-/// the path — `c:` for a classic drive root, `\\?\c:` for a verbatim one.
+/// [`std::path::PrefixComponent::as_os_str`] yields the prefix exactly as
+/// written in the path — `c:` for a classic drive root, `\\?\c:` for a verbatim one.
 /// Stripping only a literal `\\?\` wrapper and requiring the remaining body
 /// to be one original ASCII letter followed by `:` keeps lowercase, mixed,
 /// and uppercase spellings byte-identical; rebuilding from the parsed
