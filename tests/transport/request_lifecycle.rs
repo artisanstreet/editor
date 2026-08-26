@@ -1,6 +1,6 @@
 //! Client-side request-to-waiter lifecycle coverage.
 
-use std::error::Error;
+use std::{error::Error, sync::mpsc, thread, time::Duration};
 
 use artisan_domain::{IdentifierError, RequestId, ThreadId};
 use artisan_protocol::{
@@ -9,7 +9,7 @@ use artisan_protocol::{
 };
 use artisan_transport::{
     ClientRequestLifecycle, OutcomeDelivery, OutcomeWaiter, OutcomeWaiterError,
-    RequestCorrelationError, RequestOutcome,
+    RequestCorrelationError, RequestOutcome, ResolvedRequest,
 };
 
 const _: fn() = || {
@@ -456,6 +456,211 @@ fn waiter_delivers_at_most_one_outcome() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn post_handoff_receiver_drop_keeps_the_committed_handoff() -> Result<(), Box<dyn Error>> {
+    let mut lifecycle = ClientRequestLifecycle::new(1, 2)?;
+    let waiter = lifecycle.admit(request_id("request-1")?)?;
+
+    let settled = response_settling("request-1")?;
+    assert_eq!(
+        lifecycle.resolve_on_response(&settled),
+        Ok(OutcomeDelivery::Delivered),
+        "a live receiver at the handoff point receives a committed Delivered handoff"
+    );
+
+    // The receiver drops after the handoff without ever consuming: the
+    // committed verdict stands and no correlation state regresses.
+    drop(waiter);
+    assert!(lifecycle.is_empty());
+    assert_eq!(lifecycle.admitted(), 1);
+
+    let replayed = response_settling("request-1")?;
+    assert_eq!(
+        lifecycle.resolve_on_response(&replayed),
+        Err(RequestCorrelationError::Unknown),
+        "the retired identity stays retired whatever its receiver did"
+    );
+    Ok(())
+}
+
+/// Races one consumer take against publication across `trials` fresh
+/// lifecycles, using an explicit start handshake and channel completion
+/// instead of timed polling. A racing take that finds the slot settled
+/// consumes and then drops promptly before any reporting handshake; a take
+/// that loses the race synchronizes on the completed handoff and takes
+/// exactly once more. Every trial must classify
+/// [`OutcomeDelivery::Delivered`] — the waiter exists from spawn until a
+/// post-publication drop, so no interleaving can legitimately classify
+/// otherwise — and this bounded harness cannot exhaustively prove every
+/// schedule, which remains the source-level ordering's role.
+fn raced_consume_then_drop_implies_delivered(
+    trials: u32,
+    mut settle: impl FnMut(
+        &mut ClientRequestLifecycle,
+    ) -> Result<OutcomeDelivery, RequestCorrelationError>,
+) -> Result<Vec<ResolvedRequest>, Box<dyn Error>> {
+    // Generous failure bound for the fallback synchronization only; it
+    // never manufactures a schedule.
+    const CONSUMER_PATIENCE: Duration = Duration::from_secs(30);
+
+    let mut delivered = Vec::new();
+    for _ in 0..trials {
+        let mut lifecycle = ClientRequestLifecycle::new(1, 2)?;
+        let mut waiter = lifecycle.admit(request_id("request-1")?)?;
+
+        // A zero-capacity rendezvous proves the consumer reached its start
+        // receive, making settlement and the racing take eligible from
+        // that common point onward. It does not prove the consumer already
+        // reached `take_outcome`, pin it there during resolution, or
+        // guarantee physical overlap: the scheduler may still serialize
+        // either order.
+        let (start_tx, start_rx) = mpsc::sync_channel::<()>(0);
+        let (completion_tx, completion_rx) = mpsc::channel::<OutcomeDelivery>();
+        let (resolved_tx, resolved_rx) = mpsc::channel();
+        let consumer = thread::spawn(move || {
+            assert!(
+                start_rx.recv().is_ok(),
+                "producer dropped the start channel"
+            );
+            // Exactly one racing take per trial.
+            match waiter.take_outcome() {
+                Ok(resolved) => {
+                    // Won the race: consume, then drop promptly before
+                    // any reporting handshake.
+                    drop(waiter);
+                    let _ = resolved_tx.send(resolved);
+                }
+                Err(OutcomeWaiterError::NotSettled) => {
+                    // Lost the race: synchronize on the producer's
+                    // completed handoff, then take exactly once more.
+                    match completion_rx.recv_timeout(CONSUMER_PATIENCE) {
+                        Ok(_) => {}
+                        other => panic!("producer completion unusable: {other:?}"),
+                    }
+                    let second = waiter
+                        .take_outcome()
+                        .expect("the reported handoff completes the fallback take");
+                    drop(waiter);
+                    let _ = resolved_tx.send(second);
+                }
+                Err(err) => panic!("unexpected waiter failure: {err}"),
+            }
+        });
+
+        start_tx
+            .send(())
+            .expect("consumer dropped the start channel");
+        let verdict = settle(&mut lifecycle)?;
+        assert_eq!(
+            verdict,
+            OutcomeDelivery::Delivered,
+            "a committed handoff stays Delivered whatever the racing take did"
+        );
+        // Ignoring this send result permits the expected successful-first-
+        // take path, where the consumer exits and closes the channel
+        // first, but it can also mask other channel closures such as a
+        // consumer panic; the join below and the exact resolved-outcome
+        // assertions still reject any consumer failure.
+        let _ = completion_tx.send(verdict);
+
+        assert!(consumer.join().is_ok(), "consumer thread panicked");
+        delivered.push(resolved_rx.recv()?);
+        assert!(lifecycle.is_empty());
+        assert_eq!(lifecycle.admitted(), 1);
+    }
+    Ok(delivered)
+}
+
+#[test]
+fn consumed_response_outcome_implies_delivered_despite_consumer_drop() -> Result<(), Box<dyn Error>>
+{
+    const TRIALS: u32 = 8;
+
+    let settled = response_settling("request-1")?;
+    let resolved = raced_consume_then_drop_implies_delivered(TRIALS, |lifecycle| {
+        lifecycle.resolve_on_response(&settled)
+    })?;
+    for outcome in resolved {
+        let (resolved_id, carried) = outcome.into_parts();
+        assert_eq!(resolved_id.as_str(), "request-1");
+        assert_eq!(carried, RequestOutcome::Response(settled.clone()));
+    }
+    Ok(())
+}
+
+#[test]
+fn consumed_failure_outcome_implies_delivered_despite_consumer_drop() -> Result<(), Box<dyn Error>>
+{
+    const TRIALS: u32 = 8;
+
+    let settled_failure = failure_settling(Some(request_id("request-1")?))?;
+    let resolved = raced_consume_then_drop_implies_delivered(TRIALS, |lifecycle| {
+        lifecycle.resolve_on_failure(&settled_failure)
+    })?;
+    for outcome in resolved {
+        let (resolved_id, carried) = outcome.into_parts();
+        assert_eq!(resolved_id.as_str(), "request-1");
+        assert_eq!(carried, RequestOutcome::Failure(settled_failure.clone()));
+    }
+    Ok(())
+}
+
+#[test]
+fn concurrent_receiver_drop_without_consumption_keeps_state_exact() -> Result<(), Box<dyn Error>> {
+    // Bounded, start-synchronized trials: either linearized verdict is
+    // legitimate on every trial, so passing never requires a lucky
+    // interleaving.
+    const TRIALS: u32 = 8;
+
+    for _ in 0..TRIALS {
+        let mut lifecycle = ClientRequestLifecycle::new(1, 2)?;
+        let waiter = lifecycle.admit(request_id("request-1")?)?;
+
+        // A zero-capacity rendezvous proves the dropper reached its start
+        // receive, making its drop and the producer's resolution eligible
+        // from that common point onward. It does not pin the drop inside
+        // resolution or guarantee physical overlap: the scheduler may
+        // serialize either order.
+        let (start_tx, start_rx) = mpsc::sync_channel::<()>(0);
+        let (dropped_tx, dropped_rx) = mpsc::channel::<()>();
+        let dropper = thread::spawn(move || {
+            assert!(
+                start_rx.recv().is_ok(),
+                "producer dropped the start channel"
+            );
+            // Drop without consuming; the Arc decrement may land before or
+            // after the producer's liveness classification.
+            drop(waiter);
+            let _ = dropped_tx.send(());
+        });
+
+        start_tx
+            .send(())
+            .expect("dropper dropped the start channel");
+        let verdict = lifecycle.resolve_on_response(&response_settling("request-1")?)?;
+        assert!(matches!(
+            verdict,
+            OutcomeDelivery::Delivered | OutcomeDelivery::Abandoned
+        ));
+        assert!(dropper.join().is_ok(), "dropper thread panicked");
+        dropped_rx.recv()?;
+
+        // State invariants hold under either linearized verdict.
+        assert!(lifecycle.is_empty());
+        assert_eq!(lifecycle.admitted(), 1);
+
+        // Retirement is unaffected by the racing receiver drop.
+        let readmitted = lifecycle.admit(request_id("request-1")?);
+        assert_eq!(readmitted.err(), Some(RequestCorrelationError::Retired));
+        let replayed = response_settling("request-1")?;
+        assert_eq!(
+            lifecycle.resolve_on_response(&replayed),
+            Err(RequestCorrelationError::Unknown)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn resolution_frees_capacity_for_fresh_identities_in_order() -> Result<(), Box<dyn Error>> {
     let mut lifecycle = ClientRequestLifecycle::new(2, 4)?;
     let _first = lifecycle.admit(request_id("request-1")?)?;
@@ -539,6 +744,17 @@ fn every_rejection_leaves_the_lifecycle_unchanged() -> Result<(), Box<dyn Error>
     );
     assert_eq!(observed(&lifecycle), before);
 
+    // Immediate typed reads prove both live waiters are genuinely
+    // unsettled right now: no rejected operation deposited anything.
+    assert_eq!(
+        first_waiter.take_outcome(),
+        Err(OutcomeWaiterError::NotSettled)
+    );
+    assert_eq!(
+        second_waiter.take_outcome(),
+        Err(OutcomeWaiterError::NotSettled)
+    );
+
     // Every rejection left both live waiters unsettled; each still delivers
     // exactly its own outcome, exactly once.
     let settling_first = response_settling("request-1")?;
@@ -592,9 +808,9 @@ fn exhausted_budget_rejections_leave_live_waiters_exactly_one_delivery()
     let mut third_waiter = lifecycle.admit(third.clone())?;
     let second_failure = failure_settling(Some(second.clone()))?;
     assert_eq!(
-        lifecycle.resolve_on_failure(&second_failure).err(),
-        None,
-        "a correlated failure settles its pending request"
+        lifecycle.resolve_on_failure(&second_failure),
+        Ok(OutcomeDelivery::Delivered),
+        "a correlated failure settles its live pending request"
     );
 
     // Owned snapshots survive across the mutable calls below.
@@ -645,8 +861,15 @@ fn exhausted_budget_rejections_leave_live_waiters_exactly_one_delivery()
     );
     assert_eq!(observed(&lifecycle), spent);
 
-    // Every rejection left both live waiters unsettled; each still delivers
-    // exactly its own eventual outcome, exactly once.
+    // Only the third waiter is still pending: an immediate typed read
+    // proves no rejected operation deposited anything into it. The second
+    // waiter was already settled by the correlated failure above; its
+    // stored exact failure is unchanged and delivers exactly once below.
+    assert_eq!(
+        third_waiter.take_outcome(),
+        Err(OutcomeWaiterError::NotSettled)
+    );
+
     let settling_third = response_settling("request-3")?;
     assert_eq!(
         lifecycle.resolve_on_response(&settling_third),

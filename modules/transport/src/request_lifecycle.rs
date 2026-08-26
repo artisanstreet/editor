@@ -29,6 +29,15 @@
 //!   arrives, the pending request still settles exactly once and frees its
 //!   pending capacity, reported as [`OutcomeDelivery::Abandoned`]. State
 //!   therefore stays bounded whether or not any waiter outlives admission.
+//! * Each settlement publishes its outcome into the shared slot and
+//!   classifies the delivery while still holding that slot's mutex — the
+//!   explicit linearization point. [`OutcomeDelivery::Delivered`] records a
+//!   committed handoff to a receiver that existed there; it is not an
+//!   acknowledgement of consumption, and such a receiver may drop
+//!   afterwards without ever taking the outcome.
+//!   [`OutcomeDelivery::Abandoned`] means no receiver existed at that
+//!   point: nothing is visible before publication, so nothing could have
+//!   been consumed, and that classification is exact rather than advisory.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -60,12 +69,23 @@ pub enum OutcomeWaiterError {
 }
 
 /// What happened to a completion that settled exactly one pending request.
+///
+/// The verdict is classified at one explicit linearization point — under
+/// the delivery slot's mutex, immediately after the outcome is published
+/// and before the publisher releases the guard. It describes the committed
+/// handoff at that point, never a later consumption or drop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutcomeDelivery {
-    /// A live [`OutcomeWaiter`] received the outcome.
+    /// A live receiver existed at the handoff point: the outcome is
+    /// committed to it, and it may take the outcome now, take it later, or
+    /// drop without ever consuming. A committed handoff is not a
+    /// consumption acknowledgement.
     Delivered,
-    /// The waiter was dropped before settlement, so the settled outcome had
-    /// no receiver and was discarded after freeing its capacity.
+    /// No receiver existed at the handoff point, so the published outcome
+    /// had no receiver and was discarded after freeing its pending
+    /// capacity. Nothing becomes visible before publication, so nothing
+    /// could have been consumed beforehand. This classification is exact
+    /// at that point, not an advisory status.
     Abandoned,
 }
 
@@ -345,9 +365,17 @@ impl ClientRequestLifecycle {
     /// removes that delivery entry.
     ///
     /// Called only after the registry accepted the completion, so exactly
-    /// one mirrored entry correlates. The delivery verdict distinguishes a
-    /// live waiter from one dropped between admission and settlement; both
-    /// settle the request exactly once and free its pending capacity.
+    /// one mirrored entry correlates. The outcome is published and the
+    /// delivery verdict is classified while holding the same slot mutex
+    /// every [`OutcomeWaiter::take_outcome`] must acquire, so consumption
+    /// cannot outrun classification: a receiver that takes the outcome and
+    /// afterwards drops is still counted as
+    /// [`OutcomeDelivery::Delivered`]. A receiver dropped without
+    /// consuming never acquires the mutex, so its decrement may race the
+    /// liveness check and either verdict is legitimate there. The verdict
+    /// distinguishes a live receiver from no receiver at the handoff
+    /// point; both settle the request exactly once and free its pending
+    /// capacity.
     fn deliver<M, F>(&mut self, correlates: M, build_outcome: F) -> OutcomeDelivery
     where
         M: Fn(&PendingWaiter) -> bool,
@@ -359,18 +387,22 @@ impl ClientRequestLifecycle {
             .position(correlates)
             .expect("waiter entries mirror the registry's accepted pending requests");
         let pending = self.waiters.remove(position);
-        {
-            let mut slot = lock_slot(&pending.slot);
-            slot.settled = true;
-            slot.outcome = Some(ResolvedRequest {
-                request_id: pending.request_id.clone(),
-                outcome: build_outcome(),
-            });
-        }
-        if Arc::strong_count(&pending.slot) == 1 {
+        // Publish and classify inside one critical section: publication is
+        // what first makes an outcome visible to any take, and the same
+        // guard serializes those takes, so no receiver can consume between
+        // publication and this liveness classification.
+        let mut slot = lock_slot(&pending.slot);
+        slot.settled = true;
+        slot.outcome = Some(ResolvedRequest {
+            request_id: pending.request_id.clone(),
+            outcome: build_outcome(),
+        });
+        let verdict = if Arc::strong_count(&pending.slot) == 1 {
             OutcomeDelivery::Abandoned
         } else {
             OutcomeDelivery::Delivered
-        }
+        };
+        drop(slot);
+        verdict
     }
 }
