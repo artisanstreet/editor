@@ -192,20 +192,22 @@ fn outcome(request_id: &RequestId, payload: ResponsePayload) -> ServerResponse {
 
 /// Classifies a repository failure into the stable protocol vocabulary.
 ///
-/// Unknown client-named state maps to the entity-specific codes; deterministic
-/// client mistakes such as reused request identities stay non-retryable input
-/// failures; persisted-state problems stay internal without retry hope; only
-/// database-operation failures admit that an identical later request may
-/// succeed.
+/// Unknown client-named state maps to the entity-specific codes; reuse of a
+/// persisted request identity for a different command kind or immutable
+/// payload answers the dedicated non-retryable idempotency-conflict code so
+/// the originally accepted outcome stands; deterministic client mistakes such
+/// as a first message that already exists from another request stay
+/// non-retryable input failures; persisted-state problems stay internal
+/// without retry hope; only database-operation failures admit that an
+/// identical later request may succeed.
 fn repository_failure(error: &RepositoryError, request_id: &RequestId) -> ProtocolFailure {
     use RepositoryError as Failure;
 
     let (code, retryable) = match error {
         Failure::ProjectNotFound { .. } => (ErrorCode::ProjectUnknown, false),
         Failure::ThreadNotFound { .. } => (ErrorCode::ThreadUnknown, false),
-        Failure::IdempotencyConflict { .. } | Failure::FirstMessageAlreadyExists { .. } => {
-            (ErrorCode::InvalidInput, false)
-        }
+        Failure::IdempotencyConflict { .. } => (ErrorCode::IdempotencyConflict, false),
+        Failure::FirstMessageAlreadyExists { .. } => (ErrorCode::InvalidInput, false),
         Failure::ProjectConflict { .. }
         | Failure::ThreadConflict { .. }
         | Failure::MessageConflict { .. }

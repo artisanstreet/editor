@@ -409,6 +409,200 @@ async fn mismatched_command_correlation_fails_as_invalid_input() {
 }
 
 #[tokio::test]
+async fn changed_body_replay_fails_idempotency_conflict_preserving_the_original_outcome() {
+    let (_temporary, storage) = opened_storage("idempotency-body").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "request-project-1",
+            "directory-project-1",
+            "project-1",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
+        .await
+        .expect("seed create should persist");
+    repository
+        .queue_first_message(message_input(
+            "request-message-1",
+            "thread-1",
+            "message-1",
+            "original first body",
+        ))
+        .await
+        .expect("seed queue should persist");
+    let handler = RequestHandler::new(repository.clone());
+
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-message-1"),
+                &ClientRequest::Command(Command::QueueFirstMessage(
+                    artisan_domain::QueueFirstMessage {
+                        request_id: request("request-message-1"),
+                        thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
+                        body: MessageBody::parse("conflicting second body").expect("valid body"),
+                    },
+                )),
+            )
+            .await,
+    );
+    let replay = handler
+        .respond(
+            &request("request-message-1"),
+            &ClientRequest::Command(Command::QueueFirstMessage(
+                artisan_domain::QueueFirstMessage {
+                    request_id: request("request-message-1"),
+                    thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
+                    body: MessageBody::parse("original first body").expect("valid body"),
+                },
+            )),
+        )
+        .await
+        .expect("the original outcome should still replay as its durable duplicate");
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(failure.code, ErrorCode::IdempotencyConflict);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("request-message-1")));
+    assert!(!failure.detail.as_str().contains("original first body"));
+    assert!(!failure.detail.as_str().contains("conflicting second body"));
+    let ResponsePayload::FirstMessageQueued(receipt) = replay.payload else {
+        panic!("expected a first-message receipt payload");
+    };
+    assert_eq!(
+        receipt,
+        FirstMessageReceipt {
+            request_id: request("request-message-1"),
+            message_id: artisan_domain::MessageId::parse("message-1").expect("valid message id"),
+            thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
+            disposition: ReceiptDisposition::Duplicate,
+        }
+    );
+}
+
+#[tokio::test]
+async fn reused_request_identity_across_command_kinds_fails_idempotency_conflict() {
+    let (_temporary, storage) = opened_storage("idempotency-kind").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "request-project-1",
+            "directory-project-1",
+            "project-1",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input("request-shared", "project-1", "thread-1"))
+        .await
+        .expect("seed create should persist");
+    let handler = RequestHandler::new(repository.clone());
+
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-shared"),
+                &ClientRequest::Command(Command::QueueFirstMessage(
+                    artisan_domain::QueueFirstMessage {
+                        request_id: request("request-shared"),
+                        thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
+                        body: MessageBody::parse("first body").expect("valid body"),
+                    },
+                )),
+            )
+            .await,
+    );
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(failure.code, ErrorCode::IdempotencyConflict);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("request-shared")));
+    assert!(!failure.detail.as_str().contains("First thread"));
+    assert!(!failure.detail.as_str().contains("first body"));
+}
+
+#[tokio::test]
+async fn changed_attach_directory_fails_idempotency_conflict() {
+    let (_temporary, storage) = opened_storage("idempotency-directory").await;
+    storage
+        .repository()
+        .attach_project(attach_input(
+            "request-project-1",
+            "directory-project-1",
+            "project-1",
+        ))
+        .await
+        .expect("seed attach should persist");
+    let handler = RequestHandler::new(storage.repository().clone());
+
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-project-1"),
+                &ClientRequest::Command(Command::AttachProject(artisan_domain::AttachProject {
+                    request_id: request("request-project-1"),
+                    directory_id: DirectoryId::parse("directory-project-2")
+                        .expect("valid directory id"),
+                })),
+            )
+            .await,
+    );
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(failure.code, ErrorCode::IdempotencyConflict);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("request-project-1")));
+    assert!(!failure.detail.as_str().contains("directory-project-1"));
+    assert!(!failure.detail.as_str().contains("directory-project-2"));
+}
+
+#[tokio::test]
+async fn changed_create_title_fails_idempotency_conflict() {
+    let (_temporary, storage) = opened_storage("idempotency-title").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "request-project-1",
+            "directory-project-1",
+            "project-1",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
+        .await
+        .expect("seed create should persist");
+    let handler = RequestHandler::new(repository.clone());
+
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("request-thread-1"),
+                &ClientRequest::Command(Command::CreateThread(artisan_domain::CreateThread {
+                    request_id: request("request-thread-1"),
+                    project_id: ProjectId::parse("project-1").expect("valid project id"),
+                    title: ThreadTitle::parse("Other thread").expect("valid title"),
+                })),
+            )
+            .await,
+    );
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(failure.code, ErrorCode::IdempotencyConflict);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("request-thread-1")));
+    assert!(!failure.detail.as_str().contains("First thread"));
+    assert!(!failure.detail.as_str().contains("Other thread"));
+}
+
+#[tokio::test]
 async fn conversation_requests_fail_until_projection_exists() {
     let (_temporary, storage) = opened_storage("conversation").await;
     let handler = RequestHandler::new(storage.repository().clone());
