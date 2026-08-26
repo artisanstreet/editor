@@ -877,34 +877,40 @@ fn encode_conversation_patch(
             item_id,
             revision,
             text,
+            updated_at,
             ..
         } => {
             let mut append = builder.init_item_append();
             append.set_item_id(item_id.as_str());
             append.set_revision(revision.get());
             append.set_text(text.as_str());
+            append.set_updated_at_millis(updated_at.as_millis());
         }
         ConversationPatch::ItemLifecycle {
             item_id,
             revision,
             lifecycle,
+            updated_at,
             ..
         } => {
             let mut transition = builder.init_item_lifecycle();
             transition.set_item_id(item_id.as_str());
             transition.set_revision(revision.get());
             transition.set_lifecycle(encode_conversation_lifecycle(*lifecycle));
+            transition.set_updated_at_millis(updated_at.as_millis());
         }
         ConversationPatch::TurnLifecycle {
             turn_id,
             revision,
             lifecycle,
+            updated_at,
             ..
         } => {
             let mut transition = builder.init_turn_lifecycle();
             transition.set_turn_id(turn_id.as_str());
             transition.set_revision(revision.get());
             transition.set_lifecycle(encode_conversation_lifecycle(*lifecycle));
+            transition.set_updated_at_millis(updated_at.as_millis());
         }
     }
 }
@@ -1775,6 +1781,7 @@ fn decode_conversation_patch(
                     append.get_text(),
                     "conversationPatch.itemAppend.text",
                 )?)?,
+                updated_at: UnixMillis::from_millis(append.get_updated_at_millis()),
             })
         }
         conversation_patch::Which::ItemLifecycle(transition) => {
@@ -1791,6 +1798,7 @@ fn decode_conversation_patch(
                 )?,
                 revision: Revision::new(transition.get_revision()),
                 lifecycle: decode_conversation_lifecycle(transition.get_lifecycle()?),
+                updated_at: UnixMillis::from_millis(transition.get_updated_at_millis()),
             })
         }
         conversation_patch::Which::TurnLifecycle(transition) => {
@@ -1807,6 +1815,7 @@ fn decode_conversation_patch(
                 )?,
                 revision: Revision::new(transition.get_revision()),
                 lifecycle: decode_conversation_lifecycle(transition.get_lifecycle()?),
+                updated_at: UnixMillis::from_millis(transition.get_updated_at_millis()),
             })
         }
     }

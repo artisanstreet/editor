@@ -206,6 +206,7 @@ fn all_patch_variants() -> Vec<ConversationPatch> {
             item_id: item_id(),
             revision: Revision::new(3),
             text: IncrementalText::parse(" delta").expect("fixture fragment is valid"),
+            updated_at: UnixMillis::from_millis(300),
         },
         ConversationPatch::ItemLifecycle {
             patch_id: patch_id("patch-item-lifecycle"),
@@ -213,6 +214,7 @@ fn all_patch_variants() -> Vec<ConversationPatch> {
             item_id: item_id(),
             revision: Revision::new(4),
             lifecycle: ConversationLifecycle::Failed,
+            updated_at: UnixMillis::from_millis(400),
         },
         ConversationPatch::TurnLifecycle {
             patch_id: patch_id("patch-turn-lifecycle"),
@@ -220,6 +222,7 @@ fn all_patch_variants() -> Vec<ConversationPatch> {
             turn_id: turn_id(),
             revision: Revision::new(4),
             lifecycle: ConversationLifecycle::Cancelled,
+            updated_at: UnixMillis::from_millis(500),
         },
     ]
 }
@@ -259,6 +262,7 @@ fn every_conversation_lifecycle_roundtrips() -> Result<(), Box<dyn Error>> {
                 u64::try_from(index).expect("fixture lifecycle index fits u64"),
             ),
             lifecycle,
+            updated_at: UnixMillis::from_millis(60),
         };
         let batch = PatchBatch::new(
             thread_id(),
@@ -270,6 +274,153 @@ fn every_conversation_lifecycle_roundtrips() -> Result<(), Box<dyn Error>> {
             &format!("server-lifecycle-{index}"),
             WireEnvelopeBody::PatchBatch(batch),
         ))?;
+    }
+    Ok(())
+}
+
+fn owned_append_batch(updated_at: UnixMillis) -> WireEnvelope {
+    let batch = PatchBatch::new(
+        thread_id(),
+        ConversationCursor::default(),
+        ConversationCursor::new(1),
+        vec![ConversationPatch::ItemAppend {
+            patch_id: patch_id("patch-append-stamp"),
+            sequence: patch_sequence(1),
+            item_id: item_id(),
+            revision: Revision::new(1),
+            text: IncrementalText::parse(" delta").expect("fixture fragment is valid"),
+            updated_at,
+        }],
+    )
+    .expect("fixture batch is valid");
+    envelope("server-append-stamp", WireEnvelopeBody::PatchBatch(batch))
+}
+
+fn owned_item_lifecycle_batch(updated_at: UnixMillis) -> WireEnvelope {
+    let batch = PatchBatch::new(
+        thread_id(),
+        ConversationCursor::default(),
+        ConversationCursor::new(1),
+        vec![ConversationPatch::ItemLifecycle {
+            patch_id: patch_id("patch-item-lifecycle-stamp"),
+            sequence: patch_sequence(1),
+            item_id: item_id(),
+            revision: Revision::new(2),
+            lifecycle: ConversationLifecycle::Failed,
+            updated_at,
+        }],
+    )
+    .expect("fixture batch is valid");
+    envelope(
+        "server-item-lifecycle-stamp",
+        WireEnvelopeBody::PatchBatch(batch),
+    )
+}
+
+fn owned_turn_lifecycle_batch(updated_at: UnixMillis) -> WireEnvelope {
+    let batch = PatchBatch::new(
+        thread_id(),
+        ConversationCursor::default(),
+        ConversationCursor::new(1),
+        vec![ConversationPatch::TurnLifecycle {
+            patch_id: patch_id("patch-turn-lifecycle-stamp"),
+            sequence: patch_sequence(1),
+            turn_id: turn_id(),
+            revision: Revision::new(2),
+            lifecycle: ConversationLifecycle::Cancelled,
+            updated_at,
+        }],
+    )
+    .expect("fixture batch is valid");
+    envelope(
+        "server-turn-lifecycle-stamp",
+        WireEnvelopeBody::PatchBatch(batch),
+    )
+}
+
+/// Returns the single owned patch carried by a fixture envelope.
+fn single_decoded_patch(value: &WireEnvelope) -> ConversationPatch {
+    let WireEnvelopeBody::PatchBatch(batch) = &value.body else {
+        panic!("the fixture builds a patch-batch frame");
+    };
+    let [patch] = batch.patches() else {
+        panic!("the fixture carries exactly one patch");
+    };
+    patch.clone()
+}
+
+#[test]
+fn patch_updated_at_accessor_covers_all_five_kinds() {
+    // Distinct per-variant instants catch copy/paste wiring mistakes:
+    // upserts read their complete value's own time, each delta its field.
+    // The domain accessor test additionally covers both ItemUpsert roles.
+    let expected = [
+        UnixMillis::from_millis(20),  // TurnUpsert reads its complete turn.
+        UnixMillis::from_millis(25),  // ItemUpsert reads its user item.
+        UnixMillis::from_millis(300), // ItemAppend delta field.
+        UnixMillis::from_millis(400), // ItemLifecycle delta field.
+        UnixMillis::from_millis(500), // TurnLifecycle delta field.
+    ];
+    for (patch, expected) in all_patch_variants().into_iter().zip(expected) {
+        assert_eq!(patch.updated_at(), expected);
+    }
+}
+
+#[test]
+fn delta_timestamps_roundtrip_across_the_full_i64_range() -> Result<(), Box<dyn Error>> {
+    // Column rotation over five EXACT values N<0, zero, P>0, i64::MIN and
+    // i64::MAX: each of the three variants receives all five values across
+    // the fifteen cases, every row stays distinct, and copy/paste wiring
+    // between the shapes cannot pass. Decoded fields are asserted directly,
+    // not just variant tags or encoded bytes.
+    const NEGATIVE_MILLIS: i64 = -62_167_219_600_123;
+    const POSITIVE_MILLIS: i64 = 1_800_000_999_999;
+    let stamps: [(&str, [i64; 3]); 5] = [
+        ("negative-first", [NEGATIVE_MILLIS, 0, POSITIVE_MILLIS]),
+        ("zero-first", [0, POSITIVE_MILLIS, i64::MIN]),
+        ("positive-first", [POSITIVE_MILLIS, i64::MIN, i64::MAX]),
+        ("min-first", [i64::MIN, i64::MAX, NEGATIVE_MILLIS]),
+        ("max-first", [i64::MAX, NEGATIVE_MILLIS, 0]),
+    ];
+    for (name, millis) in stamps {
+        for (slot, expected_millis) in millis.into_iter().enumerate() {
+            let expected = UnixMillis::from_millis(expected_millis);
+            let value = match slot {
+                0 => owned_append_batch(expected),
+                1 => owned_item_lifecycle_batch(expected),
+                _ => owned_turn_lifecycle_batch(expected),
+            };
+            let encoded = encode_envelope(&value)?;
+            let decoded = decode_envelope(&encoded)?;
+            assert!(decoded == value, "{name}: frame changed in transit");
+            let patch = single_decoded_patch(&decoded);
+            match &patch {
+                ConversationPatch::ItemAppend {
+                    text, updated_at, ..
+                } => {
+                    assert_eq!(text.as_str(), " delta", "{name} must keep its fragment");
+                    assert_eq!(*updated_at, expected, "{name} append time must roundtrip");
+                }
+                ConversationPatch::ItemLifecycle {
+                    lifecycle,
+                    updated_at,
+                    ..
+                } => {
+                    assert_eq!(*lifecycle, ConversationLifecycle::Failed);
+                    assert_eq!(*updated_at, expected, "{name} item time must roundtrip");
+                }
+                ConversationPatch::TurnLifecycle {
+                    lifecycle,
+                    updated_at,
+                    ..
+                } => {
+                    assert_eq!(*lifecycle, ConversationLifecycle::Cancelled);
+                    assert_eq!(*updated_at, expected, "{name} turn time must roundtrip");
+                }
+                other => panic!("unexpected fixture variant: {other:?}"),
+            }
+            assert_eq!(patch.updated_at(), expected, "{name} accessor must agree");
+        }
     }
     Ok(())
 }
@@ -546,4 +697,42 @@ fn unknown_conversation_lifecycle_discriminant_is_typed() {
         decode_error(&malformed),
         ProtocolDecodeError::UnknownDiscriminant { value: 255 }
     ));
+}
+
+fn raw_unset_item_lifecycle_batch() -> Vec<u8> {
+    let mut message = raw_message();
+    let mut batch = init_raw_envelope(&mut message, "server-item-lifecycle-unset")
+        .init_body()
+        .init_patch_batch();
+    batch.set_thread_id(THREAD_ID);
+    batch.set_to_cursor(1);
+    let mut patches = batch.init_patches(1);
+    let mut patch = patches.reborrow().get(0);
+    patch.set_patch_id("patch-item-lifecycle-unset");
+    patch.set_sequence(1);
+    let mut transition = patch.init_item_lifecycle();
+    transition.set_item_id(ITEM_ID);
+    transition.set_revision(1);
+    transition.set_lifecycle(WireLifecycle::Failed);
+    words(&message)
+}
+
+#[test]
+fn unset_delta_timestamps_decode_as_epoch_zero_without_presence() -> Result<(), Box<dyn Error>> {
+    // An Int64 carries no presence information: Cap'n Proto's absent field
+    // decodes as exactly 0 -- epoch zero -- indistinguishable from a
+    // sender-supplied zero. This is wire truth, not a missing-field
+    // rejection and not an older-peer compatibility claim.
+    for bytes in [
+        raw_append_batch(1, " delta"),
+        raw_unset_item_lifecycle_batch(),
+        raw_lifecycle_batch(WireLifecycle::Pending),
+    ] {
+        let decoded = decode_envelope(&bytes)?;
+        assert_eq!(
+            single_decoded_patch(&decoded).updated_at(),
+            UnixMillis::from_millis(0)
+        );
+    }
+    Ok(())
 }
