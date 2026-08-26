@@ -45,7 +45,7 @@ use super::{
 };
 
 /// Exact byte length of every run-launch capability and of the start key.
-const RUN_CAPABILITY_BYTES: usize = 32;
+pub(super) const RUN_CAPABILITY_BYTES: usize = 32;
 
 /// Shared renderer ordinals consumed by one launch (one turn, one item).
 const LAUNCH_ORDINALS: i64 = 2;
@@ -94,7 +94,7 @@ impl RunStartKey {
         bool::from(self.0.ct_eq(&other.0))
     }
 
-    fn expose(&self) -> &[u8; RUN_CAPABILITY_BYTES] {
+    pub(super) fn expose(&self) -> &[u8; RUN_CAPABILITY_BYTES] {
         &self.0
     }
 }
@@ -106,18 +106,18 @@ impl Drop for RunStartKey {
 }
 
 /// One exact 32-byte named run capability.
-struct RunCapability([u8; RUN_CAPABILITY_BYTES]);
+pub(super) struct RunCapability([u8; RUN_CAPABILITY_BYTES]);
 
 impl RunCapability {
     const fn new(bytes: [u8; RUN_CAPABILITY_BYTES]) -> Self {
         Self(bytes)
     }
 
-    const fn expose(&self) -> &[u8; RUN_CAPABILITY_BYTES] {
+    pub(super) const fn expose(&self) -> &[u8; RUN_CAPABILITY_BYTES] {
         &self.0
     }
 
-    fn matches_stored(&self, stored: Option<&OpaqueBytes>) -> bool {
+    pub(super) fn matches_stored(&self, stored: Option<&OpaqueBytes>) -> bool {
         stored.is_some_and(|stored| stored_bytes_match(stored, self.expose()))
     }
 }
@@ -154,11 +154,11 @@ impl RunLaunchCredentials {
         }
     }
 
-    fn parts(&self) -> (&RunCapability, &RunCapability, &RunCapability) {
+    pub(super) fn parts(&self) -> (&RunCapability, &RunCapability, &RunCapability) {
         (&self.owner, &self.lease, &self.claim_token)
     }
 
-    fn matches_stored(
+    pub(super) fn matches_stored(
         &self,
         owner: Option<&OpaqueBytes>,
         lease: Option<&OpaqueBytes>,
@@ -1348,7 +1348,10 @@ async fn insert_ordinal(
     Ok(())
 }
 
-fn stored_bytes_match(stored: &OpaqueBytes, supplied: &[u8; RUN_CAPABILITY_BYTES]) -> bool {
+pub(super) fn stored_bytes_match(
+    stored: &OpaqueBytes,
+    supplied: &[u8; RUN_CAPABILITY_BYTES],
+) -> bool {
     stored.as_slice().len() == RUN_CAPABILITY_BYTES
         && bool::from(stored.as_slice().ct_eq(supplied.as_slice()))
 }

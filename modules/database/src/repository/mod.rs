@@ -5,6 +5,7 @@ mod first_message;
 mod message_dispatch;
 mod project_catalog;
 mod project_threads;
+mod run_binding;
 mod run_launch;
 
 use sea_orm::{DatabaseConnection, DbErr};
@@ -24,6 +25,9 @@ pub use message_dispatch::{
 };
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
+};
+pub use run_binding::{
+    BindRunProvider, BindRunProviderOutcome, BoundRunReceipt, ProviderBindingBytes, RunBindingError,
 };
 pub use run_launch::{
     LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, RunLaunchCredentials,

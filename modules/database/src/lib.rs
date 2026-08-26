@@ -11,11 +11,12 @@ mod repository;
 pub use artisan_domain::WorkspaceId;
 pub use connection::{ConnectError, SqliteConfig, connect};
 pub use repository::{
-    AttachProjectInput, AttachProjectResult, ClaimMessageDispatch, ClaimedMessageDispatch,
-    CompleteMessageDispatch, CreateThreadInput, CreateThreadResult, DispatchFailureReason,
-    DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,
-    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, MessageDispatchPayload,
+    AttachProjectInput, AttachProjectResult, BindRunProvider, BindRunProviderOutcome,
+    BoundRunReceipt, ClaimMessageDispatch, ClaimedMessageDispatch, CompleteMessageDispatch,
+    CreateThreadInput, CreateThreadResult, DispatchFailureReason, DispatchFailureReasonError,
+    DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch, LaunchClaimedRun,
+    LaunchClaimedRunOutcome, LaunchedRunReceipt, MessageDispatchPayload, ProviderBindingBytes,
     QueueFirstMessageInput, QueueFirstMessageResult, Repository, RepositoryError,
-    RequeueMessageDispatch, RunLaunchCredentials, RunLaunchError, RunStartKey,
+    RequeueMessageDispatch, RunBindingError, RunLaunchCredentials, RunLaunchError, RunStartKey,
     TransitionedMessageDispatch,
 };
