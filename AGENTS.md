@@ -41,6 +41,14 @@ new PR's tracking with `gh stack checkout <new-PR-number>` and verify
 `gh stack view --json` before local integration or worktree retirement.
 Neither command is permission to rewrite commits or merge remotely.
 
+The installed CLI rejects checkout when an already-tracked stack has fewer
+entries than the remote stack. If this happens, back up the common Git
+directory's `gh-stack` file, verify the active stack number, and remove
+ONLY its local tracking with `gh stack unstack <active-stack-number>
+--local`. Then repeat checkout and readback. The `--local` flag is mandatory:
+never unstack remotely. Confirm all local branch refs are unchanged and the
+other managed stacks remain tracked after the refresh.
+
 If GitHub rejects a stack-size increase, preserve the existing stack and
 start a managed continuation based on its last PR branch. Record both
 stack numbers and that dependency; do not retarget to remote `master` or

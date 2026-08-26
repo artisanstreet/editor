@@ -28,6 +28,10 @@ is `port/98-pinned-client-session`; their immediate-parent bases are
 unchanged. Append new packets to **#121**, not #19, until a newer verified
 handoff records another continuation. No remote PR was merged to create it.
 
+If checkout refuses an existing local/remote composition mismatch after
+linking a new PR, follow `AGENTS.md`'s backed-up, local-only tracking refresh.
+Do not rebase or unstack the remote stack to resolve a metadata mismatch.
+
 ## Likely packet families
 
 The stack will grow across foundation and feasibility proofs, domain and protocol slices, QUIC transport behavior, SeaORM migrations and repositories, Forge capabilities, asset extraction, UI archaeology, shared GPUI primitive families, frontend workflows and screens, accessibility and visual reviews, packaging, and eventual legacy retirement.
