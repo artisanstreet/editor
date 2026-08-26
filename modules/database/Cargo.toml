@@ -65,6 +65,10 @@ name = "queue_first_message"
 path = "../../tests/database/queue_first_message.rs"
 
 [[test]]
+name = "run_launch"
+path = "../../tests/database/run_launch.rs"
+
+[[test]]
 name = "project_catalog"
 path = "../../tests/database/project_catalog.rs"
 
