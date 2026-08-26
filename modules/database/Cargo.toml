@@ -69,6 +69,10 @@ name = "run_launch"
 path = "../../tests/database/run_launch.rs"
 
 [[test]]
+name = "run_binding"
+path = "../../tests/database/run_binding.rs"
+
+[[test]]
 name = "project_catalog"
 path = "../../tests/database/project_catalog.rs"
 
