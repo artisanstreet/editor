@@ -9,6 +9,7 @@
 
 pub mod attention;
 pub mod composer;
+pub mod conversation_projection;
 pub mod project_picker;
 pub mod proof;
 pub mod thread_list_selection;
