@@ -185,9 +185,9 @@ mod fixture {
                         // A refused TLS acceptance (for example the
                         // wrong-pin case) surfaces here as an ordinary
                         // establishment failure and must not panic the
-                        // fixture thread. Forwarding is stop-aware and
-                        // bounded so the thread join cannot hang on a
-                        // full channel.
+                        // fixture thread. Establishment and forwarding
+                        // each have a watchdog; the stop signal is checked
+                        // at the next accept, not during either wait.
                         match tokio::time::timeout(TEST_DEADLINE, incoming).await {
                             Ok(Ok(established)) => {
                                 let forwarded = tokio::time::timeout(

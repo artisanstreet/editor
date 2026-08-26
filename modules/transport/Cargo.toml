@@ -16,7 +16,12 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
+capnp.workspace = true
 rcgen.workspace = true
+
+[[test]]
+name = "client_session"
+path = "../../tests/transport/client_session.rs"
 
 [[test]]
 name = "server_dispatch"
