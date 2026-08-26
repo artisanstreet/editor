@@ -20,6 +20,7 @@ rust_library(
         "//modules/protocol:protocol",
         "//modules/transport:transport",
         "@crates//:getrandom",
+        "@crates//:quinn",
         "@crates//:sea-orm",
         "@crates//:thiserror",
         "@crates//:zeroize",
