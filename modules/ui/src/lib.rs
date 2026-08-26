@@ -6,6 +6,7 @@ pub mod button;
 pub mod card;
 pub mod icon;
 pub mod input_state;
+pub mod list_row;
 pub mod markdown;
 pub mod motion;
 pub mod progress;
