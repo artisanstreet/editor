@@ -14,12 +14,14 @@
 //! about ordinary Forge entry, wire startup, COM, or modal chooser behavior.
 //!
 //! Ownership: one [`ScenarioRun`] owns the sole stdin writer, the exact
-//! `Child`, and the joined stderr monitor together. Every exit path closes
-//! the writer, kills/reaps the child as needed, and only then joins the
-//! monitor—child death guarantees the bounded reader reaches EOF, so the
-//! join cannot deadlock. Child stdout is null so libtest progress cannot
-//! reach the readiness channel. Timeouts, watchdog expiry, malformed
-//! readiness, and trailing output are failures, never evidence.
+//! `Child`, and the stderr monitor together. Cleanup closes the writer and
+//! attempts to reap the child before joining the monitor. If the OS never
+//! confirms the child's exit, the fixture fails without starting another
+//! scenario; final best-effort Drop cannot guarantee cleanup and may detach
+//! the reader. With functioning process/pipe APIs, reaping precedes joining.
+//! Child stdout is null so libtest progress cannot reach the readiness
+//! channel. Timeouts, watchdog expiry, malformed readiness, and trailing
+//! output are failures, never evidence.
 
 use std::env;
 use std::io::{self, Read, Write};
@@ -129,7 +131,7 @@ impl StepFault {
             Self::WrongExitCode { expected, actual } => {
                 format!("wrong exit code: expected {expected}, got {actual:?}")
             }
-            Self::ReapIo => "explicit reap failed; child handle remains owned".to_owned(),
+            Self::ReapIo => "explicit reap failed; child exit was not observed".to_owned(),
             Self::MonitorJoin => "stderr monitor join failed".to_owned(),
             Self::UnexpectedTrailingDiagnostics { count } => {
                 format!("unexpected trailing stderr diagnostics: {count} bytes")
@@ -426,7 +428,6 @@ impl ScenarioRun {
         }
     }
 
-    /// Ordinary-path containment with fully reported cleanup faults.
     /// Ordinary-path containment with fully reported cleanup faults.
     ///
     /// Ordered custody: close the writer, then reap the child, and only on
