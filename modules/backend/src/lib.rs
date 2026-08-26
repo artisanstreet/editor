@@ -6,6 +6,7 @@ pub mod app;
 pub mod command_admission;
 pub mod connection;
 pub mod credential_authority;
+pub mod directory_controller;
 pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
@@ -24,6 +25,11 @@ pub use connection::{
 pub use credential_authority::{
     AuthenticatedCredential, CredentialAuthenticationError, CredentialAuthority,
     CredentialEntropyError, CredentialKind, PendingReconnect, ReconnectRotationError,
+};
+pub use directory_controller::{
+    AdmissionError, ControllerStartError, DirectoryController, DirectoryControllerConfig,
+    DirectoryPickOutcome, HealthState, HelperOperationError, OperationResult, PickOperation,
+    ShutdownReport,
 };
 // The directory helper keeps its surface private to this crate: only
 // `directory_helper::run_if_requested` is public, for `main` composition.
