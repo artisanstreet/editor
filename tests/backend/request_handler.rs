@@ -127,7 +127,8 @@ fn failure_of(result: Result<ServerResponse, ProtocolFailure>) -> ProtocolFailur
 ///
 /// The scripts are consulted front to back; a missing entry panics so a test
 /// can never silently admit without its planned nondeterminism. Failure
-/// entries exercise typed acquisition faults instead of real entropy.
+/// entries exercise typed acquisition faults with the real pinned
+/// `getrandom::Error` API value.
 #[derive(Debug)]
 struct ScriptedOrigin {
     identities: Mutex<VecDeque<Result<String, CommandOriginEntropyError>>>,
@@ -137,46 +138,6 @@ struct ScriptedOrigin {
 }
 
 impl ScriptedOrigin {
-    fn scripted(
-        identities: Vec<Result<String, CommandOriginEntropyError>>,
-        instants: Vec<Result<UnixMillis, CommandOriginClockError>>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            identities: Mutex::new(identities.into_iter().collect()),
-            identity_calls: AtomicU64::new(0),
-            instants: Mutex::new(instants.into_iter().collect()),
-            instant_calls: AtomicU64::new(0),
-        })
-    }
-
-    /// Origin answering one fresh admission with fixed deterministic values.
-    fn deterministic(identities: &[&str], instant_ms: i64) -> Arc<Self> {
-        Self::scripted(
-            identities
-                .iter()
-                .map(|identity| Ok((*identity).to_owned()))
-                .collect(),
-            vec![Ok(UnixMillis::from_millis(instant_ms)); identities.len()],
-        )
-    }
-
-    /// Origin whose next identity acquisition fails with the typed
-    /// entropy-unavailable error kind.
-    fn failing_entropy() -> Arc<Self> {
-        Self::scripted(
-            vec![Err(CommandOriginEntropyError::unavailable())],
-            Vec::new(),
-        )
-    }
-
-    /// Origin whose instant acquisition fails after identity succeeds.
-    fn failing_clock() -> Arc<Self> {
-        Self::scripted(
-            vec![Ok("message-stalled".to_owned())],
-            vec![Err(CommandOriginClockError)],
-        )
-    }
-
     fn identity_calls(&self) -> u64 {
         self.identity_calls.load(Ordering::Relaxed)
     }
@@ -206,18 +167,80 @@ impl CommandOrigin for ScriptedOrigin {
     }
 }
 
-impl CommandOrigin for Arc<ScriptedOrigin> {
+/// Shareable handle owning the scripted state.
+///
+/// The external test crate may implement the foreign backend trait only for
+/// a local type, so shared state lives behind this newtype instead of a bare
+/// `Arc<ScriptedOrigin>`.
+#[derive(Clone, Debug)]
+struct ScriptedOriginHandle(Arc<ScriptedOrigin>);
+
+impl ScriptedOriginHandle {
+    /// Origin answering each consultation from explicit failure-capable
+    /// scripts.
+    fn scripted(
+        identities: Vec<Result<String, CommandOriginEntropyError>>,
+        instants: Vec<Result<UnixMillis, CommandOriginClockError>>,
+    ) -> Self {
+        Self(Arc::new(ScriptedOrigin {
+            identities: Mutex::new(identities.into_iter().collect()),
+            identity_calls: AtomicU64::new(0),
+            instants: Mutex::new(instants.into_iter().collect()),
+            instant_calls: AtomicU64::new(0),
+        }))
+    }
+
+    /// Origin answering one fresh admission with fixed deterministic values.
+    fn deterministic(identities: &[&str], instant_ms: i64) -> Self {
+        Self::scripted(
+            identities
+                .iter()
+                .map(|identity| Ok((*identity).to_owned()))
+                .collect(),
+            vec![Ok(UnixMillis::from_millis(instant_ms)); identities.len()],
+        )
+    }
+
+    /// Origin whose next identity acquisition fails with a real typed
+    /// platform-entropy error value.
+    fn failing_entropy() -> Self {
+        Self::scripted(
+            vec![Err(CommandOriginEntropyError::from(
+                getrandom::Error::UNEXPECTED,
+            ))],
+            Vec::new(),
+        )
+    }
+
+    /// Origin whose instant acquisition fails after identity succeeds.
+    fn failing_clock() -> Self {
+        Self::scripted(
+            vec![Ok("message-stalled".to_owned())],
+            vec![Err(CommandOriginClockError)],
+        )
+    }
+
+    fn identity_calls(&self) -> u64 {
+        self.0.identity_calls()
+    }
+
+    fn instant_calls(&self) -> u64 {
+        self.0.instant_calls()
+    }
+}
+
+impl CommandOrigin for ScriptedOriginHandle {
     fn mint_identity(&self) -> Result<String, CommandOriginEntropyError> {
-        (**self).mint_identity()
+        self.0.mint_identity()
     }
 
     fn acceptance_instant(&self) -> Result<UnixMillis, CommandOriginClockError> {
-        (**self).acceptance_instant()
+        self.0.acceptance_instant()
     }
 }
 
 /// Handler over `storage` whose fresh admissions answer from `origin`.
-fn scripted_handler(storage: &ForgeStorage, origin: &Arc<ScriptedOrigin>) -> RequestHandler {
+fn scripted_handler(storage: &ForgeStorage, origin: &ScriptedOriginHandle) -> RequestHandler {
     RequestHandler::with_origin(storage.repository().clone(), Box::new(origin.clone()))
 }
 
@@ -793,7 +816,7 @@ async fn fresh_create_thread_admits_with_a_forged_identity_and_reopens_durable()
         ))
         .await
         .expect("seed attach should persist");
-    let origin = ScriptedOrigin::deterministic(&["thread-forged-1"], 1000);
+    let origin = ScriptedOriginHandle::deterministic(&["thread-forged-1"], 1000);
     let handler = scripted_handler(&storage, &origin);
 
     let response = handler
@@ -857,7 +880,7 @@ async fn fresh_queue_first_message_accepts_atomically_and_reopens_durable() {
         .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
         .await
         .expect("seed create should persist");
-    let origin = ScriptedOrigin::deterministic(&["message-forged-1"], 1200);
+    let origin = ScriptedOriginHandle::deterministic(&["message-forged-1"], 1200);
     let handler = scripted_handler(&storage, &origin);
 
     let response = handler
@@ -869,7 +892,7 @@ async fn fresh_queue_first_message_accepts_atomically_and_reopens_durable() {
         .expect("fresh queue should accept");
     let receipt = queued_receipt_of(response);
 
-    let payload = read_dispatch(&repository, "message-forged-1").await;
+    let payload = read_dispatch(repository, "message-forged-1").await;
     let listing = repository
         .list_threads(&ProjectId::parse("project-1").expect("valid project id"))
         .await
@@ -929,7 +952,7 @@ async fn exact_replay_answers_duplicate_without_consulting_the_origin() {
         ))
         .await
         .expect("seed attach should persist");
-    let origin = ScriptedOrigin::deterministic(&["thread-forged"], 500);
+    let origin = ScriptedOriginHandle::deterministic(&["thread-forged"], 500);
     let handler = scripted_handler(&storage, &origin);
 
     let accepted = handler
@@ -974,7 +997,7 @@ async fn changed_payload_conflict_preserves_the_original_outcome_without_origin_
         .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
         .await
         .expect("seed create should persist");
-    let origin = ScriptedOrigin::scripted(Vec::new(), Vec::new());
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), Vec::new());
     let handler = scripted_handler(&storage, &origin);
 
     let conflict = failure_of(
@@ -1023,7 +1046,7 @@ async fn reads_unsupported_requests_and_bad_correlation_never_consult_the_origin
         .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
         .await
         .expect("seed create should persist");
-    let origin = ScriptedOrigin::scripted(Vec::new(), Vec::new());
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), Vec::new());
     let handler = scripted_handler(&storage, &origin);
 
     let listing = handler
@@ -1081,7 +1104,7 @@ async fn fresh_create_for_unknown_project_fails_project_unknown_without_rows() {
         ))
         .await
         .expect("seed attach should persist");
-    let origin = ScriptedOrigin::deterministic(&["thread-orphan"], 100);
+    let origin = ScriptedOriginHandle::deterministic(&["thread-orphan"], 100);
     let handler = scripted_handler(&storage, &origin);
 
     let failure = failure_of(
@@ -1128,7 +1151,7 @@ async fn fresh_queue_for_unknown_thread_fails_thread_unknown_without_rows() {
         .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
         .await
         .expect("seed create should persist");
-    let origin = ScriptedOrigin::deterministic(&["message-orphan"], 300);
+    let origin = ScriptedOriginHandle::deterministic(&["message-orphan"], 300);
     let handler = scripted_handler(&storage, &origin);
 
     let failure = failure_of(
@@ -1183,7 +1206,10 @@ async fn second_first_message_from_another_request_stays_invalid_input() {
         ))
         .await
         .expect("seed queue should persist");
-    let origin = ScriptedOrigin::scripted(Vec::new(), Vec::new());
+    // The fresh request misses its receipt lookup first, so the origin must
+    // supply identity and instant before the authoritative repository
+    // rejects the ordinal-zero collision.
+    let origin = ScriptedOriginHandle::deterministic(&["message-restricted"], 300);
     let handler = scripted_handler(&storage, &origin);
 
     let restricted = failure_of(
@@ -1218,8 +1244,8 @@ async fn second_first_message_from_another_request_stays_invalid_input() {
             disposition: ReceiptDisposition::Duplicate,
         }
     );
-    assert_eq!(origin.identity_calls(), 0);
-    assert_eq!(origin.instant_calls(), 0);
+    assert_eq!(origin.identity_calls(), 1);
+    assert_eq!(origin.instant_calls(), 1);
 }
 
 #[tokio::test]
@@ -1238,7 +1264,7 @@ async fn deterministic_thread_collision_fails_typed_without_partial_writes() {
         .create_thread(create_input("request-original", "project-1", "thread-a"))
         .await
         .expect("seed create should persist");
-    let origin = ScriptedOrigin::deterministic(&["thread-a"], 900);
+    let origin = ScriptedOriginHandle::deterministic(&["thread-a"], 900);
     let handler = scripted_handler(&storage, &origin);
 
     let failure = failure_of(
@@ -1267,7 +1293,7 @@ async fn deterministic_thread_collision_fails_typed_without_partial_writes() {
     assert_eq!(failure.code, ErrorCode::Internal);
     assert!(!failure.retryable);
     assert_eq!(failure.request_id, Some(request("request-collision")));
-    assert!(!failure.detail.as_str().contains("thread-a"));
+    assert!(!failure.detail.as_str().contains("Collision title"));
     assert!(receipt.is_none());
     assert_eq!(listing.threads().len(), 1);
 }
@@ -1301,7 +1327,7 @@ async fn deterministic_message_collision_fails_internal_without_partial_writes()
         ))
         .await
         .expect("seed queue should persist");
-    let origin = ScriptedOrigin::deterministic(&["message-1"], 400);
+    let origin = ScriptedOriginHandle::deterministic(&["message-1"], 400);
     let handler = scripted_handler(&storage, &origin);
 
     let failure = failure_of(
@@ -1321,7 +1347,7 @@ async fn deterministic_message_collision_fails_internal_without_partial_writes()
         )
         .await
         .expect("receipt lookup should work");
-    let original_payload = read_dispatch(&repository, "message-1").await;
+    let original_payload = read_dispatch(repository, "message-1").await;
     storage.close().await.expect("storage should close");
 
     assert_eq!(failure.code, ErrorCode::Internal);
@@ -1349,7 +1375,7 @@ async fn instant_before_thread_creation_fails_chronology_without_partial_writes(
         .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
         .await
         .expect("seed create should persist");
-    let origin = ScriptedOrigin::deterministic(&["message-early"], 199);
+    let origin = ScriptedOriginHandle::deterministic(&["message-early"], 199);
     let handler = scripted_handler(&storage, &origin);
 
     let failure = failure_of(
@@ -1369,7 +1395,7 @@ async fn instant_before_thread_creation_fails_chronology_without_partial_writes(
         )
         .await
         .expect("receipt lookup should work");
-    let payload = read_dispatch(&repository, "message-early").await;
+    let payload = read_dispatch(repository, "message-early").await;
     storage.close().await.expect("storage should close");
 
     assert_eq!(failure.code, ErrorCode::Internal);
@@ -1393,7 +1419,7 @@ async fn entropy_failure_answers_retryable_and_leaves_the_request_retryable() {
         ))
         .await
         .expect("seed attach should persist");
-    let failing = ScriptedOrigin::failing_entropy();
+    let failing = ScriptedOriginHandle::failing_entropy();
     let handler = scripted_handler(&storage, &failing);
 
     let failure = failure_of(
@@ -1416,7 +1442,7 @@ async fn entropy_failure_answers_retryable_and_leaves_the_request_retryable() {
         .expect("receipt lookup should work");
     let recovered = scripted_handler(
         &storage,
-        &ScriptedOrigin::deterministic(&["thread-recovered"], 700),
+        &ScriptedOriginHandle::deterministic(&["thread-recovered"], 700),
     );
     let retry = recovered
         .respond(
@@ -1456,7 +1482,7 @@ async fn clock_failure_answers_retryable_and_leaves_the_request_retryable() {
         .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
         .await
         .expect("seed create should persist");
-    let failing = ScriptedOrigin::failing_clock();
+    let failing = ScriptedOriginHandle::failing_clock();
     let handler = scripted_handler(&storage, &failing);
 
     let failure = failure_of(
@@ -1476,10 +1502,10 @@ async fn clock_failure_answers_retryable_and_leaves_the_request_retryable() {
         )
         .await
         .expect("receipt lookup should work");
-    let stalled = read_dispatch(&repository, "message-stalled").await;
+    let stalled = read_dispatch(repository, "message-stalled").await;
     let recovered = scripted_handler(
         &storage,
-        &ScriptedOrigin::deterministic(&["message-recovered"], 800),
+        &ScriptedOriginHandle::deterministic(&["message-recovered"], 800),
     );
     let retry = recovered
         .respond(

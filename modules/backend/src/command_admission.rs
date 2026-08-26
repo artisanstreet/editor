@@ -45,24 +45,6 @@ pub struct CommandOriginEntropyError {
     source: getrandom::Error,
 }
 
-impl CommandOriginEntropyError {
-    /// Reports the entropy-unavailable failure kind with the provider's
-    /// unexpected-error placeholder.
-    ///
-    /// Production minting always constructs this error from the real
-    /// `getrandom::fill` result; injected origins use this constructor to
-    /// exercise the admission failure policy without linking the platform
-    /// provider themselves. Fabricating the error value claims no effect and
-    /// bypasses nothing: admission sequencing and repository authority stay
-    /// identical.
-    #[must_use]
-    pub fn unavailable() -> Self {
-        Self {
-            source: getrandom::Error::UNEXPECTED,
-        }
-    }
-}
-
 impl From<getrandom::Error> for CommandOriginEntropyError {
     fn from(source: getrandom::Error) -> Self {
         Self { source }

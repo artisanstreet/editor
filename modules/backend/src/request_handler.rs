@@ -22,7 +22,10 @@
 //! never consult it.
 
 use artisan_database::{CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError};
-use artisan_domain::{Command, DirectoryId, MessageId, Query, RequestId, ThreadId, UnixMillis};
+use artisan_domain::{
+    Command, CreateThread, DirectoryId, MessageId, Query, QueueFirstMessage, RequestId, ThreadId,
+    UnixMillis,
+};
 use artisan_protocol::{
     ClientRequest, ErrorCode, ErrorDetail, FirstMessageReceipt, ProtocolFailure, ResponsePayload,
     ServerResponse,
@@ -206,113 +209,132 @@ impl RequestHandler {
                 // directory registry, so the identity stays unknown.
                 Err(unknown_directory_failure(request_id, &attach.directory_id))
             }
-            Command::CreateThread(create) => {
-                if let Some(replay) = self
-                    .repository
-                    .lookup_create_thread(&create.request_id, &create.project_id, &create.title)
-                    .await
-                    .map_err(|error| repository_failure(&error, request_id))?
-                {
-                    return Ok(outcome(
-                        request_id,
-                        ResponsePayload::CreatedThread {
-                            thread: replay.thread,
-                            disposition: replay.receipt.disposition,
-                        },
-                    ));
-                }
-                // Fresh acceptance acquires the Forge thread identity and one
-                // shared creation instant only after replay lookup missed.
-                // The create-thread transaction stays authoritative: it
-                // repeats the lookup transactionally, resolves concurrent
-                // races into duplicate outcomes, and rejects unknown
-                // projects or colliding identities without any retry loop
-                // or timestamp repair here.
-                let identity = self
-                    .origin
-                    .mint_identity()
-                    .map_err(|error| origin_entropy_failure(&error, request_id))?;
-                let accepted_at = self
-                    .origin
-                    .acceptance_instant()
-                    .map_err(|error| origin_clock_failure(&error, request_id))?;
-                let thread_id = ThreadId::parse(identity)
-                    .map_err(|_| forged_identity_failure("thread", request_id))?;
-                let result = self
-                    .repository
-                    .create_thread(CreateThreadInput {
-                        request_id: create.request_id.clone(),
-                        thread_id,
-                        project_id: create.project_id.clone(),
-                        title: create.title.clone(),
-                        created_at: accepted_at,
-                        updated_at: accepted_at,
-                    })
-                    .await
-                    .map_err(|error| repository_failure(&error, request_id))?;
-                Ok(outcome(
-                    request_id,
-                    ResponsePayload::CreatedThread {
-                        thread: result.thread,
-                        disposition: result.receipt.disposition,
-                    },
-                ))
-            }
+            Command::CreateThread(create) => self.create_thread_outcome(request_id, create).await,
             Command::QueueFirstMessage(queue) => {
-                if let Some(replay) = self
-                    .repository
-                    .lookup_queue_first_message(&queue.request_id, &queue.thread_id, &queue.body)
-                    .await
-                    .map_err(|error| repository_failure(&error, request_id))?
-                {
-                    return Ok(outcome(
-                        request_id,
-                        ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
-                            request_id: replay.receipt.request_id,
-                            message_id: replay.message.message_id,
-                            thread_id: replay.message.thread_id,
-                            disposition: replay.receipt.disposition,
-                        }),
-                    ));
-                }
-                // Fresh acceptance mints the Forge message identity and one
-                // acceptance instant after replay lookup missed. The queueing
-                // transaction atomically persists message, receipt, recency,
-                // and queued outbox, so this answers queued acceptance —
-                // never engine completion — and a raced identical request
-                // converges on the original durable identity as Duplicate.
-                let identity = self
-                    .origin
-                    .mint_identity()
-                    .map_err(|error| origin_entropy_failure(&error, request_id))?;
-                let accepted_at = self
-                    .origin
-                    .acceptance_instant()
-                    .map_err(|error| origin_clock_failure(&error, request_id))?;
-                let message_id = MessageId::parse(identity)
-                    .map_err(|_| forged_identity_failure("message", request_id))?;
-                let result = self
-                    .repository
-                    .queue_first_message(QueueFirstMessageInput {
-                        request_id: queue.request_id.clone(),
-                        message_id,
-                        thread_id: queue.thread_id.clone(),
-                        body: queue.body.clone(),
-                        accepted_at,
-                    })
-                    .await
-                    .map_err(|error| repository_failure(&error, request_id))?;
-                Ok(outcome(
-                    request_id,
-                    ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
-                        request_id: result.receipt.request_id,
-                        message_id: result.message.message_id,
-                        thread_id: result.message.thread_id,
-                        disposition: result.receipt.disposition,
-                    }),
-                ))
+                self.queue_first_message_outcome(request_id, queue).await
             }
         }
+    }
+
+    /// Answers one create-thread mutation from its durable receipt or a
+    /// fresh Forge-minted thread.
+    ///
+    /// Fresh acceptance acquires the thread identity and one shared creation
+    /// instant only after replay lookup missed. The create-thread
+    /// transaction stays authoritative: it repeats the lookup
+    /// transactionally, resolves concurrent races into duplicate outcomes,
+    /// and rejects unknown projects or colliding identities without any
+    /// retry loop or timestamp repair here.
+    async fn create_thread_outcome(
+        &self,
+        request_id: &RequestId,
+        create: &CreateThread,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        if let Some(replay) = self
+            .repository
+            .lookup_create_thread(&create.request_id, &create.project_id, &create.title)
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?
+        {
+            return Ok(outcome(
+                request_id,
+                ResponsePayload::CreatedThread {
+                    thread: replay.thread,
+                    disposition: replay.receipt.disposition,
+                },
+            ));
+        }
+        let identity = self
+            .origin
+            .mint_identity()
+            .map_err(|error| origin_entropy_failure(&error, request_id))?;
+        let accepted_at = self
+            .origin
+            .acceptance_instant()
+            .map_err(|error| origin_clock_failure(error, request_id))?;
+        let thread_id =
+            ThreadId::parse(identity).map_err(|_| forged_identity_failure("thread", request_id))?;
+        let result = self
+            .repository
+            .create_thread(CreateThreadInput {
+                request_id: create.request_id.clone(),
+                thread_id,
+                project_id: create.project_id.clone(),
+                title: create.title.clone(),
+                created_at: accepted_at,
+                updated_at: accepted_at,
+            })
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?;
+        Ok(outcome(
+            request_id,
+            ResponsePayload::CreatedThread {
+                thread: result.thread,
+                disposition: result.receipt.disposition,
+            },
+        ))
+    }
+
+    /// Answers one first-message mutation from its durable receipt or a
+    /// fresh Forge-minted queued message.
+    ///
+    /// Fresh acceptance mints the message identity and one acceptance
+    /// instant after replay lookup missed. The queueing transaction
+    /// atomically persists message, receipt, recency, and queued outbox, so
+    /// this answers queued acceptance — never engine completion — and a
+    /// raced identical request converges on the original durable identity as
+    /// Duplicate.
+    async fn queue_first_message_outcome(
+        &self,
+        request_id: &RequestId,
+        queue: &QueueFirstMessage,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        if let Some(replay) = self
+            .repository
+            .lookup_queue_first_message(&queue.request_id, &queue.thread_id, &queue.body)
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?
+        {
+            return Ok(outcome(
+                request_id,
+                ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
+                    request_id: replay.receipt.request_id,
+                    message_id: replay.message.message_id,
+                    thread_id: replay.message.thread_id,
+                    disposition: replay.receipt.disposition,
+                }),
+            ));
+        }
+        let identity = self
+            .origin
+            .mint_identity()
+            .map_err(|error| origin_entropy_failure(&error, request_id))?;
+        let accepted_at = self
+            .origin
+            .acceptance_instant()
+            .map_err(|error| origin_clock_failure(error, request_id))?;
+        let message_id = MessageId::parse(identity)
+            .map_err(|_| forged_identity_failure("message", request_id))?;
+        let result = self
+            .repository
+            .queue_first_message(QueueFirstMessageInput {
+                request_id: queue.request_id.clone(),
+                message_id,
+                thread_id: queue.thread_id.clone(),
+                body: queue.body.clone(),
+                accepted_at,
+            })
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?;
+        Ok(outcome(
+            request_id,
+            ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
+                request_id: result.receipt.request_id,
+                message_id: result.message.message_id,
+                thread_id: result.message.thread_id,
+                disposition: result.receipt.disposition,
+            }),
+        ))
     }
 }
 
@@ -410,10 +432,7 @@ fn origin_entropy_failure(
 /// environmental and left nothing behind: conversion refuses to truncate or
 /// clamp, so the failure stays internal, payload-free, correlated, and
 /// retryable on the same terms as the entropy fault.
-fn origin_clock_failure(
-    error: &CommandOriginClockError,
-    request_id: &RequestId,
-) -> ProtocolFailure {
+fn origin_clock_failure(error: CommandOriginClockError, request_id: &RequestId) -> ProtocolFailure {
     typed_failure(
         ErrorCode::Internal,
         format!("fresh command could not acquire an acceptance instant: {error}"),

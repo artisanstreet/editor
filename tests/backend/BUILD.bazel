@@ -56,6 +56,7 @@ rust_test(
         "//modules/database:database",
         "//modules/domain:domain",
         "//modules/protocol:protocol",
+        "@crates//:getrandom",
         "@crates//:tokio",
     ],
     edition = "2024",
