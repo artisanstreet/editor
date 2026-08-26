@@ -28,22 +28,56 @@
 //! can assert the full contract without launching a window. The GPUI view is
 //! deliberately small and honest about pinned-GPUI limits: there is no
 //! platform accessibility tree yet, so the accessible name rides visible
-//! text; the `ShaderGlassSurface` material is deferred (INVENTORY §9), so the
-//! menu paints a solid popover surface; and floating placement is reduced to
-//! a fixed-width panel above the trigger instead of full collision machinery.
+//! text, and the `ShaderGlassSurface` material is deferred (INVENTORY §9), so
+//! the menu paints a solid popover surface.
+//!
+//! Placement and traversal use the audited pinned-GPUI primitives directly:
+//!
+//! - the trigger is a real tab stop (its focus handle carries
+//!   `tab_index(0)`/`tab_stop(true)`; pinned GPUI only syncs element-level
+//!   tab settings onto implicitly generated handles), so native
+//!   `Window::focus_next`/`focus_prev` traversal reaches it without pointer
+//!   help; disabling removes it from traversal while keeping it focusable;
+//! - the open menu mounts as a `deferred` layer so it paints above the
+//!   trigger, positioned by `anchored()` in window position mode against the
+//!   trigger shell's painted origin (recorded every frame by an invisible
+//!   probe element): `BottomLeft` corner with a `(0, -10)` offset reproduces
+//!   the legacy `side="top" align="start" sideOffset={10}` preferred
+//!   placement, and pinned `SwitchAnchor` fit flips the corner (horizontal,
+//!   then vertical) with every candidate staying attached to the real
+//!   trigger — window mode avoids the pinned Local-mode quirk that drops
+//!   the parent origin from flip candidates. Frames before the probe has
+//!   recorded an origin render nothing rather than risk detached placement;
+//! - the menu body is height-bounded and vertically scrollable. Known
+//!   pinned-GPUI quirks are handled rather than papered over: a fresh scroll
+//!   handle's first pending item is consumed before the handle has bounds,
+//!   so the initial reveal is re-issued on the following frame; the scroll
+//!   container maps one direct child per selectable row (the hairline
+//!   separator lives inside the final row group) so
+//!   `ScrollHandle::scroll_to_item` indexes stay aligned with [`PickerRow`]
+//!   addresses; and because the deferred menu lies outside the root hitbox,
+//!   the root's outside-press handler ignores presses inside the live menu
+//!   bounds so row activation wins the capture/bubble race.
+//!
+//! Behavior evidence comes from the pinned in-memory GPUI test harness
+//! (real painted bounds, focus, and scroll state); it is not OS-window,
+//! pixel, or platform-accessibility proof.
 
 #![allow(clippy::module_name_repetitions)]
 
+use std::cell::{Cell, RefCell};
 use std::mem;
+use std::rc::Rc;
 use std::time::Instant;
 
 use artisan_domain::ProjectId;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    ClickEvent, Context, Div, FocusHandle, InteractiveElement as _, KeyDownEvent, MouseDownEvent,
-    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, prelude::IntoElement, px,
+    AnyElement, ClickEvent, Context, Corner, Div, FocusHandle, InteractiveElement as _,
+    KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
+    SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _, Window, anchored,
+    canvas, deferred, div, point, prelude::FluentBuilder as _, prelude::IntoElement, px,
 };
 
 /// How long printable typeahead keeps accumulating before its buffer expires.
@@ -472,21 +506,93 @@ pub struct ProjectPickerView {
     theme: ArtisanTheme,
     trigger_focus: FocusHandle,
     menu_focus: FocusHandle,
+    /// Scroll state of the open menu body; one direct child per selectable
+    /// row keeps `scroll_to_item` indexes aligned with [`PickerRow`].
+    menu_scroll: ScrollHandle,
+    /// Painted window-space origin of the trigger shell, refreshed every
+    /// frame by an invisible probe element. Window-mode `anchored()` needs
+    /// this absolute position; pinned-GPUI Local mode drops the shell origin
+    /// in its flip candidates, which would detach a flipped menu from a
+    /// trigger that is not at the window origin.
+    trigger_origin: Rc<RefCell<Option<Point<Pixels>>>>,
+    /// Flat selectable-row address waiting to be revealed once the fresh
+    /// scroll handle has received real bounds. Pinned-GPUI consumes a
+    /// pending scroll item before a brand-new handle has overflow/bounds,
+    /// so the first-open reveal is carried out by the shell's paint-time
+    /// probe, which runs after the deferred menu's prepaint on the very
+    /// same frame.
+    initial_reveal_flat: Rc<Cell<Option<usize>>>,
     clock: Instant,
     last_action: Option<ProjectPickerAction>,
 }
 
 /// Painted width of the trigger row (proof geometry).
 const TRIGGER_WIDTH_PX: f32 = 280.0;
-/// Painted width of the open menu panel; the legacy `min(20rem, …)` clamp
-/// collapses to its 320 px bound inside the fixed proof surface.
+/// Preferred painted width of the open menu panel; the legacy
+/// `min(20rem, calc(100vw - 2rem))` clamp bound.
 const MENU_WIDTH_PX: f32 = 320.0;
+/// Horizontal viewport inset the legacy width clamp reserves (`2rem` total),
+/// so the panel never touches a window edge even when the preferred width
+/// cannot fit.
+const MENU_VIEWPORT_INSET_X_PX: f32 = 32.0;
+/// Bounded maximum menu body height. The legacy surface had no catalog large
+/// enough to overflow its window; this leaf deliberately bounds the panel and
+/// scrolls instead of squeezing long catalogs or overflowing the window.
+const MENU_MAX_HEIGHT_PX: f32 = 360.0;
+/// Vertical viewport inset reserved when bounding the menu height, mirroring
+/// the horizontal clamp so the bounded panel always fits with breathing room.
+const MENU_VIEWPORT_INSET_Y_PX: f32 = 32.0;
 /// Gap between the trigger and the panel above it (legacy `sideOffset={10}`).
+/// Applied only to the preferred placement; pinned-GPUI flip candidates use
+/// the raw anchor origin without the offset.
 const MENU_GAP_PX: f32 = 10.0;
 /// Debug selector painted on the trigger row.
 const TRIGGER_SELECTOR: &str = "artisan-project-picker-trigger";
 /// Debug selector painted on the open menu panel.
 const MENU_SELECTOR: &str = "artisan-project-picker-menu";
+/// Prefix of the debug selectors painted on selectable rows: project rows are
+/// suffixed with their catalog index, the final row with `-new`.
+const ROW_SELECTOR_PREFIX: &str = "artisan-project-picker-row";
+/// How close to the end of the catalog a freshly opened highlight must sit to
+/// ride the pinned first-frame-safe `scroll_to_bottom` flag instead of the
+/// pending-item path that fresh handles consume before they can scroll.
+const INITIAL_REVEAL_TAIL_BAND_ROWS: usize = 12;
+
+/// Menu panel width for a viewport: the legacy `min(20rem, 100vw - 2rem)`
+/// clamp, floored at zero for degenerate windows.
+fn menu_width_for_viewport(viewport: Size<Pixels>) -> Pixels {
+    let available = f32::from(viewport.width) - MENU_VIEWPORT_INSET_X_PX;
+    px(MENU_WIDTH_PX.min(available.max(0.0)))
+}
+
+/// Bounded menu body height for a viewport: the leaf maximum, clamped so the
+/// panel plus the reserved inset always fit inside the window.
+fn menu_max_height_for_viewport(viewport: Size<Pixels>) -> Pixels {
+    let available = f32::from(viewport.height) - MENU_VIEWPORT_INSET_Y_PX;
+    px(MENU_MAX_HEIGHT_PX.min(available.max(0.0)))
+}
+
+/// Directly scrolls the selectable row at child index `flat` into the scroll
+/// container, mirroring pinned-GPUI's `FirstVisible` strategy against the
+/// handle's measured geometry. Runs at paint time for the fresh-handle
+/// first-open reveal, after the deferred menu's prepaint has populated real
+/// bounds on this very frame.
+fn scroll_row_into_view(handle: &ScrollHandle, flat: usize) {
+    let Some(item_bounds) = handle.bounds_for_item(flat) else {
+        return;
+    };
+    let container = handle.bounds();
+    if container.size.width <= px(0.0) && container.size.height <= px(0.0) {
+        return;
+    }
+    let mut offset = handle.offset();
+    if item_bounds.top() + offset.y < container.top() {
+        offset.y = container.top() - item_bounds.top();
+    } else if item_bounds.bottom() + offset.y > container.bottom() {
+        offset.y = container.bottom() - item_bounds.bottom();
+    }
+    handle.set_offset(offset);
+}
 
 impl ProjectPickerView {
     /// Builds the view over an initial catalog and current project.
@@ -499,8 +605,15 @@ impl ProjectPickerView {
         Self {
             state: ProjectPickerState::new(projects, current),
             theme: ArtisanTheme::for_mode(mode),
-            trigger_focus: cx.focus_handle(),
+            // Pinned GPUI only applies element-level `tab_index`/`tab_stop`
+            // to implicitly generated handles; an explicitly tracked handle
+            // must carry its own tab settings, or paint inserts it into the
+            // stop map with `tab_stop: false` and traversal skips it forever.
+            trigger_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             menu_focus: cx.focus_handle(),
+            menu_scroll: ScrollHandle::new(),
+            trigger_origin: Rc::new(RefCell::new(None)),
+            initial_reveal_flat: Rc::new(Cell::new(None)),
             clock: Instant::now(),
             last_action: None,
         }
@@ -512,10 +625,37 @@ impl ProjectPickerView {
         &self.state
     }
 
+    /// The trigger's focus handle: the tab stop a real traversal must land on
+    /// while the menu is closed, and the restoration target after dismissal.
+    #[must_use]
+    pub fn trigger_focus(&self) -> &FocusHandle {
+        &self.trigger_focus
+    }
+
+    /// The open menu panel's focus handle.
+    #[must_use]
+    pub fn menu_focus(&self) -> &FocusHandle {
+        &self.menu_focus
+    }
+
     /// The last action this view drained and applied, if any.
     #[must_use]
     pub fn last_action(&self) -> Option<ProjectPickerAction> {
         self.last_action.clone()
+    }
+
+    /// Sets whether the trigger refuses interaction.
+    ///
+    /// Disabling while a menu is open closes it immediately, without
+    /// emitting any action. This minimal view seam lets real controllers
+    /// (and native probes) drive the leaf the same way they drive its state
+    /// model.
+    pub fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        self.state.set_disabled(disabled);
+        if disabled {
+            self.initial_reveal_flat.set(None);
+        }
+        cx.notify();
     }
 
     fn now_ms(&self) -> u64 {
@@ -531,19 +671,6 @@ impl ProjectPickerView {
         self.state.press_trigger();
         self.sync_focus_after_transition(window);
         cx.notify();
-    }
-
-    fn handle_trigger_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-            self.state.press_trigger();
-            self.sync_focus_after_transition(window);
-            cx.notify();
-        }
     }
 
     fn handle_menu_key(
@@ -601,20 +728,29 @@ impl ProjectPickerView {
         }
 
         if handled {
+            self.reveal_highlight();
             cx.notify();
         }
     }
 
     fn handle_outside_press(
         &mut self,
-        _: &MouseDownEvent,
+        event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.state.is_open() {
-            self.dismiss_and_settle(window);
-            cx.notify();
+        if !self.state.is_open() {
+            return;
         }
+        // The deferred menu paints outside the root hitbox, and this capture
+        // handler fires whenever the press misses the root — including
+        // presses on menu rows. A press inside the live menu bounds belongs
+        // to row activation and must win; everything else dismisses.
+        if self.menu_scroll.bounds().contains(&event.position) {
+            return;
+        }
+        self.dismiss_and_settle(window);
+        cx.notify();
     }
 
     fn choose_row(&mut self, row: PickerRow, window: &mut Window, cx: &mut Context<Self>) {
@@ -631,13 +767,50 @@ impl ProjectPickerView {
 
     /// Refocuses whichever surface owns the keyboard after an open/close
     /// transition: the menu while open, the trigger once closed (minimal
-    /// capture/restore policy for this leaf).
+    /// capture/restore policy for this leaf). Opening also arms a first-open
+    /// reveal of the initial highlight, which may sit far below the fold of
+    /// a long catalog.
     fn sync_focus_after_transition(&mut self, window: &mut Window) {
         if self.state.is_open() {
             window.focus(&self.menu_focus);
+            // Immediate attempt: harmless once the handle has bounds from an
+            // earlier open. Fresh handles consume a pending item before they
+            // have overflow/bounds, so tail-band highlights (including the
+            // final row behind its separator) ride the pinned
+            // first-frame-safe scroll_to_bottom flag instead, and other
+            // rows fall back to the paint-probe correction below.
+            let project_count = self.state.projects().len();
+            let flat = self
+                .state
+                .highlighted_row()
+                .map_or(0, |row| row.to_flat_index(project_count));
+            if flat + INITIAL_REVEAL_TAIL_BAND_ROWS > project_count {
+                self.menu_scroll.scroll_to_bottom();
+            } else {
+                self.initial_reveal_flat.set(Some(flat));
+            }
+            self.reveal_highlight();
         } else {
+            self.initial_reveal_flat.set(None);
             window.focus(&self.trigger_focus);
         }
+    }
+
+    /// Scrolls the menu body minimally so the highlighted row is inside the
+    /// bounded panel. The scroll container maps one direct child per
+    /// selectable row, so the flat row address doubles as the child index.
+    /// Pending scroll targets are consumed at prepaint; calling this while
+    /// closed or after a close is a no-op.
+    fn reveal_highlight(&mut self) {
+        if !self.state.is_open() {
+            return;
+        }
+        let project_count = self.state.projects().len();
+        let flat = self
+            .state
+            .highlighted_row()
+            .map_or(0, |row| row.to_flat_index(project_count));
+        self.menu_scroll.scroll_to_item(flat);
     }
 
     /// Applies drained actions: `Choose` repoints the surface (this view
@@ -663,13 +836,21 @@ impl ProjectPickerView {
         let surface = self.theme.colors.muted.to_paint();
         let disabled = self.state.is_disabled();
 
+        // A disabled trigger keeps its tab-index order position but leaves
+        // traversal, matching its refusal to open; the write goes through
+        // the shared FocusMap entry the paint-time stop insertion reads.
+        self.trigger_focus.clone().tab_stop(!disabled);
+
         div()
             .id("project-picker-trigger")
             .track_focus(&self.trigger_focus)
             .debug_selector(|| TRIGGER_SELECTOR.to_string())
+            // Keyboard activation rides GPUI's synthesized unmodified
+            // Enter/Space clicks for the focused element (the same channel
+            // the audited Button uses), so pointer and keyboard share one
+            // toggle path and cannot double-fire.
             .when(!disabled, |row| {
                 row.on_click(cx.listener(Self::handle_trigger_click))
-                    .on_key_down(cx.listener(Self::handle_trigger_key))
             })
             .flex()
             .items_center()
@@ -696,26 +877,36 @@ impl ProjectPickerView {
             )
     }
 
-    fn render_menu(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
+    /// Renders the open menu as a deferred `anchored()` layer in window
+    /// position mode against the captured trigger origin: preferred
+    /// `BottomLeft` placement with the legacy `(0, -10)` top/start
+    /// separation, pinned `SwitchAnchor` flip (horizontal, then vertical)
+    /// for collision — which in window mode keeps every candidate attached
+    /// to the real trigger — and a height-bounded vertically scrollable
+    /// body. The hairline separator is folded into the final row group so
+    /// every direct child of the scroll container addresses exactly one
+    /// selectable row. Frames before the probe has recorded the trigger
+    /// origin render nothing rather than risk detached placement.
+    fn render_menu(&self, viewport: Size<Pixels>, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.state.is_open() {
             return None;
         }
+        let trigger_origin = self.trigger_origin.borrow().as_ref().copied()?;
 
         let popover = self.theme.colors.popover.to_paint();
         let border = self.theme.colors.border.to_paint();
 
-        let mut column = div()
+        let mut body = div()
             .id("project-picker-menu")
             .track_focus(&self.menu_focus)
             .debug_selector(|| MENU_SELECTOR.to_string())
             .on_key_down(cx.listener(Self::handle_menu_key))
             .flex()
             .flex_col()
-            .absolute()
-            .bottom_full()
-            .left_0()
-            .w(px(MENU_WIDTH_PX))
-            .mb(px(MENU_GAP_PX))
+            .overflow_y_scroll()
+            .track_scroll(&self.menu_scroll)
+            .w(menu_width_for_viewport(viewport))
+            .max_h(menu_max_height_for_viewport(viewport))
             .p(px(4.0))
             .rounded(px(16.0))
             .bg(popover)
@@ -723,18 +914,32 @@ impl ProjectPickerView {
             .border_color(border);
 
         for index in 0..self.state.projects().len() {
-            column = column.child(self.render_project_row(index, cx));
+            body = body.child(self.render_project_row(index, cx));
         }
 
-        // The rule that makes the last row a different kind of thing
-        // (legacy hairline at 50% border alpha).
-        column = column.child(
-            separator(border, SeparatorAxis::Horizontal)
-                .my(px(4.0))
-                .mx(px(4.0)),
+        // The rule that makes the last row a different kind of thing (legacy
+        // hairline at 50% border alpha), grouped with the final row so the
+        // scroll container keeps one child per selectable address.
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    separator(border, SeparatorAxis::Horizontal)
+                        .my(px(4.0))
+                        .mx(px(4.0)),
+                )
+                .child(self.render_new_project_row(cx)),
         );
 
-        Some(column.child(self.render_new_project_row(cx)))
+        Some(
+            anchored()
+                .anchor(Corner::BottomLeft)
+                .position(trigger_origin)
+                .offset(point(px(0.0), px(-MENU_GAP_PX)))
+                .child(body)
+                .into_any_element(),
+        )
     }
 
     fn render_project_row(&self, index: usize, cx: &Context<Self>) -> Stateful<Div> {
@@ -786,6 +991,10 @@ impl ProjectPickerView {
 
     fn render_selectable_row(&self, row: PickerRow, cx: &Context<Self>) -> Stateful<Div> {
         let highlighted = self.state.highlighted_row() == Some(row);
+        let selector = match row {
+            PickerRow::Project(index) => format!("{ROW_SELECTOR_PREFIX}-{index}"),
+            PickerRow::NewProject => format!("{ROW_SELECTOR_PREFIX}-new"),
+        };
         div()
             .id(match row {
                 PickerRow::Project(index) => SharedString::from(format!("project-row-{index}")),
@@ -802,6 +1011,7 @@ impl ProjectPickerView {
             .px(px(8.0))
             .py(px(6.0))
             .rounded(px(12.0))
+            .debug_selector(move || selector.clone())
             .when(highlighted, |entry| {
                 entry.bg(self.theme.colors.accent.to_paint())
             })
@@ -817,17 +1027,61 @@ impl ProjectPickerView {
 }
 
 impl Render for ProjectPickerView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let menu = self.render_menu(cx);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size();
+        let menu = self.render_menu(viewport, cx);
         let trigger = self.render_trigger(cx);
 
+        // Invisible probe overlaying the trigger shell records its painted
+        // window-space origin every frame — pinned flip candidates drop
+        // contextual origins, so the anchored menu reads the last recorded
+        // value to stay trigger-relative. The same paint hook carries the
+        // fresh-handle first-open reveal: deferred menus prepaint before
+        // ancestors paint, so by this point the scroll handle already holds
+        // this frame's real geometry.
+        let probe_origin = Rc::clone(&self.trigger_origin);
+        let probe_reveal = Rc::clone(&self.initial_reveal_flat);
+        let probe_scroll = self.menu_scroll.clone();
+        let probe = canvas(
+            {
+                let probe_origin = Rc::clone(&probe_origin);
+                move |bounds, _, _| *probe_origin.borrow_mut() = Some(bounds.origin)
+            },
+            {
+                let probe_origin = Rc::clone(&probe_origin);
+                move |bounds, (), window, _| {
+                    *probe_origin.borrow_mut() = Some(bounds.origin);
+                    if let Some(flat) = probe_reveal.take() {
+                        // The deferred menu baked this frame's prepaint-time
+                        // offset already; correct it and refresh once so the
+                        // next frame paints the revealed row.
+                        scroll_row_into_view(&probe_scroll, flat);
+                        window.refresh();
+                    }
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+
+        // The leaf root owns the tab group that scopes the trigger's native
+        // traversal order and the outside-press dismissal boundary; the
+        // shell hugs the trigger so the probe's bounds are exactly the
+        // shell's, and the deferred menu paints above both.
         div()
             .id("project-picker-root")
+            .tab_group()
             .on_mouse_down_out(cx.listener(Self::handle_outside_press))
-            .relative()
             .flex()
             .flex_col()
-            .children(menu)
-            .child(trigger)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(probe)
+                    .children(menu.map(deferred))
+                    .child(trigger),
+            )
     }
 }

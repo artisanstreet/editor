@@ -4,6 +4,9 @@
 //! remain feasibility-only proof material for the real Windows GPUI stack.
 //! The embedded project picker is the first product-specific native leaf and
 //! follows the audited interaction contract in `docs/ui/INVENTORY.md` §6.2.
+//! The host also owns the application-level Tab/Shift+Tab traversal route
+//! (`bind_proof_actions`): GPUI supplies no automatic Tab binding, so real
+//! keyboard reachability of the picker trigger runs through this surface.
 
 use std::cell::Cell;
 use std::process::ExitCode;
@@ -18,8 +21,26 @@ use gpui::{
     px, rgb, size,
 };
 
-// Feasibility-only quit action exercising the `actions!` macro registry.
-actions!(proof, [Quit]);
+// Feasibility-only quit action exercising the `actions!` macro registry, plus
+// the proof surface's own application Tab/Shift+Tab traversal route: GPUI has
+// no automatic Tab binding, so every real host owns one.
+actions!(proof, [Quit, NextTabStop, PreviousTabStop]);
+
+/// Key context scoping the proof host's Tab/Shift+Tab bindings.
+const PROOF_KEY_CONTEXT: &str = "artisan-proof";
+
+/// Binds the complete proof-host keymap: feasibility quit plus the
+/// application-level Tab/Shift+Tab routing to the window-native traversal
+/// engine. Shared verbatim by the real proof entry point and the native
+/// probes so reachability coverage executes the actual host semantics.
+pub fn bind_proof_actions(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("tab", NextTabStop, Some(PROOF_KEY_CONTEXT)),
+        KeyBinding::new("shift-tab", PreviousTabStop, Some(PROOF_KEY_CONTEXT)),
+    ]);
+}
 
 /// Feasibility-only window title.
 const WINDOW_TITLE: &str = "Artisan — phase 1 GPUI proof";
@@ -35,17 +56,69 @@ const FOREGROUND: u32 = 0xE8_EA_ED;
 const MUTED: u32 = 0x8A_93_9E;
 
 /// Minimal interactive entity rendered inside the proof window.
-struct ProofSurface {
+pub struct ProofSurface {
     focus_handle: FocusHandle,
     clicks: usize,
     /// The native project-picker leaf hosted by this feasibility surface.
     picker: Entity<project_picker::ProjectPickerView>,
 }
 
+impl ProofSurface {
+    /// Builds the proof surface exactly as the real entry point does:
+    /// focused root, fresh click counter, and a picker leaf over the proof
+    /// catalog with the first attachment current. Public so native probes
+    /// mount the genuine host rather than a copy of its wiring.
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window);
+        let (projects, current) = proof_catalog();
+        let picker = cx.new(|picker_cx| {
+            project_picker::ProjectPickerView::new(
+                projects,
+                current,
+                artisan_ui::theme::ThemeMode::Dark,
+                picker_cx,
+            )
+        });
+        Self {
+            focus_handle,
+            clicks: 0,
+            picker,
+        }
+    }
+
+    /// The embedded project-picker leaf.
+    #[must_use]
+    pub fn picker(&self) -> &Entity<project_picker::ProjectPickerView> {
+        &self.picker
+    }
+
+    /// The proof surface's own tracked focus handle (its startup focus).
+    #[must_use]
+    pub fn root_focus(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
+    /// Number of pointer presses recorded on the proof surface so far.
+    #[must_use]
+    pub fn clicks(&self) -> usize {
+        self.clicks
+    }
+
+    /// Records one pointer press to prove event dispatch reaches entities.
+    fn handle_press(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.clicks += 1;
+        cx.notify();
+    }
+}
+
 impl Render for ProofSurface {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .track_focus(&self.focus_handle)
+            .key_context(PROOF_KEY_CONTEXT)
+            .on_action(|_: &NextTabStop, window, _| window.focus_next())
+            .on_action(|_: &PreviousTabStop, window, _| window.focus_prev())
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_press))
             .flex()
             .flex_col()
@@ -71,14 +144,6 @@ impl Render for ProofSurface {
                     .text_color(rgb(MUTED))
                     .child(picker_summary(self.picker.read(cx).last_action())),
             )
-    }
-}
-
-impl ProofSurface {
-    /// Records one pointer press to prove event dispatch reaches entities.
-    fn handle_press(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.clicks += 1;
-        cx.notify();
     }
 }
 
@@ -116,10 +181,7 @@ pub fn run() -> ExitCode {
     let launch_flag = Rc::clone(&launched);
 
     Application::new().run(move |cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("ctrl-q", Quit, None),
-        ]);
+        bind_proof_actions(cx);
         // Fallback dispatcher when no focused element handles `Quit`.
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx| {
@@ -139,26 +201,7 @@ pub fn run() -> ExitCode {
                 }),
                 ..Default::default()
             },
-            |window, cx| {
-                cx.new(|cx| {
-                    let focus_handle = cx.focus_handle();
-                    focus_handle.focus(window);
-                    let (projects, current) = proof_catalog();
-                    let picker = cx.new(|picker_cx| {
-                        project_picker::ProjectPickerView::new(
-                            projects,
-                            current,
-                            artisan_ui::theme::ThemeMode::Dark,
-                            picker_cx,
-                        )
-                    });
-                    ProofSurface {
-                        focus_handle,
-                        clicks: 0,
-                        picker,
-                    }
-                })
-            },
+            |window, cx| cx.new(|cx| ProofSurface::new(window, cx)),
         );
 
         match opened {
