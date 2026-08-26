@@ -3,9 +3,10 @@
 //! This crate owns the application-domain vocabulary of the first native
 //! end-to-end workflow: attach one Forge-visible directory by opaque identity,
 //! create a project-scoped thread, and durably queue the first bounded text
-//! message behind an accepted-or-duplicate receipt. Engine dispatch is
-//! explicitly outside this milestone, so no engine, run, or provider concept
-//! appears anywhere in the crate.
+//! message behind an accepted-or-duplicate receipt. Engine dispatch and
+//! execution stay outside the crate: the conversation vocabulary stores
+//! assistant output under an opaque Forge-minted run routing id, but models
+//! no engine, provider, or run-lifecycle state.
 //!
 //! Structure:
 //!
@@ -14,6 +15,8 @@
 //!   them: clients mint only [`RequestId`], Forge mints everything else;
 //! - [`text`] holds bounded display and message values;
 //! - [`model`] holds listed and durable state values;
+//! - [`conversation`] holds renderer snapshots, replay batches, and both
+//!   durable item kinds;
 //! - [`commands`] and [`events`] hold the workflow's mutations with their
 //!   request correlation and its durable facts;
 //! - [`time`] carries the schema's signed Unix epoch milliseconds.
@@ -46,6 +49,7 @@ pub use commands::{
     ListProjectThreads, Query, QueueFirstMessage,
 };
 pub use conversation::{
+    AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
     ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
     ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
@@ -55,8 +59,8 @@ pub use conversation::{
 };
 pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
 pub use identifiers::{
-    DirectoryId, IdentifierError, ItemId, MessageId, PatchId, ProjectId, RequestId, ThreadId,
-    TurnId,
+    DirectoryId, IdentifierError, ItemId, MessageId, PatchId, ProjectId, RequestId, RunId,
+    ThreadId, TurnId,
 };
 pub use model::{
     CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,

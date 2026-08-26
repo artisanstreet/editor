@@ -567,6 +567,9 @@ fn assert_full_snapshot_response(bytes: &[u8], message_id: &str) -> capnp::Resul
                                 ConversationLifecycle::Completed,
                             )?;
                         }
+                        conversation_item::Which::AssistantMessage(_) => {
+                            panic!("unexpected assistantMessage item in a user fixture")
+                        }
                         conversation_item::Which::Unmodeled(()) => {
                             panic!("expected userMessage item")
                         }
@@ -866,6 +869,9 @@ fn round_trips_upsert_patch_variants_in_one_batch() -> capnp::Result<()> {
                                 REVISION_ZERO,
                                 ConversationLifecycle::Completed,
                             )?;
+                        }
+                        conversation_item::Which::AssistantMessage(_) => {
+                            panic!("unexpected assistantMessage item in a user fixture")
                         }
                         conversation_item::Which::Unmodeled(()) => {
                             panic!("expected userMessage item")
@@ -1291,6 +1297,9 @@ fn duplicate_identity_snapshots_stay_representable() -> capnp::Result<()> {
                         conversation_item::Which::UserMessage(message) => {
                             assert_eq!(message?.get_item_id()?, ITEM_ID_A);
                         }
+                        conversation_item::Which::AssistantMessage(_) => {
+                            panic!("unexpected assistantMessage item in a user fixture")
+                        }
                         conversation_item::Which::Unmodeled(()) => {
                             panic!("expected userMessage item")
                         }
@@ -1361,6 +1370,9 @@ fn unknown_turn_reference_snapshot_stays_representable() -> capnp::Result<()> {
                         assert_eq!(message.get_item_id()?, ITEM_ID_B);
                         assert_eq!(message.get_turn_id()?, TURN_ID_UNKNOWN);
                         assert_eq!(message.get_ordinal(), 0);
+                    }
+                    conversation_item::Which::AssistantMessage(_) => {
+                        panic!("unexpected assistantMessage item in a user fixture")
                     }
                     conversation_item::Which::Unmodeled(()) => {
                         panic!("expected userMessage item")

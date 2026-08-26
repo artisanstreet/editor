@@ -69,6 +69,17 @@ rust_test(
 )
 
 rust_test(
+    name = "assistant_message_test",
+    srcs = ["assistant_message.rs"],
+    crate_name = "assistant_message_test",
+    deps = ["//modules/domain:domain"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "project_listing_test",
     srcs = ["project_listing.rs"],
     crate_name = "project_listing_test",

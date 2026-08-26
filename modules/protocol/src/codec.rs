@@ -1,7 +1,8 @@
 //! Total conversion between owned protocol values and generated Cap'n Proto.
 
 use artisan_domain::{
-    AttachProject, CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS, Command,
+    AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase, AttachProject,
+    CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS, Command,
     ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
     ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
@@ -14,9 +15,9 @@ use artisan_domain::{
     PatchBatch, PatchBatchError, PatchId, PatchSequence, PlaceKind, ProjectAttached, ProjectId,
     ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
     QueryTurnCountError, QueueFirstMessage, QueuedMessage, ReceiptDisposition, RequestId, Revision,
-    RootPath, RootPathError, THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing,
-    ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal,
-    UnixMillis, UserMessageItem,
+    RootPath, RootPathError, RunId, THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId,
+    ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId,
+    TurnOrdinal, UnixMillis, UserMessageItem,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -160,6 +161,13 @@ pub enum ProtocolDecodeError {
         #[source]
         source: MessageBodyError,
     },
+    /// An assistant body failed its domain bound.
+    #[error("invalid assistant body: {source}")]
+    AssistantBody {
+        /// Domain text failure.
+        #[source]
+        source: AssistantBodyError,
+    },
     /// Directory collection bounds were exceeded.
     #[error("invalid directory listing: {source}")]
     DirectoryListing {
@@ -262,6 +270,12 @@ impl From<ReconnectCapabilityError> for ProtocolDecodeError {
 impl From<VersionOfferError> for ProtocolDecodeError {
     fn from(source: VersionOfferError) -> Self {
         Self::VersionOffer { source }
+    }
+}
+
+impl From<AssistantBodyError> for ProtocolDecodeError {
+    fn from(source: AssistantBodyError) -> Self {
+        Self::AssistantBody { source }
     }
 }
 
@@ -401,6 +415,10 @@ fn parse_item_id(value: String, field: &'static str) -> Result<ItemId, ProtocolD
 
 fn parse_patch_id(value: String, field: &'static str) -> Result<PatchId, ProtocolDecodeError> {
     PatchId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
+}
+
+fn parse_run_id(value: String, field: &'static str) -> Result<RunId, ProtocolDecodeError> {
+    RunId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
 }
 
 fn encode_body(
@@ -805,6 +823,19 @@ fn encode_conversation_item(
             encoded.set_created_at_millis(message.created_at.as_millis());
             encoded.set_updated_at_millis(message.updated_at.as_millis());
         }
+        ConversationItem::AssistantMessage(message) => {
+            let mut encoded = builder.init_assistant_message();
+            encoded.set_item_id(message.item_id.as_str());
+            encoded.set_turn_id(message.turn_id.as_str());
+            encoded.set_run_id(message.run_id.as_str());
+            encoded.set_ordinal(message.ordinal.get());
+            encoded.set_revision(message.revision.get());
+            encoded.set_lifecycle(encode_conversation_lifecycle(message.lifecycle));
+            encoded.set_body(message.body.as_str());
+            encoded.set_phase(encode_assistant_message_phase(message.phase));
+            encoded.set_created_at_millis(message.created_at.as_millis());
+            encoded.set_updated_at_millis(message.updated_at.as_millis());
+        }
     }
 }
 
@@ -890,6 +921,16 @@ const fn encode_conversation_lifecycle(
         ConversationLifecycle::Failed => artisan_capnp::ConversationLifecycle::Failed,
         ConversationLifecycle::Interrupted => artisan_capnp::ConversationLifecycle::Interrupted,
         ConversationLifecycle::Cancelled => artisan_capnp::ConversationLifecycle::Cancelled,
+    }
+}
+
+const fn encode_assistant_message_phase(
+    value: AssistantMessagePhase,
+) -> artisan_capnp::AssistantMessagePhase {
+    match value {
+        AssistantMessagePhase::Unspecified => artisan_capnp::AssistantMessagePhase::Unspecified,
+        AssistantMessagePhase::Commentary => artisan_capnp::AssistantMessagePhase::Commentary,
+        AssistantMessagePhase::Final => artisan_capnp::AssistantMessagePhase::Final,
     }
 }
 
@@ -1625,6 +1666,43 @@ fn decode_conversation_item(
                 updated_at: UnixMillis::from_millis(message.get_updated_at_millis()),
             }))
         }
+        conversation_item::Which::AssistantMessage(message) => {
+            let message = message?;
+            Ok(ConversationItem::AssistantMessage(AssistantMessageItem {
+                item_id: parse_item_id(
+                    read_text(
+                        message.get_item_id(),
+                        "conversationItem.assistantMessage.itemId",
+                    )?,
+                    "conversationItem.assistantMessage.itemId",
+                )?,
+                turn_id: parse_turn_id(
+                    read_text(
+                        message.get_turn_id(),
+                        "conversationItem.assistantMessage.turnId",
+                    )?,
+                    "conversationItem.assistantMessage.turnId",
+                )?,
+                run_id: parse_run_id(
+                    read_text(
+                        message.get_run_id(),
+                        "conversationItem.assistantMessage.runId",
+                    )?,
+                    "conversationItem.assistantMessage.runId",
+                )?,
+                ordinal: ItemOrdinal::new(message.get_ordinal()),
+                revision: Revision::new(message.get_revision()),
+                lifecycle: decode_conversation_lifecycle(message.get_lifecycle()?),
+                body: AssistantBody::parse(read_text(
+                    message.get_body(),
+                    "conversationItem.assistantMessage.body",
+                )?)
+                .map_err(|source| ProtocolDecodeError::AssistantBody { source })?,
+                phase: decode_assistant_message_phase(message.get_phase()?),
+                created_at: UnixMillis::from_millis(message.get_created_at_millis()),
+                updated_at: UnixMillis::from_millis(message.get_updated_at_millis()),
+            }))
+        }
         conversation_item::Which::Unmodeled(()) => {
             Err(ProtocolDecodeError::UnmodeledConversationItem)
         }
@@ -1746,6 +1824,16 @@ const fn decode_conversation_lifecycle(
         artisan_capnp::ConversationLifecycle::Failed => ConversationLifecycle::Failed,
         artisan_capnp::ConversationLifecycle::Interrupted => ConversationLifecycle::Interrupted,
         artisan_capnp::ConversationLifecycle::Cancelled => ConversationLifecycle::Cancelled,
+    }
+}
+
+const fn decode_assistant_message_phase(
+    value: artisan_capnp::AssistantMessagePhase,
+) -> AssistantMessagePhase {
+    match value {
+        artisan_capnp::AssistantMessagePhase::Unspecified => AssistantMessagePhase::Unspecified,
+        artisan_capnp::AssistantMessagePhase::Commentary => AssistantMessagePhase::Commentary,
+        artisan_capnp::AssistantMessagePhase::Final => AssistantMessagePhase::Final,
     }
 }
 

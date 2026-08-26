@@ -1,9 +1,17 @@
 //! Conversation snapshots and bounded replay values.
 //!
 //! This module carries only renderer-facing durable state. It intentionally
-//! stops before runs, engines, providers, dispatch, and storage. Forge mints
-//! entity and patch identities; counters express ordering without conflating
-//! identities with positions.
+//! stops before engines, providers, dispatch, and storage; the single run
+//! reference it carries is the opaque Forge-minted run routing identity on
+//! assistant items, never run execution state. Forge mints entity and patch
+//! identities; counters express ordering without conflating identities with
+//! positions.
+
+mod assistant_message;
+
+pub use assistant_message::{
+    AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
+};
 
 use std::collections::HashSet;
 
@@ -319,6 +327,8 @@ pub struct UserMessageItem {
 pub enum ConversationItem {
     /// Canonical user input durably queued before any engine dispatch.
     UserMessage(UserMessageItem),
+    /// Assistant output durably stored under the run that produced it.
+    AssistantMessage(AssistantMessageItem),
 }
 
 impl ConversationItem {
@@ -327,6 +337,7 @@ impl ConversationItem {
     pub const fn item_id(&self) -> &ItemId {
         match self {
             Self::UserMessage(item) => &item.item_id,
+            Self::AssistantMessage(item) => &item.item_id,
         }
     }
 
@@ -335,6 +346,7 @@ impl ConversationItem {
     pub const fn turn_id(&self) -> &TurnId {
         match self {
             Self::UserMessage(item) => &item.turn_id,
+            Self::AssistantMessage(item) => &item.turn_id,
         }
     }
 
@@ -343,6 +355,7 @@ impl ConversationItem {
     pub const fn ordinal(&self) -> ItemOrdinal {
         match self {
             Self::UserMessage(item) => item.ordinal,
+            Self::AssistantMessage(item) => item.ordinal,
         }
     }
 }

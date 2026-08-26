@@ -608,22 +608,84 @@ struct UserMessageItem {
   updatedAtMillis @7 :Int64;
 }
 
-# Renderer-visible conversation item vocabulary for this phase. Appending a
-# second kind later adds one union member; existing members never move.
+# Renderer-disclosed display phase of one assistant message's text.
 #
-# The domain models exactly one item kind this phase, but a Cap'n Proto
-# union requires two members, so `unmodeled` occupies the second slot: it
-# carries no data and is never sent by a conforming peer. Owned conversion
-# rejects it, and the next item kind claims its own fresh ordinal when it
-# lands.
+# Mirrors `AssistantMessagePhase` in exact domain order and may only be
+# appended; readers that meet an unknown value surface a typed decode
+# failure rather than guessing. It classifies only the text a renderer was
+# given, never hidden reasoning, and it is independent of the item
+# lifecycle: final does not imply completed.
+enum AssistantMessagePhase {
+  # No phase was disclosed for this text.
+  unspecified @0;
+
+  # Progress commentary rather than the settled reply.
+  commentary @1;
+
+  # The settled reply text.
+  final @2;
+}
+
+# One durably stored assistant-output item: complete value, never a
+# projection.
+struct AssistantMessageItem {
+  # Forge-minted item identity. Identifier rule.
+  itemId @0 :Text;
+
+  # Turn that owns the item. Identifier rule.
+  turnId @1 :Text;
+
+  # Stable zero-based position in the containing conversation.
+  ordinal @2 :UInt64;
+
+  # Current zero-based entity revision; newly stored items start at zero.
+  revision @3 :UInt64;
+
+  # Renderer-visible lifecycle.
+  lifecycle @4 :ConversationLifecycle;
+
+  # Complete bounded assistant text stored durably by Forge. At most 65536
+  # UTF-8 bytes (shared message bound); EMPTY IS VALID because a stored
+  # assistant row may exist before its first visible token arrived. Owned
+  # conversion preserves every accepted byte exactly.
+  body @5 :Text;
+
+  # Creation time. Signed Unix milliseconds.
+  createdAtMillis @6 :Int64;
+
+  # Last update time. Signed Unix milliseconds.
+  updatedAtMillis @7 :Int64;
+
+  # Opaque Forge-minted routing id of the run that produced this output.
+  # Identifier rule. Nonsecret evidence of origin only -- never a lease,
+  # credential, engine id, or public run-state machine, and never an alias
+  # of a message id or frame id.
+  runId @8 :Text;
+
+  # Renderer-disclosed text phase.
+  phase @9 :AssistantMessagePhase;
+}
+
+# Renderer-visible conversation item vocabulary. Appending another kind
+# adds one union member; existing members never move.
+#
+# `userMessage` keeps ordinal @0. `unmodeled` occupied the second slot while
+# only one item kind was modeled; it carries no data and is never sent by a
+# conforming peer -- owned conversion rejects it in every revision. The
+# assistant kind appended below took the next fresh ordinal; there is no
+# protocol-version compatibility claim for an older peer decoding it.
 struct ConversationItem {
   union {
     # Canonical user input durably queued before any engine dispatch.
     userMessage @0 :UserMessageItem;
 
-    # Placeholder keeping the union compilable while only one item kind is
-    # modeled; never produced this revision.
+    # Placeholder that kept the union compilable while only one item kind
+    # was modeled; never produced by any revision, rejected forever.
     unmodeled @1 :Void;
+
+    # Appended assistant output under the run that produced it; fresh
+    # ordinal, existing ordinals frozen.
+    assistantMessage @2 :AssistantMessageItem;
   }
 }
 
