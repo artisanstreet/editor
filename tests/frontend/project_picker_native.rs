@@ -347,7 +347,7 @@ fn keyboard_only_activation_emits_choose_new_project_then_current_noop(cx: &mut 
 
     // Open on the current row 0, move down to row 1, activate with a
     // COMPLETE Enter press: Choose closes and STAYS CLOSED through release,
-    // with focus restored only after that release.
+    // with eagerly restored trigger focus retained through release.
     open_menu_from_keyboard(&host, cx);
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
@@ -963,15 +963,15 @@ fn modified_closing_release_leaves_no_fence_for_the_next_genuine_open(cx: &mut T
     cx.run_until_parked();
 
     // 1. Tab-traverse onto the trigger and open with a complete plain press,
-    //    then move Down onto the non-current docs-site row.
+    //    then move Down onto the non-current Project 001 row.
     open_menu_from_keyboard(&host, cx);
     press_down(cx, "down");
     cx.run_until_parked();
 
     // 2. Ctrl+Enter DOWN while the menu is open: selects the non-current
-    //    docs-site row, closes, and emits exactly Choose. Pinned GPUI
+    //    Project 001 row, closes, and emits exactly Choose. Pinned GPUI
     //    synthesizes keyboard clicks only from UNMODIFIED Enter/Space
-    //    releases, so this modified press must not arm the release fence.
+    //    releases, so its matching modified release leaves the fence armed.
     let mut ctrl_enter = Keystroke::parse("enter").expect("known key");
     ctrl_enter.modifiers.control = true;
     cx.simulate_event(KeyDownEvent {
@@ -1043,7 +1043,7 @@ fn ctrl_released_first_close_fences_its_plain_up_and_still_opens_fresh(cx: &mut 
     cx.simulate_resize(size(px(800.0), px(600.0)));
     cx.run_until_parked();
 
-    // Open through traversal, move onto the non-current docs-site row.
+    // Open through traversal, move onto the non-current Project 001 row.
     open_menu_from_keyboard(&host, cx);
     press_down(cx, "down");
     cx.run_until_parked();

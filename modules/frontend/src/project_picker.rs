@@ -62,9 +62,9 @@
 //!   the root's outside-press handler ignores presses inside the live menu
 //!   bounds so row activation wins the capture/bubble race;
 //! - Enter/Space activation spans the full key lifecycle: the down half
-//!   activates and closes, and focus returns to the trigger only from the
-//!   menu's own key-up handler, so the release of that same keypress cannot
-//!   synthesize a focused-trigger click and silently reopen the menu.
+//!   activates, closes, and restores trigger focus immediately. A release
+//!   fence swallows that keypress's synthesized trigger click; a genuine
+//!   later key-down or pointer click retires any stale fence.
 //!
 //! Behavior evidence comes from the pinned in-memory GPUI test harness
 //! (real painted bounds, focus, and scroll state); it is not OS-window,
@@ -671,8 +671,8 @@ impl ProjectPickerView {
     /// Retires a stale release-suppression fence at the first genuine
     /// (non-auto-repeat) key-down on the refocused trigger. Pinned GPUI
     /// synthesizes clicks only for unmodified Enter/Space releases; a
-    /// modified closing press (e.g. ctrl-enter) arms nothing to suppress,
-    /// but without this retirement an armed fence would swallow the next
+    /// modified release (e.g. ctrl-enter) can leave the fence armed without
+    /// synthesizing a click. Without this retirement it would swallow the next
     /// legitimate opening click. `is_held` keeps held-key autorepeats from
     /// being mistaken for a new interaction.
     fn disarm_stale_release_fence(
