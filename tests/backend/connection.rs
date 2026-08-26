@@ -1140,8 +1140,81 @@ async fn non_hello_first_frames_never_touch_the_authority() -> Result<(), Box<dy
     Ok(())
 }
 
+/// Writes a truncated first frame from the client while the component
+/// authenticates concurrently, returning the typed handshake failure.
+async fn truncated_first_frame_failure(
+    loopback: &mut Loopback,
+    authority: &mut CredentialAuthority,
+    handler: &RequestHandler,
+    cancel: &CancelHandle,
+) -> DeadlineError<AuthenticationStageError> {
+    let client_connection = connect_client(loopback).await;
+    let server_connection = next_server_connection(loopback).await;
+    let writer = async {
+        let (mut send, _recv) = client_connection.open_bi().await?;
+        tokio::time::timeout(TEST_DEADLINE, send.write_all(&64u32.to_le_bytes())).await??;
+        tokio::time::timeout(TEST_DEADLINE, send.write_all(&[7_u8; 10])).await??;
+        send.finish()?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let server = ForgeConnection::authenticate(
+        server_connection,
+        authority,
+        handler,
+        welcome_metadata(),
+        default_limits(),
+        cancel,
+    );
+    let (_, settled) = tokio::join!(
+        tokio::time::timeout(TEST_DEADLINE, writer),
+        tokio::time::timeout(TEST_DEADLINE, server),
+    );
+    let failure = expect_failure(
+        settled.expect("authentication settles under the watchdog"),
+        "a truncated first frame must not authenticate",
+    );
+    drop(client_connection);
+    failure
+}
+
+/// Writes an oversized first-frame prefix from the client while the
+/// component authenticates concurrently, returning the typed handshake
+/// failure together with the announced length it was rejected against.
+async fn oversized_first_frame_failure(
+    loopback: &mut Loopback,
+    authority: &mut CredentialAuthority,
+    handler: &RequestHandler,
+    cancel: &CancelHandle,
+) -> (DeadlineError<AuthenticationStageError>, u32) {
+    let announced = artisan_transport::MAX_FRAME_LEN + 1;
+    let client_connection = connect_client(loopback).await;
+    let server_connection = next_server_connection(loopback).await;
+    let writer = async {
+        let (mut send, _recv) = client_connection.open_bi().await?;
+        tokio::time::timeout(TEST_DEADLINE, send.write_all(&announced.to_le_bytes())).await??;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let server = ForgeConnection::authenticate(
+        server_connection,
+        authority,
+        handler,
+        welcome_metadata(),
+        default_limits(),
+        cancel,
+    );
+    let (_, settled) = tokio::join!(
+        tokio::time::timeout(TEST_DEADLINE, writer),
+        tokio::time::timeout(TEST_DEADLINE, server),
+    );
+    let failure = expect_failure(
+        settled.expect("authentication settles under the watchdog"),
+        "an oversized first frame must not authenticate",
+    );
+    drop(client_connection);
+    (failure, announced)
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn malformed_and_oversized_first_frames_never_touch_the_authority()
 -> Result<(), Box<dyn Error>> {
     let mut loopback = spawn_loopback();
@@ -1151,95 +1224,43 @@ async fn malformed_and_oversized_first_frames_never_touch_the_authority()
     let cancel = CancelHandle::new();
 
     // A truncated frame: the prefix announces 64 bytes, only 10 arrive.
-    {
-        let client_connection = connect_client(&loopback).await;
-        let server_connection = next_server_connection(&mut loopback).await;
-        let writer = async {
-            let (mut send, _recv) = client_connection.open_bi().await?;
-            tokio::time::timeout(TEST_DEADLINE, send.write_all(&64u32.to_le_bytes())).await??;
-            tokio::time::timeout(TEST_DEADLINE, send.write_all(&[7_u8; 10])).await??;
-            send.finish()?;
-            Ok::<(), Box<dyn Error>>(())
-        };
-        let server = ForgeConnection::authenticate(
-            server_connection,
-            &mut authority,
-            &handler,
-            welcome_metadata(),
-            default_limits(),
-            &cancel,
-        );
-        let (_, settled) = tokio::join!(
-            tokio::time::timeout(TEST_DEADLINE, writer),
-            tokio::time::timeout(TEST_DEADLINE, server),
-        );
-        let failure = expect_failure(
-            settled.expect("authentication settles under the watchdog"),
-            "a truncated first frame must not authenticate",
-        );
-        assert!(
-            matches!(
-                &failure,
-                DeadlineError::Peer {
-                    operation: OperationKind::Handshake,
-                    error: AuthenticationStageError::Handshake(HandshakeError::Receive(
-                        EnvelopeReceiveError::Frame(FrameError::Truncated {
-                            expected: 64,
-                            received: 10,
-                        }),
-                    )),
-                }
-            ),
-            "expected typed truncation, got {failure:?}"
-        );
-        drop(failure);
-        drop(client_connection);
-    }
-
-    // An oversized prefix is rejected against the transport ceiling before
-    // any body allocation or authority involvement. The writer borrows the
-    // connection so the explicit teardown below stays valid.
-    {
-        let announced = artisan_transport::MAX_FRAME_LEN + 1;
-        let client_connection = connect_client(&loopback).await;
-        let server_connection = next_server_connection(&mut loopback).await;
-        let writer = async {
-            let (mut send, _recv) = client_connection.open_bi().await?;
-            tokio::time::timeout(TEST_DEADLINE, send.write_all(&announced.to_le_bytes())).await??;
-            Ok::<(), Box<dyn Error>>(())
-        };
-        let server = ForgeConnection::authenticate(
-            server_connection,
-            &mut authority,
-            &handler,
-            welcome_metadata(),
-            default_limits(),
-            &cancel,
-        );
-        let (_, settled) = tokio::join!(
-            tokio::time::timeout(TEST_DEADLINE, writer),
-            tokio::time::timeout(TEST_DEADLINE, server),
-        );
-        let failure = expect_failure(
-            settled.expect("authentication settles under the watchdog"),
-            "an oversized first frame must not authenticate",
-        );
-        match &failure {
+    let failure =
+        truncated_first_frame_failure(&mut loopback, &mut authority, &handler, &cancel).await;
+    assert!(
+        matches!(
+            &failure,
             DeadlineError::Peer {
                 operation: OperationKind::Handshake,
-                error:
-                    AuthenticationStageError::Handshake(HandshakeError::Receive(
-                        EnvelopeReceiveError::Frame(FrameError::TooLarge { length, bound }),
-                    )),
-            } => {
-                assert_eq!(*length, announced);
-                assert_eq!(*bound, artisan_transport::MAX_FRAME_LEN);
+                error: AuthenticationStageError::Handshake(HandshakeError::Receive(
+                    EnvelopeReceiveError::Frame(FrameError::Truncated {
+                        expected: 64,
+                        received: 10,
+                    }),
+                )),
             }
-            other => panic!("expected an oversized rejection, got {other:?}"),
+        ),
+        "expected typed truncation, got {failure:?}"
+    );
+    drop(failure);
+
+    // An oversized prefix is rejected against the transport ceiling before
+    // any body allocation or authority involvement.
+    let (failure, announced) =
+        oversized_first_frame_failure(&mut loopback, &mut authority, &handler, &cancel).await;
+    match &failure {
+        DeadlineError::Peer {
+            operation: OperationKind::Handshake,
+            error:
+                AuthenticationStageError::Handshake(HandshakeError::Receive(
+                    EnvelopeReceiveError::Frame(FrameError::TooLarge { length, bound }),
+                )),
+        } => {
+            assert_eq!(*length, announced);
+            assert_eq!(*bound, artisan_transport::MAX_FRAME_LEN);
         }
-        drop(failure);
-        drop(client_connection);
+        other => panic!("expected an oversized rejection, got {other:?}"),
     }
+    drop(failure);
 
     // Neither attempt consumed anything: the genuine credential admits.
     let (client, owner) = admitted_client(
@@ -1268,8 +1289,66 @@ async fn malformed_and_oversized_first_frames_never_touch_the_authority()
     Ok(())
 }
 
+/// Admits with a zero-length handshake limit — a representable instant that
+/// simply expires first — and returns the typed timeout decided before any
+/// stage is polled.
+async fn zero_limit_handshake_failure(
+    loopback: &mut Loopback,
+    authority: &mut CredentialAuthority,
+    handler: &RequestHandler,
+) -> DeadlineError<AuthenticationStageError> {
+    let client_connection = connect_client(loopback).await;
+    let server_connection = next_server_connection(loopback).await;
+    let cancel = CancelHandle::new();
+    let outcome = tokio::time::timeout(
+        TEST_DEADLINE,
+        ForgeConnection::authenticate(
+            server_connection,
+            authority,
+            handler,
+            welcome_metadata(),
+            ConnectionLimits {
+                handshake: Duration::ZERO,
+                next_request: Duration::from_secs(2),
+            },
+            &cancel,
+        ),
+    )
+    .await
+    .expect("authentication settles under the watchdog");
+    drop(client_connection);
+    expect_failure(outcome, "a zero-length limit must not authenticate")
+}
+
+/// Admits under an already-cancelled handle and returns the typed
+/// cancellation decided before any poll.
+async fn precancelled_handshake_failure(
+    loopback: &mut Loopback,
+    authority: &mut CredentialAuthority,
+    handler: &RequestHandler,
+) -> DeadlineError<AuthenticationStageError> {
+    let client_connection = connect_client(loopback).await;
+    let server_connection = next_server_connection(loopback).await;
+    let cancel = CancelHandle::new();
+    cancel.cancel();
+    let outcome = tokio::time::timeout(
+        TEST_DEADLINE,
+        ForgeConnection::authenticate(
+            server_connection,
+            authority,
+            handler,
+            welcome_metadata(),
+            default_limits(),
+            &cancel,
+        ),
+    )
+    .await
+    .expect("authentication settles under the watchdog");
+    drop(client_connection);
+    expect_failure(outcome, "a pre-cancelled handle must not authenticate")
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn pre_consumption_deadline_and_cancellation_keep_the_bootstrap_credential_usable()
 -> Result<(), Box<dyn Error>> {
     let mut loopback = spawn_loopback();
@@ -1278,73 +1357,31 @@ async fn pre_consumption_deadline_and_cancellation_keep_the_bootstrap_credential
     let mut authority = bootstrap_authority();
 
     // A zero-length handshake limit expires before any stage is polled.
-    {
-        let client_connection = connect_client(&loopback).await;
-        let server_connection = next_server_connection(&mut loopback).await;
-        let cancel = CancelHandle::new();
-        let outcome = tokio::time::timeout(
-            TEST_DEADLINE,
-            ForgeConnection::authenticate(
-                server_connection,
-                &mut authority,
-                &handler,
-                welcome_metadata(),
-                ConnectionLimits {
-                    handshake: Duration::ZERO,
-                    next_request: Duration::from_secs(2),
-                },
-                &cancel,
-            ),
-        )
-        .await
-        .expect("authentication settles under the watchdog");
-        let failure = expect_failure(outcome, "a zero-length limit must not authenticate");
-        assert!(
-            matches!(
-                &failure,
-                DeadlineError::Timeout {
-                    operation: OperationKind::Handshake,
-                    ..
-                }
-            ),
-            "expected a typed handshake timeout, got {failure:?}"
-        );
-        drop(failure);
-        drop(client_connection);
-    }
+    let failure = zero_limit_handshake_failure(&mut loopback, &mut authority, &handler).await;
+    assert!(
+        matches!(
+            &failure,
+            DeadlineError::Timeout {
+                operation: OperationKind::Handshake,
+                ..
+            }
+        ),
+        "expected a typed handshake timeout, got {failure:?}"
+    );
+    drop(failure);
 
     // A handle cancelled before the future is polled wins immediately.
-    {
-        let client_connection = connect_client(&loopback).await;
-        let server_connection = next_server_connection(&mut loopback).await;
-        let cancel = CancelHandle::new();
-        cancel.cancel();
-        let outcome = tokio::time::timeout(
-            TEST_DEADLINE,
-            ForgeConnection::authenticate(
-                server_connection,
-                &mut authority,
-                &handler,
-                welcome_metadata(),
-                default_limits(),
-                &cancel,
-            ),
-        )
-        .await
-        .expect("authentication settles under the watchdog");
-        let failure = expect_failure(outcome, "a pre-cancelled handle must not authenticate");
-        assert!(
-            matches!(
-                &failure,
-                DeadlineError::Cancelled {
-                    operation: OperationKind::Handshake,
-                }
-            ),
-            "expected typed cancellation, got {failure:?}"
-        );
-        drop(failure);
-        drop(client_connection);
-    }
+    let failure = precancelled_handshake_failure(&mut loopback, &mut authority, &handler).await;
+    assert!(
+        matches!(
+            &failure,
+            DeadlineError::Cancelled {
+                operation: OperationKind::Handshake,
+            }
+        ),
+        "expected typed cancellation, got {failure:?}"
+    );
+    drop(failure);
 
     drop(handler);
     app.shutdown()
@@ -1481,42 +1518,52 @@ async fn cancelling_a_blocked_welcome_keeps_queued_requests_undispatched()
     .await?;
     drop(queued_send);
 
-    // Causal stage witness: these are actual bytes of the server's Welcome,
-    // so the credential was consumed and the rotation staged — the commit
-    // strictly follows the completed write and finish. The bounded prefix
-    // leaves the remaining receive credit insufficient for completion. The
-    // witness, the admission, and the canceller are all polled together:
-    // nothing progresses without driving the server side.
+    // Causal stage proof. The bounded Welcome prefix is the real witness:
+    // these are actual bytes of the server's Welcome, so the credential was
+    // consumed and the rotation staged — the commit strictly follows the
+    // completed write and finish — while the sixteen-byte receive window
+    // keeps the full Welcome from ever completing. The admission is polled
+    // concurrently with the witness, but only the successful witness
+    // completion triggers the existing CancelHandle; an admission that ends
+    // before that moment fails the test outright, and the witness's own
+    // bounded read watchdog fails it if no progress ever occurs. No timer
+    // expiry can take the successful-cancellation path.
     let mut welcome_prefix = [0_u8; 8];
-    let witness = async {
-        tokio::time::timeout(TEST_DEADLINE, control_recv.read_exact(&mut welcome_prefix))
-            .await
-            .expect("the Welcome prefix arrives under the watchdog")
-            .expect("the Welcome prefix is readable");
-    };
     let cancel = CancelHandle::new();
-    let canceller = {
-        let cancel = &cancel;
-        async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            cancel.cancel();
-        }
-    };
-    let admission = ForgeConnection::authenticate(
-        server_connection,
-        &mut authority,
-        &handler,
-        welcome_metadata(),
-        default_limits(),
-        &cancel,
-    );
-    let (outcome, (), ()) = tokio::join!(
-        tokio::time::timeout(TEST_DEADLINE, admission),
-        witness,
-        canceller
-    );
+    let mut admission = Box::pin(tokio::time::timeout(
+        TEST_DEADLINE,
+        ForgeConnection::authenticate(
+            server_connection,
+            &mut authority,
+            &handler,
+            welcome_metadata(),
+            default_limits(),
+            &cancel,
+        ),
+    ));
+    tokio::select! {
+        result = &mut admission => match result {
+            Ok(_) => panic!("the admission completed before the causal cancellation fired"),
+            Err(failure) => {
+                panic!("the admission failed before the causal cancellation fired: {failure:?}")
+            }
+        },
+        () = async {
+            tokio::time::timeout(TEST_DEADLINE, control_recv.read_exact(&mut welcome_prefix))
+                .await
+                .expect("the Welcome prefix arrives under the watchdog")
+                .expect("the Welcome prefix is readable");
+        } => {}
+    }
+
+    // The witness has provably completed first; cancellation now follows as
+    // its direct causal consequence.
+    cancel.cancel();
     let failure = expect_failure(
-        outcome.expect("the cancelled admission settles"),
+        admission
+            .as_mut()
+            .await
+            .expect("the cancelled admission settles under the watchdog"),
         "a cancelled admission must not succeed",
     );
     assert!(
@@ -1529,6 +1576,11 @@ async fn cancelling_a_blocked_welcome_keeps_queued_requests_undispatched()
         "expected typed cancellation after consumption, got {failure:?}"
     );
     drop(failure);
+    // The owning boxed future is released explicitly: awaiting only its
+    // pinned reference leaves the completed-but-retained admission — and
+    // with it the exclusive authority lease — alive inside the box, so the
+    // caller-owned authority below may only be probed once this is gone.
+    drop(admission);
 
     // Stage evidence on the caller-owned authority: consumption happened
     // while the rotation never committed.
@@ -1569,8 +1621,46 @@ async fn cancelling_a_blocked_welcome_keeps_queued_requests_undispatched()
     Ok(())
 }
 
+/// Pipelines Hello followed immediately by one real request on a single
+/// control stream, reads the resulting Welcome envelope, and returns every
+/// retained direction plus that owned Welcome for inspection.
+async fn pipelined_client_half(
+    connection: &Connection,
+) -> Result<(SendStream, RecvStream, WireEnvelope), Box<dyn Error>> {
+    let (mut control_send, mut control_recv) = connection.open_bi().await?;
+    artisan_transport::send_envelope(&mut control_send, &hello_envelope(initial_credential()))
+        .await?;
+    artisan_transport::send_envelope(&mut control_send, &list_projects_request("frame-pipelined"))
+        .await?;
+    let welcomed = tokio::time::timeout(
+        TEST_DEADLINE,
+        artisan_transport::receive_envelope(&mut control_recv),
+    )
+    .await
+    .expect("the Welcome arrives under the watchdog")?;
+    Ok((control_send, control_recv, welcomed))
+}
+
+/// Asserts the control send direction was stopped outright with exactly the
+/// documented inbound-stop code.
+///
+/// # Panics
+///
+/// Panics when the direction is never stopped or carries another code.
+async fn expect_control_direction_stopped(control_send: &mut SendStream) {
+    // The watchdog and stopped-result layers resolve before matching the
+    // real stop code: pinned Quinn resolves `stopped()` to `Option<VarInt>`.
+    let stop_code = tokio::time::timeout(TEST_DEADLINE, control_send.stopped())
+        .await
+        .expect("stop observation settles under the watchdog")
+        .expect("the control send stream remains observable");
+    match stop_code {
+        Some(code) => assert_eq!(code, VarInt::from_u32(EXPECTED_STOP_CODE)),
+        None => panic!("expected the discarded control direction to be stopped"),
+    }
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn pipelined_control_bytes_are_discarded_before_any_dispatch() -> Result<(), Box<dyn Error>> {
     let mut loopback = spawn_loopback();
     let (_temporary, app) = opened_app("pipelined").await;
@@ -1582,24 +1672,6 @@ async fn pipelined_control_bytes_are_discarded_before_any_dispatch() -> Result<(
     let client_connection = connect_client(&loopback).await;
     let server_connection = next_server_connection(&mut loopback).await;
 
-    let client = async {
-        let (mut control_send, mut control_recv) = client_connection.open_bi().await?;
-        // Pipeline Hello followed immediately by a request on one stream.
-        artisan_transport::send_envelope(&mut control_send, &hello_envelope(initial_credential()))
-            .await?;
-        artisan_transport::send_envelope(
-            &mut control_send,
-            &list_projects_request("frame-pipelined"),
-        )
-        .await?;
-        let welcomed = tokio::time::timeout(
-            TEST_DEADLINE,
-            artisan_transport::receive_envelope(&mut control_recv),
-        )
-        .await
-        .expect("the Welcome arrives under the watchdog")?;
-        Ok::<_, Box<dyn Error>>((control_send, control_recv, welcomed))
-    };
     let server = ForgeConnection::authenticate(
         server_connection,
         &mut authority,
@@ -1609,7 +1681,7 @@ async fn pipelined_control_bytes_are_discarded_before_any_dispatch() -> Result<(
         &cancel,
     );
     let (client_outcome, owner_outcome) = tokio::join!(
-        tokio::time::timeout(TEST_DEADLINE, client),
+        tokio::time::timeout(TEST_DEADLINE, pipelined_client_half(&client_connection)),
         tokio::time::timeout(TEST_DEADLINE, server),
     );
     let owner = owner_outcome.expect("authentication settles under the watchdog")?;
@@ -1641,17 +1713,8 @@ async fn pipelined_control_bytes_are_discarded_before_any_dispatch() -> Result<(
     expect_control_stream_finished(&mut link).await;
 
     // The component stopped reading that direction outright, discarding the
-    // trailing bytes instead of letting them become requests. The watchdog
-    // and stopped-result layers resolve before matching the real stop code:
-    // pinned Quinn resolves `stopped()` to `Option<VarInt>`.
-    let stop_code = tokio::time::timeout(TEST_DEADLINE, link.control_send.stopped())
-        .await
-        .expect("stop observation settles under the watchdog")
-        .expect("the control send stream remains observable");
-    match stop_code {
-        Some(code) => assert_eq!(code, VarInt::from_u32(EXPECTED_STOP_CODE)),
-        None => panic!("expected the discarded control direction to be stopped"),
-    }
+    // trailing bytes instead of letting them become requests.
+    expect_control_direction_stopped(&mut link.control_send).await;
 
     // Legitimately opened streams keep dispatching with real correlation.
     let (_reply, owner) = round_trip(
@@ -1883,8 +1946,30 @@ async fn dropping_an_in_flight_dispatch_after_a_partial_request_closes_the_owner
     Ok(())
 }
 
+/// Asserts one attach reply replays its seeded durable receipt as a
+/// duplicate for the expected project, correlated to `request_id`.
+///
+/// # Panics
+///
+/// Panics when the reply family, correlation, disposition, or identity
+/// regress.
+fn assert_duplicate_attach_reply(reply: WireEnvelope, request_id: &str) {
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated response");
+    };
+    assert_eq!(response.request_id.as_str(), request_id);
+    let ResponsePayload::AttachedProject {
+        project,
+        disposition,
+    } = response.payload
+    else {
+        panic!("expected an attached-project payload");
+    };
+    assert_eq!(disposition, ReceiptDisposition::Duplicate);
+    assert_eq!(project.project_id.as_str(), "project-1");
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn durable_receipts_replay_across_genuinely_new_connections() -> Result<(), Box<dyn Error>> {
     let mut loopback = spawn_loopback();
     let (_temporary, app) = opened_app("durable-replay").await;
@@ -1913,19 +1998,7 @@ async fn durable_receipts_replay_across_genuinely_new_connections() -> Result<()
         owner,
     )
     .await?;
-    let WireEnvelopeBody::Response(response) = reply.body else {
-        panic!("expected a correlated response");
-    };
-    assert_eq!(response.request_id.as_str(), "request-project-1");
-    let ResponsePayload::AttachedProject {
-        project,
-        disposition,
-    } = response.payload
-    else {
-        panic!("expected an attached-project payload");
-    };
-    assert_eq!(disposition, ReceiptDisposition::Duplicate);
-    assert_eq!(project.project_id.as_str(), "project-1");
+    assert_duplicate_attach_reply(reply, "request-project-1");
 
     drop(owner);
     expect_application_close(&first_client.connection).await;
@@ -1950,18 +2023,7 @@ async fn durable_receipts_replay_across_genuinely_new_connections() -> Result<()
         owner,
     )
     .await?;
-    let WireEnvelopeBody::Response(response) = reply.body else {
-        panic!("expected a correlated response");
-    };
-    let ResponsePayload::AttachedProject {
-        project,
-        disposition,
-    } = response.payload
-    else {
-        panic!("expected an attached-project payload");
-    };
-    assert_eq!(disposition, ReceiptDisposition::Duplicate);
-    assert_eq!(project.project_id.as_str(), "project-1");
+    assert_duplicate_attach_reply(reply, "request-project-1");
 
     let (reply, owner) = round_trip(
         &second_client,
@@ -1997,82 +2059,104 @@ async fn durable_receipts_replay_across_genuinely_new_connections() -> Result<()
     Ok(())
 }
 
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn request_stage_deadline_and_cancellation_preserve_the_committed_rotation()
--> Result<(), Box<dyn Error>> {
+/// Admits on a fresh rig with a zero-length next-request limit — a
+/// representable instant that expires first, distinct from any invalid-limit
+/// case — asserts the typed request timeout through full teardown, and hands
+/// back the rotated reconnect capability that committed admission produced.
+/// The expiry-before-poll means this does not prove an in-flight timeout;
+/// in-flight coverage lives in the cancellation and drop scenarios.
+async fn zero_next_request_timeout_returns_rotated(
+    authority: &mut CredentialAuthority,
+) -> Result<ReconnectCapability, Box<dyn Error>> {
     let mut loopback = spawn_loopback();
     let (_temporary, app) = opened_app("request-cancel").await;
     let handler = RequestHandler::new(app.repository().clone());
-    let mut authority = bootstrap_authority();
     let cancel = CancelHandle::new();
 
-    // Request-stage timeout: admitting with a zero-length next-request
-    // limit makes the first dispatch expire before any poll through the
-    // established typed mechanism.
-    let rotated_once = {
-        let client_connection = connect_client(&loopback).await;
-        let server_connection = next_server_connection(&mut loopback).await;
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = next_server_connection(&mut loopback).await;
 
-        let client = async {
-            let (mut send, mut recv) = client_connection.open_bi().await?;
-            let welcome = tokio::time::timeout(
-                TEST_DEADLINE,
-                artisan_transport::client_handshake(
-                    &mut send,
-                    &mut recv,
-                    hello_envelope(initial_credential()),
-                ),
-            )
-            .await??;
-            Ok::<_, Box<dyn Error>>((send, recv, welcome))
-        };
-        let server = ForgeConnection::authenticate(
-            server_connection,
-            &mut authority,
-            &handler,
-            welcome_metadata(),
-            ConnectionLimits {
-                handshake: Duration::from_secs(2),
-                next_request: Duration::ZERO,
-            },
-            &cancel,
-        );
-        let (client_outcome, owner_outcome) =
-            tokio::join!(tokio::time::timeout(TEST_DEADLINE, client), server);
-        let owner = owner_outcome.expect("authentication settles under its own deadline");
-        let (control_send, control_recv, welcome) =
-            client_outcome.expect("the client settles under the watchdog")?;
-
-        let outcome = tokio::time::timeout(
+    let client = async {
+        let (mut send, mut recv) = client_connection.open_bi().await?;
+        let welcome = tokio::time::timeout(
             TEST_DEADLINE,
-            owner.respond_next(response_stamp("forge-request-timeout-frame")),
-        )
-        .await
-        .expect("dispatch settles under the watchdog");
-        let failure = expect_failure(outcome, "a zero-length request limit must not dispatch");
-        assert!(
-            matches!(
-                &failure,
-                DeadlineError::Timeout {
-                    operation: OperationKind::Receive,
-                    ..
-                }
+            artisan_transport::client_handshake(
+                &mut send,
+                &mut recv,
+                hello_envelope(initial_credential()),
             ),
-            "expected a typed request timeout, got {failure:?}"
-        );
-        drop(failure);
-
-        expect_application_close(&client_connection).await;
-        drop(control_send);
-        drop(control_recv);
-        drop(handler);
-        app.shutdown()
-            .await
-            .expect("application storage should close");
-        loopback.drain().await;
-        welcome.welcome.reconnect_capability
+        )
+        .await??;
+        Ok::<_, Box<dyn Error>>((send, recv, welcome))
     };
+    let server = ForgeConnection::authenticate(
+        server_connection,
+        authority,
+        &handler,
+        welcome_metadata(),
+        ConnectionLimits {
+            handshake: Duration::from_secs(2),
+            next_request: Duration::ZERO,
+        },
+        &cancel,
+    );
+    let (client_outcome, owner_outcome) =
+        tokio::join!(tokio::time::timeout(TEST_DEADLINE, client), server);
+    let owner = owner_outcome.expect("authentication settles under its own deadline");
+    let (control_send, control_recv, welcome) =
+        client_outcome.expect("the client settles under the watchdog")?;
+
+    let outcome = tokio::time::timeout(
+        TEST_DEADLINE,
+        owner.respond_next(response_stamp("forge-request-timeout-frame")),
+    )
+    .await
+    .expect("dispatch settles under the watchdog");
+    let failure = expect_failure(outcome, "a zero-length request limit must not dispatch");
+    assert!(
+        matches!(
+            &failure,
+            DeadlineError::Timeout {
+                operation: OperationKind::Receive,
+                ..
+            }
+        ),
+        "expected a typed request timeout, got {failure:?}"
+    );
+    drop(failure);
+
+    expect_application_close(&client_connection).await;
+    drop(control_send);
+    drop(control_recv);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(welcome.welcome.reconnect_capability)
+}
+
+/// Opens one request stream and writes an accepted but deliberately
+/// unfinished partial frame, keeping any concurrent dispatch mid-receive.
+async fn write_unfinished_partial_frame(
+    connection: &Connection,
+    announced: u32,
+    prefix_bytes: [u8; 4],
+) -> Result<(SendStream, RecvStream), Box<dyn Error>> {
+    let (mut send, recv) = connection.open_bi().await?;
+    tokio::time::timeout(TEST_DEADLINE, send.write_all(&announced.to_le_bytes())).await??;
+    tokio::time::timeout(TEST_DEADLINE, send.write_all(&prefix_bytes)).await??;
+    Ok((send, recv))
+}
+
+#[tokio::test]
+async fn request_stage_deadline_and_cancellation_preserve_the_committed_rotation()
+-> Result<(), Box<dyn Error>> {
+    let mut authority = bootstrap_authority();
+
+    // Request-stage timeout through the established typed mechanism; see
+    // the helper for the honest ZERO-limit limitation.
+    let rotated_once = zero_next_request_timeout_returns_rotated(&mut authority).await?;
 
     // Request-stage cancellation mid-receive: an accepted partial frame
     // parks the dispatch, then the caller's handle fires.
@@ -2089,13 +2173,8 @@ async fn request_stage_deadline_and_cancellation_preserve_the_committed_rotation
     )
     .await?;
 
-    let (mut request_send, request_recv) = first_client.connection.open_bi().await?;
-    tokio::time::timeout(
-        TEST_DEADLINE,
-        request_send.write_all(&8192u32.to_le_bytes()),
-    )
-    .await??;
-    tokio::time::timeout(TEST_DEADLINE, request_send.write_all(&[9_u8; 4])).await??;
+    let (request_send, request_recv) =
+        write_unfinished_partial_frame(&first_client.connection, 8192, [9_u8; 4]).await?;
 
     let mut serving =
         Box::pin(first_owner.respond_next(response_stamp("forge-request-cancel-frame")));
