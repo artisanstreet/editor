@@ -10,6 +10,15 @@ cites source in this tree; everything else is explicitly proposed work, a
 decision request, or an evidence gate. No test run is claimed by this
 document.
 
+Integration checkpoint: this plan is published above `52ee041385055dd03a4d1409c3f6ae8006107bc5`.
+Since the immutable analysis base, PR #119 added the owning `ForgeListener`
+and PR #120 added the native `DirectoryController` with child/pipe cleanup.
+The absence claims and line references below describe the stated analysis
+base, not those later commits. E4/E6 workers must reuse these accepted
+owners or justify a narrow extraction, not recreate their responsibilities.
+Publication accepts the architecture document, not blanket implementation
+authority for E2–E8; E1 has its separately frozen worker contract.
+
 ## 1. Verified current state
 
 Accepted, implemented, and covered by declared Bazel tests (`tests/database/
