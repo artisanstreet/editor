@@ -18,5 +18,9 @@ zeroize.workspace = true
 name = "owned_codec"
 path = "../../tests/protocol/owned_codec.rs"
 
+[[test]]
+name = "product_roundtrip"
+path = "../../tests/protocol/product_roundtrip.rs"
+
 [lints]
 workspace = true
