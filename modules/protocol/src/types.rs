@@ -507,9 +507,11 @@ pub enum ClientRequest {
     /// native directory picker once. Deliberately outside the pure domain
     /// [`Query`] and durable [`Command`] vocabularies: nothing durable is
     /// created or mutated, the request must not be automatically replayed,
-    /// and every deliberate new attempt uses a fresh frame identity. This
-    /// schema slice implements neither duplicate-request suppression nor
-    /// cancellation propagation.
+    /// and every deliberate new attempt uses a fresh frame identity -- a
+    /// fresh [`FrameId`] as its wire `Envelope.messageId`, unlike the stable
+    /// verbatim-retry identity of durable commands. This schema slice
+    /// implements neither duplicate-request suppression nor cancellation
+    /// propagation.
     PickDirectory,
 }
 

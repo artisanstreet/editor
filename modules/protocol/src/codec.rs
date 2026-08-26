@@ -632,18 +632,24 @@ fn encode_response(
                 .set_thread_id(stopped.thread_id.as_str());
         }
         ResponsePayload::DirectoryPicked(outcome) => {
-            let mut encoded = builder.reborrow().init_directory_picked();
-            match outcome {
-                DirectoryPickOutcome::Selected(directory_id) => {
-                    encoded.set_selected(directory_id.as_str());
-                }
-                DirectoryPickOutcome::Cancelled => {
-                    encoded.set_cancelled(());
-                }
-            }
+            encode_directory_picked(builder.reborrow().init_directory_picked(), outcome);
         }
     }
     Ok(())
+}
+
+fn encode_directory_picked(
+    mut builder: artisan_capnp::directory_pick_outcome::Builder<'_>,
+    outcome: &DirectoryPickOutcome,
+) {
+    match outcome {
+        DirectoryPickOutcome::Selected(directory_id) => {
+            builder.set_selected(directory_id.as_str());
+        }
+        DirectoryPickOutcome::Cancelled => {
+            builder.set_cancelled(());
+        }
+    }
 }
 
 fn encode_event(mut builder: artisan_capnp::event::Builder<'_>, value: &ServerEvent) {
@@ -1259,7 +1265,7 @@ fn decode_response(
                 decode_conversation_subscription_stopped(stopped?)?,
             )
         }
-        response::Which::DirectoryPicked(picked) => decode_directory_picked(picked?),
+        response::Which::DirectoryPicked(picked) => decode_directory_picked(picked?)?,
     };
     Ok(ServerResponse {
         request_id,

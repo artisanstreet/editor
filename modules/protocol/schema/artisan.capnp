@@ -29,10 +29,9 @@
 #   which also serves as the domain RequestId and remains stable across
 #   retries of durable or idempotent requests: a retrying client resends the
 #   same envelope verbatim and never mints a second id for the same logical
-#   attempt. The host-interaction pickDirectory request sits outside that
-#   verbatim-retry guarantee: it persists nothing, must not be automatically
-#   replayed, and every deliberate new attempt is a new logical attempt that
-#   mints a fresh frame identity.
+#   attempt. The host-interaction pickDirectory request is the one documented
+#   exception to that verbatim-retry guarantee (see Request.pickDirectory
+#   below).
 #   Server frames (welcome, response, event, protocol error) carry
 #   independently server-minted FrameIds. Forge mints durable queued-message
 #   identities separately (see FirstMessageReceipt and FirstMessageQueued).
@@ -388,8 +387,10 @@ struct QueueFirstMessageRequest {
 # complete catalog, so stale or unknown ids can never fail this request.
 struct ListAttachedProjectsRequest {}
 
-# The request arms of the native protocol: the six of the first workflow
-# plus the three conversation read/subscription requests appended below.
+# The request arms of the native protocol: the six of the first workflow,
+# the three conversation read/subscription requests appended below them, and
+# the explicit host-interaction pickDirectory request appended last as the
+# tenth arm.
 struct Request {
   union {
     listDirectories @0 :ListDirectoriesRequest;

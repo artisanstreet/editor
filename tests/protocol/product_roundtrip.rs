@@ -1232,10 +1232,13 @@ fn appends_idempotency_conflict_at_the_next_unused_ordinal() -> capnp::Result<()
 }
 
 #[test]
-fn appends_pick_directory_at_the_next_unused_ordinals() -> capnp::Result<()> {
-    // Append-only evolution guard for the explicit host-interaction slice:
-    // the request and response arms are appended after every committed
-    // ordinal, and only real picker results travel in the outcome.
+fn round_trips_raw_pick_directory_request_and_outcome_through_the_current_schema()
+-> capnp::Result<()> {
+    // Raw current-schema roundtrip for the explicit host-interaction slice:
+    // the unit pickDirectory request and both DirectoryPickOutcome arms
+    // encode and decode through the generated bindings, and only real picker
+    // results travel in the outcome. Ordinal positions follow the current
+    // schema source; this test does not pin numeric wire compatibility.
     //
     // Request: a unit frame with no payload at all.
     let pick_request = {
