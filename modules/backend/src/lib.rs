@@ -9,6 +9,7 @@ pub mod credential_authority;
 pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
+pub mod listener;
 pub mod request_handler;
 pub mod storage;
 
@@ -29,6 +30,10 @@ pub use credential_authority::{
 pub use directory_selection::{
     DirectorySelectionAdmissionError, IssuedDirectory, MAX_LIFETIME_ISSUED_IDENTITIES,
     MAX_LIVE_SELECTIONS, SELECTION_TIME_TO_LIVE, SelectedDirectory, SelectedDirectoryAuthority,
+};
+pub use listener::{
+    AdmissionCause, ForgeListener, ListenerError, ListenerLimits, MetadataError,
+    RequestTermination, ServiceReport,
 };
 pub use request_handler::RequestHandler;
 pub use storage::{ForgeStorage, ForgeStorageCloseError, ForgeStorageOpenError};
