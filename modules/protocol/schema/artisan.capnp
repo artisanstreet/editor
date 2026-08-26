@@ -891,8 +891,10 @@ struct Envelope {
 
   # Protocol-owned FrameId minted by the sending side. On request frames the
   # client FrameId is also the domain RequestId and stays stable across
-  # retries; welcome, response, event, and error frames carry independently
-  # server-minted FrameIds. Identifier rule.
+  # durable or idempotent retries. PickDirectory must not be automatically
+  # replayed; each deliberate new attempt uses a fresh frame identity (see
+  # Request.pickDirectory). Welcome, response, event, and error frames carry
+  # independently server-minted FrameIds. Identifier rule.
   messageId @1 :Text;
 
   # Sender timestamp. Signed Unix epoch milliseconds (UTC).
