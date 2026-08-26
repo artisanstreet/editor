@@ -1,0 +1,12 @@
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+# Layout-only portable runtime metadata for the Phase 9 packaging proof.
+#
+# Exports the machine-readable layout contract. The only consumer is the
+# focused validator under //tests/packaging, which embeds the file as
+# compile_data and fails closed on schema drift. Producer rules (archive
+# assembly) are deferred decisions and intentionally absent here.
+exports_files(
+    ["portable_layout.txt"],
+    visibility = ["//tests/packaging:__pkg__"],
+)
