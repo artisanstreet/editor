@@ -5,7 +5,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sea_orm::{ConnectOptions, Database, DatabaseConnection, DbErr};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement,
+};
 use sqlx_sqlite::{SqliteAutoVacuum, SqliteJournalMode, SqliteSynchronous};
 use thiserror::Error;
 
@@ -16,6 +18,11 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound on the findings a single open-time verification may report,
+/// so a badly damaged image cannot produce unbounded result rows.
+const QUICK_CHECK_FINDING_LIMIT: u32 = 100;
+/// The single verdict `PRAGMA quick_check` reports for a usable database.
+const VERIFICATION_OK: &str = "ok";
 
 /// The physical SQLite location opened by [`SqliteConfig`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,15 +211,41 @@ pub enum ConnectError {
         #[source]
         source: DbErr,
     },
+
+    /// The opened file database failed SQLite's usability verification.
+    #[error("sqlite database `{location}` failed integrity verification: {findings}")]
+    CorruptImage {
+        /// Human-readable database location.
+        location: String,
+        /// Findings reported by the bounded open-time `PRAGMA quick_check`.
+        findings: String,
+    },
+
+    /// The usability verification failed before it could produce a verdict.
+    #[error("failed to verify sqlite database `{location}`")]
+    VerificationFailed {
+        /// Human-readable database location.
+        location: String,
+        /// Underlying `SeaORM` failure from running the verification query.
+        #[source]
+        source: DbErr,
+    },
 }
 
 /// Opens a configured SQLite database through `SeaORM`.
 ///
+/// File-backed databases additionally run a bounded `PRAGMA quick_check`
+/// once before the pool is handed out, so a damaged database image is
+/// rejected as a typed startup failure instead of surfacing later as
+/// mid-operation read or write errors.
+///
 /// # Errors
 ///
 /// Returns a typed validation error before opening unusable configurations,
-/// or [`ConnectError::Connect`] with the original `SeaORM` error when opening
-/// the database fails.
+/// [`ConnectError::Connect`] with the original `SeaORM` error when opening
+/// the database fails, and [`ConnectError::CorruptImage`] or
+/// [`ConnectError::VerificationFailed`] when the opened file database does
+/// not pass usability verification.
 pub async fn connect(config: SqliteConfig) -> Result<DatabaseConnection, ConnectError> {
     config.validate()?;
     let location = config.location_display();
@@ -221,9 +254,75 @@ pub async fn connect(config: SqliteConfig) -> Result<DatabaseConnection, Connect
         Location::File { path } => is_missing_or_empty_file(path),
     };
 
-    Database::connect(config.connect_options(initialize_auto_vacuum))
+    let connection = Database::connect(config.connect_options(initialize_auto_vacuum))
         .await
-        .map_err(|source| ConnectError::Connect { location, source })
+        .map_err(|source| ConnectError::Connect {
+            location: location.clone(),
+            source,
+        })?;
+
+    if matches!(config.location, Location::File { .. }) {
+        verify_image(&connection, &location).await?;
+    }
+
+    Ok(connection)
+}
+
+/// Verifies an opened file database image with SQLite's `quick_check`.
+///
+/// SQLite reads only the first page while opening a file database, so an
+/// image with interior damage opens successfully and then fails later,
+/// potentially during a write path. The bounded check runs once per open to
+/// turn that latent failure into a typed startup error. Memory databases are
+/// process-local and start empty every time, so they carry no damage across
+/// sessions and skip it.
+///
+/// # Errors
+///
+/// Returns [`ConnectError::VerificationFailed`] when the verification query
+/// itself fails before producing a verdict, and
+/// [`ConnectError::CorruptImage`] with the reported findings otherwise.
+async fn verify_image(database: &DatabaseConnection, location: &str) -> Result<(), ConnectError> {
+    let verdicts = database
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("PRAGMA quick_check({QUICK_CHECK_FINDING_LIMIT})"),
+        ))
+        .await
+        .map_err(|source| ConnectError::VerificationFailed {
+            location: location.to_owned(),
+            source,
+        })?;
+
+    let mut healthy = false;
+    let mut findings = Vec::new();
+    for verdict in verdicts {
+        let finding = verdict.try_get_by_index::<String>(0).map_err(|source| {
+            ConnectError::VerificationFailed {
+                location: location.to_owned(),
+                source,
+            }
+        })?;
+
+        if finding == VERIFICATION_OK {
+            healthy = true;
+        } else {
+            findings.push(finding);
+        }
+    }
+
+    if healthy && findings.is_empty() {
+        return Ok(());
+    }
+
+    Err(ConnectError::CorruptImage {
+        location: location.to_owned(),
+        findings: if findings.is_empty() {
+            "verification returned no usable verdict".to_owned()
+        } else {
+            findings.join("; ")
+        },
+    })
 }
 
 fn is_missing_or_empty_file(path: &Path) -> bool {
