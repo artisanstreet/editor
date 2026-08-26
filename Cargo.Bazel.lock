@@ -1,5 +1,5 @@
 {
-  "checksum": "34bb9eda5f36c885050d67ce33a21009d0c72e4dc060df9e7a73c8ba98ce39a9",
+  "checksum": "a56e87c755f21257aa7e02b30299e47a0a30a3fc30c7c2c9b01d1d4dae9899f2",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1804,8 +1804,32 @@
         "deps": {
           "common": [
             {
+              "id": "base64 0.22.1",
+              "target": "base64"
+            },
+            {
+              "id": "bytes 1.12.1",
+              "target": "bytes"
+            },
+            {
               "id": "getrandom 0.4.3",
               "target": "getrandom"
+            },
+            {
+              "id": "http 1.5.0",
+              "target": "http"
+            },
+            {
+              "id": "http-body-util 0.1.5",
+              "target": "http_body_util"
+            },
+            {
+              "id": "hyper 1.11.0",
+              "target": "hyper"
+            },
+            {
+              "id": "hyper-util 0.1.20",
+              "target": "hyper_util"
             },
             {
               "id": "quinn 0.11.11",
@@ -19532,10 +19556,24 @@
           "**"
         ],
         "crate_features": {
-          "common": [
-            "default"
-          ],
-          "selects": {}
+          "common": [],
+          "selects": {
+            "aarch64-apple-darwin": [
+              "default"
+            ],
+            "aarch64-unknown-linux-gnu": [
+              "default"
+            ],
+            "x86_64-pc-windows-msvc": [
+              "default"
+            ],
+            "x86_64-unknown-linux-gnu": [
+              "default"
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              "default"
+            ]
+          }
         },
         "deps": {
           "common": [
@@ -19727,10 +19765,25 @@
           "common": [
             "client",
             "default",
-            "http1",
-            "http2"
+            "http1"
           ],
-          "selects": {}
+          "selects": {
+            "aarch64-apple-darwin": [
+              "http2"
+            ],
+            "aarch64-unknown-linux-gnu": [
+              "http2"
+            ],
+            "x86_64-pc-windows-msvc": [
+              "http2"
+            ],
+            "x86_64-unknown-linux-gnu": [
+              "http2"
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              "http2"
+            ]
+          }
         },
         "deps": {
           "common": [
@@ -19749,10 +19802,6 @@
             {
               "id": "futures-core 0.3.34",
               "target": "futures_core"
-            },
-            {
-              "id": "h2 0.4.19",
-              "target": "h2"
             },
             {
               "id": "http 1.5.0",
@@ -19787,7 +19836,38 @@
               "target": "want"
             }
           ],
-          "selects": {}
+          "selects": {
+            "aarch64-apple-darwin": [
+              {
+                "id": "h2 0.4.19",
+                "target": "h2"
+              }
+            ],
+            "aarch64-unknown-linux-gnu": [
+              {
+                "id": "h2 0.4.19",
+                "target": "h2"
+              }
+            ],
+            "x86_64-pc-windows-msvc": [
+              {
+                "id": "h2 0.4.19",
+                "target": "h2"
+              }
+            ],
+            "x86_64-unknown-linux-gnu": [
+              {
+                "id": "h2 0.4.19",
+                "target": "h2"
+              }
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              {
+                "id": "h2 0.4.19",
+                "target": "h2"
+              }
+            ]
+          }
         },
         "edition": "2021",
         "version": "1.11.0"
@@ -19917,28 +19997,51 @@
         ],
         "crate_features": {
           "common": [
-            "client",
-            "client-legacy",
-            "default",
-            "http1",
-            "http2",
             "tokio"
           ],
-          "selects": {}
+          "selects": {
+            "aarch64-apple-darwin": [
+              "client",
+              "client-legacy",
+              "default",
+              "http1",
+              "http2"
+            ],
+            "aarch64-unknown-linux-gnu": [
+              "client",
+              "client-legacy",
+              "default",
+              "http1",
+              "http2"
+            ],
+            "x86_64-pc-windows-msvc": [
+              "client",
+              "client-legacy",
+              "default",
+              "http1",
+              "http2"
+            ],
+            "x86_64-unknown-linux-gnu": [
+              "client",
+              "client-legacy",
+              "default",
+              "http1",
+              "http2"
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              "client",
+              "client-legacy",
+              "default",
+              "http1",
+              "http2"
+            ]
+          }
         },
         "deps": {
           "common": [
             {
               "id": "bytes 1.12.1",
               "target": "bytes"
-            },
-            {
-              "id": "futures-channel 0.3.34",
-              "target": "futures_channel"
-            },
-            {
-              "id": "futures-util 0.3.34",
-              "target": "futures_util"
             },
             {
               "id": "http 1.5.0",
@@ -19953,31 +20056,146 @@
               "target": "hyper"
             },
             {
-              "id": "libc 0.2.189",
-              "target": "libc"
-            },
-            {
               "id": "pin-project-lite 0.2.17",
               "target": "pin_project_lite"
             },
             {
-              "id": "socket2 0.6.5",
-              "target": "socket2"
-            },
-            {
               "id": "tokio 1.53.1",
               "target": "tokio"
-            },
-            {
-              "id": "tower-service 0.3.3",
-              "target": "tower_service"
-            },
-            {
-              "id": "tracing 0.1.44",
-              "target": "tracing"
             }
           ],
-          "selects": {}
+          "selects": {
+            "aarch64-apple-darwin": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
+                "id": "futures-util 0.3.34",
+                "target": "futures_util"
+              },
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              },
+              {
+                "id": "socket2 0.6.5",
+                "target": "socket2"
+              },
+              {
+                "id": "tower-service 0.3.3",
+                "target": "tower_service"
+              },
+              {
+                "id": "tracing 0.1.44",
+                "target": "tracing"
+              }
+            ],
+            "aarch64-unknown-linux-gnu": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
+                "id": "futures-util 0.3.34",
+                "target": "futures_util"
+              },
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              },
+              {
+                "id": "socket2 0.6.5",
+                "target": "socket2"
+              },
+              {
+                "id": "tower-service 0.3.3",
+                "target": "tower_service"
+              },
+              {
+                "id": "tracing 0.1.44",
+                "target": "tracing"
+              }
+            ],
+            "x86_64-pc-windows-msvc": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
+                "id": "futures-util 0.3.34",
+                "target": "futures_util"
+              },
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              },
+              {
+                "id": "socket2 0.6.5",
+                "target": "socket2"
+              },
+              {
+                "id": "tower-service 0.3.3",
+                "target": "tower_service"
+              },
+              {
+                "id": "tracing 0.1.44",
+                "target": "tracing"
+              }
+            ],
+            "x86_64-unknown-linux-gnu": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
+                "id": "futures-util 0.3.34",
+                "target": "futures_util"
+              },
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              },
+              {
+                "id": "socket2 0.6.5",
+                "target": "socket2"
+              },
+              {
+                "id": "tower-service 0.3.3",
+                "target": "tower_service"
+              },
+              {
+                "id": "tracing 0.1.44",
+                "target": "tracing"
+              }
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
+                "id": "futures-util 0.3.34",
+                "target": "futures_util"
+              },
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              },
+              {
+                "id": "socket2 0.6.5",
+                "target": "socket2"
+              },
+              {
+                "id": "tower-service 0.3.3",
+                "target": "tower_service"
+              },
+              {
+                "id": "tracing 0.1.44",
+                "target": "tracing"
+              }
+            ]
+          }
         },
         "edition": "2021",
         "version": "0.1.20"
@@ -38666,25 +38884,17 @@
         "crate_features": {
           "common": [
             "const_generics",
+            "const_new",
             "union"
           ],
           "selects": {
-            "aarch64-apple-darwin": [
-              "const_new"
-            ],
             "aarch64-unknown-linux-gnu": [
-              "const_new",
               "write"
             ],
-            "x86_64-pc-windows-msvc": [
-              "const_new"
-            ],
             "x86_64-unknown-linux-gnu": [
-              "const_new",
               "write"
             ],
             "x86_64-unknown-nixos-gnu": [
-              "const_new",
               "write"
             ]
           }
@@ -56468,10 +56678,16 @@
     ]
   },
   "direct_deps": [
+    "base64 0.22.1",
+    "bytes 1.12.1",
     "capnp 0.27.0",
     "capnpc 0.27.0",
     "getrandom 0.4.3",
     "gpui 0.2.2",
+    "http 1.5.0",
+    "http-body-util 0.1.5",
+    "hyper 1.11.0",
+    "hyper-util 0.1.20",
     "native-dialog 0.9.7",
     "pulldown-cmark 0.13.4",
     "quinn 0.11.11",

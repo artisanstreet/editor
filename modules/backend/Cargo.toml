@@ -11,7 +11,13 @@ artisan-domain = { path = "../domain" }
 artisan-migrations = { path = "../migrations" }
 artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
+base64.workspace = true
+bytes.workspace = true
 getrandom.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 quinn.workspace = true
 sea-orm.workspace = true
 thiserror.workspace = true
