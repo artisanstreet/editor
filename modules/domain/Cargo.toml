@@ -8,5 +8,9 @@ version.workspace = true
 [dependencies]
 thiserror.workspace = true
 
+[[test]]
+name = "assistant_message"
+path = "../../tests/domain/assistant_message.rs"
+
 [lints]
 workspace = true

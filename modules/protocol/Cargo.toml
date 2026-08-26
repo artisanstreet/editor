@@ -15,6 +15,10 @@ zeroize.workspace = true
 # Root-level tests stay outside the crate directory; this registration keeps
 # the protocol coverage indexed for rust-analyzer and focused cargo runs.
 [[test]]
+name = "assistant_message"
+path = "../../tests/protocol/assistant_message.rs"
+
+[[test]]
 name = "owned_codec"
 path = "../../tests/protocol/owned_codec.rs"
 
