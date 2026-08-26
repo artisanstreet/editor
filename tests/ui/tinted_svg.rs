@@ -137,9 +137,9 @@ impl PassObservation {
         post_present.set(tinted.svg.text_style().is_some());
     }
 
-    /// Draws one probe through a full real lifecycle under the given
-    /// colored-parent composition (outermost color first), sharing the
-    /// supplied underlying adapter instance.
+    /// Draws one probe through a full real lifecycle in a fresh test window,
+    /// sharing the supplied underlying adapter instance. Colors refine one
+    /// parent (last wins); nested ancestors are exercised in a separate test.
     fn draw_under(
         &self,
         cx: &mut TestAppContext,

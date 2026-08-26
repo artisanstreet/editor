@@ -16,8 +16,8 @@
 //!   Explicit authored tints (a caller's
 //!   `text_color` refinement or an [`IconStyle`](crate::icon::IconStyle)
 //!   `Muted` recipe) always win and are never touched; the forwarded value
-//!   is transient — resolved fresh every frame and unwound after the
-//!   delegated paint — so a later parent recolor can never go stale through
+//!   is transient — resolved fresh every frame and restored after the
+//!   delegated paint returns normally — so a later parent recolor cannot go stale through
 //!   a frozen refinement.
 //! - **Full-color** assets render through `img()` with an explicitly
 //!   constructed [`ImageSource::Resource`] of the [`gpui::Resource::Embedded`]
@@ -110,8 +110,8 @@ enum GlyphRoute {
 ///   actual resolved color of the Window text-style stack at this tree
 ///   position — including the resolved default text style when no ancestor
 ///   set one — is injected into the inner `Svg`'s own text refinement just
-///   before delegating to its real [`Element::paint`], then unwound
-///   afterwards.
+///   before delegating to its real [`Element::paint`], then restored
+///   after normal return. Panic-unwind restoration is not guaranteed.
 /// - An authored refinement (caller `.text_color(..)` or a resolved `Muted`
 ///   recipe) wins outright: it stays byte-exact DURING delegation as well
 ///   as afterward, and normal last-refinement-wins behavior is preserved.

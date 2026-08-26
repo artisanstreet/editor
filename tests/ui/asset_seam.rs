@@ -10,12 +10,13 @@
 //! behavior, and why the multicolor route must construct
 //! `ImageSource::Resource(Resource::Embedded(..))` explicitly instead of
 //! letting upstream string conversion classify catalog keys as URIs.
-//! Dynamically: real-window lifecycle regressions (`#[gpui::test]`) proving
-//! that the tinted route resolves the *actual* ambient Window text-style
-//! color at the paint phase — nested nearest-wins, cross-frame recoloring on
-//! a persistent view, resolved defaults without ancestors — and that
-//! authored colors stay overrides while the full-color route ignores text
-//! refinements entirely. The shared `asset_glyph` foundation is exercised
+//! Dynamically: in-memory window lifecycle probes (`#[gpui::test]`) observe
+//! ambient Window text-style inputs at the paint phase: nested nearest-wins,
+//! cross-frame recoloring on a persistent view, and resolved defaults without
+//! ancestors. These sibling probes do not observe the glyph's forwarded color;
+//! private tests in `tinted_svg.rs` assert the actual inner Svg slot during
+//! delegation and its restoration after normal return. Routing assertions
+//! separately pin the full-color policy. The shared `asset_glyph` foundation is exercised
 //! directly (the exact call shape `button.rs` uses), not only through the
 //! icon recipe layer.
 
@@ -221,7 +222,7 @@ fn bare_string_keys_misclassify_as_uris_but_explicit_embedding_resolves() {
 //    Deleting the helper's mutation fails assertions there directly.
 // 2. Real-frame dynamics (`recolored_parents_repaint_the_same_view...`):
 //    every post-recolor paint-phase observation resolves the updated
-//    color — no cross-frame carrier survives a repaint.
+//    ambient input color. This does not observe the glyph's own refinement.
 // 3. Input/lifecycle probes (`canvas` siblings) and geometry bounds: pin
 //    that the resolved ambient value is live AT THE PAINT PHASE at the
 //    glyph's tree position and that layout boxes are unchanged. These are
@@ -233,17 +234,13 @@ fn bare_string_keys_misclassify_as_uris_but_explicit_embedding_resolves() {
 // observable (frame scene, sprite atlas, harness draw hook are
 // crate-private; the test App hard-wires its asset source to `()`), so no
 // executable check can read the forwarded color out of an actual
-// `MonochromeSprite`. Likewise, GPUI's public lifecycle reconstructs
-// element adapters every frame (render is per-frame and elements are
-// move-only), so a painted adapter cannot be retained and re-observed;
-// staleness through a frozen slot is excluded structurally instead: the
-// wrapper stores no element id/state and no globals, the injected value
-// lives only inside one delegated paint call, and a debug-build invariant
-// asserts the unwind. Deleting ONLY the injection lines while keeping the
-// delegation would therefore not fail these suites; it is caught by the
-// pinned-source trace (compute_style_internal → gate → injection site)
-// reviewed in this packet, which is exactly the accepted
-// trace-plus-executable-checks combination.
+// `MonochromeSprite`. The private suite observes the real inner Svg slot
+// inside the production helper, verifies restoration after normal return,
+// and reuses one underlying adapter across separate lifecycle draws. Removing
+// the injection fails those assertions. Static inspection verifies that
+// `TintedSvg::paint` uses this helper and delegates to the real `Svg::paint`;
+// the lifecycle smoke alone does not establish pixel output. The public
+// sibling probes below establish live ambient inputs, not SVG forwarding.
 // ---------------------------------------------------------------------------
 
 /// Pure red used as an unambiguous parent text color.
@@ -424,14 +421,11 @@ fn recolored_parents_repaint_the_same_view_across_frames_without_stale_values(
     cx.run_until_parked();
 
     // Recolor the parent of the SAME persistent view and repaint it — the
-    // real production recolor path. Scope note (deliberately precise): GPUI
-    // re-renders this retained view every frame with freshly constructed
-    // adapters, so what this proves is that the seam's resolution follows
-    // the live Window stack across repaints and that no window-/view-level
-    // carrier preserves an older ambient value into later frames. The
-    // adapter-instance reuse question is covered separately by
-    // `retained_adapter_resolves_live_window_state_across_renders` plus the
-    // structural no-state/no-globals argument in the header above.
+    // real production recolor path. GPUI re-renders this retained view with
+    // fresh adapters; the sibling probe observes updated ambient inputs,
+    // not the glyph's inner slot. Actual slot forwarding and adapter reuse
+    // are covered separately by the private unit test
+    // `same_instance_under_a_changed_parent_forwards_each_new_value`.
     cx.update(|window, app| {
         view.update(app, |host, cx| {
             host.parent_color = Some(BLUE);
@@ -454,8 +448,7 @@ fn recolored_parents_repaint_the_same_view_across_frames_without_stale_values(
     assert!(
         frames[red_prefix..].iter().all(|color| *color == BLUE),
         "post-recolor paints must resolve the UPDATED ambient color; got \
-         {frames:?} — any RED there would be a stale injected refinement \
-         from frame one"
+         {frames:?} — any RED there would be a stale ambient observation"
     );
 }
 
@@ -468,10 +461,9 @@ fn without_explicit_ancestors_the_resolved_default_text_style_is_live(cx: &mut T
     });
     cx.run_until_parked();
 
-    // Absence of an explicit ancestor does NOT leave the icon unpainted: the
-    // Window resolves its actual default text style, and that concrete value
-    // is what reaches the tinted route. This replaces the old invisibility
-    // premise with the real default-resolution behavior.
+    // Without an explicit ancestor, the sibling probe still observes the
+    // Window's resolved default. The private suite separately verifies
+    // forwarding this value into the glyph's real inner slot.
     let expected_default = TextStyle::default().color;
     assert_eq!(
         expected_default,
@@ -547,10 +539,9 @@ fn full_color_routes_ignore_text_color_refinements_entirely(cx: &mut TestAppCont
     });
     cx.run_until_parked();
 
-    // Geometry evidence only: both embedded-route marks lay out their box
-    // under the colored parent unchanged. Their painted pixels come from the
-    // embedded bytes (publicly unverifiable per the limitation note above),
-    // but routing itself is pinned by the assertions above.
+    // Lifecycle and ambient-input evidence only: the parent remains live
+    // around embedded-route marks. This does not measure glyph bounds or
+    // pixels; routing is pinned by the assertions above.
     let observed = capture.drained();
     assert!(
         !observed.is_empty() && observed.iter().all(|color| *color == RED),

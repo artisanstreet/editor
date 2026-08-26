@@ -5,8 +5,9 @@
 //! documented asset identities resolving byte-identical tintable sources,
 //! spacing-token-derived square edges, mode-resolved tints, the never-tint
 //! rule for multicolor artwork, and rendered layout proof through the pinned
-//! GPUI test harness. Ambient color-forwarding behavior of inherited tints
-//! is covered by the lifecycle suite in `tests/ui/asset_seam.rs`; the bounds
+//! GPUI test harness. Ambient input dynamics are covered by
+//! `tests/ui/asset_seam.rs`; actual inner-slot forwarding and restoration
+//! are covered by the private suite in `tests/ui/tinted_svg.rs`. The bounds
 //! assertions here are geometry evidence only.
 
 use artisan_ui::AssetId;
@@ -318,10 +319,9 @@ fn inherit_tinted_icons_keep_their_layout_box_without_ancestors(cx: &mut TestApp
 
     // Geometry evidence ONLY: this asserts the documented 16 px layout box
     // of an inherit-tinted glyph rendered outside any colored ancestor. It
-    // does not pin painting; paint-color forwarding is covered by the
-    // precedence and lifecycle suites in `tests/ui/asset_seam.rs` (under
-    // the repaired semantics, such a glyph resolves the default Window
-    // text style when painted).
+    // does not pin painting. `tests/ui/asset_seam.rs` observes ambient inputs;
+    // the private suite in `tests/ui/tinted_svg.rs` separately verifies
+    // forwarding the default Window text color into the real inner Svg slot.
     let bounds = cx
         .debug_bounds(INHERIT_ICON_SELECTOR)
         .expect("inherit-tinted icon must still lay out");

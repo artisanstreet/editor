@@ -33,6 +33,7 @@ rust_clippy(
         "//modules/migrations:migrations",
         "//modules/protocol:protocol",
         "//modules/transport:transport",
+        "//modules/ui:tinted_svg_unit_test",
         "//modules/ui:ui",
         "//scripts/capnp_codegen:capnpc_rust",
         "//tests/assets:assets_validation_test",
@@ -104,6 +105,7 @@ rustfmt_test(
     targets = [
         "//modules/backend:forge",
         "//modules/frontend:editor",
+        "//modules/ui:tinted_svg_unit_test",
         "//scripts/capnp_codegen:capnpc_rust",
         "//tests/assets:assets_validation_test",
         "//tests/backend:app_test",
@@ -173,6 +175,7 @@ test_suite(
     name = "tests",
     tests = [
         ":format_test",
+        "//modules/ui:tinted_svg_unit_test",
         "//tests/assets:assets_validation_test",
         "//tests/backend:app_test",
         "//tests/backend:connection_test",
