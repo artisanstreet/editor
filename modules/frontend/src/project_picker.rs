@@ -49,15 +49,22 @@
 //!   the parent origin from flip candidates. Frames before the probe has
 //!   recorded an origin render nothing rather than risk detached placement;
 //! - the menu body is height-bounded and vertically scrollable. Known
-//!   pinned-GPUI quirks are handled rather than papered over: a fresh scroll
-//!   handle's first pending item is consumed before the handle has bounds,
-//!   so the initial reveal is re-issued on the following frame; the scroll
-//!   container maps one direct child per selectable row (the hairline
-//!   separator lives inside the final row group) so
+//!   pinned-GPUI lifecycle quirks are handled rather than papered over: a
+//!   fresh scroll handle's first pending item is consumed before the handle
+//!   has overflow/bounds, so the shell's paint probe re-issues the reveal
+//!   through `Window::defer` — queued from draw, its callback runs after
+//!   that draw completes, where a refresh is legal again (`refresh` during
+//!   draw is a pinned no-op) — for any highlighted row, tail or midpoint;
+//!   the scroll container maps one direct child per selectable row (the
+//!   hairline separator lives inside the final row group) so
 //!   `ScrollHandle::scroll_to_item` indexes stay aligned with [`PickerRow`]
 //!   addresses; and because the deferred menu lies outside the root hitbox,
 //!   the root's outside-press handler ignores presses inside the live menu
-//!   bounds so row activation wins the capture/bubble race.
+//!   bounds so row activation wins the capture/bubble race;
+//! - Enter/Space activation spans the full key lifecycle: the down half
+//!   activates and closes, and focus returns to the trigger only from the
+//!   menu's own key-up handler, so the release of that same keypress cannot
+//!   synthesize a focused-trigger click and silently reopen the menu.
 //!
 //! Behavior evidence comes from the pinned in-memory GPUI test harness
 //! (real painted bounds, focus, and scroll state); it is not OS-window,
@@ -518,10 +525,15 @@ pub struct ProjectPickerView {
     /// Flat selectable-row address waiting to be revealed once the fresh
     /// scroll handle has received real bounds. Pinned-GPUI consumes a
     /// pending scroll item before a brand-new handle has overflow/bounds,
-    /// so the first-open reveal is carried out by the shell's paint-time
-    /// probe, which runs after the deferred menu's prepaint on the very
-    /// same frame.
+    /// so the shell's paint-time probe re-issues the reveal request after
+    /// that first draw completes, via a lifecycle-deferred refresh that is
+    /// legal outside the suppressed drawing phase.
     initial_reveal_flat: Rc<Cell<Option<usize>>>,
+    /// Set while the release half of a menu-closing Enter/Space keypress is
+    /// outstanding. That release synthesizes a focused-trigger click (pinned
+    /// div.rs key-up synthesis); exactly this one click is swallowed so the
+    /// menu closes and stays closed through the full press lifecycle.
+    suppress_trigger_release: bool,
     clock: Instant,
     last_action: Option<ProjectPickerAction>,
 }
@@ -553,10 +565,6 @@ const MENU_SELECTOR: &str = "artisan-project-picker-menu";
 /// Prefix of the debug selectors painted on selectable rows: project rows are
 /// suffixed with their catalog index, the final row with `-new`.
 const ROW_SELECTOR_PREFIX: &str = "artisan-project-picker-row";
-/// How close to the end of the catalog a freshly opened highlight must sit to
-/// ride the pinned first-frame-safe `scroll_to_bottom` flag instead of the
-/// pending-item path that fresh handles consume before they can scroll.
-const INITIAL_REVEAL_TAIL_BAND_ROWS: usize = 12;
 
 /// Menu panel width for a viewport: the legacy `min(20rem, 100vw - 2rem)`
 /// clamp, floored at zero for degenerate windows.
@@ -570,28 +578,6 @@ fn menu_width_for_viewport(viewport: Size<Pixels>) -> Pixels {
 fn menu_max_height_for_viewport(viewport: Size<Pixels>) -> Pixels {
     let available = f32::from(viewport.height) - MENU_VIEWPORT_INSET_Y_PX;
     px(MENU_MAX_HEIGHT_PX.min(available.max(0.0)))
-}
-
-/// Directly scrolls the selectable row at child index `flat` into the scroll
-/// container, mirroring pinned-GPUI's `FirstVisible` strategy against the
-/// handle's measured geometry. Runs at paint time for the fresh-handle
-/// first-open reveal, after the deferred menu's prepaint has populated real
-/// bounds on this very frame.
-fn scroll_row_into_view(handle: &ScrollHandle, flat: usize) {
-    let Some(item_bounds) = handle.bounds_for_item(flat) else {
-        return;
-    };
-    let container = handle.bounds();
-    if container.size.width <= px(0.0) && container.size.height <= px(0.0) {
-        return;
-    }
-    let mut offset = handle.offset();
-    if item_bounds.top() + offset.y < container.top() {
-        offset.y = container.top() - item_bounds.top();
-    } else if item_bounds.bottom() + offset.y > container.bottom() {
-        offset.y = container.bottom() - item_bounds.bottom();
-    }
-    handle.set_offset(offset);
 }
 
 impl ProjectPickerView {
@@ -614,6 +600,7 @@ impl ProjectPickerView {
             menu_scroll: ScrollHandle::new(),
             trigger_origin: Rc::new(RefCell::new(None)),
             initial_reveal_flat: Rc::new(Cell::new(None)),
+            suppress_trigger_release: false,
             clock: Instant::now(),
             last_action: None,
         }
@@ -664,10 +651,18 @@ impl ProjectPickerView {
 
     fn handle_trigger_click(
         &mut self,
-        _: &ClickEvent,
+        event: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Swallow exactly the synthesized keyboard click of a release whose
+        // down half just closed the menu. Pointer clicks clear any stale
+        // suppression and behave normally.
+        if matches!(event, ClickEvent::Keyboard(_)) && self.suppress_trigger_release {
+            self.suppress_trigger_release = false;
+            return;
+        }
+        self.suppress_trigger_release = false;
         self.state.press_trigger();
         self.sync_focus_after_transition(window);
         cx.notify();
@@ -701,6 +696,11 @@ impl ProjectPickerView {
                 self.state.activate_highlighted();
                 self.drain_actions();
                 self.sync_focus_after_transition(window);
+                // Focus is back on the trigger, so this keypress's release
+                // will synthesize a focused-trigger click (pinned key-up
+                // synthesis). Swallow exactly that one click so a complete
+                // activation press closes the menu and it stays closed.
+                self.suppress_trigger_release = true;
                 true
             }
             "escape" => {
@@ -774,21 +774,16 @@ impl ProjectPickerView {
         if self.state.is_open() {
             window.focus(&self.menu_focus);
             // Immediate attempt: harmless once the handle has bounds from an
-            // earlier open. Fresh handles consume a pending item before they
-            // have overflow/bounds, so tail-band highlights (including the
-            // final row behind its separator) ride the pinned
-            // first-frame-safe scroll_to_bottom flag instead, and other
-            // rows fall back to the paint-probe correction below.
+            // earlier open. A brand-new handle consumes this first pending
+            // item before it has overflow/bounds and silently drops it, so
+            // the flat address is also armed for the shell's paint-time
+            // probe, which re-issues it after that first draw completes.
             let project_count = self.state.projects().len();
             let flat = self
                 .state
                 .highlighted_row()
                 .map_or(0, |row| row.to_flat_index(project_count));
-            if flat + INITIAL_REVEAL_TAIL_BAND_ROWS > project_count {
-                self.menu_scroll.scroll_to_bottom();
-            } else {
-                self.initial_reveal_flat.set(Some(flat));
-            }
+            self.initial_reveal_flat.set(Some(flat));
             self.reveal_highlight();
         } else {
             self.initial_reveal_flat.set(None);
@@ -1035,28 +1030,38 @@ impl Render for ProjectPickerView {
         // Invisible probe overlaying the trigger shell records its painted
         // window-space origin every frame — pinned flip candidates drop
         // contextual origins, so the anchored menu reads the last recorded
-        // value to stay trigger-relative. The same paint hook carries the
-        // fresh-handle first-open reveal: deferred menus prepaint before
-        // ancestors paint, so by this point the scroll handle already holds
-        // this frame's real geometry.
+        // value to stay trigger-relative. Because this closure runs during
+        // draw, any follow-up work is queued through `Window::defer`, whose
+        // callback executes after the current effect cycle's draw completes:
+        // `refresh` called directly here would be a pinned no-op
+        // (`invalidator.not_drawing()` is false mid-draw), and the test
+        // platform never pumps frame callbacks at all. The deferred reveal
+        // re-issues the fresh handle's dropped pending item once real
+        // geometry exists, and the deferred refresh settles one frame after
+        // a host move/resize so the open menu follows the trigger.
         let probe_origin = Rc::clone(&self.trigger_origin);
         let probe_reveal = Rc::clone(&self.initial_reveal_flat);
         let probe_scroll = self.menu_scroll.clone();
         let probe = canvas(
             {
-                let probe_origin = Rc::clone(&probe_origin);
-                move |bounds, _, _| *probe_origin.borrow_mut() = Some(bounds.origin)
+                // Prepaint deliberately records nothing: the paint closure
+                // below both records and compares, so a host move detected
+                // here triggers exactly one settlement frame.
+                move |_, _, _| {}
             },
             {
                 let probe_origin = Rc::clone(&probe_origin);
-                move |bounds, (), window, _| {
+                move |bounds, (), window, cx| {
+                    let moved = *probe_origin.borrow_mut() != Some(bounds.origin);
                     *probe_origin.borrow_mut() = Some(bounds.origin);
                     if let Some(flat) = probe_reveal.take() {
-                        // The deferred menu baked this frame's prepaint-time
-                        // offset already; correct it and refresh once so the
-                        // next frame paints the revealed row.
-                        scroll_row_into_view(&probe_scroll, flat);
-                        window.refresh();
+                        let scroll = probe_scroll.clone();
+                        window.defer(cx, move |window, _| {
+                            scroll.scroll_to_item(flat);
+                            window.refresh();
+                        });
+                    } else if moved {
+                        window.defer(cx, |window, _| window.refresh());
                     }
                 }
             },

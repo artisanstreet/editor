@@ -44,6 +44,8 @@ const ROW_ONE_SELECTOR: &str = "artisan-project-picker-row-1";
 const ROW_FIRST_SELECTOR: &str = "artisan-project-picker-row-0";
 /// Selector of project row 5 (typeahead target in the long catalog).
 const ROW_FIVE_SELECTOR: &str = "artisan-project-picker-row-5";
+/// Selector of project row 128 (midpoint current row in a 256 catalog).
+const ROW_MID_SELECTOR: &str = "artisan-project-picker-row-128";
 /// Selector of the last project row (row 255 of the 256-project catalog).
 const ROW_LAST_SELECTOR: &str = "artisan-project-picker-row-255";
 /// Selector of the distinct final "New project" row.
@@ -172,22 +174,39 @@ fn assert_inside_viewport(bounds: Bounds<Pixels>, width: f32, height: f32, label
     );
 }
 
-/// Delivers an unmodified Enter/Space as a key-up event — the channel pinned
-/// GPUI synthesizes focused-element clicks from, exactly as the Button
-/// primitive's own probes do.
-fn press_keyboard_button(cx: &mut VisualTestContext, key: &'static str) {
+/// Delivers the DOWN half of an unmodified key press. Pinned
+/// `Window::dispatch_keystroke` (driven by `simulate_keystrokes`) dispatches
+/// key-down only; the release half is delivered separately so probes can
+/// observe and assert each phase of the real key lifecycle.
+fn press_down(cx: &mut VisualTestContext, key: &'static str) {
+    cx.simulate_keystrokes(key);
+}
+
+/// Delivers the UP half of a key press. On a focused element with click
+/// listeners, pinned GPUI synthesizes an Enter/Space click from exactly this
+/// event (div.rs key-up synthesis).
+fn release_key(cx: &mut VisualTestContext, key: &'static str) {
     cx.simulate_event(KeyUpEvent {
         keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
     });
 }
 
+/// Delivers one complete physical key press: genuine down followed by
+/// genuine release, nothing substituted.
+fn complete_press(cx: &mut VisualTestContext, key: &'static str) {
+    press_down(cx, key);
+    release_key(cx, key);
+}
+
 /// Opens the fixture menu from pure keyboard input — Tab to the trigger,
-/// Enter to open — asserting the traversal landed natively along the way,
-/// then lets the frames consuming the pending scroll settle.
+/// then a COMPLETE Enter press whose halves are individually asserted: the
+/// down half alone must stay inert and the release must synthesize exactly
+/// one opening click. Parks afterwards so the frames consuming the pending
+/// scroll settle.
 fn open_menu_from_keyboard(host: &Entity<PickerHost>, cx: &mut VisualTestContext) {
     cx.simulate_keystrokes("tab");
     // Keyboard-click synthesis registers per paint while the trigger is
-    // focused, so a frame must pass before Enter can reach that listener.
+    // focused, so a frame must pass before the press can reach that listener.
     cx.run_until_parked();
     cx.update(|window, app| {
         let trigger = host.read(app).picker.read(app).trigger_focus().clone();
@@ -195,9 +214,26 @@ fn open_menu_from_keyboard(host: &Entity<PickerHost>, cx: &mut VisualTestContext
             trigger.is_focused(window),
             "traversal must reach the trigger"
         );
+        let picker = host.read(app).picker.clone();
+        assert!(!picker.read(app).state().is_open());
     });
-    press_keyboard_button(cx, "enter");
+    press_down(cx, "enter");
+    cx.update(|_, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            !picker.read(app).state().is_open(),
+            "the down half alone must not activate"
+        );
+    });
+    release_key(cx, "enter");
     cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            picker.read(app).state().is_open(),
+            "the complete press must have opened the menu"
+        );
+    });
 }
 
 #[gpui::test]
@@ -231,14 +267,23 @@ fn real_proof_host_traversal_reaches_the_trigger_and_routes_keys(cx: &mut TestAp
         );
     });
 
-    // Enter opens exactly once (a double toggle would leave it closed) and
-    // addresses the proof catalog's current row (core, index 0).
-    press_keyboard_button(cx, "enter");
+    // A COMPLETE Enter press opens exactly once — the down half is inert and
+    // only the release synthesizes the opening click — and addresses the
+    // proof catalog's current row (core, index 0).
+    press_down(cx, "enter");
+    cx.update(|_, app| {
+        let picker = surface.read(app).picker().clone();
+        assert!(
+            !picker.read(app).state().is_open(),
+            "the down half alone must not activate"
+        );
+    });
+    release_key(cx, "enter");
     cx.run_until_parked();
     cx.update(|_, app| {
         let picker = surface.read(app).picker().clone();
         let state = picker.read(app).state();
-        assert!(state.is_open(), "enter must open the menu exactly once");
+        assert!(state.is_open(), "the complete press must open exactly once");
         assert_eq!(state.highlighted_row(), Some(PickerRow::Project(0)));
     });
 
@@ -264,7 +309,7 @@ fn real_proof_host_traversal_reaches_the_trigger_and_routes_keys(cx: &mut TestAp
     });
 
     // Space reopens from the focused trigger.
-    press_keyboard_button(cx, "space");
+    complete_press(cx, "space");
     cx.run_until_parked();
     cx.update(|_, app| {
         let picker = surface.read(app).picker().clone();
@@ -300,26 +345,45 @@ fn keyboard_only_activation_emits_choose_new_project_then_current_noop(cx: &mut 
     cx.simulate_resize(size(px(800.0), px(600.0)));
     cx.run_until_parked();
 
-    // Open on the current row 0, move down to row 1, activate: Choose.
+    // Open on the current row 0, move down to row 1, activate with a
+    // COMPLETE Enter press: Choose closes and STAYS CLOSED through release,
+    // with focus restored only after that release.
     open_menu_from_keyboard(&host, cx);
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
-    cx.simulate_keystrokes("enter");
+    press_down(cx, "enter");
     cx.run_until_parked();
-    cx.update(|window, app| {
+    cx.update(|_window, app| {
         let picker = host.read(app).picker.clone();
         assert!(!picker.read(app).state().is_open(), "choosing closes first");
         assert_eq!(
             picker.read(app).last_action(),
             Some(ProjectPickerAction::Choose(catalog_entry_id(1))),
         );
+        // The down half already restored trigger focus eagerly; the release
+        // below must not toggle anything.
+    });
+    release_key(cx, "enter");
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            !picker.read(app).state().is_open(),
+            "the release must not reopen the menu"
+        );
+        assert_eq!(
+            picker.read(app).last_action(),
+            Some(ProjectPickerAction::Choose(catalog_entry_id(1))),
+            "release must not emit a second action"
+        );
         let trigger = picker.read(app).trigger_focus().clone();
-        assert!(trigger.is_focused(window));
+        assert!(trigger.is_focused(window), "release keeps trigger focus");
     });
 
     // Reopening addresses the repointed current row; End reaches the final
-    // row behind its separator; Space activates it: New project.
-    press_keyboard_button(cx, "enter");
+    // row behind its separator; a COMPLETE Space press activates it:
+    // New project closes and stays closed through release.
+    complete_press(cx, "enter");
     cx.run_until_parked();
     cx.update(|_, app| {
         let picker = host.read(app).picker.clone();
@@ -334,7 +398,7 @@ fn keyboard_only_activation_emits_choose_new_project_then_current_noop(cx: &mut 
     let menu = painted_bounds(cx, MENU_SELECTOR);
     let new_row = painted_bounds(cx, ROW_NEW_SELECTOR);
     assert_visible_within(new_row, menu, "final row after End in a short catalog");
-    cx.simulate_keystrokes("space");
+    press_down(cx, "space");
     cx.run_until_parked();
     cx.update(|_, app| {
         let picker = host.read(app).picker.clone();
@@ -344,12 +408,28 @@ fn keyboard_only_activation_emits_choose_new_project_then_current_noop(cx: &mut 
             Some(ProjectPickerAction::NewProject),
         );
     });
-
-    // Reopen (highlights current row 1) and press Enter: activating the
-    // current project closes without emitting anything further.
-    press_keyboard_button(cx, "enter");
+    release_key(cx, "space");
     cx.run_until_parked();
-    cx.simulate_keystrokes("enter");
+    cx.update(|_, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            !picker.read(app).state().is_open(),
+            "the release must not reopen the menu"
+        );
+        assert_eq!(
+            picker.read(app).last_action(),
+            Some(ProjectPickerAction::NewProject),
+            "release must not emit a second action"
+        );
+    });
+
+    // Reopen (highlights current row 1) and activate the current project
+    // with a COMPLETE Enter press: closes as a no-op through release.
+    complete_press(cx, "enter");
+    cx.run_until_parked();
+    press_down(cx, "enter");
+    cx.run_until_parked();
+    release_key(cx, "enter");
     cx.run_until_parked();
     cx.update(|_, app| {
         let picker = host.read(app).picker.clone();
@@ -405,7 +485,7 @@ fn pointer_selection_survives_the_capture_phase_dismissal_boundary(cx: &mut Test
     });
 
     // Pointer-select the final New project row behind its separator.
-    press_keyboard_button(cx, "enter");
+    complete_press(cx, "enter");
     cx.run_until_parked();
     let menu = painted_bounds(cx, MENU_SELECTOR);
     let new_row = painted_bounds(cx, ROW_NEW_SELECTOR);
@@ -423,7 +503,7 @@ fn pointer_selection_survives_the_capture_phase_dismissal_boundary(cx: &mut Test
 
     // Reopen (current row 1 highlighted) and pointer-select the CURRENT
     // project: closing no-op, no further action.
-    press_keyboard_button(cx, "enter");
+    complete_press(cx, "enter");
     cx.run_until_parked();
     let row = painted_bounds(cx, ROW_ONE_SELECTOR);
     cx.simulate_click(row.center(), Modifiers::none());
@@ -508,9 +588,11 @@ fn long_catalog_reveals_current_home_end_wrap_typeahead_and_new_project(cx: &mut
     let typed_row = painted_bounds(cx, ROW_FIVE_SELECTOR);
     assert_visible_within(typed_row, menu, "typeahead target row 5");
 
-    // ...and the final row stays selectable straight from the keyboard.
+    // ...and the final row stays selectable straight from the keyboard: a
+    // COMPLETE Space press closes and stays closed through release.
     cx.simulate_keystrokes("end");
-    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    press_down(cx, "space");
     cx.run_until_parked();
     cx.update(|_, app| {
         let picker = host.read(app).picker.clone();
@@ -518,6 +600,20 @@ fn long_catalog_reveals_current_home_end_wrap_typeahead_and_new_project(cx: &mut
         assert_eq!(
             picker.read(app).last_action(),
             Some(ProjectPickerAction::NewProject),
+        );
+    });
+    release_key(cx, "space");
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = host.read(app).picker.clone();
+        assert!(
+            !picker.read(app).state().is_open(),
+            "the release must not reopen the menu"
+        );
+        assert_eq!(
+            picker.read(app).last_action(),
+            Some(ProjectPickerAction::NewProject),
+            "release must not emit a second action"
         );
     });
 }
@@ -723,7 +819,7 @@ fn outside_presses_dismiss_while_trigger_clicks_still_toggle(cx: &mut TestAppCon
 
     // Reopen, then press far outside the leaf: outside dismissal fires and
     // focus settles back on the trigger.
-    press_keyboard_button(cx, "enter");
+    complete_press(cx, "enter");
     cx.run_until_parked();
     cx.update(|_, app| {
         let picker = host.read(app).picker.clone();
@@ -739,5 +835,114 @@ fn outside_presses_dismiss_while_trigger_clicks_still_toggle(cx: &mut TestAppCon
         );
         let trigger_focus = picker.read(app).trigger_focus().clone();
         assert!(trigger_focus.is_focused(window));
+    });
+}
+
+#[gpui::test]
+fn midpoint_current_row_is_revealed_on_first_open(cx: &mut TestAppContext) {
+    bind_fixture_tab_actions(cx);
+    // A midpoint current row exercises the general first-open reveal: it is
+    // neither the visible-by-default top of the catalog nor the tail, so
+    // only a genuine scroll request consumed with real handle geometry can
+    // make it visible. Ordinary row sizes, no manual scrolling anywhere.
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        PickerHost::new(
+            window,
+            cx,
+            (0..256).map(catalog_entry).collect(),
+            Some(catalog_entry_id(128)),
+            240.0,
+        )
+    });
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.run_until_parked();
+
+    open_menu_from_keyboard(&host, cx);
+
+    let menu = painted_bounds(cx, MENU_SELECTOR);
+    assert!(
+        menu.size.height <= px(360.0) + px(0.6),
+        "the panel must stay height-bounded: {menu:?}"
+    );
+    let mid_row = painted_bounds(cx, ROW_MID_SELECTOR);
+    assert_visible_within(mid_row, menu, "midpoint current row 128 on first open");
+}
+
+#[gpui::test]
+fn open_menu_follows_host_reflow_and_stays_clickable(cx: &mut TestAppContext) {
+    // The REAL proof host: its centered column genuinely repositions the
+    // picker whenever the window size changes, so resizing while the menu is
+    // already open exercises production follow-the-trigger placement rather
+    // than a pre-open resize.
+    cx.update(bind_proof_actions);
+    let (surface, cx) = cx.add_window_view(ProofSurface::new);
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.run_until_parked();
+
+    // Tab to the trigger through the actual proof-host route and open with
+    // one complete Enter press.
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        let trigger = surface.read(app).picker().read(app).trigger_focus().clone();
+        assert!(trigger.is_focused(window));
+    });
+    complete_press(cx, "enter");
+    cx.run_until_parked();
+
+    let trigger_before = painted_bounds(cx, TRIGGER_SELECTOR);
+    let menu_before = painted_bounds(cx, MENU_SELECTOR);
+    assert!(
+        (menu_before.bottom() - trigger_before.top() + px(10.0)).abs() < px(0.6),
+        "fixture must open in the preferred placement before reflow"
+    );
+
+    // Resize the host while the menu is open.
+    cx.simulate_resize(size(px(1000.0), px(760.0)));
+    cx.run_until_parked();
+
+    let trigger_after = painted_bounds(cx, TRIGGER_SELECTOR);
+    let menu_after = painted_bounds(cx, MENU_SELECTOR);
+
+    // The host really moved the trigger — this is not a no-op resize.
+    assert!(
+        (trigger_after.center().x - trigger_before.center().x).abs() > px(40.0)
+            && (trigger_after.center().y - trigger_before.center().y).abs() > px(40.0),
+        "the fixture must move the trigger substantially: \
+         {trigger_before:?} -> {trigger_after:?}"
+    );
+
+    // The open menu followed the moved trigger with audited top/start +10px
+    // preferred placement (space allows here) and stays viewport bounded.
+    assert!(
+        ((menu_after.bottom() - trigger_after.top()) + px(10.0)).abs() < px(0.6),
+        "the reopened geometry must sit 10px above the moved trigger: \
+         menu {menu_after:?} trigger {trigger_after:?}"
+    );
+    assert!(
+        (menu_after.origin.x - trigger_after.origin.x).abs() < px(0.6),
+        "start alignment must follow the moved trigger"
+    );
+    assert_inside_viewport(menu_after, 1000.0, 760.0, "reflowed menu");
+
+    // The settled geometry is genuinely visible AND clickable: pointer-select
+    // the non-current docs-site row through its new painted center.
+    let row = painted_bounds(cx, ROW_ONE_SELECTOR);
+    assert_visible_within(row, menu_after, "target row after reflow");
+    cx.simulate_click(row.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = surface.read(app).picker().clone();
+        assert!(
+            !picker.read(app).state().is_open(),
+            "post-reflow selection closes the menu"
+        );
+        assert_eq!(
+            picker.read(app).last_action(),
+            Some(ProjectPickerAction::Choose(
+                ProjectId::parse("proof-docs-site").expect("proof ids are valid")
+            )),
+            "the post-reflow click must choose docs-site exactly once"
+        );
     });
 }
