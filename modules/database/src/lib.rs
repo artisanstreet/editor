@@ -14,6 +14,8 @@ pub use repository::{
     AttachProjectInput, AttachProjectResult, ClaimMessageDispatch, ClaimedMessageDispatch,
     CompleteMessageDispatch, CreateThreadInput, CreateThreadResult, DispatchFailureReason,
     DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,
-    MessageDispatchPayload, QueueFirstMessageInput, QueueFirstMessageResult, Repository,
-    RepositoryError, RequeueMessageDispatch, TransitionedMessageDispatch,
+    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, MessageDispatchPayload,
+    QueueFirstMessageInput, QueueFirstMessageResult, Repository, RepositoryError,
+    RequeueMessageDispatch, RunLaunchCredentials, RunLaunchError, RunStartKey,
+    TransitionedMessageDispatch,
 };
