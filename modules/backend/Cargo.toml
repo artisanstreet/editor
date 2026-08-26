@@ -27,6 +27,10 @@ name = "app_test"
 path = "../../tests/backend/app.rs"
 
 [[test]]
+name = "connection"
+path = "../../tests/backend/connection.rs"
+
+[[test]]
 name = "request_handler"
 path = "../../tests/backend/request_handler.rs"
 
