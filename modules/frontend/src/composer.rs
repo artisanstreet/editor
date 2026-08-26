@@ -11,11 +11,20 @@
 //! Ground rules carried over from the cited source: readiness follows the
 //! legacy `send_ready` derivation; a send attempt that cannot start is a
 //! typed outcome that preserves the draft ("your message is kept in the
-//! composer"); submissions are single-flight, each begun flight carrying an
-//! opaque identity that fences its completion so a late or duplicated
-//! completion of an older flight can neither consume nor clear a newer one;
-//! and the draft resets only when the receiver accepts the body that was
-//! actually begun — never a newer replacement drafted while that flight ran.
+//! composer"); submissions are single-flight; and the draft resets only when
+//! the receiver accepts the body that was actually begun — never a newer
+//! replacement drafted while that flight ran.
+//!
+//! Two further contracts are explicit native decisions, not legacy behavior:
+//! the legacy editor froze input mid-flight, so nothing in the audited
+//! surface can establish what should happen when edits are allowed to
+//! continue. First, identity fencing — each begun flight carries an opaque
+//! token required for its completion, so a late or duplicated completion of
+//! an older flight can neither consume nor clear a newer one. Second,
+//! authored-edit preservation — every actual post-begin draft change,
+//! including one later reverted to the original text, blocks an accepted
+//! clear, while rewriting the already-held text is not an edit.
+//!
 //! Body validity delegates to the native domain's bounded [`MessageBody`]
 //! (trim-non-blank plus the 65,536 UTF-8-byte ceiling recorded in
 //! `docs/decisions/NATIVE_PRODUCT_SCOPE.md`); blank or oversized drafts
@@ -44,10 +53,12 @@ pub enum SubmissionBlocked {
     /// Sending is disabled on this surface, such as while it prepares or
     /// loses its session.
     Disabled,
-    /// Every one of the process's single-use flight identities has been
-    /// issued exactly once, so beginning another submission would require
-    /// reusing retired identity. Unreachable in practice within one process
-    /// lifetime; no flight was started and the draft is untouched.
+    /// Every issuable single-use flight identity has been minted exactly
+    /// once: the checked counter issues `2^64 - 1` values (0 through
+    /// `u64::MAX - 1`) and reserves `u64::MAX` as its exhaustion state, so
+    /// beginning another submission would require reusing retired identity.
+    /// Unreachable in practice within one process lifetime; no flight was
+    /// started and the draft is untouched.
     IdentityExhausted,
 }
 
@@ -92,8 +103,9 @@ pub enum DraftDisposition {
 /// Source of per-flight identity: every begun submission mints the next
 /// value exactly once, and a value already handed out is never issued again —
 /// not even after the composing state resets or a different composer begins
-/// its own flights. The increment is overflow-checked: once all 2^64
-/// identities have been issued, minting fails and begins are refused (see
+/// its own flights. The increment is overflow-checked and issues exactly
+/// `2^64 - 1` values, 0 through `u64::MAX - 1`; `u64::MAX` is reserved as the
+/// exhaustion state, where minting fails and begins are refused (see
 /// [`SubmissionBlocked::IdentityExhausted`]) rather than wrapping around to
 /// reissue retired values. This mirrors the platform decision that
 /// request/response correlation is single-use and retired identifiers are
@@ -118,9 +130,10 @@ pub struct SubmissionToken {
 }
 
 impl SubmissionToken {
-    /// Mints the next unused flight identity, or [`None`] when every one of
-    /// the process's identities has been issued exactly once — retirement
-    /// stays permanent even at exhaustion.
+    /// Mints the next unused flight identity, or [`None`] once all
+    /// `2^64 - 1` issuable values (0 through `u64::MAX - 1`, with `u64::MAX`
+    /// reserved as the exhaustion state) have been issued exactly once —
+    /// retirement stays permanent even at exhaustion.
     fn mint() -> Option<Self> {
         let ordinal = NEXT_FLIGHT_ORDINAL
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |issued| {
@@ -137,6 +150,12 @@ impl SubmissionToken {
 struct ActiveFlight {
     token: SubmissionToken,
     body: MessageBody,
+    /// Sticky marker of any actual draft change after this flight began:
+    /// set by the first differing [`ComposerState::set_draft`] write and
+    /// never cleared by reverting, so an accepted send cannot discard text
+    /// the user truly touched. Starts `false` with each newly begun flight
+    /// and is never inherited by a later one.
+    changed_since_begin: bool,
 }
 
 /// Toolkit-neutral state for one composer: its draft text plus the
@@ -176,8 +195,20 @@ impl ComposerState {
     /// [`Self::finish_submission`] for how a newer draft outlives an older
     /// accepted send. Whether to freeze input is a presentation decision for
     /// the owning surface.
+    ///
+    /// Only an actual value change counts as an edit: writing the text the
+    /// draft already holds is a no-op, while any differing write during an
+    /// active flight marks that flight changed — permanently for that
+    /// flight, even if later writes restore the exact submitted text.
     pub fn set_draft(&mut self, draft: impl Into<String>) {
-        self.draft = draft.into();
+        let draft = draft.into();
+        if self.draft == draft {
+            return;
+        }
+        self.draft = draft;
+        if let Some(flight) = self.flight.as_mut() {
+            flight.changed_since_begin = true;
+        }
     }
 
     /// Returns whether sending is currently disallowed on this surface.
@@ -219,7 +250,8 @@ impl ComposerState {
     /// send seam, and that snapshot is retained as the active flight — for
     /// retry safety the draft itself is kept until
     /// [`Self::finish_submission`] reports an accepted send of this same
-    /// body. The token is the only key that can later end this flight.
+    /// body with the draft unchanged since begin. The token is the only key
+    /// that can later end this flight, and the flight starts out unmarked.
     ///
     /// Refusals follow the legacy check order: draft validity first, then an
     /// already-active flight, then a disabled surface. No refusal starts a
@@ -249,6 +281,7 @@ impl ComposerState {
         self.flight = Some(ActiveFlight {
             token,
             body: body.clone(),
+            changed_since_begin: false,
         });
         Ok((body, token))
     }
@@ -264,17 +297,22 @@ impl ComposerState {
     /// per body, so even a retry of byte-identical text carries a fresh token
     /// that the retired one cannot complete.
     ///
-    /// An accepted send of the matching flight clears the draft only when it
-    /// still equals the body that flight actually began; text entered or set
-    /// after the begin — the model permits programmatic edits even though the
-    /// legacy editor froze them — survives its completion untouched. A
-    /// retained outcome never touches the draft.
+    /// An accepted send of the matching flight clears the draft only when no
+    /// actual change has happened since its begin: text entered or set after
+    /// the begin — the model permits programmatic edits even though the
+    /// legacy editor froze them — survives completion untouched, and so does
+    /// text edited away and then restored to the exact submitted bytes.
+    /// Writing the already-held text is not an edit and does not block the
+    /// clear. A retained outcome never touches the draft.
     pub fn finish_submission(&mut self, token: SubmissionToken, disposition: DraftDisposition) {
         let Some(flight) = self.flight.take_if(|flight| flight.token == token) else {
             return;
         };
 
-        if disposition == DraftDisposition::Accepted && self.draft == flight.body.as_str() {
+        if disposition == DraftDisposition::Accepted
+            && !flight.changed_since_begin
+            && self.draft == flight.body.as_str()
+        {
             self.draft.clear();
         }
     }

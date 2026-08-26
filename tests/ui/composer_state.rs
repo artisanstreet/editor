@@ -8,7 +8,9 @@
 //! successful retry after finish. They also pin flight-identity fencing:
 //! every begun flight carries an opaque token required for completion, so a
 //! late, duplicated, or foreign completion cannot consume a newer flight,
-//! disturb its draft, or rearm submission.
+//! disturb its draft, or rearm submission. Finally they pin authored-change
+//! tracking per flight: any actual post-begin draft change — even one later
+//! reverted — blocks an accepted clear, while a same-value rewrite does not.
 
 use artisan_domain::bounds::MESSAGE_BODY_MAX_BYTES;
 use artisan_domain::text::MessageBodyError;
@@ -425,5 +427,94 @@ fn a_foreign_composers_token_completes_nothing_here() {
     assert!(
         !mine.is_submitting(),
         "my own matching completion still works"
+    );
+}
+
+#[test]
+fn an_edit_reverted_to_the_submitted_text_still_blocks_the_accepted_clear() {
+    let mut composer = ComposerState::new();
+    composer.set_draft("Original message");
+    let (_body, token) = composer
+        .begin_submission()
+        .expect("the fixture begins a flight");
+
+    // Edit away and back: the draft ends byte-identical to the submitted
+    // body, but an actual post-begin change happened during this flight.
+    composer.set_draft("Mid-flight replacement");
+    composer.set_draft("Original message");
+    assert_eq!(composer.draft(), "Original message", "fixture is reverted");
+
+    composer.finish_submission(token, DraftDisposition::Accepted);
+
+    assert!(!composer.is_submitting(), "the matched flight still ends");
+    assert_eq!(
+        composer.draft(),
+        "Original message",
+        "a reverted edit is still an edit; the authored draft survives"
+    );
+
+    // The preserved draft can be submitted again immediately.
+    let (resent_body, resent_token) = composer
+        .begin_submission()
+        .expect("the preserved draft rearms sending");
+    assert_eq!(resent_body.as_str(), "Original message");
+
+    // This new flight saw no edits of its own, so its accepted send clears.
+    composer.finish_submission(resent_token, DraftDisposition::Accepted);
+    assert_eq!(
+        composer.draft(),
+        "",
+        "a fresh unchanged flight clears normally"
+    );
+}
+
+#[test]
+fn rewriting_the_same_text_mid_flight_is_not_an_edit() {
+    let mut composer = ComposerState::new();
+    composer.set_draft(PADDED_DRAFT);
+    let (_body, token) = composer
+        .begin_submission()
+        .expect("the fixture begins a flight");
+
+    // Same-value writes leave the current flight unmarked, unlike any
+    // differing write; reverting semantics are covered by the revert test.
+    composer.set_draft(PADDED_DRAFT);
+    composer.set_draft(PADDED_DRAFT);
+
+    composer.finish_submission(token, DraftDisposition::Accepted);
+    assert!(!composer.is_submitting());
+    assert_eq!(
+        composer.draft(),
+        "",
+        "an identical no-op rewrite must not block the normal accepted clear"
+    );
+}
+
+#[test]
+fn a_new_flight_does_not_inherit_the_previous_flight_s_changed_marker() {
+    let mut composer = ComposerState::new();
+    composer.set_draft("First text");
+    let (_first_body, first_token) = composer
+        .begin_submission()
+        .expect("the first flight begins");
+    composer.set_draft("Edited mid-flight");
+    composer.finish_submission(first_token, DraftDisposition::Retained);
+    assert_eq!(
+        composer.draft(),
+        "Edited mid-flight",
+        "retention keeps every character including the edit"
+    );
+
+    // The second flight starts from the retained text and starts unmarked,
+    // forgetting the first flight's edits entirely.
+    let (_second_body, second_token) = composer
+        .begin_submission()
+        .expect("the second flight begins");
+    composer.finish_submission(second_token, DraftDisposition::Accepted);
+
+    assert_eq!(
+        composer.draft(),
+        "",
+        "the new flight's accepted send clears: old flights' markers do not carry over"
     );
 }
