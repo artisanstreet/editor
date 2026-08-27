@@ -918,7 +918,7 @@ async fn first_delivery_take_is_immediate_and_requests_remain_usable() -> Result
         .await?;
         let (session, receiver) = session.take_delivery()?;
         assert_eq!(format!("{receiver:?}"), "DeliveryReceiver { .. }");
-        assert_eq!(format!("{:?}", DeliveryLost), "DeliveryLost");
+        assert_eq!(format!("{DeliveryLost:?}"), "DeliveryLost");
         assert_eq!(DeliveryLost.to_string(), "delivery stream was lost");
         drop(receiver);
 
@@ -1027,7 +1027,7 @@ async fn delivery_receives_two_frames_sequentially_on_one_stream() -> Result<(),
     Ok(())
 }
 
-/// Cancellation before the first accept returns DeliveryLost without
+/// Cancellation before the first accept returns `DeliveryLost` without
 /// touching the wire, while the separately held session can still issue a
 /// request on the fixture's connection.
 #[tokio::test]
