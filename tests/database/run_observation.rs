@@ -1908,18 +1908,15 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
         err2,
         RunObservationError::Repository(RepositoryError::Database { .. })
     ));
-    helper_late_transaction_failure_via_trigger_rolls_back_everything_tail(
-        &before2, scope, &pair2, &body,
-    )
-    .await;
+    helper_late_transaction_failure_via_trigger_rolls_back_everything_tail(&before2, &pair2, &body)
+        .await;
 }
 async fn helper_late_transaction_failure_via_trigger_rolls_back_everything_tail(
     before2: &PersistedRows,
-    scope: RunBatchScope<'_>,
     pair2: &SeededPair,
     body: &AssistantBody,
 ) {
-    assert_eq!(before2, persisted_rows(&pair2.database).await);
+    assert_eq!(before2, &persisted_rows(&pair2.database).await);
     pair2
         .database
         .execute_unprepared("DROP TRIGGER abort_cp")
@@ -2056,8 +2053,8 @@ async fn helper_file_backed_races_identical_and_conflicting_tail(
         claimed: claimed_a,
         launched,
         bound,
-        run_start_key: context.start_key,
-        credentials: context.credentials,
+        run_start_key: &context.start_key,
+        credentials: &context.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
@@ -2065,8 +2062,8 @@ async fn helper_file_backed_races_identical_and_conflicting_tail(
         claimed: claimed_b,
         launched,
         bound,
-        run_start_key: context.start_key,
-        credentials: context.credentials,
+        run_start_key: &context.start_key,
+        credentials: &context.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
@@ -2238,8 +2235,8 @@ async fn helper_verify_conflicting_race_tail(
         claimed: alpha_claim,
         launched: launched2,
         bound: bound2,
-        run_start_key: context2.start_key,
-        credentials: context2.credentials,
+        run_start_key: &context2.start_key,
+        credentials: &context2.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
@@ -2247,8 +2244,8 @@ async fn helper_verify_conflicting_race_tail(
         claimed: beta_claim,
         launched: launched2,
         bound: bound2,
-        run_start_key: context2.start_key,
-        credentials: context2.credentials,
+        run_start_key: &context2.start_key,
+        credentials: &context2.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
