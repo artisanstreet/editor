@@ -377,42 +377,38 @@ async fn upsert_checkpoint(
     checkpoint: CheckpointRow,
     update: CheckpointUpdate<'_>,
 ) -> Result<(), RunObservationError> {
-    match checkpoint.existing {
-        Some(existing) => {
-            let mut active: entities::run_checkpoint::ActiveModel = existing.into();
-            active.last_batch_sequence = Set(checkpoint.last_batch_sequence);
-            active.updated_at_ms = Set(checkpoint.updated_at_ms);
-            if let CheckpointUpdate::Replace(engine) = update {
-                active.engine_checkpoint_version = Set(Some(engine.version()));
-                active.engine_checkpoint_blob =
-                    Set(Some(OpaqueBytes::new(engine.as_slice().to_vec())));
-            }
-            active.update(transaction).await.map_err(|source| {
-                RunObservationError::Repository(database_error("update run checkpoint", source))
-            })?;
+    if let Some(existing) = checkpoint.existing {
+        let mut active: entities::run_checkpoint::ActiveModel = existing.into();
+        active.last_batch_sequence = Set(checkpoint.last_batch_sequence);
+        active.updated_at_ms = Set(checkpoint.updated_at_ms);
+        if let CheckpointUpdate::Replace(engine) = update {
+            active.engine_checkpoint_version = Set(Some(engine.version()));
+            active.engine_checkpoint_blob = Set(Some(OpaqueBytes::new(engine.as_slice().to_vec())));
         }
-        None => {
-            let (version, blob) = match update {
-                CheckpointUpdate::Keep => (None, None),
-                CheckpointUpdate::Replace(engine) => (
-                    Some(engine.version()),
-                    Some(OpaqueBytes::new(engine.as_slice().to_vec())),
-                ),
-            };
-            entities::run_checkpoint::Entity::insert(entities::run_checkpoint::ActiveModel {
-                run_id: Set(checkpoint.run_id),
-                generation: Set(checkpoint.generation),
-                last_batch_sequence: Set(checkpoint.last_batch_sequence),
-                engine_checkpoint_version: Set(version),
-                engine_checkpoint_blob: Set(blob),
-                updated_at_ms: Set(checkpoint.updated_at_ms),
-            })
-            .exec(transaction)
-            .await
-            .map_err(|source| {
-                RunObservationError::Repository(database_error("insert run checkpoint", source))
-            })?;
-        }
+        active.update(transaction).await.map_err(|source| {
+            RunObservationError::Repository(database_error("update run checkpoint", source))
+        })?;
+    } else {
+        let (version, blob) = match update {
+            CheckpointUpdate::Keep => (None, None),
+            CheckpointUpdate::Replace(engine) => (
+                Some(engine.version()),
+                Some(OpaqueBytes::new(engine.as_slice().to_vec())),
+            ),
+        };
+        entities::run_checkpoint::Entity::insert(entities::run_checkpoint::ActiveModel {
+            run_id: Set(checkpoint.run_id),
+            generation: Set(checkpoint.generation),
+            last_batch_sequence: Set(checkpoint.last_batch_sequence),
+            engine_checkpoint_version: Set(version),
+            engine_checkpoint_blob: Set(blob),
+            updated_at_ms: Set(checkpoint.updated_at_ms),
+        })
+        .exec(transaction)
+        .await
+        .map_err(|source| {
+            RunObservationError::Repository(database_error("insert run checkpoint", source))
+        })?;
     }
     Ok(())
 }
