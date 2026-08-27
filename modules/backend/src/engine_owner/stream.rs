@@ -138,6 +138,8 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
     }
     let request = build_stream_request(input.endpoint, input.secret, input.session, input.after)
         .map_err(|_| StreamError::SendFailed)?;
+    let mut framer = SseFramer::new(input.bounds.max_sse_line, input.bounds.max_sse_event)
+        .map_err(|_| StreamError::FramingFailed)?;
     let (mut sender, conn_handle) = connect_and_handshake_stream(
         input.endpoint,
         input.bounds,
@@ -157,36 +159,29 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
     {
         Ok(r) => r,
         Err(e) => {
-            abort_and_join(conn_handle).await;
-            return Err(e);
+            return Err(abort_and_join_with_fallback(conn_handle, e).await);
         }
     };
     if !response.status().is_success() {
-        abort_and_join(conn_handle).await;
-        return Err(StreamError::StatusNotSuccess);
+        return Err(abort_and_join_with_fallback(conn_handle, StreamError::StatusNotSuccess).await);
     }
     if !is_sse_content_type(response.headers()) {
-        abort_and_join(conn_handle).await;
-        return Err(StreamError::ContentTypeInvalid);
+        return Err(
+            abort_and_join_with_fallback(conn_handle, StreamError::ContentTypeInvalid).await,
+        );
     }
     let mut body = response.into_body();
-    let mut framer = SseFramer::new(input.bounds.max_sse_line, input.bounds.max_sse_event)
-        .map_err(|_| StreamError::FramingFailed)?;
-    let mut terminal_state: Option<TerminalState> = None;
     loop {
         let frame_opt = tokio::select! {
             biased;
             () = input.shutdown.wait() => {
-                abort_and_join(conn_handle).await;
-                return Err(StreamError::Shutdown);
+                return Err(abort_and_join_with_fallback(conn_handle, StreamError::Shutdown).await);
             }
             () = input.cancel.wait() => {
-                abort_and_join(conn_handle).await;
-                return Err(StreamError::Cancelled);
+                return Err(abort_and_join_with_fallback(conn_handle, StreamError::Cancelled).await);
             }
             () = tokio::time::sleep_until(input.deadline) => {
-                abort_and_join(conn_handle).await;
-                return Err(StreamError::Timeout);
+                return Err(abort_and_join_with_fallback(conn_handle, StreamError::Timeout).await);
             }
             res = body.frame() => res,
         };
@@ -199,85 +194,63 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
                     let events = match framer.feed(&data) {
                         Ok(ev) => ev,
                         Err(_) => {
-                            abort_and_join(conn_handle).await;
-                            return Err(StreamError::FramingFailed);
+                            return Err(abort_and_join_with_fallback(
+                                conn_handle,
+                                StreamError::FramingFailed,
+                            )
+                            .await);
                         }
                     };
                     if events.is_empty() {
                         continue;
                     }
-                    // Decode all events first to detect order violations within batch
-                    // before delivering, but we must deliver sequentially.
-                    // To keep bounded behavior, decode lazily while tracking violation.
-                    let mut decoded_batches: Vec<Vec<EngineObservation>> =
-                        Vec::with_capacity(events.len());
-                    for event in &events {
-                        match decode_sse_event(event) {
-                            Ok(obs) => decoded_batches.push(obs),
-                            Err(_) => {
-                                abort_and_join(conn_handle).await;
-                                return Err(StreamError::DecodeFailed);
-                            }
-                        }
-                    }
-                    // Check order violation across the whole chunk batch if terminal already seen
-                    // or second terminal / observation after terminal inside batch.
+                    // Decode and discard one event at a time before delivering any
+                    // observation from this feed result. This keeps order validation
+                    // bounded to one event's decoded observations.
                     let mut seen_terminal_in_batch = false;
-                    let mut batch_has_violation = false;
-                    for batch in &decoded_batches {
-                        for obs in batch {
-                            let is_terminal = matches!(obs, EngineObservation::Terminal(_));
-                            if terminal_state.is_some() {
-                                batch_has_violation = true;
-                                break;
+                    for event in &events {
+                        let observations = match decode_sse_event(event) {
+                            Ok(observations) => observations,
+                            Err(_) => {
+                                return Err(abort_and_join_with_fallback(
+                                    conn_handle,
+                                    StreamError::DecodeFailed,
+                                )
+                                .await);
                             }
-                            if is_terminal {
-                                if seen_terminal_in_batch {
-                                    batch_has_violation = true;
-                                    break;
-                                }
+                        };
+                        for observation in observations {
+                            if seen_terminal_in_batch {
+                                return Err(abort_and_join_with_fallback(
+                                    conn_handle,
+                                    StreamError::OrderViolation,
+                                )
+                                .await);
+                            }
+                            if matches!(observation, EngineObservation::Terminal(_)) {
                                 seen_terminal_in_batch = true;
-                            } else if seen_terminal_in_batch {
-                                // text after terminal in same batch
-                                batch_has_violation = true;
-                                break;
                             }
                         }
-                        if batch_has_violation {
-                            break;
-                        }
-                        if seen_terminal_in_batch {
-                            // Any further batch with any observation is also violation,
-                            // but will be caught by above loop when continued.
-                            // To detect, we continue loop but terminal already seen in batch
-                            // means subsequent batches should be considered violation if non-empty.
-                            // The outer check with seen_terminal_in_batch captures it on next iteration
-                            // via the inner `if seen_terminal_in_batch && !batch.is_empty()` logic above.
-                            // However we need to keep seen flag across batches.
-                        }
                     }
-                    if batch_has_violation {
-                        abort_and_join(conn_handle).await;
-                        return Err(StreamError::OrderViolation);
-                    }
-                    if terminal_state.is_some() && decoded_batches.iter().any(|b| !b.is_empty()) {
-                        abort_and_join(conn_handle).await;
-                        return Err(StreamError::OrderViolation);
-                    }
-                    // Now deliver in order; on first terminal, capture state and finish after delivering prior.
-                    for batch in decoded_batches {
-                        for obs in batch {
-                            let is_terminal = matches!(&obs, EngineObservation::Terminal(_));
-                            let state_for_receipt = if is_terminal {
-                                match &obs {
-                                    EngineObservation::Terminal(t) => Some(t.state()),
-                                    _ => None,
-                                }
-                            } else {
-                                None
+                    // Decode each event again and deliver observations in order.
+                    for event in &events {
+                        let observations = match decode_sse_event(event) {
+                            Ok(observations) => observations,
+                            Err(_) => {
+                                return Err(abort_and_join_with_fallback(
+                                    conn_handle,
+                                    StreamError::DecodeFailed,
+                                )
+                                .await);
+                            }
+                        };
+                        for observation in observations {
+                            let receipt_state = match &observation {
+                                EngineObservation::Terminal(terminal) => Some(terminal.state()),
+                                EngineObservation::TextDelta(_) => None,
                             };
-                            match deliver_observation(
-                                obs,
+                            if let Err(error) = deliver_observation(
+                                observation,
                                 input.sender.clone(),
                                 input.shutdown,
                                 input.cancel,
@@ -285,37 +258,33 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
                             )
                             .await
                             {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    abort_and_join(conn_handle).await;
-                                    return Err(map_delivery_error(e));
-                                }
+                                return Err(abort_and_join_with_fallback(
+                                    conn_handle,
+                                    map_delivery_error(error),
+                                )
+                                .await);
                             }
-                            if let Some(state) = state_for_receipt {
-                                // Ensure no remaining observations after this terminal in the same original batch
-                                // Already checked above, so success.
-                                terminal_state = Some(state);
-                                abort_and_join(conn_handle).await;
-                                return Ok(StreamReceipt { state });
+                            if let Some(state) = receipt_state {
+                                return match abort_and_join(conn_handle).await {
+                                    Ok(()) => Ok(StreamReceipt { state }),
+                                    Err(error) => Err(error),
+                                };
                             }
                         }
                     }
                 }
             }
             Some(Err(_)) => {
-                abort_and_join(conn_handle).await;
-                return Err(StreamError::BodyFailed);
+                return Err(
+                    abort_and_join_with_fallback(conn_handle, StreamError::BodyFailed).await,
+                );
             }
             None => {
-                // EOF
-                let _ = framer.finish();
-                abort_and_join(conn_handle).await;
-                if terminal_state.is_some() {
-                    // Should have returned earlier; but if terminal was not delivered via loop
-                    // (e.g., terminal never appeared), treat as missing.
-                    return Err(StreamError::MissingTerminal);
-                }
-                return Err(StreamError::MissingTerminal);
+                let eof_error = match framer.finish() {
+                    Ok(_) => StreamError::MissingTerminal,
+                    Err(_) => StreamError::FramingFailed,
+                };
+                return Err(abort_and_join_with_fallback(conn_handle, eof_error).await);
             }
         }
     }
@@ -428,7 +397,23 @@ fn map_delivery_error(err: crate::engine_owner::observation::DeliveryError) -> S
     }
 }
 
-async fn abort_and_join(handle: tokio::task::JoinHandle<Result<(), hyper::Error>>) {
+async fn abort_and_join(
+    handle: tokio::task::JoinHandle<Result<(), hyper::Error>>,
+) -> Result<(), StreamError> {
     handle.abort();
-    let _ = handle.await;
+    match handle.await {
+        Ok(Ok(())) => Ok(()),
+        Err(error) if error.is_cancelled() => Ok(()),
+        Ok(Err(_)) | Err(_) => Err(StreamError::DriverFailed),
+    }
+}
+
+async fn abort_and_join_with_fallback(
+    handle: tokio::task::JoinHandle<Result<(), hyper::Error>>,
+    fallback: StreamError,
+) -> StreamError {
+    match abort_and_join(handle).await {
+        Ok(()) => fallback,
+        Err(error) => error,
+    }
 }
