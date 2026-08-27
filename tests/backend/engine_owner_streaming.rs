@@ -1875,7 +1875,6 @@ fn event_text_exact_4096_and_4097_chunking() {
     let event2 = event_from_data(&json2, Some("cid2"));
     let obs2 = decode_sse_event(&event2).unwrap();
     assert_eq!(obs2.len(), 2);
-    assert_eq!(obs2[0].clone(), obs2[0].clone());
     match &obs2[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "cid2:2:0"),
         _ => panic!("expected text"),

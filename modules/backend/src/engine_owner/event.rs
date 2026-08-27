@@ -87,7 +87,7 @@ pub(crate) fn decode_sse_event(
     }
 
     if has_delta {
-        let delta_value = object.get("delta").expect("delta present");
+        let delta_value = object.get("delta").ok_or(EventDecodeError::InvalidDelta)?;
         let delta_str = delta_value.as_str().ok_or(EventDecodeError::InvalidDelta)?;
         let native_id = match event.id() {
             Some(id) if !id.is_empty() => id,
@@ -102,7 +102,7 @@ pub(crate) fn decode_sse_event(
     }
 
     // Terminal shape.
-    let state_value = object.get("state").expect("state present");
+    let state_value = object.get("state").ok_or(EventDecodeError::InvalidState)?;
     let state_str = state_value.as_str().ok_or(EventDecodeError::InvalidState)?;
     let state = match state_str {
         "succeeded" => TerminalState::Completed,
