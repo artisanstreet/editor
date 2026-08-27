@@ -42,6 +42,7 @@ pub(crate) mod observation;
 mod operation;
 mod process;
 pub mod readiness;
+pub(crate) mod stream;
 
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_configuration.rs"]

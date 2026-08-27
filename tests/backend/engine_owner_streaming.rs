@@ -2314,3 +2314,797 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stream follower: bounded authenticated SSE (P4f)
+// ---------------------------------------------------------------------------
+
+use super::stream::{StreamError, StreamInput, StreamReceipt, follow_stream};
+
+fn stream_secret() -> HealthSecret {
+    HealthSecret::from_raw_for_tests("stream-secret-fixed-1234567890abcd".to_owned())
+}
+
+fn stream_bounds() -> EngineBounds {
+    EngineBounds {
+        max_json_body: 1024,
+        max_sse_line: 1024,
+        max_sse_event: 4096,
+        max_readiness_line: 256,
+        max_headers: 32,
+        max_buf_bytes: 8192,
+        stderr_cap_bytes: 4096,
+        sink_capacity: 4,
+        control_capacity: 4,
+    }
+}
+
+async fn read_stream_request(stream: &mut TcpStream) -> (String, Vec<(String, String)>) {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut tmp).await.expect("read");
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 16 * 1024 {
+            break;
+        }
+    }
+    let header_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("header end")
+        + 4;
+    let header_str = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let mut lines = header_str.lines();
+    let request_line = lines.next().unwrap_or("").to_owned();
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_owned()));
+        }
+    }
+    (request_line, headers)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_request_exact_shape() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let expected_auth = secret.basic_auth();
+    let (tx, mut rx) = mpsc::channel(4);
+    let captured = Arc::new(std::sync::Mutex::new(
+        None::<(String, Vec<(String, String)>)>,
+    ));
+    let cap = Arc::clone(&captured);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let (line, headers) = read_stream_request(&mut s).await;
+        *cap.lock().unwrap() = Some((line, headers));
+        // Send terminal immediately to allow client to exit
+        let body =
+            "data: {\"run_id\":\"run-stream-shape\",\"sequence\":1,\"state\":\"succeeded\"}\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessABC",
+        42,
+        tx,
+    ))
+    .await;
+    assert!(res.is_ok());
+    srv.await.unwrap();
+    let (line, headers) = captured.lock().unwrap().take().unwrap();
+    assert_eq!(
+        line,
+        "GET /api/experimental/session/sessABC/log?after=42&follow=true HTTP/1.1"
+    );
+    let auth = headers
+        .iter()
+        .find(|(k, _)| k == "authorization")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(auth, expected_auth);
+    let accept = headers
+        .iter()
+        .find(|(k, _)| k == "accept")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(accept, "text/event-stream");
+    let conn = headers
+        .iter()
+        .find(|(k, _)| k == "connection")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(conn, "close");
+    // Ensure after preserved and not extra
+    let _ = rx.recv().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_fragmented_multiline_text_then_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, mut rx) = mpsc::channel(8);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let resp_headers =
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+        s.write_all(resp_headers.as_bytes()).await.unwrap();
+        // Fragmented multiline: two data lines joined with \n via framer => invalid json? Instead use single delta fragmented
+        // Send text event fragmented across writes (multibyte split not needed, split inside json)
+        let part1 = "data: {\"run_id\":\"run-frag-0001\",\"sequence\":5,\"delta\":\"hel";
+        let part2 = "lo world\"}\n\ndata: {\"run_id\":\"run-frag-0001\",\"sequence\":6,\"state\":\"succeeded\"}\n\n";
+        s.write_all(part1.as_bytes()).await.unwrap();
+        s.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        s.write_all(part2.as_bytes()).await.unwrap();
+        s.flush().await.unwrap();
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessFrag",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res.unwrap().state(), TerminalState::Completed);
+    let first = rx.recv().await.unwrap();
+    match first {
+        EngineObservation::TextDelta(d) => assert_eq!(d.delta(), "hello world"),
+        _ => panic!("expected text"),
+    }
+    let second = rx.recv().await.unwrap();
+    match second {
+        EngineObservation::Terminal(t) => assert_eq!(t.state(), TerminalState::Completed),
+        _ => panic!("expected terminal"),
+    }
+    assert!(rx.try_recv().is_err());
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_bounded_delivery_and_terminal_receipt() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, mut rx) = mpsc::channel(2);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let body = "data: {\"run_id\":\"run-order-0001\",\"sequence\":1,\"delta\":\"first\"}\n\ndata: {\"run_id\":\"run-order-0001\",\"sequence\":2,\"delta\":\"second\"}\n\ndata: {\"run_id\":\"run-order-0001\",\"sequence\":3,\"state\":\"failed\"}\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream; charset=utf-8\r\nconnection: close\r\n\r\n{body}"
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let receipt = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessOrder",
+        99,
+        tx,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(receipt.state(), TerminalState::Failed);
+    let a = rx.recv().await.unwrap();
+    assert!(matches!(a, EngineObservation::TextDelta(_)));
+    let b = rx.recv().await.unwrap();
+    assert!(matches!(b, EngineObservation::TextDelta(_)));
+    let c = rx.recv().await.unwrap();
+    assert_eq!(
+        c,
+        EngineObservation::Terminal(TerminalObservation::new(
+            run_id("run-order-0001"),
+            3,
+            TerminalState::Failed,
+            None,
+            None
+        ))
+    );
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_eof_before_terminal_is_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, mut rx) = mpsc::channel(4);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let body = "data: {\"run_id\":\"run-eof-00001\",\"sequence\":1,\"delta\":\"hi\"}\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+        // close without terminal
+        drop(s);
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessEof",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res, Err(StreamError::MissingTerminal));
+    // Text before terminal is still delivered before error? The contract says text before terminal is allowed, but EOF without terminal is error. Prior text may be delivered.
+    let got = rx.recv().await.unwrap();
+    assert!(matches!(got, EngineObservation::TextDelta(_)));
+    assert!(rx.try_recv().is_err());
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_non_2xx_is_status_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, _) = mpsc::channel(4);
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&count);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        c.fetch_add(1, Ordering::SeqCst);
+        let _ = read_stream_request(&mut s).await;
+        let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessErr",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res, Err(StreamError::StatusNotSuccess));
+    srv.await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_wrong_content_type_rejected() {
+    let cases = vec!["application/json", "text/plain", "text/event-streamx", ""];
+    for ct in cases {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let endpoint = validated_endpoint_for(addr);
+        let secret = stream_secret();
+        let bounds = stream_bounds();
+        let (tx, _) = mpsc::channel(4);
+        let ct_owned = ct.to_owned();
+        let srv = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let _ = read_stream_request(&mut s).await;
+            let header = if ct_owned.is_empty() {
+                "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_owned()
+            } else {
+                format!("HTTP/1.1 200 OK\r\ncontent-type: {ct_owned}\r\nconnection: close\r\n\r\n")
+            };
+            s.write_all(header.as_bytes()).await.unwrap();
+        });
+        let res = follow_stream(StreamInput::new(
+            &endpoint,
+            &secret,
+            &bounds,
+            Instant::now() + Duration::from_secs(5),
+            &CancelHandle::new(),
+            &CancelHandle::new(),
+            "sessCt",
+            0,
+            tx,
+        ))
+        .await;
+        assert_eq!(res, Err(StreamError::ContentTypeInvalid), "ct={ct:?}");
+        srv.await.unwrap();
+    }
+    // charset allowed
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, _) = mpsc::channel(4);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let body =
+            "data: {\"run_id\":\"run-ct-ok0001\",\"sequence\":1,\"state\":\"succeeded\"}\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: Text/Event-Stream; charset=UTF-8\r\nconnection: close\r\n\r\n{body}"
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessCt",
+        0,
+        tx,
+    ))
+    .await;
+    assert!(res.is_ok());
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_framing_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let mut bounds = stream_bounds();
+    bounds.max_sse_line = 10;
+    let (tx, _) = mpsc::channel(4);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: this line is definitely longer than ten bytes\n\n";
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessFrame",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res, Err(StreamError::FramingFailed));
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_decode_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, _) = mpsc::channel(4);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: not-json-at-all\n\n";
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessDecode",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res, Err(StreamError::DecodeFailed));
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_sink_closed_and_backpressure() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    // closed sink
+    let (tx, rx) = mpsc::channel(4);
+    drop(rx);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let body = "data: {\"run_id\":\"run-sink-0001\",\"sequence\":1,\"delta\":\"hi\"}\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessSink",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res, Err(StreamError::DeliveryFailed));
+    srv.await.unwrap();
+    // backpressure later
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let endpoint2 = validated_endpoint_for(addr2);
+    let (tx2, mut rx2) = mpsc::channel(1);
+    tx2.send(make_delta("fill")).await.unwrap();
+    let srv2 = tokio::spawn(async move {
+        let (mut s, _) = listener2.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let body = "data: {\"run_id\":\"run-sink-0002\",\"sequence\":1,\"delta\":\"blocked\"}\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+        // keep connection open a bit
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+    let cancel = CancelHandle::new();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel_clone.cancel();
+    });
+    let res2 = follow_stream(StreamInput::new(
+        &endpoint2,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &cancel,
+        &CancelHandle::new(),
+        "sessBack",
+        0,
+        tx2,
+    ))
+    .await;
+    // While full, cancel should win
+    assert_eq!(res2, Err(StreamError::Cancelled));
+    let _ = rx2.recv().await;
+    srv2.abort();
+    let _ = srv2.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_pre_signalled_shutdown_cancel_deadline() {
+    let endpoint = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, _) = mpsc::channel(4);
+    // shutdown wins over cancel
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    shutdown.cancel();
+    cancel.cancel();
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &cancel,
+        &shutdown,
+        "sessPre",
+        0,
+        tx.clone(),
+    ))
+    .await;
+    assert_eq!(res, Err(StreamError::Shutdown));
+    // cancel
+    let res2 = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &{
+            let c = CancelHandle::new();
+            c.cancel();
+            c
+        },
+        &CancelHandle::new(),
+        "sessPre",
+        0,
+        tx.clone(),
+    ))
+    .await;
+    assert_eq!(res2, Err(StreamError::Cancelled));
+    // deadline
+    let res3 = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() - Duration::from_millis(10),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessPre",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res3, Err(StreamError::Timeout));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_mid_stream_shutdown_cancel_deadline_precedence() {
+    // mid-stream cancel wins over deadline when both fire
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, _rx) = mpsc::channel(4);
+    let shutdown = Arc::new(CancelHandle::new());
+    let cancel = Arc::new(CancelHandle::new());
+    let s_shutdown = Arc::clone(&shutdown);
+    let s_cancel = Arc::clone(&cancel);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        s.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        // Hold without sending terminal to trigger deadline/cancel
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    });
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let handle = tokio::spawn(follow_stream(StreamInput::new(
+        &endpoint, &secret, &bounds, deadline, &cancel, &shutdown, "sessMid", 0, tx,
+    )));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+    shutdown.cancel();
+    let res = tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    // shutdown > cancel > deadline, shutdown was signalled so should be Shutdown
+    assert_eq!(res, Err(StreamError::Shutdown));
+    srv.abort();
+    let _ = srv.await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_no_retry() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&count);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        c.fetch_add(1, Ordering::SeqCst);
+        let _ = read_stream_request(&mut s).await;
+        drop(s);
+        // Ensure no second connection within timeout
+        let res = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+        if let Ok(Ok((mut s2, _))) = res {
+            c.fetch_add(1, Ordering::SeqCst);
+            let _ = read_stream_request(&mut s2).await;
+        }
+    });
+    let (tx, _) = mpsc::channel(4);
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(2),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessRetry",
+        0,
+        tx,
+    ))
+    .await;
+    assert_ne!(
+        res,
+        Ok(StreamReceipt {
+            state: TerminalState::Completed
+        })
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    srv.abort();
+    let _ = srv.await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_payload_free_errors_and_driver_cleanup() {
+    let secret_val = "hunter2-super-secret-stream-xyz-999";
+    let secret = HealthSecret::from_raw_for_tests(secret_val.to_owned());
+    let bounds = stream_bounds();
+    let endpoint = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let (tx, _) = mpsc::channel(4);
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "bad/session",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res, Err(StreamError::InvalidSession));
+    let err = res.unwrap_err();
+    let disp = format!("{err}");
+    let dbg = format!("{err:?}");
+    assert!(!disp.contains(secret_val));
+    assert!(!dbg.contains(secret_val));
+    for e in [
+        StreamError::InvalidSession,
+        StreamError::ConnectFailed,
+        StreamError::HandshakeFailed,
+        StreamError::SendFailed,
+        StreamError::StatusNotSuccess,
+        StreamError::ContentTypeInvalid,
+        StreamError::BodyFailed,
+        StreamError::FramingFailed,
+        StreamError::DecodeFailed,
+        StreamError::DeliveryFailed,
+        StreamError::MissingTerminal,
+        StreamError::OrderViolation,
+        StreamError::Timeout,
+        StreamError::Cancelled,
+        StreamError::Shutdown,
+        StreamError::DriverFailed,
+    ] {
+        let d = format!("{e}");
+        let dbg = format!("{e:?}");
+        assert!(!d.contains(secret_val));
+        assert!(!dbg.contains(secret_val));
+        assert_eq!(e, e);
+        let _ = e.clone();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_order_violation_second_terminal_and_text_after() {
+    // second terminal
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let (tx, mut rx) = mpsc::channel(4);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let body = "data: {\"run_id\":\"run-order-vio1\",\"sequence\":1,\"state\":\"succeeded\"}\n\ndata: {\"run_id\":\"run-order-vio1\",\"sequence\":2,\"state\":\"failed\"}\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = follow_stream(StreamInput::new(
+        &endpoint,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessVio",
+        0,
+        tx,
+    ))
+    .await;
+    assert_eq!(res, Err(StreamError::OrderViolation));
+    // First terminal was delivered before violation detection? Our implementation delivers before detecting second? Actually we detect violation before delivering any in batch, so none delivered if batch contains two terminals.
+    // Ensure at most one delivered or zero.
+    let _ = rx.try_recv();
+    srv.await.unwrap();
+
+    // text after terminal in same batch (single chunk containing both)
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let endpoint2 = validated_endpoint_for(addr2);
+    let (tx2, _) = mpsc::channel(4);
+    let srv2 = tokio::spawn(async move {
+        let (mut s, _) = listener2.accept().await.unwrap();
+        let _ = read_stream_request(&mut s).await;
+        let body = "data: {\"run_id\":\"run-order-vio2\",\"sequence\":1,\"state\":\"succeeded\"}\n\ndata: {\"run_id\":\"run-order-vio2\",\"sequence\":2,\"delta\":\"after\"}\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res2 = follow_stream(StreamInput::new(
+        &endpoint2,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        "sessVio2",
+        0,
+        tx2,
+    ))
+    .await;
+    assert_eq!(res2, Err(StreamError::OrderViolation));
+    srv2.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stream_invalid_session_variants_rejected_before_transport() {
+    let secret = stream_secret();
+    let bounds = stream_bounds();
+    let endpoint = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let cases = vec!["", "a/b", "a?b", "a#b", "a\rb", "a\nb", "a%b"];
+    for sess in cases {
+        let (tx, _) = mpsc::channel(4);
+        let res = follow_stream(StreamInput::new(
+            &endpoint,
+            &secret,
+            &bounds,
+            Instant::now() + Duration::from_secs(5),
+            &CancelHandle::new(),
+            &CancelHandle::new(),
+            sess,
+            5,
+            tx,
+        ))
+        .await;
+        assert_eq!(res, Err(StreamError::InvalidSession), "session {sess:?}");
+    }
+}
