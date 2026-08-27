@@ -1909,13 +1909,13 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
         RunObservationError::Repository(RepositoryError::Database { .. })
     ));
     helper_late_transaction_failure_via_trigger_rolls_back_everything_tail(
-        before2, scope, pair2, body,
+        &before2, scope, &pair2, &body,
     )
     .await;
 }
 async fn helper_late_transaction_failure_via_trigger_rolls_back_everything_tail(
-    before2: &SeededPair,
-    scope: RunBatchScope,
+    before2: &PersistedRows,
+    scope: RunBatchScope<'_>,
     pair2: &SeededPair,
     body: &AssistantBody,
 ) {
@@ -2031,39 +2031,42 @@ async fn file_backed_races_identical_and_conflicting() {
     let claimed_b = replayable_claim(&claimed);
     let body = assistant_body("race");
     helper_file_backed_races_identical_and_conflicting_tail(
-        binding, claimed_a, body, repo_b, claimed, claimed_b, path, context, repo_a,
+        &binding, &claimed_a, &body, &repo_b, &claimed, &claimed_b, &path, &context, &repo_a,
+        &launched, &bound,
     )
     .await;
 }
 async fn helper_file_backed_races_identical_and_conflicting_tail(
-    binding: &SeededPair,
-    claimed_a: &SeededPair,
+    binding: &ProviderBindingBytes,
+    claimed_a: &ClaimedMessageDispatch,
     body: &AssistantBody,
-    repo_b: &SeededPair,
-    claimed: &SeededPair,
-    claimed_b: &SeededPair,
-    path: &SeededPair,
-    context: &SeededPair,
-    repo_a: &SeededPair,
+    repo_b: &Repository,
+    claimed: &ClaimedMessageDispatch,
+    claimed_b: &ClaimedMessageDispatch,
+    path: &PathBuf,
+    context: &LaunchContext,
+    repo_a: &Repository,
+    launched: &artisan_database::LaunchedRunReceipt,
+    bound: &artisan_database::BoundRunReceipt,
 ) {
     let iid = ItemId::parse("assistant-race").expect("id");
     let pt = PatchId::parse("p-act-race").expect("p");
     let pi = PatchId::parse("p-start-race").expect("p");
     let scope_a = RunBatchScope {
-        claimed: &claimed_a,
-        launched: &launched,
-        bound: &bound,
-        run_start_key: &context.start_key,
-        credentials: &context.credentials,
+        claimed: claimed_a,
+        launched,
+        bound,
+        run_start_key: context.start_key,
+        credentials: context.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
     let scope_b = RunBatchScope {
-        claimed: &claimed_b,
-        launched: &launched,
-        bound: &bound,
-        run_start_key: &context.start_key,
-        credentials: &context.credentials,
+        claimed: claimed_b,
+        launched,
+        bound,
+        run_start_key: context.start_key,
+        credentials: context.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
@@ -2076,7 +2079,7 @@ async fn helper_file_backed_races_identical_and_conflicting_tail(
     let changes_b = [AssistantChange::Start {
         item_id: &iid,
         phase: AssistantMessagePhase::Unspecified,
-        body: &body,
+        body,
         patch_id: &pi,
     }];
     let (out_a, out_b) = tokio::join!(
@@ -2202,23 +2205,28 @@ async fn verify_conflicting_race(binding: &ProviderBindingBytes) {
     let alpha_body = assistant_body("content-a");
     let beta_body = assistant_body("content-b");
     helper_verify_conflicting_race_tail(
-        alpha_body,
-        alpha_repo,
-        beta_body,
-        alpha_claim,
-        beta_repo,
-        beta_claim,
-        context2,
-    );
+        &alpha_body,
+        &alpha_repo,
+        &beta_body,
+        &alpha_claim,
+        &beta_repo,
+        &beta_claim,
+        &context2,
+        &launched2,
+        &bound2,
+    )
+    .await;
 }
-fn helper_verify_conflicting_race_tail(
-    alpha_body: &SeededPair,
-    alpha_repo: &SeededPair,
-    beta_body: &SeededPair,
-    alpha_claim: &SeededPair,
-    beta_repo: &SeededPair,
-    beta_claim: &SeededPair,
-    context2: &SeededPair,
+async fn helper_verify_conflicting_race_tail(
+    alpha_body: &AssistantBody,
+    alpha_repo: &Repository,
+    beta_body: &AssistantBody,
+    alpha_claim: &ClaimedMessageDispatch,
+    beta_repo: &Repository,
+    beta_claim: &ClaimedMessageDispatch,
+    context2: &LaunchContext,
+    launched2: &artisan_database::LaunchedRunReceipt,
+    bound2: &artisan_database::BoundRunReceipt,
 ) {
     let alpha_item = ItemId::parse("assistant-conflict").expect("id");
     let beta_item = ItemId::parse("assistant-conflict").expect("id");
@@ -2227,33 +2235,33 @@ fn helper_verify_conflicting_race_tail(
     let alpha_activation_patch = PatchId::parse("p-act-conflict-a").expect("p");
     let beta_activation_patch = PatchId::parse("p-act-conflict-b").expect("p");
     let alpha_scope = RunBatchScope {
-        claimed: &alpha_claim,
-        launched: &launched2,
-        bound: &bound2,
-        run_start_key: &context2.start_key,
-        credentials: &context2.credentials,
+        claimed: alpha_claim,
+        launched: launched2,
+        bound: bound2,
+        run_start_key: context2.start_key,
+        credentials: context2.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
     let beta_scope = RunBatchScope {
-        claimed: &beta_claim,
-        launched: &launched2,
-        bound: &bound2,
-        run_start_key: &context2.start_key,
-        credentials: &context2.credentials,
+        claimed: beta_claim,
+        launched: launched2,
+        bound: bound2,
+        run_start_key: context2.start_key,
+        credentials: context2.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
     let alpha_changes = [AssistantChange::Start {
         item_id: &alpha_item,
         phase: AssistantMessagePhase::Unspecified,
-        body: &alpha_body,
+        body: alpha_body,
         patch_id: &alpha_item_patch,
     }];
     let beta_changes = [AssistantChange::Start {
         item_id: &beta_item,
         phase: AssistantMessagePhase::Unspecified,
-        body: &beta_body,
+        body: beta_body,
         patch_id: &beta_item_patch,
     }];
     let (alpha_outcome, beta_outcome) = tokio::join!(
