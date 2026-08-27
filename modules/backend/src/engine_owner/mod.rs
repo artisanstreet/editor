@@ -13,12 +13,14 @@
 //!
 //! This module also hosts the [`EngineOwner`] facade: the one non-Clone
 //! parent-side owner of the external engine process, running a single owner
-//! task on a caller-supplied Tokio runtime handle. Skeleton scope only:
-//! admission, incarnation numbering, child custody, bounded teardown, and
-//! quarantine exist, while readiness, HTTP, SSE, observation, and database
-//! logic deliberately do not. The public surface beyond configuration is
-//! exactly `start`/`health`/`shutdown`; no operation API exists because no
-//! operation could honestly perform its contract before readiness exists.
+//! task on a caller-supplied Tokio runtime handle. Admission, incarnation
+//! numbering, child custody, bounded teardown, quarantine, readiness, and
+//! HTTP exist; a pure, independently reviewable SSE framing and observation
+//! foundation leaf (`framing`/`observation`) exists without claiming live
+//! `IncomingBody` driving, global/per-run SSE connections, `POST /prompt`,
+//! owner integration, or `reserve_owned` sink backpressure which remain P4b.
+//! The public surface beyond configuration is exactly
+//! `start`/`health`/`shutdown`; no operation API exists beyond that.
 
 use std::fmt;
 use std::future::Future;
@@ -32,7 +34,9 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub(crate) mod framing;
 pub mod http;
+pub(crate) mod observation;
 mod operation;
 mod process;
 pub mod readiness;
@@ -48,6 +52,10 @@ mod engine_owner_custody;
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_readiness.rs"]
 mod engine_owner_readiness;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_streaming.rs"]
+mod engine_owner_streaming;
 
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
