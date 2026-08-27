@@ -1,9 +1,7 @@
 <p>
-  <img src="modules/frontend/src/lib/assets/barekey/runtime-app-icons/plastic-jaw-shading.png" alt="Artisan Editor app icon" width="80" align="left" />
-  <strong><big><big>Artisan Editor</big></big></strong><br /><br clear="left" />
+  <img src="modules/frontend/src/lib/assets/barekey/runtime-app-icons/foreground-gradient-symbol.png" alt="Artisan Editor app icon" width="80" align="left" />
+  <strong><big><big><big><big>Artisan Editor</big></big></big></big></strong><br /><br clear="left" />
 </p>
-
-An efficient orchestrator for working with coding agents.
 
 <table>
 <tr>
