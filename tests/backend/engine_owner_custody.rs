@@ -280,7 +280,7 @@ async fn shutdown_task_lost_when_owner_task_aborted() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn shutdown_quarantined_does_not_consume_custody() {
+async fn shutdown_after_generation_quarantine_prefers_settled_join() {
     reset_witnesses();
     let config = valid_config_with_capacity(4);
     let mut owner = crate::engine_owner::start_with_exhausted_allocator_for_tests(
@@ -291,11 +291,12 @@ async fn shutdown_quarantined_does_not_consume_custody() {
         .admit(run_id("run-quarantine-shutdown"), Duration::from_secs(10))
         .expect("admit");
     let _ = accepted.await;
-    // Owner is now quarantined (parked forever retaining no child, but health is Quarantined).
+    // Generation exhaustion quarantines admission, but there is no child or
+    // pipe custody to retain, so the quarantine tail may settle naturally.
     assert_eq!(owner.health(), EngineOwnerHealth::Quarantined);
     let report = owner.shutdown().await;
-    assert_eq!(report, EngineOwnerShutdown::Quarantined);
-    // Quarantined does not consume custody; health stays Quarantined.
+    assert_eq!(report, EngineOwnerShutdown::Joined);
+    // The settled join takes precedence without reopening admission.
     assert_eq!(owner.health(), EngineOwnerHealth::Quarantined);
 }
 
