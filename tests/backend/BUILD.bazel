@@ -10,6 +10,7 @@ exports_files([
     "directory_helper_fixture.rs",
     "directory_helper_unit.rs",
     "engine_owner_configuration.rs",
+    "engine_owner_custody.rs",
     "listener_configuration.rs",
 ])
 

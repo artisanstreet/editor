@@ -10,16 +10,41 @@
 //! close policy; real operation deadlines must be rechecked later against a
 //! fresh `Instant`. This leaf does not claim total-memory or process/runtime
 //! safety; future `cap + 1` uses remain separately checked.
+//!
+//! This module also hosts the [`EngineOwner`] facade: the one non-Clone
+//! parent-side owner of the external engine process, running a single owner
+//! task on a caller-supplied Tokio runtime handle. Skeleton scope only:
+//! admission, incarnation numbering, child custody, bounded teardown, and
+//! quarantine exist, while readiness, HTTP, SSE, observation, and database
+//! logic deliberately do not. The public surface beyond configuration is
+//! exactly `start`/`health`/`shutdown`; no operation API exists because no
+//! operation could honestly perform its contract before readiness exists.
 
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use artisan_domain::RunId;
+use artisan_transport::CancelHandle;
 use thiserror::Error;
+use tokio::runtime::Handle;
+use tokio::sync::{mpsc, oneshot, watch};
+
+mod operation;
+mod process;
 
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_configuration.rs"]
 mod engine_owner_configuration;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_custody.rs"]
+mod engine_owner_custody;
+
+use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
+use process::LaunchRecipe;
 
 /// Raw engine time limits.
 ///
@@ -209,5 +234,249 @@ impl fmt::Debug for EngineOwnerConfig {
             .field("limits", &self.limits)
             .field("bounds", &self.bounds)
             .finish()
+    }
+}
+
+/// Payload-free health of one engine owner instance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EngineOwnerHealth {
+    /// Admission is open; the owner task is serving work.
+    Active,
+    /// The owner irreversibly stopped serving new work.
+    Quarantined,
+}
+
+/// Report of one shutdown attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EngineOwnerShutdown {
+    /// The owner task was observed to complete after draining its queue.
+    Joined,
+    /// The owner task ended without a normal completion (panic).
+    TaskLost,
+    /// The owner had quarantined itself; the report is deliberately
+    /// incomplete, the facade and its stored join handle are not consumed,
+    /// and a later call may observe eventual completion honestly.
+    Quarantined,
+}
+
+/// The one parent-side owner of the external engine process.
+///
+/// See the module documentation for the ownership contract. Instances are
+/// neither `Clone` nor `Copy`.
+pub struct EngineOwner {
+    jobs: mpsc::Sender<Job>,
+    shutdown: Arc<CancelHandle>,
+    health: watch::Receiver<OwnerHealth>,
+    join: tokio::task::JoinHandle<()>,
+    /// Cached completion verdict for the owner task. A completed Tokio
+    /// `JoinHandle` consumes its output on the delivering poll and panics if
+    /// polled again, so the observation is recorded exactly once and replayed
+    /// by later calls.
+    observed_join: Option<bool>,
+}
+
+impl fmt::Debug for EngineOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineOwner { <payload-free> }")
+    }
+}
+
+impl EngineOwner {
+    /// Starts the single owner task on the supplied runtime handle.
+    ///
+    /// Creates the bounded job channel with capacity
+    /// `config.bounds().control_capacity`, the shutdown [`CancelHandle`], the
+    /// health watch channel, and spawns only the owner task on the caller's
+    /// handle. No child is spawned here, no probe is performed, and no extra
+    /// runtime is created. The config is already validated, so this is
+    /// infallible.
+    #[must_use]
+    pub fn start(config: EngineOwnerConfig, runtime: &Handle) -> Self {
+        let capacity = config.bounds().control_capacity;
+        let close_budget = config.limits().close;
+        let stderr_cap = config.bounds().stderr_cap_bytes;
+        let executable = config.engine_executable().to_owned();
+        let recipe = LaunchRecipe::Production { executable };
+        let (jobs, pending) = mpsc::channel::<Job>(capacity);
+        let shutdown = Arc::new(CancelHandle::new());
+        let (health_sender, health) = watch::channel(OwnerHealth::Active);
+        let join = runtime.spawn(run_owner(
+            pending,
+            Arc::clone(&shutdown),
+            health_sender,
+            recipe,
+            close_budget,
+            stderr_cap,
+        ));
+        Self {
+            jobs,
+            shutdown,
+            health,
+            join,
+            observed_join: None,
+        }
+    }
+
+    /// Returns the current payload-free health state.
+    #[must_use]
+    pub fn health(&self) -> EngineOwnerHealth {
+        match *self.health.borrow() {
+            OwnerHealth::Active => EngineOwnerHealth::Active,
+            OwnerHealth::Quarantined => EngineOwnerHealth::Quarantined,
+        }
+    }
+
+    /// Shuts the owner down and reports what is actually observed.
+    ///
+    /// This is deliberately NOT an async method: the shutdown signal is
+    /// raised here, before the returned future exists, so admission stops
+    /// and orderly teardown starts even if that future is never polled.
+    ///
+    /// The returned future retains both wake sources across `Pending` polls —
+    /// the owned health-watch `changed()` waiter and the owner `JoinHandle` —
+    /// so a quarantine arriving while the join is parked wakes it
+    /// immediately. Completion wins when both sources settle together, and
+    /// the consumed join verdict is cached exactly once, so repeated calls
+    /// honestly replay the observed ending. On a quarantined observation the
+    /// report is explicitly incomplete: the facade and its join handle are
+    /// untouched and later calls may still observe eventual completion.
+    pub fn shutdown(&mut self) -> impl Future<Output = EngineOwnerShutdown> + '_ {
+        self.shutdown.cancel();
+        let read_rx = self.health.clone();
+        let mut wait_rx = self.health.clone();
+        async move {
+            let mut changed = Box::pin(wait_rx.changed());
+            loop {
+                if let Some(joined_cleanly) = self.observed_join {
+                    return if joined_cleanly {
+                        EngineOwnerShutdown::Joined
+                    } else {
+                        EngineOwnerShutdown::TaskLost
+                    };
+                }
+                tokio::select! {
+                    biased;
+
+                    joined = &mut self.join => {
+                        let joined_cleanly = joined.is_ok();
+                        self.observed_join = Some(joined_cleanly);
+                        return if joined_cleanly {
+                            EngineOwnerShutdown::Joined
+                        } else {
+                            EngineOwnerShutdown::TaskLost
+                        };
+                    }
+                    _ = &mut changed => {
+                        drop(changed);
+                        if *read_rx.borrow() == OwnerHealth::Quarantined {
+                            return EngineOwnerShutdown::Quarantined;
+                        }
+                        changed = Box::pin(wait_rx.changed());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Crate-private admission: controls installed before `try_send`.
+    ///
+    /// Health and shutdown are checked first; deadline computed once via
+    /// `checked_add`; `try_send` full yields `Busy`, closed or quarantined
+    /// yields `Unavailable`. No polling loops.
+    pub(crate) fn admit(
+        &self,
+        run_id: RunId,
+        budget: Duration,
+    ) -> Result<operation::AcceptedLaunch, LaunchAdmissionError> {
+        if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
+            return Err(LaunchAdmissionError::Unavailable);
+        }
+        if budget == Duration::ZERO {
+            return Err(LaunchAdmissionError::InvalidDeadline);
+        }
+        let Some(deadline) = Instant::now().checked_add(budget) else {
+            return Err(LaunchAdmissionError::InvalidDeadline);
+        };
+        let control = Arc::new(CancelHandle::new());
+        let (respond, receiver) = oneshot::channel();
+        let job = Job {
+            run_id,
+            deadline,
+            control: Arc::clone(&control),
+            respond,
+        };
+        match self.jobs.try_send(job) {
+            Ok(()) => Ok(operation::AcceptedLaunch::from_parts(receiver, control)),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
+        }
+    }
+}
+
+impl Drop for EngineOwner {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+#[cfg(test)]
+impl EngineOwner {
+    /// Aborts the owner task for `TaskLost` coverage (test-only).
+    pub(crate) fn abort_for_tests(&self) {
+        self.join.abort();
+    }
+
+    /// Injects a job with an already-expired deadline for deterministic
+    /// `Deadline` coverage without wall-clock races (test-only).
+    pub(crate) fn inject_expired_for_tests(&self, run_id: RunId) -> operation::AcceptedLaunch {
+        let control = Arc::new(CancelHandle::new());
+        let (respond, receiver) = oneshot::channel();
+        let job = Job {
+            run_id,
+            deadline: tokio::time::Instant::now() - Duration::from_secs(1),
+            control: Arc::clone(&control),
+            respond,
+        };
+        let _ = self.jobs.try_send(job);
+        operation::AcceptedLaunch::from_parts(receiver, control)
+    }
+}
+
+/// Re-exports powering the private test module.
+#[cfg(test)]
+pub(crate) use operation::GenerationAllocator;
+#[cfg(test)]
+pub(crate) use process::{reset_witnesses, witness_counts};
+
+#[cfg(test)]
+pub(crate) fn start_with_exhausted_allocator_for_tests(
+    config: EngineOwnerConfig,
+    runtime: &Handle,
+) -> EngineOwner {
+    let capacity = config.bounds().control_capacity;
+    let close_budget = config.limits().close;
+    let stderr_cap = config.bounds().stderr_cap_bytes;
+    let executable = config.engine_executable().to_owned();
+    let recipe = LaunchRecipe::Production { executable };
+    let (jobs, pending) = mpsc::channel::<Job>(capacity);
+    let shutdown = Arc::new(CancelHandle::new());
+    let (health_sender, health) = watch::channel(OwnerHealth::Active);
+    let mut allocator = operation::GenerationAllocator::new();
+    allocator.force_next(u64::MAX);
+    let join = runtime.spawn(operation::run_owner_with_allocator(
+        pending,
+        Arc::clone(&shutdown),
+        health_sender,
+        recipe,
+        close_budget,
+        stderr_cap,
+        allocator,
+    ));
+    EngineOwner {
+        jobs,
+        shutdown,
+        health,
+        join,
+        observed_join: None,
     }
 }
