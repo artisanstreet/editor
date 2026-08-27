@@ -17,11 +17,11 @@
 //! numbering, child custody, bounded teardown, quarantine, readiness, and
 //! HTTP exist; a pure, independently reviewable SSE framing and wakeable
 //! bounded observation delivery leaf (`framing`/`observation` with
-//! `reserve_owned` sink) exists without claiming live `IncomingBody`
-//! driving, global/per-run SSE connections, `POST /prompt`, or owner
-//! integration which remain P4.
+//! `reserve_owned` sink) plus a crate-private one-shot `POST /prompt` leaf
+//! exists without claiming live `IncomingBody` driving, global/per-run SSE
+//! connections, or owner integration which remain P4.
 //! The public surface beyond configuration is exactly
-//! `start`/`health`/`shutdown`; no operation API exists beyond that.
+//! `start`/`health`/`shutdown`; prompt remains crate-private.
 
 use std::fmt;
 use std::future::Future;
