@@ -6,6 +6,10 @@
 //! exports are added here.
 
 use artisan_domain::RunId;
+use artisan_transport::CancelHandle;
+use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 /// Distinct terminal states for a provider run.
 ///
@@ -106,4 +110,136 @@ pub(crate) fn chunk_text(
         });
     }
     out
+}
+
+/// Typed terminal observation preserving caller-supplied identity and state.
+///
+/// Keeps the provided [`RunId`], durable sequence, one of the four distinct
+/// [`TerminalState`] values, and optional reason/error reference strings.
+/// No sequence is invented, no `Interrupted` is collapsed into `Cancelled`,
+/// and no raw frames, auth, secrets, or serialization are added.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TerminalObservation {
+    run_id: RunId,
+    sequence: u64,
+    state: TerminalState,
+    reason: Option<String>,
+    error_ref: Option<String>,
+}
+
+impl TerminalObservation {
+    #[must_use]
+    pub(crate) fn new(
+        run_id: RunId,
+        sequence: u64,
+        state: TerminalState,
+        reason: Option<String>,
+        error_ref: Option<String>,
+    ) -> Self {
+        Self {
+            run_id,
+            sequence,
+            state,
+            reason,
+            error_ref,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    #[must_use]
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    #[must_use]
+    pub(crate) fn state(&self) -> TerminalState {
+        self.state
+    }
+
+    #[must_use]
+    pub(crate) fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    #[must_use]
+    pub(crate) fn error_ref(&self) -> Option<&str> {
+        self.error_ref.as_deref()
+    }
+}
+
+/// Minimal wakeable observation carrying either a text delta or a terminal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EngineObservation {
+    TextDelta(TextDelta),
+    Terminal(TerminalObservation),
+}
+
+/// Payload-free error for one bounded observation delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub(crate) enum DeliveryError {
+    #[error("observation delivery shut down")]
+    Shutdown,
+    #[error("observation delivery cancelled")]
+    Cancelled,
+    #[error("observation delivery deadline exceeded")]
+    Deadline,
+    #[error("observation sink closed")]
+    SinkClosed,
+}
+
+/// Delivers exactly one [`EngineObservation`] through a bounded channel with
+/// wakeable backpressure.
+///
+/// Retains the pending observation and exactly one
+/// `sender.clone().reserve_owned()` future across `Pending`. The future is
+/// pinned once and the delivery races with `shutdown`, `cancel`, and
+/// `deadline` under `tokio::select! { biased; }` with precedence
+/// `shutdown > cancel > deadline > permit`. The same precedence is checked
+/// before creating the permit so already-signalled conditions are
+/// deterministic.
+///
+/// On `OwnedPermit` the observation is sent exactly once via
+/// `permit.send(observation)`. On `SendError(())` the error is
+/// `SinkClosed`. No retry, no `try_send` parking, no unbounded channel,
+/// and no silent drop of a payload. Cancellation, deadline, or shutdown
+/// ends only this delivery; they do not mutate the observation.
+pub(crate) async fn deliver_observation(
+    observation: EngineObservation,
+    sender: mpsc::Sender<EngineObservation>,
+    shutdown: &CancelHandle,
+    cancel: &CancelHandle,
+    deadline: Instant,
+) -> Result<(), DeliveryError> {
+    if shutdown.is_cancelled() {
+        return Err(DeliveryError::Shutdown);
+    }
+    if cancel.is_cancelled() {
+        return Err(DeliveryError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(DeliveryError::Deadline);
+    }
+
+    let mut pending = Some(observation);
+    let mut reserve = Box::pin(sender.clone().reserve_owned());
+
+    tokio::select! {
+        biased;
+
+        () = shutdown.wait() => Err(DeliveryError::Shutdown),
+        () = cancel.wait() => Err(DeliveryError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(DeliveryError::Deadline),
+        res = &mut reserve => match res {
+            Ok(permit) => {
+                let obs = pending.take().expect("pending observation present");
+                permit.send(obs);
+                Ok(())
+            }
+            Err(_) => Err(DeliveryError::SinkClosed),
+        }
+    }
 }
