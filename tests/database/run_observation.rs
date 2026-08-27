@@ -21,8 +21,7 @@ use artisan_domain::{
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, DbBackend,
-    EntityTrait, Statement,
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, EntityTrait,
 };
 use sha2::{Digest, Sha256};
 
@@ -1853,7 +1852,12 @@ async fn failure_after_dispatch_fence_rolls_back_pair_stamps() {
 async fn late_transaction_failure_via_trigger_rolls_back_everything() {
     let pair = seeded_pair().await;
     // Create trigger that aborts patch insertion (sqlite trigger)
-    pair.database.execute(&Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_patch BEFORE INSERT ON conversation_patches BEGIN SELECT RAISE(ABORT, 'test abort patch'); END;".to_owned())).await.expect("trigger patch");
+    pair.database
+        .execute_unprepared(
+            "CREATE TRIGGER abort_patch BEFORE INSERT ON conversation_patches BEGIN SELECT RAISE(ABORT, 'test abort patch'); END;",
+        )
+        .await
+        .expect("trigger patch");
     let before = persisted_rows(&pair.database).await;
     let body = assistant_body("x");
     let scope = batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS));
@@ -1882,16 +1886,19 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
     assert_eq!(before, persisted_rows(&pair.database).await);
     // cleanup trigger for other tests not needed (this pair is isolated)
     pair.database
-        .execute(&Statement::from_string(
-            DbBackend::Sqlite,
-            "DROP TRIGGER abort_patch".to_owned(),
-        ))
+        .execute_unprepared("DROP TRIGGER abort_patch")
         .await
         .expect("drop");
 
     // checkpoint trigger
     let pair2 = seeded_pair().await;
-    pair2.database.execute(&Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_cp BEFORE INSERT ON run_checkpoints BEGIN SELECT RAISE(ABORT, 'test abort cp'); END;".to_owned())).await.expect("trigger cp");
+    pair2
+        .database
+        .execute_unprepared(
+            "CREATE TRIGGER abort_cp BEFORE INSERT ON run_checkpoints BEGIN SELECT RAISE(ABORT, 'test abort cp'); END;",
+        )
+        .await
+        .expect("trigger cp");
     let before2 = persisted_rows(&pair2.database).await;
     let scope2 = batch_scope(&pair2, UnixMillis::from_millis(BOUND_AT_MS));
     let err2 = pair2
@@ -1918,16 +1925,19 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
     assert_eq!(before2, persisted_rows(&pair2.database).await);
     pair2
         .database
-        .execute(&Statement::from_string(
-            DbBackend::Sqlite,
-            "DROP TRIGGER abort_cp".to_owned(),
-        ))
+        .execute_unprepared("DROP TRIGGER abort_cp")
         .await
         .expect("drop2");
 
     // receipt trigger
     let pair3 = seeded_pair().await;
-    pair3.database.execute(&Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_receipt BEFORE INSERT ON run_batch_receipts BEGIN SELECT RAISE(ABORT, 'test abort receipt'); END;".to_owned())).await.expect("trigger receipt");
+    pair3
+        .database
+        .execute_unprepared(
+            "CREATE TRIGGER abort_receipt BEFORE INSERT ON run_batch_receipts BEGIN SELECT RAISE(ABORT, 'test abort receipt'); END;",
+        )
+        .await
+        .expect("trigger receipt");
     let before3 = persisted_rows(&pair3.database).await;
     let scope3 = batch_scope(&pair3, UnixMillis::from_millis(BOUND_AT_MS));
     let err3 = pair3
