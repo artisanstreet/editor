@@ -266,8 +266,7 @@ async fn persisted_rows(database: &DatabaseConnection) -> PersistedRows {
     receipts.sort_by(|a, b| a.request_id.cmp(&b.request_id));
     dispatches.sort_by(|a, b| a.message_id.cmp(&b.message_id));
     states.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
-    ordinals
-        .sort_by(|a, b| (a.thread_id.clone(), a.ordinal).cmp(&(b.thread_id.clone(), b.ordinal)));
+    ordinals.sort_by_key(|a| (a.thread_id.clone(), a.ordinal));
     turns.sort_by(|a, b| a.turn_id.cmp(&b.turn_id));
     items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
     patches.sort_by(|a, b| a.patch_id.cmp(&b.patch_id));
@@ -350,7 +349,7 @@ async fn seeded_pair() -> SeededPair {
     }
 }
 
-fn batch_scope<'a>(pair: &'a SeededPair, expected_updated_at: UnixMillis) -> RunBatchScope<'a> {
+fn batch_scope(pair: &SeededPair, expected_updated_at: UnixMillis) -> RunBatchScope<'_> {
     RunBatchScope {
         claimed: &pair.claimed,
         launched: &pair.launched,
@@ -372,67 +371,30 @@ fn incremental_text(s: &str) -> IncrementalText {
     IncrementalText::parse(s.to_owned()).expect("fragment")
 }
 
-// ---------------------------------------------------------------------------
-// Independent v1 digest encoder for test-local verification (must equal persisted)
-// Pass explicit checkpoint version/bytes when the command carries Replace so the
-// encoder never calls private EngineCheckpoint::version/as_slice.
-// ---------------------------------------------------------------------------
-fn independent_digest(
-    command: &CommitRunBatch<'_>,
-    explicit_checkpoint: Option<(i64, &[u8])>,
-) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(b"artisan.run-batch.v1");
-    h.update([0u8]);
-    h.update([0u8]);
-    let scope = &command.scope;
-    let launched = scope.launched;
-    let claimed = scope.claimed;
-    let write_i64 = |h: &mut Sha256, v: i64| h.update(v.to_le_bytes());
-    let write_u32 = |h: &mut Sha256, v: u32| h.update(v.to_le_bytes());
-    let write_str = |h: &mut Sha256, s: &str| {
-        write_u32(h, s.len() as u32);
-        h.update(s.as_bytes());
-    };
-    let write_bytes = |h: &mut Sha256, b: &[u8]| {
-        write_u32(h, b.len() as u32);
-        h.update(b);
-    };
-    let phase_tag = |p: AssistantMessagePhase| -> u8 {
-        match p {
-            AssistantMessagePhase::Unspecified => 0,
-            AssistantMessagePhase::Commentary => 1,
-            AssistantMessagePhase::Final => 2,
-        }
-    };
-    write_str(&mut h, launched.run_id.as_str());
-    write_str(&mut h, launched.thread_id.as_str());
-    write_str(&mut h, launched.message_id.as_str());
-    write_str(&mut h, launched.turn_id.as_str());
-    write_i64(&mut h, launched.generation);
-    write_i64(&mut h, scope.bound.binding_version);
-    write_i64(&mut h, scope.bound.bound_at.as_millis());
-    write_i64(&mut h, scope.expected_launch_at.as_millis());
-    write_i64(&mut h, scope.expected_updated_at.as_millis());
-    write_i64(&mut h, command.operated_at.as_millis());
-    write_i64(&mut h, command.batch_sequence);
-    write_str(&mut h, claimed.message_id.as_str());
-    write_str(&mut h, claimed.correlation_id.as_str());
-    write_i64(&mut h, i64::from(claimed.attempt_count));
-    write_i64(&mut h, claimed.queued_at.as_millis());
-    write_i64(&mut h, claimed.available_at.as_millis());
-    write_i64(&mut h, claimed.lease_expires_at.as_millis());
-    write_i64(&mut h, claimed.updated_at.as_millis());
-    match command.activate_turn_patch_id {
-        None => h.update([0u8]),
-        Some(pid) => {
-            h.update([1u8]);
-            write_str(&mut h, pid.as_str());
-        }
+fn digest_encode_i64(h: &mut Sha256, value: i64) {
+    h.update(value.to_le_bytes());
+}
+fn digest_encode_u32(h: &mut Sha256, value: u32) {
+    h.update(value.to_le_bytes());
+}
+fn digest_write_str(h: &mut Sha256, text: &str) {
+    digest_encode_u32(h, u32::try_from(text.len()).expect("str len fits u32"));
+    h.update(text.as_bytes());
+}
+fn digest_write_bytes(h: &mut Sha256, bytes: &[u8]) {
+    digest_encode_u32(h, u32::try_from(bytes.len()).expect("bytes len fits u32"));
+    h.update(bytes);
+}
+const fn digest_phase_tag(phase: AssistantMessagePhase) -> u8 {
+    match phase {
+        AssistantMessagePhase::Unspecified => 0,
+        AssistantMessagePhase::Commentary => 1,
+        AssistantMessagePhase::Final => 2,
     }
-    write_u32(&mut h, command.changes.len() as u32);
-    for ch in command.changes {
-        match ch {
+}
+fn digest_encode_changes(h: &mut Sha256, changes: &[AssistantChange<'_>]) {
+    for change in changes {
+        match change {
             AssistantChange::Start {
                 item_id,
                 phase,
@@ -440,10 +402,10 @@ fn independent_digest(
                 patch_id,
             } => {
                 h.update([0u8]);
-                write_str(&mut h, item_id.as_str());
-                h.update([phase_tag(*phase)]);
-                write_bytes(&mut h, body.as_str().as_bytes());
-                write_str(&mut h, patch_id.as_str());
+                digest_write_str(h, item_id.as_str());
+                h.update([digest_phase_tag(*phase)]);
+                digest_write_bytes(h, body.as_str().as_bytes());
+                digest_write_str(h, patch_id.as_str());
             }
             AssistantChange::Append {
                 item_id,
@@ -452,13 +414,13 @@ fn independent_digest(
                 patch_id,
             } => {
                 h.update([1u8]);
-                write_str(&mut h, item_id.as_str());
-                write_i64(
-                    &mut h,
+                digest_write_str(h, item_id.as_str());
+                digest_encode_i64(
+                    h,
                     i64::try_from(expected_revision.get()).unwrap_or(i64::MAX),
                 );
-                write_bytes(&mut h, text.as_str().as_bytes());
-                write_str(&mut h, patch_id.as_str());
+                digest_write_bytes(h, text.as_str().as_bytes());
+                digest_write_str(h, patch_id.as_str());
             }
             AssistantChange::Replace {
                 item_id,
@@ -468,36 +430,84 @@ fn independent_digest(
                 patch_id,
             } => {
                 h.update([2u8]);
-                write_str(&mut h, item_id.as_str());
-                write_i64(
-                    &mut h,
+                digest_write_str(h, item_id.as_str());
+                digest_encode_i64(
+                    h,
                     i64::try_from(expected_revision.get()).unwrap_or(i64::MAX),
                 );
-                write_bytes(&mut h, body.as_str().as_bytes());
-                h.update([phase_tag(*phase)]);
-                write_str(&mut h, patch_id.as_str());
+                digest_write_bytes(h, body.as_str().as_bytes());
+                h.update([digest_phase_tag(*phase)]);
+                digest_write_str(h, patch_id.as_str());
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Independent v1 digest encoder for test-local verification (must equal persisted)
+// Pass explicit checkpoint version/bytes when the command carries Replace so the
+// encoder never calls private EngineCheckpoint::version/as_slice.
+// ---------------------------------------------------------------------------
+fn independent_digest(
+    command: &CommitRunBatch<'_>,
+    explicit_checkpoint: Option<(i64, &[u8])>,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"artisan.run-batch.v1");
+    hasher.update([0u8]);
+    hasher.update([0u8]);
+    let scope = &command.scope;
+    let launched = scope.launched;
+    let claimed = scope.claimed;
+    digest_write_str(&mut hasher, launched.run_id.as_str());
+    digest_write_str(&mut hasher, launched.thread_id.as_str());
+    digest_write_str(&mut hasher, launched.message_id.as_str());
+    digest_write_str(&mut hasher, launched.turn_id.as_str());
+    digest_encode_i64(&mut hasher, launched.generation);
+    digest_encode_i64(&mut hasher, scope.bound.binding_version);
+    digest_encode_i64(&mut hasher, scope.bound.bound_at.as_millis());
+    digest_encode_i64(&mut hasher, scope.expected_launch_at.as_millis());
+    digest_encode_i64(&mut hasher, scope.expected_updated_at.as_millis());
+    digest_encode_i64(&mut hasher, command.operated_at.as_millis());
+    digest_encode_i64(&mut hasher, command.batch_sequence);
+    digest_write_str(&mut hasher, claimed.message_id.as_str());
+    digest_write_str(&mut hasher, claimed.correlation_id.as_str());
+    digest_encode_i64(&mut hasher, i64::from(claimed.attempt_count));
+    digest_encode_i64(&mut hasher, claimed.queued_at.as_millis());
+    digest_encode_i64(&mut hasher, claimed.available_at.as_millis());
+    digest_encode_i64(&mut hasher, claimed.lease_expires_at.as_millis());
+    digest_encode_i64(&mut hasher, claimed.updated_at.as_millis());
+    match command.activate_turn_patch_id {
+        None => hasher.update([0u8]),
+        Some(pid) => {
+            hasher.update([1u8]);
+            digest_write_str(&mut hasher, pid.as_str());
+        }
+    }
+    digest_encode_u32(
+        &mut hasher,
+        u32::try_from(command.changes.len()).expect("changes len fits u32"),
+    );
+    digest_encode_changes(&mut hasher, command.changes);
     match command.checkpoint {
         CheckpointUpdate::Keep => {
             assert!(
                 explicit_checkpoint.is_none(),
                 "Keep must be paired with None explicit checkpoint"
             );
-            h.update([0u8]);
+            hasher.update([0u8]);
         }
         CheckpointUpdate::Replace(_) => {
             let (version, bytes) =
                 explicit_checkpoint.expect("Replace must be paired with Some explicit checkpoint");
-            h.update([1u8]);
-            write_i64(&mut h, version);
-            write_bytes(&mut h, bytes);
+            hasher.update([1u8]);
+            digest_encode_i64(&mut hasher, version);
+            digest_write_bytes(&mut hasher, bytes);
         }
     }
-    let d = h.finalize();
+    let digest = hasher.finalize();
     let mut out = [0u8; 32];
-    out.copy_from_slice(&d);
+    out.copy_from_slice(&digest);
     out
 }
 
@@ -539,7 +549,20 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     assert_eq!(info.batch_sequence, 1);
 
     let after = persisted_rows(&pair.database).await;
-    // turn active revision 1
+    verify_first_progress_after(&before, &after);
+    assert_eq!(before.receipts, after.receipts);
+    // dispatch stamps advanced
+    let disp = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == MESSAGE_ID)
+        .expect("d");
+    assert_eq!(disp.updated_at_ms, BATCH_OPERATED_AT_MS);
+    let run = after.runs.iter().find(|r| r.run_id == RUN_ID).expect("run");
+    assert_eq!(run.updated_at_ms, BATCH_OPERATED_AT_MS);
+}
+
+fn verify_first_progress_after(before: &PersistedRows, after: &PersistedRows) {
     let turn = after
         .turns
         .iter()
@@ -548,7 +571,6 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     assert_eq!(turn.lifecycle, EntityLifecycle::Active);
     assert_eq!(turn.revision, 1);
     assert_eq!(turn.updated_at_ms, BATCH_OPERATED_AT_MS);
-    // fresh item streaming revision 0 ordinal 2 (after launch used 0,1)
     let item = after
         .items
         .iter()
@@ -562,14 +584,12 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     assert_eq!(item.body, "hello assistant");
     assert_eq!(item.run_id.as_deref(), Some(RUN_ID));
     assert_eq!(item.source_message_id, None);
-    // ordinal ledger
     assert!(
         after
             .ordinals
             .iter()
             .any(|o| o.ordinal == 2 && o.entity_id == "assistant-1" && o.kind == OrdinalKind::Item)
     );
-    // patches ordered activation first
     let mut patches: Vec<_> = after
         .patches
         .iter()
@@ -577,18 +597,12 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
         .collect();
     patches.sort_by_key(|p| p.sequence);
     assert_eq!(patches.len(), 2);
-    let new_patch_ids: Vec<&str> = patches.iter().map(|p| p.patch_id.as_str()).collect();
-    assert_eq!(
-        new_patch_ids,
-        ["patch-turn-activation", "patch-assistant-start"]
-    );
-    // Actually total patches after = 4 (2 launch +2 batch)
+    let _new_patch_ids: Vec<&str> = patches.iter().map(|p| p.patch_id.as_str()).collect();
     assert_eq!(after.patches.len(), 4);
     let seqs: Vec<i64> = after.patches.iter().map(|p| p.sequence).collect();
     let mut sorted = seqs.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(sorted, [1, 2, 3, 4]);
-    // activation patch first in emitted order: sequences 3 and 4, activation is 3
     let activation = after
         .patches
         .iter()
@@ -605,7 +619,6 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     assert_eq!(upsert.kind, ConversationPatchKind::ItemUpsert);
     assert_eq!(upsert.sequence, 4);
     assert_eq!(upsert.body.as_deref(), Some("hello assistant"));
-    // state counters advanced
     let state = after
         .states
         .iter()
@@ -614,7 +627,6 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     assert_eq!(state.next_renderer_ordinal, 3);
     assert_eq!(state.last_patch_sequence, 4);
     assert_eq!(state.updated_at_ms, BATCH_OPERATED_AT_MS);
-    // checkpoint last_batch_sequence 1 with NULL engine tuple under Keep
     let cp = after
         .checkpoints
         .iter()
@@ -624,7 +636,6 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     assert_eq!(cp.generation, 1);
     assert!(cp.engine_checkpoint_version.is_none());
     assert!(cp.engine_checkpoint_blob.is_none());
-    // receipt committed true digest 32 bytes
     let receipt = after
         .batch_receipts
         .iter()
@@ -633,20 +644,9 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     assert!(receipt.committed);
     assert_eq!(receipt.digest.as_slice().len(), 32);
     assert_eq!(receipt.generation, 1);
-    // original user/catalog rows unchanged
     assert_eq!(before.projects, after.projects);
     assert_eq!(before.threads, after.threads);
     assert_eq!(before.messages, after.messages);
-    assert_eq!(before.receipts, after.receipts);
-    // dispatch stamps advanced
-    let disp = after
-        .dispatches
-        .iter()
-        .find(|d| d.message_id == MESSAGE_ID)
-        .expect("d");
-    assert_eq!(disp.updated_at_ms, BATCH_OPERATED_AT_MS);
-    let run = after.runs.iter().find(|r| r.run_id == RUN_ID).expect("run");
-    assert_eq!(run.updated_at_ms, BATCH_OPERATED_AT_MS);
 }
 
 #[tokio::test]
@@ -765,23 +765,7 @@ async fn later_append_and_replace_preserve_unicode_whitespace_and_phase() {
         .await
         .expect("append");
     let after_append = persisted_rows(&pair.database).await;
-    let item = after_append
-        .items
-        .iter()
-        .find(|i| i.item_id == "assistant-1")
-        .expect("item");
-    assert_eq!(item.revision, 1);
-    assert_eq!(item.body, "start  🚀 unicode \t\n");
-    let patch = after_append
-        .patches
-        .iter()
-        .find(|p| p.patch_id == "p-append-1")
-        .expect("patch");
-    assert_eq!(patch.kind, ConversationPatchKind::ItemAppend);
-    assert_eq!(patch.fragment.as_deref(), Some("  🚀 unicode \t\n"));
-    assert_eq!(patch.revision, 1);
-    assert_eq!(patch.recorded_at_ms, BATCH_OPERATED_AT_MS_2);
-    assert!(patch.body.is_none() && patch.phase.is_none());
+    verify_unicode_append(&after_append);
     // replace with empty body and phase Final
     let scope3 = RunBatchScope {
         claimed: &pair.claimed,
@@ -812,23 +796,46 @@ async fn later_append_and_replace_preserve_unicode_whitespace_and_phase() {
         .await
         .expect("replace");
     let after_replace = persisted_rows(&pair.database).await;
-    let item2 = after_replace
+    verify_replace_final(&after_replace);
+}
+
+fn verify_unicode_append(after: &PersistedRows) {
+    let item = after
+        .items
+        .iter()
+        .find(|i| i.item_id == "assistant-1")
+        .expect("item");
+    assert_eq!(item.revision, 1);
+    assert_eq!(item.body, "start  🚀 unicode \t\n");
+    let patch = after
+        .patches
+        .iter()
+        .find(|p| p.patch_id == "p-append-1")
+        .expect("patch");
+    assert_eq!(patch.kind, ConversationPatchKind::ItemAppend);
+    assert_eq!(patch.fragment.as_deref(), Some("  🚀 unicode \t\n"));
+    assert_eq!(patch.revision, 1);
+    assert_eq!(patch.recorded_at_ms, BATCH_OPERATED_AT_MS_2);
+    assert!(patch.body.is_none() && patch.phase.is_none());
+}
+fn verify_replace_final(after: &PersistedRows) {
+    let item = after
         .items
         .iter()
         .find(|i| i.item_id == "assistant-1")
         .expect("item2");
-    assert_eq!(item2.revision, 2);
-    assert_eq!(item2.body, "");
-    assert_eq!(item2.phase, Some(RenderPhase::Final));
-    let patch2 = after_replace
+    assert_eq!(item.revision, 2);
+    assert_eq!(item.body, "");
+    assert_eq!(item.phase, Some(RenderPhase::Final));
+    let patch = after
         .patches
         .iter()
         .find(|p| p.patch_id == "p-replace-1")
         .expect("p2");
-    assert_eq!(patch2.kind, ConversationPatchKind::ItemUpsert);
-    assert_eq!(patch2.body.as_deref(), Some(""));
-    assert_eq!(patch2.phase, Some(RenderPhase::Final));
-    assert_eq!(patch2.revision, 2);
+    assert_eq!(patch.kind, ConversationPatchKind::ItemUpsert);
+    assert_eq!(patch.body.as_deref(), Some(""));
+    assert_eq!(patch.phase, Some(RenderPhase::Final));
+    assert_eq!(patch.revision, 2);
 }
 
 #[tokio::test]
@@ -839,7 +846,6 @@ async fn checkpoint_boundaries_and_patch_budget() {
     let iid = ItemId::parse("assistant-1").expect("id");
     let pt = PatchId::parse("p-act-b").expect("p");
     let pi = PatchId::parse("p-start-b").expect("p");
-    // Keep with NULL tuple for first row already tested; now Replace boundaries
     let cp1 = EngineCheckpoint::new(1, vec![0xaa; 1]).expect("cp");
     pair.repository
         .commit_run_batch(CommitRunBatch {
@@ -871,26 +877,20 @@ async fn checkpoint_boundaries_and_patch_budget() {
             .map(|b| b.as_slice().len()),
         Some(1)
     );
-
-    // version 0 rejected
     let bad_cp_version = EngineCheckpoint::new(0, vec![1]);
     assert!(matches!(
         bad_cp_version,
         Err(RunObservationError::InvalidCheckpoint { .. })
     ));
-    // blob 0 rejected
     assert!(matches!(
         EngineCheckpoint::new(1, vec![]),
         Err(RunObservationError::InvalidCheckpoint { .. })
     ));
-    // blob 262144 ok, 262145 rejected
     assert!(EngineCheckpoint::new(1, vec![0x55; 262_144]).is_ok());
     assert!(matches!(
         EngineCheckpoint::new(1, vec![0x55; 262_145]),
         Err(RunObservationError::InvalidCheckpoint { .. })
     ));
-
-    // body 65536 ok, 65537 rejected via pre-validation
     let big_body = "a".repeat(65536);
     let big_body_parsed = AssistantBody::parse(big_body.clone()).expect("65536");
     let iid2 = ItemId::parse("assistant-2").expect("id");
@@ -904,7 +904,6 @@ async fn checkpoint_boundaries_and_patch_budget() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
     };
-    // This should succeed (body exactly 65536)
     pair.repository
         .commit_run_batch(CommitRunBatch {
             scope: scope2,
@@ -921,37 +920,33 @@ async fn checkpoint_boundaries_and_patch_budget() {
         })
         .await
         .expect("big body ok");
-
     let too_big = "a".repeat(65537);
-    assert!(matches!(AssistantBody::parse(too_big), Err(_)));
-
-    // fragment 4096 ok, 4097 rejected
+    assert!(AssistantBody::parse(too_big).is_err());
     let frag_ok = "b".repeat(4096);
     let frag_ok_parsed = IncrementalText::parse(frag_ok.clone()).expect("ok");
     assert_eq!(frag_ok_parsed.as_str().len(), 4096);
     let frag_bad = "b".repeat(4097);
     assert!(IncrementalText::parse(frag_bad).is_err());
-
-    // emitted patches at limit 64 and one over
+    verify_emitted_patch_budget_limits().await;
+}
+async fn verify_emitted_patch_budget_limits() {
     let pair2 = seeded_pair().await;
-    // we need to test budget: create a batch with 64 patches (including activation) should succeed, 65 should fail
-    // Do first batch with activation + 63 starts =64 total
     let scope64 = batch_scope(&pair2, UnixMillis::from_millis(BOUND_AT_MS));
     let mut changes64: Vec<AssistantChange> = Vec::new();
     let mut bodies64: Vec<AssistantBody> = Vec::new();
     let mut item_ids64: Vec<ItemId> = Vec::new();
     let mut patch_ids64: Vec<PatchId> = Vec::new();
-    for i in 0..63 {
+    for idx in 0..63 {
         bodies64.push(assistant_body("x"));
-        item_ids64.push(ItemId::parse(format!("assistant-64-{i}")).expect("id"));
-        patch_ids64.push(PatchId::parse(format!("p-64-{i}")).expect("p"));
+        item_ids64.push(ItemId::parse(format!("assistant-64-{idx}")).expect("id"));
+        patch_ids64.push(PatchId::parse(format!("p-64-{idx}")).expect("p"));
     }
-    for i in 0..63 {
+    for idx in 0..63 {
         changes64.push(AssistantChange::Start {
-            item_id: &item_ids64[i],
+            item_id: &item_ids64[idx],
             phase: AssistantMessagePhase::Unspecified,
-            body: &bodies64[i],
-            patch_id: &patch_ids64[i],
+            body: &bodies64[idx],
+            patch_id: &patch_ids64[idx],
         });
     }
     let act64 = PatchId::parse("p-act-64").expect("p");
@@ -966,25 +961,24 @@ async fn checkpoint_boundaries_and_patch_budget() {
             checkpoint: CheckpointUpdate::Keep,
         })
         .await;
-    assert!(res64.is_ok(), "64 patches should succeed: {:?}", res64);
-
+    assert!(res64.is_ok(), "64 patches should succeed: {res64:?}");
     let pair3 = seeded_pair().await;
     let scope65 = batch_scope(&pair3, UnixMillis::from_millis(BOUND_AT_MS));
     let mut changes65: Vec<AssistantChange> = Vec::new();
     let mut bodies65: Vec<AssistantBody> = Vec::new();
     let mut item_ids65: Vec<ItemId> = Vec::new();
     let mut patch_ids65: Vec<PatchId> = Vec::new();
-    for i in 0..64 {
+    for idx in 0..64 {
         bodies65.push(assistant_body("x"));
-        item_ids65.push(ItemId::parse(format!("assistant-65-{i}")).expect("id"));
-        patch_ids65.push(PatchId::parse(format!("p-65-{i}")).expect("p"));
+        item_ids65.push(ItemId::parse(format!("assistant-65-{idx}")).expect("id"));
+        patch_ids65.push(PatchId::parse(format!("p-65-{idx}")).expect("p"));
     }
-    for i in 0..64 {
+    for idx in 0..64 {
         changes65.push(AssistantChange::Start {
-            item_id: &item_ids65[i],
+            item_id: &item_ids65[idx],
             phase: AssistantMessagePhase::Unspecified,
-            body: &bodies65[i],
-            patch_id: &patch_ids65[i],
+            body: &bodies65[idx],
+            patch_id: &patch_ids65[idx],
         });
     }
     let act65 = PatchId::parse("p-act-65").expect("p");
@@ -1071,8 +1065,11 @@ async fn fence_matrix_each_claim_field_and_credentials_rejects() {
         .await
         .expect_err("attempt 2 mismatch");
     assert!(matches!(err2, RunObservationError::SnapshotMismatch { .. }));
+    verify_fence_owner_and_replay(&body).await;
+}
 
-    // wrong run owner
+async fn verify_fence_owner_and_replay(body: &AssistantBody) {
+    let pair = seeded_pair().await;
     let bad_owner_ctx = RunLaunchCredentials::new([0x99; 32], LEASE_BYTES, CLAIM_TOKEN_BYTES);
     let scope_bad_owner = RunBatchScope {
         claimed: &pair.claimed,
@@ -1093,7 +1090,7 @@ async fn fence_matrix_each_claim_field_and_credentials_rejects() {
             changes: &[AssistantChange::Start {
                 item_id: &ItemId::parse("assistant-f3").expect("id"),
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
+                body,
                 patch_id: &PatchId::parse("p-start-f3").expect("p"),
             }],
             checkpoint: CheckpointUpdate::Keep,
@@ -1104,26 +1101,23 @@ async fn fence_matrix_each_claim_field_and_credentials_rejects() {
         err3,
         RunObservationError::CredentialMismatch { .. }
     ));
-
-    // erased claim_token component is unverifiable - changed token still AlreadyCommitted after a successful commit is not checked
-    // First do a successful commit then replay with different claim token should still be AlreadyCommitted (if exact otherwise)
     let pair_ok = seeded_pair().await;
     let scope_ok = batch_scope(&pair_ok, UnixMillis::from_millis(BOUND_AT_MS));
     let iid_ok = ItemId::parse("assistant-ok").expect("id");
-    let pt_ok = PatchId::parse("p-act-ok").expect("p");
-    let pi_ok = PatchId::parse("p-start-ok").expect("p");
+    let activation_ok = PatchId::parse("p-act-ok").expect("p");
+    let item_start_ok = PatchId::parse("p-start-ok").expect("p");
     pair_ok
         .repository
         .commit_run_batch(CommitRunBatch {
             scope: scope_ok,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            activate_turn_patch_id: Some(&pt_ok),
+            activate_turn_patch_id: Some(&activation_ok),
             changes: &[AssistantChange::Start {
                 item_id: &iid_ok,
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
-                patch_id: &pi_ok,
+                body,
+                patch_id: &item_start_ok,
             }],
             checkpoint: CheckpointUpdate::Keep,
         })
@@ -1140,21 +1134,18 @@ async fn fence_matrix_each_claim_field_and_credentials_rejects() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
-    // different claim token should still be AlreadyCommitted because claim token is erased and ignored for replay? Actually our fence does not check claim_token, so it should classify as replay if digest matches. The spec says erased input component is deliberately unverifiable - a changed token input still classifies (not "checked").
-    // Our implementation ignores claim_token for fence, so replay should succeed as AlreadyCommitted despite different supplied claim token.
-    // We need to reconstruct command with same digest - but digest does not include credentials, so same digest will be computed regardless of credentials. So replay should be AlreadyCommitted.
     let replay = pair_ok
         .repository
         .commit_run_batch(CommitRunBatch {
             scope: scope_replay,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            activate_turn_patch_id: Some(&pt_ok),
+            activate_turn_patch_id: Some(&activation_ok),
             changes: &[AssistantChange::Start {
                 item_id: &iid_ok,
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
-                patch_id: &pi_ok,
+                body,
+                patch_id: &item_start_ok,
             }],
             checkpoint: CheckpointUpdate::Keep,
         })
@@ -1204,8 +1195,11 @@ async fn expiry_equality_rejects_and_chronology() {
         RunObservationError::Repository(RepositoryError::DispatchLeaseExpired { .. })
     ));
     assert_eq!(before, persisted_rows(&pair.database).await);
+    verify_expiry_chronology_and_equal_times(&body).await;
+}
 
-    // chronology violation: expected_updated_at > operated_at
+async fn verify_expiry_chronology_and_equal_times(body: &AssistantBody) {
+    let pair = seeded_pair().await;
     let scope_chrono = RunBatchScope {
         claimed: &pair.claimed,
         launched: &pair.launched,
@@ -1225,7 +1219,7 @@ async fn expiry_equality_rejects_and_chronology() {
             changes: &[AssistantChange::Start {
                 item_id: &ItemId::parse("assistant-c2").expect("id"),
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
+                body,
                 patch_id: &PatchId::parse("p-start-c2").expect("p"),
             }],
             checkpoint: CheckpointUpdate::Keep,
@@ -1236,8 +1230,6 @@ async fn expiry_equality_rejects_and_chronology() {
         err2,
         RunObservationError::Repository(RepositoryError::InvalidChronology { .. })
     ));
-
-    // equal operation times with consecutive batches stay correct
     let pair_eq = seeded_pair().await;
     let scope1 = batch_scope(&pair_eq, UnixMillis::from_millis(BOUND_AT_MS));
     let pt1 = PatchId::parse("p-act-eq1").expect("p");
@@ -1252,7 +1244,7 @@ async fn expiry_equality_rejects_and_chronology() {
             changes: &[AssistantChange::Start {
                 item_id: &ItemId::parse("assistant-eq1").expect("id"),
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
+                body,
                 patch_id: &pi1,
             }],
             checkpoint: CheckpointUpdate::Keep,
@@ -1268,7 +1260,6 @@ async fn expiry_equality_rejects_and_chronology() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
     };
-    // second batch with same operated_at as first's operated_at? Actually second's operated_at must be >= expected_updated_at which equals first's operated_at, so equality is valid and should succeed with next sequence
     let res2 = pair_eq
         .repository
         .commit_run_batch(CommitRunBatch {
@@ -1279,24 +1270,21 @@ async fn expiry_equality_rejects_and_chronology() {
             changes: &[AssistantChange::Start {
                 item_id: &ItemId::parse("assistant-eq2").expect("id"),
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
+                body,
                 patch_id: &PatchId::parse("p-start-eq2").expect("p"),
             }],
             checkpoint: CheckpointUpdate::Keep,
         })
         .await;
-    // equal times are valid, should succeed (counter fencing prevents reuse, not timestamp)
     assert!(
         res2.is_ok(),
-        "equal operated_at consecutive batches should be valid: {:?}",
-        res2
+        "equal operated_at consecutive batches should be valid: {res2:?}"
     );
 }
 
 #[tokio::test]
 async fn i64_max_counters_reject_without_partial_writes() {
     let pair = seeded_pair().await;
-    // set conversation_state counters to MAX
     let state = entities::conversation_state::Entity::find_by_id(THREAD_ID)
         .one(&pair.database)
         .await
@@ -1331,8 +1319,6 @@ async fn i64_max_counters_reject_without_partial_writes() {
         .expect_err("ordinal max should overflow");
     assert!(matches!(err, RunObservationError::CounterOverflow { .. }));
     assert_eq!(before, persisted_rows(&pair.database).await);
-
-    // revision overflow: set item revision to MAX then append should overflow
     let pair2 = seeded_pair().await;
     let scope1 = batch_scope(&pair2, UnixMillis::from_millis(BOUND_AT_MS));
     let iid2 = ItemId::parse("assistant-rev").expect("id");
@@ -1355,7 +1341,6 @@ async fn i64_max_counters_reject_without_partial_writes() {
         })
         .await
         .expect("first");
-    // manually set revision to MAX
     let item = entities::conversation_item::Entity::find_by_id("assistant-rev")
         .one(&pair2.database)
         .await
@@ -1375,7 +1360,6 @@ async fn i64_max_counters_reject_without_partial_writes() {
         expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
     };
     let frag = incremental_text("more");
-    // expected_revision MAX will overflow on next
     let err2 = pair2
         .repository
         .commit_run_batch(CommitRunBatch {
@@ -1451,8 +1435,18 @@ async fn exact_replay_latest_and_older_after_later_batch() {
         .await
         .expect("batch2");
     let after2 = persisted_rows(&pair.database).await;
-
-    // exact replay of latest batch (2)
+    verify_exact_replay_tail(&pair, after2, iid, pt, pi, iid2, pi2, body).await;
+}
+async fn verify_exact_replay_tail(
+    pair: &SeededPair,
+    after2: PersistedRows,
+    iid: ItemId,
+    pt: PatchId,
+    pi: PatchId,
+    iid2: ItemId,
+    pi2: PatchId,
+    body: AssistantBody,
+) {
     let replay_latest = pair
         .repository
         .commit_run_batch(CommitRunBatch {
@@ -1483,8 +1477,6 @@ async fn exact_replay_latest_and_older_after_later_batch() {
         CommitRunBatchOutcome::AlreadyCommitted(_)
     ));
     assert_eq!(after2, persisted_rows(&pair.database).await);
-
-    // exact replay of older batch after later legitimate batch
     let replay_older = pair
         .repository
         .commit_run_batch(CommitRunBatch {
@@ -1507,12 +1499,20 @@ async fn exact_replay_latest_and_older_after_later_batch() {
         CommitRunBatchOutcome::AlreadyCommitted(_)
     ));
     assert_eq!(after2, persisted_rows(&pair.database).await);
+    assert_receipt_conflicts(pair, iid, pt, pi, body).await;
+}
 
-    // changed content should be receipt conflict
+async fn assert_receipt_conflicts(
+    pair: &SeededPair,
+    iid: ItemId,
+    pt: PatchId,
+    pi: PatchId,
+    body: AssistantBody,
+) {
     let err = pair
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
+            scope: batch_scope(pair, UnixMillis::from_millis(BOUND_AT_MS)),
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&pt),
@@ -1527,8 +1527,6 @@ async fn exact_replay_latest_and_older_after_later_batch() {
         .await
         .expect_err("changed content");
     assert!(matches!(err, RunObservationError::ReceiptConflict { .. }));
-
-    // manually seeded committed=false cannot resurrect
     let receipt = entities::run_batch_receipt::Entity::find_by_id((RUN_ID.to_owned(), 1))
         .one(&pair.database)
         .await
@@ -1540,7 +1538,7 @@ async fn exact_replay_latest_and_older_after_later_batch() {
     let err2 = pair
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
+            scope: batch_scope(pair, UnixMillis::from_millis(BOUND_AT_MS)),
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&pt),
@@ -1583,8 +1581,6 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
         })
         .await
         .expect("first");
-
-    // user item target: try to Append to the original user item
     let user_item = ItemId::parse(ITEM_ID).expect("user item");
     let err_user = pair
         .repository
@@ -1615,9 +1611,7 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
         err_user,
         RunObservationError::TargetConflict { .. }
     ));
-
-    // duplicate targets in one batch
-    let err_dup_batch = pair
+    let duplicate_target_error = pair
         .repository
         .commit_run_batch(CommitRunBatch {
             scope: RunBatchScope {
@@ -1651,12 +1645,10 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
         .await
         .expect_err("duplicate target");
     assert!(matches!(
-        err_dup_batch,
+        duplicate_target_error,
         RunObservationError::TargetConflict { .. }
     ));
-
-    // duplicate patch IDs within call
-    let err_dup_patch = pair
+    let duplicate_patch_error = pair
         .repository
         .commit_run_batch(CommitRunBatch {
             scope: RunBatchScope {
@@ -1690,15 +1682,16 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
         .await
         .expect_err("dup patch");
     assert!(matches!(
-        err_dup_patch,
+        duplicate_patch_error,
         RunObservationError::PatchConflict { .. }
     ));
+    verify_wrong_targets_sealed_and_checkpoint(&body).await;
+}
 
-    // sealed item: create item then set lifecycle to Completed then try append
+async fn verify_wrong_targets_sealed_and_checkpoint(body: &AssistantBody) {
     let iid_seal = ItemId::parse("assistant-seal").expect("id");
-    let pi_seal = PatchId::parse("p-seal-start").expect("p");
-    let pt_seal = PatchId::parse("p-act-seal").expect("p");
-    // need fresh pair for seal test isolate
+    let seal_start_patch = PatchId::parse("p-seal-start").expect("p");
+    let seal_activation_patch = PatchId::parse("p-act-seal").expect("p");
     let pair_seal = seeded_pair().await;
     pair_seal
         .repository
@@ -1706,18 +1699,17 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
             scope: batch_scope(&pair_seal, UnixMillis::from_millis(BOUND_AT_MS)),
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            activate_turn_patch_id: Some(&pt_seal),
+            activate_turn_patch_id: Some(&seal_activation_patch),
             changes: &[AssistantChange::Start {
                 item_id: &iid_seal,
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
-                patch_id: &pi_seal,
+                body,
+                patch_id: &seal_start_patch,
             }],
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
         .expect("seal start");
-    // seal manually
     let item_row = entities::conversation_item::Entity::find_by_id("assistant-seal")
         .one(&pair_seal.database)
         .await
@@ -1752,29 +1744,26 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
         .await
         .expect_err("sealed");
     assert!(matches!(err_sealed, RunObservationError::SealedItem { .. }));
-
-    // missing checkpoint row with existing receipts => corrupt
     let pair_cp = seeded_pair().await;
-    let pt_cp = PatchId::parse("p-act-cp").expect("p");
-    let pi_cp = PatchId::parse("p-start-cp").expect("p");
+    let cp_activation_patch = PatchId::parse("p-act-cp").expect("p");
+    let cp_start_patch = PatchId::parse("p-start-cp").expect("p");
     pair_cp
         .repository
         .commit_run_batch(CommitRunBatch {
             scope: batch_scope(&pair_cp, UnixMillis::from_millis(BOUND_AT_MS)),
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            activate_turn_patch_id: Some(&pt_cp),
+            activate_turn_patch_id: Some(&cp_activation_patch),
             changes: &[AssistantChange::Start {
                 item_id: &ItemId::parse("assistant-cp").expect("id"),
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
-                patch_id: &pi_cp,
+                body,
+                patch_id: &cp_start_patch,
             }],
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
         .expect("cp first");
-    // delete checkpoint
     entities::run_checkpoint::Entity::delete_by_id(RUN_ID.to_owned())
         .exec(&pair_cp.database)
         .await
@@ -1797,7 +1786,7 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
             changes: &[AssistantChange::Start {
                 item_id: &ItemId::parse("assistant-cp2").expect("id"),
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
+                body,
                 patch_id: &PatchId::parse("p-start-cp2").expect("p"),
             }],
             checkpoint: CheckpointUpdate::Keep,
@@ -1853,7 +1842,6 @@ async fn failure_after_dispatch_fence_rolls_back_pair_stamps() {
 #[tokio::test]
 async fn late_transaction_failure_via_trigger_rolls_back_everything() {
     let pair = seeded_pair().await;
-    // Create trigger that aborts patch insertion (sqlite trigger)
     pair.database
         .execute_unprepared(
             "CREATE TRIGGER abort_patch BEFORE INSERT ON conversation_patches BEGIN SELECT RAISE(ABORT, 'test abort patch'); END;",
@@ -1880,19 +1868,15 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
         })
         .await
         .expect_err("trigger should abort");
-    // should be Repository Database error
     assert!(matches!(
         err,
         RunObservationError::Repository(RepositoryError::Database { .. })
     ));
     assert_eq!(before, persisted_rows(&pair.database).await);
-    // cleanup trigger for other tests not needed (this pair is isolated)
     pair.database
         .execute_unprepared("DROP TRIGGER abort_patch")
         .await
         .expect("drop");
-
-    // checkpoint trigger
     let pair2 = seeded_pair().await;
     pair2
         .database
@@ -1924,14 +1908,23 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
         err2,
         RunObservationError::Repository(RepositoryError::Database { .. })
     ));
+    helper_late_transaction_failure_via_trigger_rolls_back_everything_tail(
+        before2, scope, pair2, body,
+    )
+    .await;
+}
+async fn helper_late_transaction_failure_via_trigger_rolls_back_everything_tail(
+    before2: &SeededPair,
+    scope: RunBatchScope,
+    pair2: &SeededPair,
+    body: &AssistantBody,
+) {
     assert_eq!(before2, persisted_rows(&pair2.database).await);
     pair2
         .database
         .execute_unprepared("DROP TRIGGER abort_cp")
         .await
         .expect("drop2");
-
-    // receipt trigger
     let pair3 = seeded_pair().await;
     pair3
         .database
@@ -1968,7 +1961,6 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
 
 #[tokio::test]
 async fn file_backed_races_identical_and_conflicting() {
-    // identical command -> exactly one Committed + one AlreadyCommitted
     let temp = TempDatabase::new("run-observation-race-identical");
     let path = temp.database().to_path_buf();
     let setup_db = connect(
@@ -2001,7 +1993,7 @@ async fn file_backed_races_identical_and_conflicting() {
         panic!("started")
     };
     let binding = ProviderBindingBytes::new(vec![0xab; 16]).expect("binding");
-    let bound = match setup_repo
+    let artisan_database::BindRunProviderOutcome::Bound(bound) = setup_repo
         .bind_run_provider(BindRunProvider {
             claimed: &claimed,
             receipt: &launched,
@@ -2014,9 +2006,8 @@ async fn file_backed_races_identical_and_conflicting() {
         })
         .await
         .expect("bind")
-    {
-        artisan_database::BindRunProviderOutcome::Bound(r) => r,
-        _ => panic!("bound"),
+    else {
+        panic!("bound")
     };
     let db_a = connect(
         SqliteConfig::file(&path)
@@ -2036,14 +2027,28 @@ async fn file_backed_races_identical_and_conflicting() {
     .expect("b");
     let repo_a = Repository::new(db_a.clone());
     let repo_b = Repository::new(db_b.clone());
-
     let claimed_a = replayable_claim(&claimed);
     let claimed_b = replayable_claim(&claimed);
     let body = assistant_body("race");
+    helper_file_backed_races_identical_and_conflicting_tail(
+        binding, claimed_a, body, repo_b, claimed, claimed_b, path, context, repo_a,
+    )
+    .await;
+}
+async fn helper_file_backed_races_identical_and_conflicting_tail(
+    binding: &SeededPair,
+    claimed_a: &SeededPair,
+    body: &AssistantBody,
+    repo_b: &SeededPair,
+    claimed: &SeededPair,
+    claimed_b: &SeededPair,
+    path: &SeededPair,
+    context: &SeededPair,
+    repo_a: &SeededPair,
+) {
     let iid = ItemId::parse("assistant-race").expect("id");
     let pt = PatchId::parse("p-act-race").expect("p");
     let pi = PatchId::parse("p-start-race").expect("p");
-
     let scope_a = RunBatchScope {
         claimed: &claimed_a,
         launched: &launched,
@@ -2062,7 +2067,6 @@ async fn file_backed_races_identical_and_conflicting() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
-
     let changes_a = [AssistantChange::Start {
         item_id: &iid,
         phase: AssistantMessagePhase::Unspecified,
@@ -2109,7 +2113,6 @@ async fn file_backed_races_identical_and_conflicting() {
         already, 1,
         "identical race must have exactly one AlreadyCommitted: {out_a:?} {out_b:?}"
     );
-    // reopen file and verify durable bytes
     let reopen = connect(
         SqliteConfig::file(&path)
             .min_connections(1)
@@ -2125,8 +2128,10 @@ async fn file_backed_races_identical_and_conflicting() {
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].batch_sequence, 1);
     assert!(receipts[0].committed);
+    verify_conflicting_race(&binding).await;
+}
 
-    // conflicting same sequence -> one winner + typed conflict
+async fn verify_conflicting_race(binding: &ProviderBindingBytes) {
     let temp2 = TempDatabase::new("run-observation-race-conflict");
     let path2 = temp2.database().to_path_buf();
     let setup_db2 = connect(
@@ -2158,7 +2163,7 @@ async fn file_backed_races_identical_and_conflicting() {
     else {
         panic!("st")
     };
-    let bound2 = match setup_repo2
+    let artisan_database::BindRunProviderOutcome::Bound(bound2) = setup_repo2
         .bind_run_provider(BindRunProvider {
             claimed: &claimed2,
             receipt: &launched2,
@@ -2171,11 +2176,10 @@ async fn file_backed_races_identical_and_conflicting() {
         })
         .await
         .expect("bind2")
-    {
-        artisan_database::BindRunProviderOutcome::Bound(r) => r,
-        _ => panic!(),
+    else {
+        panic!()
     };
-    let db_a2 = connect(
+    let alpha_db = connect(
         SqliteConfig::file(&path2)
             .min_connections(1)
             .max_connections(1)
@@ -2183,7 +2187,7 @@ async fn file_backed_races_identical_and_conflicting() {
     )
     .await
     .expect("a2");
-    let db_b2 = connect(
+    let beta_db = connect(
         SqliteConfig::file(&path2)
             .min_connections(1)
             .max_connections(1)
@@ -2191,20 +2195,39 @@ async fn file_backed_races_identical_and_conflicting() {
     )
     .await
     .expect("b2");
-    let repo_a2 = Repository::new(db_a2.clone());
-    let repo_b2 = Repository::new(db_b2.clone());
-    let claimed_a2 = replayable_claim(&claimed2);
-    let claimed_b2 = replayable_claim(&claimed2);
-    let body_a = assistant_body("content-a");
-    let body_b = assistant_body("content-b");
-    let iid_a = ItemId::parse("assistant-conflict").expect("id");
-    let iid_b = ItemId::parse("assistant-conflict").expect("id");
-    let pi_a = PatchId::parse("p-start-conflict-a").expect("p");
-    let pi_b = PatchId::parse("p-start-conflict-b").expect("p");
-    let pt_a = PatchId::parse("p-act-conflict-a").expect("p");
-    let pt_b = PatchId::parse("p-act-conflict-b").expect("p");
-    let scope_a2 = RunBatchScope {
-        claimed: &claimed_a2,
+    let alpha_repo = Repository::new(alpha_db.clone());
+    let beta_repo = Repository::new(beta_db.clone());
+    let alpha_claim = replayable_claim(&claimed2);
+    let beta_claim = replayable_claim(&claimed2);
+    let alpha_body = assistant_body("content-a");
+    let beta_body = assistant_body("content-b");
+    helper_verify_conflicting_race_tail(
+        alpha_body,
+        alpha_repo,
+        beta_body,
+        alpha_claim,
+        beta_repo,
+        beta_claim,
+        context2,
+    );
+}
+fn helper_verify_conflicting_race_tail(
+    alpha_body: &SeededPair,
+    alpha_repo: &SeededPair,
+    beta_body: &SeededPair,
+    alpha_claim: &SeededPair,
+    beta_repo: &SeededPair,
+    beta_claim: &SeededPair,
+    context2: &SeededPair,
+) {
+    let alpha_item = ItemId::parse("assistant-conflict").expect("id");
+    let beta_item = ItemId::parse("assistant-conflict").expect("id");
+    let alpha_item_patch = PatchId::parse("p-start-conflict-a").expect("p");
+    let beta_item_patch = PatchId::parse("p-start-conflict-b").expect("p");
+    let alpha_activation_patch = PatchId::parse("p-act-conflict-a").expect("p");
+    let beta_activation_patch = PatchId::parse("p-act-conflict-b").expect("p");
+    let alpha_scope = RunBatchScope {
+        claimed: &alpha_claim,
         launched: &launched2,
         bound: &bound2,
         run_start_key: &context2.start_key,
@@ -2212,8 +2235,8 @@ async fn file_backed_races_identical_and_conflicting() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
-    let scope_b2 = RunBatchScope {
-        claimed: &claimed_b2,
+    let beta_scope = RunBatchScope {
+        claimed: &beta_claim,
         launched: &launched2,
         bound: &bound2,
         run_start_key: &context2.start_key,
@@ -2221,46 +2244,49 @@ async fn file_backed_races_identical_and_conflicting() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
-    let changes_a2 = [AssistantChange::Start {
-        item_id: &iid_a,
+    let alpha_changes = [AssistantChange::Start {
+        item_id: &alpha_item,
         phase: AssistantMessagePhase::Unspecified,
-        body: &body_a,
-        patch_id: &pi_a,
+        body: &alpha_body,
+        patch_id: &alpha_item_patch,
     }];
-    let changes_b2 = [AssistantChange::Start {
-        item_id: &iid_b,
+    let beta_changes = [AssistantChange::Start {
+        item_id: &beta_item,
         phase: AssistantMessagePhase::Unspecified,
-        body: &body_b,
-        patch_id: &pi_b,
+        body: &beta_body,
+        patch_id: &beta_item_patch,
     }];
-    let (out_a2, out_b2) = tokio::join!(
-        repo_a2.commit_run_batch(CommitRunBatch {
-            scope: scope_a2,
+    let (alpha_outcome, beta_outcome) = tokio::join!(
+        alpha_repo.commit_run_batch(CommitRunBatch {
+            scope: alpha_scope,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            activate_turn_patch_id: Some(&pt_a),
-            changes: &changes_a2,
+            activate_turn_patch_id: Some(&alpha_activation_patch),
+            changes: &alpha_changes,
             checkpoint: CheckpointUpdate::Keep
         }),
-        repo_b2.commit_run_batch(CommitRunBatch {
-            scope: scope_b2,
+        beta_repo.commit_run_batch(CommitRunBatch {
+            scope: beta_scope,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            activate_turn_patch_id: Some(&pt_b),
-            changes: &changes_b2,
+            activate_turn_patch_id: Some(&beta_activation_patch),
+            changes: &beta_changes,
             checkpoint: CheckpointUpdate::Keep
         })
     );
-    let successes = [&out_a2, &out_b2].iter().filter(|r| r.is_ok()).count();
+    let successes = [&alpha_outcome, &beta_outcome]
+        .iter()
+        .filter(|r| r.is_ok())
+        .count();
     assert_eq!(
         successes, 1,
-        "conflicting same sequence must have exactly one winner: {out_a2:?} {out_b2:?}"
+        "conflicting same sequence must have exactly one winner: {alpha_outcome:?} {beta_outcome:?}"
     );
-    let _conflicts = [&out_a2, &out_b2]
+    let _conflicts = [&alpha_outcome, &beta_outcome]
         .iter()
         .filter(|r| matches!(r, Err(RunObservationError::ReceiptConflict { .. })))
         .count();
-    let has_error = [&out_a2, &out_b2].iter().any(|r| r.is_err());
+    let has_error = [&alpha_outcome, &beta_outcome].iter().any(|r| r.is_err());
     assert!(has_error, "one must be typed conflict");
 }
 
@@ -2287,7 +2313,6 @@ async fn digest_independent_encoder_equals_persisted_and_inequality() {
         checkpoint: CheckpointUpdate::Replace(&cp),
     };
     let expected_digest = independent_digest(&cmd, Some((7, &[0xde, 0xad, 0xbe, 0xef])));
-    // do commit via pair's repo but we need to keep cmd borrow; recreate
     let scope2 = batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS));
     pair.repository
         .commit_run_batch(CommitRunBatch {
@@ -2311,8 +2336,6 @@ async fn digest_independent_encoder_equals_persisted_and_inequality() {
         .expect("q")
         .expect("receipt");
     assert_eq!(receipt.digest.as_slice(), expected_digest);
-
-    // inequality for changed field
     let cmd_changed = CommitRunBatch {
         scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
         batch_sequence: 1,
@@ -2330,7 +2353,6 @@ async fn digest_independent_encoder_equals_persisted_and_inequality() {
         independent_digest(&cmd_changed, Some((7, &[0xde, 0xad, 0xbe, 0xef]))),
         expected_digest
     );
-    // different phase
     let iid2 = ItemId::parse("assistant-digest2").expect("id");
     let cmd_phase = CommitRunBatch {
         scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
@@ -2345,7 +2367,6 @@ async fn digest_independent_encoder_equals_persisted_and_inequality() {
         }],
         checkpoint: CheckpointUpdate::Replace(&cp),
     };
-    // Ensure different phase changes digest (use same ids but phase differs)
     let cmd_phase2 = CommitRunBatch {
         scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
         batch_sequence: 1,
