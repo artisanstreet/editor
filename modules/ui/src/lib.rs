@@ -19,6 +19,7 @@ pub mod skeleton;
 pub mod switch;
 pub mod tabs;
 pub mod theme;
+pub mod toggle_group;
 pub mod tooltip;
 
 pub use artisan_assets::AssetId;
