@@ -394,7 +394,7 @@ impl EngineOwner {
         if budget == Duration::ZERO {
             return Err(LaunchAdmissionError::InvalidDeadline);
         }
-        let Some(deadline) = Instant::now().checked_add(budget) else {
+        let Some(deadline) = tokio::time::Instant::now().checked_add(budget) else {
             return Err(LaunchAdmissionError::InvalidDeadline);
         };
         let control = Arc::new(CancelHandle::new());

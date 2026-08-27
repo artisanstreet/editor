@@ -101,7 +101,7 @@ async fn admission_busy_when_queue_full() {
         .admit(run_id("run-busy-1"), Duration::from_secs(10))
         .expect("first admit should succeed");
     let second = owner.admit(run_id("run-busy-2"), Duration::from_secs(10));
-    assert_eq!(second.unwrap_err(), LaunchAdmissionError::Busy);
+    assert!(matches!(second, Err(LaunchAdmissionError::Busy)));
     drop(first);
     drop(owner);
     assert_eq!(witness_counts().spawned, 0);
@@ -120,7 +120,7 @@ async fn admission_unavailable_after_shutdown_signal() {
     let _future = owner.shutdown();
     // Admission must stop immediately even though future was not polled.
     let result = owner.admit(run_id("run-after-shutdown"), Duration::from_secs(10));
-    assert_eq!(result.unwrap_err(), LaunchAdmissionError::Unavailable);
+    assert!(matches!(result, Err(LaunchAdmissionError::Unavailable)));
     // Polling the future should yield Joined (clean drain, no child).
     let report = owner.shutdown().await;
     assert_eq!(report, EngineOwnerShutdown::Joined);
@@ -133,12 +133,12 @@ async fn admission_rejects_zero_and_unrepresentable_budgets() {
     let config = valid_config_with_capacity(4);
     let owner = EngineOwner::start(config, &tokio::runtime::Handle::current());
     let zero = owner.admit(run_id("run-zero"), Duration::ZERO);
-    assert_eq!(zero.unwrap_err(), LaunchAdmissionError::InvalidDeadline);
+    assert!(matches!(zero, Err(LaunchAdmissionError::InvalidDeadline)));
     let unrepresentable = owner.admit(run_id("run-unrep"), Duration::MAX);
-    assert_eq!(
-        unrepresentable.unwrap_err(),
-        LaunchAdmissionError::InvalidDeadline
-    );
+    assert!(matches!(
+        unrepresentable,
+        Err(LaunchAdmissionError::InvalidDeadline)
+    ));
     // Neither queued nor spawned.
     assert_eq!(witness_counts().spawned, 0);
 }
@@ -152,7 +152,7 @@ async fn admission_unavailable_after_owner_termination() {
     assert_eq!(report, EngineOwnerShutdown::Joined);
     // Channel is closed after owner terminated.
     let result = owner.admit(run_id("run-after-join"), Duration::from_secs(10));
-    assert_eq!(result.unwrap_err(), LaunchAdmissionError::Unavailable);
+    assert!(matches!(result, Err(LaunchAdmissionError::Unavailable)));
     assert_eq!(witness_counts().spawned, 0);
 }
 
@@ -165,7 +165,7 @@ async fn pre_spawn_cancelled_before_dequeue_consumes_no_generation() {
     reset_witnesses();
     let config = valid_config_with_capacity(4);
     let owner = EngineOwner::start(config, &tokio::runtime::Handle::current());
-    let mut accepted = owner
+    let accepted = owner
         .admit(run_id("run-cancelled"), Duration::from_secs(10))
         .expect("admit");
     // Cancel before owner dequeues.
@@ -229,7 +229,7 @@ async fn generation_exhaustion_quarantines_without_spawn() {
     assert_eq!(owner.health(), EngineOwnerHealth::Quarantined);
     // Later admits return Unavailable.
     let later = owner.admit(run_id("run-after-exhaust"), Duration::from_secs(10));
-    assert_eq!(later.unwrap_err(), LaunchAdmissionError::Unavailable);
+    assert!(matches!(later, Err(LaunchAdmissionError::Unavailable)));
     // No spawn occurred.
     assert_eq!(witness_counts().spawned, 0);
 }
@@ -247,7 +247,7 @@ async fn shutdown_signal_stops_admission_even_if_future_not_polled() {
     let future = owner.shutdown();
     std::mem::forget(future);
     let result = owner.admit(run_id("run-after-signal"), Duration::from_secs(10));
-    assert_eq!(result.unwrap_err(), LaunchAdmissionError::Unavailable);
+    assert!(matches!(result, Err(LaunchAdmissionError::Unavailable)));
     // Now poll shutdown to completion.
     let report = owner.shutdown().await;
     assert_eq!(report, EngineOwnerShutdown::Joined);
