@@ -53,9 +53,9 @@ use artisan_protocol::{
 use artisan_transport as transport;
 use artisan_transport::{
     CancelHandle, ClientHello, ClientRequestError, ClientSession, ClientSessionError,
-    ClientSessionLimits, DeadlineError, DeliveryLost, DeliveryReceiver, EnvelopeReceiveError,
-    ExchangeError, FrameError, HandshakeError, HandshakeMessageKind, HandshakeStageError,
-    LoopbackTarget, OperationKind, PinnedIdentity, ReplyRejection, RequestOutcome, TransportError,
+    ClientSessionLimits, DeadlineError, DeliveryLost, EnvelopeReceiveError, ExchangeError,
+    FrameError, HandshakeError, HandshakeMessageKind, HandshakeStageError, LoopbackTarget,
+    OperationKind, PinnedIdentity, ReplyRejection, RequestOutcome, TransportError,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -842,8 +842,8 @@ async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), B
 
         tokio::select! {
             biased;
-            result = &mut witnessed => {
-                panic!("fragmented delivery receive completed before the abort: {result:?}");
+            _ = &mut witnessed => {
+                panic!("fragmented delivery receive completed before the abort");
             }
             ready = &mut ready_rx => {
                 ready.map_err(|_| "fragmented delivery readiness witness dropped")?;
@@ -922,9 +922,10 @@ async fn first_delivery_take_is_immediate_and_requests_remain_usable() -> Result
 {
     let (certificate, private_key, pin) = ephemeral_identity();
     let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_addr = server.addr;
     let client = async {
         let (session, _) = ClientSession::connect(
-            target(server.addr),
+            target(server_addr),
             certificate,
             pin,
             hello_envelope("take-hello")?,
