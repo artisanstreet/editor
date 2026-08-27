@@ -47,14 +47,14 @@ use artisan_protocol::{
     ClientRequest, ConnectionId, ErrorCode, ErrorDetail, EventCursor, FrameId, Hello,
     HelloCredential, LocalCapability, ProtocolDecodeError, ProtocolFailure, ProtocolValueError,
     ProtocolVersion, ReconnectCapability, ResponsePayload, ServerEvent, ServerResponse,
-    VersionOffer, Welcome, WireEnvelope, WireEnvelopeBody,
+    VersionOffer, Welcome, WireEnvelope, WireEnvelopeBody, encode_envelope,
 };
 use artisan_transport as transport;
 use artisan_transport::{
     CancelHandle, ClientHello, ClientRequestError, ClientSession, ClientSessionError,
-    ClientSessionLimits, DeadlineError, EnvelopeReceiveError, ExchangeError, FrameError,
-    HandshakeError, HandshakeMessageKind, HandshakeStageError, LoopbackTarget, OperationKind,
-    PinnedIdentity, ReplyRejection, RequestOutcome, TransportError,
+    ClientSessionLimits, DeadlineError, DeliveryLost, EnvelopeReceiveError, ExchangeError,
+    FrameError, HandshakeError, HandshakeMessageKind, HandshakeStageError, LoopbackTarget,
+    OperationKind, PinnedIdentity, ReplyRejection, RequestOutcome, TransportError,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -86,6 +86,13 @@ const LEAF_ABANDON_CODE: u64 = 1;
 /// (`client_session/link.rs`): the application-close cause the drain
 /// witness expects.
 const LEAF_SHUTDOWN_CODE: u64 = 2;
+
+/// The session leaf's fixed private STOP code for an abandoned delivery
+/// stream (`client_session/link.rs`).
+const LEAF_STREAM_STOP_CODE: u32 = 4;
+
+/// Short bounded witness for the one-live-incoming-stream credit check.
+const DELIVERY_BLOCKED_WINDOW: Duration = Duration::from_millis(100);
 
 /// Server-only loopback fixture.
 ///
@@ -476,6 +483,17 @@ fn raw_unsupported_version_bytes() -> Vec<u8> {
     serialize::write_message_to_words(&message)
 }
 
+/// Encodes one envelope into the existing four-byte-length-prefixed wire
+/// representation so a delivery fixture can deliberately split its output.
+fn encoded_delivery_frame(envelope: &WireEnvelope) -> Result<Vec<u8>, Box<dyn Error>> {
+    let encoded = encode_envelope(envelope)?;
+    let length = u32::try_from(encoded.len())?;
+    let mut framed = Vec::with_capacity(4 + encoded.len());
+    framed.extend_from_slice(&length.to_le_bytes());
+    framed.extend_from_slice(&encoded);
+    Ok(framed)
+}
+
 /// One scripted reply the fixture server produces after reading exactly
 /// one request.
 enum Step {
@@ -629,6 +647,461 @@ async fn handshake_then_witness_closed(
         }
         _ => false,
     }
+}
+
+/// Opens exactly one server-owned delivery stream, writes only the prefix and
+/// one body byte of one envelope, then releases the client's biased receive
+/// selection. That selection polls the receive branch before the release
+/// branch, so the stream is accepted and blocked inside its frame read before
+/// the client abandons it. The server witnesses the receiver's synchronous
+/// STOP before serving one ordinary request on the still-live connection.
+async fn serve_fragmented_delivery(
+    mut connections: tokio::sync::mpsc::Receiver<Connection>,
+    fragment_written: tokio::sync::oneshot::Sender<()>,
+) -> Result<Connection, Box<dyn Error>> {
+    let connection = next_connection(&mut connections).await?;
+    let welcome = welcome_envelope()?;
+    let (_hello, _handshake_send, _handshake_receive) =
+        drive_handshake(&connection, &welcome).await?;
+
+    let mut delivery_send = tokio::time::timeout(TEST_DEADLINE, connection.open_uni())
+        .await
+        .map_err(|_| "delivery stream did not open within the fixture watchdog")??;
+    let framed = encoded_delivery_frame(&event_reply()?)?;
+    assert!(
+        framed.len() > 5,
+        "the scripted envelope must have a body byte after its four-byte prefix"
+    );
+    delivery_send.write_all(&framed[..5]).await?;
+    fragment_written
+        .send(())
+        .map_err(|()| "the client abandoned before receiving the mid-frame witness")?;
+
+    let stopped = tokio::time::timeout(TEST_DEADLINE, delivery_send.stopped())
+        .await
+        .map_err(|_| "the peer did not witness the delivery STOP within the watchdog")?
+        .map_err(|_| "the delivery STOP witness failed")?;
+    assert_eq!(
+        stopped,
+        Some(VarInt::from_u32(LEAF_STREAM_STOP_CODE)),
+        "an abandoned fragmented delivery must use the private stream STOP code"
+    );
+
+    let (mut send, mut receive) = tokio::time::timeout(TEST_DEADLINE, connection.accept_bi())
+        .await
+        .map_err(|_| "the post-delivery request stream timed out")??;
+    let request = tokio::time::timeout(TEST_DEADLINE, transport::receive_envelope(&mut receive))
+        .await
+        .map_err(|_| "the post-delivery request read timed out")??;
+    let reply = correlated_response(&request.frame_id.to_request_id()?)?;
+    tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+        .await
+        .map_err(|_| "the post-delivery response send timed out")??;
+    send.finish()?;
+    Ok(connection)
+}
+
+/// Sends two complete envelopes on one still-open delivery stream and checks
+/// that the client's one-stream credit prevents a second server stream while
+/// the first stream remains owned by the consuming receiver.
+async fn serve_two_delivery_frames(
+    mut connections: tokio::sync::mpsc::Receiver<Connection>,
+    mut client_read_done: tokio::sync::oneshot::Receiver<()>,
+    second_stream_witness: tokio::sync::oneshot::Sender<bool>,
+) -> Result<Connection, Box<dyn Error>> {
+    let connection = next_connection(&mut connections).await?;
+    let welcome = welcome_envelope()?;
+    let (_hello, _handshake_send, _handshake_receive) =
+        drive_handshake(&connection, &welcome).await?;
+
+    let mut delivery_send = tokio::time::timeout(TEST_DEADLINE, connection.open_uni())
+        .await
+        .map_err(|_| "delivery stream did not open within the fixture watchdog")??;
+    let first = event_reply()?;
+    let second = patch_batch_reply()?;
+    tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::send_envelope(&mut delivery_send, &first),
+    )
+    .await
+    .map_err(|_| "the first delivery frame send timed out")??;
+    tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::send_envelope(&mut delivery_send, &second),
+    )
+    .await
+    .map_err(|_| "the second delivery frame send timed out")??;
+
+    tokio::time::timeout(TEST_DEADLINE, &mut client_read_done)
+        .await
+        .map_err(|_| "the client did not consume both delivery frames")?
+        .map_err(|_| "the client read witness was dropped")?;
+    let second_stream_blocked =
+        tokio::time::timeout(DELIVERY_BLOCKED_WINDOW, connection.open_uni())
+            .await
+            .is_err();
+    second_stream_witness
+        .send(second_stream_blocked)
+        .map_err(|bool| format!("the second-stream witness receiver dropped: {bool}"))?;
+    Ok(connection)
+}
+
+/// Failure mode scripted by the peer for a delivery receiver.
+#[derive(Clone, Copy)]
+enum DeliveryFailure {
+    /// The server cleanly FINs before writing a frame.
+    CleanStream,
+    /// The server writes a zero-length frame prefix.
+    MalformedFrame,
+}
+
+/// Produces one clean or malformed delivery stream, then serves one ordinary
+/// request so the stream-local failure remains distinct from session loss.
+async fn serve_failed_delivery(
+    mut connections: tokio::sync::mpsc::Receiver<Connection>,
+    failure: DeliveryFailure,
+) -> Result<Connection, Box<dyn Error>> {
+    let connection = next_connection(&mut connections).await?;
+    let welcome = welcome_envelope()?;
+    let (_hello, _handshake_send, _handshake_receive) =
+        drive_handshake(&connection, &welcome).await?;
+
+    let mut delivery_send = tokio::time::timeout(TEST_DEADLINE, connection.open_uni())
+        .await
+        .map_err(|_| "delivery stream did not open within the fixture watchdog")??;
+    match failure {
+        DeliveryFailure::CleanStream => delivery_send.finish()?,
+        DeliveryFailure::MalformedFrame => delivery_send.write_all(&0u32.to_le_bytes()).await?,
+    }
+
+    if matches!(failure, DeliveryFailure::MalformedFrame) {
+        let stopped = tokio::time::timeout(TEST_DEADLINE, delivery_send.stopped())
+            .await
+            .map_err(|_| "the malformed delivery STOP was not witnessed")?
+            .map_err(|_| "the malformed delivery STOP witness failed")?;
+        assert_eq!(
+            stopped,
+            Some(VarInt::from_u32(LEAF_STREAM_STOP_CODE)),
+            "malformed delivery input must stop the abandoned stream"
+        );
+    }
+
+    let (mut send, mut receive) = tokio::time::timeout(TEST_DEADLINE, connection.accept_bi())
+        .await
+        .map_err(|_| "the post-failure request stream timed out")??;
+    let request = tokio::time::timeout(TEST_DEADLINE, transport::receive_envelope(&mut receive))
+        .await
+        .map_err(|_| "the post-failure request read timed out")??;
+    let reply = correlated_response(&request.frame_id.to_request_id()?)?;
+    tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+        .await
+        .map_err(|_| "the post-failure response send timed out")??;
+    send.finish()?;
+    Ok(connection)
+}
+
+/// Runs the fragmented-frame scenario once with cancellation and once with a
+/// dropped receive future. Both paths must stop the stream, return no
+/// receiver, and leave the separately held session usable.
+async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+
+    let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_fragmented_delivery(server.take_connections(), ready_tx);
+    let client = async {
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("fragmented-hello")?,
+            component_limits(2),
+            &CancelHandle::new(),
+        )
+        .await?;
+        let (session, receiver) = session.take_delivery()?;
+        let delivery_cancel = CancelHandle::new();
+        let mut receive = Box::pin(receiver.recv(&delivery_cancel));
+
+        tokio::select! {
+            biased;
+            _ = &mut receive => {
+                panic!("fragmented delivery receive completed before the abort");
+            }
+            ready = &mut ready_rx => {
+                ready.map_err(|_| "fragmented delivery readiness witness dropped")?;
+            }
+        }
+
+        if cancel_mid_frame {
+            delivery_cancel.cancel();
+            let result = receive.await;
+            assert!(matches!(result, Err(DeliveryLost)));
+        } else {
+            drop(receive);
+        }
+
+        let request_cancel = CancelHandle::new();
+        let (session, resolved) = session
+            .request(request_envelope("after-fragmented-abort")?, &request_cancel)
+            .await?;
+        assert!(matches!(resolved.outcome(), RequestOutcome::Response(_)));
+        session.shutdown(&request_cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// Runs a clean or malformed delivery stream and proves the consuming
+/// receiver exposes only the payload-free loss condition while the session
+/// owner remains usable for an ordinary request.
+async fn failed_delivery_is_typed(failure: DeliveryFailure) -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_side = serve_failed_delivery(server.take_connections(), failure);
+    let client = async {
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("failed-delivery-hello")?,
+            component_limits(2),
+            &CancelHandle::new(),
+        )
+        .await?;
+        let (session, receiver) = session.take_delivery()?;
+        let delivery_cancel = CancelHandle::new();
+        let outcome = receiver.recv(&delivery_cancel).await;
+        assert!(matches!(outcome, Err(DeliveryLost)));
+
+        let request_cancel = CancelHandle::new();
+        let (session, resolved) = session
+            .request(request_envelope("after-delivery-loss")?, &request_cancel)
+            .await?;
+        assert!(matches!(resolved.outcome(), RequestOutcome::Response(_)));
+        session.shutdown(&request_cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// The first delivery take is a synchronous ownership split: the server has
+/// not opened a uni stream, yet the returned session still completes an
+/// ordinary request over its original connection.
+#[tokio::test]
+async fn first_delivery_take_is_immediate_and_requests_remain_usable() -> Result<(), Box<dyn Error>>
+{
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_addr = server.addr;
+    let client = async {
+        let (session, _) = ClientSession::connect(
+            target(server_addr),
+            certificate,
+            pin,
+            hello_envelope("take-hello")?,
+            component_limits(2),
+            &CancelHandle::new(),
+        )
+        .await?;
+        let (session, receiver) = session.take_delivery()?;
+        assert_eq!(format!("{receiver:?}"), "DeliveryReceiver { .. }");
+        assert_eq!(format!("{DeliveryLost:?}"), "DeliveryLost");
+        assert_eq!(DeliveryLost.to_string(), "delivery stream was lost");
+        drop(receiver);
+
+        let request_cancel = CancelHandle::new();
+        let (session, resolved) = session
+            .request(request_envelope("after-take")?, &request_cancel)
+            .await?;
+        assert!(matches!(resolved.outcome(), RequestOutcome::Response(_)));
+        session.shutdown(&request_cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let server_side = serve_full(server.take_connections(), vec![Step::CorrelatedResponse]);
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// A second delivery take is the exact typed terminal error; consuming that
+/// error drops the session and the peer witnesses the existing abandon close.
+#[tokio::test]
+async fn second_delivery_take_is_terminal_and_closes_the_session() -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_task = tokio::spawn(handshake_then_witness_closed(server.take_connections()));
+    let joined = tokio::time::timeout(TEST_DEADLINE, server_task);
+    let client = async {
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("second-take-hello")?,
+            component_limits(1),
+            &CancelHandle::new(),
+        )
+        .await?;
+        let (session, receiver) = session.take_delivery()?;
+        drop(receiver);
+        let second = session.take_delivery();
+        assert!(matches!(
+            second,
+            Err(ClientSessionError::DeliveryAlreadyTaken)
+        ));
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, joined) = tokio::join!(client, joined);
+    let closed_without_streams = joined
+        .expect("second-take fixture task finishes")
+        .expect("second-take fixture task does not panic");
+    assert!(closed_without_streams);
+    client_result?;
+    drop(server);
+    Ok(())
+}
+
+/// Two consuming receives read two frames from one server-owned stream; the
+/// receiver never accepts a second stream, and the live first stream keeps a
+/// second server open blocked by the one-stream credit.
+#[tokio::test]
+async fn delivery_receives_two_frames_sequentially_on_one_stream() -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (read_done_tx, read_done_rx) = tokio::sync::oneshot::channel();
+    let (second_stream_tx, second_stream_rx) = tokio::sync::oneshot::channel();
+    let server_side =
+        serve_two_delivery_frames(server.take_connections(), read_done_rx, second_stream_tx);
+    let client = async {
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("two-delivery-hello")?,
+            component_limits(1),
+            &CancelHandle::new(),
+        )
+        .await?;
+        let (session, receiver) = session.take_delivery()?;
+        let delivery_cancel = CancelHandle::new();
+        let (receiver, first) = receiver.recv(&delivery_cancel).await?;
+        assert_eq!(first.frame_id.as_str(), "fixture-event");
+        assert!(matches!(first.body, WireEnvelopeBody::Event(_)));
+        let (receiver, second) = receiver.recv(&delivery_cancel).await?;
+        assert_eq!(second.frame_id.as_str(), "fixture-patch-batch");
+        assert!(matches!(second.body, WireEnvelopeBody::PatchBatch(_)));
+        read_done_tx
+            .send(())
+            .map_err(|()| "the two-frame server stopped before the read witness")?;
+        let second_stream_blocked = second_stream_rx
+            .await
+            .map_err(|_| "the second-stream witness was dropped")?;
+        assert!(second_stream_blocked);
+        drop(receiver);
+        session.shutdown(&delivery_cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// Cancellation before the first accept returns `DeliveryLost` without
+/// touching the wire, while the separately held session can still issue a
+/// request on the fixture's connection.
+#[tokio::test]
+async fn pre_accept_delivery_cancellation_is_typed_and_nonterminal_to_session()
+-> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_side = serve_full(server.take_connections(), vec![Step::CorrelatedResponse]);
+    let client = async {
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("pre-accept-hello")?,
+            component_limits(2),
+            &CancelHandle::new(),
+        )
+        .await?;
+        let (session, receiver) = session.take_delivery()?;
+        let delivery_cancel = CancelHandle::new();
+        delivery_cancel.cancel();
+        assert!(matches!(
+            receiver.recv(&delivery_cancel).await,
+            Err(DeliveryLost)
+        ));
+
+        let request_cancel = CancelHandle::new();
+        let (session, resolved) = session
+            .request(
+                request_envelope("after-pre-accept-cancel")?,
+                &request_cancel,
+            )
+            .await?;
+        assert!(matches!(resolved.outcome(), RequestOutcome::Response(_)));
+        session.shutdown(&request_cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// A cancellation while a fragmented envelope is being read stops the exact
+/// stream with the private code and leaves the session's request owner live.
+#[tokio::test]
+async fn mid_frame_delivery_cancellation_stops_without_returning_receiver()
+-> Result<(), Box<dyn Error>> {
+    fragmented_delivery_abandonment(true).await
+}
+
+/// Dropping a receive future after a fragmented frame has begun has the same
+/// stream custody result, without closing the separately held session.
+#[tokio::test]
+async fn dropping_mid_frame_delivery_stops_without_returning_receiver() -> Result<(), Box<dyn Error>>
+{
+    fragmented_delivery_abandonment(false).await
+}
+
+/// A cleanly finished delivery stream is a payload-free loss and does not
+/// prevent the separate session owner from completing another request.
+#[tokio::test]
+async fn clean_delivery_stream_failure_maps_to_delivery_lost() -> Result<(), Box<dyn Error>> {
+    failed_delivery_is_typed(DeliveryFailure::CleanStream).await
+}
+
+/// A malformed bounded frame is a payload-free loss and its abandoned stream
+/// is stopped before the still-live session serves another request.
+#[tokio::test]
+async fn malformed_delivery_frame_maps_to_delivery_lost() -> Result<(), Box<dyn Error>> {
+    failed_delivery_is_typed(DeliveryFailure::MalformedFrame).await
 }
 
 /// A successful pinned handshake hands the Welcome — and its rotated

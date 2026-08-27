@@ -67,12 +67,13 @@
 //! closes synchronously only and promises no asynchronous drain;
 //! [`ClientSession::shutdown`] is the sole awaited-drain path.
 
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use artisan_domain::IdentifierError;
 use artisan_protocol::{ConnectionId, ProtocolVersion, WireEnvelope, WireEnvelopeBody};
-use quinn::{Connection, Endpoint};
+use quinn::{Connection, Endpoint, RecvStream};
 use rustls_pki_types::CertificateDer;
 use thiserror::Error;
 
@@ -94,6 +95,118 @@ pub use exchange::{ExchangeError, HandshakeStageError, ReplyRejection};
 
 use exchange::{SettledReply, classify_reply, handshake_stage, request_stage};
 use link::SessionLink;
+
+/// The one public failure condition for the consuming server-delivery
+/// receiver.
+///
+/// The condition intentionally carries no Quinn error, close code, or peer
+/// payload. A lost delivery stream is terminal for this receiver; callers
+/// recover by establishing a fresh session and acquiring a fresh receiver.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("delivery stream was lost")]
+pub struct DeliveryLost;
+
+/// A consuming owner of the server-initiated delivery stream.
+///
+/// The receiver retains only a private clone of the session's connection and
+/// the one accepted receive stream. It never exposes either Quinn handle.
+/// Before the first successful acceptance, [`recv`](Self::recv) waits for one
+/// server-opened unidirectional stream; after that, each consuming call reads
+/// exactly one bounded application envelope from the same stream.
+///
+/// The type deliberately implements neither [`Clone`] nor [`Copy`]. A stream
+/// that is abandoned while a frame is being read is stopped synchronously and
+/// cannot be reused by a later call.
+pub struct DeliveryReceiver {
+    /// Private shared connection handle used only to accept the one inbound
+    /// stream. The session owns the separate connection handle that keeps
+    /// request and shutdown custody independent.
+    connection: Connection,
+    /// Accepted delivery stream, installed before any frame-read await.
+    stream: Option<RecvStream>,
+}
+
+impl fmt::Debug for DeliveryReceiver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeliveryReceiver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeliveryReceiver {
+    /// Creates a receiver with no accepted stream.
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            stream: None,
+        }
+    }
+
+    /// Consumes the receiver to accept or use its delivery stream and read
+    /// exactly one bounded envelope.
+    ///
+    /// The first call awaits exactly one `accept_uni`; subsequent calls use
+    /// the already accepted stream. Cancellation is checked before the
+    /// operation and wins through a biased selection both while accepting
+    /// and while reading. Every cancellation, stream/connection failure,
+    /// framing failure, decode failure, or abandoned operation is terminal:
+    /// no receiver is returned. If a stream was accepted, dropping the
+    /// consumed owner stops it with the private delivery-stop code before
+    /// the error is observed by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeliveryLost`] for every delivery failure. No Quinn or
+    /// protocol-source error crosses this boundary.
+    pub async fn recv(
+        mut self,
+        cancel: &CancelHandle,
+    ) -> Result<(DeliveryReceiver, WireEnvelope), DeliveryLost> {
+        if self.stream.is_none() {
+            if cancel.is_cancelled() {
+                return Err(DeliveryLost);
+            }
+            let stream = tokio::select! {
+                biased;
+                () = cancel.wait() => return Err(DeliveryLost),
+                accepted = self.connection.accept_uni() => {
+                    accepted.map_err(|_| DeliveryLost)?
+                }
+            };
+            // Install custody immediately after acceptance and before the
+            // first frame await. Any later escape therefore stops this exact
+            // stream synchronously through `Drop`.
+            self.stream = Some(stream);
+        }
+
+        if cancel.is_cancelled() {
+            return Err(DeliveryLost);
+        }
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(DeliveryLost);
+        };
+        let envelope = tokio::select! {
+            biased;
+            () = cancel.wait() => return Err(DeliveryLost),
+            envelope = crate::receive_envelope(stream) => {
+                envelope.map_err(|_| DeliveryLost)?
+            }
+        };
+        Ok((self, envelope))
+    }
+}
+
+impl Drop for DeliveryReceiver {
+    fn drop(&mut self) {
+        // A receiver drop never closes the shared session connection. It
+        // only stops an accepted inbound stream, including one abandoned in
+        // the middle of a bounded frame read.
+        if let Some(mut stream) = self.stream.take() {
+            let _stopped = stream.stop(link::close_code(link::STREAM_STOP_CODE));
+        }
+    }
+}
 
 /// Fixed simultaneous pending-request capacity of the sequential API.
 ///
@@ -211,6 +324,10 @@ pub enum ClientSessionError {
     /// The awaited shutdown drain failed under its finite limit.
     #[error("shutdown drain failed: {0}")]
     Shutdown(#[source] DeadlineError<TransportError>),
+    /// Delivery acquisition was attempted a second time. The consuming
+    /// session is dropped by this terminal error path.
+    #[error("delivery receiver was already taken")]
+    DeliveryAlreadyTaken,
 }
 
 /// Terminal failure of one sequential request; the session is always
@@ -278,6 +395,8 @@ pub struct ClientSession {
     negotiated_version: ProtocolVersion,
     /// Negotiated non-secret connection diagnostic identity.
     connection_id: ConnectionId,
+    /// Whether the one server-delivery receiver has already been acquired.
+    delivery_taken: bool,
 }
 
 impl Drop for ClientSession {
@@ -372,6 +491,7 @@ impl ClientSession {
                 limits,
                 negotiated_version,
                 connection_id,
+                delivery_taken: false,
             },
             welcome,
         ))
@@ -408,6 +528,31 @@ impl ClientSession {
     #[must_use]
     pub const fn pending_capacity(&self) -> usize {
         PENDING_CAPACITY
+    }
+
+    /// Takes the server-initiated delivery receiver without waiting for the
+    /// server or performing any network I/O.
+    ///
+    /// The first call marks this session and returns the same session together
+    /// with exactly one receiver holding only a private cloned connection
+    /// handle. The server opens its stream only after a real delivery write,
+    /// so all waiting belongs to [`DeliveryReceiver::recv`]. A second call is
+    /// a terminal typed session error and consumes the session under the same
+    /// conservative rule as other session-local errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientSessionError::DeliveryAlreadyTaken`] when the
+    /// receiver was already acquired; the supplied session is dropped on
+    /// that path and its endpoint and connection are closed synchronously.
+    pub fn take_delivery(self) -> Result<(Self, DeliveryReceiver), ClientSessionError> {
+        let mut session = self;
+        if session.delivery_taken {
+            return Err(ClientSessionError::DeliveryAlreadyTaken);
+        }
+        session.delivery_taken = true;
+        let receiver = DeliveryReceiver::new(session.connection.clone());
+        Ok((session, receiver))
     }
 
     /// Runs exactly one sequential request and returns the same owner
