@@ -117,7 +117,8 @@ async fn admission_unavailable_after_shutdown_signal() {
     let config = valid_config_with_capacity(4);
     let mut owner = EngineOwner::start(config, &tokio::runtime::Handle::current());
     // Signal shutdown but do not poll the future.
-    let _future = owner.shutdown();
+    let future = owner.shutdown();
+    drop(future);
     // Admission must stop immediately even though future was not polled.
     let result = owner.admit(run_id("run-after-shutdown"), Duration::from_secs(10));
     assert!(matches!(result, Err(LaunchAdmissionError::Unavailable)));
