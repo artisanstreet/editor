@@ -1,5 +1,12 @@
 use super::framing::{SseEof, SseFramer, SseFramerError};
-use super::observation::{TerminalState, TextDelta, chunk_text};
+use super::observation::{
+    DeliveryError, EngineObservation, TerminalObservation, TerminalState, TextDelta, chunk_text,
+    deliver_observation,
+};
+use artisan_transport::CancelHandle;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 fn run_id(value: &str) -> artisan_domain::RunId {
     artisan_domain::RunId::parse(value).expect("valid run id")
@@ -178,24 +185,11 @@ fn framer_blank_line_without_data_does_not_dispatch() {
 
 #[test]
 fn framer_exact_line_cap_accepted() {
-    // max_line=10, line "data: hi" is 7 bytes before LF
+    // "data: 1234" is exactly 10 bytes before LF.
     let mut framer = SseFramer::new(10, 100).unwrap();
-    let line = b"data: hi\n\n";
-    let events = framer.feed(line).unwrap();
+    let events = framer.feed(b"data: 1234\n\n").unwrap();
     assert_eq!(events.len(), 1);
-    // Exactly at cap: build line of length 10
-    let mut framer2 = SseFramer::new(10, 100).unwrap();
-    let payload = b"0123456789"; // 10 bytes
-    let mut buf = Vec::new();
-    buf.extend_from_slice(payload);
-    buf.push(b'\n');
-    buf.extend_from_slice(b"\n");
-    // First line is 10 bytes without LF -> exactly at cap
-    // But it has no valid field, will be ignored then blank dispatch? Let's use data field.
-    // Need a valid data line of exactly 10 bytes: "data: 1234" is 10
-    let mut framer3 = SseFramer::new(10, 100).unwrap();
-    let events3 = framer3.feed(b"data: 1234\n\n").unwrap();
-    assert_eq!(events3.len(), 1);
+    assert_eq!(events[0].data(), "1234");
 }
 
 #[test]
@@ -493,4 +487,386 @@ fn chunking_preserves_multibyte_exactly() {
         assert!(d.delta().len() <= 4096);
         assert!(std::str::from_utf8(d.delta().as_bytes()).is_ok());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sink: wakeable bounded delivery
+// ---------------------------------------------------------------------------
+
+fn make_delta(text: &str) -> EngineObservation {
+    let deltas = chunk_text(&run_id("run-sink-test1"), 42, "native", text);
+    assert_eq!(deltas.len(), 1);
+    EngineObservation::TextDelta(deltas.into_iter().next().unwrap())
+}
+
+fn make_terminal(
+    state: TerminalState,
+    seq: u64,
+    reason: Option<&str>,
+    error_ref: Option<&str>,
+) -> EngineObservation {
+    EngineObservation::Terminal(TerminalObservation::new(
+        run_id("run-sink-term1"),
+        seq,
+        state,
+        reason.map(std::borrow::ToOwned::to_owned),
+        error_ref.map(std::borrow::ToOwned::to_owned),
+    ))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_immediate_capacity_delivers_exactly_once() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(2);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let obs = make_delta("hello sink");
+    let obs_clone = obs.clone();
+
+    let res = deliver_observation(obs, tx.clone(), &shutdown, &cancel, deadline).await;
+    assert_eq!(res, Ok(()));
+
+    let got = rx.recv().await.expect("one item");
+    assert_eq!(got, obs_clone);
+    assert!(rx.try_recv().is_err(), "exactly once");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_full_capacity_stays_pending_then_wakes_on_receive() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+
+    // Fill capacity.
+    let first = make_delta("first");
+    tx.send(first).await.unwrap();
+    assert_eq!(tx.capacity(), 0);
+
+    let pending = make_delta("pending-secret-xyz");
+    let pending_clone = pending.clone();
+    let tx2 = tx.clone();
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let handle = tokio::spawn(async move {
+        deliver_observation(pending, tx2, &shutdown, &cancel, deadline).await
+    });
+
+    // Let the reserve register.
+    tokio::task::yield_now().await;
+    assert!(!handle.is_finished(), "should stay pending while full");
+
+    // Free one slot.
+    let got_first = rx.recv().await.unwrap();
+    assert_eq!(got_first, make_delta("first"));
+
+    let res = tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("wakes")
+        .unwrap();
+    assert_eq!(res, Ok(()));
+
+    let got_pending = rx.recv().await.unwrap();
+    assert_eq!(got_pending, pending_clone);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_receiver_close_while_pending_returns_sink_closed() {
+    let (tx, rx) = mpsc::channel::<EngineObservation>(1);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+
+    // Fill.
+    tx.send(make_delta("fill")).await.unwrap();
+
+    let pending = make_delta("closed-pending");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let tx2 = tx.clone();
+    let handle = tokio::spawn(async move {
+        deliver_observation(pending, tx2, &shutdown, &cancel, deadline).await
+    });
+    tokio::task::yield_now().await;
+    assert!(!handle.is_finished());
+
+    drop(rx);
+    // Dropping the receiver still leaves sender capacity but reserve will see closed when all receivers gone?
+    // With 1 capacity channel, dropping receiver closes channel; reserve should return SinkClosed.
+    // Need to also drop the original tx's receiver side is gone; but tx still exists.
+    // Close the channel explicitly by dropping remaining receiver already done; give time.
+    let res = tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("wakes on close")
+        .unwrap();
+    assert_eq!(res, Err(DeliveryError::SinkClosed));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_pre_cancel_returns_cancelled_without_delivery() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    cancel.cancel();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let obs = make_delta("pre-cancel-secret-hunter2");
+    let res = deliver_observation(obs, tx.clone(), &shutdown, &cancel, deadline).await;
+    assert_eq!(res, Err(DeliveryError::Cancelled));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_pre_shutdown_returns_shutdown_without_delivery() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    shutdown.cancel();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let obs = make_delta("pre-shutdown");
+    let res = deliver_observation(obs, tx.clone(), &shutdown, &cancel, deadline).await;
+    assert_eq!(res, Err(DeliveryError::Shutdown));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_expired_deadline_returns_deadline_without_delivery() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    let deadline = Instant::now() - Duration::from_millis(10);
+    let obs = make_delta("expired");
+    let res = deliver_observation(obs, tx.clone(), &shutdown, &cancel, deadline).await;
+    assert_eq!(res, Err(DeliveryError::Deadline));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_shutdown_wins_over_cancel_when_both_pre_signalled() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    shutdown.cancel();
+    cancel.cancel();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let obs = make_delta("both");
+    let res = deliver_observation(obs, tx.clone(), &shutdown, &cancel, deadline).await;
+    assert_eq!(res, Err(DeliveryError::Shutdown));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_cancel_wins_over_deadline_when_both_ready() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    cancel.cancel();
+    let deadline = Instant::now() - Duration::from_millis(10);
+    let obs = make_delta("cancel-vs-deadline");
+    let res = deliver_observation(obs, tx.clone(), &shutdown, &cancel, deadline).await;
+    // Preflight: shutdown not set, cancel set => Cancelled wins even though deadline expired.
+    assert_eq!(res, Err(DeliveryError::Cancelled));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_later_shutdown_wins_while_full() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    tx.send(make_delta("fill")).await.unwrap();
+    let shutdown = std::sync::Arc::new(CancelHandle::new());
+    let cancel = std::sync::Arc::new(CancelHandle::new());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pending = make_delta("late-shutdown");
+    let txc = tx.clone();
+    let s = std::sync::Arc::clone(&shutdown);
+    let c = std::sync::Arc::clone(&cancel);
+    let h = tokio::spawn(async move { deliver_observation(pending, txc, &s, &c, deadline).await });
+    tokio::task::yield_now().await;
+    assert!(!h.is_finished());
+    shutdown.cancel();
+    let res = tokio::time::timeout(Duration::from_secs(1), h)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(res, Err(DeliveryError::Shutdown));
+    // No pending delivered.
+    let first = rx.recv().await.unwrap();
+    assert_eq!(first, make_delta("fill"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_later_cancel_wins_while_full() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    tx.send(make_delta("fill")).await.unwrap();
+    let shutdown = std::sync::Arc::new(CancelHandle::new());
+    let cancel = std::sync::Arc::new(CancelHandle::new());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pending = make_delta("late-cancel");
+    let txc = tx.clone();
+    let s = std::sync::Arc::clone(&shutdown);
+    let c = std::sync::Arc::clone(&cancel);
+    let h = tokio::spawn(async move { deliver_observation(pending, txc, &s, &c, deadline).await });
+    tokio::task::yield_now().await;
+    assert!(!h.is_finished());
+    cancel.cancel();
+    let res = tokio::time::timeout(Duration::from_secs(1), h)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(res, Err(DeliveryError::Cancelled));
+    let first = rx.recv().await.unwrap();
+    assert_eq!(first, make_delta("fill"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_later_deadline_wins_while_full() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    tx.send(make_delta("fill")).await.unwrap();
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    let deadline = Instant::now() + Duration::from_millis(30);
+    let pending = make_delta("late-deadline");
+    let txc = tx.clone();
+    let h = tokio::spawn(async move {
+        deliver_observation(pending, txc, &shutdown, &cancel, deadline).await
+    });
+    // Do not free capacity; deadline should fire.
+    let res = tokio::time::timeout(Duration::from_secs(1), h)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(res, Err(DeliveryError::Deadline));
+    let first = rx.recv().await.unwrap();
+    assert_eq!(first, make_delta("fill"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sink_frees_capacity_before_deadline_sends_successfully() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(1);
+    tx.send(make_delta("fill")).await.unwrap();
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let pending = make_delta("before-deadline");
+    let pending_clone = pending.clone();
+    let txc = tx.clone();
+    let h = tokio::spawn(async move {
+        deliver_observation(pending, txc, &shutdown, &cancel, deadline).await
+    });
+    tokio::task::yield_now().await;
+    // Free after 20ms, before deadline.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let first = rx.recv().await.unwrap();
+    assert_eq!(first, make_delta("fill"));
+    let res = tokio::time::timeout(Duration::from_secs(1), h)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(res, Ok(()));
+    let got = rx.recv().await.unwrap();
+    assert_eq!(got, pending_clone);
+}
+
+#[test]
+fn terminal_observation_preserves_all_four_states_and_fields() {
+    let seq = 987;
+    let run = run_id("run-term-preserve");
+    for state in [
+        TerminalState::Completed,
+        TerminalState::Failed,
+        TerminalState::Cancelled,
+        TerminalState::Interrupted,
+    ] {
+        let obs = TerminalObservation::new(
+            run.clone(),
+            seq,
+            state,
+            Some("reason-text".to_owned()),
+            Some("error-ref-123".to_owned()),
+        );
+        assert_eq!(obs.run_id().as_str(), run.as_str());
+        assert_eq!(obs.sequence(), seq);
+        assert_eq!(obs.state(), state);
+        assert_eq!(obs.reason(), Some("reason-text"));
+        assert_eq!(obs.error_ref(), Some("error-ref-123"));
+        // EngineObservation wrapper preserves.
+        let wrapped = EngineObservation::Terminal(obs.clone());
+        match wrapped {
+            EngineObservation::Terminal(t) => {
+                assert_eq!(t.state(), state);
+                assert_eq!(t.sequence(), seq);
+                assert_eq!(t.run_id().as_str(), run.as_str());
+                assert_eq!(t.reason(), Some("reason-text"));
+                assert_eq!(t.error_ref(), Some("error-ref-123"));
+            }
+            EngineObservation::TextDelta(_) => panic!("expected terminal"),
+        }
+    }
+    // Reason/error None preserved.
+    let no_ref = TerminalObservation::new(run.clone(), 1, TerminalState::Completed, None, None);
+    assert_eq!(no_ref.reason(), None);
+    assert_eq!(no_ref.error_ref(), None);
+    // Distinction: Interrupted != Cancelled
+    assert_ne!(TerminalState::Interrupted, TerminalState::Cancelled);
+}
+
+#[test]
+fn terminal_states_all_distinct_in_observation() {
+    let run = run_id("run-distinct");
+    let a = TerminalObservation::new(run.clone(), 1, TerminalState::Interrupted, None, None);
+    let b = TerminalObservation::new(run.clone(), 1, TerminalState::Cancelled, None, None);
+    assert_ne!(
+        EngineObservation::Terminal(a),
+        EngineObservation::Terminal(b)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delivery_errors_are_payload_free() {
+    let secret = "hunter2-super-secret-xyz-12345-Bearer-token-999";
+    let obs = make_delta(secret);
+    // Force SinkClosed via closed channel to get error that could leak.
+    let (tx, rx) = mpsc::channel::<EngineObservation>(1);
+    drop(rx);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let res = deliver_observation(obs, tx, &shutdown, &cancel, deadline).await;
+    assert_eq!(res, Err(DeliveryError::SinkClosed));
+    let err = res.unwrap_err();
+    let display = format!("{err}");
+    let debug = format!("{err:?}");
+    assert!(!display.contains(secret));
+    assert!(!debug.contains(secret));
+    assert!(!display.contains("hunter2"));
+    assert!(!debug.contains("hunter2"));
+
+    // Also check other variants payload-free.
+    for e in [
+        DeliveryError::Shutdown,
+        DeliveryError::Cancelled,
+        DeliveryError::Deadline,
+        DeliveryError::SinkClosed,
+    ] {
+        let d = format!("{e}");
+        let dbg = format!("{e:?}");
+        assert!(!d.contains(secret));
+        assert!(!dbg.contains(secret));
+        assert!(!d.contains("hunter2"));
+        assert!(!dbg.contains("hunter2"));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn deliver_terminal_observation_exact_payload() {
+    let (tx, mut rx) = mpsc::channel::<EngineObservation>(2);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let term = make_terminal(TerminalState::Failed, 42, Some("oops"), Some("err-ref"));
+    let term_clone = term.clone();
+    let res = deliver_observation(term, tx.clone(), &shutdown, &cancel, deadline).await;
+    assert_eq!(res, Ok(()));
+    let got = rx.recv().await.unwrap();
+    assert_eq!(got, term_clone);
 }

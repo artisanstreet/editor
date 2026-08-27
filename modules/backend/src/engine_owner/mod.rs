@@ -15,10 +15,11 @@
 //! parent-side owner of the external engine process, running a single owner
 //! task on a caller-supplied Tokio runtime handle. Admission, incarnation
 //! numbering, child custody, bounded teardown, quarantine, readiness, and
-//! HTTP exist; a pure, independently reviewable SSE framing and observation
-//! foundation leaf (`framing`/`observation`) exists without claiming live
-//! `IncomingBody` driving, global/per-run SSE connections, `POST /prompt`,
-//! owner integration, or `reserve_owned` sink backpressure which remain P4b.
+//! HTTP exist; a pure, independently reviewable SSE framing and wakeable
+//! bounded observation delivery leaf (`framing`/`observation` with
+//! `reserve_owned` sink) exists without claiming live `IncomingBody`
+//! driving, global/per-run SSE connections, `POST /prompt`, or owner
+//! integration which remain P4.
 //! The public surface beyond configuration is exactly
 //! `start`/`health`/`shutdown`; no operation API exists beyond that.
 
