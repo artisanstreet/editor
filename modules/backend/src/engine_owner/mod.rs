@@ -35,6 +35,7 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub(crate) mod event;
 pub(crate) mod framing;
 pub mod http;
 pub(crate) mod observation;
