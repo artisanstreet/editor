@@ -11,12 +11,14 @@ mod repository;
 pub use artisan_domain::WorkspaceId;
 pub use connection::{ConnectError, SqliteConfig, connect};
 pub use repository::{
-    AttachProjectInput, AttachProjectResult, BindRunProvider, BindRunProviderOutcome,
-    BoundRunReceipt, ClaimMessageDispatch, ClaimedMessageDispatch, CompleteMessageDispatch,
+    AssistantChange, AttachProjectInput, AttachProjectResult, BindRunProvider,
+    BindRunProviderOutcome, BoundRunReceipt, CheckpointUpdate, ClaimMessageDispatch,
+    ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome, CompleteMessageDispatch,
     CreateThreadInput, CreateThreadResult, DispatchFailureReason, DispatchFailureReasonError,
-    DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch, LaunchClaimedRun,
-    LaunchClaimedRunOutcome, LaunchedRunReceipt, MessageDispatchPayload, ProviderBindingBytes,
-    QueueFirstMessageInput, QueueFirstMessageResult, Repository, RepositoryError,
-    RequeueMessageDispatch, RunBindingError, RunLaunchCredentials, RunLaunchError, RunStartKey,
+    DispatchLeaseOwner, DispatchLeaseOwnerError, EngineCheckpoint, FailMessageDispatch,
+    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, MessageDispatchPayload,
+    ProviderBindingBytes, QueueFirstMessageInput, QueueFirstMessageResult, Repository,
+    RepositoryError, RequeueMessageDispatch, RunBatchReceiptInfo, RunBatchScope, RunBindingError,
+    RunLaunchCredentials, RunLaunchError, RunObservationError, RunStartKey,
     TransitionedMessageDispatch,
 };
