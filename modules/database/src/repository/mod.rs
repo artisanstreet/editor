@@ -1,5 +1,6 @@
 //! Domain-typed repositories for the native schema.
 
+mod conversation_projection;
 mod dispatch_payload;
 mod first_message;
 mod message_dispatch;
