@@ -1,7 +1,10 @@
-<p>
-  <img src="modules/frontend/src/lib/assets/barekey/runtime-app-icons/foreground-gradient-symbol.png" alt="Artisan Editor app icon" width="80" align="left" />
-  <strong><big><big><big><big>Artisan Editor</big></big></big></big></strong><br /><br clear="left" />
-</p>
+<img src="modules/frontend/src/lib/assets/barekey/runtime-app-icons/foreground-gradient-symbol.png" alt="Artisan Editor app icon" width="96" align="left" />
+
+<h1>Artisan Editor</h1>
+
+<p><sub>A native workspace for running and managing coding agents.</sub></p>
+
+<br clear="left" />
 
 <table>
 <tr>
