@@ -18,6 +18,7 @@
 
 mod batch;
 mod projection;
+pub mod terminal;
 
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, IncrementalText, ItemId, MessageId, PatchId, Revision,
