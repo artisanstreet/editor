@@ -14,6 +14,7 @@ pub mod conversation_projection;
 pub mod project_picker;
 pub mod proof;
 pub mod shell;
+pub mod subscription_projection;
 pub mod thread_list_selection;
 pub mod transcript;
 
