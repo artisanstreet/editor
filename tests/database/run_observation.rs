@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use artisan_database::entities::{
-    self, AssistantRunLifecycle, ConversationItemKind, ConversationPatchKind, DispatchState,
-    EntityLifecycle, OrdinalKind, RenderPhase,
+    self, ConversationItemKind, ConversationPatchKind, EntityLifecycle, OrdinalKind, RenderPhase,
 };
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch,
@@ -22,8 +21,8 @@ use artisan_domain::{
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
-    DbBackend, EntityTrait, QueryFilter, Statement,
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, DbBackend,
+    EntityTrait, Statement,
 };
 use sha2::{Digest, Sha256};
 
@@ -378,8 +377,13 @@ fn incremental_text(s: &str) -> IncrementalText {
 
 // ---------------------------------------------------------------------------
 // Independent v1 digest encoder for test-local verification (must equal persisted)
+// Pass explicit checkpoint version/bytes when the command carries Replace so the
+// encoder never calls private EngineCheckpoint::version/as_slice.
 // ---------------------------------------------------------------------------
-fn independent_digest(command: &CommitRunBatch<'_>) -> [u8; 32] {
+fn independent_digest(
+    command: &CommitRunBatch<'_>,
+    explicit_checkpoint: Option<(i64, &[u8])>,
+) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"artisan.run-batch.v1");
     h.update([0u8]);
@@ -479,11 +483,19 @@ fn independent_digest(command: &CommitRunBatch<'_>) -> [u8; 32] {
         }
     }
     match command.checkpoint {
-        CheckpointUpdate::Keep => h.update([0u8]),
-        CheckpointUpdate::Replace(cp) => {
+        CheckpointUpdate::Keep => {
+            assert!(
+                explicit_checkpoint.is_none(),
+                "Keep must be paired with None explicit checkpoint"
+            );
+            h.update([0u8]);
+        }
+        CheckpointUpdate::Replace(_) => {
+            let (version, bytes) =
+                explicit_checkpoint.expect("Replace must be paired with Some explicit checkpoint");
             h.update([1u8]);
-            write_i64(&mut h, cp.version());
-            write_bytes(&mut h, cp.as_slice());
+            write_i64(&mut h, version);
+            write_bytes(&mut h, bytes);
         }
     }
     let d = h.finalize();
@@ -568,7 +580,7 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
         .collect();
     patches.sort_by_key(|p| p.sequence);
     assert_eq!(patches.len(), 4); // 2 launch + 2 new =4 total with filter we get 2 new; overall patches total 4
-    let new_patch_ids: Vec<&str> = patches.iter().map(|p| p.patch_id.as_str()).collect();
+    let _new_patch_ids: Vec<&str> = patches.iter().map(|p| p.patch_id.as_str()).collect();
     // Actually total patches after = 4 (2 launch +2 batch)
     assert_eq!(after.patches.len(), 4);
     let seqs: Vec<i64> = after.patches.iter().map(|p| p.sequence).collect();
@@ -640,13 +652,11 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
 async fn seeded_nonzero_counters_allocate_from_actual_state() {
     let pair = seeded_pair().await;
     // bump state to nonzero via direct update
-    let mut state = entities::conversation_state::Entity::find_by_id(THREAD_ID)
+    let state = entities::conversation_state::Entity::find_by_id(THREAD_ID)
         .one(&pair.database)
         .await
         .expect("q")
         .expect("state");
-    state.next_renderer_ordinal = 10;
-    state.last_patch_sequence = 20;
     let mut active: entities::conversation_state::ActiveModel = state.into();
     active.next_renderer_ordinal = Set(10);
     active.last_patch_sequence = Set(20);
@@ -1286,7 +1296,7 @@ async fn expiry_equality_rejects_and_chronology() {
 async fn i64_max_counters_reject_without_partial_writes() {
     let pair = seeded_pair().await;
     // set conversation_state counters to MAX
-    let mut state = entities::conversation_state::Entity::find_by_id(THREAD_ID)
+    let state = entities::conversation_state::Entity::find_by_id(THREAD_ID)
         .one(&pair.database)
         .await
         .expect("q")
@@ -1345,7 +1355,7 @@ async fn i64_max_counters_reject_without_partial_writes() {
         .await
         .expect("first");
     // manually set revision to MAX
-    let mut item = entities::conversation_item::Entity::find_by_id("assistant-rev")
+    let item = entities::conversation_item::Entity::find_by_id("assistant-rev")
         .one(&pair2.database)
         .await
         .expect("q")
@@ -1410,7 +1420,7 @@ async fn exact_replay_latest_and_older_after_later_batch() {
         })
         .await
         .expect("batch1");
-    let after1 = persisted_rows(&pair.database).await;
+    let _after1 = persisted_rows(&pair.database).await;
     // second batch
     let scope2 = RunBatchScope {
         claimed: &pair.claimed,
@@ -1518,7 +1528,7 @@ async fn exact_replay_latest_and_older_after_later_batch() {
     assert!(matches!(err, RunObservationError::ReceiptConflict { .. }));
 
     // manually seeded committed=false cannot resurrect
-    let mut receipt = entities::run_batch_receipt::Entity::find_by_id((RUN_ID.to_owned(), 1))
+    let receipt = entities::run_batch_receipt::Entity::find_by_id((RUN_ID.to_owned(), 1))
         .one(&pair.database)
         .await
         .expect("q")
@@ -1707,7 +1717,7 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
         .await
         .expect("seal start");
     // seal manually
-    let mut item_row = entities::conversation_item::Entity::find_by_id("assistant-seal")
+    let item_row = entities::conversation_item::Entity::find_by_id("assistant-seal")
         .one(&pair_seal.database)
         .await
         .expect("q")
@@ -1843,7 +1853,7 @@ async fn failure_after_dispatch_fence_rolls_back_pair_stamps() {
 async fn late_transaction_failure_via_trigger_rolls_back_everything() {
     let pair = seeded_pair().await;
     // Create trigger that aborts patch insertion (sqlite trigger)
-    pair.database.execute(Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_patch BEFORE INSERT ON conversation_patches BEGIN SELECT RAISE(ABORT, 'test abort patch'); END;".to_owned())).await.expect("trigger patch");
+    pair.database.execute(&Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_patch BEFORE INSERT ON conversation_patches BEGIN SELECT RAISE(ABORT, 'test abort patch'); END;".to_owned())).await.expect("trigger patch");
     let before = persisted_rows(&pair.database).await;
     let body = assistant_body("x");
     let scope = batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS));
@@ -1872,7 +1882,7 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
     assert_eq!(before, persisted_rows(&pair.database).await);
     // cleanup trigger for other tests not needed (this pair is isolated)
     pair.database
-        .execute(Statement::from_string(
+        .execute(&Statement::from_string(
             DbBackend::Sqlite,
             "DROP TRIGGER abort_patch".to_owned(),
         ))
@@ -1881,7 +1891,7 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
 
     // checkpoint trigger
     let pair2 = seeded_pair().await;
-    pair2.database.execute(Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_cp BEFORE INSERT ON run_checkpoints BEGIN SELECT RAISE(ABORT, 'test abort cp'); END;".to_owned())).await.expect("trigger cp");
+    pair2.database.execute(&Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_cp BEFORE INSERT ON run_checkpoints BEGIN SELECT RAISE(ABORT, 'test abort cp'); END;".to_owned())).await.expect("trigger cp");
     let before2 = persisted_rows(&pair2.database).await;
     let scope2 = batch_scope(&pair2, UnixMillis::from_millis(BOUND_AT_MS));
     let err2 = pair2
@@ -1908,7 +1918,7 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
     assert_eq!(before2, persisted_rows(&pair2.database).await);
     pair2
         .database
-        .execute(Statement::from_string(
+        .execute(&Statement::from_string(
             DbBackend::Sqlite,
             "DROP TRIGGER abort_cp".to_owned(),
         ))
@@ -1917,7 +1927,7 @@ async fn late_transaction_failure_via_trigger_rolls_back_everything() {
 
     // receipt trigger
     let pair3 = seeded_pair().await;
-    pair3.database.execute(Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_receipt BEFORE INSERT ON run_batch_receipts BEGIN SELECT RAISE(ABORT, 'test abort receipt'); END;".to_owned())).await.expect("trigger receipt");
+    pair3.database.execute(&Statement::from_string(DbBackend::Sqlite, "CREATE TRIGGER abort_receipt BEFORE INSERT ON run_batch_receipts BEGIN SELECT RAISE(ABORT, 'test abort receipt'); END;".to_owned())).await.expect("trigger receipt");
     let before3 = persisted_rows(&pair3.database).await;
     let scope3 = batch_scope(&pair3, UnixMillis::from_millis(BOUND_AT_MS));
     let err3 = pair3
@@ -2041,18 +2051,25 @@ async fn file_backed_races_identical_and_conflicting() {
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
 
+    let changes_a = [AssistantChange::Start {
+        item_id: &iid,
+        phase: AssistantMessagePhase::Unspecified,
+        body: &body,
+        patch_id: &pi,
+    }];
+    let changes_b = [AssistantChange::Start {
+        item_id: &iid,
+        phase: AssistantMessagePhase::Unspecified,
+        body: &body,
+        patch_id: &pi,
+    }];
     let (out_a, out_b) = tokio::join!(
         repo_a.commit_run_batch(CommitRunBatch {
             scope: scope_a,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&pt),
-            changes: &[AssistantChange::Start {
-                item_id: &iid,
-                phase: AssistantMessagePhase::Unspecified,
-                body: &body,
-                patch_id: &pi
-            }],
+            changes: &changes_a,
             checkpoint: CheckpointUpdate::Keep
         }),
         repo_b.commit_run_batch(CommitRunBatch {
@@ -2060,12 +2077,7 @@ async fn file_backed_races_identical_and_conflicting() {
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&pt),
-            changes: &[AssistantChange::Start {
-                item_id: &iid,
-                phase: AssistantMessagePhase::Unspecified,
-                body: &body,
-                patch_id: &pi
-            }],
+            changes: &changes_b,
             checkpoint: CheckpointUpdate::Keep
         })
     );
@@ -2197,18 +2209,25 @@ async fn file_backed_races_identical_and_conflicting() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
+    let changes_a2 = [AssistantChange::Start {
+        item_id: &iid_a,
+        phase: AssistantMessagePhase::Unspecified,
+        body: &body_a,
+        patch_id: &pi_a,
+    }];
+    let changes_b2 = [AssistantChange::Start {
+        item_id: &iid_b,
+        phase: AssistantMessagePhase::Unspecified,
+        body: &body_b,
+        patch_id: &pi_b,
+    }];
     let (out_a2, out_b2) = tokio::join!(
         repo_a2.commit_run_batch(CommitRunBatch {
             scope: scope_a2,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&pt_a),
-            changes: &[AssistantChange::Start {
-                item_id: &iid_a,
-                phase: AssistantMessagePhase::Unspecified,
-                body: &body_a,
-                patch_id: &pi_a
-            }],
+            changes: &changes_a2,
             checkpoint: CheckpointUpdate::Keep
         }),
         repo_b2.commit_run_batch(CommitRunBatch {
@@ -2216,12 +2235,7 @@ async fn file_backed_races_identical_and_conflicting() {
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&pt_b),
-            changes: &[AssistantChange::Start {
-                item_id: &iid_b,
-                phase: AssistantMessagePhase::Unspecified,
-                body: &body_b,
-                patch_id: &pi_b
-            }],
+            changes: &changes_b2,
             checkpoint: CheckpointUpdate::Keep
         })
     );
@@ -2260,7 +2274,7 @@ async fn digest_independent_encoder_equals_persisted_and_inequality() {
         }],
         checkpoint: CheckpointUpdate::Replace(&cp),
     };
-    let expected_digest = independent_digest(&cmd);
+    let expected_digest = independent_digest(&cmd, Some((7, &[0xde, 0xad, 0xbe, 0xef])));
     // do commit via pair's repo but we need to keep cmd borrow; recreate
     let scope2 = batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS));
     pair.repository
@@ -2287,7 +2301,7 @@ async fn digest_independent_encoder_equals_persisted_and_inequality() {
     assert_eq!(receipt.digest.as_slice(), expected_digest);
 
     // inequality for changed field
-    let mut cmd_changed = CommitRunBatch {
+    let cmd_changed = CommitRunBatch {
         scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
         batch_sequence: 1,
         operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS + 1),
@@ -2300,7 +2314,10 @@ async fn digest_independent_encoder_equals_persisted_and_inequality() {
         }],
         checkpoint: CheckpointUpdate::Replace(&cp),
     };
-    assert_ne!(independent_digest(&cmd_changed), expected_digest);
+    assert_ne!(
+        independent_digest(&cmd_changed, Some((7, &[0xde, 0xad, 0xbe, 0xef]))),
+        expected_digest
+    );
     // different phase
     let iid2 = ItemId::parse("assistant-digest2").expect("id");
     let cmd_phase = CommitRunBatch {
@@ -2331,8 +2348,8 @@ async fn digest_independent_encoder_equals_persisted_and_inequality() {
         checkpoint: CheckpointUpdate::Replace(&cp),
     };
     assert_ne!(
-        independent_digest(&cmd_phase),
-        independent_digest(&cmd_phase2)
+        independent_digest(&cmd_phase, Some((7, &[0xde, 0xad, 0xbe, 0xef]))),
+        independent_digest(&cmd_phase2, Some((7, &[0xde, 0xad, 0xbe, 0xef])))
     );
 }
 
@@ -2372,7 +2389,7 @@ async fn redaction_errors_never_contain_secret_or_checkpoint_bytes() {
     assert!(!msg.contains("a1a1"), "error should not leak owner bytes");
     assert!(!msg.contains("b2b2"), "error should not leak lease bytes");
     // checkpoint bytes redaction: create checkpoint with known pattern and try to cause InvalidCheckpoint error leaking bytes
-    let bad_cp = EngineCheckpoint::new(1, vec![0xde, 0xad, 0xbe, 0xef]);
+    let _bad_cp = EngineCheckpoint::new(1, vec![0xde, 0xad, 0xbe, 0xef]);
     // bad_cp itself error not needed; but ensure formatting doesn't contain bytes
     // Use an invalid checkpoint attempt: we test EngineCheckpoint::new error message doesn't contain bytes? It shouldn't.
     let bad = EngineCheckpoint::new(0, vec![0xde, 0xad]);
