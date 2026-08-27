@@ -2400,7 +2400,7 @@ async fn stream_request_exact_shape() {
         );
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2410,7 +2410,7 @@ async fn stream_request_exact_shape() {
         "sessABC",
         42,
         tx,
-    ))
+    )))
     .await;
     assert!(res.is_ok());
     srv.await.unwrap();
@@ -2468,7 +2468,7 @@ async fn stream_fragmented_multiline_text_then_terminal() {
         s.write_all(part2.as_bytes()).await.unwrap();
         s.flush().await.unwrap();
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2478,18 +2478,18 @@ async fn stream_fragmented_multiline_text_then_terminal() {
         "sessFrag",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res.unwrap().state(), TerminalState::Completed);
     let first = rx.recv().await.unwrap();
     match first {
         EngineObservation::TextDelta(d) => assert_eq!(d.delta(), "hello world"),
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
     let second = rx.recv().await.unwrap();
     match second {
         EngineObservation::Terminal(t) => assert_eq!(t.state(), TerminalState::Completed),
-        _ => panic!("expected terminal"),
+        EngineObservation::TextDelta(_) => panic!("expected terminal"),
     }
     assert!(rx.try_recv().is_err());
     srv.await.unwrap();
@@ -2512,7 +2512,7 @@ async fn stream_bounded_delivery_and_terminal_receipt() {
         );
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let receipt = follow_stream(StreamInput::new(
+    let receipt = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2522,7 +2522,7 @@ async fn stream_bounded_delivery_and_terminal_receipt() {
         "sessOrder",
         99,
         tx,
-    ))
+    )))
     .await
     .unwrap();
     assert_eq!(receipt.state(), TerminalState::Failed);
@@ -2563,7 +2563,7 @@ async fn stream_eof_before_terminal_is_error() {
         // close without terminal
         drop(s);
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2573,7 +2573,7 @@ async fn stream_eof_before_terminal_is_error() {
         "sessEof",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res, Err(StreamError::MissingTerminal));
     // Text before terminal is still delivered before error? The contract says text before terminal is allowed, but EOF without terminal is error. Prior text may be delivered.
@@ -2600,7 +2600,7 @@ async fn stream_non_2xx_is_status_error() {
         let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2610,7 +2610,7 @@ async fn stream_non_2xx_is_status_error() {
         "sessErr",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res, Err(StreamError::StatusNotSuccess));
     srv.await.unwrap();
@@ -2638,7 +2638,7 @@ async fn stream_wrong_content_type_rejected() {
             };
             s.write_all(header.as_bytes()).await.unwrap();
         });
-        let res = follow_stream(StreamInput::new(
+        let res = follow_stream(StreamInput::new((
             &endpoint,
             &secret,
             &bounds,
@@ -2648,7 +2648,7 @@ async fn stream_wrong_content_type_rejected() {
             "sessCt",
             0,
             tx,
-        ))
+        )))
         .await;
         assert_eq!(res, Err(StreamError::ContentTypeInvalid), "ct={ct:?}");
         srv.await.unwrap();
@@ -2670,7 +2670,7 @@ async fn stream_wrong_content_type_rejected() {
         );
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2680,7 +2680,7 @@ async fn stream_wrong_content_type_rejected() {
         "sessCt",
         0,
         tx,
-    ))
+    )))
     .await;
     assert!(res.is_ok());
     srv.await.unwrap();
@@ -2701,7 +2701,7 @@ async fn stream_framing_error() {
         let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: this line is definitely longer than ten bytes\n\n";
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2711,7 +2711,7 @@ async fn stream_framing_error() {
         "sessFrame",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res, Err(StreamError::FramingFailed));
     srv.await.unwrap();
@@ -2731,7 +2731,7 @@ async fn stream_decode_error() {
         let resp = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: not-json-at-all\n\n";
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2741,7 +2741,7 @@ async fn stream_decode_error() {
         "sessDecode",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res, Err(StreamError::DecodeFailed));
     srv.await.unwrap();
@@ -2766,7 +2766,7 @@ async fn stream_sink_closed_and_backpressure() {
         );
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2776,7 +2776,7 @@ async fn stream_sink_closed_and_backpressure() {
         "sessSink",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res, Err(StreamError::DeliveryFailed));
     srv.await.unwrap();
@@ -2803,7 +2803,7 @@ async fn stream_sink_closed_and_backpressure() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         cancel_clone.cancel();
     });
-    let res2 = follow_stream(StreamInput::new(
+    let res2 = follow_stream(StreamInput::new((
         &endpoint2,
         &secret,
         &bounds,
@@ -2813,7 +2813,7 @@ async fn stream_sink_closed_and_backpressure() {
         "sessBack",
         0,
         tx2,
-    ))
+    )))
     .await;
     // While full, cancel should win
     assert_eq!(res2, Err(StreamError::Cancelled));
@@ -2833,7 +2833,7 @@ async fn stream_pre_signalled_shutdown_cancel_deadline() {
     let cancel = CancelHandle::new();
     shutdown.cancel();
     cancel.cancel();
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2843,11 +2843,11 @@ async fn stream_pre_signalled_shutdown_cancel_deadline() {
         "sessPre",
         0,
         tx.clone(),
-    ))
+    )))
     .await;
     assert_eq!(res, Err(StreamError::Shutdown));
     // cancel
-    let res2 = follow_stream(StreamInput::new(
+    let res2 = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2861,11 +2861,11 @@ async fn stream_pre_signalled_shutdown_cancel_deadline() {
         "sessPre",
         0,
         tx.clone(),
-    ))
+    )))
     .await;
     assert_eq!(res2, Err(StreamError::Cancelled));
     // deadline
-    let res3 = follow_stream(StreamInput::new(
+    let res3 = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2875,7 +2875,7 @@ async fn stream_pre_signalled_shutdown_cancel_deadline() {
         "sessPre",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res3, Err(StreamError::Timeout));
 }
@@ -2909,7 +2909,7 @@ async fn stream_mid_stream_shutdown_cancel_deadline_precedence() {
     let cancel_owned = Arc::clone(&cancel);
     let shutdown_owned = Arc::clone(&shutdown);
     let handle = tokio::spawn(async move {
-        follow_stream(StreamInput::new(
+        follow_stream(StreamInput::new((
             &endpoint_owned,
             &secret_owned,
             &bounds_owned,
@@ -2919,7 +2919,7 @@ async fn stream_mid_stream_shutdown_cancel_deadline_precedence() {
             "sessMid",
             0,
             tx,
-        ))
+        )))
         .await
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2957,7 +2957,7 @@ async fn stream_no_retry() {
         }
     });
     let (tx, _) = mpsc::channel(4);
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2967,7 +2967,7 @@ async fn stream_no_retry() {
         "sessRetry",
         0,
         tx,
-    ))
+    )))
     .await;
     assert!(res.is_err());
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -2983,7 +2983,7 @@ async fn stream_payload_free_errors_and_driver_cleanup() {
     let bounds = stream_bounds();
     let endpoint = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
     let (tx, _) = mpsc::channel(4);
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -2993,7 +2993,7 @@ async fn stream_payload_free_errors_and_driver_cleanup() {
         "bad/session",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res, Err(StreamError::InvalidSession));
     let err = res.unwrap_err();
@@ -3024,7 +3024,7 @@ async fn stream_payload_free_errors_and_driver_cleanup() {
         assert!(!d.contains(secret_val));
         assert!(!dbg.contains(secret_val));
         assert_eq!(e, e);
-        let _ = e.clone();
+        let _ = e;
     }
 }
 
@@ -3046,7 +3046,7 @@ async fn stream_order_violation_second_terminal_and_text_after() {
         );
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let res = follow_stream(StreamInput::new(
+    let res = follow_stream(StreamInput::new((
         &endpoint,
         &secret,
         &bounds,
@@ -3056,7 +3056,7 @@ async fn stream_order_violation_second_terminal_and_text_after() {
         "sessVio",
         0,
         tx,
-    ))
+    )))
     .await;
     assert_eq!(res, Err(StreamError::OrderViolation));
     // First terminal was delivered before violation detection? Our implementation delivers before detecting second? Actually we detect violation before delivering any in batch, so none delivered if batch contains two terminals.
@@ -3078,7 +3078,7 @@ async fn stream_order_violation_second_terminal_and_text_after() {
         );
         s.write_all(resp.as_bytes()).await.unwrap();
     });
-    let res2 = follow_stream(StreamInput::new(
+    let res2 = follow_stream(StreamInput::new((
         &endpoint2,
         &secret,
         &bounds,
@@ -3088,7 +3088,7 @@ async fn stream_order_violation_second_terminal_and_text_after() {
         "sessVio2",
         0,
         tx2,
-    ))
+    )))
     .await;
     assert_eq!(res2, Err(StreamError::OrderViolation));
     srv2.await.unwrap();
@@ -3102,7 +3102,7 @@ async fn stream_invalid_session_variants_rejected_before_transport() {
     let cases = vec!["", "a/b", "a?b", "a#b", "a\rb", "a\nb", "a%b"];
     for sess in cases {
         let (tx, _) = mpsc::channel(4);
-        let res = follow_stream(StreamInput::new(
+        let res = follow_stream(StreamInput::new((
             &endpoint,
             &secret,
             &bounds,
@@ -3112,7 +3112,7 @@ async fn stream_invalid_session_variants_rejected_before_transport() {
             sess,
             5,
             tx,
-        ))
+        )))
         .await;
         assert_eq!(res, Err(StreamError::InvalidSession), "session {sess:?}");
     }

@@ -16,7 +16,7 @@ use super::http::HealthSecret;
 use super::readiness::ValidatedEndpoint;
 use crate::engine_owner::EngineBounds;
 use crate::engine_owner::event::decode_sse_event;
-use crate::engine_owner::framing::SseFramer;
+use crate::engine_owner::framing::{SseEvent, SseFramer};
 use crate::engine_owner::observation::{EngineObservation, TerminalState, deliver_observation};
 
 /// Payload-free typed failure of the bounded SSE stream follower.
@@ -64,10 +64,23 @@ pub(crate) struct StreamReceipt {
 
 impl StreamReceipt {
     #[must_use]
-    pub(crate) fn state(&self) -> TerminalState {
+    pub(crate) fn state(self) -> TerminalState {
         self.state
     }
 }
+
+/// Grouped borrowed values used to construct one stream operation.
+pub(crate) type StreamInputParts<'a> = (
+    &'a ValidatedEndpoint,
+    &'a HealthSecret,
+    &'a EngineBounds,
+    Instant,
+    &'a CancelHandle,
+    &'a CancelHandle,
+    &'a str,
+    u64,
+    mpsc::Sender<EngineObservation>,
+);
 
 /// Small input struct to avoid a long argument list.
 pub(crate) struct StreamInput<'a> {
@@ -84,17 +97,8 @@ pub(crate) struct StreamInput<'a> {
 
 impl<'a> StreamInput<'a> {
     #[must_use]
-    pub(crate) fn new(
-        endpoint: &'a ValidatedEndpoint,
-        secret: &'a HealthSecret,
-        bounds: &'a EngineBounds,
-        deadline: Instant,
-        cancel: &'a CancelHandle,
-        shutdown: &'a CancelHandle,
-        session: &'a str,
-        after: u64,
-        sender: mpsc::Sender<EngineObservation>,
-    ) -> Self {
+    pub(crate) fn new(parts: StreamInputParts<'a>) -> Self {
+        let (endpoint, secret, bounds, deadline, cancel, shutdown, session, after, sender) = parts;
         Self {
             endpoint,
             secret,
@@ -124,22 +128,7 @@ impl std::fmt::Debug for StreamInput<'_> {
 /// via `deliver_observation` sequentially. Exactly one terminal ends success;
 /// clean EOF without terminal is a typed error.
 pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceipt, StreamError> {
-    if !super::http::is_valid_session_segment(input.session) {
-        return Err(StreamError::InvalidSession);
-    }
-    if input.shutdown.is_cancelled() {
-        return Err(StreamError::Shutdown);
-    }
-    if input.cancel.is_cancelled() {
-        return Err(StreamError::Cancelled);
-    }
-    if Instant::now() >= input.deadline {
-        return Err(StreamError::Timeout);
-    }
-    let request = build_stream_request(input.endpoint, input.secret, input.session, input.after)
-        .map_err(|_| StreamError::SendFailed)?;
-    let mut framer = SseFramer::new(input.bounds.max_sse_line, input.bounds.max_sse_event)
-        .map_err(|_| StreamError::FramingFailed)?;
+    let (request, mut framer) = prepare_stream(&input)?;
     let (mut sender, conn_handle) = connect_and_handshake_stream(
         input.endpoint,
         input.bounds,
@@ -157,9 +146,9 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
     )
     .await
     {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(abort_and_join_with_fallback(conn_handle, e).await);
+        Ok(response) => response,
+        Err(error) => {
+            return Err(abort_and_join_with_fallback(conn_handle, error).await);
         }
     };
     if !response.status().is_success() {
@@ -172,7 +161,7 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
     }
     let mut body = response.into_body();
     loop {
-        let frame_opt = tokio::select! {
+        let frame = tokio::select! {
             biased;
             () = input.shutdown.wait() => {
                 return Err(abort_and_join_with_fallback(conn_handle, StreamError::Shutdown).await);
@@ -183,94 +172,33 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
             () = tokio::time::sleep_until(input.deadline) => {
                 return Err(abort_and_join_with_fallback(conn_handle, StreamError::Timeout).await);
             }
-            res = body.frame() => res,
+            result = body.frame() => result,
         };
-        match frame_opt {
+        match frame {
             Some(Ok(frame)) => {
-                if let Ok(data) = frame.into_data() {
-                    if data.is_empty() {
-                        continue;
-                    }
-                    let events = match framer.feed(&data) {
-                        Ok(ev) => ev,
-                        Err(_) => {
-                            return Err(abort_and_join_with_fallback(
-                                conn_handle,
-                                StreamError::FramingFailed,
-                            )
-                            .await);
-                        }
-                    };
-                    if events.is_empty() {
-                        continue;
-                    }
-                    // Decode and discard one event at a time before delivering any
-                    // observation from this feed result. This keeps order validation
-                    // bounded to one event's decoded observations.
-                    let mut seen_terminal_in_batch = false;
-                    for event in &events {
-                        let observations = match decode_sse_event(event) {
-                            Ok(observations) => observations,
-                            Err(_) => {
-                                return Err(abort_and_join_with_fallback(
-                                    conn_handle,
-                                    StreamError::DecodeFailed,
-                                )
-                                .await);
-                            }
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                if data.is_empty() {
+                    continue;
+                }
+                let Ok(events) = framer.feed(&data) else {
+                    return Err(abort_and_join_with_fallback(
+                        conn_handle,
+                        StreamError::FramingFailed,
+                    )
+                    .await);
+                };
+                match deliver_events(&events, &input).await {
+                    Ok(None) => {}
+                    Ok(Some(state)) => {
+                        return match abort_and_join(conn_handle).await {
+                            Ok(()) => Ok(StreamReceipt { state }),
+                            Err(error) => Err(error),
                         };
-                        for observation in observations {
-                            if seen_terminal_in_batch {
-                                return Err(abort_and_join_with_fallback(
-                                    conn_handle,
-                                    StreamError::OrderViolation,
-                                )
-                                .await);
-                            }
-                            if matches!(observation, EngineObservation::Terminal(_)) {
-                                seen_terminal_in_batch = true;
-                            }
-                        }
                     }
-                    // Decode each event again and deliver observations in order.
-                    for event in &events {
-                        let observations = match decode_sse_event(event) {
-                            Ok(observations) => observations,
-                            Err(_) => {
-                                return Err(abort_and_join_with_fallback(
-                                    conn_handle,
-                                    StreamError::DecodeFailed,
-                                )
-                                .await);
-                            }
-                        };
-                        for observation in observations {
-                            let receipt_state = match &observation {
-                                EngineObservation::Terminal(terminal) => Some(terminal.state()),
-                                EngineObservation::TextDelta(_) => None,
-                            };
-                            if let Err(error) = deliver_observation(
-                                observation,
-                                input.sender.clone(),
-                                input.shutdown,
-                                input.cancel,
-                                input.deadline,
-                            )
-                            .await
-                            {
-                                return Err(abort_and_join_with_fallback(
-                                    conn_handle,
-                                    map_delivery_error(error),
-                                )
-                                .await);
-                            }
-                            if let Some(state) = receipt_state {
-                                return match abort_and_join(conn_handle).await {
-                                    Ok(()) => Ok(StreamReceipt { state }),
-                                    Err(error) => Err(error),
-                                };
-                            }
-                        }
+                    Err(error) => {
+                        return Err(abort_and_join_with_fallback(conn_handle, error).await);
                     }
                 }
             }
@@ -288,6 +216,73 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
             }
         }
     }
+}
+
+fn prepare_stream(
+    input: &StreamInput<'_>,
+) -> Result<(Request<Empty<Bytes>>, SseFramer), StreamError> {
+    if !super::http::is_valid_session_segment(input.session) {
+        return Err(StreamError::InvalidSession);
+    }
+    if input.shutdown.is_cancelled() {
+        return Err(StreamError::Shutdown);
+    }
+    if input.cancel.is_cancelled() {
+        return Err(StreamError::Cancelled);
+    }
+    if Instant::now() >= input.deadline {
+        return Err(StreamError::Timeout);
+    }
+    let request = build_stream_request(input.endpoint, input.secret, input.session, input.after)
+        .map_err(|_| StreamError::SendFailed)?;
+    let framer = SseFramer::new(input.bounds.max_sse_line, input.bounds.max_sse_event)
+        .map_err(|_| StreamError::FramingFailed)?;
+    Ok((request, framer))
+}
+
+async fn deliver_events(
+    events: &[SseEvent],
+    input: &StreamInput<'_>,
+) -> Result<Option<TerminalState>, StreamError> {
+    let mut seen_terminal = false;
+    for event in events {
+        let Ok(observations) = decode_sse_event(event) else {
+            return Err(StreamError::DecodeFailed);
+        };
+        for observation in observations {
+            if seen_terminal {
+                return Err(StreamError::OrderViolation);
+            }
+            if matches!(observation, EngineObservation::Terminal(_)) {
+                seen_terminal = true;
+            }
+        }
+    }
+
+    for event in events {
+        let Ok(observations) = decode_sse_event(event) else {
+            return Err(StreamError::DecodeFailed);
+        };
+        for observation in observations {
+            let receipt_state = match &observation {
+                EngineObservation::Terminal(terminal) => Some(terminal.state()),
+                EngineObservation::TextDelta(_) => None,
+            };
+            deliver_observation(
+                observation,
+                input.sender.clone(),
+                input.shutdown,
+                input.cancel,
+                input.deadline,
+            )
+            .await
+            .map_err(map_delivery_error)?;
+            if receipt_state.is_some() {
+                return Ok(receipt_state);
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn build_stream_request(
