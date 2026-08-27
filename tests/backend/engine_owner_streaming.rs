@@ -1744,7 +1744,7 @@ fn event_text_fallback_uses_run_id_when_no_sse_id() {
         EngineObservation::TextDelta(delta) => {
             assert_eq!(delta.chunk_id(), "run-event-bbbb:42:0");
         }
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
 
@@ -1758,7 +1758,7 @@ fn event_text_empty_sse_id_falls_back_to_run_id() {
         EngineObservation::TextDelta(delta) => {
             assert_eq!(delta.chunk_id(), "run-event-cccc:3:0");
         }
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
 
@@ -1779,7 +1779,7 @@ fn event_multiline_json_via_framer() {
             assert_eq!(delta.delta(), "hello multiline");
             assert_eq!(delta.chunk_id(), "mid-1:11:0");
         }
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
 
@@ -1803,14 +1803,14 @@ fn event_text_unicode_and_chunking_over_4096() {
                 assert_eq!(delta.sequence(), 99);
                 assert!(delta.chunk_id().starts_with("uid99:99:"));
             }
-            _ => panic!("expected text"),
+            EngineObservation::Terminal(_) => panic!("expected text"),
         }
     }
     let concat: String = observations
         .iter()
         .map(|o| match o {
             EngineObservation::TextDelta(d) => d.delta(),
-            _ => "",
+            EngineObservation::Terminal(_) => "",
         })
         .collect();
     assert_eq!(concat, large);
@@ -1822,7 +1822,7 @@ fn event_text_unicode_and_chunking_over_4096() {
         EngineObservation::TextDelta(d) => {
             assert_eq!(d.chunk_id(), "run-unicode-event:99:0");
         }
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
 
     let unicode_small = "héllo 🌍 — 𝄞 end";
@@ -1837,7 +1837,7 @@ fn event_text_unicode_and_chunking_over_4096() {
     assert_eq!(obs_small.len(), 1);
     match &obs_small[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.delta(), unicode_small),
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
 
@@ -1877,11 +1877,11 @@ fn event_text_exact_4096_and_4097_chunking() {
     assert_eq!(obs2.len(), 2);
     match &obs2[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "cid2:2:0"),
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
     match &obs2[1] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "cid2:2:1"),
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
 }
 
@@ -1911,7 +1911,7 @@ fn event_terminal_all_four_states() {
                 assert_eq!(term.reason(), None);
                 assert_eq!(term.error_ref(), None);
             }
-            _ => panic!("expected terminal for {state_str}"),
+            EngineObservation::TextDelta(_) => panic!("expected terminal for {state_str}"),
         }
     }
 }
@@ -1933,7 +1933,7 @@ fn event_terminal_optional_fields() {
             assert_eq!(term.reason(), Some("something broke"));
             assert_eq!(term.error_ref(), Some("err-123"));
         }
-        _ => panic!("expected terminal"),
+        EngineObservation::TextDelta(_) => panic!("expected terminal"),
     }
 
     let json_null = serde_json::json!({
@@ -1951,7 +1951,7 @@ fn event_terminal_optional_fields() {
             assert_eq!(term.reason(), None);
             assert_eq!(term.error_ref(), None);
         }
-        _ => panic!("expected terminal"),
+        EngineObservation::TextDelta(_) => panic!("expected terminal"),
     }
 
     let json_missing = serde_json::json!({
@@ -1967,7 +1967,7 @@ fn event_terminal_optional_fields() {
             assert_eq!(term.reason(), None);
             assert_eq!(term.error_ref(), None);
         }
-        _ => panic!("expected terminal"),
+        EngineObservation::TextDelta(_) => panic!("expected terminal"),
     }
 
     let json_only_reason = serde_json::json!({
@@ -1984,7 +1984,7 @@ fn event_terminal_optional_fields() {
             assert_eq!(term.reason(), Some("only reason"));
             assert_eq!(term.error_ref(), None);
         }
-        _ => panic!("expected terminal"),
+        EngineObservation::TextDelta(_) => panic!("expected terminal"),
     }
 }
 
@@ -2004,7 +2004,7 @@ fn event_extra_fields_ignored() {
     assert_eq!(obs.len(), 1);
     match &obs[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.delta(), "extra ok"),
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
 
     let json_term = serde_json::json!({
@@ -2156,16 +2156,16 @@ fn event_rejects_unknown_state_and_wrong_types() {
     );
 
     let json_wrong_delta_type = r#"{"run_id":"run-wrong-delta","sequence":1,"delta":123}"#;
-    let event_wd = event_from_data(json_wrong_delta_type, None);
+    let wrong_delta_event = event_from_data(json_wrong_delta_type, None);
     assert_eq!(
-        decode_sse_event(&event_wd).unwrap_err(),
+        decode_sse_event(&wrong_delta_event).unwrap_err(),
         EventDecodeError::InvalidDelta
     );
 
     let json_wrong_state_type = r#"{"run_id":"run-wrong-state","sequence":1,"state":123}"#;
-    let event_ws = event_from_data(json_wrong_state_type, None);
+    let wrong_state_event = event_from_data(json_wrong_state_type, None);
     assert_eq!(
-        decode_sse_event(&event_ws).unwrap_err(),
+        decode_sse_event(&wrong_state_event).unwrap_err(),
         EventDecodeError::InvalidState
     );
 
@@ -2286,7 +2286,7 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
             assert_eq!(d.sequence(), 12345);
             assert_eq!(d.chunk_id(), "stable-id:12345:0");
         }
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
 
     let large = "x".repeat(5000);
@@ -2301,16 +2301,16 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
     assert_eq!(obs_large.len(), 2);
     match &obs_large[0] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "det-id:77:0"),
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
     match &obs_large[1] {
         EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "det-id:77:1"),
-        _ => panic!("expected text"),
+        EngineObservation::Terminal(_) => panic!("expected text"),
     }
     for obs in &obs_large {
         match obs {
             EngineObservation::TextDelta(d) => assert_eq!(d.sequence(), 77),
-            _ => panic!("expected text"),
+            EngineObservation::Terminal(_) => panic!("expected text"),
         }
     }
 }
