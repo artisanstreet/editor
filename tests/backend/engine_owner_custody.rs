@@ -198,7 +198,7 @@ async fn pre_spawn_shutdown_raised_consumes_no_generation() {
         .admit(run_id("run-shutdown"), Duration::from_secs(10))
         .expect("admit");
     // Raise shutdown before owner dequeues this job.
-    let _ = owner.shutdown();
+    drop(owner.shutdown());
     let result = accepted.await;
     assert_eq!(result.unwrap_err(), EngineOperationError::Shutdown);
     assert_eq!(witness_counts().spawned, 0);
