@@ -1,8 +1,9 @@
-# Artisan Editor
+<p>
+  <img src="modules/frontend/src/lib/assets/barekey/runtime-app-icons/plastic-jaw-shading.png" alt="Artisan Editor app icon" width="80" align="left" />
+  <strong><big><big>Artisan Editor</big></big></strong><br /><br clear="left" />
+</p>
 
 An efficient orchestrator for working with coding agents.
-
-## Features
 
 <table>
 <tr>
