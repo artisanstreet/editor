@@ -1435,10 +1435,20 @@ async fn exact_replay_latest_and_older_after_later_batch() {
         .await
         .expect("batch2");
     let after2 = persisted_rows(&pair.database).await;
-    verify_exact_replay_tail(&pair, after2, iid, pt, pi, iid2, pi2, body).await;
+    let ctx = ExactReplayTailContext {
+        pair: &pair,
+        after2,
+        iid,
+        pt,
+        pi,
+        iid2,
+        pi2,
+        body,
+    };
+    verify_exact_replay_tail(ctx).await;
 }
-async fn verify_exact_replay_tail(
-    pair: &SeededPair,
+struct ExactReplayTailContext<'a> {
+    pair: &'a SeededPair,
     after2: PersistedRows,
     iid: ItemId,
     pt: PatchId,
@@ -1446,16 +1456,19 @@ async fn verify_exact_replay_tail(
     iid2: ItemId,
     pi2: PatchId,
     body: AssistantBody,
-) {
-    let replay_latest = pair
+}
+async fn verify_exact_replay_tail(ctx: ExactReplayTailContext<'_>) {
+    let second_body = assistant_body("second");
+    let replay_latest = ctx
+        .pair
         .repository
         .commit_run_batch(CommitRunBatch {
             scope: RunBatchScope {
-                claimed: &pair.claimed,
-                launched: &pair.launched,
-                bound: &pair.bound,
-                run_start_key: &pair.context.start_key,
-                credentials: &pair.context.credentials,
+                claimed: &ctx.pair.claimed,
+                launched: &ctx.pair.launched,
+                bound: &ctx.pair.bound,
+                run_start_key: &ctx.pair.context.start_key,
+                credentials: &ctx.pair.context.credentials,
                 expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
                 expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             },
@@ -1463,10 +1476,10 @@ async fn verify_exact_replay_tail(
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS + 10),
             activate_turn_patch_id: None,
             changes: &[AssistantChange::Start {
-                item_id: &iid2,
+                item_id: &ctx.iid2,
                 phase: AssistantMessagePhase::Unspecified,
-                body: &assistant_body("second"),
-                patch_id: &pi2,
+                body: &second_body,
+                patch_id: &ctx.pi2,
             }],
             checkpoint: CheckpointUpdate::Keep,
         })
@@ -1476,19 +1489,20 @@ async fn verify_exact_replay_tail(
         replay_latest,
         CommitRunBatchOutcome::AlreadyCommitted(_)
     ));
-    assert_eq!(after2, persisted_rows(&pair.database).await);
-    let replay_older = pair
+    assert_eq!(ctx.after2, persisted_rows(&ctx.pair.database).await);
+    let replay_older = ctx
+        .pair
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
+            scope: batch_scope(ctx.pair, UnixMillis::from_millis(BOUND_AT_MS)),
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            activate_turn_patch_id: Some(&pt),
+            activate_turn_patch_id: Some(&ctx.pt),
             changes: &[AssistantChange::Start {
-                item_id: &iid,
+                item_id: &ctx.iid,
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
-                patch_id: &pi,
+                body: &ctx.body,
+                patch_id: &ctx.pi,
             }],
             checkpoint: CheckpointUpdate::Keep,
         })
@@ -1498,8 +1512,8 @@ async fn verify_exact_replay_tail(
         replay_older,
         CommitRunBatchOutcome::AlreadyCommitted(_)
     ));
-    assert_eq!(after2, persisted_rows(&pair.database).await);
-    assert_receipt_conflicts(pair, iid, pt, pi, body).await;
+    assert_eq!(ctx.after2, persisted_rows(&ctx.pair.database).await);
+    assert_receipt_conflicts(ctx.pair, ctx.iid, ctx.pt, ctx.pi, ctx.body).await;
 }
 
 async fn assert_receipt_conflicts(
@@ -1565,147 +1579,169 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
     let pt = PatchId::parse("p-act-wrong").expect("p");
     let pi = PatchId::parse("p-start-wrong").expect("p");
     let iid = ItemId::parse("assistant-wrong").expect("id");
+    let scope = batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS));
+    let changes = [AssistantChange::Start {
+        item_id: &iid,
+        phase: AssistantMessagePhase::Unspecified,
+        body: &body,
+        patch_id: &pi,
+    }];
     pair.repository
         .commit_run_batch(CommitRunBatch {
-            scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
+            scope,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&pt),
-            changes: &[AssistantChange::Start {
-                item_id: &iid,
-                phase: AssistantMessagePhase::Unspecified,
-                body: &body,
-                patch_id: &pi,
-            }],
+            changes: &changes,
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
         .expect("first");
+    assert_user_item_target_conflict(&pair, &body).await;
+    assert_duplicate_target_conflict(&pair, &body).await;
+    assert_duplicate_patch_conflict(&pair, &body).await;
+    verify_wrong_targets_sealed_and_checkpoint(&body).await;
+}
+async fn assert_user_item_target_conflict(pair: &SeededPair, body: &AssistantBody) {
     let user_item = ItemId::parse(ITEM_ID).expect("user item");
-    let err_user = pair
+    let frag = incremental_text("frag");
+    let append_patch = PatchId::parse("p-append-user").expect("p");
+    let scope = RunBatchScope {
+        claimed: &pair.claimed,
+        launched: &pair.launched,
+        bound: &pair.bound,
+        run_start_key: &pair.context.start_key,
+        credentials: &pair.context.credentials,
+        expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
+        expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
+    };
+    let changes = [AssistantChange::Append {
+        item_id: &user_item,
+        expected_revision: Revision::new(0),
+        text: &frag,
+        patch_id: &append_patch,
+    }];
+    let err = pair
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: RunBatchScope {
-                claimed: &pair.claimed,
-                launched: &pair.launched,
-                bound: &pair.bound,
-                run_start_key: &pair.context.start_key,
-                credentials: &pair.context.credentials,
-                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
-                expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            },
+            scope,
             batch_sequence: 2,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS + 10),
             activate_turn_patch_id: None,
-            changes: &[AssistantChange::Append {
-                item_id: &user_item,
-                expected_revision: Revision::new(0),
-                text: &incremental_text("frag"),
-                patch_id: &PatchId::parse("p-append-user").expect("p"),
-            }],
+            changes: &changes,
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
         .expect_err("user item");
-    assert!(matches!(
-        err_user,
-        RunObservationError::TargetConflict { .. }
-    ));
-    let duplicate_target_error = pair
+    assert!(matches!(err, RunObservationError::TargetConflict { .. }));
+}
+async fn assert_duplicate_target_conflict(pair: &SeededPair, body: &AssistantBody) {
+    let item_a = ItemId::parse("assistant-a").expect("id");
+    let patch_a = PatchId::parse("p-a").expect("p");
+    let patch_b = PatchId::parse("p-b").expect("p");
+    let scope = RunBatchScope {
+        claimed: &pair.claimed,
+        launched: &pair.launched,
+        bound: &pair.bound,
+        run_start_key: &pair.context.start_key,
+        credentials: &pair.context.credentials,
+        expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
+        expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
+    };
+    let changes = [
+        AssistantChange::Start {
+            item_id: &item_a,
+            phase: AssistantMessagePhase::Unspecified,
+            body,
+            patch_id: &patch_a,
+        },
+        AssistantChange::Start {
+            item_id: &item_a,
+            phase: AssistantMessagePhase::Unspecified,
+            body,
+            patch_id: &patch_b,
+        },
+    ];
+    let err = pair
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: RunBatchScope {
-                claimed: &pair.claimed,
-                launched: &pair.launched,
-                bound: &pair.bound,
-                run_start_key: &pair.context.start_key,
-                credentials: &pair.context.credentials,
-                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
-                expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            },
+            scope,
             batch_sequence: 2,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS + 10),
             activate_turn_patch_id: None,
-            changes: &[
-                AssistantChange::Start {
-                    item_id: &ItemId::parse("assistant-a").expect("id"),
-                    phase: AssistantMessagePhase::Unspecified,
-                    body: &body,
-                    patch_id: &PatchId::parse("p-a").expect("p"),
-                },
-                AssistantChange::Start {
-                    item_id: &ItemId::parse("assistant-a").expect("id"),
-                    phase: AssistantMessagePhase::Unspecified,
-                    body: &body,
-                    patch_id: &PatchId::parse("p-b").expect("p"),
-                },
-            ],
+            changes: &changes,
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
         .expect_err("duplicate target");
-    assert!(matches!(
-        duplicate_target_error,
-        RunObservationError::TargetConflict { .. }
-    ));
-    let duplicate_patch_error = pair
+    assert!(matches!(err, RunObservationError::TargetConflict { .. }));
+}
+async fn assert_duplicate_patch_conflict(pair: &SeededPair, body: &AssistantBody) {
+    let item_p1 = ItemId::parse("assistant-p1").expect("id");
+    let item_p2 = ItemId::parse("assistant-p2").expect("id");
+    let dup_patch = PatchId::parse("p-dup").expect("p");
+    let scope = RunBatchScope {
+        claimed: &pair.claimed,
+        launched: &pair.launched,
+        bound: &pair.bound,
+        run_start_key: &pair.context.start_key,
+        credentials: &pair.context.credentials,
+        expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
+        expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
+    };
+    let changes = [
+        AssistantChange::Start {
+            item_id: &item_p1,
+            phase: AssistantMessagePhase::Unspecified,
+            body,
+            patch_id: &dup_patch,
+        },
+        AssistantChange::Start {
+            item_id: &item_p2,
+            phase: AssistantMessagePhase::Unspecified,
+            body,
+            patch_id: &dup_patch,
+        },
+    ];
+    let err = pair
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: RunBatchScope {
-                claimed: &pair.claimed,
-                launched: &pair.launched,
-                bound: &pair.bound,
-                run_start_key: &pair.context.start_key,
-                credentials: &pair.context.credentials,
-                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
-                expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            },
+            scope,
             batch_sequence: 2,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS + 10),
             activate_turn_patch_id: None,
-            changes: &[
-                AssistantChange::Start {
-                    item_id: &ItemId::parse("assistant-p1").expect("id"),
-                    phase: AssistantMessagePhase::Unspecified,
-                    body: &body,
-                    patch_id: &PatchId::parse("p-dup").expect("p"),
-                },
-                AssistantChange::Start {
-                    item_id: &ItemId::parse("assistant-p2").expect("id"),
-                    phase: AssistantMessagePhase::Unspecified,
-                    body: &body,
-                    patch_id: &PatchId::parse("p-dup").expect("p"),
-                },
-            ],
+            changes: &changes,
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
         .expect_err("dup patch");
-    assert!(matches!(
-        duplicate_patch_error,
-        RunObservationError::PatchConflict { .. }
-    ));
-    verify_wrong_targets_sealed_and_checkpoint(&body).await;
+    assert!(matches!(err, RunObservationError::PatchConflict { .. }));
 }
 
 async fn verify_wrong_targets_sealed_and_checkpoint(body: &AssistantBody) {
+    verify_sealed_item_append_rejected(body).await;
+    verify_missing_checkpoint_rejected(body).await;
+}
+async fn verify_sealed_item_append_rejected(body: &AssistantBody) {
     let iid_seal = ItemId::parse("assistant-seal").expect("id");
     let seal_start_patch = PatchId::parse("p-seal-start").expect("p");
     let seal_activation_patch = PatchId::parse("p-act-seal").expect("p");
     let pair_seal = seeded_pair().await;
+    let scope = batch_scope(&pair_seal, UnixMillis::from_millis(BOUND_AT_MS));
+    let changes = [AssistantChange::Start {
+        item_id: &iid_seal,
+        phase: AssistantMessagePhase::Unspecified,
+        body,
+        patch_id: &seal_start_patch,
+    }];
     pair_seal
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: batch_scope(&pair_seal, UnixMillis::from_millis(BOUND_AT_MS)),
+            scope,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&seal_activation_patch),
-            changes: &[AssistantChange::Start {
-                item_id: &iid_seal,
-                phase: AssistantMessagePhase::Unspecified,
-                body,
-                patch_id: &seal_start_patch,
-            }],
+            changes: &changes,
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
@@ -1718,48 +1754,57 @@ async fn verify_wrong_targets_sealed_and_checkpoint(body: &AssistantBody) {
     let mut active: entities::conversation_item::ActiveModel = item_row.into();
     active.lifecycle = Set(EntityLifecycle::Completed);
     active.update(&pair_seal.database).await.expect("seal");
+    let frag = incremental_text("frag");
+    let append_patch = PatchId::parse("p-append-sealed").expect("p");
+    let scope2 = RunBatchScope {
+        claimed: &pair_seal.claimed,
+        launched: &pair_seal.launched,
+        bound: &pair_seal.bound,
+        run_start_key: &pair_seal.context.start_key,
+        credentials: &pair_seal.context.credentials,
+        expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
+        expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
+    };
+    let changes2 = [AssistantChange::Append {
+        item_id: &iid_seal,
+        expected_revision: Revision::new(0),
+        text: &frag,
+        patch_id: &append_patch,
+    }];
     let err_sealed = pair_seal
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: RunBatchScope {
-                claimed: &pair_seal.claimed,
-                launched: &pair_seal.launched,
-                bound: &pair_seal.bound,
-                run_start_key: &pair_seal.context.start_key,
-                credentials: &pair_seal.context.credentials,
-                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
-                expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            },
+            scope: scope2,
             batch_sequence: 2,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS + 10),
             activate_turn_patch_id: None,
-            changes: &[AssistantChange::Append {
-                item_id: &iid_seal,
-                expected_revision: Revision::new(0),
-                text: &incremental_text("frag"),
-                patch_id: &PatchId::parse("p-append-sealed").expect("p"),
-            }],
+            changes: &changes2,
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
         .expect_err("sealed");
     assert!(matches!(err_sealed, RunObservationError::SealedItem { .. }));
+}
+async fn verify_missing_checkpoint_rejected(body: &AssistantBody) {
     let pair_cp = seeded_pair().await;
     let cp_activation_patch = PatchId::parse("p-act-cp").expect("p");
     let cp_start_patch = PatchId::parse("p-start-cp").expect("p");
+    let cp_item = ItemId::parse("assistant-cp").expect("id");
+    let scope = batch_scope(&pair_cp, UnixMillis::from_millis(BOUND_AT_MS));
+    let changes = [AssistantChange::Start {
+        item_id: &cp_item,
+        phase: AssistantMessagePhase::Unspecified,
+        body,
+        patch_id: &cp_start_patch,
+    }];
     pair_cp
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: batch_scope(&pair_cp, UnixMillis::from_millis(BOUND_AT_MS)),
+            scope,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
             activate_turn_patch_id: Some(&cp_activation_patch),
-            changes: &[AssistantChange::Start {
-                item_id: &ItemId::parse("assistant-cp").expect("id"),
-                phase: AssistantMessagePhase::Unspecified,
-                body,
-                patch_id: &cp_start_patch,
-            }],
+            changes: &changes,
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
@@ -1768,27 +1813,31 @@ async fn verify_wrong_targets_sealed_and_checkpoint(body: &AssistantBody) {
         .exec(&pair_cp.database)
         .await
         .expect("del cp");
+    let cp2_item = ItemId::parse("assistant-cp2").expect("id");
+    let cp2_patch = PatchId::parse("p-start-cp2").expect("p");
+    let scope2 = RunBatchScope {
+        claimed: &pair_cp.claimed,
+        launched: &pair_cp.launched,
+        bound: &pair_cp.bound,
+        run_start_key: &pair_cp.context.start_key,
+        credentials: &pair_cp.context.credentials,
+        expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
+        expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
+    };
+    let changes2 = [AssistantChange::Start {
+        item_id: &cp2_item,
+        phase: AssistantMessagePhase::Unspecified,
+        body,
+        patch_id: &cp2_patch,
+    }];
     let err_cp = pair_cp
         .repository
         .commit_run_batch(CommitRunBatch {
-            scope: RunBatchScope {
-                claimed: &pair_cp.claimed,
-                launched: &pair_cp.launched,
-                bound: &pair_cp.bound,
-                run_start_key: &pair_cp.context.start_key,
-                credentials: &pair_cp.context.credentials,
-                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
-                expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
-            },
+            scope: scope2,
             batch_sequence: 2,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS + 10),
             activate_turn_patch_id: None,
-            changes: &[AssistantChange::Start {
-                item_id: &ItemId::parse("assistant-cp2").expect("id"),
-                phase: AssistantMessagePhase::Unspecified,
-                body,
-                patch_id: &PatchId::parse("p-start-cp2").expect("p"),
-            }],
+            changes: &changes2,
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
@@ -1942,7 +1991,7 @@ async fn helper_late_transaction_failure_via_trigger_rolls_back_everything_tail(
             changes: &[AssistantChange::Start {
                 item_id: &ItemId::parse("assistant-trig3").expect("id"),
                 phase: AssistantMessagePhase::Unspecified,
-                body: &body,
+                body,
                 patch_id: &PatchId::parse("p-start-trig3").expect("p"),
             }],
             checkpoint: CheckpointUpdate::Keep,
@@ -2027,60 +2076,71 @@ async fn file_backed_races_identical_and_conflicting() {
     let claimed_a = replayable_claim(&claimed);
     let claimed_b = replayable_claim(&claimed);
     let body = assistant_body("race");
-    helper_file_backed_races_identical_and_conflicting_tail(
-        &binding, &claimed_a, &body, &repo_b, &claimed, &claimed_b, &path, &context, &repo_a,
-        &launched, &bound,
-    )
-    .await;
+    let path_ref = path.as_path();
+    let ctx = IdenticalRaceTailContext {
+        binding: &binding,
+        claimed_a: &claimed_a,
+        claimed_b: &claimed_b,
+        body: &body,
+        path: path_ref,
+        context: &context,
+        repo_a: &repo_a,
+        repo_b: &repo_b,
+        launched: &launched,
+        bound: &bound,
+    };
+    helper_file_backed_races_identical_and_conflicting_tail(ctx).await;
+}
+struct IdenticalRaceTailContext<'a> {
+    binding: &'a ProviderBindingBytes,
+    claimed_a: &'a ClaimedMessageDispatch,
+    claimed_b: &'a ClaimedMessageDispatch,
+    body: &'a AssistantBody,
+    path: &'a Path,
+    context: &'a LaunchContext,
+    repo_a: &'a Repository,
+    repo_b: &'a Repository,
+    launched: &'a artisan_database::LaunchedRunReceipt,
+    bound: &'a artisan_database::BoundRunReceipt,
 }
 async fn helper_file_backed_races_identical_and_conflicting_tail(
-    binding: &ProviderBindingBytes,
-    claimed_a: &ClaimedMessageDispatch,
-    body: &AssistantBody,
-    repo_b: &Repository,
-    claimed: &ClaimedMessageDispatch,
-    claimed_b: &ClaimedMessageDispatch,
-    path: &PathBuf,
-    context: &LaunchContext,
-    repo_a: &Repository,
-    launched: &artisan_database::LaunchedRunReceipt,
-    bound: &artisan_database::BoundRunReceipt,
+    ctx: IdenticalRaceTailContext<'_>,
 ) {
     let iid = ItemId::parse("assistant-race").expect("id");
     let pt = PatchId::parse("p-act-race").expect("p");
     let pi = PatchId::parse("p-start-race").expect("p");
     let scope_a = RunBatchScope {
-        claimed: claimed_a,
-        launched,
-        bound,
-        run_start_key: &context.start_key,
-        credentials: &context.credentials,
+        claimed: ctx.claimed_a,
+        launched: ctx.launched,
+        bound: ctx.bound,
+        run_start_key: &ctx.context.start_key,
+        credentials: &ctx.context.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
     let scope_b = RunBatchScope {
-        claimed: claimed_b,
-        launched,
-        bound,
-        run_start_key: &context.start_key,
-        credentials: &context.credentials,
+        claimed: ctx.claimed_b,
+        launched: ctx.launched,
+        bound: ctx.bound,
+        run_start_key: &ctx.context.start_key,
+        credentials: &ctx.context.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
     let changes_a = [AssistantChange::Start {
         item_id: &iid,
         phase: AssistantMessagePhase::Unspecified,
-        body: &body,
+        body: ctx.body,
         patch_id: &pi,
     }];
     let changes_b = [AssistantChange::Start {
         item_id: &iid,
         phase: AssistantMessagePhase::Unspecified,
-        body,
+        body: ctx.body,
         patch_id: &pi,
     }];
     let (out_a, out_b) = tokio::join!(
-        repo_a.commit_run_batch(CommitRunBatch {
+        ctx.repo_a.commit_run_batch(CommitRunBatch {
             scope: scope_a,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
@@ -2088,7 +2148,7 @@ async fn helper_file_backed_races_identical_and_conflicting_tail(
             changes: &changes_a,
             checkpoint: CheckpointUpdate::Keep
         }),
-        repo_b.commit_run_batch(CommitRunBatch {
+        ctx.repo_b.commit_run_batch(CommitRunBatch {
             scope: scope_b,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
@@ -2114,7 +2174,7 @@ async fn helper_file_backed_races_identical_and_conflicting_tail(
         "identical race must have exactly one AlreadyCommitted: {out_a:?} {out_b:?}"
     );
     let reopen = connect(
-        SqliteConfig::file(&path)
+        SqliteConfig::file(ctx.path)
             .min_connections(1)
             .max_connections(1)
             .sqlx_logging(false),
@@ -2128,7 +2188,7 @@ async fn helper_file_backed_races_identical_and_conflicting_tail(
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].batch_sequence, 1);
     assert!(receipts[0].committed);
-    verify_conflicting_race(&binding).await;
+    verify_conflicting_race(ctx.binding).await;
 }
 
 async fn verify_conflicting_race(binding: &ProviderBindingBytes) {
@@ -2172,7 +2232,7 @@ async fn verify_conflicting_race(binding: &ProviderBindingBytes) {
             expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
             bound_at: UnixMillis::from_millis(BOUND_AT_MS),
             binding_version: 2,
-            binding_bytes: &binding,
+            binding_bytes: binding,
         })
         .await
         .expect("bind2")
@@ -2201,30 +2261,31 @@ async fn verify_conflicting_race(binding: &ProviderBindingBytes) {
     let beta_claim = replayable_claim(&claimed2);
     let alpha_body = assistant_body("content-a");
     let beta_body = assistant_body("content-b");
-    helper_verify_conflicting_race_tail(
-        &alpha_body,
-        &alpha_repo,
-        &beta_body,
-        &alpha_claim,
-        &beta_repo,
-        &beta_claim,
-        &context2,
-        &launched2,
-        &bound2,
-    )
-    .await;
+    let ctx = ConflictingRaceTailContext {
+        alpha_body: &alpha_body,
+        alpha_repo: &alpha_repo,
+        beta_body: &beta_body,
+        alpha_claim: &alpha_claim,
+        beta_repo: &beta_repo,
+        beta_claim: &beta_claim,
+        context2: &context2,
+        launched2: &launched2,
+        bound2: &bound2,
+    };
+    helper_verify_conflicting_race_tail(ctx).await;
 }
-async fn helper_verify_conflicting_race_tail(
-    alpha_body: &AssistantBody,
-    alpha_repo: &Repository,
-    beta_body: &AssistantBody,
-    alpha_claim: &ClaimedMessageDispatch,
-    beta_repo: &Repository,
-    beta_claim: &ClaimedMessageDispatch,
-    context2: &LaunchContext,
-    launched2: &artisan_database::LaunchedRunReceipt,
-    bound2: &artisan_database::BoundRunReceipt,
-) {
+struct ConflictingRaceTailContext<'a> {
+    alpha_body: &'a AssistantBody,
+    alpha_repo: &'a Repository,
+    beta_body: &'a AssistantBody,
+    alpha_claim: &'a ClaimedMessageDispatch,
+    beta_repo: &'a Repository,
+    beta_claim: &'a ClaimedMessageDispatch,
+    context2: &'a LaunchContext,
+    launched2: &'a artisan_database::LaunchedRunReceipt,
+    bound2: &'a artisan_database::BoundRunReceipt,
+}
+async fn helper_verify_conflicting_race_tail(ctx: ConflictingRaceTailContext<'_>) {
     let alpha_item = ItemId::parse("assistant-conflict").expect("id");
     let beta_item = ItemId::parse("assistant-conflict").expect("id");
     let alpha_item_patch = PatchId::parse("p-start-conflict-a").expect("p");
@@ -2232,37 +2293,37 @@ async fn helper_verify_conflicting_race_tail(
     let alpha_activation_patch = PatchId::parse("p-act-conflict-a").expect("p");
     let beta_activation_patch = PatchId::parse("p-act-conflict-b").expect("p");
     let alpha_scope = RunBatchScope {
-        claimed: alpha_claim,
-        launched: launched2,
-        bound: bound2,
-        run_start_key: &context2.start_key,
-        credentials: &context2.credentials,
+        claimed: ctx.alpha_claim,
+        launched: ctx.launched2,
+        bound: ctx.bound2,
+        run_start_key: &ctx.context2.start_key,
+        credentials: &ctx.context2.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
     let beta_scope = RunBatchScope {
-        claimed: beta_claim,
-        launched: launched2,
-        bound: bound2,
-        run_start_key: &context2.start_key,
-        credentials: &context2.credentials,
+        claimed: ctx.beta_claim,
+        launched: ctx.launched2,
+        bound: ctx.bound2,
+        run_start_key: &ctx.context2.start_key,
+        credentials: &ctx.context2.credentials,
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
     let alpha_changes = [AssistantChange::Start {
         item_id: &alpha_item,
         phase: AssistantMessagePhase::Unspecified,
-        body: alpha_body,
+        body: ctx.alpha_body,
         patch_id: &alpha_item_patch,
     }];
     let beta_changes = [AssistantChange::Start {
         item_id: &beta_item,
         phase: AssistantMessagePhase::Unspecified,
-        body: beta_body,
+        body: ctx.beta_body,
         patch_id: &beta_item_patch,
     }];
     let (alpha_outcome, beta_outcome) = tokio::join!(
-        alpha_repo.commit_run_batch(CommitRunBatch {
+        ctx.alpha_repo.commit_run_batch(CommitRunBatch {
             scope: alpha_scope,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
@@ -2270,7 +2331,7 @@ async fn helper_verify_conflicting_race_tail(
             changes: &alpha_changes,
             checkpoint: CheckpointUpdate::Keep
         }),
-        beta_repo.commit_run_batch(CommitRunBatch {
+        ctx.beta_repo.commit_run_batch(CommitRunBatch {
             scope: beta_scope,
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
