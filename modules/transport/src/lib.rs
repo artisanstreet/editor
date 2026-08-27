@@ -28,8 +28,9 @@ pub mod server_dispatch;
 
 pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
 pub use client_session::{
-    ClientRequestError, ClientSession, ClientSessionError, ClientSessionLimits, ExchangeError,
-    HandshakeStageError, LoopbackTarget, PENDING_CAPACITY, ReplyRejection, SessionTargetError,
+    ClientRequestError, ClientSession, ClientSessionError, ClientSessionLimits, DeliveryLost,
+    DeliveryReceiver, ExchangeError, HandshakeStageError, LoopbackTarget, PENDING_CAPACITY,
+    ReplyRejection, SessionTargetError,
 };
 pub use deadline::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 pub use endpoint::{
