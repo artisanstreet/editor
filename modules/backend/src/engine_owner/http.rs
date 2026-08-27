@@ -566,20 +566,22 @@ async fn abort_and_join(handle: tokio::task::JoinHandle<Result<(), hyper::Error>
 // One-shot authenticated prompt RPC
 // ---------------------------------------------------------------------------
 
+pub(crate) fn is_valid_session_segment(session: &str) -> bool {
+    !session.is_empty()
+        && !session.contains('/')
+        && !session.contains('?')
+        && !session.contains('#')
+        && !session.contains('\r')
+        && !session.contains('\n')
+        && !session.contains('%')
+}
+
 fn validate_session(session: &str) -> Result<(), PromptError> {
-    if session.is_empty() {
-        return Err(PromptError::InvalidSession);
+    if is_valid_session_segment(session) {
+        Ok(())
+    } else {
+        Err(PromptError::InvalidSession)
     }
-    if session.contains('/')
-        || session.contains('?')
-        || session.contains('#')
-        || session.contains('\r')
-        || session.contains('\n')
-        || session.contains('%')
-    {
-        return Err(PromptError::InvalidSession);
-    }
-    Ok(())
 }
 
 fn validate_prompt_inputs(
