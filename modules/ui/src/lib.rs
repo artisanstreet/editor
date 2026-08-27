@@ -4,6 +4,7 @@ pub mod asset_seam;
 pub mod badge;
 pub mod button;
 pub mod card;
+pub mod collapsible;
 pub mod icon;
 pub mod input_state;
 pub mod list_row;
