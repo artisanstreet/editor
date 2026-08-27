@@ -27,23 +27,60 @@ rust_test(
     visibility = ["//:__pkg__"],
 )
 
+# Deterministic archive proof: validates the stored ZIP produced by
+# //packaging/portable:portable_archive contains exactly the two Bazel-built
+# binaries under contract-derived names with deterministic metadata.
+# Layout proof and archive proof remain separate claim surfaces.
+rust_test(
+    name = "portable_archive_test",
+    srcs = ["portable_archive.rs"],
+    compile_data = ["//packaging/portable:portable_layout.txt"],
+    crate_name = "portable_archive_test",
+    data = [
+        "//modules/backend:forge",
+        "//modules/frontend:editor",
+        "//packaging/portable:portable_archive",
+        "//packaging/portable:portable_archive_reproducibility_fixture",
+    ],
+    edition = "2024",
+    env = {
+        "ARTISAN_PORTABLE_ARCHIVE": "$(rlocationpath //packaging/portable:portable_archive)",
+        "ARTISAN_PORTABLE_ARCHIVE_REPRODUCIBILITY": "$(rlocationpath //packaging/portable:portable_archive_reproducibility_fixture)",
+        "ARTISAN_PORTABLE_EDITOR_BINARY": "$(rlocationpath //modules/frontend:editor)",
+        "ARTISAN_PORTABLE_FORGE_BINARY": "$(rlocationpath //modules/backend:forge)",
+    },
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+    deps = ["@rules_rust//rust/runfiles"],
+)
+
 # Package-local focused gates so this leaf stays self-contained. Root-level
 # aggregate registration (// clippy / format_test / tests) remains a
 # controller integration step and is intentionally not done here.
 rust_clippy(
     name = "clippy",
     testonly = True,
-    deps = [":portable_layout_test"],
+    deps = [
+        ":portable_archive_test",
+        ":portable_layout_test",
+    ],
 )
 
 rustfmt_test(
     name = "format_test",
     size = "small",
-    targets = [":portable_layout_test"],
+    targets = [
+        ":portable_archive_test",
+        ":portable_layout_test",
+    ],
     transitive = True,
 )
 
 test_suite(
     name = "tests",
-    tests = [":portable_layout_test"],
+    tests = [
+        ":portable_archive_test",
+        ":portable_layout_test",
+    ],
 )

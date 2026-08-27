@@ -1,4 +1,5 @@
 load("@rules_rust//rust:defs.bzl", "rust_test")
+load(":portable_archive.bzl", "portable_archive")
 
 # Layout-only portable runtime metadata for the Phase 9 packaging proof.
 #
@@ -8,5 +9,24 @@ load("@rules_rust//rust:defs.bzl", "rust_test")
 # assembly) are deferred decisions and intentionally absent here.
 exports_files(
     ["portable_layout.txt"],
+    visibility = ["//tests/packaging:__pkg__"],
+)
+
+portable_archive(
+    name = "portable_archive",
+    editor = "//modules/frontend:editor",
+    forge = "//modules/backend:forge",
+    layout = ":portable_layout.txt",
+    output_name = "artisan-editor-portable.zip",
+    visibility = ["//tests/packaging:__pkg__"],
+)
+
+portable_archive(
+    name = "portable_archive_reproducibility_fixture",
+    testonly = True,
+    editor = "//modules/frontend:editor",
+    forge = "//modules/backend:forge",
+    layout = ":portable_layout.txt",
+    output_name = "artisan-editor-portable-reproducibility.zip",
     visibility = ["//tests/packaging:__pkg__"],
 )
