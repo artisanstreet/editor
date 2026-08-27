@@ -46,9 +46,13 @@ const IDLE_TIMEOUT_MS: u32 = 30_000;
 /// Maximum peer-initiated bidirectional streams admitted concurrently.
 const MAX_INCOMING_BIDI_STREAMS: u32 = 16;
 
-/// Artisan currently carries every application exchange on bidirectional
-/// streams, so peers receive no unidirectional-stream credit.
-const MAX_INCOMING_UNI_STREAMS: u32 = 0;
+/// Server advertises no incoming unidirectional streams because clients
+/// never initiate them toward Forge.
+const SERVER_MAX_INCOMING_UNI_STREAMS: u32 = 0;
+
+/// Client advertises exactly one incoming unidirectional stream reserved
+/// for the server-owned conversation-delivery stream.
+const CLIENT_MAX_INCOMING_UNI_STREAMS: u32 = 1;
 
 /// Per-stream receive credit. Quinn replenishes this window as consumers
 /// read, so it deliberately need not equal the maximum framed payload.
@@ -68,12 +72,15 @@ fn ring_provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-fn transport_config(keep_alive_interval: Option<Duration>) -> TransportConfig {
+fn transport_config(
+    keep_alive_interval: Option<Duration>,
+    max_incoming_uni_streams: u32,
+) -> TransportConfig {
     let mut transport = TransportConfig::default();
     let idle_timeout = IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT_MS));
     transport
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_INCOMING_BIDI_STREAMS))
-        .max_concurrent_uni_streams(VarInt::from_u32(MAX_INCOMING_UNI_STREAMS))
+        .max_concurrent_uni_streams(VarInt::from_u32(max_incoming_uni_streams))
         .max_idle_timeout(Some(idle_timeout))
         .stream_receive_window(VarInt::from_u32(STREAM_RECEIVE_WINDOW_BYTES))
         .receive_window(VarInt::from_u32(CONNECTION_RECEIVE_WINDOW_BYTES))
@@ -107,7 +114,10 @@ pub fn server_config(
 
     let crypto = QuicServerConfig::try_from(tls)?;
     let mut config = ServerConfig::with_crypto(Arc::new(crypto));
-    config.transport_config(Arc::new(transport_config(None)));
+    config.transport_config(Arc::new(transport_config(
+        None,
+        SERVER_MAX_INCOMING_UNI_STREAMS,
+    )));
     Ok(config)
 }
 
@@ -159,9 +169,10 @@ pub fn client_config(
 
     let crypto = QuicClientConfig::try_from(tls)?;
     let mut config = ClientConfig::new(Arc::new(crypto));
-    config.transport_config(Arc::new(transport_config(Some(Duration::from_secs(
-        CLIENT_KEEP_ALIVE_SECONDS,
-    )))));
+    config.transport_config(Arc::new(transport_config(
+        Some(Duration::from_secs(CLIENT_KEEP_ALIVE_SECONDS)),
+        CLIENT_MAX_INCOMING_UNI_STREAMS,
+    )));
     Ok(config)
 }
 

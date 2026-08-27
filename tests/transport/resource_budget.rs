@@ -13,7 +13,6 @@ const BLOCKED_OPERATION_WINDOW: Duration = Duration::from_millis(100);
 
 const COMMON_BUDGET_FIELDS: &[&str] = &[
     "max_concurrent_bidi_streams: 16",
-    "max_concurrent_uni_streams: 0",
     "max_idle_timeout: Some(30000)",
     "stream_receive_window: 1250000",
     "receive_window: 20000000",
@@ -39,6 +38,14 @@ fn endpoint_configs_encode_the_exact_resource_policy() {
 
     assert_common_budget(&server_transport);
     assert_common_budget(&client_config);
+    assert!(
+        server_transport.contains("max_concurrent_uni_streams: 0"),
+        "server must advertise zero incoming uni streams: {server_transport}"
+    );
+    assert!(
+        client_config.contains("max_concurrent_uni_streams: 1"),
+        "client must advertise one incoming uni stream: {client_config}"
+    );
     assert!(server_transport.contains("keep_alive_interval: None"));
     assert!(client_config.contains("keep_alive_interval: Some(15s)"));
 }
@@ -134,7 +141,7 @@ async fn seventeenth_bidirectional_stream_waits_until_credit_returns() {
 }
 
 #[tokio::test]
-async fn unidirectional_streams_and_application_datagrams_are_disabled() {
+async fn unidirectional_delivery_stream_credit_is_role_split() {
     let mut loopback = spawn_loopback();
     let client_connection = connect_client(&loopback).await;
     let server_connection = server_connection(&mut loopback).await;
@@ -145,12 +152,49 @@ async fn unidirectional_streams_and_application_datagrams_are_disabled() {
             .is_err(),
         "the server unexpectedly advertised unidirectional stream credit"
     );
+
+    let mut server_send = tokio::time::timeout(TEST_DEADLINE, server_connection.open_uni())
+        .await
+        .expect("client advertised one uni stream credit")
+        .expect("server opens delivery uni stream");
+    server_send
+        .write_all(b"m")
+        .await
+        .expect("delivery marker written");
+
+    let mut client_recv = tokio::time::timeout(TEST_DEADLINE, client_connection.accept_uni())
+        .await
+        .expect("client observes delivery stream within deadline")
+        .expect("client accepts delivery stream");
+    let mut observed = [0u8; 1];
+    client_recv
+        .read_exact(&mut observed)
+        .await
+        .expect("delivery marker readable");
+    assert_eq!(observed, [b'm']);
+
     assert!(
         tokio::time::timeout(BLOCKED_OPERATION_WINDOW, server_connection.open_uni())
             .await
             .is_err(),
-        "the client unexpectedly advertised unidirectional stream credit"
+        "a second live delivery uni stream exceeded the advertised budget"
     );
+
+    server_send
+        .finish()
+        .expect("server finishes delivery stream");
+    assert!(
+        client_recv
+            .read_to_end(1024)
+            .await
+            .expect("client observes delivery FIN")
+            .is_empty()
+    );
+    let stopped = tokio::time::timeout(TEST_DEADLINE, server_send.stopped())
+        .await
+        .expect("delivery FIN acknowledged within deadline")
+        .expect("delivery stream remains connected");
+    assert!(stopped.is_none());
 
     assert!(matches!(
         client_connection.send_datagram(b"client datagram".as_slice().into()),
@@ -161,6 +205,8 @@ async fn unidirectional_streams_and_application_datagrams_are_disabled() {
         Err(SendDatagramError::Disabled)
     ));
 
+    drop(server_send);
+    drop(client_recv);
     drop(client_connection);
     drop(server_connection);
     loopback
