@@ -337,12 +337,9 @@ async fn execute_job(
         return Execution::Completed;
     }
 
-    let spawned = match spawn_engine(recipe) {
-        Ok(child) => child,
-        Err(_) => {
-            let _ = respond.send(Err(EngineOperationError::SpawnFailed));
-            return Execution::Completed;
-        }
+    let Ok(spawned) = spawn_engine(recipe) else {
+        let _ = respond.send(Err(EngineOperationError::SpawnFailed));
+        return Execution::Completed;
     };
     let mut child = spawned;
     let lifeline = LifelineWriter::take(&mut child);

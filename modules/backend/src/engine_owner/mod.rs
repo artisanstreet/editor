@@ -292,11 +292,17 @@ impl EngineOwner {
     /// infallible.
     #[must_use]
     pub fn start(config: EngineOwnerConfig, runtime: &Handle) -> Self {
-        let capacity = config.bounds().control_capacity;
-        let close_budget = config.limits().close;
-        let stderr_cap = config.bounds().stderr_cap_bytes;
-        let executable = config.engine_executable().to_owned();
-        let recipe = LaunchRecipe::Production { executable };
+        let EngineOwnerConfig {
+            engine_executable,
+            limits,
+            bounds,
+        } = config;
+        let capacity = bounds.control_capacity;
+        let close_budget = limits.close;
+        let stderr_cap = bounds.stderr_cap_bytes;
+        let recipe = LaunchRecipe::Production {
+            executable: engine_executable,
+        };
         let (jobs, pending) = mpsc::channel::<Job>(capacity);
         let shutdown = Arc::new(CancelHandle::new());
         let (health_sender, health) = watch::channel(OwnerHealth::Active);
