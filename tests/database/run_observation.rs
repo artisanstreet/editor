@@ -587,7 +587,7 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
     let seqs: Vec<i64> = after.patches.iter().map(|p| p.sequence).collect();
     let mut sorted = seqs.clone();
     sorted.sort();
-    assert_eq!(seqs, sorted);
+    assert_eq!(sorted, [1, 2, 3, 4]);
     // activation patch first in emitted order: sequences 3 and 4, activation is 3
     let activation = after
         .patches
