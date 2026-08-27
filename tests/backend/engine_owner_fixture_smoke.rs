@@ -2,7 +2,7 @@
 //!
 //! One integration test crate independent of `backend/engine_owner`:
 //! `std` + pinned `tokio` 1.53.1 + `serde_json` + official `runfiles` only.
-//! Six actual children run serially with absolute `15s` hard / `10s` probe +
+//! Seven actual children run serially with absolute `15s` hard / `10s` probe +
 //! `5s` cleanup deadlines, remaining-capacity reads, and one common
 //! `CaseState` + finalizer. No detached task, no raw diagnostic.
 
@@ -292,55 +292,61 @@ async fn read_headers_and_prefix(
     stream: &mut TcpStream,
     deadline: Instant,
     pid: u32,
+    stage: &str,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
     let mut buf: Vec<u8> = Vec::with_capacity(HEADER_CAP + 1);
     let mut tmp = [0_u8; 512];
     loop {
         if Instant::now() >= deadline {
-            return Err(format!("stage=health header timeout pid={pid}"));
+            return Err(format!("stage={stage} header timeout pid={pid}"));
         }
         if let Some(pos) = find_crlfcrlf(&buf) {
             if pos + 4 > HEADER_CAP {
-                return Err(format!("stage=health header beyond cap pid={pid}"));
+                return Err(format!("stage={stage} header beyond cap pid={pid}"));
             }
             let header = buf[..pos + 4].to_vec();
             let prefix = buf[pos + 4..].to_vec();
             if prefix.len() > BODY_SENTINEL {
-                return Err(format!("stage=health prefix over sentinel pid={pid}"));
+                return Err(format!("stage={stage} prefix over sentinel pid={pid}"));
             }
             return Ok((header, prefix));
         }
         if buf.len() > HEADER_CAP {
-            return Err(format!("stage=health header over cap pid={pid}"));
+            return Err(format!("stage={stage} header over cap pid={pid}"));
         }
         let remaining = (HEADER_CAP + 1).saturating_sub(buf.len());
         if remaining == 0 {
-            return Err(format!("stage=health header over cap pid={pid}"));
+            return Err(format!("stage={stage} header over cap pid={pid}"));
         }
         let want = remaining.min(tmp.len());
         let n = tokio::time::timeout_at(deadline, stream.read(&mut tmp[..want]))
             .await
-            .map_err(|_| format!("stage=health header timeout pid={pid}"))?
-            .map_err(|e| format!("stage=health header read kind={} pid={}", e.kind(), pid))?;
+            .map_err(|_| format!("stage={stage} header timeout pid={pid}"))?
+            .map_err(|e| format!("stage={stage} header read kind={} pid={}", e.kind(), pid))?;
         if n == 0 {
-            return Err(format!("stage=health header EOF pid={pid}"));
+            return Err(format!("stage={stage} header EOF pid={pid}"));
         }
         buf.extend_from_slice(&tmp[..n]);
         if buf.len() > HEADER_CAP + 1 {
-            return Err(format!("stage=health header over cap pid={pid}"));
+            return Err(format!("stage={stage} header over cap pid={pid}"));
         }
     }
 }
 
-fn parse_headers(header: &[u8], pid: u32) -> Result<(usize, bool, bool), String> {
+fn parse_headers(
+    header: &[u8],
+    pid: u32,
+    stage: &str,
+    expected_ct: &str,
+) -> Result<(usize, bool, bool), String> {
     let text = std::str::from_utf8(header)
-        .map_err(|_| format!("stage=health header not utf8 pid={pid}"))?;
+        .map_err(|_| format!("stage={stage} header not utf8 pid={pid}"))?;
     let mut lines = text.split("\r\n");
     let status = lines
         .next()
-        .ok_or_else(|| format!("stage=health missing status pid={pid}"))?;
+        .ok_or_else(|| format!("stage={stage} missing status pid={pid}"))?;
     if status != "HTTP/1.1 200 OK" {
-        return Err(format!("stage=health status not 200 pid={pid}"));
+        return Err(format!("stage={stage} status not 200 pid={pid}"));
     }
     let mut len: Option<usize> = None;
     let mut ctype = false;
@@ -351,33 +357,35 @@ fn parse_headers(header: &[u8], pid: u32) -> Result<(usize, bool, bool), String>
         }
         let colon = line
             .find(':')
-            .ok_or_else(|| format!("stage=health header missing colon pid={pid}"))?;
+            .ok_or_else(|| format!("stage={stage} header missing colon pid={pid}"))?;
         let name = line[..colon].trim().to_ascii_lowercase();
         let value = line[colon + 1..].trim();
         if name == "content-length" {
             if len.is_some() {
-                return Err(format!("stage=health duplicate length pid={pid}"));
+                return Err(format!("stage={stage} duplicate length pid={pid}"));
             }
             let v: usize = value
                 .parse()
-                .map_err(|_| format!("stage=health length not numeric pid={pid}"))?;
+                .map_err(|_| format!("stage={stage} length not numeric pid={pid}"))?;
             len = Some(v);
-        } else if name == "content-type" && value.eq_ignore_ascii_case("application/json") {
+        } else if name == "content-type" && value.eq_ignore_ascii_case(expected_ct) {
             ctype = true;
         } else if name == "connection" && value.eq_ignore_ascii_case("close") {
             close = true;
         }
     }
     if !ctype {
-        return Err(format!("stage=health content-type not json pid={pid}"));
+        return Err(format!(
+            "stage={stage} content-type not {expected_ct} pid={pid}"
+        ));
     }
     if !close {
-        return Err(format!("stage=health connection not close pid={pid}"));
+        return Err(format!("stage={stage} connection not close pid={pid}"));
     }
-    let declared = len.ok_or_else(|| format!("stage=health missing length pid={pid}"))?;
+    let declared = len.ok_or_else(|| format!("stage={stage} missing length pid={pid}"))?;
     if declared > BODY_CAP {
         return Err(format!(
-            "stage=health length over cap {declared}>{BODY_CAP} pid={pid}"
+            "stage={stage} length over cap {declared}>{BODY_CAP} pid={pid}"
         ));
     }
     Ok((declared, ctype, close))
@@ -389,38 +397,39 @@ async fn read_body_and_eof(
     declared: usize,
     deadline: Instant,
     pid: u32,
+    stage: &str,
 ) -> Result<Vec<u8>, String> {
     if body.len() > declared {
-        return Err(format!("stage=health body prefix over declared pid={pid}"));
+        return Err(format!("stage={stage} body prefix over declared pid={pid}"));
     }
     let mut tmp = [0_u8; 512];
     while body.len() < declared {
         if Instant::now() >= deadline {
-            return Err(format!("stage=health body timeout pid={pid}"));
+            return Err(format!("stage={stage} body timeout pid={pid}"));
         }
         let remaining = declared.saturating_sub(body.len());
         let want = remaining.min(tmp.len());
         let n = tokio::time::timeout_at(deadline, stream.read(&mut tmp[..want]))
             .await
-            .map_err(|_| format!("stage=health body timeout pid={pid}"))?
-            .map_err(|e| format!("stage=health body read kind={} pid={}", e.kind(), pid))?;
+            .map_err(|_| format!("stage={stage} body timeout pid={pid}"))?
+            .map_err(|e| format!("stage={stage} body read kind={} pid={}", e.kind(), pid))?;
         if n == 0 {
-            return Err(format!("stage=health body EOF pid={pid}"));
+            return Err(format!("stage={stage} body EOF pid={pid}"));
         }
         body.extend_from_slice(&tmp[..n]);
     }
     if body.len() != declared {
-        return Err(format!("stage=health body length mismatch pid={pid}"));
+        return Err(format!("stage={stage} body length mismatch pid={pid}"));
     }
     if Instant::now() >= deadline {
-        return Err(format!("stage=health eof timeout pid={pid}"));
+        return Err(format!("stage={stage} eof timeout pid={pid}"));
     }
     let mut eof_tmp = [0_u8; 1];
     match tokio::time::timeout_at(deadline, stream.read(&mut eof_tmp)).await {
         Ok(Ok(0)) => Ok(body),
-        Ok(Ok(_)) => Err(format!("stage=health expected EOF got bytes pid={pid}")),
-        Ok(Err(e)) => Err(format!("stage=health eof kind={} pid={}", e.kind(), pid)),
-        Err(_) => Err(format!("stage=health eof timeout pid={pid}")),
+        Ok(Ok(_)) => Err(format!("stage={stage} expected EOF got bytes pid={pid}")),
+        Ok(Err(e)) => Err(format!("stage={stage} eof kind={} pid={}", e.kind(), pid)),
+        Err(_) => Err(format!("stage={stage} eof timeout pid={pid}")),
     }
 }
 
@@ -445,9 +454,9 @@ async fn probe_health(
         .await
         .map_err(|_| format!("stage=health flush timeout pid={pid}"))?
         .map_err(|e| format!("stage=health flush kind={} pid={}", e.kind(), pid))?;
-    let (header, prefix) = read_headers_and_prefix(&mut stream, deadline, pid).await?;
-    let (declared, _, _) = parse_headers(&header, pid)?;
-    let body = read_body_and_eof(&mut stream, prefix, declared, deadline, pid).await?;
+    let (header, prefix) = read_headers_and_prefix(&mut stream, deadline, pid, "health").await?;
+    let (declared, _, _) = parse_headers(&header, pid, "health", "application/json")?;
+    let body = read_body_and_eof(&mut stream, prefix, declared, deadline, pid, "health").await?;
     let text =
         std::str::from_utf8(&body).map_err(|_| format!("stage=health body not utf8 pid={pid}"))?;
     let v: serde_json::Value =
@@ -472,6 +481,182 @@ async fn probe_health(
         .ok_or_else(|| format!("stage=health missing version pid={pid}"))?
         .to_owned();
     Ok(version)
+}
+
+async fn probe_prompt(
+    addr: SocketAddr,
+    auth: &str,
+    pid: u32,
+    deadline: Instant,
+) -> Result<(), String> {
+    let stage = "prompt_text_then_terminal";
+    let body_json = serde_json::json!({
+        "delivery": "immediate",
+        "files": [{"uri": "file:///tmp/a.txt", "name": "a.txt"}],
+        "id": "fixture-run",
+        "resume": false,
+        "text": "hello world"
+    });
+    let body_str = body_json.to_string();
+    let body_bytes = body_str.as_bytes();
+    if body_bytes.is_empty() || body_bytes.len() > BODY_CAP {
+        return Err(format!("stage={stage} prompt body cap pid={pid}"));
+    }
+    let header = format!(
+        "POST /api/session/test-session/prompt HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {auth}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body_bytes.len()
+    );
+    let mut request = Vec::with_capacity(header.len() + body_bytes.len());
+    request.extend_from_slice(header.as_bytes());
+    request.extend_from_slice(body_bytes);
+    let mut stream = tokio::time::timeout_at(deadline, TcpStream::connect(addr))
+        .await
+        .map_err(|_| format!("stage={stage} connect timeout pid={pid}"))?
+        .map_err(|e| format!("stage={stage} connect kind={} pid={}", e.kind(), pid))?;
+    tokio::time::timeout_at(deadline, stream.write_all(&request))
+        .await
+        .map_err(|_| format!("stage={stage} write timeout pid={pid}"))?
+        .map_err(|e| format!("stage={stage} write kind={} pid={}", e.kind(), pid))?;
+    tokio::time::timeout_at(deadline, stream.flush())
+        .await
+        .map_err(|_| format!("stage={stage} flush timeout pid={pid}"))?
+        .map_err(|e| format!("stage={stage} flush kind={} pid={}", e.kind(), pid))?;
+    let (header_bytes, prefix) = read_headers_and_prefix(&mut stream, deadline, pid, stage).await?;
+    let (declared, _, _) = parse_headers(&header_bytes, pid, stage, "application/json")?;
+    let body = read_body_and_eof(&mut stream, prefix, declared, deadline, pid, stage).await?;
+    let text =
+        std::str::from_utf8(&body).map_err(|_| format!("stage={stage} body not utf8 pid={pid}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| format!("stage={stage} body not json pid={pid}"))?;
+    let ok = v
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| format!("stage={stage} missing ok pid={pid}"))?;
+    if !ok {
+        return Err(format!("stage={stage} ok false pid={pid}"));
+    }
+    if v.as_object().is_none_or(|o| o.len() != 1) {
+        return Err(format!("stage={stage} body shape pid={pid}"));
+    }
+    Ok(())
+}
+
+async fn probe_log(
+    addr: SocketAddr,
+    auth: &str,
+    pid: u32,
+    deadline: Instant,
+) -> Result<(), String> {
+    let stage = "prompt_text_then_terminal";
+    let mut stream = tokio::time::timeout_at(deadline, TcpStream::connect(addr))
+        .await
+        .map_err(|_| format!("stage={stage} connect timeout pid={pid}"))?
+        .map_err(|e| format!("stage={stage} connect kind={} pid={}", e.kind(), pid))?;
+    let req = format!(
+        "GET /api/experimental/session/test-session/log?after=0&follow=true HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n"
+    );
+    tokio::time::timeout_at(deadline, stream.write_all(req.as_bytes()))
+        .await
+        .map_err(|_| format!("stage={stage} write timeout pid={pid}"))?
+        .map_err(|e| format!("stage={stage} write kind={} pid={}", e.kind(), pid))?;
+    tokio::time::timeout_at(deadline, stream.flush())
+        .await
+        .map_err(|_| format!("stage={stage} flush timeout pid={pid}"))?
+        .map_err(|e| format!("stage={stage} flush kind={} pid={}", e.kind(), pid))?;
+    let (header_bytes, prefix) = read_headers_and_prefix(&mut stream, deadline, pid, stage).await?;
+    let (declared, _, _) = parse_headers(&header_bytes, pid, stage, "text/event-stream")?;
+    let body = read_body_and_eof(&mut stream, prefix, declared, deadline, pid, stage).await?;
+    let text =
+        std::str::from_utf8(&body).map_err(|_| format!("stage={stage} sse not utf8 pid={pid}"))?;
+    validate_sse_body(text, pid)
+}
+
+fn validate_sse_body(text: &str, pid: u32) -> Result<(), String> {
+    let stage = "prompt_text_then_terminal";
+    if !text.starts_with(": keepalive\n") {
+        return Err(format!("stage={stage} keepalive missing pid={pid}"));
+    }
+    let events: Vec<&str> = text.split("\n\n").filter(|s| s.contains("data:")).collect();
+    if events.len() != 2 {
+        return Err(format!("stage={stage} sse event count pid={pid}"));
+    }
+    let first_lines: Vec<&str> = events[0]
+        .lines()
+        .filter(|l| l.starts_with("data:"))
+        .collect();
+    if first_lines.len() != 2 {
+        return Err(format!("stage={stage} sse first multiline pid={pid}"));
+    }
+    let second_lines: Vec<&str> = events[1]
+        .lines()
+        .filter(|l| l.starts_with("data:"))
+        .collect();
+    if second_lines.len() != 1 {
+        return Err(format!("stage={stage} sse second count pid={pid}"));
+    }
+    let first_json = first_lines
+        .iter()
+        .map(|l| {
+            l.strip_prefix("data: ")
+                .unwrap_or(l.strip_prefix("data:").unwrap_or(""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let second_json = second_lines
+        .iter()
+        .map(|l| {
+            l.strip_prefix("data: ")
+                .unwrap_or(l.strip_prefix("data:").unwrap_or(""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let v1: serde_json::Value = serde_json::from_str(&first_json)
+        .map_err(|_| format!("stage={stage} sse json1 pid={pid}"))?;
+    let v2: serde_json::Value = serde_json::from_str(&second_json)
+        .map_err(|_| format!("stage={stage} sse json2 pid={pid}"))?;
+    let run1 = v1
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("stage={stage} sse run_id1 pid={pid}"))?;
+    if run1 != "fixture-run" {
+        return Err(format!("stage={stage} sse run_id1 mismatch pid={pid}"));
+    }
+    let seq1 = v1
+        .get("sequence")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("stage={stage} sse seq1 pid={pid}"))?;
+    if seq1 != 1 {
+        return Err(format!("stage={stage} sse seq1 pid={pid}"));
+    }
+    let delta = v1
+        .get("delta")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("stage={stage} sse delta pid={pid}"))?;
+    if delta != "hello world" {
+        return Err(format!("stage={stage} sse delta pid={pid}"));
+    }
+    let run2 = v2
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("stage={stage} sse run_id2 pid={pid}"))?;
+    if run2 != "fixture-run" {
+        return Err(format!("stage={stage} sse run_id2 mismatch pid={pid}"));
+    }
+    let seq2 = v2
+        .get("sequence")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("stage={stage} sse seq2 pid={pid}"))?;
+    if seq2 != 2 {
+        return Err(format!("stage={stage} sse seq2 pid={pid}"));
+    }
+    let state_val = v2
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("stage={stage} sse state pid={pid}"))?;
+    if state_val != "succeeded" {
+        return Err(format!("stage={stage} sse state pid={pid}"));
+    }
+    Ok(())
 }
 
 fn join_wait_errors(natural: Option<String>, kill: Option<String>, tail: String) -> String {
@@ -863,6 +1048,30 @@ fn run_abrupt(state: &mut CaseState) -> Result<(), String> {
     Ok(())
 }
 
+async fn run_prompt_text_then_terminal(state: &mut CaseState) -> Result<(), String> {
+    let text = state.read_readiness().await?;
+    if text.len() > READINESS_LIMIT {
+        return Err(format!(
+            "stage=prompt_text_then_terminal overflow pid={}",
+            state.pid
+        ));
+    }
+    let addr = classify_url(&text, state.pid)?;
+    let version = probe_health(addr, SYNTHETIC_AUTH, state.pid, state.probe_deadline).await?;
+    if version != EXPECTED_VERSION {
+        return Err(format!(
+            "stage=prompt_text_then_terminal version mismatch pid={}",
+            state.pid
+        ));
+    }
+    state.check_still_alive("prompt_text_then_terminal")?;
+    probe_prompt(addr, SYNTHETIC_AUTH, state.pid, state.probe_deadline).await?;
+    state.check_still_alive("prompt_text_then_terminal")?;
+    probe_log(addr, SYNTHETIC_AUTH, state.pid, state.probe_deadline).await?;
+    state.check_still_alive("prompt_text_then_terminal")?;
+    Ok(())
+}
+
 fn emit_record(scenario: &str, state: &CaseState) {
     let exit = state.exit_code.unwrap_or(-1);
     let stdout_bytes = state.stdout_buf.len();
@@ -901,6 +1110,7 @@ fn engine_owner_fixture_parent_smoke() {
         ("health_version_reject", 3, LIFELINE_EXIT, false),
         ("hang_until_lifeline", 4, LIFELINE_EXIT, false),
         ("abrupt_child_exit_nonzero", 5, ABRUPT_EXIT, true),
+        ("prompt_text_then_terminal", 6, LIFELINE_EXIT, false),
     ];
     for (scenario, kind, expected, is_abrupt) in cases.iter().copied() {
         let hard_deadline = Instant::now() + Duration::from_secs(HARD_SECS);
@@ -920,6 +1130,7 @@ fn engine_owner_fixture_parent_smoke() {
                     3 => run_health_version(&mut state).await,
                     4 => run_hang(&mut state).await,
                     5 => run_abrupt(&mut state),
+                    6 => run_prompt_text_then_terminal(&mut state).await,
                     _ => panic!("unknown kind"),
                 };
                 (res, scenario, expected, is_abrupt)
