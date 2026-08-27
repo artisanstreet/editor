@@ -7,6 +7,7 @@ mod project_catalog;
 mod project_threads;
 mod run_binding;
 mod run_launch;
+mod run_observation;
 
 use sea_orm::{DatabaseConnection, DbErr};
 use thiserror::Error;
@@ -32,6 +33,10 @@ pub use run_binding::{
 pub use run_launch::{
     LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, RunLaunchCredentials,
     RunLaunchError, RunStartKey,
+};
+pub use run_observation::{
+    AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome, EngineCheckpoint,
+    RunBatchReceiptInfo, RunBatchScope, RunObservationError,
 };
 
 /// Typed failures at the native persistence boundary.
