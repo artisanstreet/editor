@@ -28,6 +28,7 @@ rust_library(
         "src/engine_owner/process.rs",
         "src/engine_owner/readiness.rs",
         "src/engine_owner/http.rs",
+        "src/engine_owner/event.rs",
         "src/engine_owner/framing.rs",
         "src/engine_owner/observation.rs",
         "src/lib.rs",

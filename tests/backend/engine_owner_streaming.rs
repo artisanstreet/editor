@@ -1683,3 +1683,635 @@ async fn prompt_no_retry_after_close() {
         "exactly one request, no retry"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Event decoder: bridging SseEvent -> EngineObservation
+// ---------------------------------------------------------------------------
+
+use super::event::{EventDecodeError, decode_sse_event};
+
+fn event_from_data(data: &str, id: Option<&str>) -> super::framing::SseEvent {
+    let mut framer = SseFramer::new(8192, 16384).unwrap();
+    let mut raw = Vec::new();
+    if let Some(value) = id {
+        raw.extend_from_slice(format!("id: {value}\n").as_bytes());
+    }
+    raw.extend_from_slice(format!("data: {data}\n\n").as_bytes());
+    let mut events = framer.feed(&raw).unwrap();
+    assert_eq!(events.len(), 1, "expected one framed event for {data:?}");
+    events.pop().unwrap()
+}
+
+fn event_from_multiline_data(lines: &[&str], id: Option<&str>) -> super::framing::SseEvent {
+    let mut framer = SseFramer::new(8192, 16384).unwrap();
+    let mut raw = Vec::new();
+    if let Some(value) = id {
+        raw.extend_from_slice(format!("id: {value}\n").as_bytes());
+    }
+    for line in lines {
+        raw.extend_from_slice(format!("data: {line}\n").as_bytes());
+    }
+    raw.extend_from_slice(b"\n");
+    let mut events = framer.feed(&raw).unwrap();
+    assert_eq!(events.len(), 1);
+    events.pop().unwrap()
+}
+
+#[test]
+fn event_text_single_chunk_with_sse_id() {
+    let json = r#"{"run_id":"run-event-aaaa","sequence":7,"delta":"hello world"}"#;
+    let event = event_from_data(json, Some("sse-1"));
+    let observations = decode_sse_event(&event).unwrap();
+    assert_eq!(observations.len(), 1);
+    match &observations[0] {
+        EngineObservation::TextDelta(delta) => {
+            assert_eq!(delta.delta(), "hello world");
+            assert_eq!(delta.sequence(), 7);
+            assert_eq!(delta.run_id().as_str(), "run-event-aaaa");
+            assert_eq!(delta.chunk_id(), "sse-1:7:0");
+        }
+        EngineObservation::Terminal(_) => panic!("expected text"),
+    }
+}
+
+#[test]
+fn event_text_fallback_uses_run_id_when_no_sse_id() {
+    let json = r#"{"run_id":"run-event-bbbb","sequence":42,"delta":"fallback check"}"#;
+    let event = event_from_data(json, None);
+    let observations = decode_sse_event(&event).unwrap();
+    assert_eq!(observations.len(), 1);
+    match &observations[0] {
+        EngineObservation::TextDelta(delta) => {
+            assert_eq!(delta.chunk_id(), "run-event-bbbb:42:0");
+        }
+        _ => panic!("expected text"),
+    }
+}
+
+#[test]
+fn event_text_empty_sse_id_falls_back_to_run_id() {
+    let json = r#"{"run_id":"run-event-cccc","sequence":3,"delta":"empty id fallback"}"#;
+    let event = event_from_data(json, Some(""));
+    let observations = decode_sse_event(&event).unwrap();
+    assert_eq!(observations.len(), 1);
+    match &observations[0] {
+        EngineObservation::TextDelta(delta) => {
+            assert_eq!(delta.chunk_id(), "run-event-cccc:3:0");
+        }
+        _ => panic!("expected text"),
+    }
+}
+
+#[test]
+fn event_multiline_json_via_framer() {
+    let line1 = r#"{"run_id": "run-multiline1", "sequence": 11,"#;
+    let line2 = r#""delta": "hello multiline"}"#;
+    let event = event_from_multiline_data(&[line1, line2], Some("mid-1"));
+    assert_eq!(
+        event.data(),
+        format!("{line1}\n{line2}"),
+        "framer joins with newline"
+    );
+    let observations = decode_sse_event(&event).unwrap();
+    assert_eq!(observations.len(), 1);
+    match &observations[0] {
+        EngineObservation::TextDelta(delta) => {
+            assert_eq!(delta.delta(), "hello multiline");
+            assert_eq!(delta.chunk_id(), "mid-1:11:0");
+        }
+        _ => panic!("expected text"),
+    }
+}
+
+#[test]
+fn event_text_unicode_and_chunking_over_4096() {
+    let large = format!("{}{}", "€".repeat(1365), "a".repeat(10));
+    assert!(large.len() > 4096);
+    let json = serde_json::json!({
+        "run_id": "run-unicode-event",
+        "sequence": 99,
+        "delta": large
+    })
+    .to_string();
+    let event = event_from_data(&json, Some("uid99"));
+    let observations = decode_sse_event(&event).unwrap();
+    assert!(observations.len() > 1);
+    for obs in &observations {
+        match obs {
+            EngineObservation::TextDelta(delta) => {
+                assert!(delta.delta().len() <= 4096);
+                assert_eq!(delta.sequence(), 99);
+                assert!(delta.chunk_id().starts_with("uid99:99:"));
+            }
+            _ => panic!("expected text"),
+        }
+    }
+    let concat: String = observations
+        .iter()
+        .map(|o| match o {
+            EngineObservation::TextDelta(d) => d.delta(),
+            _ => "",
+        })
+        .collect();
+    assert_eq!(concat, large);
+
+    let fallback = event_from_data(&json, None);
+    let fallback_obs = decode_sse_event(&fallback).unwrap();
+    assert_eq!(fallback_obs.len(), observations.len());
+    match &fallback_obs[0] {
+        EngineObservation::TextDelta(d) => {
+            assert_eq!(d.chunk_id(), "run-unicode-event:99:0");
+        }
+        _ => panic!("expected text"),
+    }
+
+    let unicode_small = "héllo 🌍 — 𝄞 end";
+    let json_small = serde_json::json!({
+        "run_id": "run-unicode-small",
+        "sequence": 5,
+        "delta": unicode_small
+    })
+    .to_string();
+    let ev_small = event_from_data(&json_small, Some("u-small"));
+    let obs_small = decode_sse_event(&ev_small).unwrap();
+    assert_eq!(obs_small.len(), 1);
+    match &obs_small[0] {
+        EngineObservation::TextDelta(d) => assert_eq!(d.delta(), unicode_small),
+        _ => panic!("expected text"),
+    }
+}
+
+#[test]
+fn event_text_empty_delta_yields_zero_observations() {
+    let json = r#"{"run_id":"run-empty-delta","sequence":8,"delta":""}"#;
+    let event = event_from_data(json, Some("eid"));
+    let observations = decode_sse_event(&event).unwrap();
+    assert!(
+        observations.is_empty(),
+        "empty delta must yield zero observations"
+    );
+}
+
+#[test]
+fn event_text_exact_4096_and_4097_chunking() {
+    let text_4096 = "a".repeat(4096);
+    let json = serde_json::json!({
+        "run_id": "run-chunk-4096",
+        "sequence": 1,
+        "delta": text_4096
+    })
+    .to_string();
+    let event = event_from_data(&json, Some("cid"));
+    let obs = decode_sse_event(&event).unwrap();
+    assert_eq!(obs.len(), 1);
+
+    let text_4097 = "a".repeat(4097);
+    let json2 = serde_json::json!({
+        "run_id": "run-chunk-4097",
+        "sequence": 2,
+        "delta": text_4097
+    })
+    .to_string();
+    let event2 = event_from_data(&json2, Some("cid2"));
+    let obs2 = decode_sse_event(&event2).unwrap();
+    assert_eq!(obs2.len(), 2);
+    assert_eq!(obs2[0].clone(), obs2[0].clone());
+    match &obs2[0] {
+        EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "cid2:2:0"),
+        _ => panic!("expected text"),
+    }
+    match &obs2[1] {
+        EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "cid2:2:1"),
+        _ => panic!("expected text"),
+    }
+}
+
+#[test]
+fn event_terminal_all_four_states() {
+    let cases = [
+        ("succeeded", TerminalState::Completed),
+        ("failed", TerminalState::Failed),
+        ("cancelled", TerminalState::Cancelled),
+        ("interrupted", TerminalState::Interrupted),
+    ];
+    for (state_str, expected) in cases {
+        let json = serde_json::json!({
+            "run_id": "run-term-all",
+            "sequence": 100,
+            "state": state_str
+        })
+        .to_string();
+        let event = event_from_data(&json, None);
+        let obs = decode_sse_event(&event).unwrap();
+        assert_eq!(obs.len(), 1);
+        match &obs[0] {
+            EngineObservation::Terminal(term) => {
+                assert_eq!(term.state(), expected);
+                assert_eq!(term.sequence(), 100);
+                assert_eq!(term.run_id().as_str(), "run-term-all");
+                assert_eq!(term.reason(), None);
+                assert_eq!(term.error_ref(), None);
+            }
+            _ => panic!("expected terminal for {state_str}"),
+        }
+    }
+}
+
+#[test]
+fn event_terminal_optional_fields() {
+    let json = serde_json::json!({
+        "run_id": "run-term-opt",
+        "sequence": 5,
+        "state": "failed",
+        "reason": "something broke",
+        "error_ref": "err-123"
+    })
+    .to_string();
+    let event = event_from_data(&json, None);
+    let obs = decode_sse_event(&event).unwrap();
+    match &obs[0] {
+        EngineObservation::Terminal(term) => {
+            assert_eq!(term.reason(), Some("something broke"));
+            assert_eq!(term.error_ref(), Some("err-123"));
+        }
+        _ => panic!("expected terminal"),
+    }
+
+    let json_null = serde_json::json!({
+        "run_id": "run-term-opt",
+        "sequence": 6,
+        "state": "cancelled",
+        "reason": null,
+        "error_ref": null
+    })
+    .to_string();
+    let event_null = event_from_data(&json_null, None);
+    let obs_null = decode_sse_event(&event_null).unwrap();
+    match &obs_null[0] {
+        EngineObservation::Terminal(term) => {
+            assert_eq!(term.reason(), None);
+            assert_eq!(term.error_ref(), None);
+        }
+        _ => panic!("expected terminal"),
+    }
+
+    let json_missing = serde_json::json!({
+        "run_id": "run-term-opt",
+        "sequence": 7,
+        "state": "succeeded"
+    })
+    .to_string();
+    let event_missing = event_from_data(&json_missing, None);
+    let obs_missing = decode_sse_event(&event_missing).unwrap();
+    match &obs_missing[0] {
+        EngineObservation::Terminal(term) => {
+            assert_eq!(term.reason(), None);
+            assert_eq!(term.error_ref(), None);
+        }
+        _ => panic!("expected terminal"),
+    }
+
+    let json_only_reason = serde_json::json!({
+        "run_id": "run-term-opt",
+        "sequence": 8,
+        "state": "interrupted",
+        "reason": "only reason"
+    })
+    .to_string();
+    let event_only = event_from_data(&json_only_reason, None);
+    let obs_only = decode_sse_event(&event_only).unwrap();
+    match &obs_only[0] {
+        EngineObservation::Terminal(term) => {
+            assert_eq!(term.reason(), Some("only reason"));
+            assert_eq!(term.error_ref(), None);
+        }
+        _ => panic!("expected terminal"),
+    }
+}
+
+#[test]
+fn event_extra_fields_ignored() {
+    let json = serde_json::json!({
+        "run_id": "run-extra-fields",
+        "sequence": 9,
+        "delta": "extra ok",
+        "unknown": 123,
+        "extra": {"nested": true},
+        "another": [1,2,3]
+    })
+    .to_string();
+    let event = event_from_data(&json, Some("eid-extra"));
+    let obs = decode_sse_event(&event).unwrap();
+    assert_eq!(obs.len(), 1);
+    match &obs[0] {
+        EngineObservation::TextDelta(d) => assert_eq!(d.delta(), "extra ok"),
+        _ => panic!("expected text"),
+    }
+
+    let json_term = serde_json::json!({
+        "run_id": "run-extra-term",
+        "sequence": 10,
+        "state": "succeeded",
+        "reason": "ok",
+        "extra_field": "ignore me"
+    })
+    .to_string();
+    let event_term = event_from_data(&json_term, None);
+    let obs_term = decode_sse_event(&event_term).unwrap();
+    assert_eq!(obs_term.len(), 1);
+}
+
+#[test]
+fn event_rejects_malformed_json() {
+    let event = event_from_data("not-json-at-all", None);
+    let err = decode_sse_event(&event).unwrap_err();
+    assert_eq!(err, EventDecodeError::InvalidJson);
+
+    let event2 = event_from_data("{", None);
+    assert_eq!(
+        decode_sse_event(&event2).unwrap_err(),
+        EventDecodeError::InvalidJson
+    );
+
+    let event3 = event_from_data("[1,2,3]", None);
+    assert_eq!(
+        decode_sse_event(&event3).unwrap_err(),
+        EventDecodeError::InvalidJson
+    );
+}
+
+#[test]
+fn event_rejects_missing_and_invalid_run_id() {
+    let json_missing = r#"{"sequence":1,"delta":"hi"}"#;
+    let event = event_from_data(json_missing, None);
+    assert_eq!(
+        decode_sse_event(&event).unwrap_err(),
+        EventDecodeError::InvalidRunId
+    );
+
+    let json_empty = r#"{"run_id":"","sequence":1,"delta":"hi"}"#;
+    let event2 = event_from_data(json_empty, None);
+    assert_eq!(
+        decode_sse_event(&event2).unwrap_err(),
+        EventDecodeError::InvalidRunId
+    );
+
+    let json_space = r#"{"run_id":"has space","sequence":1,"delta":"hi"}"#;
+    let event3 = event_from_data(json_space, None);
+    assert_eq!(
+        decode_sse_event(&event3).unwrap_err(),
+        EventDecodeError::InvalidRunId
+    );
+
+    let json_wrong_type = r#"{"run_id":123,"sequence":1,"delta":"hi"}"#;
+    let event4 = event_from_data(json_wrong_type, None);
+    assert_eq!(
+        decode_sse_event(&event4).unwrap_err(),
+        EventDecodeError::InvalidRunId
+    );
+
+    let json_null = r#"{"run_id":null,"sequence":1,"delta":"hi"}"#;
+    let event5 = event_from_data(json_null, None);
+    assert_eq!(
+        decode_sse_event(&event5).unwrap_err(),
+        EventDecodeError::InvalidRunId
+    );
+}
+
+#[test]
+fn event_rejects_missing_and_invalid_sequence() {
+    let json_missing = r#"{"run_id":"run-seq-missing","delta":"hi"}"#;
+    let event = event_from_data(json_missing, None);
+    assert_eq!(
+        decode_sse_event(&event).unwrap_err(),
+        EventDecodeError::InvalidSequence
+    );
+
+    let json_str = r#"{"run_id":"run-seq-str","sequence":"1","delta":"hi"}"#;
+    let event2 = event_from_data(json_str, None);
+    assert_eq!(
+        decode_sse_event(&event2).unwrap_err(),
+        EventDecodeError::InvalidSequence
+    );
+
+    let json_float = r#"{"run_id":"run-seq-float","sequence":1.5,"delta":"hi"}"#;
+    let event3 = event_from_data(json_float, None);
+    assert_eq!(
+        decode_sse_event(&event3).unwrap_err(),
+        EventDecodeError::InvalidSequence
+    );
+
+    let json_negative = r#"{"run_id":"run-seq-neg","sequence":-1,"delta":"hi"}"#;
+    let event4 = event_from_data(json_negative, None);
+    assert_eq!(
+        decode_sse_event(&event4).unwrap_err(),
+        EventDecodeError::InvalidSequence
+    );
+
+    let json_null = r#"{"run_id":"run-seq-null","sequence":null,"delta":"hi"}"#;
+    let event5 = event_from_data(json_null, None);
+    assert_eq!(
+        decode_sse_event(&event5).unwrap_err(),
+        EventDecodeError::InvalidSequence
+    );
+
+    let json_bool = r#"{"run_id":"run-seq-bool","sequence":true,"delta":"hi"}"#;
+    let event6 = event_from_data(json_bool, None);
+    assert_eq!(
+        decode_sse_event(&event6).unwrap_err(),
+        EventDecodeError::InvalidSequence
+    );
+}
+
+#[test]
+fn event_rejects_both_and_neither_shape() {
+    let json_both = r#"{"run_id":"run-both","sequence":1,"delta":"hi","state":"succeeded"}"#;
+    let event_both = event_from_data(json_both, None);
+    assert_eq!(
+        decode_sse_event(&event_both).unwrap_err(),
+        EventDecodeError::BothShapes
+    );
+
+    let json_neither = r#"{"run_id":"run-neither","sequence":1}"#;
+    let event_neither = event_from_data(json_neither, None);
+    assert_eq!(
+        decode_sse_event(&event_neither).unwrap_err(),
+        EventDecodeError::NeitherShape
+    );
+
+    let json_empty_obj = r#"{"run_id":"run-neither2","sequence":1,"other":123}"#;
+    let event_empty = event_from_data(json_empty_obj, None);
+    assert_eq!(
+        decode_sse_event(&event_empty).unwrap_err(),
+        EventDecodeError::NeitherShape
+    );
+}
+
+#[test]
+fn event_rejects_unknown_state_and_wrong_types() {
+    let json_unknown = r#"{"run_id":"run-unk","sequence":1,"state":"unknown"}"#;
+    let event_unknown = event_from_data(json_unknown, None);
+    assert_eq!(
+        decode_sse_event(&event_unknown).unwrap_err(),
+        EventDecodeError::UnknownState
+    );
+
+    let json_wrong_delta_type = r#"{"run_id":"run-wrong-delta","sequence":1,"delta":123}"#;
+    let event_wd = event_from_data(json_wrong_delta_type, None);
+    assert_eq!(
+        decode_sse_event(&event_wd).unwrap_err(),
+        EventDecodeError::InvalidDelta
+    );
+
+    let json_wrong_state_type = r#"{"run_id":"run-wrong-state","sequence":1,"state":123}"#;
+    let event_ws = event_from_data(json_wrong_state_type, None);
+    assert_eq!(
+        decode_sse_event(&event_ws).unwrap_err(),
+        EventDecodeError::InvalidState
+    );
+
+    let json_null_delta = r#"{"run_id":"run-null-delta","sequence":1,"delta":null}"#;
+    let event_null = event_from_data(json_null_delta, None);
+    assert_eq!(
+        decode_sse_event(&event_null).unwrap_err(),
+        EventDecodeError::InvalidDelta
+    );
+
+    let json_null_state = r#"{"run_id":"run-null-state","sequence":1,"state":null}"#;
+    let event_null_state = event_from_data(json_null_state, None);
+    assert_eq!(
+        decode_sse_event(&event_null_state).unwrap_err(),
+        EventDecodeError::InvalidState
+    );
+}
+
+#[test]
+fn event_rejects_wrong_optional_field_types() {
+    let json_bad_reason =
+        r#"{"run_id":"run-bad-reason","sequence":1,"state":"failed","reason":123}"#;
+    let event = event_from_data(json_bad_reason, None);
+    assert_eq!(
+        decode_sse_event(&event).unwrap_err(),
+        EventDecodeError::InvalidReason
+    );
+
+    let json_bad_error_ref =
+        r#"{"run_id":"run-bad-err","sequence":1,"state":"failed","error_ref":true}"#;
+    let event2 = event_from_data(json_bad_error_ref, None);
+    assert_eq!(
+        decode_sse_event(&event2).unwrap_err(),
+        EventDecodeError::InvalidErrorRef
+    );
+
+    let json_bad_reason_obj =
+        r#"{"run_id":"run-bad-reason2","sequence":1,"state":"failed","reason":{}}"#;
+    let event3 = event_from_data(json_bad_reason_obj, None);
+    assert_eq!(
+        decode_sse_event(&event3).unwrap_err(),
+        EventDecodeError::InvalidReason
+    );
+
+    let json_bad_error_ref_arr =
+        r#"{"run_id":"run-bad-err2","sequence":1,"state":"failed","error_ref":[]}"#;
+    let event4 = event_from_data(json_bad_error_ref_arr, None);
+    assert_eq!(
+        decode_sse_event(&event4).unwrap_err(),
+        EventDecodeError::InvalidErrorRef
+    );
+}
+
+#[test]
+fn event_errors_are_payload_free_and_copy_eq() {
+    let secret = "hunter2-super-secret-xyz-999-Bearer-token";
+    let run_secret = "run-secret-xyz-hunter2";
+    let json = format!(
+        r#"{{"run_id":"{run_secret}","sequence":1,"delta":"{secret}","state":"succeeded"}}"#
+    );
+    let event = event_from_data(&json, Some(secret));
+    let err = decode_sse_event(&event).unwrap_err();
+    let display = format!("{err}");
+    let debug = format!("{err:?}");
+    assert!(!display.contains(secret));
+    assert!(!debug.contains(secret));
+    assert!(!display.contains(run_secret));
+    assert!(!debug.contains(run_secret));
+    assert!(!display.contains("hunter2"));
+    assert!(!debug.contains("hunter2"));
+
+    let secret2 = "another-secret-payload-xyz";
+    let json2 = format!(r#"{{"run_id":"{secret2}","sequence":1,"delta":"hi"}}"#);
+    let event2 = event_from_data(&json2, None);
+    if let Err(e) = decode_sse_event(&event2) {
+        let d = format!("{e}");
+        let dbg = format!("{e:?}");
+        assert!(!d.contains(secret2));
+        assert!(!dbg.contains(secret2));
+    }
+
+    for err in [
+        EventDecodeError::InvalidJson,
+        EventDecodeError::InvalidRunId,
+        EventDecodeError::InvalidSequence,
+        EventDecodeError::BothShapes,
+        EventDecodeError::NeitherShape,
+        EventDecodeError::InvalidDelta,
+        EventDecodeError::InvalidState,
+        EventDecodeError::UnknownState,
+        EventDecodeError::InvalidReason,
+        EventDecodeError::InvalidErrorRef,
+    ] {
+        let a = err;
+        let b = err;
+        assert_eq!(a, b);
+        let c = a;
+        assert_eq!(c, err);
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        assert!(!display.contains(secret));
+        assert!(!debug.contains(secret));
+        assert!(!display.contains("hunter2"));
+        assert!(!debug.contains("hunter2"));
+    }
+}
+
+#[test]
+fn event_sequence_preserved_and_chunk_ids_deterministic() {
+    let json = r#"{"run_id":"run-deterministic","sequence":12345,"delta":"hello"}"#;
+    let event_a = event_from_data(json, Some("stable-id"));
+    let event_b = event_from_data(json, Some("stable-id"));
+    let obs_a = decode_sse_event(&event_a).unwrap();
+    let obs_b = decode_sse_event(&event_b).unwrap();
+    assert_eq!(obs_a, obs_b);
+    match &obs_a[0] {
+        EngineObservation::TextDelta(d) => {
+            assert_eq!(d.sequence(), 12345);
+            assert_eq!(d.chunk_id(), "stable-id:12345:0");
+        }
+        _ => panic!("expected text"),
+    }
+
+    let large = "x".repeat(5000);
+    let json_large = serde_json::json!({
+        "run_id": "run-det-large",
+        "sequence": 77,
+        "delta": large
+    })
+    .to_string();
+    let event_large = event_from_data(&json_large, Some("det-id"));
+    let obs_large = decode_sse_event(&event_large).unwrap();
+    assert_eq!(obs_large.len(), 2);
+    match &obs_large[0] {
+        EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "det-id:77:0"),
+        _ => panic!("expected text"),
+    }
+    match &obs_large[1] {
+        EngineObservation::TextDelta(d) => assert_eq!(d.chunk_id(), "det-id:77:1"),
+        _ => panic!("expected text"),
+    }
+    for obs in &obs_large {
+        match obs {
+            EngineObservation::TextDelta(d) => assert_eq!(d.sequence(), 77),
+            _ => panic!("expected text"),
+        }
+    }
+}
