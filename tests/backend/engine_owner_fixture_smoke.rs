@@ -568,6 +568,11 @@ async fn probe_log(
     let body = read_body_and_eof(&mut stream, prefix, declared, deadline, pid, stage).await?;
     let text =
         std::str::from_utf8(&body).map_err(|_| format!("stage={stage} sse not utf8 pid={pid}"))?;
+    validate_sse_body(text, pid)
+}
+
+fn validate_sse_body(text: &str, pid: u32) -> Result<(), String> {
+    let stage = "prompt_text_then_terminal";
     if !text.starts_with(": keepalive\n") {
         return Err(format!("stage={stage} keepalive missing pid={pid}"));
     }
