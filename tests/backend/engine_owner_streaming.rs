@@ -2502,7 +2502,7 @@ async fn stream_bounded_delivery_and_terminal_receipt() {
     let endpoint = validated_endpoint_for(addr);
     let secret = stream_secret();
     let bounds = stream_bounds();
-    let (tx, mut rx) = mpsc::channel(2);
+    let (tx, mut rx) = mpsc::channel(3);
     let srv = tokio::spawn(async move {
         let (mut s, _) = listener.accept().await.unwrap();
         let _ = read_stream_request(&mut s).await;
@@ -2659,7 +2659,7 @@ async fn stream_wrong_content_type_rejected() {
     let endpoint = validated_endpoint_for(addr);
     let secret = stream_secret();
     let bounds = stream_bounds();
-    let (tx, _) = mpsc::channel(4);
+    let (tx, _rx) = mpsc::channel(4);
     let srv = tokio::spawn(async move {
         let (mut s, _) = listener.accept().await.unwrap();
         let _ = read_stream_request(&mut s).await;
