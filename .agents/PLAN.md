@@ -8,7 +8,7 @@ without allowing architecture work to replace implementation throughput.
 
 The detailed product contracts live in `docs/plans/` and the live checkpoint
 lives in `docs/SESSION_HANDOFF.md`. This plan defines how Fable architects turn
-those contracts into a sustained Muse worker queue.
+those contracts into a sustained external implementation-worker queue.
 
 ## System streams
 
@@ -43,7 +43,7 @@ parallel source packets do not collide.
 
 ## Fifty-worker queue
 
-The target queue contains up to 50 implementation-ready Muse packets. Fable
+The target queue contains up to 50 implementation-ready worker packets. Fable
 maintains it as a dependency graph, not a flat wish list. A packet enters READY
 only when all fields below are concrete:
 
@@ -62,8 +62,9 @@ would be fake, broken, or only administrative. Documentation-only/no-op packets
 do not count toward the 50-worker target unless documentation is itself the
 required product outcome.
 
-Each Fable lane keeps multiple READY packets and supervises four to eight Muse
-workers during a healthy source wave. Sol admits them in small batches across
+Each Fable lane keeps multiple READY packets and supervises four to eight
+implementation workers during a healthy source wave. Sol selects the current
+model tier from `.agents/MODELS.md` and admits workers in small batches across
 disjoint worktrees, resamples machine pressure, and refills as workers finish.
 The backlog may contain 50 while fewer are live due dependencies or host load;
 the handoff must distinguish READY, WORKING, GATING, PUBLISHABLE, BLOCKED, and
@@ -74,7 +75,8 @@ DONE counts.
 At all times, try to keep independent stages occupied:
 
 - Fable freezes downstream contracts.
-- Muse implements READY source packets.
+- External Fable/Opus/Muse/Luna workers implement READY source packets under
+  the strict model cascade.
 - One native gate verifies the highest-priority finished packet.
 - Sol reviews/publishes a different already-green packet.
 - Completed worktrees are locally integrated and retired immediately.
@@ -84,18 +86,35 @@ keeps the stack moving. Do not wait for remote CI before beginning the next
 local packet. Do not let a broad replay stop source-only work in disjoint lanes
 when resource headroom is safe.
 
-## Fable-to-Muse packet cycle
+The target publication pace is one genuine PR every 5–10 minutes. At ten
+minutes without publication, Sol records READY/WORKING/CORRECTING/GATING/
+PUBLISHABLE counts and fixes the smallest actual bottleneck. A long native gate
+may exceed ten minutes only while its process/progress is visible and safe
+source-only workers continue elsewhere. Do not create no-op PRs to fake pace.
+
+Worker churn is mandatory. A PM without a live delegated worker, active review
+of returned bytes, authorized gate, or publication handoff is inactive. Five
+PMs with zero workers is an immediate pipeline failure: stop adding planners or
+reviewers and launch READY contracts through existing lanes. Do not let
+speculative issues or optional review layers deadlock accepted source.
+
+## Fable-to-worker packet cycle
 
 1. Fable reads the applicable plan and nearby production/tests.
 2. Fable freezes the bounded contract and validates it against the current
    local stack tip.
-3. The lane provisions one isolated worktree per independent Muse worker.
-4. Fable launches Muse with the exact model and records live identity/state.
-5. Muse implements, tests, reviews, and commits.
-6. Fable reads the actual final diff/evidence. It accepts, requests a bounded
+3. The lane provisions one isolated worktree per independent implementation
+   worker.
+4. Sol selects Fable, Opus, fresh-available Muse, or external Codex CLI Luna
+   using `.agents/MODELS.md` and the canonical provider-status file.
+5. Fable launches the external worker process and records provider, exact
+   model, CLI, session/PIDs, and live state. Codex collaboration/subagent APIs
+   are never part of this cycle.
+6. The worker implements, tests, reviews, and commits.
+7. Fable reads the actual final diff/evidence. It accepts, requests a bounded
    same-session correction, or rejects with concrete reasons.
-7. Fable returns a publication-ready receipt to Sol.
-8. Sol performs shared integration, proportional final gates, stack publication,
+8. Fable returns a publication-ready receipt to Sol.
+9. Sol performs shared integration, proportional final gates, stack publication,
    local-master fast-forward, retirement, and queue refill.
 
 An architect-only result is not completion. Unless the vertical is explicitly
@@ -117,3 +136,7 @@ cadence stops, use current evidence to classify the bottleneck:
 Fix the identified stage instead of adding more managers. After compaction,
 follow the restart sequence in `AGENTS.md`, reconstruct these counts, resume
 valid sessions, and continue from the exact next action in the handoff.
+
+Muse availability is never rediscovered independently by PMs. The canonical
+`.agents/PROVIDER_STATUS.md` caches the VP's result for one hour. Fresh status
+is accepted as fact; stale status is escalated to the VP for one probe.
