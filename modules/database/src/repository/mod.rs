@@ -34,6 +34,10 @@ pub use run_launch::{
     LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, RunLaunchCredentials,
     RunLaunchError, RunStartKey,
 };
+pub use run_observation::terminal::{
+    CompleteRun, CompleteRunError, CompleteRunOutcome, FailRun, FailRunError, FailRunOutcome,
+    RunErrorCode, RunErrorMessage, TerminalRunReceipt,
+};
 pub use run_observation::{
     AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome, EngineCheckpoint,
     RunBatchReceiptInfo, RunBatchScope, RunObservationError,
