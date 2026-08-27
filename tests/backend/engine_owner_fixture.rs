@@ -1,26 +1,30 @@
 //! TEST-ONLY engine-owner protocol child fixture.
 //!
 //! One ordinary `main` in a `testonly` Bazel `rust_binary`: no libtest
-//! harness, no banner, never shipped. It implements only the six frozen
-//! P0 first-wave scenarios and no P4 session/SSE flows. No product module
-//! is imported; the only non-`std` dependency is the pinned
-//! `@crates//:serde_json` (1.0.151).
+//! harness, no banner, never shipped. It implements seven frozen scenarios:
+//! six P0 first-wave readiness/health cases plus one finite P4 transport
+//! prerequisite `prompt_text_then_terminal` that serves a bounded
+//! `GET /api/health` → `POST /api/session/test-session/prompt` →
+//! `GET /api/experimental/session/test-session/log?after=0&follow=true` SSE
+//! sequence. No product module is imported; the only non-`std` dependency is
+//! the pinned `@crates//:serde_json` (1.0.151).
 //!
 //! Selector is child-only `ARTISAN_ENGINE_OWNER_TEST_SCENARIO` set on the
 //! spawned `Command` environment. Missing, non-Unicode or unknown exits 87
 //! with no stdout. Parent must never mutate global env and must never read
-//! real engine credentials. Health scenarios compare the exact fixture
-//! credential from `ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION` (bounded,
+//! real engine credentials. Health/prompt/log scenarios compare the exact
+//! fixture credential from `ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION` (bounded,
 //! CR/LF-free, supplied by the parent) to the request `Authorization`
 //! header. This is not shipping auth policy.
 //!
 //! Main is dedicated to the stdin lifeline: EOF exits 3; any unexpected
 //! input byte or read error exits 87. A fixture-local 20s watchdog exits
-//! 99 and is always failure. At most one health-server thread plus the
-//! watchdog exists; no thread-per-request, nested processes, temporary
-//! directories, marker files or recursive discovery. Blocking accept/read
-//! cannot prevent main from observing lifeline EOF. OS sockets/threads die
-//! with this test process; parent must observe `Child::wait`.
+//! 99 and is always failure. At most one server thread plus the watchdog
+//! exists; no thread-per-request, nested processes, temporary directories,
+//! marker files or recursive discovery. Connections are sequential with
+//! `Connection: close`. Blocking accept/read cannot prevent main from
+//! observing lifeline EOF. OS sockets/threads die with this test process;
+//! parent must observe `Child::wait`.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -53,6 +57,13 @@ const OVERSIZED_READY_LEN: usize = 257;
 const REQUEST_HEADER_CAP: usize = 4096;
 /// Expected-Authorization cap (synthetic).
 const EXPECTED_AUTH_CAP: usize = 512;
+/// Prompt JSON body cap (bounded, synthetic).
+const PROMPT_BODY_CAP: usize = 4096;
+/// Fixed session id for the P4 flow.
+const FIXTURE_SESSION_ID: &str = "test-session";
+/// Fixed run id for the P4 SSE flow.
+#[cfg(test)]
+const FIXTURE_RUN_ID: &str = "fixture-run";
 /// Watchdog bound.
 const WATCHDOG_SECS: u64 = 20;
 
@@ -84,6 +95,7 @@ fn main() {
         "health_version_reject" => run_ready_ok(INCOMPATIBLE_VERSION),
         "hang_until_lifeline" => run_hang_until_lifeline(),
         "abrupt_child_exit_nonzero" => process::exit(ABRUPT_EXIT_CODE),
+        "prompt_text_then_terminal" => run_prompt_text_then_terminal(),
         _ => process::exit(SCENARIO_REFUSED_EXIT),
     }
 }
@@ -141,6 +153,25 @@ fn run_ready_ok(version: &'static str) -> ! {
         .name("engine-owner-fixture-health".to_owned())
         .spawn(move || health_server_loop(listener, &expected_auth, version))
         .expect("health thread should spawn");
+    wait_for_lifeline_eof();
+}
+
+fn run_prompt_text_then_terminal() -> ! {
+    let expected_auth = get_expected_auth_or_exit();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+    assert!(port != 0, "advertised port must be nonzero");
+    let readiness = build_readiness_line(port);
+    debug_assert!(readiness.len() <= READINESS_LIMIT);
+    {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{readiness}").expect("readiness write");
+        out.flush().expect("readiness flush");
+    }
+    std::thread::Builder::new()
+        .name("engine-owner-fixture-p4".to_owned())
+        .spawn(move || p4_server_loop(&listener, &expected_auth))
+        .expect("p4 thread should spawn");
     wait_for_lifeline_eof();
 }
 
@@ -208,15 +239,23 @@ fn find_crlfcrlf(buf: &[u8]) -> Option<usize> {
 }
 
 fn read_bounded_headers<R: Read>(reader: &mut R) -> Result<Vec<u8>, &'static str> {
+    let (headers, _) = read_bounded_headers_with_remainder(reader)?;
+    Ok(headers)
+}
+
+fn read_bounded_headers_with_remainder<R: Read>(
+    reader: &mut R,
+) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
     let mut buf = Vec::with_capacity(REQUEST_HEADER_CAP + 1);
     let mut tmp = [0_u8; 512];
     loop {
         if let Some(pos) = find_crlfcrlf(&buf) {
-            if pos + 4 > REQUEST_HEADER_CAP {
+            let header_end = pos + 4;
+            if header_end > REQUEST_HEADER_CAP {
                 return Err("header too large");
             }
-            buf.truncate(pos + 4);
-            return Ok(buf);
+            let remainder = buf.split_off(header_end);
+            return Ok((buf, remainder));
         }
         if buf.len() > REQUEST_HEADER_CAP {
             return Err("header too large");
@@ -234,43 +273,40 @@ fn read_bounded_headers<R: Read>(reader: &mut R) -> Result<Vec<u8>, &'static str
     }
 }
 
-fn validate_health_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
-    // Bound raw header length through CRLFCRLF inclusive.
+// ---------------------------------------------------------------------------
+// Strict header parsing shared by health / prompt / log.
+// ---------------------------------------------------------------------------
+
+struct CommonHeaders {
+    method: String,
+    path: String,
+    version: String,
+    content_length: Option<usize>,
+}
+
+fn parse_common_headers(raw: &[u8], expected_auth: &str) -> Result<CommonHeaders, u16> {
     if raw.len() > REQUEST_HEADER_CAP {
         return Err(400);
     }
     let text = std::str::from_utf8(raw).map_err(|_| 400_u16)?;
-    // Split request line and headers.
     let mut lines = text.split("\r\n");
     let request_line = lines.next().ok_or(400_u16)?;
     let mut parts = request_line.split(' ');
     let method = parts.next().ok_or(400_u16)?;
     let path = parts.next().ok_or(400_u16)?;
-    let http_version = parts.next().ok_or(400_u16)?;
+    let version = parts.next().ok_or(400_u16)?;
     if parts.next().is_some() {
         return Err(400);
     }
-    if method != "GET" {
-        return Err(405);
-    }
-    if path != "/api/health" {
-        return Err(404);
-    }
-    if http_version != "HTTP/1.1" {
+    if version != "HTTP/1.1" {
         return Err(400);
     }
-
-    // Synthetic capability checks for expected credential.
-    // If expected credential itself is over cap or contains CR/LF, treat as
-    // unsatisfiable so no request can be authorized (without panicking).
     let expected_ok = expected_auth.len() <= EXPECTED_AUTH_CAP
         && !expected_auth.contains('\r')
         && !expected_auth.contains('\n');
-
     let mut auth_value: Option<String> = None;
     let mut content_length_value: Option<String> = None;
     let mut has_transfer_encoding = false;
-
     for line in lines {
         if line.is_empty() {
             break;
@@ -281,8 +317,6 @@ fn validate_health_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
         if name.is_empty() {
             return Err(400);
         }
-        // Header value must not contain CR/LF (already split) and for
-        // Authorization must be bounded to EXPECTED_AUTH_CAP.
         let name_lower = name.to_ascii_lowercase();
         if name_lower == "authorization" {
             if auth_value.is_some() {
@@ -301,25 +335,21 @@ fn validate_health_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
             if content_length_value.is_some() {
                 return Err(400);
             }
-            // Ambiguous / duplicate is already handled; also reject non-numeric.
             if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(400);
             }
             content_length_value = Some(value.to_owned());
         }
     }
-
     if has_transfer_encoding {
         return Err(400);
     }
-    if let Some(ref v) = content_length_value {
-        // Accept absent or one unambiguous zero. Any nonzero is rejected.
-        if v != "0" {
-            return Err(400);
-        }
-        // Duplicate already rejected; ambiguous already rejected via numeric check.
-    }
-    // Authorization is required for health.
+    let content_length = if let Some(v) = content_length_value {
+        let n: usize = v.parse().map_err(|_| 400_u16)?;
+        Some(n)
+    } else {
+        None
+    };
     let Some(provided) = auth_value else {
         return Err(401);
     };
@@ -329,7 +359,275 @@ fn validate_health_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
     if provided != expected_auth {
         return Err(401);
     }
+    Ok(CommonHeaders {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        version: version.to_owned(),
+        content_length,
+    })
+}
+
+fn validate_health_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
+    let headers = parse_common_headers(raw, expected_auth)?;
+    if headers.method != "GET" {
+        return Err(405);
+    }
+    if headers.path != "/api/health" {
+        return Err(404);
+    }
+    if headers.version != "HTTP/1.1" {
+        return Err(400);
+    }
+    if headers.content_length.is_some_and(|n| n != 0) {
+        return Err(400);
+    }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// P4 prompt + SSE helpers
+// ---------------------------------------------------------------------------
+
+fn prompt_route() -> String {
+    format!("/api/session/{FIXTURE_SESSION_ID}/prompt")
+}
+
+fn log_route() -> String {
+    format!("/api/experimental/session/{FIXTURE_SESSION_ID}/log?after=0&follow=true")
+}
+
+fn prompt_success_body() -> String {
+    r#"{"ok":true}"#.to_owned()
+}
+
+fn sse_body_bytes() -> Vec<u8> {
+    // Deterministic SSE stream:
+    // : keepalive (comment)
+    // blank
+    // multiline data event (sequence 1) split across two data lines
+    // blank
+    // terminal succeeded event (sequence 2)
+    // blank
+    // The two data lines join with \n to valid JSON with run_id fixture-run.
+    let mut s = String::new();
+    s.push_str(": keepalive\n");
+    s.push('\n');
+    s.push_str("data: {\"run_id\":\"fixture-run\",\"sequence\":1,\n");
+    s.push_str("data: \"delta\":\"hello world\"}\n");
+    s.push('\n');
+    s.push_str("data: {\"run_id\":\"fixture-run\",\"sequence\":2,\"state\":\"succeeded\"}\n");
+    s.push('\n');
+    s.into_bytes()
+}
+
+fn prompt_http_response() -> Vec<u8> {
+    let body = prompt_success_body();
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut out = Vec::with_capacity(header.len() + body.len());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
+fn sse_http_response() -> Vec<u8> {
+    let body = sse_body_bytes();
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut out = Vec::with_capacity(header.len() + body.len());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+fn send_prompt_ok(stream: &mut TcpStream) {
+    let bytes = prompt_http_response();
+    let _ = stream.write_all(&bytes);
+    let _ = stream.flush();
+}
+
+fn send_sse_ok(stream: &mut TcpStream) {
+    let bytes = sse_http_response();
+    let _ = stream.write_all(&bytes);
+    let _ = stream.flush();
+}
+
+#[cfg(test)]
+fn read_exact_body<R: Read>(reader: &mut R, declared: usize, cap: usize) -> Result<Vec<u8>, u16> {
+    read_exact_body_with_prefix(reader, declared, cap, Vec::new())
+}
+
+fn read_exact_body_with_prefix<R: Read>(
+    reader: &mut R,
+    declared: usize,
+    cap: usize,
+    mut buf: Vec<u8>,
+) -> Result<Vec<u8>, u16> {
+    if declared > cap || buf.len() > declared {
+        return Err(400);
+    }
+    buf.reserve(declared - buf.len());
+    let mut tmp = [0_u8; 512];
+    let mut remaining = declared - buf.len();
+    while remaining > 0 {
+        let to_read = remaining.min(tmp.len());
+        let n = reader.read(&mut tmp[..to_read]).map_err(|_| 400_u16)?;
+        if n == 0 {
+            return Err(400);
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        remaining -= n;
+        if buf.len() > cap {
+            return Err(400);
+        }
+    }
+    Ok(buf)
+}
+
+fn validate_prompt_json(body: &[u8]) -> Result<(), u16> {
+    if body.len() > PROMPT_BODY_CAP {
+        return Err(400);
+    }
+    let v: serde_json::Value = serde_json::from_slice(body).map_err(|_| 400_u16)?;
+    let obj = v.as_object().ok_or(400_u16)?;
+    let delivery = obj.get("delivery").ok_or(400_u16)?;
+    if !delivery.is_string() {
+        return Err(400);
+    }
+    let files = obj.get("files").ok_or(400_u16)?;
+    let arr = files.as_array().ok_or(400_u16)?;
+    for entry in arr {
+        let eobj = entry.as_object().ok_or(400_u16)?;
+        let uri = eobj.get("uri").ok_or(400_u16)?;
+        if !uri.is_string() {
+            return Err(400);
+        }
+        let name = eobj.get("name").ok_or(400_u16)?;
+        if !name.is_string() {
+            return Err(400);
+        }
+    }
+    let id = obj.get("id").ok_or(400_u16)?;
+    if !id.is_string() {
+        return Err(400);
+    }
+    let resume = obj.get("resume").ok_or(400_u16)?;
+    if !resume.is_boolean() {
+        return Err(400);
+    }
+    let text = obj.get("text").ok_or(400_u16)?;
+    let s = text.as_str().ok_or(400_u16)?;
+    if s.is_empty() {
+        return Err(400);
+    }
+    Ok(())
+}
+
+fn validate_prompt_request(raw: &[u8], expected_auth: &str) -> Result<usize, u16> {
+    let headers = parse_common_headers(raw, expected_auth)?;
+    if headers.method != "POST" {
+        return Err(405);
+    }
+    if headers.path != prompt_route() {
+        return Err(404);
+    }
+    if headers.version != "HTTP/1.1" {
+        return Err(400);
+    }
+    let Some(n) = headers.content_length else {
+        return Err(400);
+    };
+    if n > PROMPT_BODY_CAP {
+        return Err(400);
+    }
+    if n == 0 {
+        return Err(400);
+    }
+    Ok(n)
+}
+
+fn validate_log_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
+    let headers = parse_common_headers(raw, expected_auth)?;
+    if headers.method != "GET" {
+        return Err(405);
+    }
+    if headers.path != log_route() {
+        return Err(404);
+    }
+    if headers.version != "HTTP/1.1" {
+        return Err(400);
+    }
+    if headers.content_length.is_some_and(|n| n != 0) {
+        return Err(400);
+    }
+    Ok(())
+}
+
+fn p4_server_loop(listener: &TcpListener, expected_auth: &str) {
+    // Step 1: GET /api/health
+    let Ok((mut stream, _)) = listener.accept() else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let Ok(raw) = read_bounded_headers(&mut stream) else {
+        send_error(&mut stream, 400);
+        return;
+    };
+    match validate_health_request(&raw, expected_auth) {
+        Ok(()) => send_health_ok(&mut stream, EXPECTED_HEALTH_VERSION),
+        Err(code) => {
+            send_error(&mut stream, code);
+            return;
+        }
+    }
+    drop(stream);
+    // Step 2: POST /api/session/test-session/prompt
+    let Ok((mut stream2, _)) = listener.accept() else {
+        return;
+    };
+    let _ = stream2.set_read_timeout(Some(Duration::from_secs(5)));
+    let Ok((raw2, body_prefix)) = read_bounded_headers_with_remainder(&mut stream2) else {
+        send_error(&mut stream2, 400);
+        return;
+    };
+    let declared = match validate_prompt_request(&raw2, expected_auth) {
+        Ok(n) => n,
+        Err(code) => {
+            send_error(&mut stream2, code);
+            return;
+        }
+    };
+    let body =
+        match read_exact_body_with_prefix(&mut stream2, declared, PROMPT_BODY_CAP, body_prefix) {
+            Ok(b) => b,
+            Err(code) => {
+                send_error(&mut stream2, code);
+                return;
+            }
+        };
+    if validate_prompt_json(&body).is_err() {
+        send_error(&mut stream2, 400);
+        return;
+    }
+    send_prompt_ok(&mut stream2);
+    drop(stream2);
+    // Step 3: GET /api/experimental/session/test-session/log?after=0&follow=true
+    let Ok((mut stream3, _)) = listener.accept() else {
+        return;
+    };
+    let _ = stream3.set_read_timeout(Some(Duration::from_secs(5)));
+    let Ok(raw3) = read_bounded_headers(&mut stream3) else {
+        send_error(&mut stream3, 400);
+        return;
+    };
+    match validate_log_request(&raw3, expected_auth) {
+        Ok(()) => send_sse_ok(&mut stream3),
+        Err(code) => send_error(&mut stream3, code),
+    }
 }
 
 fn health_body(pid: u32, version: &str) -> String {
@@ -376,6 +674,7 @@ fn is_known_scenario(name: &str) -> bool {
             | "health_version_reject"
             | "hang_until_lifeline"
             | "abrupt_child_exit_nonzero"
+            | "prompt_text_then_terminal"
     )
 }
 
@@ -388,6 +687,38 @@ mod tests {
     fn valid_health_raw(auth: &str) -> Vec<u8> {
         format!("GET /api/health HTTP/1.1\r\nAuthorization: {auth}\r\nHost: 127.0.0.1\r\n\r\n")
             .into_bytes()
+    }
+
+    fn valid_prompt_body() -> Vec<u8> {
+        serde_json::json!({
+            "delivery": "test",
+            "files": [{"uri": "file:///tmp/a.txt", "name": "a.txt"}],
+            "id": "fixture-run",
+            "resume": false,
+            "text": "hello"
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn valid_prompt_raw(auth: &str, body: &[u8]) -> Vec<u8> {
+        format!(
+            "POST {path} HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: {}\r\nHost: 127.0.0.1\r\n\r\n",
+            body.len(),
+            path = prompt_route()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect()
+    }
+
+    fn valid_log_raw(auth: &str) -> Vec<u8> {
+        format!(
+            "GET {} HTTP/1.1\r\nAuthorization: {auth}\r\nHost: 127.0.0.1\r\n\r\n",
+            log_route()
+        )
+        .into_bytes()
     }
 
     struct FragmentedReader {
@@ -433,6 +764,7 @@ mod tests {
             "health_version_reject",
             "hang_until_lifeline",
             "abrupt_child_exit_nonzero",
+            "prompt_text_then_terminal",
         ] {
             assert!(is_known_scenario(s), "{s} should be known");
         }
@@ -719,6 +1051,445 @@ mod tests {
         assert_eq!(
             v.get("version").and_then(|x| x.as_str()),
             Some(EXPECTED_HEALTH_VERSION)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P4 prompt + SSE tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn valid_prompt_headers_and_body_accepted() {
+        let auth = "Basic ok";
+        let body = valid_prompt_body();
+        let header = format!(
+            "POST {} HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: {}\r\nHost: 127.0.0.1\r\n\r\n",
+            prompt_route(),
+            body.len()
+        )
+        .into_bytes();
+        // Header validation returns declared length.
+        let declared = validate_prompt_request(&header, auth).unwrap();
+        assert_eq!(declared, body.len());
+        // Body parsing consumes exactly declared bytes.
+        let mut cur = Cursor::new(body.clone());
+        let out = read_exact_body(&mut cur, declared, PROMPT_BODY_CAP).unwrap();
+        assert_eq!(out, body);
+        assert!(validate_prompt_json(&out).is_ok());
+    }
+
+    #[test]
+    fn prompt_headers_and_body_in_same_read_pass() {
+        let auth = "Basic ok";
+        let body = valid_prompt_body();
+        let mut cur = Cursor::new(valid_prompt_raw(auth, &body));
+        let (headers, body_prefix) = read_bounded_headers_with_remainder(&mut cur).unwrap();
+        let declared = validate_prompt_request(&headers, auth).unwrap();
+        let consumed =
+            read_exact_body_with_prefix(&mut cur, declared, PROMPT_BODY_CAP, body_prefix).unwrap();
+        assert_eq!(consumed, body);
+        assert!(validate_prompt_json(&consumed).is_ok());
+    }
+
+    #[test]
+    fn valid_prompt_headers_lowercase_auth() {
+        let auth = "Basic ok";
+        let body = valid_prompt_body();
+        let raw = format!(
+            "POST {} HTTP/1.1\r\nauthorization: {auth}\r\ncontent-length: {}\r\n\r\n",
+            prompt_route(),
+            body.len()
+        )
+        .into_bytes();
+        let declared = validate_prompt_request(&raw, auth).unwrap();
+        assert_eq!(declared, body.len());
+    }
+
+    #[test]
+    fn prompt_wrong_auth_rejected() {
+        let body = valid_prompt_body();
+        let header = format!(
+            "POST {} HTTP/1.1\r\nAuthorization: Basic wrong\r\nContent-Length: {}\r\n\r\n",
+            prompt_route(),
+            body.len()
+        )
+        .into_bytes();
+        assert_eq!(
+            validate_prompt_request(&header, "Basic correct").unwrap_err(),
+            401
+        );
+    }
+
+    #[test]
+    fn prompt_wrong_method_rejected() {
+        let auth = "Basic ok";
+        let body = valid_prompt_body();
+        let raw = format!(
+            "GET {} HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: {}\r\n\r\n",
+            prompt_route(),
+            body.len()
+        )
+        .into_bytes();
+        assert_eq!(validate_prompt_request(&raw, auth).unwrap_err(), 405);
+    }
+
+    #[test]
+    fn prompt_wrong_path_rejected() {
+        let auth = "Basic ok";
+        let body = valid_prompt_body();
+        let raw = format!(
+            "POST /api/session/wrong/prompt HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        assert_eq!(validate_prompt_request(&raw, auth).unwrap_err(), 404);
+    }
+
+    #[test]
+    fn prompt_wrong_version_rejected() {
+        let auth = "Basic ok";
+        let body = valid_prompt_body();
+        let raw = format!(
+            "POST {} HTTP/1.0\r\nAuthorization: {auth}\r\nContent-Length: {}\r\n\r\n",
+            prompt_route(),
+            body.len()
+        )
+        .into_bytes();
+        assert_eq!(validate_prompt_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn prompt_transfer_encoding_rejected() {
+        let auth = "Basic ok";
+        let body = valid_prompt_body();
+        let raw = format!(
+            "POST {} HTTP/1.1\r\nAuthorization: {auth}\r\nTransfer-Encoding: chunked\r\nContent-Length: {}\r\n\r\n",
+            prompt_route(),
+            body.len()
+        )
+        .into_bytes();
+        assert_eq!(validate_prompt_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn prompt_duplicate_content_length_rejected() {
+        let auth = "Basic ok";
+        let raw = format!(
+            "POST {} HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n",
+            prompt_route()
+        )
+        .into_bytes();
+        assert_eq!(validate_prompt_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn prompt_invalid_content_length_rejected() {
+        let auth = "Basic ok";
+        let raw = format!(
+            "POST {} HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: abc\r\n\r\n",
+            prompt_route()
+        )
+        .into_bytes();
+        assert_eq!(validate_prompt_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn prompt_missing_content_length_rejected() {
+        let auth = "Basic ok";
+        let raw = format!(
+            "POST {} HTTP/1.1\r\nAuthorization: {auth}\r\n\r\n",
+            prompt_route()
+        )
+        .into_bytes();
+        assert_eq!(validate_prompt_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn prompt_over_cap_rejected() {
+        let auth = "Basic ok";
+        let big = PROMPT_BODY_CAP + 1;
+        let raw = format!(
+            "POST {} HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: {big}\r\n\r\n",
+            prompt_route()
+        )
+        .into_bytes();
+        assert_eq!(validate_prompt_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn prompt_truncated_body_rejected() {
+        let body = valid_prompt_body();
+        let declared = body.len();
+        // Provide only declared-1 bytes.
+        let mut truncated = body.clone();
+        truncated.pop();
+        let mut cur = Cursor::new(truncated);
+        assert_eq!(
+            read_exact_body(&mut cur, declared, PROMPT_BODY_CAP).unwrap_err(),
+            400
+        );
+    }
+
+    #[test]
+    fn prompt_body_over_cap_rejected_via_read() {
+        let big = vec![b'a'; PROMPT_BODY_CAP + 1];
+        let mut cur = Cursor::new(big);
+        assert_eq!(
+            read_exact_body(&mut cur, PROMPT_BODY_CAP + 1, PROMPT_BODY_CAP).unwrap_err(),
+            400
+        );
+    }
+
+    #[test]
+    fn prompt_malformed_json_rejected() {
+        let bad = b"{not json}".to_vec();
+        assert_eq!(validate_prompt_json(&bad).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn prompt_missing_field_rejected() {
+        let v = serde_json::json!({
+            "delivery": "x",
+            "files": [],
+            "id": "a",
+            "resume": false
+        });
+        assert_eq!(
+            validate_prompt_json(&v.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+    }
+
+    #[test]
+    fn prompt_wrong_field_types_rejected() {
+        // delivery not string
+        let v1 = serde_json::json!({"delivery": 123, "files": [], "id": "a", "resume": false, "text": "hi"});
+        assert_eq!(
+            validate_prompt_json(&v1.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+        // files not array
+        let v2 = serde_json::json!({"delivery": "x", "files": {}, "id": "a", "resume": false, "text": "hi"});
+        assert_eq!(
+            validate_prompt_json(&v2.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+        // files entry missing name
+        let v3 = serde_json::json!({"delivery": "x", "files": [{"uri": "u"}], "id": "a", "resume": false, "text": "hi"});
+        assert_eq!(
+            validate_prompt_json(&v3.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+        // id not string
+        let v4 = serde_json::json!({"delivery": "x", "files": [], "id": 1, "resume": false, "text": "hi"});
+        assert_eq!(
+            validate_prompt_json(&v4.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+        // resume not bool
+        let v5 = serde_json::json!({"delivery": "x", "files": [], "id": "a", "resume": "false", "text": "hi"});
+        assert_eq!(
+            validate_prompt_json(&v5.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+        // text not string
+        let v6 = serde_json::json!({"delivery": "x", "files": [], "id": "a", "resume": false, "text": 123});
+        assert_eq!(
+            validate_prompt_json(&v6.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+        // text empty
+        let v7 = serde_json::json!({"delivery": "x", "files": [], "id": "a", "resume": false, "text": ""});
+        assert_eq!(
+            validate_prompt_json(&v7.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+        // files entry uri not string
+        let v8 = serde_json::json!({"delivery": "x", "files": [{"uri": 1, "name": "n"}], "id": "a", "resume": false, "text": "hi"});
+        assert_eq!(
+            validate_prompt_json(&v8.to_string().into_bytes()).unwrap_err(),
+            400
+        );
+    }
+
+    #[test]
+    fn prompt_success_response_exact_length_and_json() {
+        let bytes = prompt_http_response();
+        let text = String::from_utf8(bytes).unwrap();
+        let (header, body) = text.split_once("\r\n\r\n").unwrap();
+        let cl_line = header
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+            .unwrap();
+        let declared: usize = cl_line.split(':').nth(1).unwrap().trim().parse().unwrap();
+        assert_eq!(declared, body.len());
+        let v: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v.get("ok").and_then(Value::as_bool), Some(true));
+        assert!(
+            header
+                .to_ascii_lowercase()
+                .contains("content-type: application/json")
+        );
+        assert!(header.to_ascii_lowercase().contains("connection: close"));
+    }
+
+    #[test]
+    fn sse_response_exact_length_content_type_and_events() {
+        let bytes = sse_http_response();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        let (header, body) = text.split_once("\r\n\r\n").unwrap();
+        let cl_line = header
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+            .unwrap();
+        let declared: usize = cl_line.split(':').nth(1).unwrap().trim().parse().unwrap();
+        assert_eq!(declared, body.len());
+        assert!(
+            header
+                .to_ascii_lowercase()
+                .contains("content-type: text/event-stream")
+        );
+        assert!(header.to_ascii_lowercase().contains("connection: close"));
+        // Body must start with comment.
+        assert!(body.starts_with(": keepalive\n"));
+        // Exactly two event boundaries = two blank-line-terminated data events.
+        // Count dispatched events by splitting on \n\n and filtering for data:.
+        let events: Vec<&str> = body.split("\n\n").filter(|s| s.contains("data:")).collect();
+        assert_eq!(events.len(), 2, "should have two data events");
+        // First event must be multiline data (two data: lines).
+        let first = events[0];
+        let first_data_lines: Vec<&str> =
+            first.lines().filter(|l| l.starts_with("data:")).collect();
+        assert_eq!(first_data_lines.len(), 2, "first event should be multiline");
+        // Second event single data line.
+        let second = events[1];
+        let second_data_lines: Vec<&str> =
+            second.lines().filter(|l| l.starts_with("data:")).collect();
+        assert_eq!(second_data_lines.len(), 1);
+        // Extract JSON by joining multiline data with \n.
+        let first_json = first_data_lines
+            .iter()
+            .map(|l| {
+                l.strip_prefix("data: ")
+                    .unwrap_or(l.strip_prefix("data:").unwrap_or(""))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let second_json = second_data_lines
+            .iter()
+            .map(|l| {
+                l.strip_prefix("data: ")
+                    .unwrap_or(l.strip_prefix("data:").unwrap_or(""))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let v1: Value = serde_json::from_str(&first_json).unwrap();
+        let v2: Value = serde_json::from_str(&second_json).unwrap();
+        // Stable run id and sequences.
+        assert_eq!(
+            v1.get("run_id").and_then(Value::as_str),
+            Some(FIXTURE_RUN_ID)
+        );
+        assert_eq!(
+            v2.get("run_id").and_then(Value::as_str),
+            Some(FIXTURE_RUN_ID)
+        );
+        assert_eq!(v1.get("sequence").and_then(Value::as_u64), Some(1));
+        assert_eq!(v2.get("sequence").and_then(Value::as_u64), Some(2));
+        // Distinct payloads: first contains delta text, second terminal succeeded.
+        assert!(v1.get("delta").and_then(Value::as_str).is_some());
+        assert_eq!(v2.get("state").and_then(Value::as_str), Some("succeeded"));
+        assert_ne!(first_json, second_json);
+    }
+
+    #[test]
+    fn valid_log_request_accepts_exact_route() {
+        let auth = "Basic ok";
+        let raw = valid_log_raw(auth);
+        assert!(validate_log_request(&raw, auth).is_ok());
+    }
+
+    #[test]
+    fn log_wrong_route_rejected() {
+        let auth = "Basic ok";
+        let raw = format!(
+            "GET /api/experimental/session/{FIXTURE_SESSION_ID}/log?after=1&follow=true HTTP/1.1\r\nAuthorization: {auth}\r\n\r\n"
+        )
+        .into_bytes();
+        assert_eq!(validate_log_request(&raw, auth).unwrap_err(), 404);
+        let raw2 = format!(
+            "GET /api/experimental/session/wrong/log?after=0&follow=true HTTP/1.1\r\nAuthorization: {auth}\r\n\r\n"
+        )
+        .into_bytes();
+        assert_eq!(validate_log_request(&raw2, auth).unwrap_err(), 404);
+    }
+
+    #[test]
+    fn log_wrong_method_rejected() {
+        let auth = "Basic ok";
+        let raw = format!(
+            "POST {} HTTP/1.1\r\nAuthorization: {auth}\r\n\r\n",
+            log_route()
+        )
+        .into_bytes();
+        assert_eq!(validate_log_request(&raw, auth).unwrap_err(), 405);
+    }
+
+    #[test]
+    fn log_wrong_auth_rejected() {
+        let raw = valid_log_raw("Basic wrong");
+        assert_eq!(
+            validate_log_request(&raw, "Basic correct").unwrap_err(),
+            401
+        );
+    }
+
+    #[test]
+    fn log_transfer_encoding_rejected() {
+        let auth = "Basic ok";
+        let raw = format!(
+            "GET {} HTTP/1.1\r\nAuthorization: {auth}\r\nTransfer-Encoding: chunked\r\n\r\n",
+            log_route()
+        )
+        .into_bytes();
+        assert_eq!(validate_log_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn log_duplicate_content_length_rejected() {
+        let auth = "Basic ok";
+        let raw = format!(
+            "GET {} HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+            log_route()
+        )
+        .into_bytes();
+        assert_eq!(validate_log_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn log_nonzero_content_length_rejected() {
+        let auth = "Basic ok";
+        let raw = format!(
+            "GET {} HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: 5\r\n\r\n",
+            log_route()
+        )
+        .into_bytes();
+        assert_eq!(validate_log_request(&raw, auth).unwrap_err(), 400);
+    }
+
+    #[test]
+    fn prompt_trailing_bytes_rejected() {
+        let auth = "Basic ok";
+        let body = valid_prompt_body();
+        let mut with_trailing = valid_prompt_raw(auth, &body);
+        with_trailing.extend_from_slice(b"TRAILING");
+        let mut cur = Cursor::new(with_trailing);
+        let (headers, body_prefix) = read_bounded_headers_with_remainder(&mut cur).unwrap();
+        let declared = validate_prompt_request(&headers, auth).unwrap();
+        assert_eq!(
+            read_exact_body_with_prefix(&mut cur, declared, PROMPT_BODY_CAP, body_prefix)
+                .unwrap_err(),
+            400
         );
     }
 }
