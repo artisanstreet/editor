@@ -300,7 +300,6 @@ struct SeededPair {
     launched: artisan_database::LaunchedRunReceipt,
     bound: artisan_database::BoundRunReceipt,
     context: LaunchContext,
-    identity: LaunchIdentityFixture,
 }
 async fn seeded_pair() -> SeededPair {
     let (database, repository) = memory_database().await;
@@ -348,7 +347,6 @@ async fn seeded_pair() -> SeededPair {
         launched,
         bound,
         context,
-        identity,
     }
 }
 
@@ -578,8 +576,12 @@ async fn first_progress_writes_turn_active_fresh_item_patches_state_checkpoint_r
         .filter(|p| p.patch_id == "patch-turn-activation" || p.patch_id == "patch-assistant-start")
         .collect();
     patches.sort_by_key(|p| p.sequence);
-    assert_eq!(patches.len(), 4); // 2 launch + 2 new =4 total with filter we get 2 new; overall patches total 4
-    let _new_patch_ids: Vec<&str> = patches.iter().map(|p| p.patch_id.as_str()).collect();
+    assert_eq!(patches.len(), 2);
+    let new_patch_ids: Vec<&str> = patches.iter().map(|p| p.patch_id.as_str()).collect();
+    assert_eq!(
+        new_patch_ids,
+        ["patch-turn-activation", "patch-assistant-start"]
+    );
     // Actually total patches after = 4 (2 launch +2 batch)
     assert_eq!(after.patches.len(), 4);
     let seqs: Vec<i64> = after.patches.iter().map(|p| p.sequence).collect();
