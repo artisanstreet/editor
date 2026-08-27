@@ -2797,8 +2797,8 @@ async fn stream_sink_closed_and_backpressure() {
         // keep connection open a bit
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
-    let cancel = CancelHandle::new();
-    let cancel_clone = cancel.clone();
+    let cancel = Arc::new(CancelHandle::new());
+    let cancel_clone = Arc::clone(&cancel);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
         cancel_clone.cancel();
@@ -2891,8 +2891,6 @@ async fn stream_mid_stream_shutdown_cancel_deadline_precedence() {
     let (tx, _rx) = mpsc::channel(4);
     let shutdown = Arc::new(CancelHandle::new());
     let cancel = Arc::new(CancelHandle::new());
-    let s_shutdown = Arc::clone(&shutdown);
-    let s_cancel = Arc::clone(&cancel);
     let srv = tokio::spawn(async move {
         let (mut s, _) = listener.accept().await.unwrap();
         let _ = read_stream_request(&mut s).await;
@@ -2905,9 +2903,25 @@ async fn stream_mid_stream_shutdown_cancel_deadline_precedence() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
     let deadline = Instant::now() + Duration::from_millis(200);
-    let handle = tokio::spawn(follow_stream(StreamInput::new(
-        &endpoint, &secret, &bounds, deadline, &cancel, &shutdown, "sessMid", 0, tx,
-    )));
+    let endpoint_owned = endpoint;
+    let secret_owned = secret;
+    let bounds_owned = bounds;
+    let cancel_owned = Arc::clone(&cancel);
+    let shutdown_owned = Arc::clone(&shutdown);
+    let handle = tokio::spawn(async move {
+        follow_stream(StreamInput::new(
+            &endpoint_owned,
+            &secret_owned,
+            &bounds_owned,
+            deadline,
+            &cancel_owned,
+            &shutdown_owned,
+            "sessMid",
+            0,
+            tx,
+        ))
+        .await
+    });
     tokio::time::sleep(Duration::from_millis(50)).await;
     cancel.cancel();
     shutdown.cancel();
