@@ -13,6 +13,7 @@ pub mod list_row;
 pub mod markdown;
 pub mod motion;
 pub mod progress;
+pub mod scroll_area;
 pub mod separator;
 pub mod skeleton;
 pub mod switch;
