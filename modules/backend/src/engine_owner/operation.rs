@@ -12,6 +12,13 @@
 //! owner shutdown or terminal state, abandonment or explicit cancellation,
 //! the operation deadline, and only then completion sources. Once a cleanup
 //! sequence starts it runs to completion regardless of those signals.
+//!
+//! P3 adds bounded child readiness parsing and a bounded authenticated
+//! HTTP/1 health handshake after spawn. Readiness is exactly one
+//! newline-terminated `{"url": "..."}` record capped via `cap + 1`; health
+//! is one `GET /api/health` with `Basic base64(opencode:<secret>)` over a
+//! Hyper `TokioIo<TcpStream>` connection configured with caller-supplied
+//! `max_headers` and `max_buf_bytes` and body-bounded via `Limited`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,10 +29,13 @@ use tokio::time::Instant;
 use artisan_domain::RunId;
 use artisan_transport::CancelHandle;
 
+use super::http::{HealthError, HealthSecret};
 use super::process::{
     ChildParts, CleanupObservation, LaunchRecipe, LifelineWriter, RetainedEngine, StderrCounter,
     cleanup_after_abort, eventual_wait_once, spawn_engine,
 };
+use super::readiness::ReadinessError;
+use super::{EngineBounds, EngineLimits};
 
 /// Payload-free engine health observable by the facade.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,6 +122,14 @@ pub(crate) enum EngineOperationError {
     GenerationExhausted,
     /// The child could not be spawned.
     SpawnFailed,
+    /// Operating-system entropy for the 32-byte secret failed.
+    EntropyFailed,
+    /// Bounded readiness parsing failed.
+    ReadinessFailed(ReadinessError),
+    /// Bounded health handshake failed.
+    HealthFailed(HealthError),
+    /// Health version was incompatible with the expected value.
+    IncompatibleVersion,
     /// Cleanup could not observe the child's death and no primary cause
     /// existed to preserve alongside it.
     ReapUnresolved,
@@ -216,16 +234,16 @@ pub(crate) async fn run_owner(
     shutdown: Arc<CancelHandle>,
     health: watch::Sender<HealthState>,
     recipe: LaunchRecipe,
-    close_budget: Duration,
-    stderr_cap: usize,
+    limits: EngineLimits,
+    bounds: EngineBounds,
 ) {
     run_owner_with_allocator(
         jobs,
         shutdown,
         health,
         recipe,
-        close_budget,
-        stderr_cap,
+        limits,
+        bounds,
         GenerationAllocator::new(),
     )
     .await;
@@ -237,8 +255,8 @@ pub(crate) async fn run_owner_with_allocator(
     shutdown: Arc<CancelHandle>,
     health: watch::Sender<HealthState>,
     recipe: LaunchRecipe,
-    close_budget: Duration,
-    stderr_cap: usize,
+    limits: EngineLimits,
+    bounds: EngineBounds,
     mut generations: GenerationAllocator,
 ) {
     loop {
@@ -268,7 +286,7 @@ pub(crate) async fn run_owner_with_allocator(
                     return;
                 };
 
-                match execute_job(&recipe, generation, job, &shutdown, close_budget, stderr_cap).await {
+                match execute_job(&recipe, generation, job, &shutdown, limits, bounds).await {
                     Execution::Completed => {}
                     Execution::Quarantined(retained) => {
                         let _ = health.send(HealthState::Quarantined);
@@ -306,14 +324,99 @@ async fn quarantine_tail(jobs: &mut mpsc::Receiver<Job>, retained: Option<Box<Re
     }
 }
 
-/// Executes one admitted job end to end.
+async fn drive_readiness(
+    stdout: &mut tokio::process::ChildStdout,
+    parts: &mut ChildParts,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    max_line: usize,
+) -> Result<super::readiness::ValidatedEndpoint, ReadinessError> {
+    let readiness_fut =
+        super::readiness::read_readiness(stdout, max_line, deadline, shutdown, control);
+    tokio::pin!(readiness_fut);
+    loop {
+        if shutdown.is_cancelled() {
+            break Err(ReadinessError::Shutdown);
+        }
+        if control.is_cancelled() {
+            break Err(ReadinessError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            break Err(ReadinessError::Deadline);
+        }
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => break Err(ReadinessError::Shutdown),
+            () = control.wait() => break Err(ReadinessError::Cancelled),
+            () = tokio::time::sleep_until(deadline) => break Err(ReadinessError::Deadline),
+            event = parts.stderr_counter.pump(), if parts.stderr_counter.state() == super::process::StderrState::Open => {
+                let _ = event;
+            }
+            waited = parts.child.wait() => {
+                match waited {
+                    Ok(_) => break Err(ReadinessError::EofBeforeNewline),
+                    Err(_) => break Err(ReadinessError::Io),
+                }
+            }
+            res = &mut readiness_fut => break res,
+        }
+    }
+}
+
+struct HealthPhaseCtx<'a> {
+    limits: EngineLimits,
+    bounds: EngineBounds,
+    deadline: Instant,
+    control: &'a Arc<CancelHandle>,
+    shutdown: &'a Arc<CancelHandle>,
+}
+
+async fn handle_health_phase(
+    parts: ChildParts,
+    generation: u64,
+    endpoint: super::readiness::ValidatedEndpoint,
+    secret: HealthSecret,
+    respond: oneshot::Sender<LaunchResult>,
+    ctx: HealthPhaseCtx<'_>,
+) -> Execution {
+    let health_deadline = std::cmp::min(
+        Instant::now()
+            .checked_add(ctx.limits.health)
+            .unwrap_or(ctx.deadline),
+        ctx.deadline,
+    );
+    #[cfg(test)]
+    let expected: Option<&str> = Some(super::http::FIXTURE_EXPECTED_VERSION);
+    #[cfg(not(test))]
+    let expected: Option<&str> = None;
+    let health_result = super::http::perform_health(
+        &endpoint,
+        &secret,
+        &ctx.bounds,
+        health_deadline,
+        ctx.control,
+        ctx.shutdown,
+        expected,
+    )
+    .await;
+    match health_result {
+        Ok(_version) => finish_success(parts, generation, respond, ctx.limits.close).await,
+        Err(health_err) => {
+            let mapped = map_health_error(health_err);
+            finish_aborted(parts, mapped, respond, ctx.limits.close).await
+        }
+    }
+}
+
+/// Executes one admitted job end to end, including P3 readiness and health.
 async fn execute_job(
     recipe: &LaunchRecipe,
     generation: u64,
     job: Job,
     shutdown: &Arc<CancelHandle>,
-    close_budget: Duration,
-    stderr_cap: usize,
+    limits: EngineLimits,
+    bounds: EngineBounds,
 ) -> Execution {
     let Job {
         run_id: _,
@@ -321,9 +424,6 @@ async fn execute_job(
         control,
         respond,
     } = job;
-
-    // Pre-execution dispositions were already handled by the owner loop;
-    // re-check before the spawn attempt in case the job waited in the queue.
     if shutdown.is_cancelled() {
         let _ = respond.send(Err(EngineOperationError::Shutdown));
         return Execution::Completed;
@@ -336,113 +436,89 @@ async fn execute_job(
         let _ = respond.send(Err(EngineOperationError::Deadline));
         return Execution::Completed;
     }
-
-    let Ok(spawned) = spawn_engine(recipe) else {
+    let Ok(secret) = HealthSecret::generate() else {
+        let _ = respond.send(Err(EngineOperationError::EntropyFailed));
+        return Execution::Completed;
+    };
+    let Ok(spawned) = spawn_engine(recipe, secret.as_str()) else {
         let _ = respond.send(Err(EngineOperationError::SpawnFailed));
         return Execution::Completed;
     };
     let mut child = spawned;
     let lifeline = LifelineWriter::take(&mut child);
-    let stderr_counter = StderrCounter::new(child.stderr.take(), stderr_cap);
-
-    let parts = ChildParts {
+    let maybe_stdout = child.stdout.take();
+    let stderr_counter = StderrCounter::new(child.stderr.take(), bounds.stderr_cap_bytes);
+    let Some(mut stdout) = maybe_stdout else {
+        let parts = ChildParts {
+            child,
+            lifeline,
+            stdout: None,
+            stderr_counter,
+        };
+        return finish_aborted(
+            parts,
+            EngineOperationError::ReadinessFailed(ReadinessError::Io),
+            respond,
+            limits.close,
+        )
+        .await;
+    };
+    let mut parts = ChildParts {
         child,
         lifeline,
+        stdout: None,
         stderr_counter,
     };
-
-    drive_until_deadline_or_control(
-        parts,
-        generation,
+    let readiness_deadline = std::cmp::min(
+        Instant::now()
+            .checked_add(limits.readiness)
+            .unwrap_or(deadline),
         deadline,
-        &control,
+    );
+    let endpoint_result = drive_readiness(
+        &mut stdout,
+        &mut parts,
+        readiness_deadline,
         shutdown,
-        respond,
-        close_budget,
+        &control,
+        bounds.max_readiness_line,
     )
-    .await
+    .await;
+    let endpoint = match endpoint_result {
+        Ok(ep) => ep,
+        Err(e) => {
+            let mapped = map_readiness_error(e);
+            drop(stdout);
+            return finish_aborted(parts, mapped, respond, limits.close).await;
+        }
+    };
+    drop(stdout);
+    let ctx = HealthPhaseCtx {
+        limits,
+        bounds,
+        deadline,
+        control: &control,
+        shutdown,
+    };
+    handle_health_phase(parts, generation, endpoint, secret, respond, ctx).await
 }
 
-/// Drives one spawned child until its deadline or a control signal fires,
-/// then performs the fixed bounded teardown and settles the response.
-async fn drive_until_deadline_or_control(
-    mut parts: ChildParts,
-    generation: u64,
-    deadline: Instant,
-    control: &Arc<CancelHandle>,
-    shutdown: &Arc<CancelHandle>,
-    respond: oneshot::Sender<LaunchResult>,
-    close_budget: Duration,
-) -> Execution {
-    let mut status: Option<std::io::Result<std::process::ExitStatus>> = None;
-    let mut fault: Option<EngineOperationError> = None;
+fn map_readiness_error(error: ReadinessError) -> EngineOperationError {
+    match error {
+        ReadinessError::Deadline => EngineOperationError::Deadline,
+        ReadinessError::Cancelled => EngineOperationError::Cancelled,
+        ReadinessError::Shutdown => EngineOperationError::Shutdown,
+        other => EngineOperationError::ReadinessFailed(other),
+    }
+}
 
-    loop {
-        if shutdown.is_cancelled() {
-            return finish_aborted(parts, EngineOperationError::Shutdown, respond, close_budget)
-                .await;
-        }
-        if control.is_cancelled() {
-            return finish_aborted(
-                parts,
-                EngineOperationError::Cancelled,
-                respond,
-                close_budget,
-            )
-            .await;
-        }
-        if Instant::now() >= deadline {
-            return finish_aborted(parts, EngineOperationError::Deadline, respond, close_budget)
-                .await;
-        }
-
-        tokio::select! {
-            biased;
-
-            () = shutdown.wait() => {
-                return finish_aborted(parts, EngineOperationError::Shutdown, respond, close_budget).await;
-            }
-            () = control.wait() => {
-                return finish_aborted(parts, EngineOperationError::Cancelled, respond, close_budget).await;
-            }
-            () = tokio::time::sleep_until(deadline) => {
-                return finish_aborted(parts, EngineOperationError::Deadline, respond, close_budget).await;
-            }
-
-            event = parts.stderr_counter.pump(), if parts.stderr_counter.state() == crate::engine_owner::process::StderrState::Open => {
-                match event {
-                    crate::engine_owner::process::StderrEvent::WithinCap
-                    | crate::engine_owner::process::StderrEvent::Closed => {}
-                    crate::engine_owner::process::StderrEvent::CapExceeded
-                    | crate::engine_owner::process::StderrEvent::ReadFailed => {
-                        let _ = event;
-                    }
-                }
-            }
-
-            waited = parts.child.wait(), if status.is_none() => {
-                match waited {
-                    Ok(exit_status) => status = Some(Ok(exit_status)),
-                    Err(_) => fault = Some(EngineOperationError::ReapUnresolved),
-                }
-            }
-        }
-
-        if let Some(Ok(exit_status)) = status.as_ref() {
-            let success = exit_status.success();
-            #[cfg(test)]
-            super::process::note_observed_reap_for_tests(*exit_status);
-            let outcome = LaunchOutcome::ObservedExit {
-                generation,
-                success,
-            };
-            drop(parts);
-            let _ = respond.send(Ok(outcome));
-            return Execution::Completed;
-        }
-        if let Some(cause) = fault.take() {
-            return finish_aborted(parts, cause, respond, close_budget).await;
-        }
+fn map_health_error(error: HealthError) -> EngineOperationError {
+    match error {
+        HealthError::Timeout => EngineOperationError::Deadline,
+        HealthError::Cancelled => EngineOperationError::Cancelled,
+        HealthError::Shutdown => EngineOperationError::Shutdown,
+        HealthError::IncompatibleVersion => EngineOperationError::IncompatibleVersion,
+        other => EngineOperationError::HealthFailed(other),
     }
 }
 
@@ -465,6 +541,77 @@ async fn finish_aborted(
                 primary: Box::new(cause),
             }));
             Execution::Quarantined(engine)
+        }
+    }
+}
+
+/// Graceful teardown after successful readiness and health.
+///
+/// Closes the lifeline and waits up to `close_budget` for the child to
+/// exit. A prompt reap is expected without a kill on the fixture path;
+/// fallback kill preserves quarantine guarantees.
+async fn finish_success(
+    parts: ChildParts,
+    generation: u64,
+    respond: oneshot::Sender<LaunchResult>,
+    close_budget: Duration,
+) -> Execution {
+    let ChildParts {
+        mut child,
+        mut lifeline,
+        stdout: _,
+        stderr_counter,
+    } = parts;
+    lifeline.close();
+    let start = Instant::now();
+    let deadline = start.checked_add(close_budget);
+    let first_wait = match deadline {
+        Some(d) => match tokio::time::timeout_at(d, child.wait()).await {
+            Ok(res) => res,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "close budget elapsed",
+            )),
+        },
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "close budget unrepresentable",
+        )),
+    };
+    if let Ok(status) = first_wait {
+        #[cfg(test)]
+        super::process::note_observed_reap_for_tests(status);
+        let outcome = LaunchOutcome::ObservedExit {
+            generation,
+            success: status.success(),
+        };
+        drop(stderr_counter);
+        drop(lifeline);
+        let _ = respond.send(Ok(outcome));
+        Execution::Completed
+    } else {
+        let parts = ChildParts {
+            child,
+            lifeline,
+            stdout: None,
+            stderr_counter,
+        };
+        match cleanup_after_abort(parts, Duration::ZERO).await {
+            CleanupObservation::ReapedWithoutKill(status)
+            | CleanupObservation::ReapedAfterKill(status) => {
+                #[cfg(test)]
+                super::process::note_observed_reap_for_tests(status);
+                let outcome = LaunchOutcome::ObservedExit {
+                    generation,
+                    success: status.success(),
+                };
+                let _ = respond.send(Ok(outcome));
+                Execution::Completed
+            }
+            CleanupObservation::Retained(engine) => {
+                let _ = respond.send(Err(EngineOperationError::ReapUnresolved));
+                Execution::Quarantined(engine)
+            }
         }
     }
 }

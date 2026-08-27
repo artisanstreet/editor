@@ -32,8 +32,10 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub mod http;
 mod operation;
 mod process;
+pub mod readiness;
 
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_configuration.rs"]
@@ -42,6 +44,10 @@ mod engine_owner_configuration;
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_custody.rs"]
 mod engine_owner_custody;
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_readiness.rs"]
+mod engine_owner_readiness;
 
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
@@ -298,8 +304,6 @@ impl EngineOwner {
             bounds,
         } = config;
         let capacity = bounds.control_capacity;
-        let close_budget = limits.close;
-        let stderr_cap = bounds.stderr_cap_bytes;
         let recipe = LaunchRecipe::Production {
             executable: engine_executable,
         };
@@ -311,8 +315,8 @@ impl EngineOwner {
             Arc::clone(&shutdown),
             health_sender,
             recipe,
-            close_budget,
-            stderr_cap,
+            limits,
+            bounds,
         ));
         Self {
             jobs,
@@ -455,6 +459,11 @@ pub(crate) use operation::GenerationAllocator;
 pub(crate) use process::{reset_witnesses, witness_counts};
 
 #[cfg(test)]
+pub(crate) use http::HealthSecret;
+#[cfg(test)]
+pub(crate) use readiness::ReadinessError;
+
+#[cfg(test)]
 pub(crate) fn start_with_exhausted_allocator_for_tests(
     config: EngineOwnerConfig,
     runtime: &Handle,
@@ -465,8 +474,6 @@ pub(crate) fn start_with_exhausted_allocator_for_tests(
         bounds,
     } = config;
     let capacity = bounds.control_capacity;
-    let close_budget = limits.close;
-    let stderr_cap = bounds.stderr_cap_bytes;
     let recipe = LaunchRecipe::Production {
         executable: engine_executable,
     };
@@ -481,9 +488,43 @@ pub(crate) fn start_with_exhausted_allocator_for_tests(
         Arc::clone(&shutdown),
         health_sender,
         recipe,
-        close_budget,
-        stderr_cap,
+        limits,
+        bounds,
         allocator,
+    ));
+    EngineOwner {
+        jobs,
+        shutdown,
+        health,
+        join,
+        observed_join: None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn start_with_fixture_for_tests(
+    limits: EngineLimits,
+    bounds: EngineBounds,
+    runtime: &Handle,
+    fixture_program: std::path::PathBuf,
+    scenario: &'static str,
+) -> EngineOwner {
+    let capacity = bounds.control_capacity;
+    let recipe = LaunchRecipe::Fixture {
+        program: fixture_program,
+        args: Vec::new(),
+        scenario,
+    };
+    let (jobs, pending) = mpsc::channel::<Job>(capacity);
+    let shutdown = Arc::new(CancelHandle::new());
+    let (health_sender, health) = watch::channel(OwnerHealth::Active);
+    let join = runtime.spawn(operation::run_owner(
+        pending,
+        Arc::clone(&shutdown),
+        health_sender,
+        recipe,
+        limits,
+        bounds,
     ));
     EngineOwner {
         jobs,
