@@ -8,6 +8,7 @@
 //! [`thread_list_selection`].
 
 pub mod attention;
+pub mod command_ranking;
 pub mod composer;
 pub mod conversation_projection;
 pub mod project_picker;
