@@ -12,6 +12,7 @@ pub mod motion;
 pub mod progress;
 pub mod separator;
 pub mod skeleton;
+pub mod switch;
 pub mod theme;
 pub mod tooltip;
 
