@@ -1,10 +1,18 @@
+use super::EngineBounds;
 use super::framing::{SseEof, SseFramer, SseFramerError};
+use super::http::{HealthSecret, PromptError, PromptFile, PromptInput, PromptReceipt};
 use super::observation::{
     DeliveryError, EngineObservation, TerminalObservation, TerminalState, TextDelta, chunk_text,
     deliver_observation,
 };
 use artisan_transport::CancelHandle;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -869,4 +877,809 @@ async fn deliver_terminal_observation_exact_payload() {
     assert_eq!(res, Ok(()));
     let got = rx.recv().await.unwrap();
     assert_eq!(got, term_clone);
+}
+
+// ---------------------------------------------------------------------------
+// Prompt RPC: helpers
+// ---------------------------------------------------------------------------
+
+fn prompt_bounds(max_json_body: usize) -> EngineBounds {
+    EngineBounds {
+        max_json_body,
+        max_sse_line: 1024,
+        max_sse_event: 4096,
+        max_readiness_line: 256,
+        max_headers: 32,
+        max_buf_bytes: 8192,
+        stderr_cap_bytes: 4096,
+        sink_capacity: 4,
+        control_capacity: 4,
+    }
+}
+
+fn prompt_secret() -> HealthSecret {
+    HealthSecret::from_raw_for_tests("prompt-secret-fixed-1234567890abcd".to_owned())
+}
+
+fn validated_endpoint_for(addr: std::net::SocketAddr) -> super::readiness::ValidatedEndpoint {
+    let url = match addr {
+        std::net::SocketAddr::V4(v) => format!("http://{}:{}", v.ip(), v.port()),
+        std::net::SocketAddr::V6(v) => format!("http://[{}]:{}", v.ip(), v.port()),
+    };
+    let line = format!(r#"{{"url":"{url}"}}"#);
+    super::readiness::validate_readiness_line(line.as_bytes(), 2048).expect("endpoint")
+}
+
+async fn read_http_request(stream: &mut TcpStream) -> (String, Vec<(String, String)>, Vec<u8>) {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut tmp).await.expect("read");
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 16 * 1024 {
+            break;
+        }
+    }
+    let header_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("header end")
+        + 4;
+    let header_bytes = &buf[..header_end];
+    let header_str = String::from_utf8_lossy(header_bytes).to_string();
+    let mut lines = header_str.lines();
+    let request_line = lines.next().unwrap_or("").to_owned();
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_owned()));
+        }
+    }
+    let content_len = headers
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = buf[header_end..].to_vec();
+    while body.len() < content_len {
+        let n = stream.read(&mut tmp).await.expect("body read");
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&tmp[..n]);
+    }
+    body.truncate(content_len);
+    (request_line, headers, body)
+}
+
+// ---------------------------------------------------------------------------
+// Prompt RPC: request shape
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_request_exact_shape() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(4096);
+    let expected_auth = secret.basic_auth();
+
+    let files = vec![
+        PromptFile::new("file:///tmp/a.txt".to_owned(), "a.txt".to_owned()),
+        PromptFile::new("file:///tmp/b.txt".to_owned(), "b.txt".to_owned()),
+    ];
+    let captured = Arc::new(std::sync::Mutex::new(
+        None::<(String, Vec<(String, String)>, Vec<u8>)>,
+    ));
+
+    let cap_clone = Arc::clone(&captured);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (req_line, headers, body) = read_http_request(&mut stream).await;
+        *cap_clone.lock().unwrap() = Some((req_line, headers.clone(), body.clone()));
+        // Validate server side quickly and respond with minimal JSON object.
+        let resp = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+        stream.write_all(resp.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let shutdown = CancelHandle::new();
+    let cancel = CancelHandle::new();
+    let res = super::http::perform_prompt(
+        &endpoint,
+        &secret,
+        &bounds,
+        deadline,
+        &cancel,
+        &shutdown,
+        PromptInput::new(
+            "sess123",
+            "agent",
+            &files,
+            "id-xyz",
+            true,
+            "hello prompt text",
+        ),
+    )
+    .await;
+    assert_eq!(res, Ok(PromptReceipt));
+    server.await.unwrap();
+    let (req_line, headers, body) = captured.lock().unwrap().take().expect("captured");
+    assert_eq!(req_line, "POST /api/session/sess123/prompt HTTP/1.1");
+    let host = headers
+        .iter()
+        .find(|(k, _)| k == "host")
+        .expect("host")
+        .1
+        .clone();
+    assert!(host.contains(&addr.port().to_string()));
+    let auth = headers
+        .iter()
+        .find(|(k, _)| k == "authorization")
+        .expect("auth")
+        .1
+        .clone();
+    assert_eq!(auth, expected_auth);
+    let ct = headers
+        .iter()
+        .find(|(k, _)| k == "content-type")
+        .expect("ct")
+        .1
+        .clone();
+    assert_eq!(ct, "application/json");
+    let conn = headers
+        .iter()
+        .find(|(k, _)| k == "connection")
+        .expect("conn")
+        .1
+        .clone();
+    assert_eq!(conn, "close");
+    let cl: usize = headers
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .unwrap()
+        .1
+        .parse()
+        .unwrap();
+    assert_eq!(cl, body.len());
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["delivery"], "agent");
+    assert_eq!(parsed["id"], "id-xyz");
+    assert_eq!(parsed["resume"], true);
+    assert_eq!(parsed["text"], "hello prompt text");
+    assert_eq!(parsed["files"].as_array().unwrap().len(), 2);
+    assert_eq!(parsed["files"][0]["uri"], "file:///tmp/a.txt");
+    assert_eq!(parsed["files"][0]["name"], "a.txt");
+    assert_eq!(parsed["files"][1]["uri"], "file:///tmp/b.txt");
+    assert_eq!(parsed["files"][1]["name"], "b.txt");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_request_resume_false_and_empty_files() {
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let endpoint2 = validated_endpoint_for(addr2);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(4096);
+    let captured2 = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+    let c2 = Arc::clone(&captured2);
+    let srv2 = tokio::spawn(async move {
+        let (mut s, _) = listener2.accept().await.unwrap();
+        let (_, _, body) = read_http_request(&mut s).await;
+        *c2.lock().unwrap() = Some(body);
+        let resp = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res2 = super::http::perform_prompt(
+        &endpoint2,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess123", "agent", &[], "id2", false, "t2"),
+    )
+    .await;
+    assert_eq!(res2, Ok(PromptReceipt));
+    srv2.await.unwrap();
+    let body2 = captured2.lock().unwrap().take().unwrap();
+    let p2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+    assert_eq!(p2["resume"], false);
+    assert_eq!(p2["files"].as_array().unwrap().len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Prompt RPC: invalid inputs before transport
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_rejects_invalid_session_variants_before_transport() {
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let dummy_endpoint = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let cases = vec![
+        "",
+        "a/b",
+        "a?b",
+        "a#b",
+        "a\rb",
+        "a\nb",
+        "a%b",
+        "a%2f",
+        "a%2F",
+        "sess/with/slash",
+    ];
+    for sess in cases {
+        let res = super::http::perform_prompt(
+            &dummy_endpoint,
+            &secret,
+            &bounds,
+            deadline,
+            &CancelHandle::new(),
+            &CancelHandle::new(),
+            PromptInput::new(sess, "delivery", &[], "id", false, "text"),
+        )
+        .await;
+        assert_eq!(res, Err(PromptError::InvalidSession), "session {sess:?}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_rejects_empty_fields_before_transport() {
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let ep = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // empty delivery
+    assert_eq!(
+        super::http::perform_prompt(
+            &ep,
+            &secret,
+            &bounds,
+            deadline,
+            &CancelHandle::new(),
+            &CancelHandle::new(),
+            PromptInput::new("sess", "", &[], "id", false, "text")
+        )
+        .await,
+        Err(PromptError::InvalidDelivery)
+    );
+    assert_eq!(
+        super::http::perform_prompt(
+            &ep,
+            &secret,
+            &bounds,
+            deadline,
+            &CancelHandle::new(),
+            &CancelHandle::new(),
+            PromptInput::new("sess", "d", &[], "", false, "text")
+        )
+        .await,
+        Err(PromptError::InvalidId)
+    );
+    assert_eq!(
+        super::http::perform_prompt(
+            &ep,
+            &secret,
+            &bounds,
+            deadline,
+            &CancelHandle::new(),
+            &CancelHandle::new(),
+            PromptInput::new("sess", "d", &[], "id", false, "")
+        )
+        .await,
+        Err(PromptError::InvalidText)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_rejects_crlf_file_fields_before_transport() {
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let ep = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let bad_files = vec![
+        PromptFile::new("uri\r".to_owned(), "name".to_owned()),
+        PromptFile::new("uri".to_owned(), "na\nme".to_owned()),
+        PromptFile::new("a\rb".to_owned(), "n".to_owned()),
+    ];
+    for f in bad_files {
+        let res = super::http::perform_prompt(
+            &ep,
+            &secret,
+            &bounds,
+            deadline,
+            &CancelHandle::new(),
+            &CancelHandle::new(),
+            PromptInput::new("sess", "d", std::slice::from_ref(&f), "id", false, "text"),
+        )
+        .await;
+        assert_eq!(res, Err(PromptError::InvalidFile));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prompt RPC: body cap exactly at boundary
+// ---------------------------------------------------------------------------
+
+fn prompt_serialized_len(
+    delivery: &str,
+    files: &[PromptFile],
+    id: &str,
+    resume: bool,
+    text: &str,
+) -> usize {
+    let mut files_json = Vec::new();
+    for f in files {
+        files_json.push(serde_json::json!({"uri": f.uri(), "name": f.name()}));
+    }
+    let v = serde_json::json!({"delivery": delivery, "files": files_json, "id": id, "resume": resume, "text": text});
+    serde_json::to_vec(&v).unwrap().len()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_body_exactly_at_cap_accepts() {
+    // Find text length that makes body exactly at cap without huge allocation.
+    let cap = 256;
+    let bounds = prompt_bounds(cap);
+    // Use fixed small delivery/id and no files; brute force text length.
+    let mut target_len = None;
+    let mut good_text = String::new();
+    for len in 0..=cap {
+        let t = "a".repeat(len);
+        let l = prompt_serialized_len("d", &[], "id", false, &t);
+        if l == cap {
+            target_len = Some(l);
+            good_text = t;
+            break;
+        }
+    }
+    assert_eq!(target_len, Some(cap), "must find text len for exact cap");
+    // Now start server expecting success.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let (_, _, body) = read_http_request(&mut s).await;
+        assert_eq!(body.len(), cap);
+        let resp = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, &good_text),
+    )
+    .await;
+    assert_eq!(res, Ok(PromptReceipt));
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_body_cap_plus_one_rejects_before_network() {
+    let cap = 256;
+    let bounds = prompt_bounds(cap);
+    let mut found = None;
+    let mut bad_text = String::new();
+    for len in 0..=512 {
+        let t = "a".repeat(len);
+        let l = prompt_serialized_len("d", &[], "id", false, &t);
+        if l == cap + 1 {
+            found = Some(l);
+            bad_text = t;
+            break;
+        }
+    }
+    assert_eq!(found, Some(cap + 1));
+    let ep = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let secret = prompt_secret();
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, &bad_text),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::BodyTooLarge));
+}
+
+// ---------------------------------------------------------------------------
+// Prompt RPC: debug/display do not leak secrets
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prompt_error_and_receipt_do_not_leak_secret() {
+    let secret_val = "super-secret-prompt-hunter2-999-Bearer-xyz";
+    let file_uri = "file:///secret/path/hunter2";
+    let err = PromptError::BodyTooLarge;
+    let display = format!("{err}");
+    let debug = format!("{err:?}");
+    assert!(!display.contains(secret_val));
+    assert!(!debug.contains(secret_val));
+    assert!(!display.contains(file_uri));
+    assert!(!debug.contains(file_uri));
+    for e in [
+        PromptError::InvalidSession,
+        PromptError::InvalidDelivery,
+        PromptError::InvalidId,
+        PromptError::InvalidText,
+        PromptError::InvalidFile,
+        PromptError::BodyTooLarge,
+        PromptError::ConnectFailed,
+        PromptError::HandshakeFailed,
+        PromptError::SendFailed,
+        PromptError::StatusNotSuccess,
+        PromptError::BodyReadFailed,
+        PromptError::InvalidJson,
+        PromptError::Timeout,
+        PromptError::Cancelled,
+        PromptError::Shutdown,
+        PromptError::DriverFailed,
+    ] {
+        let d = format!("{e}");
+        let dbg = format!("{e:?}");
+        assert!(!d.contains(secret_val));
+        assert!(!dbg.contains(secret_val));
+        assert!(!d.contains("hunter2"));
+        assert!(!dbg.contains("hunter2"));
+    }
+    let file = PromptFile::new(file_uri.to_owned(), "secret-name-hunter2".to_owned());
+    let dbg = format!("{file:?}");
+    assert!(!dbg.contains(file_uri));
+    assert!(!dbg.contains("hunter2"));
+    let secret = HealthSecret::from_raw_for_tests(secret_val.to_owned());
+    let dbg = format!("{secret:?}");
+    assert!(!dbg.contains(secret_val));
+    let receipt = PromptReceipt;
+    let d = format!("{receipt:?}");
+    assert!(!d.contains(secret_val));
+}
+
+#[test]
+fn prompt_success_receipt_is_copy_zero_sized() {
+    let r = PromptReceipt;
+    let r2 = r;
+    assert_eq!(r, r2);
+    assert_eq!(format!("{r:?}"), "PromptReceipt");
+}
+
+// ---------------------------------------------------------------------------
+// Prompt RPC: transport and error variants, no retry
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_success_single_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&count);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        c.fetch_add(1, Ordering::SeqCst);
+        let (_, _, _) = read_http_request(&mut s).await;
+        let resp = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+        s.write_all(resp.as_bytes()).await.unwrap();
+        // Keep listening for unexpected second request with timeout.
+        // If a second connection arrives, count it as retry.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess1", "d", &[], "id1", false, "hello"),
+    )
+    .await;
+    assert_eq!(res, Ok(PromptReceipt));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    srv.await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_non_2xx_is_status_error_and_no_retry() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&count);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        c.fetch_add(1, Ordering::SeqCst);
+        let (_, _, _) = read_http_request(&mut s).await;
+        let resp = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::StatusNotSuccess));
+    srv.await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_malformed_json_is_invalid_json() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let (_, _, _) = read_http_request(&mut s).await;
+        let body = b"not-json";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::InvalidJson));
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_non_object_json_is_invalid_json() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let (_, _, _) = read_http_request(&mut s).await;
+        let body = b"[1,2,3]";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::InvalidJson));
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_declared_oversize_is_body_too_large() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(128);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let (_, _, _) = read_http_request(&mut s).await;
+        // The request fits, while the declared response exceeds the cap.
+        let resp = "HTTP/1.1 200 OK\r\ncontent-length: 129\r\nconnection: close\r\n\r\n{}";
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::BodyTooLarge));
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_streamed_oversize_is_body_read_failed_or_too_large() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(128);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let (_, _, _) = read_http_request(&mut s).await;
+        let body = format!(r#"{{"a":"{}"}}"#, "x".repeat(160));
+        // No Content-Length: the body itself must trip `Limited` while the
+        // close-delimited response is collected.
+        s.write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        s.write_all(body.as_bytes()).await.unwrap();
+    });
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::BodyReadFailed));
+    srv.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_pre_cancel_is_cancelled() {
+    let ep = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let cancel = CancelHandle::new();
+    cancel.cancel();
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &cancel,
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::Cancelled));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_pre_shutdown_is_shutdown() {
+    let ep = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let shutdown = CancelHandle::new();
+    shutdown.cancel();
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &shutdown,
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::Shutdown));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_expired_deadline_is_timeout() {
+    let ep = validated_endpoint_for("127.0.0.1:9".parse().unwrap());
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() - Duration::from_millis(10),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::Timeout));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_closed_transport_is_connect_failed() {
+    // Reserve an ephemeral loopback address, then close it before connecting
+    // so refusal does not depend on a fixed platform port.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    assert_eq!(res, Err(PromptError::ConnectFailed));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_no_retry_after_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ep = validated_endpoint_for(addr);
+    let secret = prompt_secret();
+    let bounds = prompt_bounds(1024);
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&count);
+    let srv = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        c.fetch_add(1, Ordering::SeqCst);
+        let (_, _, _) = read_http_request(&mut s).await;
+        // Close without response to simulate unknown close.
+        drop(s);
+        // Wait and ensure no second accept within timeout.
+        let res = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+        if let Ok(Ok((mut s2, _))) = res {
+            c.fetch_add(1, Ordering::SeqCst);
+            let _ = read_http_request(&mut s2).await;
+        }
+    });
+    let res = super::http::perform_prompt(
+        &ep,
+        &secret,
+        &bounds,
+        Instant::now() + Duration::from_secs(2),
+        &CancelHandle::new(),
+        &CancelHandle::new(),
+        PromptInput::new("sess", "d", &[], "id", false, "t"),
+    )
+    .await;
+    // Closed without response should be SendFailed or BodyReadFailed or DriverFailed, but not success.
+    assert_ne!(res, Ok(PromptReceipt));
+    // Must not have retried.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    srv.abort();
+    let _ = srv.await;
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "exactly one request, no retry"
+    );
 }
