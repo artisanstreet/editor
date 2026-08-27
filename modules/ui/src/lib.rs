@@ -16,6 +16,7 @@ pub mod motion;
 pub mod progress;
 pub mod scroll_area;
 pub mod separator;
+pub mod shimmer_text;
 pub mod skeleton;
 pub mod switch;
 pub mod tabs;
