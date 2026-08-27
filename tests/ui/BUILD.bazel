@@ -169,6 +169,20 @@ rust_test(
 )
 
 rust_test(
+    name = "lip_card_test",
+    srcs = ["lip_card.rs"],
+    crate_name = "lip_card_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "avatar_test",
     srcs = ["avatar.rs"],
     crate_name = "avatar_test",

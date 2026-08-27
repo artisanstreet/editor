@@ -8,6 +8,7 @@ pub mod card;
 pub mod collapsible;
 pub mod icon;
 pub mod input_state;
+pub mod lip_card;
 pub mod list_row;
 pub mod markdown;
 pub mod motion;
