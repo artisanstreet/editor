@@ -78,6 +78,10 @@ name = "run_observation"
 path = "../../tests/database/run_observation.rs"
 
 [[test]]
+name = "run_terminal"
+path = "../../tests/database/run_terminal.rs"
+
+[[test]]
 name = "project_catalog"
 path = "../../tests/database/project_catalog.rs"
 
