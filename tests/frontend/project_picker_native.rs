@@ -27,11 +27,13 @@ use artisan_frontend::project_picker::{
     PickerRow, ProjectOption, ProjectPickerAction, ProjectPickerView,
 };
 use artisan_frontend::proof::{ProofSurface, bind_proof_actions};
-use artisan_ui::theme::ThemeMode;
+use artisan_ui::list_row::{ListRowGeometry, ListRowStyle, ListRowTone};
+use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    AppContext as _, Bounds, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyBinding, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ParentElement as _, Pixels, Render,
-    Styled as _, TestAppContext, VisualTestContext, Window, actions, div, point, px, size,
+    AppContext as _, Bounds, Context, Entity, FocusHandle, FontWeight, InteractiveElement as _,
+    IntoElement, KeyBinding, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ParentElement as _,
+    Pixels, Render, Styled as _, TestAppContext, VisualTestContext, Window, actions, div, point,
+    px, size,
 };
 
 /// Selector painted by the leaf on its trigger row.
@@ -50,6 +52,20 @@ const ROW_MID_SELECTOR: &str = "artisan-project-picker-row-128";
 const ROW_LAST_SELECTOR: &str = "artisan-project-picker-row-255";
 /// Selector of the distinct final "New project" row.
 const ROW_NEW_SELECTOR: &str = "artisan-project-picker-row-new";
+/// Selector of the trailing chosen check inside project row 0 (absent unless
+/// row 0 is the current project).
+const ROW_FIRST_CHECK_SELECTOR: &str = "artisan-project-picker-row-0-check";
+/// Selector of the leading identity dot inside project row 1.
+const ROW_ONE_DOT_SELECTOR: &str = "artisan-project-picker-row-1-dot";
+/// Selector of the trailing chosen check inside project row 1.
+const ROW_ONE_CHECK_SELECTOR: &str = "artisan-project-picker-row-1-check";
+/// Selector of project row 2 (the long-named current row of the truncation
+/// fixture).
+const ROW_TWO_SELECTOR: &str = "artisan-project-picker-row-2";
+/// Selector of the leading identity dot inside project row 2.
+const ROW_TWO_DOT_SELECTOR: &str = "artisan-project-picker-row-2-dot";
+/// Selector of the trailing chosen check inside project row 2.
+const ROW_TWO_CHECK_SELECTOR: &str = "artisan-project-picker-row-2-check";
 
 // Geometry-fixture-only traversal actions; the REAL host route under
 // `proof::NextTabStop`/`proof::PreviousTabStop` is exercised separately
@@ -1100,4 +1116,140 @@ fn ctrl_released_first_close_fences_its_plain_up_and_still_opens_fresh(cx: &mut 
             Some(PickerRow::Project(1)),
         );
     });
+}
+
+/// The shared Menu recipe the painted project rows must carry, resolved
+/// independently of the picker's own derivation: dark mode (the fixture's
+/// theme), foreground tone, regular title weight — the picker's fixed row
+/// configuration.
+fn resolved_menu_row_style() -> ListRowStyle {
+    ListRowStyle::resolve(
+        ArtisanTheme::for_mode(ThemeMode::Dark),
+        ListRowGeometry::Menu,
+        ListRowTone::Foreground,
+        FontWeight::NORMAL,
+    )
+}
+
+#[gpui::test]
+fn project_rows_paint_the_shared_menu_list_row_recipe(cx: &mut TestAppContext) {
+    bind_fixture_tab_actions(cx);
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        PickerHost::new(
+            window,
+            cx,
+            (0..3).map(catalog_entry).collect(),
+            Some(catalog_entry_id(1)),
+            240.0,
+        )
+    });
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.run_until_parked();
+
+    open_menu_from_keyboard(&host, cx);
+
+    let style = resolved_menu_row_style();
+    let expected_height = style.vertical_padding * 2.0 + style.title_line_height;
+    assert_eq!(
+        expected_height,
+        px(32.0),
+        "the audited Menu recipe row is 6 + 20 + 6 = 32 px tall"
+    );
+    assert_eq!(
+        style.horizontal_padding,
+        px(8.0),
+        "the audited Menu recipe keeps the 8 px horizontal inset"
+    );
+
+    // Both a plain row and the selected (checked) row carry the recipe
+    // height: two paddings around exactly one explicit title line box.
+    let menu = painted_bounds(cx, MENU_SELECTOR);
+    let plain_row = painted_bounds(cx, ROW_FIRST_SELECTOR);
+    let selected_row = painted_bounds(cx, ROW_ONE_SELECTOR);
+    assert_visible_within(selected_row, menu, "current row on open");
+    for (row, label) in [(plain_row, "plain row"), (selected_row, "selected row")] {
+        assert!(
+            (row.size.height - expected_height).abs() < px(0.6),
+            "{label} must be exactly one recipe row tall: {row:?}"
+        );
+    }
+
+    // The leading identity dot sits at the recipe's 8 px horizontal inset,
+    // vertically centered by the row.
+    let dot = painted_bounds(cx, ROW_ONE_DOT_SELECTOR);
+    assert!(
+        (dot.origin.x - (selected_row.origin.x + style.horizontal_padding)).abs() < px(0.6),
+        "dot must sit at the recipe's padded edge: dot {dot:?} row {selected_row:?}"
+    );
+    let dot_inset_y = dot.origin.y - selected_row.origin.y;
+    let centered_y = (selected_row.size.height - dot.size.height) / 2.0;
+    assert!(
+        (dot_inset_y - centered_y).abs() < px(0.6),
+        "dot must be vertically centered: dot {dot:?} row {selected_row:?}"
+    );
+
+    // The chosen check anchors the trailing padded edge of the selected row
+    // and paints nowhere else.
+    let check = painted_bounds(cx, ROW_ONE_CHECK_SELECTOR);
+    assert!(
+        ((selected_row.right() - check.right()) - style.horizontal_padding).abs() < px(0.6),
+        "check must anchor the trailing padded edge: check {check:?} row {selected_row:?}"
+    );
+    assert!(
+        cx.debug_bounds(ROW_FIRST_CHECK_SELECTOR).is_none(),
+        "a non-current row must paint no chosen check"
+    );
+}
+
+#[gpui::test]
+fn absurdly_long_project_name_stays_bounded_with_slots_intact(cx: &mut TestAppContext) {
+    bind_fixture_tab_actions(cx);
+    let long_id = ProjectId::parse("project-long").expect("catalog ids are valid");
+    let long_name = "An absurdly long project display name that cannot fit ".repeat(8);
+    let mut projects: Vec<ProjectOption> = (0..2).map(catalog_entry).collect();
+    projects.push(ProjectOption {
+        id: long_id.clone(),
+        name: long_name.into(),
+    });
+    let (host, cx) = cx
+        .add_window_view(|window, cx| PickerHost::new(window, cx, projects, Some(long_id), 240.0));
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.run_until_parked();
+
+    open_menu_from_keyboard(&host, cx);
+
+    // The long-named current row stays fully inside the menu panel: the
+    // center line truncates instead of widening the row, and stays on one
+    // explicit line box instead of wrapping.
+    let style = resolved_menu_row_style();
+    let menu = painted_bounds(cx, MENU_SELECTOR);
+    let row = painted_bounds(cx, ROW_TWO_SELECTOR);
+    assert_visible_within(row, menu, "long-named current row");
+    let expected_height = style.vertical_padding * 2.0 + style.title_line_height;
+    assert!(
+        (row.size.height - expected_height).abs() < px(0.6),
+        "the truncated title must stay on one 20 px line box: {row:?}"
+    );
+
+    // The leading dot refused to shrink and holds the padded edge...
+    let dot = painted_bounds(cx, ROW_TWO_DOT_SELECTOR);
+    assert!(
+        (dot.size.width - px(8.0)).abs() < px(0.6),
+        "width pressure must not shrink the identity dot: {dot:?}"
+    );
+    assert!(
+        (dot.origin.x - (row.origin.x + style.horizontal_padding)).abs() < px(0.6),
+        "dot must hold the leading padded edge under pressure: {dot:?} row {row:?}"
+    );
+
+    // ...and the chosen check stays intact at the trailing padded edge.
+    let check = painted_bounds(cx, ROW_TWO_CHECK_SELECTOR);
+    assert!(
+        ((row.right() - check.right()) - style.horizontal_padding).abs() < px(0.6),
+        "check must hold the trailing padded edge under pressure: {check:?} row {row:?}"
+    );
+    assert!(
+        check.size.width > px(0.6),
+        "the check glyph must keep real painted width: {check:?}"
+    );
 }

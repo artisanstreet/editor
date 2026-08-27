@@ -78,10 +78,13 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use artisan_domain::ProjectId;
+use artisan_ui::list_row::{
+    ListRowContent, ListRowGeometry, ListRowSlots, ListRowStyle, ListRowTone, list_row,
+};
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    AnyElement, ClickEvent, Context, Corner, Div, FocusHandle, InteractiveElement as _,
+    AnyElement, ClickEvent, Context, Corner, Div, FocusHandle, FontWeight, InteractiveElement as _,
     KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
     SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _, Window, anchored,
     canvas, deferred, div, point, prelude::FluentBuilder as _, prelude::IntoElement, px,
@@ -962,37 +965,57 @@ impl ProjectPickerView {
         )
     }
 
+    /// Renders one attached-project row. Presentation comes entirely from the
+    /// shared `artisan_ui::list_row` Menu recipe: the identity dot rides the
+    /// leading slot, the name is the one-line truncated center, and the
+    /// chosen ✓ check rides the trailing slot only while selected.
+    /// Interaction stays caller-owned through [`Self::selectable_row`].
     fn render_project_row(&self, index: usize, cx: &Context<Self>) -> Stateful<Div> {
         let option = &self.state.projects()[index];
         let selected = self
             .state
             .current_id()
             .is_some_and(|current| current == &option.id);
-        let foreground = self.theme.colors.foreground.to_paint();
 
-        self.render_selectable_row(PickerRow::Project(index), cx)
-            .gap(px(10.0))
-            .child(self.identity_dot())
-            .child(
+        let style = ListRowStyle::resolve(
+            self.theme,
+            ListRowGeometry::Menu,
+            ListRowTone::Foreground,
+            FontWeight::NORMAL,
+        );
+        let dot_selector = format!("{ROW_SELECTOR_PREFIX}-{index}-dot");
+        let mut slots = ListRowSlots::new().leading(
+            self.identity_dot()
+                .debug_selector(move || dot_selector.clone()),
+        );
+        if selected {
+            let check_selector = format!("{ROW_SELECTOR_PREFIX}-{index}-check");
+            slots = slots.trailing(
                 div()
-                    .flex_1()
-                    .text_size(px(14.0))
-                    .text_color(foreground)
-                    .child(option.name.clone()),
-            )
-            .when(selected, |entry| {
-                entry.child(
-                    div()
-                        .text_size(px(16.0))
-                        .text_color(self.theme.colors.muted_foreground.to_paint())
-                        .child("✓"),
-                )
-            })
+                    .text_size(px(16.0))
+                    .line_height(style.title_line_height)
+                    .text_color(self.theme.colors.muted_foreground.to_paint())
+                    .debug_selector(move || check_selector.clone())
+                    .child("✓"),
+            );
+        }
+
+        let presentation = list_row(style, ListRowContent::one_line(option.name.clone()), slots);
+        self.selectable_row(presentation, PickerRow::Project(index), cx)
     }
 
+    /// Renders the distinct final action row. Its presentation deliberately
+    /// keeps the pre-recipe hand-rolled construction: only the reached
+    /// project rows adopt the shared `list_row` primitive in this packet.
     fn render_new_project_row(&self, cx: &Context<Self>) -> Stateful<Div> {
-        self.render_selectable_row(PickerRow::NewProject, cx)
+        let presentation = div()
+            .flex()
+            .items_center()
+            .w_full()
             .gap(px(10.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(12.0))
             .child(
                 div()
                     .size(px(24.0))
@@ -1006,16 +1029,27 @@ impl ProjectPickerView {
                     .text_size(px(14.0))
                     .text_color(self.theme.colors.foreground.to_paint())
                     .child(NEW_PROJECT_ROW_LABEL),
-            )
+            );
+        self.selectable_row(presentation, PickerRow::NewProject, cx)
     }
 
-    fn render_selectable_row(&self, row: PickerRow, cx: &Context<Self>) -> Stateful<Div> {
+    /// Attaches the caller-owned interaction contract onto a finished row
+    /// presentation: the stable `project-row-*` id, click activation through
+    /// [`Self::choose_row`], the row debug selector, and the highlight paint
+    /// — chained after the presentation so its values win over any recipe
+    /// defaults.
+    fn selectable_row(
+        &self,
+        presentation: Div,
+        row: PickerRow,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         let highlighted = self.state.highlighted_row() == Some(row);
         let selector = match row {
             PickerRow::Project(index) => format!("{ROW_SELECTOR_PREFIX}-{index}"),
             PickerRow::NewProject => format!("{ROW_SELECTOR_PREFIX}-new"),
         };
-        div()
+        presentation
             .id(match row {
                 PickerRow::Project(index) => SharedString::from(format!("project-row-{index}")),
                 PickerRow::NewProject => SharedString::from("project-row-new"),
@@ -1025,12 +1059,6 @@ impl ProjectPickerView {
                     view.choose_row(row, window, context);
                 }),
             )
-            .flex()
-            .items_center()
-            .w_full()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(12.0))
             .debug_selector(move || selector.clone())
             .when(highlighted, |entry| {
                 entry.bg(self.theme.colors.accent.to_paint())
