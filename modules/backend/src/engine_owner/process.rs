@@ -8,9 +8,13 @@
 //! environment (`env_clear`), documenting the refusal to inherit ambient
 //! state; production argv and environment are a separately frozen later
 //! contract and no public API can reach a production spawn in this packet.
-//! No detached per-pipe reader tasks exist; the owner interleaves waits and
-//! control signals on one task.
+//! P3 adds explicit child environment `OPENCODE_PASSWORD=<secret>` and
+//! `OPENCODE_SERVER_PASSWORD=` derived from a fresh 32-byte OS secret that
+//! is never logged or cloned. No detached per-pipe reader tasks exist; the
+//! owner interleaves waits and control signals on one task.
 
+#[cfg(test)]
+use std::cell::Cell;
 #[cfg(test)]
 use std::ffi::OsString;
 use std::io;
@@ -18,7 +22,9 @@ use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use tokio::process::{Child, ChildStderr, ChildStdin};
+#[cfg(test)]
+use base64::Engine as _;
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
 /// The exact executable launch the owner task performs.
 ///
@@ -44,28 +50,30 @@ pub(crate) enum LaunchRecipe {
     },
 }
 
-/// Spawns one engine child from the supplied recipe.
+/// Spawns one engine child from the supplied recipe with the P3 secret.
 ///
 /// All three standard streams are piped, `kill_on_drop(true)` is set so the
 /// final `Child` drop is best-effort containment, and on Windows
 /// `CREATE_NO_WINDOW` is applied. For `Production`, `env_clear()` is called
 /// with no arguments: the explicit refusal of ambient inheritance, not a
-/// shipping launch claim. No public API path can reach a production spawn in
-/// this packet; production argv, environment, and auth are a separately
-/// frozen later contract.
-///
-/// The environment is cleared only for `Production`; the `cfg(test)` variant
-/// (unused in this packet) carries its own minimal fixture environment.
+/// shipping launch claim. The child environment then receives exactly
+/// `OPENCODE_PASSWORD=<secret>` and `OPENCODE_SERVER_PASSWORD=` and no
+/// ambient auth is read. The fixture variant also receives the same two
+/// variables plus a synthetic `ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION`
+/// `Basic base64(opencode:<secret>)` so the isolated fixture can validate
+/// the single health request.
 ///
 /// # Errors
 ///
 /// Returns the raw spawn failure; the caller reduces it to a typed,
 /// payload-free cause and never surfaces the operating-system message.
-pub(crate) fn spawn_engine(recipe: &LaunchRecipe) -> io::Result<Child> {
+pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<Child> {
     let mut command = match recipe {
         LaunchRecipe::Production { executable } => {
             let mut command = tokio::process::Command::new(executable);
             command.env_clear();
+            command.env("OPENCODE_PASSWORD", secret);
+            command.env("OPENCODE_SERVER_PASSWORD", "");
             command
         }
         #[cfg(test)]
@@ -76,6 +84,14 @@ pub(crate) fn spawn_engine(recipe: &LaunchRecipe) -> io::Result<Child> {
         } => {
             let mut command = tokio::process::Command::new(program);
             command.env("ARTISAN_ENGINE_OWNER_TEST_SCENARIO", scenario);
+            command.env("OPENCODE_PASSWORD", secret);
+            command.env("OPENCODE_SERVER_PASSWORD", "");
+            // Synthetic fixture auth so the fixture's health validator sees the
+            // exact Basic value derived from the same secret.
+            let credentials = format!("opencode:{secret}");
+            let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+            let auth_value = format!("Basic {encoded}");
+            command.env("ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION", auth_value);
             for argument in args {
                 command.arg(argument);
             }
@@ -241,6 +257,8 @@ pub(crate) struct ChildParts {
     pub(crate) child: Child,
     /// The sole stdin writer.
     pub(crate) lifeline: LifelineWriter,
+    /// Owned stdout pipe for exactly one bounded readiness record.
+    pub(crate) stdout: Option<ChildStdout>,
     /// Count-only stderr state.
     pub(crate) stderr_counter: StderrCounter,
 }
@@ -260,6 +278,7 @@ pub(crate) async fn cleanup_after_abort(
     let ChildParts {
         mut child,
         mut lifeline,
+        stdout: _stdout,
         stderr_counter,
     } = parts;
 
@@ -363,54 +382,61 @@ pub(crate) struct WitnessCounts {
     pub(crate) reaps_observed: u64,
     /// How many observed reaps ended with a failure classification.
     pub(crate) watchdog_failures_seen: u64,
+    /// Successful control driver joins observed.
+    pub(crate) control_driver_joined: u64,
 }
 
 #[cfg(test)]
-static WITNESS_SPAWNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-#[cfg(test)]
-static WITNESS_KILLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-#[cfg(test)]
-static WITNESS_REAPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-#[cfg(test)]
-static WITNESS_WATCHDOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static WITNESS_SPAWNED: Cell<u64> = const { Cell::new(0) };
+    static WITNESS_KILLS: Cell<u64> = const { Cell::new(0) };
+    static WITNESS_REAPS: Cell<u64> = const { Cell::new(0) };
+    static WITNESS_WATCHDOG: Cell<u64> = const { Cell::new(0) };
+    static WITNESS_CONTROL_DRIVER: Cell<u64> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 fn witness_spawned() {
-    WITNESS_SPAWNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    WITNESS_SPAWNED.with(|c| c.set(c.get() + 1));
 }
 
 #[cfg(test)]
 fn witness_kill_requested() {
-    WITNESS_KILLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    WITNESS_KILLS.with(|c| c.set(c.get() + 1));
 }
 
 #[cfg(test)]
 fn witness_reaped(status: ExitStatus) {
-    WITNESS_REAPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    WITNESS_REAPS.with(|c| c.set(c.get() + 1));
     if !status.success() {
-        WITNESS_WATCHDOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        WITNESS_WATCHDOG.with(|c| c.set(c.get() + 1));
     }
+}
+
+#[cfg(test)]
+pub(crate) fn witness_control_driver_joined() {
+    WITNESS_CONTROL_DRIVER.with(|c| c.set(c.get() + 1));
 }
 
 /// Resets and reads the phase witnesses (test-only).
 #[cfg(test)]
 pub(crate) fn reset_witnesses() {
-    WITNESS_SPAWNED.store(0, std::sync::atomic::Ordering::Relaxed);
-    WITNESS_KILLS.store(0, std::sync::atomic::Ordering::Relaxed);
-    WITNESS_REAPS.store(0, std::sync::atomic::Ordering::Relaxed);
-    WITNESS_WATCHDOG.store(0, std::sync::atomic::Ordering::Relaxed);
+    WITNESS_SPAWNED.with(|c| c.set(0));
+    WITNESS_KILLS.with(|c| c.set(0));
+    WITNESS_REAPS.with(|c| c.set(0));
+    WITNESS_WATCHDOG.with(|c| c.set(0));
+    WITNESS_CONTROL_DRIVER.with(|c| c.set(0));
 }
 
 /// Reads the current phase witnesses (test-only).
 #[cfg(test)]
 pub(crate) fn witness_counts() -> WitnessCounts {
-    let load =
-        |counter: &std::sync::atomic::AtomicU64| counter.load(std::sync::atomic::Ordering::Relaxed);
     WitnessCounts {
-        spawned: load(&WITNESS_SPAWNED),
-        kills_requested: load(&WITNESS_KILLS),
-        reaps_observed: load(&WITNESS_REAPS),
-        watchdog_failures_seen: load(&WITNESS_WATCHDOG),
+        spawned: WITNESS_SPAWNED.with(std::cell::Cell::get),
+        kills_requested: WITNESS_KILLS.with(std::cell::Cell::get),
+        reaps_observed: WITNESS_REAPS.with(std::cell::Cell::get),
+        watchdog_failures_seen: WITNESS_WATCHDOG.with(std::cell::Cell::get),
+        control_driver_joined: WITNESS_CONTROL_DRIVER.with(std::cell::Cell::get),
     }
 }
 

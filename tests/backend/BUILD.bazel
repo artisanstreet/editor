@@ -11,6 +11,7 @@ exports_files([
     "directory_helper_unit.rs",
     "engine_owner_configuration.rs",
     "engine_owner_custody.rs",
+    "engine_owner_readiness.rs",
     "listener_configuration.rs",
 ])
 
@@ -126,7 +127,10 @@ rust_test(
 rust_test(
     name = "backend_unit_test",
     crate = "//modules/backend:backend",
-    data = [":directory_controller_fixture"],
+    data = [
+        ":directory_controller_fixture",
+        ":engine_owner_fixture",
+    ],
     deps = [
         "@crates//:rcgen",
         "@crates//:rustls-pki-types",
@@ -134,6 +138,7 @@ rust_test(
     ],
     env = {
         "ARTISAN_DIRECTORY_CONTROLLER_FIXTURE": "$(rlocationpath :directory_controller_fixture)",
+        "ARTISAN_ENGINE_OWNER_FIXTURE": "$(rlocationpath :engine_owner_fixture)",
     },
     lint_config = "//:workspace_lints",
     size = "small",
