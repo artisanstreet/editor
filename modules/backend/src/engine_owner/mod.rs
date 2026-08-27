@@ -463,6 +463,7 @@ pub(crate) fn start_with_exhausted_allocator_for_tests(
     let (health_sender, health) = watch::channel(OwnerHealth::Active);
     let mut allocator = operation::GenerationAllocator::new();
     allocator.force_next(u64::MAX);
+    let _ = allocator.mint();
     let join = runtime.spawn(operation::run_owner_with_allocator(
         pending,
         Arc::clone(&shutdown),
