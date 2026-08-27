@@ -183,10 +183,9 @@ impl DeliveryReceiver {
         if cancel.is_cancelled() {
             return Err(DeliveryLost);
         }
-        let stream = self
-            .stream
-            .as_mut()
-            .expect("delivery stream installed before frame receive");
+        let Some(stream) = self.stream.as_mut() else {
+            return Err(DeliveryLost);
+        };
         let envelope = tokio::select! {
             biased;
             () = cancel.wait() => return Err(DeliveryLost),
