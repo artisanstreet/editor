@@ -2319,7 +2319,7 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
 // Stream follower: bounded authenticated SSE (P4f)
 // ---------------------------------------------------------------------------
 
-use super::stream::{StreamError, StreamInput, StreamReceipt, follow_stream};
+use super::stream::{StreamError, StreamInput, follow_stream};
 
 fn stream_secret() -> HealthSecret {
     HealthSecret::from_raw_for_tests("stream-secret-fixed-1234567890abcd".to_owned())
@@ -2969,12 +2969,7 @@ async fn stream_no_retry() {
         tx,
     ))
     .await;
-    assert_ne!(
-        res,
-        Ok(StreamReceipt {
-            state: TerminalState::Completed
-        })
-    );
+    assert!(res.is_err());
     tokio::time::sleep(Duration::from_millis(400)).await;
     srv.abort();
     let _ = srv.await;
