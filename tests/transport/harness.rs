@@ -95,9 +95,11 @@ fn ephemeral_certificate() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'stat
 /// [`TEST_DEADLINE`].
 pub(crate) fn spawn_loopback() -> Loopback {
     let (certificate, private_key) = ephemeral_certificate();
+    let pinned_identity = transport::PinnedIdentity::from_certificate(&certificate);
     let server_config = transport::server_config(vec![certificate.clone()], private_key)
         .expect("server configuration");
-    let client_config = transport::client_config(certificate).expect("client configuration");
+    let client_config =
+        transport::client_config(certificate, pinned_identity).expect("client configuration");
 
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
     let (connections_tx, connections_rx) = tokio::sync::mpsc::channel(1);

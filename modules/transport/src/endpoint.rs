@@ -1,12 +1,16 @@
 //! Endpoint construction, loopback binding, and lifecycle helpers.
 //!
-//! The trust model behind these builders is deliberately minimal: callers
-//! hand over DER material, and this module wires ring-backed rustls with a
-//! fixed ALPN onto Quinn endpoints bound to `127.0.0.1:0`. Certificate
-//! provisioning, peer authentication, pairing, and reconnection are the
-//! production trust decision (an open plan decision) and are not invented
-//! here.
+//! The trust model behind these builders is deliberately narrow: callers
+//! hand over DER material plus the pinned end-entity fingerprint, and this
+//! module wires ring-backed rustls with a fixed ALPN onto Quinn endpoints
+//! bound to `127.0.0.1:0`. Every client configuration runs ordinary chain,
+//! validity, name, and signature verification first, then requires the
+//! SHA-256 fingerprint of the full end-entity DER to equal
+//! [`PinnedIdentity`] exactly. Certificate provisioning, pairing, and
+//! reconnection remain the production trust decision (an open plan
+//! decision) and are not invented here.
 
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,9 +19,13 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
     ClientConfig, Connection, Endpoint, IdleTimeout, ServerConfig, TransportConfig, VarInt,
 };
-use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::{DigitallySignedStruct, SignatureScheme};
+use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 
 use crate::error::TransportError;
+use crate::identity::PinnedIdentity;
 
 /// ALPN identifier every Artisan transport connection negotiates.
 pub const ALPN_PROTOCOL: &[u8] = b"artisan/1";
@@ -73,29 +81,49 @@ pub fn server_config(
     Ok(config)
 }
 
-/// Builds a QUIC client configuration trusting exactly `trusted_root`,
-/// requiring TLS 1.3 through the ring provider, and offering
-/// [`ALPN_PROTOCOL`].
+/// Builds a QUIC client configuration trusting exactly `trusted_root` and
+/// accepting only a server whose end-entity certificate hashes, via
+/// SHA-256 over the full DER, to exactly `pinned_identity`.
 ///
-/// Loopback proofs pass their ephemeral server certificate here; remote
-/// trust models replace this call without touching the rest of the
-/// transport.
+/// Ordinary chain construction, validity windows, name matching, and
+/// signature verification stay delegated to the standard web-PKI verifier
+/// built on the same ring provider as the rest of the configuration; the
+/// pin is enforced only after that succeeds. There is deliberately no
+/// unpinned client configuration: everything produced here requires both
+/// checks.
+///
+/// Loopback proofs pass their ephemeral server certificate and its
+/// fingerprint here; remote trust models reuse this call with the
+/// handed-off pin without touching the rest of the transport.
 ///
 /// # Errors
 ///
 /// Returns [`TransportError::Tls`] when the root cannot be parsed into a
-/// trust anchor, the versions are rejected, or the resulting configuration
-/// cannot serve QUIC.
+/// trust anchor or the versions are rejected,
+/// [`TransportError::VerifierBuilder`] when the underlying web-PKI
+/// verifier cannot be constructed, and [`TransportError::Crypto`] when
+/// the resulting configuration cannot serve QUIC.
 pub fn client_config(
     trusted_root: CertificateDer<'static>,
+    pinned_identity: PinnedIdentity,
 ) -> Result<ClientConfig, TransportError> {
+    let provider = ring_provider();
+
     let mut roots = rustls::RootCertStore::empty();
     roots.add(trusted_root).map_err(TransportError::Tls)?;
 
-    let mut tls = rustls::ClientConfig::builder_with_provider(ring_provider())
+    let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+        .build()
+        .map_err(TransportError::VerifierBuilder)?;
+
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(TransportError::Tls)?
-        .with_root_certificates(roots)
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedServerVerifier {
+            inner,
+            pinned_identity,
+        }))
         .with_no_client_auth();
     tls.alpn_protocols = vec![ALPN_PROTOCOL.to_vec()];
 
@@ -103,6 +131,82 @@ pub fn client_config(
     let mut config = ClientConfig::new(Arc::new(crypto));
     config.transport_config(Arc::new(transport_config()));
     Ok(config)
+}
+
+/// Exact-leaf pin wrapped around standard server-certificate verification.
+///
+/// The inner verifier performs the complete ordinary check — chain to the
+/// handed-off trust anchor, validity window, DNS/SAN match, and signature
+/// verification — using the same ring provider as the rest of the
+/// configuration. Only once that succeeds is the SHA-256 of the full
+/// end-entity DER compared against the pin. A mismatch yields a fixed
+/// zero-payload certificate error so failures reveal nothing about how
+/// close a presented certificate came to the pin.
+struct PinnedServerVerifier {
+    /// Ordinary verification already bound to the shared trust roots and
+    /// ring signature algorithms.
+    inner: Arc<WebPkiServerVerifier>,
+    /// Required SHA-256 fingerprint of the end-entity DER.
+    pinned_identity: PinnedIdentity,
+}
+
+impl fmt::Debug for PinnedServerVerifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PinnedServerVerifier")
+            .field("algorithm", &PinnedIdentity::ALGORITHM)
+            .field("fingerprint", &self.pinned_identity.to_hex())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ServerCertVerifier for PinnedServerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let verified = self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
+        if PinnedIdentity::from_certificate(end_entity) != self.pinned_identity {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        Ok(verified)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner
+            .verify_tls12_signature(message, certificate, signature)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner
+            .verify_tls13_signature(message, certificate, signature)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
 }
 
 /// Binds a server endpoint on `127.0.0.1:0`.

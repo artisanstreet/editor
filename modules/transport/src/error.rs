@@ -20,6 +20,10 @@ pub enum TransportError {
     #[error(transparent)]
     Crypto(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
 
+    /// The pinned certificate verifier could not be constructed.
+    #[error("building the pinned certificate verifier failed: {0}")]
+    VerifierBuilder(#[source] rustls::client::VerifierBuilderError),
+
     /// Binding a loopback socket failed.
     #[error("binding the loopback endpoint failed: {0}")]
     Bind(#[source] std::io::Error),
