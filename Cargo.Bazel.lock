@@ -1,5 +1,5 @@
 {
-  "checksum": "287118a8197b53459279894abdabeb774d898cd410e33f9b330d3b5392da7066",
+  "checksum": "6c06a1ce00d54f82c7ee92ef422de3027e91be19b39c5b3288e87d58ea95ee92",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -2005,6 +2005,10 @@
             {
               "id": "capnp 0.27.0",
               "target": "capnp"
+            },
+            {
+              "id": "zeroize 1.9.0",
+              "target": "zeroize"
             }
           ],
           "selects": {}
@@ -55136,7 +55140,8 @@
     "sqlx-sqlite 0.9.0",
     "syntect 5.3.0",
     "thiserror 2.0.20",
-    "tokio 1.53.1"
+    "tokio 1.53.1",
+    "zeroize 1.9.0"
   ],
   "direct_dev_deps": [
     "rcgen 0.14.9"

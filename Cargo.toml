@@ -60,6 +60,7 @@ syntect = { version = "=5.3.0", default-features = false, features = [
 ] }
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", default-features = false }
+zeroize = "=1.9.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
