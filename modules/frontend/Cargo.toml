@@ -117,6 +117,10 @@ name = "reader_attention"
 path = "../../tests/frontend/reader_attention.rs"
 
 [[test]]
+name = "runtime_fixture_policy"
+path = "../../tests/frontend/runtime_fixture_policy.rs"
+
+[[test]]
 name = "runtime_surface"
 path = "../../tests/frontend/runtime_surface.rs"
 
