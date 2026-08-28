@@ -77,6 +77,7 @@ const RECEIPT_DUPLICATE_RESPONSE_ID: &str = "server-frame-000008";
 const PROJECT_LIST_RESPONSE_ID: &str = "server-frame-000009";
 const CORRELATED_ERROR_FRAME_ID: &str = "server-error-000001";
 const VERSION_REJECTION_FRAME_ID: &str = "server-error-000002";
+const IDEMPOTENCY_CONFLICT_FRAME_ID: &str = "server-error-000003";
 const PROJECT_ATTACHED_EVENT_ID: &str = "server-event-000001";
 const THREAD_CREATED_EVENT_ID: &str = "server-event-000002";
 const FIRST_MESSAGE_QUEUED_EVENT_ID: &str = "server-event-000003";
@@ -1164,6 +1165,62 @@ fn correlates_errors_to_the_triggering_request_id() -> capnp::Result<()> {
             match error.which()? {
                 protocol_error::Which::Correlated(_) => panic!("expected uncorrelated error"),
                 protocol_error::Which::Uncorrelated(()) => {}
+            }
+        }
+        _ => panic!("expected protocolError body"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn appends_idempotency_conflict_at_the_next_unused_ordinal() -> capnp::Result<()> {
+    // Append-only evolution guard on the raw generated surface: every
+    // committed enumerator keeps its frozen ordinal and the conflict
+    // classification owns exactly the next unused slot, @6.
+    assert_eq!(ErrorCode::UnsupportedVersion as u16, 0);
+    assert_eq!(ErrorCode::InvalidInput as u16, 1);
+    assert_eq!(ErrorCode::DirectoryUnknown as u16, 2);
+    assert_eq!(ErrorCode::ProjectUnknown as u16, 3);
+    assert_eq!(ErrorCode::ThreadUnknown as u16, 4);
+    assert_eq!(ErrorCode::Internal as u16, 5);
+    assert_eq!(ErrorCode::IdempotencyConflict as u16, 6);
+
+    // One correlated, non-retryable conflict report survives verbatim: Forge
+    // rejected a stable request identity previously accepted for a different
+    // command kind or immutable payload; repeating it can never succeed, and
+    // the triggering request id stays correlatable.
+    let encoded = {
+        let mut message = frame();
+        let mut error = init_envelope(&mut message, IDEMPOTENCY_CONFLICT_FRAME_ID)
+            .init_body()
+            .init_protocol_error();
+        error.set_code(ErrorCode::IdempotencyConflict);
+        error.set_message("request id already used for a different command");
+        error.set_retryable(false);
+        error.set_correlated(CLIENT_REQUEST_ID);
+        encode(&message)
+    };
+
+    let decoded = decode(&encoded)?;
+    let envelope: envelope::Reader = decoded.get_root()?;
+    assert_server_envelope(envelope, IDEMPOTENCY_CONFLICT_FRAME_ID)?;
+    match envelope.get_body().which()? {
+        envelope::body::Which::ProtocolError(error) => {
+            let error = error?;
+            assert_eq!(error.get_code()?, ErrorCode::IdempotencyConflict);
+            assert_eq!(
+                error.get_message()?,
+                "request id already used for a different command"
+            );
+            assert!(!error.get_retryable());
+            match error.which()? {
+                protocol_error::Which::Correlated(request_id) => {
+                    assert_eq!(request_id?, CLIENT_REQUEST_ID);
+                }
+                protocol_error::Which::Uncorrelated(()) => {
+                    panic!("expected correlated conflict")
+                }
             }
         }
         _ => panic!("expected protocolError body"),

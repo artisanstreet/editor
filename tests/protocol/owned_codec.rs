@@ -822,6 +822,60 @@ fn unknown_wire_enum_discriminant_is_typed() {
 }
 
 #[test]
+fn idempotency_conflict_roundtrips_correlated_and_never_retryable() -> Result<(), Box<dyn Error>> {
+    let detail = ErrorDetail::parse("request id already accepted for a different command")?;
+    let correlation = request_id("request-conflicting-retry");
+    let frame = envelope(
+        "server-error-idempotency-conflict",
+        WireEnvelopeBody::ProtocolError(ProtocolFailure {
+            code: ErrorCode::IdempotencyConflict,
+            detail: detail.clone(),
+            retryable: false,
+            request_id: Some(correlation.clone()),
+        }),
+    );
+
+    // The failure survives field for field through the owned codec.
+    let decoded = decode_envelope(&encode_envelope(&frame)?)?;
+    assert!(
+        decoded == frame,
+        "owned envelope must survive field-for-field"
+    );
+    match decoded.body {
+        WireEnvelopeBody::ProtocolError(failure) => {
+            assert_eq!(failure.code, ErrorCode::IdempotencyConflict);
+            assert_eq!(failure.detail, detail);
+            assert!(
+                !failure.retryable,
+                "repeating a conflicting request must stay non-retryable"
+            );
+            assert_eq!(failure.request_id.as_ref(), Some(&correlation));
+        }
+        _ => panic!("expected protocolError body"),
+    }
+
+    // Raw-schema ordinal guard: every earlier enumerator keeps its committed
+    // ordinal, the appended classification owns exactly the next unused one
+    // at @6, and that raw wire value decodes into the owned variant.
+    assert_eq!(WireErrorCode::UnsupportedVersion as u16, 0);
+    assert_eq!(WireErrorCode::InvalidInput as u16, 1);
+    assert_eq!(WireErrorCode::DirectoryUnknown as u16, 2);
+    assert_eq!(WireErrorCode::ProjectUnknown as u16, 3);
+    assert_eq!(WireErrorCode::ThreadUnknown as u16, 4);
+    assert_eq!(WireErrorCode::Internal as u16, 5);
+    assert_eq!(WireErrorCode::IdempotencyConflict as u16, 6);
+    assert!(matches!(
+        decode_envelope(&raw_protocol_error(WireErrorCode::IdempotencyConflict))?.body,
+        WireEnvelopeBody::ProtocolError(ProtocolFailure {
+            code: ErrorCode::IdempotencyConflict,
+            ..
+        })
+    ));
+
+    Ok(())
+}
+
+#[test]
 fn unknown_hello_credential_discriminant_is_typed() {
     let mut malformed = raw_hello_credential(false);
     let comparison = raw_hello_credential(true);

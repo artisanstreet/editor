@@ -906,6 +906,7 @@ const fn encode_error_code(value: ErrorCode) -> artisan_capnp::ErrorCode {
         ErrorCode::ProjectUnknown => artisan_capnp::ErrorCode::ProjectUnknown,
         ErrorCode::ThreadUnknown => artisan_capnp::ErrorCode::ThreadUnknown,
         ErrorCode::Internal => artisan_capnp::ErrorCode::Internal,
+        ErrorCode::IdempotencyConflict => artisan_capnp::ErrorCode::IdempotencyConflict,
     }
 }
 
@@ -1744,5 +1745,6 @@ const fn decode_error_code(value: artisan_capnp::ErrorCode) -> ErrorCode {
         artisan_capnp::ErrorCode::ProjectUnknown => ErrorCode::ProjectUnknown,
         artisan_capnp::ErrorCode::ThreadUnknown => ErrorCode::ThreadUnknown,
         artisan_capnp::ErrorCode::Internal => ErrorCode::Internal,
+        artisan_capnp::ErrorCode::IdempotencyConflict => ErrorCode::IdempotencyConflict,
     }
 }
