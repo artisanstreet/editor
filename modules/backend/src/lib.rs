@@ -26,6 +26,7 @@ pub mod storage;
 pub mod telemetry_preferences_control_policy;
 pub mod thread_liveness_policy;
 pub mod thread_resource_quiescence_policy;
+pub mod wake_lock_policy;
 
 pub use app::{ForgeApp, ForgeConfig, ForgeShutdownError, ForgeStartupError};
 pub use command_admission::{
