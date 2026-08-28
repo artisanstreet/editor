@@ -73,7 +73,7 @@ fn format_sub_ten(value: f64, suffix: char) -> String {
     // have a `.25` or `.75` fraction. `.75` already rounds upward under both
     // rules; `.25` needs the explicit JS result.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let formatted = if value.fract() == 0.25 {
+    let formatted = if value.fract().to_bits() == 0.25_f64.to_bits() {
         format!("{}.3", value.trunc() as u64)
     } else {
         format!("{value:.1}")
