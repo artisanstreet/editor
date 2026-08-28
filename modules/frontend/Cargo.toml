@@ -364,5 +364,9 @@ path = "../../tests/frontend/vcs_labels.rs"
 name = "workspace_header_presentation"
 path = "../../tests/frontend/workspace_header_presentation.rs"
 
+[[test]]
+name = "workspace_tab_state"
+path = "../../tests/frontend/workspace_tab_state.rs"
+
 [lints]
 workspace = true

@@ -101,6 +101,7 @@ rust_library(
         "src/usage_reset_duration.rs",
         "src/vcs_labels.rs",
         "src/workspace_header_presentation.rs",
+        "src/workspace_tab_state.rs",
     ],
     crate_name = "artisan_frontend",
     deps = [
