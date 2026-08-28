@@ -5,5 +5,17 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[dependencies]
+sea-orm-migration.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+artisan-database = { path = "../database" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[test]]
+name = "migrations"
+path = "../../tests/database/migrations.rs"
+
 [lints]
 workspace = true

@@ -6,6 +6,10 @@ rust_library(
     name = "migrations",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "artisan_migrations",
+    deps = [
+        "@crates//:sea-orm-migration",
+        "@crates//:thiserror",
+    ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],

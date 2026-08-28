@@ -45,6 +45,11 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
     "macros",
     "sqlite-use-returning-for-3_35",
 ] }
+sea-orm-migration = { version = "=2.0.2", default-features = false, features = [
+    "runtime-tokio",
+    "sqlx-sqlite",
+    "sqlite-use-returning-for-3_35",
+] }
 sqlx-sqlite = { version = "=0.9.0", default-features = false, features = [
     "offline",
 ] }
