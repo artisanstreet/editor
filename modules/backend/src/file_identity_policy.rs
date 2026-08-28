@@ -48,7 +48,7 @@ where
     T: Into<i128>,
 {
     let normalized = value.into().rem_euclid(UINT64_MODULUS);
-    u64::try_from(normalized).expect("a remainder modulo 2^64 always fits in u64")
+    u64::try_from(normalized).unwrap_or_default()
 }
 
 /// Compares two identities by device and inode, requiring both to match.
