@@ -5,6 +5,7 @@ exports_files(["Cargo.toml"])
 rust_library(
     name = "frontend",
     srcs = [
+        "src/approval_presentation.rs",
         "src/attention.rs",
         "src/attention_reconnect.rs",
         "src/artisan_error_code.rs",
