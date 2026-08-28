@@ -440,6 +440,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Starts the first fresh scope-owned attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the policy is not [`AuthoritativeSubscriptionState::Ready`], or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptIdExhausted`] if a fresh
+    /// attempt or scope identity cannot be allocated.
     pub fn begin_attempt(
         &mut self,
     ) -> Result<AuthoritativeSubscriptionTransition, AuthoritativeSubscriptionPolicyError> {
@@ -451,6 +458,15 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Applies one typed external observation to the state machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] for
+    /// an event that does not belong to the current lifecycle phase,
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptIdExhausted`] when a
+    /// retry cannot allocate a fresh attempt and scope identity.
     pub fn apply(
         &mut self,
         event: AuthoritativeSubscriptionEvent,
@@ -539,6 +555,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Records successful subscribe and enters stream consumption.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the policy is not subscribing, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn subscribe_succeeded(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -547,6 +570,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Records one update accepted by the owner without applying it here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the policy is not streaming, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn stream_update(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -555,6 +585,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Records subscribe failure and requests scope finalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the policy is not subscribing, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn subscribe_failed(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -563,6 +600,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Records stream failure and requests scope finalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the policy is not streaming, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn stream_failed(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -571,6 +615,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Records update failure and requests scope finalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the policy is not streaming, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn update_failed(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -579,6 +630,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Converts normal stream completion into the lost-subscription failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the policy is not streaming, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn stream_ended(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -587,6 +645,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Acknowledges scope finalization and requests exactly one recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the policy is not waiting for scope finalization, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn scope_finalized(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -595,6 +660,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Accepts successful recovery and returns the next retry delay.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// recovery is not in progress, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn recovery_succeeded(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -603,6 +675,13 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Absorbs failed recovery and returns the same next retry delay.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// recovery is not in progress, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`] for a stale
+    /// attempt or scope identity.
     pub fn recovery_failed(
         &mut self,
         attempt: SubscriptionAttempt,
@@ -611,6 +690,14 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     /// Starts the next attempt after the caller's externally owned delay.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthoritativeSubscriptionPolicyError::InvalidTransition`] if
+    /// the retry is not ready, [`AuthoritativeSubscriptionPolicyError::AttemptMismatch`]
+    /// for a stale attempt or scope identity, or
+    /// [`AuthoritativeSubscriptionPolicyError::AttemptIdExhausted`] if a fresh
+    /// attempt or scope identity cannot be allocated.
     pub fn retry_ready(
         &mut self,
         attempt: SubscriptionAttempt,
