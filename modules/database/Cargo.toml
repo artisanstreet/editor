@@ -1,0 +1,12 @@
+[package]
+name = "artisan-database"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+artisan-domain = { path = "../domain" }
+
+[lints]
+workspace = true

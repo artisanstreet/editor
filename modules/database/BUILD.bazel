@@ -3,13 +3,10 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 exports_files(["Cargo.toml"])
 
 rust_library(
-    name = "transport",
+    name = "database",
     srcs = glob(["src/**/*.rs"]),
-    crate_name = "artisan_transport",
-    deps = [
-        "//modules/domain:domain",
-        "//modules/protocol:protocol",
-    ],
+    crate_name = "artisan_database",
+    deps = ["//modules/domain:domain"],
     edition = "2024",
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],

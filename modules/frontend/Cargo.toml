@@ -1,0 +1,15 @@
+[package]
+name = "artisan-frontend"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+artisan-assets = { path = "../assets" }
+artisan-domain = { path = "../domain" }
+artisan-transport = { path = "../transport" }
+artisan-ui = { path = "../ui" }
+
+[lints]
+workspace = true
