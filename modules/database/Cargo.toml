@@ -39,6 +39,10 @@ name = "conversation_execution_run_item_entities"
 path = "../../tests/database/conversation_execution_run_item_entities.rs"
 
 [[test]]
+name = "conversation_execution_patch_checkpoint_entities"
+path = "../../tests/database/conversation_execution_patch_checkpoint_entities.rs"
+
+[[test]]
 name = "project_threads"
 path = "../../tests/database/project_threads.rs"
 
