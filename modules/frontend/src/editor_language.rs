@@ -180,10 +180,10 @@ fn file_extension(file_name: &str) -> &str {
 /// them.
 #[must_use]
 pub fn editor_language_for_path(path: &str, declared_language: Option<&str>) -> EditorLanguageId {
-    if let Some(declared_language) = declared_language {
-        if let Some(language) = EditorLanguageId::highlighted_from_declared(declared_language) {
-            return language;
-        }
+    if let Some(declared_language) = declared_language
+        && let Some(language) = EditorLanguageId::highlighted_from_declared(declared_language)
+    {
+        return language;
     }
 
     let file_name = file_name(path);
