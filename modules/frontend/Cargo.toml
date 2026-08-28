@@ -229,6 +229,10 @@ name = "native_shell"
 path = "../../tests/frontend/native_shell.rs"
 
 [[test]]
+name = "new_thread_draft"
+path = "../../tests/frontend/new_thread_draft.rs"
+
+[[test]]
 name = "new_thread_interaction"
 path = "../../tests/frontend/new_thread_interaction.rs"
 
