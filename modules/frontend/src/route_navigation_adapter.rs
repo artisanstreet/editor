@@ -20,6 +20,11 @@ pub trait RouteNavigationHost {
     /// The intent is borrowed so the adapter can forward the exact existing
     /// value without rebuilding its target or option fields. Implementations
     /// must keep any platform behavior behind this boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the host-specific [`Self::Error`] produced by the one host
+    /// attempt.
     fn navigate(&self, intent: &RouteNavigationIntent) -> Result<(), Self::Error>;
 }
 
@@ -65,6 +70,11 @@ where
 {
     /// Executes one host attempt for `intent` and returns its typed outcome.
     #[must_use = "route-navigation results must be handled"]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouteNavigationFailure`] containing the exact typed error
+    /// returned by the host's one attempt.
     pub fn execute(
         &self,
         intent: &RouteNavigationIntent,
