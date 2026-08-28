@@ -34,6 +34,10 @@ name = "connection"
 path = "../../tests/backend/connection.rs"
 
 [[test]]
+name = "directory_selection"
+path = "../../tests/backend/directory_selection.rs"
+
+[[test]]
 name = "request_handler"
 path = "../../tests/backend/request_handler.rs"
 
