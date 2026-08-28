@@ -5,6 +5,7 @@ rust_test(
     srcs = [
         "harness.rs",
         "loopback.rs",
+        "resource_budget.rs",
     ],
     crate_name = "loopback_test",
     crate_root = "loopback.rs",

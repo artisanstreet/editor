@@ -11,6 +11,7 @@
 //! reach idle state without waiting on references the test still holds.
 
 mod harness;
+mod resource_budget;
 
 use artisan_transport as transport;
 use harness::{
@@ -70,8 +71,9 @@ async fn bidi_frames_round_trip_over_streams() {
     let server_connection = server_connection(&mut loopback).await;
     let echo = spawn_echo(server_connection);
 
-    // Larger than the default 64 KiB stream receive window on purpose.
-    let large_payload = deterministic_payload(192 * 1024);
+    // Larger than the configured 1,250,000-byte stream receive window on
+    // purpose: Quinn must replenish credit while the framed body is read.
+    let large_payload = deterministic_payload(1_500_000);
     let (mut send, mut recv) = client_connection.open_bi().await.expect("bidi stream");
     transport::write_frame(&mut send, &large_payload)
         .await
