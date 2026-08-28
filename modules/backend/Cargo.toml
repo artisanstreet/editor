@@ -57,6 +57,10 @@ name = "file_identity_policy"
 path = "../../tests/backend/file_identity_policy.rs"
 
 [[test]]
+name = "harness_config_registry_policy"
+path = "../../tests/backend/harness_config_registry_policy.rs"
+
+[[test]]
 name = "listener"
 path = "../../tests/backend/listener.rs"
 
