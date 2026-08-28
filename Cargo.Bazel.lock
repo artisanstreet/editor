@@ -1,5 +1,5 @@
 {
-  "checksum": "33acb199b7c52bb7004e79cc697c23a51ee276eb33a475aa9e0766128a90408e",
+  "checksum": "497cf9f8a15a3058b9de7b11efaff26b4feebc138fe7a205e3270512d4223724",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -1705,6 +1705,10 @@
         ],
         "deps_dev": {
           "common": [
+            {
+              "id": "roxmltree 0.20.0",
+              "target": "roxmltree"
+            },
             {
               "id": "sha2 0.11.0",
               "target": "sha2"
@@ -55221,6 +55225,7 @@
   ],
   "direct_dev_deps": [
     "rcgen 0.14.9",
+    "roxmltree 0.20.0",
     "sha2 0.11.0",
     "toml 1.1.4+spec-1.1.0"
   ],

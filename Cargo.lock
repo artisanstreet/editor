@@ -300,6 +300,7 @@ dependencies = [
 name = "artisan-assets"
 version = "0.0.0"
 dependencies = [
+ "roxmltree",
  "sha2 0.11.0",
  "toml 1.1.4+spec-1.1.0",
 ]
