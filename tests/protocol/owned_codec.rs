@@ -173,6 +173,31 @@ fn capability_is_exact_length_and_errors_never_render_secret_material() {
 }
 
 #[test]
+fn capability_equality_uses_the_constant_time_boundary() {
+    let initial = LocalCapability::from_bytes(INITIAL_CAPABILITY);
+    let same_initial = LocalCapability::from_bytes(INITIAL_CAPABILITY);
+    let mut different_initial_bytes = INITIAL_CAPABILITY;
+    different_initial_bytes[0] ^= 0xff;
+    let different_initial = LocalCapability::from_bytes(different_initial_bytes);
+
+    assert!(initial.constant_time_eq(&same_initial));
+    assert!(initial == same_initial);
+    assert!(!initial.constant_time_eq(&different_initial));
+    assert!(initial != different_initial);
+
+    let reconnect = ReconnectCapability::from_bytes(RECONNECT_HELLO_CAPABILITY);
+    let same_reconnect = ReconnectCapability::from_bytes(RECONNECT_HELLO_CAPABILITY);
+    let mut different_reconnect_bytes = RECONNECT_HELLO_CAPABILITY;
+    different_reconnect_bytes[RECONNECT_CAPABILITY_BYTES - 1] ^= 0xff;
+    let different_reconnect = ReconnectCapability::from_bytes(different_reconnect_bytes);
+
+    assert!(reconnect.constant_time_eq(&same_reconnect));
+    assert!(reconnect == same_reconnect);
+    assert!(!reconnect.constant_time_eq(&different_reconnect));
+    assert!(reconnect != different_reconnect);
+}
+
+#[test]
 fn version_offer_and_protocol_metadata_enforce_boundaries() {
     assert_eq!(VersionOffer::new(Vec::new()), Err(VersionOfferError::Empty));
     assert_eq!(
