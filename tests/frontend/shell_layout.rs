@@ -77,8 +77,8 @@ fn fit_is_inclusive_at_the_exact_boundary_and_changes_one_pixel_away() {
     // Tight and balanced cross the boundary while the inspector is in its
     // 25vw region. Loose crosses after the inspector reaches its 350px cap.
     let cases = [
-        (ProseWidth::Tight, 1258.666_666_666_666_7),
-        (ProseWidth::Balanced, 1386.666_666_666_666_7),
+        (ProseWidth::Tight, 1_258.666_666_666_666_7),
+        (ProseWidth::Balanced, 1_386.666_666_666_666_7),
         (ProseWidth::Loose, 1518.0),
     ];
 
