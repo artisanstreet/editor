@@ -77,6 +77,10 @@ name = "dev_instance_policy"
 path = "../../tests/frontend/dev_instance_policy.rs"
 
 [[test]]
+name = "engine_section_indicator_policy"
+path = "../../tests/frontend/engine_section_indicator_policy.rs"
+
+[[test]]
 name = "engine_usage_cache"
 path = "../../tests/frontend/engine_usage_cache.rs"
 
