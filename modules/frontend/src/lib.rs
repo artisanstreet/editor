@@ -1,11 +1,14 @@
 //! Native Artisan Editor application assembly boundary.
 //!
-//! Phase 1 feasibility state: this crate currently launches the minimal GPUI
-//! proof window so the upstream native toolchain can be exercised end to end.
-//! Product assembly, navigation, and screens arrive in later phases; nothing
-//! here is Artisan visual or interaction design.
+//! Phase 1 feasibility state: the binary launches the minimal GPUI proof
+//! window so the upstream native toolchain can be exercised end to end.
+//! Product assembly, navigation, and screens arrive in later phases. Beyond
+//! that window, the library now hosts narrow product presentation-model
+//! leaves that record audited semantics without rendering them; the
+//! transcript message presentation model ([`transcript`]) is the first.
 
 pub mod proof;
+pub mod transcript;
 
 use std::process::ExitCode;
 
