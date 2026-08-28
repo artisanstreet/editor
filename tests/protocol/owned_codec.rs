@@ -14,8 +14,8 @@ use artisan_domain::{
 };
 use artisan_protocol::artisan_capnp::{ErrorCode as WireErrorCode, envelope};
 use artisan_protocol::{
-    CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ClientRequest, ConnectionId, ErrorCode,
-    ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello, HelloCredential,
+    CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ClientRequest, ConnectionId, DispatchFailure,
+    ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello, HelloCredential,
     LocalCapability, LocalCapabilityError, ProtocolDecodeError, ProtocolEncodeError,
     ProtocolFailure, ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES,
     ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse,
@@ -512,6 +512,110 @@ fn every_event_and_error_family_roundtrips() -> Result<(), Box<dyn Error>> {
     ))?;
     assert_roundtrip(&envelope(
         "server-error-uncorrelated",
+        WireEnvelopeBody::ProtocolError(ProtocolFailure {
+            code: ErrorCode::UnsupportedVersion,
+            detail: ErrorDetail::default(),
+            retryable: false,
+            request_id: None,
+        }),
+    ))
+}
+
+#[test]
+fn dispatch_failure_names_exactly_the_request_it_settles() -> Result<(), Box<dyn Error>> {
+    let settled = envelope(
+        "request-dispatch",
+        WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueFirstMessage(
+            QueueFirstMessage {
+                request_id: request_id("request-dispatch"),
+                thread_id: ThreadId::parse("thread-1")?,
+                body: MessageBody::parse("The dispatched message.")?,
+            },
+        ))),
+    );
+    let rejection = DispatchFailure::settling(
+        &settled,
+        ErrorCode::ThreadUnknown,
+        ErrorDetail::parse("no thread matches the referenced thread id")?,
+        false,
+    )
+    .expect("a request frame always yields a correlated dispatch failure");
+
+    // The failure carries the settled request's identity, not a separately
+    // supplied id that could drift from it.
+    assert_eq!(rejection.code(), ErrorCode::ThreadUnknown);
+    assert_eq!(
+        rejection.detail().as_str(),
+        "no thread matches the referenced thread id"
+    );
+    assert!(!rejection.retryable());
+    assert_eq!(rejection.request_id(), &request_id("request-dispatch"));
+
+    // Conversion always selects the correlated arm with the same identity.
+    let failure = ProtocolFailure::from(rejection);
+    assert_eq!(failure.code, ErrorCode::ThreadUnknown);
+    assert_eq!(
+        failure.detail.as_str(),
+        "no thread matches the referenced thread id"
+    );
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.request_id.as_ref(),
+        Some(&request_id("request-dispatch"))
+    );
+
+    // Correlation survives the wire and never conflates the echoed client
+    // RequestId with the server-minted FrameId of the failure frame itself.
+    let decoded = decode_envelope(&encode_envelope(&envelope(
+        "server-error-dispatch",
+        WireEnvelopeBody::ProtocolError(failure),
+    ))?)?;
+    let WireEnvelopeBody::ProtocolError(decoded_failure) = decoded.body else {
+        panic!("expected a protocol error body");
+    };
+    assert_eq!(decoded.frame_id.as_str(), "server-error-dispatch");
+    assert_eq!(
+        decoded_failure.request_id.as_ref(),
+        Some(&request_id("request-dispatch"))
+    );
+    Ok(())
+}
+
+#[test]
+fn failures_without_a_settled_request_stay_uncorrelated() -> Result<(), Box<dyn Error>> {
+    let hello = envelope(
+        "client-hello-frame",
+        WireEnvelopeBody::Hello(Hello {
+            supported_versions: VersionOffer::new(vec![1])?,
+            credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+        }),
+    );
+    assert!(
+        DispatchFailure::settling(
+            &hello,
+            ErrorCode::UnsupportedVersion,
+            ErrorDetail::default(),
+            true
+        )
+        .is_none()
+    );
+
+    let answer = envelope(
+        "server-response-frame",
+        WireEnvelopeBody::Response(ServerResponse {
+            request_id: request_id("request-thread-list"),
+            payload: ResponsePayload::ThreadListing(ThreadListing::new(vec![thread()])?),
+        }),
+    );
+    assert!(
+        DispatchFailure::settling(&answer, ErrorCode::Internal, ErrorDetail::default(), false)
+            .is_none()
+    );
+
+    // The general failure shape keeps the schema's uncorrelated arm for
+    // hello-time rejections that implicate no request at all.
+    assert_roundtrip(&envelope(
+        "server-version-rejection",
         WireEnvelopeBody::ProtocolError(ProtocolFailure {
             code: ErrorCode::UnsupportedVersion,
             detail: ErrorDetail::default(),

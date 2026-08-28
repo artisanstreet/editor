@@ -12,5 +12,11 @@ subtle.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
+# Root-level tests stay outside the crate directory; this registration keeps
+# the protocol coverage indexed for rust-analyzer and focused cargo runs.
+[[test]]
+name = "owned_codec"
+path = "../../tests/protocol/owned_codec.rs"
+
 [lints]
 workspace = true
