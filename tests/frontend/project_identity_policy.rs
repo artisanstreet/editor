@@ -4,9 +4,8 @@ mod project_identity_policy;
 use std::time::Duration;
 
 use project_identity_policy::{
-    ColdStartRetryState, ProjectIdentity, ProjectIdentityPolicy, ProjectIdentityState,
-    RefreshAdmission, RetryIntent, COLD_START_RETRY_SCHEDULE_DURATION,
-    MAX_RETAINED_PROJECT_IDENTITIES,
+    COLD_START_RETRY_SCHEDULE_DURATION, ColdStartRetryState, MAX_RETAINED_PROJECT_IDENTITIES,
+    ProjectIdentity, ProjectIdentityPolicy, ProjectIdentityState, RefreshAdmission, RetryIntent,
 };
 
 fn identity(project_id: &str, metadata: &str) -> ProjectIdentity<String> {
@@ -84,9 +83,11 @@ fn retry_sequence_is_exponential_and_bounded_by_elapsed_schedule_duration() {
             ),
         ]
     );
-    assert!(intents
-        .last()
-        .is_some_and(|(_, _, elapsed)| *elapsed <= COLD_START_RETRY_SCHEDULE_DURATION));
+    assert!(
+        intents
+            .last()
+            .is_some_and(|(_, _, elapsed)| *elapsed <= COLD_START_RETRY_SCHEDULE_DURATION)
+    );
     let (_, final_delay, final_elapsed) = intents[5];
     assert!(final_elapsed + final_delay > COLD_START_RETRY_SCHEDULE_DURATION);
     assert!(schedule.is_exhausted());
