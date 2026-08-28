@@ -116,6 +116,17 @@ rust_test(
 )
 
 rust_test(
+    name = "clipboard_write_boundary_test",
+    srcs = ["clipboard_write_boundary.rs"],
+    crate_name = "clipboard_write_boundary_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "command_ranking_test",
     srcs = ["command_ranking.rs"],
     crate_name = "command_ranking_test",
