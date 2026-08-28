@@ -11,6 +11,7 @@ rust_library(
         "src/browser_dom_boundary.rs",
         "src/composer.rs",
         "src/context_usage_description.rs",
+        "src/context_usage_gauge_policy.rs",
         "src/context_usage_model_name.rs",
         "src/context_usage_tone.rs",
         "src/conversation_diff_stat.rs",

@@ -14,6 +14,7 @@ pub mod browser_dom_boundary;
 pub mod command_ranking;
 pub mod composer;
 pub mod context_usage_description;
+pub mod context_usage_gauge_policy;
 pub mod context_usage_model_name;
 pub mod context_usage_tone;
 pub mod conversation_diff_stat;
