@@ -52,6 +52,7 @@ pub mod new_thread_interaction;
 pub mod notification_events;
 pub mod notification_preferences;
 pub mod notification_web_presenter_policy;
+pub mod onboarding_harness_presentation;
 pub mod onboarding_route;
 pub mod project_identity_policy;
 pub mod project_picker;
