@@ -85,6 +85,7 @@ pub mod run_usage_policy;
 pub mod runtime_fixture_policy;
 pub mod runtime_fixture_support;
 pub mod runtime_surface;
+pub mod session_projection;
 pub mod session_tool_policy;
 pub mod setup_label_transition_policy;
 pub mod shell;

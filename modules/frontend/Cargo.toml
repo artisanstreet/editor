@@ -313,6 +313,10 @@ name = "runtime_surface"
 path = "../../tests/frontend/runtime_surface.rs"
 
 [[test]]
+name = "session_projection"
+path = "../../tests/frontend/session_projection.rs"
+
+[[test]]
 name = "session_tool_policy"
 path = "../../tests/frontend/session_tool_policy.rs"
 
