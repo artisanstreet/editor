@@ -38,6 +38,7 @@ rust_library(
         "src/graph_advancement_policy.rs",
         "src/harness_config_registry_policy.rs",
         "src/host_identity_policy.rs",
+        "src/host_machines_policy.rs",
         "src/host_suspend_detection_policy.rs",
         "src/lib.rs",
         "src/listener.rs",

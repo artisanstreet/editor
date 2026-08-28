@@ -17,6 +17,7 @@ pub mod file_identity_policy;
 pub mod graph_advancement_policy;
 pub mod harness_config_registry_policy;
 pub mod host_identity_policy;
+pub mod host_machines_policy;
 pub mod host_suspend_detection_policy;
 pub mod listener;
 pub mod orchestration_intake_policy;
