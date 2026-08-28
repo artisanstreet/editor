@@ -68,6 +68,15 @@ pub enum ReconnectRotationError {
     NotTakenForWelcome,
 }
 
+/// Operating-system entropy was unavailable while minting a credential.
+#[derive(Debug, Error)]
+#[error("operating-system entropy failed while minting a reconnect capability: {source}")]
+pub struct CredentialEntropyError {
+    /// Typed source returned by the platform entropy provider.
+    #[source]
+    source: getrandom::Error,
+}
+
 enum ExpectedCredential {
     Initial(LocalCapability),
     Reconnect(ReconnectCapability),
@@ -170,6 +179,27 @@ pub struct AuthenticatedCredential<'authority> {
 }
 
 impl<'authority> AuthenticatedCredential<'authority> {
+    /// Mints and stages the next reconnect pair from operating-system entropy.
+    ///
+    /// The temporary source buffer is scrubbed on both success and failure.
+    /// An entropy failure consumes this authentication grant and leaves the
+    /// authority in its fail-closed rotation-only state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialEntropyError`] when the operating system cannot
+    /// fill the fixed-size capability buffer.
+    pub fn prepare_system_reconnect(
+        self,
+    ) -> Result<PendingReconnect<'authority>, CredentialEntropyError> {
+        let mut material = [0_u8; RECONNECT_CAPABILITY_BYTES];
+        if let Err(source) = getrandom::fill(&mut material) {
+            material.zeroize();
+            return Err(CredentialEntropyError { source });
+        }
+        Ok(self.prepare_reconnect(&mut material))
+    }
+
     /// Stages the next server/client reconnect-capability pair.
     ///
     /// `material` must come from a cryptographically secure generator. It is

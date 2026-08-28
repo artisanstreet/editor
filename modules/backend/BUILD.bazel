@@ -12,6 +12,7 @@ rust_library(
         "//modules/migrations:migrations",
         "//modules/protocol:protocol",
         "//modules/transport:transport",
+        "@crates//:getrandom",
         "@crates//:thiserror",
         "@crates//:zeroize",
     ],

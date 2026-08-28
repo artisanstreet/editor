@@ -5,8 +5,8 @@ use std::process::ExitCode;
 pub mod credential_authority;
 
 pub use credential_authority::{
-    AuthenticatedCredential, CredentialAuthenticationError, CredentialAuthority, CredentialKind,
-    PendingReconnect, ReconnectRotationError,
+    AuthenticatedCredential, CredentialAuthenticationError, CredentialAuthority,
+    CredentialEntropyError, CredentialKind, PendingReconnect, ReconnectRotationError,
 };
 
 /// Runs the currently implemented Forge process boundary.
