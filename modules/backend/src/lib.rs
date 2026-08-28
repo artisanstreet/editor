@@ -18,6 +18,7 @@ pub mod preview_service_policy;
 pub mod product_telemetry_capture_policy;
 pub mod request_handler;
 pub mod storage;
+pub mod thread_liveness_policy;
 
 pub use app::{ForgeApp, ForgeConfig, ForgeShutdownError, ForgeStartupError};
 pub use command_admission::{
