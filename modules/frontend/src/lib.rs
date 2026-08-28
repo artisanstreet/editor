@@ -8,6 +8,7 @@
 //! [`thread_list_selection`].
 
 pub mod active_thread_light_policy;
+pub mod activity_status_labels;
 pub mod approval_presentation;
 pub mod artisan_error_code;
 pub mod attention;

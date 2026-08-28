@@ -6,6 +6,7 @@ rust_library(
     name = "frontend",
     srcs = [
         "src/active_thread_light_policy.rs",
+        "src/activity_status_labels.rs",
         "src/approval_presentation.rs",
         "src/attention.rs",
         "src/attention_reconnect.rs",

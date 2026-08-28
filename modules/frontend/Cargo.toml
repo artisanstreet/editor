@@ -17,6 +17,10 @@ name = "active_thread_light_policy"
 path = "../../tests/frontend/active_thread_light_policy.rs"
 
 [[test]]
+name = "activity_status_labels"
+path = "../../tests/frontend/activity_status_labels.rs"
+
+[[test]]
 name = "approval_presentation"
 path = "../../tests/frontend/approval_presentation.rs"
 
