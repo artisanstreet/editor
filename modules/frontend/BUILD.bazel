@@ -64,6 +64,7 @@ rust_library(
         "src/subscription_projection.rs",
         "src/telemetry_bootstrap_policy.rs",
         "src/telemetry_preferences.rs",
+        "src/thread_hover_rail_policy.rs",
         "src/thread_list_selection.rs",
         "src/thread_title_policy.rs",
         "src/thread_title_settings_policy.rs",
