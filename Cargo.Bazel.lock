@@ -1,5 +1,5 @@
 {
-  "checksum": "62aab9284d26368024e296ddf8b37fa362c8e506d90ed26671d9ad8598f63530",
+  "checksum": "a8cffadeafcc8a93eaa5fbdadd136825bc591a86f0122bf6f4a642047fcf5d46",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1808,12 +1808,37 @@
               "target": "getrandom"
             },
             {
+              "id": "quinn 0.11.11",
+              "target": "quinn"
+            },
+            {
+              "id": "sea-orm 2.0.2",
+              "target": "sea_orm"
+            },
+            {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
             {
               "id": "zeroize 1.9.0",
               "target": "zeroize"
+            }
+          ],
+          "selects": {}
+        },
+        "deps_dev": {
+          "common": [
+            {
+              "id": "rcgen 0.14.9",
+              "target": "rcgen"
+            },
+            {
+              "id": "rustls-pki-types 1.15.1",
+              "target": "rustls_pki_types"
+            },
+            {
+              "id": "tokio 1.53.1",
+              "target": "tokio"
             }
           ],
           "selects": {}

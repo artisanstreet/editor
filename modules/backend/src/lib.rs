@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 pub mod app;
 pub mod command_admission;
+pub mod connection;
 pub mod credential_authority;
 pub mod request_handler;
 pub mod storage;
@@ -11,6 +12,10 @@ pub mod storage;
 pub use app::{ForgeApp, ForgeConfig, ForgeShutdownError, ForgeStartupError};
 pub use command_admission::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, SystemCommandOrigin,
+};
+pub use connection::{
+    AuthenticationStageError, ConnectionLimits, ForgeConnection, RequestStageError,
+    ServerFrameStamp, WelcomeMetadata,
 };
 pub use credential_authority::{
     AuthenticatedCredential, CredentialAuthenticationError, CredentialAuthority,

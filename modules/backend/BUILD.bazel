@@ -6,6 +6,7 @@ rust_library(
     name = "backend",
     srcs = [
         "src/app.rs",
+        "src/connection.rs",
         "src/credential_authority.rs",
         "src/command_admission.rs",
         "src/lib.rs",
@@ -20,6 +21,7 @@ rust_library(
         "//modules/protocol:protocol",
         "//modules/transport:transport",
         "@crates//:getrandom",
+        "@crates//:quinn",
         "@crates//:sea-orm",
         "@crates//:thiserror",
         "@crates//:zeroize",
