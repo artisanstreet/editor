@@ -17,5 +17,13 @@ thiserror.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 
+[[test]]
+name = "file_connection"
+path = "../../tests/database/file_connection.rs"
+
+[[test]]
+name = "seaorm_sqlite"
+path = "../../tests/database/seaorm_sqlite.rs"
+
 [lints]
 workspace = true
