@@ -17,6 +17,7 @@ pub mod conversation_diff_stat;
 pub mod conversation_presentation;
 pub mod conversation_projection;
 pub mod image_inspection_store;
+pub mod image_policy;
 pub mod image_viewer;
 pub mod latest_request_gate;
 pub mod motion_spring;
