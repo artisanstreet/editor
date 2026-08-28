@@ -2,6 +2,7 @@
 
 use std::process::ExitCode;
 
+pub mod agent_name_allocation_policy;
 pub mod app;
 pub mod command_admission;
 pub mod connection;
