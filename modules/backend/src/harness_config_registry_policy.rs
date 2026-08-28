@@ -357,6 +357,13 @@ impl Default for HarnessConfigRegistry {
 ///
 /// This free function mirrors the TypeScript layer factory while keeping the
 /// Rust API independent of an effect runtime.
+///
+/// # Errors
+///
+/// Returns [`HarnessConfigRegistryError::DuplicateKeyIdentity`] when two keys
+/// resolve to the same `harness:path` identity, or
+/// [`HarnessConfigRegistryError::DuplicateHarnessTarget`] when two targets
+/// claim the same harness.
 pub fn make_harness_config_registry(
     keys: Option<Vec<HarnessConfigKeyIdentity>>,
     targets: Vec<HarnessConfigTarget>,
