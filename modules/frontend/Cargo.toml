@@ -109,6 +109,10 @@ name = "project_identity_policy"
 path = "../../tests/frontend/project_identity_policy.rs"
 
 [[test]]
+name = "telemetry_bootstrap_policy"
+path = "../../tests/frontend/telemetry_bootstrap_policy.rs"
+
+[[test]]
 name = "telemetry_preferences"
 path = "../../tests/frontend/telemetry_preferences.rs"
 
