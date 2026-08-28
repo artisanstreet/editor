@@ -5,8 +5,9 @@
 //! construction with deterministic lifecycle helpers ([`endpoint`]), and the
 //! sole conversion seam between bounded streams and owned application
 //! envelopes ([`application`]), contiguous per-session ordering for
-//! Forge-originated server events ([`event_sequence`]), and the
-//! exact-leaf pinned identity enforced on every client configuration
+//! Forge-originated server events ([`event_sequence`]), single-request
+//! server-side dispatch over one accepted stream ([`server_dispatch`]), and
+//! the exact-leaf pinned identity enforced on every client configuration
 //! ([`identity`]). Session authentication, request coordination, reconnect
 //! policy, and frontend-facing channels build above these layers.
 
@@ -19,6 +20,7 @@ pub mod frame;
 pub mod handshake;
 pub mod identity;
 pub mod request_correlation;
+pub mod server_dispatch;
 
 pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
 pub use deadline::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
@@ -35,3 +37,6 @@ pub use handshake::{
 };
 pub use identity::{PinnedIdentity, PinnedIdentityError};
 pub use request_correlation::{RequestCorrelationError, RequestCorrelationRegistry};
+pub use server_dispatch::{
+    IncomingRequest, ReplyValidationError, ServerDispatchError, dispatch_server_request,
+};

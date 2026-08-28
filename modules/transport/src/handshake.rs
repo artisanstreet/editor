@@ -127,7 +127,7 @@ pub struct ServerWelcome {
     pub welcome: Welcome,
 }
 
-fn kind(body: &WireEnvelopeBody) -> HandshakeMessageKind {
+pub(crate) fn kind(body: &WireEnvelopeBody) -> HandshakeMessageKind {
     match body {
         WireEnvelopeBody::Hello(_) => HandshakeMessageKind::Hello,
         WireEnvelopeBody::Welcome(_) => HandshakeMessageKind::Welcome,
