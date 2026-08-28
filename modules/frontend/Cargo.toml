@@ -109,6 +109,10 @@ name = "project_picker_native"
 path = "../../tests/frontend/project_picker_native.rs"
 
 [[test]]
+name = "reader_attention"
+path = "../../tests/frontend/reader_attention.rs"
+
+[[test]]
 name = "thread_list_navigation"
 path = "../../tests/frontend/thread_list_navigation.rs"
 
