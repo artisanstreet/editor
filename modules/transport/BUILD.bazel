@@ -8,7 +8,9 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     crate_name = "artisan_transport",
-    deps = all_crate_deps(normal = True),
+    deps = all_crate_deps(normal = True) + [
+        "//modules/protocol:protocol",
+    ],
     edition = crate_edition(),
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],
