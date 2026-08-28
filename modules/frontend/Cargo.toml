@@ -133,6 +133,10 @@ name = "harness_setup_policy"
 path = "../../tests/frontend/harness_setup_policy.rs"
 
 [[test]]
+name = "hover_pill_geometry_policy"
+path = "../../tests/frontend/hover_pill_geometry_policy.rs"
+
+[[test]]
 name = "hover_pill_group_policy"
 path = "../../tests/frontend/hover_pill_group_policy.rs"
 
