@@ -12,6 +12,7 @@ use sea_orm_migration::sea_orm::{ConnectionTrait, DbBackend, Statement};
 
 const INITIAL_MIGRATION: &str = "m20260824_000001_initial_native_schema";
 const RECEIPTS_MIGRATION: &str = "m20260824_000002_global_command_receipts";
+const EXECUTION_MIGRATION: &str = "m20260824_000003_conversation_execution";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -60,7 +61,7 @@ async fn native_table_count(
 ) -> Result<i64, Box<dyn Error>> {
     scalar_i64(
         database,
-        "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('attached_projects', 'threads', 'messages', 'message_dispatches', 'command_receipts')",
+        "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('attached_projects', 'threads', 'messages', 'message_dispatches', 'command_receipts', 'conversation_state', 'conversation_ordinals', 'conversation_turns', 'assistant_runs', 'conversation_items', 'conversation_patches', 'run_checkpoints', 'run_batch_receipts')",
     )
     .await
 }
@@ -72,10 +73,10 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
 
     migrate_to_current(&first).await?;
     migrate_to_current(&first).await?;
-    assert_eq!(native_table_count(&first).await?, 5);
+    assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        2
+        3
     );
     first
         .execute_unprepared(
@@ -106,10 +107,10 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
 
     let reopened = connect(SqliteConfig::file(temp.database()).sqlx_logging(false)).await?;
     migrate_to_current(&reopened).await?;
-    assert_eq!(native_table_count(&reopened).await?, 5);
+    assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        2
+        3
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -161,7 +162,14 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
         .iter()
         .map(|row| row.try_get_by_index::<String>(0))
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(versions, [INITIAL_MIGRATION, RECEIPTS_MIGRATION]);
+    assert_eq!(
+        versions,
+        [
+            INITIAL_MIGRATION.to_string(),
+            RECEIPTS_MIGRATION.to_string(),
+            EXECUTION_MIGRATION.to_string()
+        ]
+    );
     database.close().await?;
     Ok(())
 }
@@ -170,13 +178,13 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
 async fn controlled_down_and_reapply_restore_the_schema() -> Result<(), Box<dyn Error>> {
     let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
     migrate_to_current(&database).await?;
-    assert_eq!(native_table_count(&database).await?, 5);
+    assert_eq!(native_table_count(&database).await?, 13);
 
     Migrator::down(&database, None).await?;
     assert_eq!(native_table_count(&database).await?, 0);
 
     migrate_to_current(&database).await?;
-    assert_eq!(native_table_count(&database).await?, 5);
+    assert_eq!(native_table_count(&database).await?, 13);
     database.close().await?;
     Ok(())
 }
@@ -193,7 +201,7 @@ async fn receipt_migration_upgrades_an_existing_initial_schema() -> Result<(), B
 
     migrate_to_current(&database).await?;
 
-    assert_eq!(native_table_count(&database).await?, 5);
+    assert_eq!(native_table_count(&database).await?, 13);
     assert_eq!(
         scalar_i64(
             &database,
