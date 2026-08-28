@@ -58,7 +58,7 @@ fn acceleration_uses_updated_velocity_for_position() {
     assert_state_close(
         next,
         SpringState {
-            value: -0.2858144,
+            value: -0.285_814_4,
             velocity: 4.0116,
         },
         STEP_TOLERANCE,
@@ -81,7 +81,7 @@ fn damping_reduces_an_existing_positive_velocity() {
     assert_state_close(
         next,
         SpringState {
-            value: 1.54140625,
+            value: 1.541_406_25,
             velocity: -2.34375,
         },
         STEP_TOLERANCE,
@@ -104,7 +104,7 @@ fn retargeting_preserves_incoming_velocity() {
     assert_state_close(
         next,
         SpringState {
-            value: 0.719125,
+            value: 0.719_125,
             velocity: -8.07,
         },
         STEP_TOLERANCE,
@@ -226,36 +226,36 @@ fn repeated_steps_follow_the_same_semi_implicit_trajectory() {
         (
             3,
             SpringState {
-                value: 0.217625,
+                value: 0.217_625,
                 velocity: 5.4075,
             },
         ),
         (
             10,
             SpringState {
-                value: 0.7394438145284179,
-                velocity: 3.0636400614316406,
+                value: 0.739_443_814_528_417_9,
+                velocity: 3.063_640_061_431_640_6,
             },
         ),
         (
             30,
             SpringState {
-                value: 0.9955839861133686,
-                velocity: 0.06356147694692137,
+                value: 0.995_583_986_113_368_6,
+                velocity: 0.063_561_476_946_921_37,
             },
         ),
         (
             60,
             SpringState {
-                value: 0.9999939656925254,
-                velocity: 0.0000900362386754821,
+                value: 0.999_993_965_692_525_4,
+                velocity: 0.000_090_036_238_675_482_1,
             },
         ),
         (
             120,
             SpringState {
-                value: 0.999999999990609,
-                velocity: 0.000000000140851368248418,
+                value: 0.999_999_999_990_609,
+                velocity: 0.000_000_000_140_851_368_248_418,
             },
         ),
     ];
