@@ -32,6 +32,7 @@ rust_library(
         "src/reasoning_display.rs",
         "src/shell.rs",
         "src/subscription_projection.rs",
+        "src/telemetry_preferences.rs",
         "src/thread_list_selection.rs",
         "src/transcript.rs",
     ],

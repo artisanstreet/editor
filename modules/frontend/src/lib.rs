@@ -33,6 +33,7 @@ pub mod proof;
 pub mod reasoning_display;
 pub mod shell;
 pub mod subscription_projection;
+pub mod telemetry_preferences;
 pub mod thread_list_selection;
 pub mod transcript;
 
