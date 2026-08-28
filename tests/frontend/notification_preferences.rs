@@ -48,23 +48,21 @@ fn explicit_true_and_false_values_survive_on_both_surfaces() {
 
     // In particular, an explicit opt-out on desktop and opt-in in a browser
     // must not be rewritten merely because each differs from its default.
-    assert_eq!(
-        resolve_notification_preferences(
+    assert!(
+        !resolve_notification_preferences(
             RuntimeSurface::Desktop,
             StoredNotificationPreferences::Valid(NotificationPreferences::new(false)),
         )
         .state()
-        .enabled,
-        false
+        .enabled
     );
-    assert_eq!(
+    assert!(
         resolve_notification_preferences(
             RuntimeSurface::Browser,
             StoredNotificationPreferences::Valid(NotificationPreferences::new(true)),
         )
         .state()
-        .enabled,
-        true
+        .enabled
     );
 }
 
