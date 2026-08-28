@@ -83,6 +83,17 @@ rust_test(
 )
 
 rust_test(
+    name = "composer_draft_session_policy_test",
+    srcs = ["composer_draft_session_policy.rs"],
+    crate_name = "composer_draft_session_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "context_usage_description_test",
     srcs = ["context_usage_description.rs"],
     crate_name = "context_usage_description_test",
