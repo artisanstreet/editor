@@ -53,6 +53,10 @@ name = "engine_owner_fixture_smoke"
 path = "../../tests/backend/engine_owner_fixture_smoke.rs"
 
 [[test]]
+name = "file_identity_policy"
+path = "../../tests/backend/file_identity_policy.rs"
+
+[[test]]
 name = "listener"
 path = "../../tests/backend/listener.rs"
 
