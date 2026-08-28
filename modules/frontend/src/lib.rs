@@ -62,6 +62,7 @@ pub mod runtime_fixture_policy;
 pub mod runtime_fixture_support;
 pub mod runtime_surface;
 pub mod shell;
+pub mod setup_label_transition_policy;
 pub mod subscription_projection;
 pub mod telemetry_bootstrap_policy;
 pub mod telemetry_preferences;
