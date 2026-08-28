@@ -41,6 +41,11 @@ impl IntakeRisk {
     ///
     /// Matching is intentionally case-sensitive and does not trim or
     /// otherwise rewrite externally supplied values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeRiskParseError`] when `value` is not one of the exact
+    /// risk spellings in this contract.
     #[must_use = "handle invalid intake risk input"]
     pub fn parse(value: &str) -> Result<Self, IntakeRiskParseError> {
         match value {
@@ -106,6 +111,11 @@ impl IntakeResolution {
     ///
     /// Matching is intentionally case-sensitive and does not trim or
     /// otherwise rewrite externally supplied values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntakeResolutionParseError`] when `value` is not one of the
+    /// exact resolution spellings in this contract.
     #[must_use = "handle invalid intake resolution input"]
     pub fn parse(value: &str) -> Result<Self, IntakeResolutionParseError> {
         match value {
