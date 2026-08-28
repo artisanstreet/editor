@@ -85,6 +85,10 @@ name = "terminal_transcript_consumption_policy"
 path = "../../tests/backend/terminal_transcript_consumption_policy.rs"
 
 [[test]]
+name = "thread_metadata_refiner_policy"
+path = "../../tests/backend/thread_metadata_refiner_policy.rs"
+
+[[test]]
 name = "usage_interruption_model_policy"
 path = "../../tests/backend/usage_interruption_model_policy.rs"
 
