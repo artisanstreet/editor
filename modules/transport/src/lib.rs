@@ -15,6 +15,7 @@ pub mod error;
 pub mod event_sequence;
 pub mod frame;
 pub mod handshake;
+pub mod request_correlation;
 
 pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
 pub use endpoint::{
@@ -28,3 +29,4 @@ pub use handshake::{
     ClientHello, HandshakeError, HandshakeMessageKind, ServerWelcome, client_handshake,
     receive_client_hello, send_server_welcome,
 };
+pub use request_correlation::{RequestCorrelationError, RequestCorrelationRegistry};
