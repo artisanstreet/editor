@@ -5,8 +5,9 @@
 //! Product assembly, navigation, and screens arrive in later phases. Beyond
 //! that window, the library now hosts narrow product presentation-model
 //! leaves that record audited semantics without rendering them:
-//! [`transcript`] and [`thread_list_selection`].
+//! [`attention`], [`transcript`], and [`thread_list_selection`].
 
+pub mod attention;
 pub mod proof;
 pub mod thread_list_selection;
 pub mod transcript;
