@@ -195,7 +195,6 @@ pub struct ReleasePendingSteeringLip<Submission> {
 /// Returns [`SteeringPendingLipError::GenerationExhausted`] when
 /// `state.next_generation` is `u64::MAX`. The state is unchanged and the
 /// counter never wraps.
-#[must_use]
 pub fn begin_pending_steering_lip<Submission: Clone>(
     state: &SteeringPendingLipState<Submission>,
     submission: Submission,
