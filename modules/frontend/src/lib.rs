@@ -41,6 +41,7 @@ pub mod markdown_warmup_policy;
 pub mod marketplace_fixture_policy;
 pub mod math_rendering_policy;
 pub mod mobile_breakpoint_policy;
+pub mod model_favorites_presentation;
 pub mod motion_spring;
 pub mod new_thread_interaction;
 pub mod notification_events;
