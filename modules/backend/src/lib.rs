@@ -13,6 +13,7 @@ pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
 pub mod engine_owner;
+pub mod file_identity_policy;
 pub mod graph_advancement_policy;
 pub mod host_identity_policy;
 pub mod host_suspend_detection_policy;
