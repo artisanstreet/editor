@@ -40,7 +40,7 @@ fn alternate_policy() -> SessionPolicy {
 }
 
 fn assert_flush_result(
-    result: PolicyFlushResult,
+    result: &PolicyFlushResult,
     confirmed: &[SessionPolicy],
     current: Option<&SessionPolicy>,
 ) {
@@ -66,7 +66,7 @@ fn empty_state_is_absent_and_empty_flush_does_not_persist() {
         })
         .expect("an empty flush succeeds");
 
-    assert_flush_result(result, &[], None);
+    assert_flush_result(&result, &[], None);
     assert_eq!(calls.get(), 0);
 }
 
@@ -106,7 +106,7 @@ fn effective_precedence_is_desired_then_in_flight_then_authoritative() {
         .expect("both queued policies persist");
 
     assert_eq!(calls, 2);
-    assert_flush_result(result, &[desired, queued.clone()], Some(&queued));
+    assert_flush_result(&result, &[desired, queued.clone()], Some(&queued));
     assert_eq!(controller.current(), Some(queued));
 }
 
@@ -259,7 +259,11 @@ fn repair_requests_deduplicate_against_effective_policy_and_existing_key() {
     let result = controller
         .flush(|_| Ok::<_, &'static str>(normalized.clone()))
         .expect("repair persists");
-    assert_flush_result(result, &[normalized.clone()], Some(&normalized));
+    assert_flush_result(
+        &result,
+        std::slice::from_ref(&normalized),
+        Some(&normalized),
+    );
     assert_eq!(controller.state().repair_key, Some(repair.key()));
 
     // The normalized effective value differs from `repair`, so this false
@@ -288,7 +292,11 @@ fn one_flush_confirms_normalized_authority_and_a_later_flush_is_empty() {
             Ok::<_, &'static str>(authoritative.clone())
         })
         .expect("the first flush succeeds");
-    assert_flush_result(first, &[authoritative.clone()], Some(&authoritative));
+    assert_flush_result(
+        &first,
+        std::slice::from_ref(&authoritative),
+        Some(&authoritative),
+    );
     assert_eq!(*calls.borrow(), vec![desired]);
     assert_eq!(controller.state().in_flight, None);
 
@@ -298,7 +306,7 @@ fn one_flush_confirms_normalized_authority_and_a_later_flush_is_empty() {
             Ok::<_, &'static str>(policy)
         })
         .expect("an empty later flush succeeds");
-    assert_flush_result(second, &[], Some(&authoritative));
+    assert_flush_result(&second, &[], Some(&authoritative));
     assert_eq!(*calls.borrow(), vec![base_policy()]);
 }
 
@@ -329,7 +337,7 @@ fn one_flush_consumes_latest_intent_queued_during_persistence() {
         .expect("the queued latest intent also succeeds");
 
     assert_eq!(persisted, vec![first, latest.clone()]);
-    assert_flush_result(result, &[normalized_first, latest.clone()], Some(&latest));
+    assert_flush_result(&result, &[normalized_first, latest.clone()], Some(&latest));
     assert_eq!(controller.state().desired, None);
     assert_eq!(controller.state().in_flight, None);
 }
@@ -397,7 +405,7 @@ fn concurrent_flushes_are_serialized_while_first_flush_drains_queued_work() {
     let second = thread::spawn(move || {
         second_started_tx.send(()).expect("test receiver is live");
         second_controller
-            .flush(|policy| Ok::<_, &'static str>(policy))
+            .flush(Ok::<_, &'static str>)
             .expect("second flush succeeds after the first lock is released")
     });
     second_started_rx
@@ -411,9 +419,9 @@ fn concurrent_flushes_are_serialized_while_first_flush_drains_queued_work() {
     let second_result = second.join().expect("second flush thread joins");
 
     assert_flush_result(
-        first_result,
+        &first_result,
         &[first_policy.clone(), second_policy.clone()],
         Some(&second_policy),
     );
-    assert_flush_result(second_result, &[], Some(&second_policy));
+    assert_flush_result(&second_result, &[], Some(&second_policy));
 }
