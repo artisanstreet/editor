@@ -6,6 +6,7 @@ rust_library(
     name = "frontend",
     srcs = [
         "src/attention.rs",
+        "src/attention_reconnect.rs",
         "src/artisan_error_code.rs",
         "src/composer.rs",
         "src/context_usage_description.rs",
