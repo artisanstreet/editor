@@ -97,6 +97,10 @@ name = "onboarding_route"
 path = "../../tests/frontend/onboarding_route.rs"
 
 [[test]]
+name = "project_identity_policy"
+path = "../../tests/frontend/project_identity_policy.rs"
+
+[[test]]
 name = "telemetry_preferences"
 path = "../../tests/frontend/telemetry_preferences.rs"
 
