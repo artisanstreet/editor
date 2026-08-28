@@ -35,6 +35,7 @@ rust_library(
         "src/engine_owner/framing.rs",
         "src/engine_owner/observation.rs",
         "src/graph_advancement_policy.rs",
+        "src/host_identity_policy.rs",
         "src/lib.rs",
         "src/listener.rs",
         "src/orchestration_intake_policy.rs",
