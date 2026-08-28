@@ -33,6 +33,7 @@ pub mod notification_preferences;
 pub mod onboarding_route;
 pub mod project_picker;
 pub mod proof;
+pub mod reader_attention;
 pub mod reasoning_display;
 pub mod shell;
 pub mod subscription_projection;

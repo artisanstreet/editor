@@ -32,6 +32,7 @@ rust_library(
         "src/onboarding_route.rs",
         "src/proof.rs",
         "src/project_picker.rs",
+        "src/reader_attention.rs",
         "src/reasoning_display.rs",
         "src/shell.rs",
         "src/subscription_projection.rs",
