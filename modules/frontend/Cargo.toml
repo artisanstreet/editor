@@ -37,6 +37,10 @@ name = "context_usage_description"
 path = "../../tests/frontend/context_usage_description.rs"
 
 [[test]]
+name = "context_usage_gauge_policy"
+path = "../../tests/frontend/context_usage_gauge_policy.rs"
+
+[[test]]
 name = "context_usage_model_name"
 path = "../../tests/frontend/context_usage_model_name.rs"
 
