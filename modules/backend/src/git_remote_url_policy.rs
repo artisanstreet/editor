@@ -233,8 +233,7 @@ fn parse_port(port: &str) -> Option<()> {
     }
 
     port.parse::<u32>()
-        .ok()
-        .is_some_and(|port| u16::try_from(port).is_ok())
+        .is_ok_and(|port| u16::try_from(port).is_ok())
         .then_some(())
 }
 
