@@ -18,3 +18,7 @@ workspace = true
 [[test]]
 name = "tooltip"
 path = "../../tests/ui/tooltip.rs"
+
+[[test]]
+name = "progress"
+path = "../../tests/ui/progress.rs"
