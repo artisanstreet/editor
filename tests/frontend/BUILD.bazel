@@ -317,6 +317,17 @@ rust_test(
 )
 
 rust_test(
+    name = "project_identity_policy_test",
+    srcs = ["project_identity_policy.rs"],
+    crate_name = "project_identity_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "reasoning_display_test",
     srcs = ["reasoning_display.rs"],
     crate_name = "reasoning_display_test",
