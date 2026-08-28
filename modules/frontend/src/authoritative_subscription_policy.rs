@@ -377,8 +377,7 @@ impl fmt::Display for AuthoritativeSubscriptionPolicyError {
             }
             Self::AttemptMismatch { expected, actual } => write!(
                 formatter,
-                "subscription event addressed attempt {:?}, expected {:?}",
-                actual, expected
+                "subscription event addressed attempt {actual:?}, expected {expected:?}"
             ),
             Self::AttemptIdExhausted => {
                 formatter.write_str("authoritative subscription attempt identity is exhausted")
@@ -500,7 +499,7 @@ impl AuthoritativeSubscriptionPolicy {
                         attempt: expected,
                         failure,
                     } => {
-                        self.ensure_same_attempt(expected, attempt)?;
+                        Self::ensure_same_attempt(expected, attempt)?;
                         failure
                     }
                     _ => {
@@ -517,19 +516,23 @@ impl AuthoritativeSubscriptionPolicy {
             }
             AuthoritativeSubscriptionEvent::RecoverySucceeded { attempt }
             | AuthoritativeSubscriptionEvent::RecoveryFailed { attempt } => {
-                let expected = match self.state {
-                    AuthoritativeSubscriptionState::Recovering { attempt, .. } => attempt,
-                    _ => return Err(self.invalid("complete recovery")),
+                let AuthoritativeSubscriptionState::Recovering {
+                    attempt: expected, ..
+                } = self.state
+                else {
+                    return Err(self.invalid("complete recovery"));
                 };
-                self.ensure_same_attempt(expected, attempt)?;
-                self.schedule_retry(attempt)
+                Self::ensure_same_attempt(expected, attempt)?;
+                Ok(self.schedule_retry(attempt))
             }
             AuthoritativeSubscriptionEvent::RetryReady { attempt } => {
-                let expected = match self.state {
-                    AuthoritativeSubscriptionState::WaitingToRetry { attempt, .. } => attempt,
-                    _ => return Err(self.invalid("start the next retry")),
+                let AuthoritativeSubscriptionState::WaitingToRetry {
+                    attempt: expected, ..
+                } = self.state
+                else {
+                    return Err(self.invalid("start the next retry"));
                 };
-                self.ensure_same_attempt(expected, attempt)?;
+                Self::ensure_same_attempt(expected, attempt)?;
                 self.start_fresh_attempt()
             }
         }
@@ -657,7 +660,7 @@ impl AuthoritativeSubscriptionPolicy {
     fn schedule_retry(
         &mut self,
         attempt: SubscriptionAttempt,
-    ) -> Result<AuthoritativeSubscriptionTransition, AuthoritativeSubscriptionPolicyError> {
+    ) -> AuthoritativeSubscriptionTransition {
         let retry_index = self.next_retry_index;
         let delay = retry_delay(retry_index);
         self.next_retry_index = self.next_retry_index.saturating_add(1);
@@ -666,12 +669,10 @@ impl AuthoritativeSubscriptionPolicy {
             retry_index,
             delay,
         };
-        Ok(
-            self.transition(Some(AuthoritativeSubscriptionAction::RetryAfterDelay {
-                attempt,
-                delay,
-            })),
-        )
+        self.transition(Some(AuthoritativeSubscriptionAction::RetryAfterDelay {
+            attempt,
+            delay,
+        }))
     }
 
     fn transition(
@@ -682,7 +683,6 @@ impl AuthoritativeSubscriptionPolicy {
     }
 
     fn ensure_same_attempt(
-        &self,
         expected: SubscriptionAttempt,
         actual: SubscriptionAttempt,
     ) -> Result<(), AuthoritativeSubscriptionPolicyError> {
@@ -706,7 +706,7 @@ impl AuthoritativeSubscriptionPolicy {
             .state
             .attempt()
             .expect("non-ready state kinds always carry an attempt");
-        self.ensure_same_attempt(expected, actual)
+        Self::ensure_same_attempt(expected, actual)
     }
 
     fn invalid(&self, operation: &'static str) -> AuthoritativeSubscriptionPolicyError {
