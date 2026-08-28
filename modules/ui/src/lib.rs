@@ -2,6 +2,7 @@
 
 pub mod asset_seam;
 pub mod button;
+pub mod card;
 pub mod markdown;
 pub mod motion;
 pub mod theme;
