@@ -39,11 +39,11 @@ fn refresh_admission_table_preserves_one_batch_and_empty_noop() {
     let returned = response(&["project-a"]);
 
     assert_eq!(
-        ProjectIdentityPolicy::<String>::new().admit_refresh(&empty),
+        ProjectIdentityPolicy::<String>::admit_refresh(&empty),
         RefreshAdmission::NoOp
     );
     assert_eq!(
-        ProjectIdentityPolicy::<String>::new().admit_refresh(&requested),
+        ProjectIdentityPolicy::<String>::admit_refresh(&requested),
         RefreshAdmission::BatchLookup {
             project_ids: requested,
         }
@@ -56,15 +56,13 @@ fn retry_sequence_is_exponential_and_bounded_by_elapsed_schedule_duration() {
     let mut schedule = ColdStartRetryState::new();
     let mut intents = Vec::new();
 
-    loop {
-        match schedule.next_intent() {
-            RetryIntent::Retry {
-                attempt,
-                delay,
-                elapsed,
-            } => intents.push((attempt, delay, elapsed)),
-            RetryIntent::Exhausted => break,
-        }
+    while let RetryIntent::Retry {
+        attempt,
+        delay,
+        elapsed,
+    } = schedule.next_intent()
+    {
+        intents.push((attempt, delay, elapsed));
     }
 
     assert_eq!(

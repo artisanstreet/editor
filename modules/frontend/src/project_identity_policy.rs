@@ -256,7 +256,7 @@ impl<T> ProjectIdentityPolicy<T> {
 
     /// Computes refresh admission for the supplied project IDs.
     #[must_use]
-    pub fn admit_refresh(&self, project_ids: &[String]) -> RefreshAdmission {
+    pub fn admit_refresh(project_ids: &[String]) -> RefreshAdmission {
         admit_refresh(project_ids)
     }
 
