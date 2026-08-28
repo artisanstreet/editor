@@ -44,6 +44,7 @@ pub mod engine_usage_cache;
 pub mod file_icon;
 pub mod forge_recovery_health;
 pub mod harness_setup_policy;
+pub mod host_resume_recovery_policy;
 pub mod hover_pill_geometry_policy;
 pub mod hover_pill_group_policy;
 pub mod image_inspection_store;
