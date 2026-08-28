@@ -11,6 +11,7 @@ pub mod attention;
 pub mod command_ranking;
 pub mod composer;
 pub mod conversation_projection;
+pub mod image_viewer;
 pub mod project_picker;
 pub mod proof;
 pub mod shell;
