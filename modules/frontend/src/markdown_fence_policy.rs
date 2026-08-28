@@ -134,9 +134,27 @@ fn opening(line: &str) -> Option<(char, usize, &str)> {
 }
 
 /// Returns whether a character is whitespace in the JavaScript regular
-/// expressions used by the legacy requested-language scanner.
+/// expressions and `String#trim` used by the legacy scanner.
 fn is_legacy_whitespace(character: char) -> bool {
-    character.is_whitespace() || character == '\u{feff}'
+    matches!(
+        character,
+        '\u{0009}'
+            | '\u{000a}'
+            | '\u{000b}'
+            | '\u{000c}'
+            | '\u{000d}'
+            | '\u{0020}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
 }
 
 /// Returns the first requested label token from an opener-like line.
@@ -311,14 +329,18 @@ pub fn open_conversation_fence_body(markdown: &str) -> Option<String> {
 }
 
 /// Returns whether `code` is exactly the currently open fence body after
-/// removing only trailing LF characters from both values.
+/// removing only trailing LF characters from `code`.
+///
+/// `open_body` is the normalized value returned by
+/// [`open_conversation_fence_body`]. It is compared byte-for-byte after the
+/// candidate code is normalized, matching the legacy predicate's contract.
 #[must_use]
 pub fn is_open_conversation_fence_body(code: &str, open_body: Option<&str>) -> bool {
     let Some(open_body) = open_body else {
         return false;
     };
 
-    normalize_fence_body(code) == normalize_fence_body(open_body)
+    normalize_fence_body(code) == open_body
 }
 
 /// Removes parser-generated trailing LF characters from a fence body.
