@@ -19,7 +19,7 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
 /// The minimal project projection required to build an editor target.
 ///
-/// project_id is caller-owned identity text. This type stores it without
+/// `project_id` is caller-owned identity text. This type stores it without
 /// trimming, case folding, path conversion, or any other interpretation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditorProjectInput {
@@ -39,7 +39,7 @@ impl EditorProjectInput {
 
 /// The minimal thread projection required by the editor target policy.
 ///
-/// None for primary_project represents a detached historical thread. It is
+/// None for `primary_project` represents a detached historical thread. It is
 /// not interchangeable with an empty project identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditorThreadInput {
@@ -64,7 +64,7 @@ impl EditorThreadInput {
 ///
 /// A detached thread has only path and the "thread" target type. A thread
 /// with a primary project has path, the "editor" target type, and the
-/// unmodified project identifier as workspace_id.
+/// unmodified project identifier as `workspace_id`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EditorRouteTarget {
     /// Fall back to the canonical thread route when no primary project exists.
@@ -112,7 +112,7 @@ impl EditorRouteTarget {
 /// Builds the canonical editor URL for one workspace/thread pair.
 ///
 /// The thread route id removes one leading thread_ prefix when that leaves a
-/// non-empty id, matching ThreadRouteId. A present file is always emitted as
+/// non-empty id, matching `ThreadRouteId`. A present file is always emitted as
 /// ?file=..., including Some(""); None omits the query entirely. Components
 /// are encoded independently and no caller text is otherwise normalized.
 #[must_use]
@@ -133,7 +133,7 @@ pub fn editor_route_path(workspace_id: &str, thread_id: &str, file: Option<&str>
 ///
 /// A thread without a primary project falls back to the thread route and does
 /// not carry a file query. A project-backed thread produces the editor target,
-/// retaining the exact project identifier in workspace_id while using the
+/// retaining the exact project identifier in `workspace_id` while using the
 /// same encoded value in its path.
 #[must_use]
 pub fn editor_route_target_for_thread(
@@ -151,7 +151,7 @@ pub fn editor_route_target_for_thread(
     }
 }
 
-/// Applies the legacy ThreadRouteId projection to one thread identity.
+/// Applies the legacy `ThreadRouteId` projection to one thread identity.
 fn thread_route_id(thread_id: &str) -> &str {
     let route_id = thread_id
         .strip_prefix(LEGACY_THREAD_PREFIX)
