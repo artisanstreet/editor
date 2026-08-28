@@ -284,6 +284,17 @@ rust_test(
 )
 
 rust_test(
+    name = "harness_setup_policy_test",
+    srcs = ["harness_setup_policy.rs"],
+    crate_name = "harness_setup_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "hover_pill_group_policy_test",
     srcs = ["hover_pill_group_policy.rs"],
     crate_name = "hover_pill_group_policy_test",
