@@ -117,12 +117,19 @@ pub fn thinking_word_for<T: AsRef<str>>(
     vocabulary: &[T],
 ) -> String {
     let words = resolve_thinking_vocabulary(vocabulary);
-    let vocabulary_length = u64::try_from(words.len()).expect("a slice length always fits in u64");
-    let index = usize::try_from(
-        u64::from(code_point_fnv1a(seed)).wrapping_add(visibility_generation) % vocabulary_length,
-    )
-    .expect("the selected vocabulary index fits in usize");
-    words[index].clone()
+    let value = u64::from(code_point_fnv1a(seed)).wrapping_add(visibility_generation);
+    let index = match u64::try_from(words.len()) {
+        Ok(vocabulary_length) => usize::try_from(value % vocabulary_length).unwrap_or_default(),
+        Err(_) => usize::try_from(value).unwrap_or_default(),
+    };
+
+    words.get(index).cloned().unwrap_or_else(|| {
+        FALLBACK_THINKING_WORDS
+            .first()
+            .copied()
+            .unwrap_or_default()
+            .to_owned()
+    })
 }
 
 /// Returns the exact pre-response provider wait label when an engine is known.
