@@ -28,6 +28,7 @@ pub mod image_policy;
 pub mod image_viewer;
 pub mod latest_request_gate;
 pub mod markdown_fence_policy;
+pub mod markdown_warmup_policy;
 pub mod marketplace_fixture_policy;
 pub mod math_rendering_policy;
 pub mod motion_spring;
