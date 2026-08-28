@@ -15,6 +15,7 @@ sqlx-sqlite.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+artisan-migrations = { path = "../migrations" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [[test]]
@@ -24,6 +25,10 @@ path = "../../tests/database/file_connection.rs"
 [[test]]
 name = "seaorm_sqlite"
 path = "../../tests/database/seaorm_sqlite.rs"
+
+[[test]]
+name = "command_receipt_entities"
+path = "../../tests/database/command_receipt_entities.rs"
 
 [lints]
 workspace = true

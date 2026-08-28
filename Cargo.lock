@@ -323,6 +323,7 @@ name = "artisan-database"
 version = "0.0.0"
 dependencies = [
  "artisan-domain",
+ "artisan-migrations",
  "sea-orm",
  "sqlx-sqlite",
  "thiserror 2.0.20",
