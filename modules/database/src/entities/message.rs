@@ -27,6 +27,18 @@ pub enum Relation {
     Dispatch,
     #[sea_orm(has_many = "super::command_receipt::Entity")]
     CommandReceipts,
+    #[sea_orm(
+        has_one = "super::assistant_run::Entity",
+        from = "(Column::MessageId, Column::ThreadId)",
+        to = "(super::assistant_run::Column::OriginMessageId, super::assistant_run::Column::ThreadId)"
+    )]
+    AssistantRun,
+    #[sea_orm(
+        has_one = "super::conversation_item::Entity",
+        from = "(Column::MessageId, Column::ThreadId)",
+        to = "(super::conversation_item::Column::SourceMessageId, super::conversation_item::Column::ThreadId)"
+    )]
+    ConversationItem,
 }
 
 impl Related<super::thread::Entity> for Entity {
@@ -44,6 +56,18 @@ impl Related<super::message_dispatch::Entity> for Entity {
 impl Related<super::command_receipt::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::CommandReceipts.def()
+    }
+}
+
+impl Related<super::assistant_run::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::AssistantRun.def()
+    }
+}
+
+impl Related<super::conversation_item::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ConversationItem.def()
     }
 }
 

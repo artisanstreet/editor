@@ -28,11 +28,35 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Ordinal,
+    #[sea_orm(
+        has_one = "super::assistant_run::Entity",
+        from = "(Column::TurnId, Column::ThreadId)",
+        to = "(super::assistant_run::Column::OriginTurnId, super::assistant_run::Column::ThreadId)"
+    )]
+    AssistantRun,
+    #[sea_orm(
+        has_many = "super::conversation_item::Entity",
+        from = "(Column::TurnId, Column::ThreadId)",
+        to = "(super::conversation_item::Column::TurnId, super::conversation_item::Column::ThreadId)"
+    )]
+    Items,
 }
 
 impl Related<super::conversation_ordinal::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Ordinal.def()
+    }
+}
+
+impl Related<super::assistant_run::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::AssistantRun.def()
+    }
+}
+
+impl Related<super::conversation_item::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Items.def()
     }
 }
 
