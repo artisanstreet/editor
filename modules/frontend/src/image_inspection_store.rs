@@ -7,7 +7,7 @@
 //! releases its lease.
 
 /// Shared count of the viewers currently inspecting images.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct ImageInspectionStore {
     count: usize,
 }
