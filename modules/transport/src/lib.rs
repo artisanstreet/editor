@@ -20,6 +20,7 @@ pub mod frame;
 pub mod handshake;
 pub mod identity;
 pub mod request_correlation;
+pub mod request_lifecycle;
 pub mod server_dispatch;
 
 pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
@@ -37,6 +38,10 @@ pub use handshake::{
 };
 pub use identity::{PinnedIdentity, PinnedIdentityError};
 pub use request_correlation::{RequestCorrelationError, RequestCorrelationRegistry};
+pub use request_lifecycle::{
+    ClientRequestLifecycle, OutcomeDelivery, OutcomeWaiter, OutcomeWaiterError, RequestOutcome,
+    ResolvedRequest,
+};
 pub use server_dispatch::{
     IncomingRequest, ReplyValidationError, ServerDispatchError, dispatch_server_request,
 };
