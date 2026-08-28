@@ -11,8 +11,8 @@ mod speed_presentation;
 
 use speed_presentation::{
     DEFAULT_NATIVE_VALUE, DEFAULT_SPEED_ID, FAST_CLASS, FAST_LABEL, SUPERFAST_CLASS,
-    SUPERFAST_LABEL, SpeedOption, SpeedOptionPresentation, available_speed_options, default_speed,
-    dispatch_speed_presentation, has_dispatch_speed, is_available, is_known_presentation_id,
+    SUPERFAST_LABEL, SpeedOption, SpeedOptionPresentation, authoritative_speed_id,
+    available_speed_options, default_speed, dispatch_speed_presentation, is_available,
     selected_speed_by_id, selected_speed_by_native_value, speed_by_id, speed_by_native_value,
     speed_option_presentation, trigger_speed_presentation,
 };
@@ -188,28 +188,6 @@ fn presentation_uses_only_id_and_label_and_preserves_description_elsewhere() {
     assert_eq!(speed.disabled.as_deref(), Some("temporarily unavailable"));
     assert_eq!(speed_option_presentation(&speed).class_name, FAST_CLASS);
     assert_eq!(speed_option_presentation(&speed).label, FAST_LABEL);
-}
-
-#[test]
-fn known_presentation_ids_are_exact_and_do_not_include_standard_or_effort() {
-    for id in ["fast", "superfast"] {
-        assert!(is_known_presentation_id(id), "id={id:?}");
-    }
-    for id in [
-        "standard",
-        "",
-        "FAST",
-        "Superfast",
-        "unknown",
-        "light",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-    ] {
-        assert!(!is_known_presentation_id(id), "id={id:?}");
-    }
 }
 
 #[test]
@@ -402,14 +380,85 @@ fn selected_native_value_uses_exact_available_value_then_default_fallback() {
 }
 
 #[test]
-fn trigger_hides_default_unknown_and_unavailable_values() {
+fn authoritative_sync_uses_raw_native_then_raw_default_then_standard() {
+    let options = vec![
+        option(
+            "standard",
+            "Standard",
+            "standard",
+            "standard",
+            true,
+            Some("currently unavailable"),
+        ),
+        option(
+            "fast",
+            "Fast",
+            "fast",
+            "fast",
+            false,
+            Some("currently unavailable"),
+        ),
+    ];
+
+    assert_eq!(selected_speed_by_native_value(&options, "fast"), None);
+    assert_eq!(authoritative_speed_id(&options, "fast"), "fast");
+    assert_eq!(authoritative_speed_id(&options, "retired"), "standard");
+
+    let multiple_defaults = vec![
+        option(
+            "first-default",
+            "First default",
+            "first-default",
+            "first",
+            true,
+            Some("currently unavailable"),
+        ),
+        option(
+            "second-default",
+            "Second default",
+            "second-default",
+            "second",
+            true,
+            None,
+        ),
+    ];
+    assert_eq!(
+        authoritative_speed_id(&multiple_defaults, "retired"),
+        "first-default"
+    );
+
+    let no_default = vec![option(
+        "economy",
+        "Economy",
+        "economy",
+        "economy",
+        false,
+        Some("currently unavailable"),
+    )];
+    assert_eq!(authoritative_speed_id(&no_default, "retired"), "standard");
+
+    let no_standard_option: Vec<SpeedOption> = Vec::new();
+    assert_eq!(
+        authoritative_speed_id(&no_standard_option, "retired"),
+        DEFAULT_SPEED_ID
+    );
+}
+
+#[test]
+fn trigger_hides_default_and_unknown_but_not_a_disabled_selected_value() {
     let options = standard_speeds();
     assert_eq!(trigger_speed_presentation(&options, "standard"), None);
     assert_eq!(trigger_speed_presentation(&options, "unknown"), None);
     assert_eq!(trigger_speed_presentation(&options, ""), None);
 
     let disabled = disabled_fast_speeds();
-    assert_eq!(trigger_speed_presentation(&disabled, "fast"), None);
+    assert_eq!(
+        trigger_speed_presentation(&disabled, "fast"),
+        Some(SpeedOptionPresentation {
+            class_name: FAST_CLASS,
+            label: FAST_LABEL.to_owned(),
+        })
+    );
 
     let empty: Vec<SpeedOption> = Vec::new();
     assert_eq!(trigger_speed_presentation(&empty, "fast"), None);
@@ -447,16 +496,20 @@ fn trigger_uses_exact_branded_and_unknown_non_default_presentations() {
 }
 
 #[test]
-fn dispatch_hides_default_unknown_and_unavailable_values() {
+fn dispatch_hides_default_and_unknown_but_not_an_unavailable_value() {
     let options = standard_speeds();
     assert_eq!(dispatch_speed_presentation(&options, "standard"), None);
     assert_eq!(dispatch_speed_presentation(&options, "unknown"), None);
     assert_eq!(dispatch_speed_presentation(&options, ""), None);
-    assert!(!has_dispatch_speed(&options, "standard"));
 
     let disabled = disabled_fast_speeds();
-    assert_eq!(dispatch_speed_presentation(&disabled, "fast"), None);
-    assert!(!has_dispatch_speed(&disabled, "fast"));
+    assert_eq!(
+        dispatch_speed_presentation(&disabled, "fast"),
+        Some(SpeedOptionPresentation {
+            class_name: FAST_CLASS,
+            label: FAST_LABEL.to_owned(),
+        })
+    );
 }
 
 #[test]
@@ -496,8 +549,6 @@ fn dispatch_uses_native_value_not_id_and_preserves_exact_custom_label() {
         })
     );
     assert_eq!(dispatch_speed_presentation(&options, "fast"), None);
-    assert!(has_dispatch_speed(&options, "native-fast"));
-    assert!(has_dispatch_speed(&options, "native-custom"));
 }
 
 #[test]
@@ -510,7 +561,6 @@ fn default_constants_preserve_the_standard_picker_and_wire_fallbacks() {
 fn speed_policy_does_not_conflate_reasoning_effort_with_speed() {
     for effort in ["light", "medium", "high", "xhigh", "max", "ultra"] {
         let option = option(effort, effort, effort, "effort", false, None);
-        assert!(!is_known_presentation_id(effort));
         assert_eq!(speed_option_presentation(&option).class_name, "");
         assert_eq!(speed_option_presentation(&option).label, effort);
     }

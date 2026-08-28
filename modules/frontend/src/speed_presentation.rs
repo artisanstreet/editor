@@ -113,16 +113,6 @@ pub fn speed_option_presentation(option: &SpeedOption) -> SpeedOptionPresentatio
     }
 }
 
-/// Returns whether `id` has a branded accelerated presentation.
-///
-/// `standard` is a valid speed option but intentionally is not a branded
-/// presentation tier. Unknown, case-altered, and reasoning-level ids return
-/// `false`.
-#[must_use]
-pub fn is_known_presentation_id(id: &str) -> bool {
-    matches!(id, "fast" | "superfast")
-}
-
 /// Returns whether a catalog option may be selected.
 ///
 /// The Svelte policy controls filter out every option with a disabled reason;
@@ -210,19 +200,33 @@ pub fn selected_speed_by_native_value<'a>(
         .or_else(|| default_speed(options))
 }
 
+/// Resolves the speed id written by `SyncAuthoritativePolicy`.
+///
+/// This is intentionally a different policy from
+/// [`selected_speed_by_native_value`]. The authoritative sync expression
+/// first finds an exact native value without checking `disabled`, then finds
+/// the first default without checking `disabled`, and finally assigns the
+/// literal `"standard"` when neither option exists. The literal fallback is
+/// returned even when no `standard` option exists in the catalog.
+#[must_use = "use the synchronized speed id"]
+pub fn authoritative_speed_id(options: &[SpeedOption], service_tier: &str) -> String {
+    speed_by_native_value(options, service_tier)
+        .or_else(|| options.iter().find(|option| option.default))
+        .map_or_else(|| DEFAULT_SPEED_ID.to_owned(), |option| option.id.clone())
+}
+
 /// Resolves the model-picker trigger's optional speed badge.
 ///
 /// The trigger adds no word for the model's own default. The selected id is
-/// normally produced by the available-selection policy; the explicit
-/// availability check keeps a stale disabled selection from being rendered.
+/// normally produced by the available-selection policy, but the trigger
+/// expression itself does not inspect `disabled`; a stale disabled selection
+/// is still rendered when its id is selected.
 #[must_use]
 pub fn trigger_speed_presentation(
     options: &[SpeedOption],
     selected_id: &str,
 ) -> Option<SpeedOptionPresentation> {
-    let selected = options
-        .iter()
-        .find(|option| is_available(option) && option.id == selected_id)?;
+    let selected = speed_by_id(options, selected_id)?;
     if selected.default {
         return None;
     }
@@ -231,23 +235,18 @@ pub fn trigger_speed_presentation(
 
 /// Resolves the optional speed badge for a dispatched model.
 ///
-/// Dispatch presentation uses the policy's native value, hides the model's
-/// own default, and omits a dynamically unavailable option. The lookup and
-/// comparisons remain exact; an unknown value produces no badge.
+/// Dispatch presentation uses the policy's native value and hides the
+/// model's own default. The lookup and comparisons remain exact; an unknown
+/// value produces no badge. As in the source dispatch expression, `disabled`
+/// does not affect this presentation lookup.
 #[must_use]
 pub fn dispatch_speed_presentation(
     options: &[SpeedOption],
     service_tier: &str,
 ) -> Option<SpeedOptionPresentation> {
     let option = speed_by_native_value(options, service_tier)?;
-    if option.default || !is_available(option) {
+    if option.default {
         return None;
     }
     Some(speed_option_presentation(option))
-}
-
-/// Returns whether a dispatched model has a non-default available speed badge.
-#[must_use]
-pub fn has_dispatch_speed(options: &[SpeedOption], service_tier: &str) -> bool {
-    dispatch_speed_presentation(options, service_tier).is_some()
 }
