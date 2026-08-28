@@ -131,7 +131,7 @@ pub fn recent_projects(projects: &[Project], threads: &[ThreadRow]) -> Vec<Recen
             });
         seen.thread_count += 1;
         if timestamp > seen.last_message_at.as_str() {
-            seen.last_message_at = timestamp.to_owned();
+            timestamp.clone_into(&mut seen.last_message_at);
         }
     }
 
