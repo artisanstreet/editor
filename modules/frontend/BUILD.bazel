@@ -24,6 +24,7 @@ rust_library(
         "src/conversation_turn_footer_policy.rs",
         "src/conversation_turn_navigator.rs",
         "src/dev_instance_policy.rs",
+        "src/engine_section_indicator_policy.rs",
         "src/engine_usage_cache.rs",
         "src/file_icon.rs",
         "src/forge_recovery_health.rs",
