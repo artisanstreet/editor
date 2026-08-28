@@ -120,10 +120,7 @@ const FILE_ASSOCIATIONS: &[FileAssociation] = FALLBACK_FILE_ASSOCIATIONS;
 /// loading at lookup time.
 #[must_use]
 pub fn resolve_file_icon(path: &str) -> FileIcon {
-    let filename = path
-        .rsplit(|character| character == '/' || character == '\\')
-        .next()
-        .unwrap_or(path);
+    let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
 
     FILE_ASSOCIATIONS
         .iter()
