@@ -1,6 +1,54 @@
 {
-  "checksum": "497cf9f8a15a3058b9de7b11efaff26b4feebc138fe7a205e3270512d4223724",
+  "checksum": "043c9dd98f1f6596b37eb43eb76b86a50835d09a1397c94f6ce411989db3b060",
   "crates": {
+    "addr2line 0.25.1": {
+      "name": "addr2line",
+      "version": "0.25.1",
+      "package_url": "https://github.com/gimli-rs/addr2line",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/addr2line/0.25.1/download",
+          "sha256": "1b5d307320b3181d6d7954e663bd7c774a838b8220fe0593c86d9fb09f498b4b"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "addr2line",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "addr2line",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "gimli 0.32.3",
+              "target": "gimli"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.25.1"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "adler2 2.0.1": {
       "name": "adler2",
       "version": "2.0.1",
@@ -2136,6 +2184,10 @@
         ],
         "deps": {
           "common": [
+            {
+              "id": "gpui 0.2.2",
+              "target": "gpui"
+            },
             {
               "id": "pulldown-cmark 0.13.4",
               "target": "pulldown_cmark"
@@ -4701,6 +4753,90 @@
       ],
       "license_file": "LICENSE"
     },
+    "backtrace 0.3.76": {
+      "name": "backtrace",
+      "version": "0.3.76",
+      "package_url": "https://github.com/rust-lang/backtrace-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/backtrace/0.3.76/download",
+          "sha256": "bb531853791a215d7c62a30daf0dde835f381ab5de4589cfe7c649d2cbe92bd6"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "backtrace",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "backtrace",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "default",
+            "std"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "cfg-if 1.0.4",
+              "target": "cfg_if"
+            },
+            {
+              "id": "rustc-demangle 0.1.28",
+              "target": "rustc_demangle"
+            }
+          ],
+          "selects": {
+            "cfg(any(windows, target_os = \"cygwin\"))": [
+              {
+                "id": "windows-link 0.2.1",
+                "target": "windows_link"
+              }
+            ],
+            "cfg(not(all(windows, target_env = \"msvc\", not(target_vendor = \"uwp\"))))": [
+              {
+                "id": "addr2line 0.25.1",
+                "target": "addr2line"
+              },
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              },
+              {
+                "id": "miniz_oxide 0.8.9",
+                "target": "miniz_oxide"
+              },
+              {
+                "id": "object 0.37.3",
+                "target": "object"
+              }
+            ]
+          }
+        },
+        "edition": "2021",
+        "version": "0.3.76"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "base64 0.22.1": {
       "name": "base64",
       "version": "0.22.1",
@@ -7099,6 +7235,12 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "parallel"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -7106,11 +7248,40 @@
               "target": "find_msvc_tools"
             },
             {
+              "id": "jobserver 0.1.35",
+              "target": "jobserver"
+            },
+            {
               "id": "shlex 2.0.1",
               "target": "shlex"
             }
           ],
-          "selects": {}
+          "selects": {
+            "aarch64-apple-darwin": [
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              }
+            ],
+            "aarch64-unknown-linux-gnu": [
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              }
+            ],
+            "x86_64-unknown-linux-gnu": [
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              }
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              }
+            ]
+          }
         },
         "edition": "2021",
         "version": "1.4.4"
@@ -16003,6 +16174,116 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "gimli 0.32.3": {
+      "name": "gimli",
+      "version": "0.32.3",
+      "package_url": "https://github.com/gimli-rs/gimli",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/gimli/0.32.3/download",
+          "sha256": "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "gimli",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "gimli",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "read",
+            "read-core"
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.32.3"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "git2 0.20.4": {
+      "name": "git2",
+      "version": "0.20.4",
+      "package_url": "https://github.com/rust-lang/git2-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/git2/0.20.4/download",
+          "sha256": "7b88256088d75a56f8ecfa070513a775dd9107f6530ef14919dac831af9cfe2b"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "git2",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "git2",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "bitflags 2.13.1",
+              "target": "bitflags"
+            },
+            {
+              "id": "libc 0.2.189",
+              "target": "libc"
+            },
+            {
+              "id": "libgit2-sys 0.18.5+1.9.4",
+              "target": "libgit2_sys"
+            },
+            {
+              "id": "log 0.4.34",
+              "target": "log"
+            },
+            {
+              "id": "url 2.5.8",
+              "target": "url"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.20.4"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "glob 0.3.4": {
       "name": "glob",
       "version": "0.3.4",
@@ -16453,6 +16734,7 @@
           "common": [
             "as-raw-xcb-connection",
             "ashpd",
+            "backtrace",
             "blade-graphics",
             "blade-macros",
             "blade-util",
@@ -16463,7 +16745,10 @@
             "filedescriptor",
             "font-kit",
             "inspector",
+            "leak-detection",
             "open",
+            "rand",
+            "test-support",
             "wayland",
             "wayland-backend",
             "wayland-client",
@@ -16488,6 +16773,10 @@
             {
               "id": "async-task 4.7.1",
               "target": "async_task"
+            },
+            {
+              "id": "backtrace 0.3.76",
+              "target": "backtrace"
             },
             {
               "id": "blade-graphics 0.7.1",
@@ -16590,6 +16879,10 @@
             {
               "id": "profiling 1.0.18",
               "target": "profiling"
+            },
+            {
+              "id": "rand 0.9.5",
+              "target": "rand"
             },
             {
               "id": "raw-window-handle 0.6.2",
@@ -16807,10 +17100,6 @@
               {
                 "id": "flume 0.11.1",
                 "target": "flume"
-              },
-              {
-                "id": "rand 0.9.5",
-                "target": "rand"
               },
               {
                 "id": "windows 0.61.3",
@@ -17140,6 +17429,12 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "test-support"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -17246,6 +17541,12 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "test-support"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -17691,6 +17992,15 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "git2",
+            "rand",
+            "test-support",
+            "util_macros"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -17722,6 +18032,10 @@
               "target": "futures_lite"
             },
             {
+              "id": "git2 0.20.4",
+              "target": "git2"
+            },
+            {
               "id": "globset 0.4.20",
               "target": "globset"
             },
@@ -17737,6 +18051,10 @@
             {
               "id": "log 0.4.34",
               "target": "log"
+            },
+            {
+              "id": "rand 0.9.5",
+              "target": "rand"
             },
             {
               "id": "regex 1.13.1",
@@ -17815,6 +18133,16 @@
           }
         },
         "edition": "2024",
+        "proc_macro_deps": {
+          "common": [
+            {
+              "id": "gpui_util_macros 0.2.2",
+              "target": "gpui_util_macros",
+              "alias": "util_macros"
+            }
+          ],
+          "selects": {}
+        },
         "version": "0.2.2"
       },
       "license": "Apache-2.0",
@@ -22209,6 +22537,110 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "libgit2-sys 0.18.5+1.9.4": {
+      "name": "libgit2-sys",
+      "version": "0.18.5+1.9.4",
+      "package_url": "https://github.com/rust-lang/git2-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/libgit2-sys/0.18.5+1.9.4/download",
+          "sha256": "005d6ae6eac1912906073e069f7db60b1fa98e052a68227824afe3e3a1c59ca2"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "libgit2_sys",
+            "crate_root": "lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "libgit2_sys",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "libc 0.2.189",
+              "target": "libc"
+            },
+            {
+              "id": "libz-sys 1.1.29",
+              "target": "libz_sys"
+            }
+          ],
+          "selects": {}
+        },
+        "extra_deps": {
+          "common": [
+            ":build_script_build"
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.18.5+1.9.4"
+      },
+      "build_script_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "compile_data_glob_excludes": [
+          "**/*.rs"
+        ],
+        "data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "cc 1.4.4",
+              "target": "cc"
+            },
+            {
+              "id": "pkg-config 0.3.34",
+              "target": "pkg_config"
+            }
+          ],
+          "selects": {}
+        },
+        "link_deps": {
+          "common": [
+            {
+              "id": "libz-sys 1.1.29",
+              "target": "libz_sys"
+            }
+          ],
+          "selects": {}
+        },
+        "links": "git2"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "libloading 0.8.9": {
       "name": "libloading",
       "version": "0.8.9",
@@ -22471,6 +22903,107 @@
         "MIT"
       ],
       "license_file": "LICENSE"
+    },
+    "libz-sys 1.1.29": {
+      "name": "libz-sys",
+      "version": "1.1.29",
+      "package_url": "https://github.com/rust-lang/libz-sys",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/libz-sys/1.1.29/download",
+          "sha256": "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "libz_sys",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "libz_sys",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "libc"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "libc 0.2.189",
+              "target": "libc"
+            }
+          ],
+          "selects": {}
+        },
+        "extra_deps": {
+          "common": [
+            ":build_script_build"
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "1.1.29"
+      },
+      "build_script_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "compile_data_glob_excludes": [
+          "**/*.rs"
+        ],
+        "data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "cc 1.4.4",
+              "target": "cc"
+            },
+            {
+              "id": "pkg-config 0.3.34",
+              "target": "pkg_config"
+            },
+            {
+              "id": "vcpkg 0.2.15",
+              "target": "vcpkg"
+            }
+          ],
+          "selects": {}
+        },
+        "links": "z"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
     },
     "linux-raw-sys 0.4.15": {
       "name": "linux-raw-sys",
@@ -26531,6 +27064,96 @@
       ],
       "license_file": null
     },
+    "object 0.37.3": {
+      "name": "object",
+      "version": "0.37.3",
+      "package_url": "https://github.com/gimli-rs/object",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/object/0.37.3/download",
+          "sha256": "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "object",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "object",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "archive",
+            "coff",
+            "elf",
+            "macho",
+            "pe",
+            "read_core",
+            "unaligned",
+            "xcoff"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "memchr 2.8.3",
+              "target": "memchr"
+            }
+          ],
+          "selects": {}
+        },
+        "extra_deps": {
+          "common": [
+            ":build_script_build"
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.37.3"
+      },
+      "build_script_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "compile_data_glob_excludes": [
+          "**/*.rs"
+        ],
+        "data_glob": [
+          "**"
+        ]
+      },
+      "license": "Apache-2.0 OR MIT",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "object 0.39.1": {
       "name": "object",
       "version": "0.39.1",
@@ -30584,17 +31207,14 @@
         "crate_features": {
           "common": [
             "alloc",
+            "default",
             "os_rng",
+            "small_rng",
             "std",
             "std_rng",
             "thread_rng"
           ],
-          "selects": {
-            "x86_64-pc-windows-msvc": [
-              "default",
-              "small_rng"
-            ]
-          }
+          "selects": {}
         },
         "deps": {
           "common": [
@@ -33087,6 +33707,45 @@
         "MIT"
       ],
       "license_file": "LICENSE"
+    },
+    "rustc-demangle 0.1.28": {
+      "name": "rustc-demangle",
+      "version": "0.1.28",
+      "package_url": "https://github.com/rust-lang/rustc-demangle",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/rustc-demangle/0.1.28/download",
+          "sha256": "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "rustc_demangle",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "rustc_demangle",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2015",
+        "version": "0.1.28"
+      },
+      "license": "MIT/Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
     },
     "rustc-hash 1.1.0": {
       "name": "rustc-hash",
@@ -55061,6 +55720,9 @@
       "x86_64-unknown-linux-gnu",
       "x86_64-unknown-nixos-gnu"
     ],
+    "cfg(any(windows, target_os = \"cygwin\"))": [
+      "x86_64-pc-windows-msvc"
+    ],
     "cfg(any(windows, target_os = \"linux\"))": [
       "aarch64-unknown-linux-gnu",
       "x86_64-pc-windows-msvc",
@@ -55089,6 +55751,14 @@
       "aarch64-unknown-linux-gnu",
       "wasm32-wasip1",
       "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-nixos-gnu"
+    ],
+    "cfg(not(all(windows, target_env = \"msvc\", not(target_vendor = \"uwp\"))))": [
+      "aarch64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "wasm32-unknown-unknown",
+      "wasm32-wasip1",
       "x86_64-unknown-linux-gnu",
       "x86_64-unknown-nixos-gnu"
     ],
