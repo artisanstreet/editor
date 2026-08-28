@@ -15,6 +15,7 @@ pub mod lip_card;
 pub mod list_row;
 pub mod markdown;
 pub mod motion;
+pub mod popover;
 pub mod progress;
 pub mod scroll_area;
 pub mod separator;

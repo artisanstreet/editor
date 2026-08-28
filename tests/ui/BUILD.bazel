@@ -323,6 +323,20 @@ rust_test(
 )
 
 rust_test(
+    name = "popover_test",
+    srcs = ["popover.rs"],
+    crate_name = "popover_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "progress_test",
     srcs = ["progress.rs"],
     crate_name = "progress_test",
