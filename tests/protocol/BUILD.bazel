@@ -24,6 +24,7 @@ rust_test(
     srcs = ["product_roundtrip.rs"],
     crate_name = "product_roundtrip_test",
     deps = [
+        "//modules/domain:domain",
         "//modules/protocol:protocol",
         "@crates//:capnp",
     ],

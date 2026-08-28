@@ -38,12 +38,12 @@ pub use bounds::{
     CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES, DIRECTORY_LISTING_MAX_ENTRIES,
     DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, IDENTIFIER_MAX_BYTES,
-    MESSAGE_BODY_MAX_BYTES, ROOT_PATH_MAX_BYTES, THREAD_LISTING_MAX_THREADS,
-    THREAD_TITLE_MAX_BYTES,
+    MESSAGE_BODY_MAX_BYTES, PROJECT_LISTING_MAX_PROJECTS, ROOT_PATH_MAX_BYTES,
+    THREAD_LISTING_MAX_THREADS, THREAD_TITLE_MAX_BYTES,
 };
 pub use commands::{
-    AttachProject, Command, CreateThread, ListDirectories, ListProjectThreads, Query,
-    QueueFirstMessage,
+    AttachProject, Command, CreateThread, ListAttachedProjects, ListDirectories,
+    ListProjectThreads, Query, QueueFirstMessage,
 };
 pub use conversation::{
     ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
@@ -60,8 +60,8 @@ pub use identifiers::{
 };
 pub use model::{
     CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,
-    DirectoryPlace, PlaceKind, ProjectSummary, QueuedMessage, ReceiptDisposition, ThreadListing,
-    ThreadListingError, ThreadSummary,
+    DirectoryPlace, PlaceKind, ProjectListing, ProjectListingError, ProjectSummary, QueuedMessage,
+    ReceiptDisposition, ThreadListing, ThreadListingError, ThreadSummary,
 };
 pub use text::{
     DisplayName, DisplayNameError, MessageBody, MessageBodyError, RootPath, RootPathError,

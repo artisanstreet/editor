@@ -222,6 +222,16 @@ struct ThreadList {
   threads @0 :List(ThreadSummary);
 }
 
+# Answer to an attached-project listing request. Losslessly mirrors the
+# domain's bounded `ProjectListing`: complete `Project` rows -- the exact row
+# shape carried by AttachProjectResult and the projectAttached event -- in
+# Forge-supplied order. Bounded to at most 256 rows by owned conversion (the
+# legacy catalog array was unbounded; this cap is a deliberate, documented
+# improvement).
+struct ProjectList {
+  projects @0 :List(Project);
+}
+
 # Result of an idempotent create-thread mutation. The outer
 # Response.requestId carries correlation; the thread is always the original
 # durable thread for duplicate replay.
@@ -342,7 +352,12 @@ struct QueueFirstMessageRequest {
   body @1 :Text;
 }
 
-# The five requests of the first native workflow.
+# Rediscovery read: lists every currently attached project. Carries no
+# identity at all -- a returning client asks once and Forge answers with the
+# complete catalog, so stale or unknown ids can never fail this request.
+struct ListAttachedProjectsRequest {}
+
+# The six requests of the first native workflow.
 struct Request {
   union {
     listDirectories @0 :ListDirectoriesRequest;
@@ -350,6 +365,10 @@ struct Request {
     listProjectThreads @2 :ListProjectThreadsRequest;
     createProjectThread @3 :CreateProjectThreadRequest;
     queueFirstMessage @4 :QueueFirstMessageRequest;
+
+    # Appended for durable-project rediscovery after the five-request
+    # contract was committed; fresh ordinal, existing ordinals frozen.
+    listAttachedProjects @5 :ListAttachedProjectsRequest;
   }
 }
 
@@ -369,6 +388,10 @@ struct Response {
     threadList @3 :ThreadList;
     createdThread @4 :CreateProjectThreadResult;
     queuedReceipt @5 :FirstMessageReceipt;
+
+    # Appended for durable-project rediscovery after the five-arm contract
+    # was committed; fresh ordinal, existing ordinals frozen.
+    projectList @6 :ProjectList;
   }
 }
 
