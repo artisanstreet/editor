@@ -146,40 +146,40 @@ impl InstallationPhase {
 /// The legacy report carries additional attempt metadata, but the onboarding
 /// state only reads its URL. Secrets and execution details therefore remain
 /// outside this policy type.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct InstallationAuthorization<'a> {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct InstallationAuthorization {
     /// URL that a later browser boundary may open.
-    pub url: &'a str,
+    pub url: String,
 }
 
-impl<'a> InstallationAuthorization<'a> {
+impl InstallationAuthorization {
     /// Creates authorization data from its already-decoded URL.
     #[must_use]
-    pub const fn new(url: &'a str) -> Self {
-        Self { url }
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
     }
 }
 
 /// The decoded installation fields consumed by onboarding presentation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct InstallationReport<'a> {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct InstallationReport {
     /// Current installation lifecycle activity.
     pub activity: InstallationActivity,
     /// Optional safe user-facing detail for the active operation.
-    pub activity_detail: Option<&'a str>,
+    pub activity_detail: Option<String>,
     /// Optional structured phase for the active operation.
     pub activity_phase: Option<InstallationPhase>,
     /// Optional browser authorization data for authentication.
-    pub authorization: Option<InstallationAuthorization<'a>>,
+    pub authorization: Option<InstallationAuthorization>,
     /// Whether the managed home already contains provider credentials.
     pub credentials_present: bool,
     /// Optional failure reported by the installation service.
-    pub failure: Option<&'a str>,
+    pub failure: Option<String>,
     /// Whether the active binary is Artisan-managed.
     pub managed: bool,
 }
 
-impl<'a> InstallationReport<'a> {
+impl InstallationReport {
     /// Creates a report with no optional detail, authorization, or failure
     /// fields.
     #[must_use]
@@ -224,18 +224,18 @@ impl UsageAuthentication {
 }
 
 /// The usage fields consumed by onboarding presentation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct UsageReport<'a> {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct UsageReport {
     /// Provider account authentication classification.
     pub authentication: UsageAuthentication,
     /// Optional provider account email.
-    pub account_email: Option<&'a str>,
+    pub account_email: Option<String>,
 }
 
-impl<'a> UsageReport<'a> {
+impl UsageReport {
     /// Creates a usage report with the supplied authentication and email.
     #[must_use]
-    pub const fn new(authentication: UsageAuthentication, account_email: Option<&'a str>) -> Self {
+    pub fn new(authentication: UsageAuthentication, account_email: Option<String>) -> Self {
         Self {
             account_email,
             authentication,
@@ -244,37 +244,37 @@ impl<'a> UsageReport<'a> {
 }
 
 /// Inputs already decoded by the installation and usage controllers.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct HarnessSetupInput<'a> {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct HarnessSetupInput {
     /// Whether the installation controller currently has usable state.
     pub available: bool,
     /// Optional controller-level error for the selected harness.
-    pub error: Option<&'a str>,
+    pub error: Option<String>,
     /// Whether this harness requires external provider setup.
     pub external_auth: Option<bool>,
     /// Whether an installation or authentication request is pending.
     pub pending: bool,
     /// Latest installation report, when available.
-    pub report: Option<InstallationReport<'a>>,
+    pub report: Option<InstallationReport>,
     /// Latest usage report, when available.
-    pub usage: Option<UsageReport<'a>>,
+    pub usage: Option<UsageReport>,
 }
 
 /// The deterministic state consumed by an onboarding renderer.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct HarnessSetupState<'a> {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct HarnessSetupState {
     /// Action a host boundary may execute, if any.
     pub action: HarnessSetupAction,
     /// Authorization URL when the action is [`HarnessSetupAction::OpenAuthorization`].
-    pub authorization_url: Option<&'a str>,
+    pub authorization_url: Option<String>,
     /// Whether the presentation represents an in-flight operation.
     pub busy: bool,
     /// Provider email when the ready state has one.
-    pub email: Option<&'a str>,
+    pub email: Option<String>,
     /// Controller or installation failure to display, when present.
-    pub failure: Option<&'a str>,
+    pub failure: Option<String>,
     /// Exact user-facing label.
-    pub label: &'a str,
+    pub label: String,
     /// Whether setup is complete.
     pub ready: bool,
     /// Exact setup status.
@@ -284,33 +284,35 @@ pub struct HarnessSetupState<'a> {
 const INSTALLATION_STATUS_UNAVAILABLE_FAILURE: &str = "Installation status is unavailable.";
 const SETUP_DID_NOT_COMPLETE_FAILURE: &str = "Setup did not complete.";
 
-fn signed_in<'a>(usage: Option<UsageReport<'a>>) -> HarnessSetupState<'a> {
+fn signed_in(usage: Option<UsageReport>) -> HarnessSetupState {
     let email = usage.and_then(|report| report.account_email);
+    let has_email = email.is_some();
     HarnessSetupState {
         action: HarnessSetupAction::None,
         authorization_url: None,
         busy: false,
         email,
         failure: None,
-        label: if email.is_some() {
-            "Signed in as"
+        label: if has_email {
+            String::from("Signed in as")
         } else {
-            "Signed in"
+            String::from("Signed in")
         },
         ready: true,
         status: HarnessSetupStatus::Ready,
     }
 }
 
-fn installation_progress_label<'a>(report: &InstallationReport<'a>) -> &'a str {
-    if let Some(detail) = report.activity_detail {
-        return detail;
+fn installation_progress_label(report: &InstallationReport) -> String {
+    if let Some(detail) = report.activity_detail.as_ref() {
+        return detail.clone();
     }
 
     report
         .activity_phase
         .map(InstallationPhase::label)
         .unwrap_or("Installing…")
+        .to_owned()
 }
 
 /// Projects decoded harness setup observations into the legacy onboarding
@@ -319,10 +321,11 @@ fn installation_progress_label<'a>(report: &InstallationReport<'a>) -> &'a str {
 /// The branch order intentionally mirrors `ProjectManagedHarnessSetup`:
 /// availability, active installation/pending unmanaged work, authenticating,
 /// failed, ready credentials, unmanaged download, external Hermes setup, and
-/// managed sign-in. Optional strings are borrowed without trimming,
-/// normalizing, or otherwise changing their presence or contents.
+/// managed sign-in. Optional strings are moved or cloned without trimming,
+/// normalizing, or otherwise changing their presence or contents, and the
+/// returned state owns every string it exposes.
 #[must_use]
-pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> HarnessSetupState<'a> {
+pub fn project_managed_harness_setup(input: HarnessSetupInput) -> HarnessSetupState {
     if !input.available {
         return HarnessSetupState {
             action: HarnessSetupAction::None,
@@ -330,7 +333,7 @@ pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> Harnes
             busy: true,
             email: None,
             failure: None,
-            label: "Checking…",
+            label: String::from("Checking…"),
             ready: false,
             status: HarnessSetupStatus::Checking,
         };
@@ -342,8 +345,8 @@ pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> Harnes
             authorization_url: None,
             busy: false,
             email: None,
-            failure: Some(INSTALLATION_STATUS_UNAVAILABLE_FAILURE),
-            label: "Unavailable",
+            failure: Some(INSTALLATION_STATUS_UNAVAILABLE_FAILURE.to_owned()),
+            label: String::from("Unavailable"),
             ready: false,
             status: HarnessSetupStatus::Failed,
         };
@@ -363,16 +366,18 @@ pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> Harnes
     }
 
     if report.activity == InstallationActivity::Authenticating {
+        let authorization_url = report.authorization.map(|authorization| authorization.url);
         return HarnessSetupState {
-            action: match report.authorization {
-                Some(_) => HarnessSetupAction::OpenAuthorization,
-                None => HarnessSetupAction::None,
+            action: if authorization_url.is_some() {
+                HarnessSetupAction::OpenAuthorization
+            } else {
+                HarnessSetupAction::None
             },
-            authorization_url: report.authorization.map(|authorization| authorization.url),
+            authorization_url,
             busy: true,
             email: None,
             failure: None,
-            label: "Waiting for sign-in…",
+            label: String::from("Waiting for sign-in…"),
             ready: false,
             status: HarnessSetupStatus::WaitingForSignIn,
         };
@@ -382,7 +387,7 @@ pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> Harnes
         let failure = input
             .error
             .or(report.failure)
-            .or(Some(SETUP_DID_NOT_COMPLETE_FAILURE));
+            .or_else(|| Some(SETUP_DID_NOT_COMPLETE_FAILURE.to_owned()));
         let managed = report.managed;
         return HarnessSetupState {
             action: if managed {
@@ -395,9 +400,9 @@ pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> Harnes
             email: None,
             failure,
             label: if managed {
-                "Try Sign In Again"
+                String::from("Try Sign In Again")
             } else {
-                "Retry Download"
+                String::from("Retry Download")
             },
             ready: false,
             status: HarnessSetupStatus::Failed,
@@ -407,22 +412,25 @@ pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> Harnes
     if report.credentials_present
         || input
             .usage
+            .as_ref()
             .is_some_and(|usage| usage.authentication == UsageAuthentication::Authenticated)
     {
         return signed_in(input.usage);
     }
 
     if !report.managed {
+        let error = input.error;
+        let has_error = error.is_some();
         return HarnessSetupState {
             action: HarnessSetupAction::Install,
             authorization_url: None,
             busy: false,
             email: None,
-            failure: input.error,
-            label: if input.error.is_some() {
-                "Retry Download"
+            failure: error,
+            label: if has_error {
+                String::from("Retry Download")
             } else {
-                "Download"
+                String::from("Download")
             },
             ready: false,
             status: HarnessSetupStatus::SignIn,
@@ -436,7 +444,7 @@ pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> Harnes
             busy: false,
             email: None,
             failure: input.error,
-            label: "Configure Hermes",
+            label: String::from("Configure Hermes"),
             ready: false,
             status: HarnessSetupStatus::SignIn,
         };
@@ -449,9 +457,9 @@ pub fn project_managed_harness_setup<'a>(input: HarnessSetupInput<'a>) -> Harnes
         email: None,
         failure: input.error,
         label: if input.pending {
-            "Starting sign-in…"
+            String::from("Starting sign-in…")
         } else {
-            "Sign In"
+            String::from("Sign In")
         },
         ready: false,
         status: HarnessSetupStatus::SignIn,

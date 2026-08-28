@@ -13,11 +13,11 @@ fn report(
     activity: InstallationActivity,
     managed: bool,
     credentials_present: bool,
-) -> InstallationReport<'static> {
+) -> InstallationReport {
     InstallationReport::new(managed, credentials_present, activity)
 }
 
-fn input(report: Option<InstallationReport<'static>>) -> HarnessSetupInput<'static> {
+fn input(report: Option<InstallationReport>) -> HarnessSetupInput {
     HarnessSetupInput {
         available: true,
         error: None,
@@ -28,30 +28,32 @@ fn input(report: Option<InstallationReport<'static>>) -> HarnessSetupInput<'stat
     }
 }
 
-fn assert_state<'a>(
-    actual: HarnessSetupState<'a>,
-    action: HarnessSetupAction,
-    authorization_url: Option<&'a str>,
-    busy: bool,
-    email: Option<&'a str>,
-    failure: Option<&'a str>,
-    label: &'a str,
-    ready: bool,
-    status: HarnessSetupStatus,
-) {
-    assert_eq!(
-        actual,
-        HarnessSetupState {
-            action,
-            authorization_url,
-            busy,
-            email,
-            failure,
-            label,
-            ready,
-            status,
-        }
-    );
+macro_rules! assert_state {
+    (
+        $actual:expr,
+        $action:expr,
+        $authorization_url:expr,
+        $busy:expr,
+        $email:expr,
+        $failure:expr,
+        $label:expr,
+        $ready:expr,
+        $status:expr $(,)?
+    ) => {{
+        assert_eq!(
+            $actual,
+            HarnessSetupState {
+                action: $action,
+                authorization_url: $authorization_url.map(str::to_owned),
+                busy: $busy,
+                email: $email.map(str::to_owned),
+                failure: $failure.map(str::to_owned),
+                label: $label.to_owned(),
+                ready: $ready,
+                status: $status,
+            }
+        );
+    }};
 }
 
 #[test]
@@ -128,14 +130,14 @@ fn discriminants_and_phase_labels_match_the_legacy_contract() {
 fn unavailable_and_missing_report_are_the_first_decisions() {
     let mut unavailable_input = input(Some(report(InstallationActivity::Installing, true, true)));
     unavailable_input.available = false;
-    unavailable_input.error = Some("controller error");
+    unavailable_input.error = Some("controller error".to_owned());
     unavailable_input.external_auth = Some(true);
     unavailable_input.pending = true;
     unavailable_input.usage = Some(UsageReport::new(
         UsageAuthentication::Authenticated,
-        Some("user@example.test"),
+        Some("user@example.test".to_owned()),
     ));
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(unavailable_input),
         HarnessSetupAction::None,
         None,
@@ -148,14 +150,14 @@ fn unavailable_and_missing_report_are_the_first_decisions() {
     );
 
     let mut missing_report = input(None);
-    missing_report.error = Some("controller error");
+    missing_report.error = Some("controller error".to_owned());
     missing_report.external_auth = Some(true);
     missing_report.pending = true;
     missing_report.usage = Some(UsageReport::new(
         UsageAuthentication::Authenticated,
-        Some("user@example.test"),
+        Some("user@example.test".to_owned()),
     ));
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(missing_report),
         HarnessSetupAction::None,
         None,
@@ -183,7 +185,7 @@ fn installing_detail_takes_precedence_over_each_phase_and_fallback() {
     for (phase, label) in phases {
         let mut installing = report(InstallationActivity::Installing, true, false);
         installing.activity_phase = phase;
-        assert_state(
+        assert_state!(
             project_managed_harness_setup(input(Some(installing))),
             HarnessSetupAction::None,
             None,
@@ -197,10 +199,10 @@ fn installing_detail_takes_precedence_over_each_phase_and_fallback() {
     }
 
     let mut detailed = report(InstallationActivity::Installing, true, true);
-    detailed.activity_detail = Some("");
+    detailed.activity_detail = Some(String::new());
     detailed.activity_phase = Some(InstallationPhase::Verifying);
-    assert_state(
-        project_managed_harness_setup(input(Some(detailed))),
+    assert_state!(
+        project_managed_harness_setup(input(Some(detailed.clone()))),
         HarnessSetupAction::None,
         None,
         true,
@@ -211,8 +213,8 @@ fn installing_detail_takes_precedence_over_each_phase_and_fallback() {
         HarnessSetupStatus::Downloading,
     );
 
-    detailed.activity_detail = Some("Fetching release metadata");
-    assert_state(
+    detailed.activity_detail = Some("Fetching release metadata".to_owned());
+    assert_state!(
         project_managed_harness_setup(input(Some(detailed))),
         HarnessSetupAction::None,
         None,
@@ -229,7 +231,7 @@ fn installing_detail_takes_precedence_over_each_phase_and_fallback() {
 fn installing_and_pending_unmanaged_work_precede_later_states() {
     let mut pending_idle = input(Some(report(InstallationActivity::Idle, false, false)));
     pending_idle.pending = true;
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(pending_idle),
         HarnessSetupAction::None,
         None,
@@ -243,8 +245,8 @@ fn installing_and_pending_unmanaged_work_precede_later_states() {
 
     let mut pending_failed = input(Some(report(InstallationActivity::Failed, false, false)));
     pending_failed.pending = true;
-    pending_failed.error = Some("controller error");
-    assert_state(
+    pending_failed.error = Some("controller error".to_owned());
+    assert_state!(
         project_managed_harness_setup(pending_failed),
         HarnessSetupAction::None,
         None,
@@ -262,12 +264,12 @@ fn installing_and_pending_unmanaged_work_precede_later_states() {
         false,
     )));
     pending_authenticating.pending = true;
-    pending_authenticating.error = Some("ignored while busy");
+    pending_authenticating.error = Some("ignored while busy".to_owned());
     let mut authenticating_report = pending_authenticating.report.unwrap();
     authenticating_report.authorization =
         Some(InstallationAuthorization::new("https://example.test/auth"));
     pending_authenticating.report = Some(authenticating_report);
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(pending_authenticating),
         HarnessSetupAction::None,
         None,
@@ -281,7 +283,7 @@ fn installing_and_pending_unmanaged_work_precede_later_states() {
 
     let mut managed_pending = input(Some(report(InstallationActivity::Idle, true, false)));
     managed_pending.pending = true;
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(managed_pending),
         HarnessSetupAction::Authenticate,
         None,
@@ -301,13 +303,13 @@ fn authenticating_waits_and_only_exposes_present_authorization() {
         true,
         true,
     )));
-    without_authorization.error = Some("ignored while authenticating");
+    without_authorization.error = Some("ignored while authenticating".to_owned());
     without_authorization.usage = Some(UsageReport::new(
         UsageAuthentication::Authenticated,
-        Some("ignored@example.test"),
+        Some("ignored@example.test".to_owned()),
     ));
-    assert_state(
-        project_managed_harness_setup(without_authorization),
+    assert_state!(
+        project_managed_harness_setup(without_authorization.clone()),
         HarnessSetupAction::None,
         None,
         true,
@@ -321,9 +323,9 @@ fn authenticating_waits_and_only_exposes_present_authorization() {
     let mut with_authorization = without_authorization;
     let mut report = with_authorization.report.unwrap();
     report.authorization = Some(InstallationAuthorization::new("https://example.test/auth"));
-    with_authorization.report = Some(report);
-    assert_state(
-        project_managed_harness_setup(with_authorization),
+    with_authorization.report = Some(report.clone());
+    assert_state!(
+        project_managed_harness_setup(with_authorization.clone()),
         HarnessSetupAction::OpenAuthorization,
         Some("https://example.test/auth"),
         true,
@@ -336,7 +338,7 @@ fn authenticating_waits_and_only_exposes_present_authorization() {
 
     report.authorization = Some(InstallationAuthorization::new(""));
     with_authorization.report = Some(report);
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(with_authorization),
         HarnessSetupAction::OpenAuthorization,
         Some(""),
@@ -356,15 +358,15 @@ fn failed_state_uses_controller_error_then_report_failure_then_fallback() {
         (false, HarnessSetupAction::Install, "Retry Download"),
     ] {
         let mut with_both = input(Some(report(InstallationActivity::Failed, managed, true)));
-        with_both.error = Some("controller failure");
+        with_both.error = Some("controller failure".to_owned());
         let mut installation_report = with_both.report.unwrap();
-        installation_report.failure = Some("installation failure");
+        installation_report.failure = Some("installation failure".to_owned());
         with_both.report = Some(installation_report);
         with_both.usage = Some(UsageReport::new(
             UsageAuthentication::Authenticated,
-            Some("ignored@example.test"),
+            Some("ignored@example.test".to_owned()),
         ));
-        assert_state(
+        assert_state!(
             project_managed_harness_setup(with_both),
             action,
             None,
@@ -378,9 +380,9 @@ fn failed_state_uses_controller_error_then_report_failure_then_fallback() {
 
         let mut report_failure = input(Some(report(InstallationActivity::Failed, managed, false)));
         let mut installation_report = report_failure.report.unwrap();
-        installation_report.failure = Some("installation failure");
+        installation_report.failure = Some("installation failure".to_owned());
         report_failure.report = Some(installation_report);
-        assert_state(
+        assert_state!(
             project_managed_harness_setup(report_failure),
             action,
             None,
@@ -392,7 +394,7 @@ fn failed_state_uses_controller_error_then_report_failure_then_fallback() {
             HarnessSetupStatus::Failed,
         );
 
-        assert_state(
+        assert_state!(
             project_managed_harness_setup(input(Some(report(
                 InstallationActivity::Failed,
                 managed,
@@ -412,7 +414,7 @@ fn failed_state_uses_controller_error_then_report_failure_then_fallback() {
 
 #[test]
 fn credentials_or_authenticated_usage_produce_ready_state_with_optional_email() {
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(input(Some(report(InstallationActivity::Idle, true, true)))),
         HarnessSetupAction::None,
         None,
@@ -427,9 +429,9 @@ fn credentials_or_authenticated_usage_produce_ready_state_with_optional_email() 
     let mut credentials_with_email = input(Some(report(InstallationActivity::Idle, true, true)));
     credentials_with_email.usage = Some(UsageReport::new(
         UsageAuthentication::Unknown,
-        Some("person@example.test"),
+        Some("person@example.test".to_owned()),
     ));
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(credentials_with_email),
         HarnessSetupAction::None,
         None,
@@ -447,7 +449,10 @@ fn credentials_or_authenticated_usage_produce_ready_state_with_optional_email() 
         UsageAuthentication::Unknown,
     ] {
         let mut usage_input = input(Some(report(InstallationActivity::Idle, true, false)));
-        usage_input.usage = Some(UsageReport::new(authentication, Some("usage@example.test")));
+        usage_input.usage = Some(UsageReport::new(
+            authentication,
+            Some("usage@example.test".to_owned()),
+        ));
         let expected_ready = authentication == UsageAuthentication::Authenticated;
         let state = project_managed_harness_setup(usage_input);
         assert_eq!(
@@ -456,12 +461,12 @@ fn credentials_or_authenticated_usage_produce_ready_state_with_optional_email() 
         );
         if expected_ready {
             assert_eq!(state.action, HarnessSetupAction::None);
-            assert_eq!(state.email, Some("usage@example.test"));
+            assert_eq!(state.email.as_deref(), Some("usage@example.test"));
             assert_eq!(state.label, "Signed in as");
             assert_eq!(state.status, HarnessSetupStatus::Ready);
         } else {
             assert_eq!(state.action, HarnessSetupAction::Authenticate);
-            assert_eq!(state.email, None);
+            assert!(state.email.is_none());
             assert_eq!(state.label, "Sign In");
             assert_eq!(state.status, HarnessSetupStatus::SignIn);
         }
@@ -470,7 +475,7 @@ fn credentials_or_authenticated_usage_produce_ready_state_with_optional_email() 
 
 #[test]
 fn unmanaged_harness_uses_download_action_and_preserves_error_presence() {
-    assert_state(
+    assert_state!(
         project_managed_harness_setup(input(Some(report(
             InstallationActivity::Idle,
             false,
@@ -487,9 +492,9 @@ fn unmanaged_harness_uses_download_action_and_preserves_error_presence() {
     );
 
     let mut with_error = input(Some(report(InstallationActivity::Idle, false, false)));
-    with_error.error = Some("");
-    assert_state(
-        project_managed_harness_setup(with_error),
+    with_error.error = Some(String::new());
+    assert_state!(
+        project_managed_harness_setup(with_error.clone()),
         HarnessSetupAction::Install,
         None,
         false,
@@ -500,8 +505,8 @@ fn unmanaged_harness_uses_download_action_and_preserves_error_presence() {
         HarnessSetupStatus::SignIn,
     );
 
-    with_error.error = Some("download failed");
-    assert_state(
+    with_error.error = Some("download failed".to_owned());
+    assert_state!(
         project_managed_harness_setup(with_error),
         HarnessSetupAction::Install,
         None,
@@ -516,12 +521,13 @@ fn unmanaged_harness_uses_download_action_and_preserves_error_presence() {
 
 #[test]
 fn external_auth_is_exact_true_and_precedes_managed_sign_in() {
-    for external_auth in [Some(true)] {
+    {
+        let external_auth = Some(true);
         let mut external = input(Some(report(InstallationActivity::Idle, true, false)));
         external.external_auth = external_auth;
         external.pending = true;
-        external.error = Some("configuration unavailable");
-        assert_state(
+        external.error = Some("configuration unavailable".to_owned());
+        assert_state!(
             project_managed_harness_setup(external),
             HarnessSetupAction::OpenExternalSetup,
             None,
@@ -537,8 +543,8 @@ fn external_auth_is_exact_true_and_precedes_managed_sign_in() {
     for external_auth in [None, Some(false)] {
         let mut managed = input(Some(report(InstallationActivity::Idle, true, false)));
         managed.external_auth = external_auth;
-        managed.error = Some("sign-in unavailable");
-        assert_state(
+        managed.error = Some("sign-in unavailable".to_owned());
+        assert_state!(
             project_managed_harness_setup(managed),
             HarnessSetupAction::Authenticate,
             None,
@@ -557,8 +563,8 @@ fn managed_sign_in_pending_changes_only_busy_and_label() {
     for (pending, busy, label) in [(false, false, "Sign In"), (true, true, "Starting sign-in…")] {
         let mut managed = input(Some(report(InstallationActivity::Idle, true, false)));
         managed.pending = pending;
-        managed.error = Some("authentication unavailable");
-        assert_state(
+        managed.error = Some("authentication unavailable".to_owned());
+        assert_state!(
             project_managed_harness_setup(managed),
             HarnessSetupAction::Authenticate,
             None,
@@ -570,4 +576,46 @@ fn managed_sign_in_pending_changes_only_busy_and_label() {
             HarnessSetupStatus::SignIn,
         );
     }
+}
+
+#[test]
+fn projected_state_owns_text_after_source_reports_are_dropped() {
+    let (progress, authenticating, ready, failed) = {
+        let mut installing = report(InstallationActivity::Installing, true, false);
+        installing.activity_detail = Some(String::from("Preparing a source-owned detail"));
+        let progress = project_managed_harness_setup(input(Some(installing)));
+
+        let mut authenticating_report = report(InstallationActivity::Authenticating, true, false);
+        authenticating_report.authorization = Some(InstallationAuthorization::new(String::from(
+            "https://example.test/source-owned-auth",
+        )));
+        let authenticating = project_managed_harness_setup(input(Some(authenticating_report)));
+
+        let ready_input = HarnessSetupInput {
+            available: true,
+            error: None,
+            external_auth: None,
+            pending: false,
+            report: Some(report(InstallationActivity::Idle, true, false)),
+            usage: Some(UsageReport::new(
+                UsageAuthentication::Authenticated,
+                Some(String::from("source-owned@example.test")),
+            )),
+        };
+        let ready = project_managed_harness_setup(ready_input);
+
+        let mut failed_report = report(InstallationActivity::Failed, true, false);
+        failed_report.failure = Some(String::from("source-owned failure"));
+        let failed = project_managed_harness_setup(input(Some(failed_report)));
+
+        (progress, authenticating, ready, failed)
+    };
+
+    assert_eq!(progress.label, "Preparing a source-owned detail");
+    assert_eq!(
+        authenticating.authorization_url.as_deref(),
+        Some("https://example.test/source-owned-auth")
+    );
+    assert_eq!(ready.email.as_deref(), Some("source-owned@example.test"));
+    assert_eq!(failed.failure.as_deref(), Some("source-owned failure"));
 }
