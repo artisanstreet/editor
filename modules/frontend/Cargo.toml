@@ -229,6 +229,10 @@ name = "route_navigation"
 path = "../../tests/frontend/route_navigation.rs"
 
 [[test]]
+name = "run_usage_policy"
+path = "../../tests/frontend/run_usage_policy.rs"
+
+[[test]]
 name = "runtime_fixture_policy"
 path = "../../tests/frontend/runtime_fixture_policy.rs"
 
