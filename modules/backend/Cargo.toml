@@ -69,6 +69,10 @@ name = "subscription_patch_selection_policy"
 path = "../../tests/backend/subscription_patch_selection_policy.rs"
 
 [[test]]
+name = "terminal_transcript_consumption_policy"
+path = "../../tests/backend/terminal_transcript_consumption_policy.rs"
+
+[[test]]
 name = "usage_interruption_model_policy"
 path = "../../tests/backend/usage_interruption_model_policy.rs"
 

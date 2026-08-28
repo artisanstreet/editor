@@ -50,6 +50,7 @@ rust_library(
         "src/storage.rs",
         "src/subscription_patch_selection_policy.rs",
         "src/telemetry_preferences_control_policy.rs",
+        "src/terminal_transcript_consumption_policy.rs",
         "src/thread_liveness_policy.rs",
         "src/thread_resource_quiescence_policy.rs",
         "src/usage_interruption_model_policy.rs",
