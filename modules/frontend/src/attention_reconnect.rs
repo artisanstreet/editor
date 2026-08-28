@@ -59,7 +59,7 @@ impl AttentionReconnectPolicy {
 
     /// Returns the most recently observed attention value, if initialized.
     #[must_use]
-    pub const fn last_watching(&self) -> Option<bool> {
+    pub const fn last_watching(self) -> Option<bool> {
         self.last_watching
     }
 }
