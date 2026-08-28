@@ -7,6 +7,7 @@
 //! rendering them: [`attention`], [`composer`], [`transcript`], and
 //! [`thread_list_selection`].
 
+pub mod approval_presentation;
 pub mod artisan_error_code;
 pub mod attention;
 pub mod attention_reconnect;

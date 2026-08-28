@@ -13,6 +13,10 @@ artisan-ui = { path = "../ui" }
 gpui.workspace = true
 
 [[test]]
+name = "approval_presentation"
+path = "../../tests/frontend/approval_presentation.rs"
+
+[[test]]
 name = "attention"
 path = "../../tests/frontend/attention.rs"
 
