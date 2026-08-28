@@ -315,8 +315,7 @@ pub fn active_conversation_turn_with_threshold<'a>(
 
     offsets
         .iter()
-        .filter(|offset| offset.top <= threshold)
-        .next_back()
+        .rfind(|offset| offset.top <= threshold)
         .map(|offset| offset.id)
         .or_else(|| offsets.first().map(|offset| offset.id))
 }
