@@ -25,6 +25,7 @@ rust_library(
         "src/latest_request_gate.rs",
         "src/lib.rs",
         "src/motion_spring.rs",
+        "src/new_thread_interaction.rs",
         "src/notification_events.rs",
         "src/notification_preferences.rs",
         "src/onboarding_route.rs",
