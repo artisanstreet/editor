@@ -53,6 +53,10 @@ name = "conversation_scroll_position"
 path = "../../tests/frontend/conversation_scroll_position.rs"
 
 [[test]]
+name = "conversation_turn_footer_policy"
+path = "../../tests/frontend/conversation_turn_footer_policy.rs"
+
+[[test]]
 name = "conversation_turn_navigator"
 path = "../../tests/frontend/conversation_turn_navigator.rs"
 

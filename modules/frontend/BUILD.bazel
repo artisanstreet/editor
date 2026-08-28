@@ -18,6 +18,7 @@ rust_library(
         "src/conversation_projection.rs",
         "src/conversation_projection/validation.rs",
         "src/conversation_scroll_position.rs",
+        "src/conversation_turn_footer_policy.rs",
         "src/conversation_turn_navigator.rs",
         "src/engine_usage_cache.rs",
         "src/file_icon.rs",
