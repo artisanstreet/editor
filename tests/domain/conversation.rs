@@ -154,6 +154,33 @@ fn snapshot_validates_ids_ordinals_and_turn_ownership() {
 }
 
 #[test]
+fn snapshot_rejects_turn_count_above_the_query_ceiling() {
+    let maximum = usize::from(CONVERSATION_QUERY_MAX_TURNS);
+    let turns = (0..=maximum)
+        .map(|index| {
+            turn(
+                &format!("turn-{index}"),
+                u64::try_from(index).expect("fixture index fits u64"),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        ConversationSnapshot::new(
+            thread_id(),
+            ConversationCursor::default(),
+            turns,
+            Vec::new(),
+            UnixMillis::from_millis(0),
+        ),
+        Err(ConversationSnapshotError::TooManyTurns {
+            count: maximum + 1,
+            maximum,
+        })
+    );
+}
+
+#[test]
 fn snapshot_canonicalizes_out_of_order_input_by_shared_ordinals() {
     let snapshot = ConversationSnapshot::new(
         thread_id(),
