@@ -40,6 +40,7 @@ rust_clippy(
         "//tests/policy:dependency_policy_test",
         "//tests/protocol:phase1_proof_test",
         "//tests/transport:loopback_test",
+        "//tests/ui:markdown_seam_test",
     ],
 )
 
@@ -55,6 +56,7 @@ rustfmt_test(
         "//tests/policy:dependency_policy_test",
         "//tests/protocol:phase1_proof_test",
         "//tests/transport:loopback_test",
+        "//tests/ui:markdown_seam_test",
     ],
     transitive = True,
 )
@@ -68,5 +70,6 @@ test_suite(
         "//tests/policy:dependency_policy_test",
         "//tests/protocol:phase1_proof_test",
         "//tests/transport:loopback_test",
+        "//tests/ui:markdown_seam_test",
     ],
 )
