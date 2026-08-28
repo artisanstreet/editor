@@ -157,6 +157,10 @@ name = "model_policy_controller"
 path = "../../tests/frontend/model_policy_controller.rs"
 
 [[test]]
+name = "model_policy_controls_presentation"
+path = "../../tests/frontend/model_policy_controls_presentation.rs"
+
+[[test]]
 name = "model_selection_presentation"
 path = "../../tests/frontend/model_selection_presentation.rs"
 

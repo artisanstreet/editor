@@ -47,6 +47,7 @@ pub mod math_rendering_policy;
 pub mod mobile_breakpoint_policy;
 pub mod model_favorites_presentation;
 pub mod model_policy_controller;
+pub mod model_policy_controls_presentation;
 pub mod model_selection_presentation;
 pub mod motion_spring;
 pub mod new_thread_interaction;
