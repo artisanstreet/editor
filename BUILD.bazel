@@ -35,6 +35,7 @@ rust_clippy(
         "//modules/transport:transport",
         "//modules/ui:ui",
         "//scripts/capnp_codegen:capnpc_rust",
+        "//tests/assets:assets_validation_test",
         "//tests/database:command_receipt_entities",
         "//tests/database:file_connection",
         "//tests/database:migrations",
@@ -65,6 +66,7 @@ rustfmt_test(
         "//modules/backend:forge",
         "//modules/frontend:editor",
         "//scripts/capnp_codegen:capnpc_rust",
+        "//tests/assets:assets_validation_test",
         "//tests/database:command_receipt_entities",
         "//tests/database:file_connection",
         "//tests/database:migrations",
@@ -93,6 +95,7 @@ test_suite(
     name = "tests",
     tests = [
         ":format_test",
+        "//tests/assets:assets_validation_test",
         "//tests/database:command_receipt_entities",
         "//tests/database:file_connection",
         "//tests/database:migrations",
