@@ -201,7 +201,7 @@ impl UsageRecoverySettingsState {
     pub fn finish_save(&mut self, outcome: UsageRecoverySaveOutcome) {
         self.saving = false;
         if matches!(outcome, UsageRecoverySaveOutcome::Failed) {
-            self.message = USAGE_RECOVERY_SAVE_FAILURE_MESSAGE.to_owned();
+            USAGE_RECOVERY_SAVE_FAILURE_MESSAGE.clone_into(&mut self.message);
         }
     }
 
