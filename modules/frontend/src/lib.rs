@@ -20,6 +20,7 @@ pub mod conversation_diff_stat;
 pub mod conversation_presentation;
 pub mod conversation_projection;
 pub mod conversation_scroll_position;
+pub mod conversation_turn_footer_policy;
 pub mod conversation_turn_navigator;
 pub mod engine_usage_cache;
 pub mod file_icon;
