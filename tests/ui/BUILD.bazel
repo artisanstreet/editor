@@ -169,6 +169,20 @@ rust_test(
 )
 
 rust_test(
+    name = "dialog_test",
+    srcs = ["dialog.rs"],
+    crate_name = "dialog_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "fade_arc_test",
     srcs = ["fade_arc.rs"],
     crate_name = "fade_arc_test",

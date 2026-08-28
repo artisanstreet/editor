@@ -6,6 +6,7 @@ pub mod badge;
 pub mod button;
 pub mod card;
 pub mod collapsible;
+pub mod dialog;
 pub mod fade_arc;
 pub mod icon;
 pub mod input;
