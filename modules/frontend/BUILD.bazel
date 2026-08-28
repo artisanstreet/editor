@@ -8,6 +8,7 @@ rust_library(
         "src/attention.rs",
         "src/composer.rs",
         "src/context_usage_tone.rs",
+        "src/conversation_diff_stat.rs",
         "src/conversation_projection.rs",
         "src/conversation_projection/validation.rs",
         "src/image_viewer.rs",
