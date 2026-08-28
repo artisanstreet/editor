@@ -51,6 +51,7 @@ rust_library(
         "src/notification_events.rs",
         "src/notification_web_presenter_policy.rs",
         "src/notification_preferences.rs",
+        "src/onboarding_harness_presentation.rs",
         "src/onboarding_route.rs",
         "src/proof.rs",
         "src/project_identity_policy.rs",

@@ -177,6 +177,10 @@ name = "notification_preferences"
 path = "../../tests/frontend/notification_preferences.rs"
 
 [[test]]
+name = "onboarding_harness_presentation"
+path = "../../tests/frontend/onboarding_harness_presentation.rs"
+
+[[test]]
 name = "onboarding_route"
 path = "../../tests/frontend/onboarding_route.rs"
 
