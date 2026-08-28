@@ -55,6 +55,7 @@ pub mod model_policy_controls_presentation;
 pub mod model_selection_presentation;
 pub mod motion_spring;
 pub mod new_thread_interaction;
+pub mod new_thread_sentence_policy;
 pub mod notification_events;
 pub mod notification_preferences;
 pub mod notification_web_presenter_policy;

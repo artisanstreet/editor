@@ -193,6 +193,10 @@ name = "new_thread_interaction"
 path = "../../tests/frontend/new_thread_interaction.rs"
 
 [[test]]
+name = "new_thread_sentence_policy"
+path = "../../tests/frontend/new_thread_sentence_policy.rs"
+
+[[test]]
 name = "notification_events"
 path = "../../tests/frontend/notification_events.rs"
 
