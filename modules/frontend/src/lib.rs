@@ -39,6 +39,7 @@ pub mod proof;
 pub mod reader_attention;
 pub mod reasoning_display;
 pub mod runtime_fixture_policy;
+pub mod runtime_fixture_support;
 pub mod runtime_surface;
 pub mod shell;
 pub mod subscription_projection;

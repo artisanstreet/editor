@@ -38,6 +38,7 @@ rust_library(
         "src/reader_attention.rs",
         "src/reasoning_display.rs",
         "src/runtime_fixture_policy.rs",
+        "src/runtime_fixture_support.rs",
         "src/runtime_surface.rs",
         "src/shell.rs",
         "src/subscription_projection.rs",
