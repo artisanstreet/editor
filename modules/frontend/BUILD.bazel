@@ -23,6 +23,7 @@ rust_library(
         "src/engine_usage_cache.rs",
         "src/file_icon.rs",
         "src/forge_recovery_health.rs",
+        "src/hover_pill_group_policy.rs",
         "src/image_inspection_store.rs",
         "src/image_policy.rs",
         "src/image_viewer.rs",
