@@ -19,6 +19,7 @@ pub mod orchestration_intake_policy;
 pub mod preview_service_policy;
 pub mod product_telemetry_capture_policy;
 pub mod request_handler;
+pub mod sqlite_write_retry_policy;
 pub mod storage;
 pub mod telemetry_preferences_control_policy;
 pub mod thread_liveness_policy;
