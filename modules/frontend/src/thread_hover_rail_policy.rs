@@ -191,10 +191,19 @@ impl WorkingRowsLayout {
         let row_height = if row_count == 0 {
             0.0
         } else {
-            measured_total_height / row_count as f64
+            // A host can only materialize a finite, bounded number of rows in
+            // this UI list. Converting that row count is inherent to dividing
+            // its measured CSS-pixel height and is exact for realizable lists.
+            #[allow(clippy::cast_precision_loss)]
+            let row_count_as_float = row_count as f64;
+            measured_total_height / row_count_as_float
         };
         let scrolls = row_height > 0.0 && row_count > VISIBLE_WORKING_ROWS;
-        let max_height = scrolls.then_some(row_height * VISIBLE_WORKING_ROWS as f64);
+        // This fixed ten-row policy constant is exactly representable as an
+        // f64; the local allowance keeps the integer policy source explicit.
+        #[allow(clippy::cast_precision_loss)]
+        let visible_working_rows_as_float = VISIBLE_WORKING_ROWS as f64;
+        let max_height = scrolls.then_some(row_height * visible_working_rows_as_float);
 
         Self {
             row_height,
@@ -223,7 +232,6 @@ impl WorkingRowsLayout {
 }
 
 /// Derives the measured working-row layout without retaining state.
-#[must_use]
 pub fn working_rows_layout(measured_total_height: f64, row_count: usize) -> WorkingRowsLayout {
     WorkingRowsLayout::new(measured_total_height, row_count)
 }
@@ -300,7 +308,6 @@ impl<T> ThreadHoverRailPolicy<T> {
     }
 
     /// Returns the newest remembered pointer coordinate.
-    #[must_use]
     pub const fn last_pointer(&self) -> PointerPosition {
         self.last_pointer
     }
@@ -464,9 +471,8 @@ impl<T> ThreadHoverRailPolicy<T> {
     /// containment. When that is false, the remembered pointer keeps the rail
     /// open if it is still inside the measured zone, using inclusive edges.
     pub fn focus_departure(&mut self, related_target_in_zone: bool, zone: Option<Rectangle>) {
-        let pointer_inside_zone = zone
-            .map(|zone| zone.contains_inclusive(self.last_pointer))
-            .unwrap_or(false);
+        let pointer_inside_zone =
+            zone.is_some_and(|zone| zone.contains_inclusive(self.last_pointer));
         if !related_target_in_zone && !pointer_inside_zone {
             self.conceal();
         }
