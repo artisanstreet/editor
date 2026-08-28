@@ -193,6 +193,10 @@ name = "thread_list_navigation"
 path = "../../tests/frontend/thread_list_navigation.rs"
 
 [[test]]
+name = "thread_title_policy"
+path = "../../tests/frontend/thread_title_policy.rs"
+
+[[test]]
 name = "transcript"
 path = "../../tests/frontend/transcript.rs"
 
