@@ -218,14 +218,17 @@ fn semantics_retain_role_variant_and_composition_flags() {
     assert_eq!(filled_semantics.role, ALERT_ROLE);
     assert_eq!(filled_semantics.variant, AlertVariant::Destructive);
     assert_eq!(
-        filled_semantics.title.as_ref().map(|value| value.as_ref()),
+        filled_semantics
+            .title
+            .as_ref()
+            .map(<gpui::SharedString as AsRef<str>>::as_ref),
         Some("Title")
     );
     assert_eq!(
         filled_semantics
             .description
             .as_ref()
-            .map(|value| value.as_ref()),
+            .map(<gpui::SharedString as AsRef<str>>::as_ref),
         Some("Description")
     );
     assert!(filled_semantics.has_icon);
