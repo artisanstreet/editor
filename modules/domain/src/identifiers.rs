@@ -182,3 +182,13 @@ wire_identifier! {
     /// Forge-minted identity of one replayable conversation patch.
     PatchId
 }
+
+wire_identifier! {
+    /// Forge-minted opaque routing identity of one assistant run.
+    ///
+    /// Nonsecret evidence of which run produced a durable assistant item;
+    /// never a run lifecycle, lease, credential, engine id, or public state
+    /// machine, and never an alias of [`MessageId`] or a protocol frame id.
+    /// Never supplied by clients.
+    RunId
+}
