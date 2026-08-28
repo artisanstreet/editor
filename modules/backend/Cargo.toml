@@ -16,5 +16,12 @@ sea-orm.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[test]]
+name = "app_test"
+path = "../../tests/backend/app.rs"
+
 [lints]
 workspace = true

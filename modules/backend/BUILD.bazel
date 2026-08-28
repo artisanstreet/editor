@@ -5,6 +5,7 @@ exports_files(["Cargo.toml"])
 rust_library(
     name = "backend",
     srcs = [
+        "src/app.rs",
         "src/lib.rs",
         "src/storage.rs",
     ],
