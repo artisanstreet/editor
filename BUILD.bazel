@@ -36,6 +36,7 @@ rust_clippy(
         "//modules/ui:ui",
         "//tests/domain:workspace_id_test",
         "//tests/policy:dependency_policy_test",
+        "//tests/transport:loopback_test",
     ],
 )
 
@@ -47,6 +48,7 @@ rustfmt_test(
         "//modules/frontend:editor",
         "//tests/domain:workspace_id_test",
         "//tests/policy:dependency_policy_test",
+        "//tests/transport:loopback_test",
     ],
     transitive = True,
 )
@@ -57,5 +59,6 @@ test_suite(
         ":format_test",
         "//tests/domain:workspace_id_test",
         "//tests/policy:dependency_policy_test",
+        "//tests/transport:loopback_test",
     ],
 )
