@@ -7,6 +7,7 @@ rust_library(
     srcs = [
         "src/lib.rs",
         "src/proof.rs",
+        "src/thread_list_selection.rs",
         "src/transcript.rs",
     ],
     crate_name = "artisan_frontend",
