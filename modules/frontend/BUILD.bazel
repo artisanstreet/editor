@@ -40,6 +40,7 @@ rust_library(
         "src/dev_instance_policy.rs",
         "src/dropdown_highlight_settle.rs",
         "src/editor_diagnostic_mapping.rs",
+        "src/editor_language.rs",
         "src/editor_route_gate_policy.rs",
         "src/editor_view_state_policy.rs",
         "src/editor_workspace_identity.rs",
