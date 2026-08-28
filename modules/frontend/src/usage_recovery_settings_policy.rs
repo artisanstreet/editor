@@ -166,6 +166,12 @@ impl UsageRecoverySettingsState {
     /// in flight, and emits the inverse of the current authoritative value.
     /// The authoritative value itself is intentionally left untouched until a
     /// later stream update arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UsageRecoverySaveRejection::Saving`] if a save is already in
+    /// flight, or [`UsageRecoverySaveRejection::Unavailable`] if usage recovery
+    /// is unavailable.
     pub fn start_save(
         &mut self,
     ) -> Result<UsageRecoveryPersistenceCommand, UsageRecoverySaveRejection> {
