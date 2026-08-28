@@ -126,9 +126,9 @@ impl<'models, 'fields> RuntimeCatalogView<'models, 'fields> {
 /// subsequent run, but it cannot rename telemetry from the run represented by
 /// `usage`.
 #[must_use]
-pub fn context_usage_model_name<'models, 'fields>(
+pub fn context_usage_model_name<'fields>(
     usage: SurfaceUsageAggregateView<'_>,
-    runtime_catalog: RuntimeCatalogView<'models, 'fields>,
+    runtime_catalog: RuntimeCatalogView<'_, 'fields>,
 ) -> Option<&'fields str> {
     let origin = usage.context_origin?;
     let engine_id = origin.engine_id?;
