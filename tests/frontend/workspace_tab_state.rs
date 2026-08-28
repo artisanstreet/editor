@@ -27,15 +27,15 @@ fn empty_initialization_preserves_all_exact_defaults() {
     assert!(state.recent_files.is_empty());
     assert!(state.changed_files.is_empty());
     assert_eq!(state.editor, EditorViewState::default());
-    assert_eq!(state.editor.scroll_top, 0.0);
+    assert!(state.editor.scroll_top.abs() <= f64::EPSILON);
     assert_eq!(state.editor.cursor_line, 1);
     assert_eq!(state.editor.cursor_column, 1);
     assert_eq!(state.chat, ChatViewState::default());
     assert_eq!(state.chat.draft, "");
-    assert_eq!(state.chat.transcript_scroll_top, 0.0);
+    assert!(state.chat.transcript_scroll_top.abs() <= f64::EPSILON);
     assert_eq!(state.orchestrator, OrchestratorViewState::default());
     assert_eq!(state.orchestrator.selected_node_id, None);
-    assert_eq!(state.orchestrator.graph_scroll_top, 0.0);
+    assert!(state.orchestrator.graph_scroll_top.abs() <= f64::EPSILON);
     assert_eq!(state.next_tab_generation, 0);
 }
 
