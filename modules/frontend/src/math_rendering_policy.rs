@@ -62,7 +62,7 @@ impl MathRenderMode {
 /// Output format required of a later math renderer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MathRenderOutput {
-    /// The renderer must provide both HTML and MathML representations.
+    /// The renderer must provide both HTML and `MathML` representations.
     HtmlAndMathml,
 }
 
@@ -100,19 +100,19 @@ pub const MATH_RENDERER_CONSTRAINTS: MathRendererConstraints = MathRendererConst
 };
 
 impl MathRendererConstraints {
-    /// Returns the maximum expansion count (`maxExpand` in KaTeX).
+    /// Returns the maximum expansion count (`maxExpand` in `KaTeX`).
     #[must_use]
     pub const fn max_expansion(self) -> u32 {
         self.max_expansion
     }
 
-    /// Returns the maximum size (`maxSize` in KaTeX).
+    /// Returns the maximum size (`maxSize` in `KaTeX`).
     #[must_use]
     pub const fn max_size(self) -> u32 {
         self.max_size
     }
 
-    /// Returns the required combined HTML and MathML output mode.
+    /// Returns the required combined HTML and `MathML` output mode.
     #[must_use]
     pub const fn output(self) -> MathRenderOutput {
         self.output

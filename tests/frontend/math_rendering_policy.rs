@@ -12,10 +12,7 @@ use math_rendering_policy::{
     math_source_utf16_code_units,
 };
 
-fn admitted<'source>(
-    source: &'source str,
-    mode: MathRenderMode,
-) -> math_rendering_policy::MathRenderRequest<'source> {
+fn admitted(source: &str, mode: MathRenderMode) -> math_rendering_policy::MathRenderRequest<'_> {
     match admit_math_render(source, mode) {
         MathRenderAdmission::Admitted(request) => request,
         MathRenderAdmission::Rejected(rejection) => {
