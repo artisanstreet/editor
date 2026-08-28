@@ -27,12 +27,15 @@
 # * Envelope.messageId is the protocol-owned FrameId minted by whichever side
 #   sends the frame. Client request frames carry one client-minted FrameId
 #   which also serves as the domain RequestId and remains stable across
-#   retries: a retrying client resends the same envelope verbatim and never
-#   mints a second id for the same logical attempt. Server frames (welcome,
-#   response, event, protocol error) carry independently server-minted
-#   FrameIds. Forge mints durable queued-message identities separately (see
-#   FirstMessageReceipt and FirstMessageQueued). These vocabularies never
-#   alias.
+#   retries of durable or idempotent requests: a retrying client resends the
+#   same envelope verbatim and never mints a second id for the same logical
+#   attempt. The host-interaction pickDirectory request is the one documented
+#   exception to that verbatim-retry guarantee (see Request.pickDirectory
+#   below).
+#   Server frames (welcome, response, event, protocol error) carry
+#   independently server-minted FrameIds. Forge mints durable queued-message
+#   identities separately (see FirstMessageReceipt and FirstMessageQueued).
+#   These vocabularies never alias.
 # * Response.requestId, FirstMessageReceipt.requestId,
 #   FirstMessageQueued.requestId, and correlated ProtocolError arms echo the
 #   client RequestId -- that is, the triggering request's Envelope.messageId
@@ -336,7 +339,10 @@ struct Welcome {
 # project id when a directory is attached, the thread id when a thread is
 # created, and the queued-message id when a first message is durably queued.
 # Mutation retries resend the request frame verbatim, reusing the client
-# FrameId that doubles as its stable RequestId.
+# FrameId that doubles as its stable RequestId. Only durable and idempotent
+# requests carry that replay guarantee: the host-interaction pickDirectory
+# request below persists nothing and must not be automatically replayed --
+# each deliberate new attempt sends a fresh frame identity.
 # ---------------------------------------------------------------------------
 
 struct ListDirectoriesRequest {
@@ -381,8 +387,10 @@ struct QueueFirstMessageRequest {
 # complete catalog, so stale or unknown ids can never fail this request.
 struct ListAttachedProjectsRequest {}
 
-# The request arms of the native protocol: the six of the first workflow
-# plus the three conversation read/subscription requests appended below.
+# The request arms of the native protocol: the six of the first workflow,
+# the three conversation read/subscription requests appended below them, and
+# the explicit host-interaction pickDirectory request appended last as the
+# tenth arm.
 struct Request {
   union {
     listDirectories @0 :ListDirectoriesRequest;
@@ -400,6 +408,17 @@ struct Request {
     conversationQuery @6 :ConversationQueryRequest;
     conversationSubscribe @7 :ConversationSubscribeRequest;
     conversationUnsubscribe @8 :ConversationUnsubscribeRequest;
+
+    # Explicit user interaction: ask the local Forge process to show its
+    # native directory picker once. Deliberately a unit arm outside the pure
+    # domain Query and durable Command vocabularies above: nothing durable is
+    # created or mutated, the request must not be automatically replayed, and
+    # every deliberate new attempt uses a fresh frame identity.
+    # Duplicate-request suppression and cancellation propagation stay outside
+    # this slice until the separately owned process/admission packet lands.
+    # Appended after the conversation requests; fresh ordinal, existing
+    # ordinals frozen.
+    pickDirectory @9 :Void;
   }
 }
 
@@ -431,6 +450,32 @@ struct Response {
     conversationSubscriptionStarted @8 :ConversationSubscriptionStarted;
 
     conversationSubscriptionStopped @9 :ConversationSubscriptionStopped;
+
+    # Outcome of one explicit pickDirectory interaction; answers only real
+    # picker results. cancelled reports an actual user dismissal of the
+    # picker rather than a request cancellation or a dropped frame;
+    # cancellation propagation and late-response behavior stay explicitly
+    # outside this slice. Appended after the conversation responses; fresh
+    # ordinal, existing ordinals frozen.
+    directoryPicked @10 :DirectoryPickOutcome;
+  }
+}
+
+# Outcome of one explicit native directory-pick interaction.
+#
+# selected carries only the validated opaque DirectoryId of the chosen
+# directory under the shared identifier rule -- never a filesystem path,
+# display label, directory enumeration, or has-children projection.
+# cancelled reports an actual user dismissal of the picker. Every deliberate
+# new pick attempt is a fresh request frame with its own identity (see
+# Request.pickDirectory).
+struct DirectoryPickOutcome {
+  union {
+    # Opaque Forge-minted directory identity. Identifier rule.
+    selected @0 :Text;
+
+    # The user dismissed the picker.
+    cancelled @1 :Void;
   }
 }
 
@@ -846,8 +891,10 @@ struct Envelope {
 
   # Protocol-owned FrameId minted by the sending side. On request frames the
   # client FrameId is also the domain RequestId and stays stable across
-  # retries; welcome, response, event, and error frames carry independently
-  # server-minted FrameIds. Identifier rule.
+  # durable or idempotent retries. PickDirectory must not be automatically
+  # replayed; each deliberate new attempt uses a fresh frame identity (see
+  # Request.pickDirectory). Welcome, response, event, and error frames carry
+  # independently server-minted FrameIds. Identifier rule.
   messageId @1 :Text;
 
   # Sender timestamp. Signed Unix epoch milliseconds (UTC).

@@ -138,6 +138,13 @@ impl RequestHandler {
             ClientRequest::Conversation(_) => {
                 Err(unbacked_failure(request_id, "conversation projection"))
             }
+            // No native picker exists in this build; the separately owned
+            // process/admission packet integrates the real chooser. Answer
+            // through the established bounded, non-retryable unbacked path
+            // instead of claiming a picker outcome.
+            ClientRequest::PickDirectory => {
+                Err(unbacked_failure(request_id, "native directory picking"))
+            }
         }
     }
 

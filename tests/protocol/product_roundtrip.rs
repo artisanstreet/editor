@@ -16,8 +16,9 @@
 use artisan_domain::PROJECT_LISTING_MAX_PROJECTS;
 use artisan_protocol::artisan_capnp::{
     DirectoryEntryKind, ErrorCode, PlaceKind, QueuedState, ReceiptDisposition, directory_listing,
-    envelope, event, hello, list_attached_projects_request, list_directories_request, project,
-    project_list, protocol_error, request, response, thread_summary,
+    directory_pick_outcome, envelope, event, hello, list_attached_projects_request,
+    list_directories_request, project, project_list, protocol_error, request, response,
+    thread_summary,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -75,6 +76,7 @@ const THREAD_CREATE_DUPLICATE_RESPONSE_ID: &str = "server-frame-000006-duplicate
 const RECEIPT_ACCEPTED_RESPONSE_ID: &str = "server-frame-000007";
 const RECEIPT_DUPLICATE_RESPONSE_ID: &str = "server-frame-000008";
 const PROJECT_LIST_RESPONSE_ID: &str = "server-frame-000009";
+const DIRECTORY_PICKED_RESPONSE_ID: &str = "server-frame-000010";
 const CORRELATED_ERROR_FRAME_ID: &str = "server-error-000001";
 const VERSION_REJECTION_FRAME_ID: &str = "server-error-000002";
 const IDEMPOTENCY_CONFLICT_FRAME_ID: &str = "server-error-000003";
@@ -1224,6 +1226,106 @@ fn appends_idempotency_conflict_at_the_next_unused_ordinal() -> capnp::Result<()
             }
         }
         _ => panic!("expected protocolError body"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn round_trips_raw_pick_directory_request_and_outcome_through_the_current_schema()
+-> capnp::Result<()> {
+    // Raw current-schema roundtrip for the explicit host-interaction slice:
+    // the unit pickDirectory request and both DirectoryPickOutcome arms
+    // encode and decode through the generated bindings, and only real picker
+    // results travel in the outcome. Ordinal positions follow the current
+    // schema source; this test does not pin numeric wire compatibility.
+    //
+    // Request: a unit frame with no payload at all.
+    let pick_request = {
+        let mut message = frame();
+        init_envelope(&mut message, CLIENT_REQUEST_ID)
+            .init_body()
+            .init_request()
+            .reborrow()
+            .set_pick_directory(());
+        encode(&message)
+    };
+
+    {
+        let decoded = decode(&pick_request)?;
+        let envelope: envelope::Reader = decoded.get_root()?;
+        assert_envelope_header(envelope, CLIENT_REQUEST_ID)?;
+        match envelope.get_body().which()? {
+            envelope::body::Which::Request(req) => match req?.which()? {
+                request::Which::PickDirectory(()) => {}
+                _ => panic!("expected pickDirectory request"),
+            },
+            _ => panic!("expected request body"),
+        }
+    }
+
+    // Response, selected arm: the server frame identity stays independent of
+    // the echoed client request id, and only the opaque directory id moves.
+    let selected_response = {
+        let mut message = frame();
+        let mut res = init_envelope(&mut message, DIRECTORY_PICKED_RESPONSE_ID)
+            .init_body()
+            .init_response();
+        res.set_request_id(CLIENT_REQUEST_ID);
+        res.init_directory_picked().set_selected(DIRECTORY_ID);
+        encode(&message)
+    };
+
+    {
+        let decoded = decode(&selected_response)?;
+        let envelope: envelope::Reader = decoded.get_root()?;
+        assert_server_envelope(envelope, DIRECTORY_PICKED_RESPONSE_ID)?;
+        match envelope.get_body().which()? {
+            envelope::body::Which::Response(res) => match res?.which()? {
+                response::Which::DirectoryPicked(outcome) => {
+                    let outcome = outcome?;
+                    match outcome.which()? {
+                        directory_pick_outcome::Which::Selected(directory_id) => {
+                            assert_eq!(directory_id?, DIRECTORY_ID);
+                        }
+                        directory_pick_outcome::Which::Cancelled(()) => {
+                            panic!("expected selected outcome")
+                        }
+                    }
+                }
+                _ => panic!("expected directoryPicked response"),
+            },
+            _ => panic!("expected response body"),
+        }
+    }
+
+    // Response, cancelled arm: an actual user dismissal of the picker.
+    let cancelled_response = {
+        let mut message = frame();
+        let mut res = init_envelope(&mut message, DIRECTORY_PICKED_RESPONSE_ID)
+            .init_body()
+            .init_response();
+        res.set_request_id(CLIENT_REQUEST_ID);
+        res.init_directory_picked().set_cancelled(());
+        encode(&message)
+    };
+
+    {
+        let decoded = decode(&cancelled_response)?;
+        let envelope: envelope::Reader = decoded.get_root()?;
+        assert_server_envelope(envelope, DIRECTORY_PICKED_RESPONSE_ID)?;
+        match envelope.get_body().which()? {
+            envelope::body::Which::Response(res) => match res?.which()? {
+                response::Which::DirectoryPicked(outcome) => match outcome?.which()? {
+                    directory_pick_outcome::Which::Selected(_) => {
+                        panic!("expected cancelled outcome")
+                    }
+                    directory_pick_outcome::Which::Cancelled(()) => {}
+                },
+                _ => panic!("expected directoryPicked response"),
+            },
+            _ => panic!("expected response body"),
+        }
     }
 
     Ok(())

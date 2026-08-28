@@ -14,13 +14,13 @@ use artisan_domain::{
 };
 use artisan_protocol::artisan_capnp::{ErrorCode as WireErrorCode, envelope};
 use artisan_protocol::{
-    CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ClientRequest, ConnectionId, DispatchFailure,
-    ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello, HelloCredential,
-    LocalCapability, LocalCapabilityError, ProtocolDecodeError, ProtocolEncodeError,
-    ProtocolFailure, ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES,
-    ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse,
-    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody, decode_envelope,
-    encode_envelope,
+    CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ClientRequest, ConnectionId,
+    DirectoryPickOutcome, DispatchFailure, ErrorCode, ErrorDetail, EventCursor,
+    FirstMessageReceipt, FrameId, Hello, HelloCredential, LocalCapability, LocalCapabilityError,
+    ProtocolDecodeError, ProtocolEncodeError, ProtocolFailure, ProtocolValueError, ProtocolVersion,
+    RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ReconnectCapabilityError, ResponsePayload,
+    ServerEvent, ServerResponse, VersionOffer, VersionOfferError, Welcome, WireEnvelope,
+    WireEnvelopeBody, decode_envelope, encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -451,6 +451,141 @@ fn every_response_family_roundtrips_with_independent_server_frames() -> Result<(
             }),
         }),
     ))
+}
+
+#[test]
+fn pick_directory_request_roundtrips_as_a_unit_host_interaction() -> Result<(), Box<dyn Error>> {
+    let request_frame = envelope(
+        "request-pick-directory",
+        WireEnvelopeBody::Request(ClientRequest::PickDirectory),
+    );
+    assert_roundtrip(&request_frame)?;
+
+    // The client-minted frame identity survives untouched; a deliberate new
+    // attempt simply mints a different one.
+    let decoded = decode_envelope(&encode_envelope(&request_frame)?)?;
+    assert!(matches!(
+        decoded.body,
+        WireEnvelopeBody::Request(ClientRequest::PickDirectory)
+    ));
+    assert_eq!(decoded.frame_id.as_str(), "request-pick-directory");
+    Ok(())
+}
+
+#[test]
+fn directory_pick_outcomes_roundtrip_with_independent_server_frames() -> Result<(), Box<dyn Error>>
+{
+    let selected = envelope(
+        "server-frame-pick-selected",
+        WireEnvelopeBody::Response(ServerResponse {
+            request_id: request_id("request-pick"),
+            payload: ResponsePayload::DirectoryPicked(DirectoryPickOutcome::Selected(
+                DirectoryId::parse("directory-picked-1")?,
+            )),
+        }),
+    );
+    assert_roundtrip(&selected)?;
+    let decoded = decode_envelope(&encode_envelope(&selected)?)?;
+    let WireEnvelopeBody::Response(response) = decoded.body else {
+        panic!("expected a response body");
+    };
+    // The server-minted frame identity stays independent of the echoed
+    // client request identity, and Selected carries only the opaque id.
+    assert_eq!(decoded.frame_id.as_str(), "server-frame-pick-selected");
+    assert_ne!(decoded.frame_id.as_str(), response.request_id.as_str());
+    let ResponsePayload::DirectoryPicked(DirectoryPickOutcome::Selected(directory_id)) =
+        response.payload
+    else {
+        panic!("expected a directory-picked payload");
+    };
+    assert_eq!(directory_id.as_str(), "directory-picked-1");
+
+    let cancelled = envelope(
+        "server-frame-pick-cancelled",
+        WireEnvelopeBody::Response(ServerResponse {
+            request_id: request_id("request-pick-cancelled"),
+            payload: ResponsePayload::DirectoryPicked(DirectoryPickOutcome::Cancelled),
+        }),
+    );
+    assert_roundtrip(&cancelled)?;
+    let decoded = decode_envelope(&encode_envelope(&cancelled)?)?;
+    assert_ne!(decoded.frame_id.as_str(), "request-pick-cancelled");
+    let WireEnvelopeBody::Response(response) = decoded.body else {
+        panic!("expected a response body");
+    };
+    assert_eq!(response.request_id, request_id("request-pick-cancelled"));
+    assert!(matches!(
+        response.payload,
+        ResponsePayload::DirectoryPicked(DirectoryPickOutcome::Cancelled)
+    ));
+    Ok(())
+}
+
+#[test]
+fn malformed_selected_directory_id_is_rejected_through_the_decoder() {
+    let malformed_selected = {
+        let mut message = raw_envelope();
+        let mut root = message.init_root::<envelope::Builder>();
+        root.set_protocol_version(1);
+        root.set_message_id("server-frame-pick-selected");
+        let mut response = root.reborrow().init_body().init_response();
+        response.set_request_id("request-pick");
+        response
+            .reborrow()
+            .init_directory_picked()
+            .set_selected("not a valid directory id");
+        serialize::write_message_to_words(&message)
+    };
+    assert!(matches!(
+        decode_envelope(&malformed_selected),
+        Err(ProtocolDecodeError::Identifier {
+            field: "response.directoryPicked.selected",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn appended_pick_directory_wire_arms_decode_from_raw_frames() -> Result<(), Box<dyn Error>> {
+    let raw_request = {
+        let mut message = raw_envelope();
+        let mut root = message.init_root::<envelope::Builder>();
+        root.set_protocol_version(1);
+        root.set_message_id("request-pick-directory");
+        root.reborrow()
+            .init_body()
+            .init_request()
+            .reborrow()
+            .set_pick_directory(());
+        serialize::write_message_to_words(&message)
+    };
+    assert!(matches!(
+        decode_envelope(&raw_request)?.body,
+        WireEnvelopeBody::Request(ClientRequest::PickDirectory)
+    ));
+
+    let raw_cancelled = {
+        let mut message = raw_envelope();
+        let mut root = message.init_root::<envelope::Builder>();
+        root.set_protocol_version(1);
+        root.set_message_id("server-frame-pick-cancelled");
+        let mut response = root.reborrow().init_body().init_response();
+        response.set_request_id("request-pick-cancelled");
+        response
+            .reborrow()
+            .init_directory_picked()
+            .set_cancelled(());
+        serialize::write_message_to_words(&message)
+    };
+    assert!(matches!(
+        decode_envelope(&raw_cancelled)?.body,
+        WireEnvelopeBody::Response(ServerResponse {
+            payload: ResponsePayload::DirectoryPicked(DirectoryPickOutcome::Cancelled),
+            ..
+        })
+    ));
+
+    Ok(())
 }
 
 #[test]

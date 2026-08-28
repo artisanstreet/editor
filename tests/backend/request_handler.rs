@@ -805,6 +805,27 @@ async fn directory_browsing_fails_typed_until_a_registry_exists() {
 }
 
 #[tokio::test]
+async fn pick_directory_fails_correlated_nonretryable_without_a_picker_process() {
+    let (_temporary, storage) = opened_storage("pick-directory").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+
+    let failure = failure_of(
+        handler
+            .respond(&request("frame-pick"), &ClientRequest::PickDirectory)
+            .await,
+    );
+
+    storage.close().await.expect("storage should close");
+
+    // The explicit host-interaction request stays correlated to its frame,
+    // answers through the established unbacked-capability path, and never
+    // claims that a picker ran: repeating it deterministically fails again.
+    assert_eq!(failure.code, ErrorCode::Internal);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("frame-pick")));
+}
+
+#[tokio::test]
 async fn fresh_create_thread_admits_with_a_forged_identity_and_reopens_durable() {
     let (temporary, storage) = opened_storage("fresh-create").await;
     storage
