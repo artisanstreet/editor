@@ -37,6 +37,7 @@ rust_library(
         "src/project_picker.rs",
         "src/reader_attention.rs",
         "src/reasoning_display.rs",
+        "src/route_navigation.rs",
         "src/runtime_fixture_policy.rs",
         "src/runtime_fixture_support.rs",
         "src/runtime_surface.rs",
