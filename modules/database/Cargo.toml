@@ -30,5 +30,9 @@ path = "../../tests/database/seaorm_sqlite.rs"
 name = "command_receipt_entities"
 path = "../../tests/database/command_receipt_entities.rs"
 
+[[test]]
+name = "project_threads"
+path = "../../tests/database/project_threads.rs"
+
 [lints]
 workspace = true
