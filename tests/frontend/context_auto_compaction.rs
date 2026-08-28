@@ -9,6 +9,14 @@ use context_auto_compaction::{
     context_compaction_is_imminent, context_usage_auto_compaction_percent,
 };
 
+fn assert_approx_eq(got: f64, expected: f64, context: impl std::fmt::Display) {
+    let tolerance = 16.0 * f64::EPSILON * got.abs().max(expected.abs()).max(1.0);
+    assert!(
+        (got - expected).abs() <= tolerance,
+        "{context}: expected {expected:?}, got {got:?} (tolerance {tolerance:?})"
+    );
+}
+
 fn model(
     harness: &'static str,
     native_model_id: Option<&'static str>,
@@ -30,35 +38,39 @@ fn usage(
 
 #[test]
 fn documented_and_unknown_harness_thresholds_match_the_typescript_policy() {
-    assert_eq!(
+    assert_approx_eq(
         context_auto_compaction_percent(model("codex", None, 1_000_000.0)),
-        90.0
+        90.0,
+        "Codex threshold",
     );
-    assert_eq!(
+    assert_approx_eq(
         context_auto_compaction_percent(model("claude", None, 1_000_000.0)),
-        100.0
+        100.0,
+        "normal Claude threshold",
     );
-    assert_eq!(
+    assert_approx_eq(
         context_auto_compaction_percent(model("unknown", Some("claude-sonnet-5"), 1_000_000.0)),
-        UNKNOWN_COMPACTION_PERCENT
+        UNKNOWN_COMPACTION_PERCENT,
+        "unknown harness threshold",
     );
-    assert_eq!(
+    assert_approx_eq(
         context_auto_compaction_percent(model("", None, 1_000_000.0)),
-        UNKNOWN_COMPACTION_PERCENT
+        UNKNOWN_COMPACTION_PERCENT,
+        "missing harness threshold",
     );
 }
 
 #[test]
 fn sonnet_uses_window_when_smaller_than_its_documented_capacity() {
     for window_tokens in [1.0, 200_000.0, 966_999.0, 967_000.0] {
-        assert_eq!(
+        assert_approx_eq(
             context_auto_compaction_percent(model(
                 "claude",
                 Some("claude-sonnet-5"),
                 window_tokens,
             )),
             100.0,
-            "window={window_tokens}"
+            format_args!("window={window_tokens}"),
         );
     }
 }
@@ -67,10 +79,11 @@ fn sonnet_uses_window_when_smaller_than_its_documented_capacity() {
 fn sonnet_uses_its_capacity_as_a_percentage_for_larger_windows() {
     let threshold =
         context_auto_compaction_percent(model("claude", Some("claude-sonnet-5"), 1_000_000.0));
-    assert_eq!(threshold, 96.7);
-    assert_eq!(
-        context_auto_compaction_percent(model("claude", Some("claude-sonnet-5"), 2_000_000.0,)),
-        CLAUDE_SONNET_5_COMPACTION_TOKENS / 2_000_000.0 * 100.0
+    assert_approx_eq(threshold, 96.7, "Sonnet 1,000,000-token window");
+    assert_approx_eq(
+        context_auto_compaction_percent(model("claude", Some("claude-sonnet-5"), 2_000_000.0)),
+        CLAUDE_SONNET_5_COMPACTION_TOKENS / 2_000_000.0 * 100.0,
+        "Sonnet 2,000,000-token window",
     );
 }
 
@@ -139,13 +152,15 @@ fn threshold_resolution_uses_reporting_origin_not_a_current_policy() {
     let codex_usage = usage(Some("codex"), Some("gpt-5.6-sol"), Some(900_000.0));
     let sonnet_usage = usage(Some("claude"), Some("claude-sonnet-5"), Some(967_000.0));
 
-    assert_eq!(
+    assert_approx_eq(
         context_usage_auto_compaction_percent(Some(&codex_usage), 1_000_000.0),
-        90.0
+        90.0,
+        "reporting Codex origin",
     );
-    assert_eq!(
+    assert_approx_eq(
         context_usage_auto_compaction_percent(Some(&sonnet_usage), 1_000_000.0),
-        96.7
+        96.7,
+        "reporting Sonnet origin",
     );
     assert!(context_compaction_is_imminent(
         Some(&codex_usage),
@@ -164,9 +179,10 @@ fn missing_or_incomplete_origin_is_the_unknown_engine_case() {
     let missing_model = usage(Some("claude"), None, Some(100.0));
 
     for aggregate in [&no_origin, &missing_engine, &missing_model] {
-        assert_eq!(
+        assert_approx_eq(
             context_usage_auto_compaction_percent(Some(aggregate), 100.0),
-            UNKNOWN_COMPACTION_PERCENT
+            UNKNOWN_COMPACTION_PERCENT,
+            format_args!("incomplete reporting origin: {aggregate:?}"),
         );
     }
 }
@@ -175,10 +191,10 @@ fn missing_or_incomplete_origin_is_the_unknown_engine_case() {
 fn non_positive_and_non_finite_windows_return_the_conservative_boundary() {
     for window_tokens in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         for harness in ["codex", "claude", "unknown"] {
-            assert_eq!(
+            assert_approx_eq(
                 context_auto_compaction_percent(model(harness, None, window_tokens)),
                 UNKNOWN_COMPACTION_PERCENT,
-                "harness={harness} window={window_tokens}"
+                format_args!("harness={harness} window={window_tokens}"),
             );
         }
     }
