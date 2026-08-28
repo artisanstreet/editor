@@ -264,6 +264,11 @@ impl<T> ProjectIdentityPolicy<T> {
     ///
     /// An error is returned unchanged and leaves retained state untouched;
     /// transport-specific error types remain outside this policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the client error unchanged when `result` is `Err`; retained
+    /// state is not modified in that case.
     pub fn apply_client_result<E>(
         &mut self,
         result: Result<Vec<ProjectIdentity<T>>, E>,
