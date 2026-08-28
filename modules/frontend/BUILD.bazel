@@ -7,6 +7,7 @@ rust_library(
     srcs = [
         "src/attention.rs",
         "src/composer.rs",
+        "src/context_usage_description.rs",
         "src/context_usage_tone.rs",
         "src/conversation_diff_stat.rs",
         "src/conversation_presentation.rs",
