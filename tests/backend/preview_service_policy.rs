@@ -102,7 +102,6 @@ fn list_forwards_optional_workspace() {
 
 #[test]
 fn forwarding_preserves_url_register_and_update_inputs() {
-    let policy = PreviewServicePolicy::new();
     assert_eq!(
         validate_target_url("http://preview.invalid:4312"),
         PreviewServiceAction::ValidateLocalPreviewUrl {
@@ -124,14 +123,16 @@ fn forwarding_preserves_url_register_and_update_inputs() {
         workspace_id: "workspace-1".to_owned(),
     };
     assert_eq!(
-        policy.register(register_input.clone()),
+        PreviewServicePolicy::register(register_input.clone()),
         PreviewServiceAction::Register {
             input: register_input
         }
     );
 
-    let replay = policy.replay_target_update(update_command(PreviewTargetUpdateAction::Probe));
-    let update = policy.update_target(
+    let replay = PreviewServicePolicy::replay_target_update(update_command(
+        PreviewTargetUpdateAction::Probe,
+    ));
+    let update = PreviewServicePolicy::update_target(
         update_command(PreviewTargetUpdateAction::Probe),
         Some("lease-1"),
     );
@@ -157,9 +158,9 @@ fn forwarding_preserves_url_register_and_update_inputs() {
 
 #[test]
 fn inspection_and_dispatch_lease_forwarding_keep_optional_values() {
-    let policy = PreviewServicePolicy::new();
     let inspection_input = inspection_command();
-    let inspection = policy.update_inspection(inspection_input.clone(), Some("lease-2"));
+    let inspection =
+        PreviewServicePolicy::update_inspection(inspection_input.clone(), Some("lease-2"));
     assert_eq!(
         inspection,
         PreviewServiceAction::UpdateInspection {
@@ -168,7 +169,7 @@ fn inspection_and_dispatch_lease_forwarding_keep_optional_values() {
         }
     );
     assert_eq!(
-        policy.update_inspection(inspection_command(), None),
+        PreviewServicePolicy::update_inspection(inspection_command(), None),
         PreviewServiceAction::UpdateInspection {
             input: inspection_command(),
             dispatch_lease_id: None,
@@ -182,31 +183,30 @@ fn inspection_and_dispatch_lease_forwarding_keep_optional_values() {
         thread_id: "thread-1".to_owned(),
     };
     assert_eq!(
-        policy.acquire_dispatch_lease(lease_input.clone()),
+        PreviewServicePolicy::acquire_dispatch_lease(lease_input.clone()),
         PreviewServiceAction::AcquireDispatchLease { input: lease_input }
     );
 
     let lease = lease();
     assert_eq!(
-        policy.release_dispatch_lease(lease.clone()),
+        PreviewServicePolicy::release_dispatch_lease(lease.clone()),
         PreviewServiceAction::ReleaseDispatchLease {
             lease: lease.clone()
         }
     );
     assert_eq!(
-        policy.renew_dispatch_lease(lease.clone()),
+        PreviewServicePolicy::renew_dispatch_lease(lease.clone()),
         PreviewServiceAction::RenewDispatchLease { lease }
     );
 }
 
 #[test]
 fn all_service_commands_have_distinct_typed_actions() {
-    let policy = PreviewServicePolicy::new();
     let actions = [
         get("target-1").unwrap(),
-        policy.list(None),
-        policy.validate_target_url("https://localhost:4312"),
-        policy.register(preview_service_policy::PreviewRegisterCommand {
+        PreviewServicePolicy::list(None),
+        PreviewServicePolicy::validate_target_url("https://localhost:4312"),
+        PreviewServicePolicy::register(preview_service_policy::PreviewRegisterCommand {
             message_id: "message-4".to_owned(),
             port: 4312,
             project_id: "project-1".to_owned(),
@@ -217,19 +217,24 @@ fn all_service_commands_have_distinct_typed_actions() {
             url: "https://localhost:4312".to_owned(),
             workspace_id: "workspace-1".to_owned(),
         }),
-        policy.replay_target_update(update_command(PreviewTargetUpdateAction::Launch)),
-        policy.update_target(update_command(PreviewTargetUpdateAction::Remove), None),
-        policy.update_inspection(inspection_command(), None),
-        policy.recover_inspections(),
-        policy.acquire_dispatch_lease(PreviewDispatchLeaseInput {
+        PreviewServicePolicy::replay_target_update(update_command(
+            PreviewTargetUpdateAction::Launch,
+        )),
+        PreviewServicePolicy::update_target(
+            update_command(PreviewTargetUpdateAction::Remove),
+            None,
+        ),
+        PreviewServicePolicy::update_inspection(inspection_command(), None),
+        PreviewServicePolicy::recover_inspections(),
+        PreviewServicePolicy::acquire_dispatch_lease(PreviewDispatchLeaseInput {
             kind: PreviewDispatchLeaseKind::Probe,
             session_id: None,
             target_id: Some("target-1".to_owned()),
             thread_id: "thread-1".to_owned(),
         }),
-        policy.release_dispatch_lease(lease()),
-        policy.renew_dispatch_lease(lease()),
-        policy.recover_dispatch_leases(),
+        PreviewServicePolicy::release_dispatch_lease(lease()),
+        PreviewServicePolicy::renew_dispatch_lease(lease()),
+        PreviewServicePolicy::recover_dispatch_leases(),
     ];
 
     assert!(matches!(actions[0], PreviewServiceAction::GetTarget { .. }));

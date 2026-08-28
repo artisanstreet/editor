@@ -285,7 +285,7 @@ impl PreviewServicePolicy {
         Self
     }
 
-    pub fn get<T>(&self, target_id: T) -> Result<PreviewServiceAction, PreviewServiceError>
+    pub fn get<T>(target_id: T) -> Result<PreviewServiceAction, PreviewServiceError>
     where
         T: Into<String>,
     {
@@ -295,14 +295,14 @@ impl PreviewServicePolicy {
     }
 
     #[must_use]
-    pub fn list(&self, workspace_id: Option<&str>) -> PreviewServiceAction {
+    pub fn list(workspace_id: Option<&str>) -> PreviewServiceAction {
         PreviewServiceAction::ListTargets {
             workspace_id: workspace_id.map(str::to_owned),
         }
     }
 
     #[must_use]
-    pub fn validate_target_url<T>(&self, url: T) -> PreviewServiceAction
+    pub fn validate_target_url<T>(url: T) -> PreviewServiceAction
     where
         T: Into<String>,
     {
@@ -310,18 +310,17 @@ impl PreviewServicePolicy {
     }
 
     #[must_use]
-    pub fn register(&self, input: PreviewRegisterCommand) -> PreviewServiceAction {
+    pub fn register(input: PreviewRegisterCommand) -> PreviewServiceAction {
         PreviewServiceAction::Register { input }
     }
 
     #[must_use]
-    pub fn replay_target_update(&self, input: PreviewTargetUpdateCommand) -> PreviewServiceAction {
+    pub fn replay_target_update(input: PreviewTargetUpdateCommand) -> PreviewServiceAction {
         PreviewServiceAction::ReplayTargetUpdate { input }
     }
 
     #[must_use]
     pub fn update_target(
-        &self,
         input: PreviewTargetUpdateCommand,
         dispatch_lease_id: Option<&str>,
     ) -> PreviewServiceAction {
@@ -333,7 +332,6 @@ impl PreviewServicePolicy {
 
     #[must_use]
     pub fn update_inspection(
-        &self,
         input: PreviewInspectionCommand,
         dispatch_lease_id: Option<&str>,
     ) -> PreviewServiceAction {
@@ -344,27 +342,27 @@ impl PreviewServicePolicy {
     }
 
     #[must_use]
-    pub fn recover_inspections(&self) -> PreviewServiceAction {
+    pub fn recover_inspections() -> PreviewServiceAction {
         PreviewServiceAction::RecoverInspections
     }
 
     #[must_use]
-    pub fn acquire_dispatch_lease(&self, input: PreviewDispatchLeaseInput) -> PreviewServiceAction {
+    pub fn acquire_dispatch_lease(input: PreviewDispatchLeaseInput) -> PreviewServiceAction {
         PreviewServiceAction::AcquireDispatchLease { input }
     }
 
     #[must_use]
-    pub fn release_dispatch_lease(&self, lease: PreviewDispatchLease) -> PreviewServiceAction {
+    pub fn release_dispatch_lease(lease: PreviewDispatchLease) -> PreviewServiceAction {
         PreviewServiceAction::ReleaseDispatchLease { lease }
     }
 
     #[must_use]
-    pub fn renew_dispatch_lease(&self, lease: PreviewDispatchLease) -> PreviewServiceAction {
+    pub fn renew_dispatch_lease(lease: PreviewDispatchLease) -> PreviewServiceAction {
         PreviewServiceAction::RenewDispatchLease { lease }
     }
 
     #[must_use]
-    pub fn recover_dispatch_leases(&self) -> PreviewServiceAction {
+    pub fn recover_dispatch_leases() -> PreviewServiceAction {
         PreviewServiceAction::RecoverDispatchLeases
     }
 }
@@ -373,12 +371,12 @@ pub fn get<T>(target_id: T) -> Result<PreviewServiceAction, PreviewServiceError>
 where
     T: Into<String>,
 {
-    PreviewServicePolicy::new().get(target_id)
+    PreviewServicePolicy::get(target_id)
 }
 
 #[must_use]
 pub fn list(workspace_id: Option<&str>) -> PreviewServiceAction {
-    PreviewServicePolicy::new().list(workspace_id)
+    PreviewServicePolicy::list(workspace_id)
 }
 
 #[must_use]
@@ -386,17 +384,17 @@ pub fn validate_target_url<T>(url: T) -> PreviewServiceAction
 where
     T: Into<String>,
 {
-    PreviewServicePolicy::new().validate_target_url(url)
+    PreviewServicePolicy::validate_target_url(url)
 }
 
 #[must_use]
 pub fn register(input: PreviewRegisterCommand) -> PreviewServiceAction {
-    PreviewServicePolicy::new().register(input)
+    PreviewServicePolicy::register(input)
 }
 
 #[must_use]
 pub fn replay_target_update(input: PreviewTargetUpdateCommand) -> PreviewServiceAction {
-    PreviewServicePolicy::new().replay_target_update(input)
+    PreviewServicePolicy::replay_target_update(input)
 }
 
 #[must_use]
@@ -404,7 +402,7 @@ pub fn update_target(
     input: PreviewTargetUpdateCommand,
     dispatch_lease_id: Option<&str>,
 ) -> PreviewServiceAction {
-    PreviewServicePolicy::new().update_target(input, dispatch_lease_id)
+    PreviewServicePolicy::update_target(input, dispatch_lease_id)
 }
 
 #[must_use]
@@ -412,30 +410,30 @@ pub fn update_inspection(
     input: PreviewInspectionCommand,
     dispatch_lease_id: Option<&str>,
 ) -> PreviewServiceAction {
-    PreviewServicePolicy::new().update_inspection(input, dispatch_lease_id)
+    PreviewServicePolicy::update_inspection(input, dispatch_lease_id)
 }
 
 #[must_use]
 pub fn recover_inspections() -> PreviewServiceAction {
-    PreviewServicePolicy::new().recover_inspections()
+    PreviewServicePolicy::recover_inspections()
 }
 
 #[must_use]
 pub fn acquire_dispatch_lease(input: PreviewDispatchLeaseInput) -> PreviewServiceAction {
-    PreviewServicePolicy::new().acquire_dispatch_lease(input)
+    PreviewServicePolicy::acquire_dispatch_lease(input)
 }
 
 #[must_use]
 pub fn release_dispatch_lease(lease: PreviewDispatchLease) -> PreviewServiceAction {
-    PreviewServicePolicy::new().release_dispatch_lease(lease)
+    PreviewServicePolicy::release_dispatch_lease(lease)
 }
 
 #[must_use]
 pub fn renew_dispatch_lease(lease: PreviewDispatchLease) -> PreviewServiceAction {
-    PreviewServicePolicy::new().renew_dispatch_lease(lease)
+    PreviewServicePolicy::renew_dispatch_lease(lease)
 }
 
 #[must_use]
 pub fn recover_dispatch_leases() -> PreviewServiceAction {
-    PreviewServicePolicy::new().recover_dispatch_leases()
+    PreviewServicePolicy::recover_dispatch_leases()
 }
