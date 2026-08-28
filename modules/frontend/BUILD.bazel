@@ -70,6 +70,7 @@ rust_library(
         "src/runtime_fixture_policy.rs",
         "src/runtime_fixture_support.rs",
         "src/runtime_surface.rs",
+        "src/session_tool_policy.rs",
         "src/shell.rs",
         "src/setup_label_transition_policy.rs",
         "src/subscription_projection.rs",

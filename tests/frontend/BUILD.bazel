@@ -735,6 +735,17 @@ rust_test(
 )
 
 rust_test(
+    name = "session_tool_policy_test",
+    srcs = ["session_tool_policy.rs"],
+    crate_name = "session_tool_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "setup_label_transition_policy_test",
     srcs = ["setup_label_transition_policy.rs"],
     crate_name = "setup_label_transition_policy_test",
