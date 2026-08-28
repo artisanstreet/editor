@@ -15,6 +15,7 @@ pub mod directory_selection;
 pub mod engine_owner;
 pub mod graph_advancement_policy;
 pub mod host_identity_policy;
+pub mod host_suspend_detection_policy;
 pub mod listener;
 pub mod orchestration_intake_policy;
 pub mod preview_service_policy;
