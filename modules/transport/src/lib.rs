@@ -10,6 +10,7 @@
 //! frontend-facing channels build above these layers.
 
 pub mod application;
+pub mod deadline;
 pub mod endpoint;
 pub mod error;
 pub mod event_sequence;
@@ -18,6 +19,7 @@ pub mod handshake;
 pub mod request_correlation;
 
 pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
+pub use deadline::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 pub use endpoint::{
     ALPN_PROTOCOL, LOOPBACK_SERVER_NAME, bind_loopback_client, bind_loopback_server, client_config,
     connect, server_config, shutdown,
