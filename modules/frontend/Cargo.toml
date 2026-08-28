@@ -73,6 +73,10 @@ name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 
 [[test]]
+name = "context_auto_compaction"
+path = "../../tests/frontend/context_auto_compaction.rs"
+
+[[test]]
 name = "context_usage_description"
 path = "../../tests/frontend/context_usage_description.rs"
 
