@@ -92,6 +92,7 @@ rust_library(
         "src/setup_label_transition_policy.rs",
         "src/speed_presentation.rs",
         "src/subscription_projection.rs",
+        "src/tab_derivations.rs",
         "src/telemetry_bootstrap_policy.rs",
         "src/telemetry_preferences.rs",
         "src/thread_environment_presentation.rs",
