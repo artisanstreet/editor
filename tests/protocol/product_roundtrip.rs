@@ -2,11 +2,12 @@
 //!
 //! Exercises every message family of `schema/artisan.capnp` through its
 //! Bazel-generated bindings (`artisan_protocol::artisan_capnp`): hello and
-//! welcome negotiation including the one-time client capability, all six
-//! request/response pairs with optional-parent, place, entry, and
-//! attached-project listings, all three events, both receipt dispositions,
-//! correlated and uncorrelated protocol errors, and deterministic framing.
-//! Wire shape only; owned domain conversions arrive in a later packet.
+//! welcome negotiation across both credential kinds with reconnect rotation,
+//! every request and response arm with optional-parent, place, entry, and
+//! attached-project listings, all three events with their per-session
+//! cursors, both receipt dispositions, correlated and uncorrelated protocol
+//! errors, and deterministic framing. Wire shape only; owned domain
+//! conversions arrive in a later packet.
 //!
 //! Identifier vocabulary matches the schema header: opaque text ids of at
 //! most 128 UTF-8 bytes, nonblank, without Unicode whitespace or control
@@ -79,6 +80,18 @@ const VERSION_REJECTION_FRAME_ID: &str = "server-error-000002";
 const PROJECT_ATTACHED_EVENT_ID: &str = "server-event-000001";
 const THREAD_CREATED_EVENT_ID: &str = "server-event-000002";
 const FIRST_MESSAGE_QUEUED_EVENT_ID: &str = "server-event-000003";
+/// One-based per-session event cursors: the session's first three events
+/// increment contiguously from 1.
+const PROJECT_ATTACHED_EVENT_CURSOR: u64 = 1;
+const THREAD_CREATED_EVENT_CURSOR: u64 = 2;
+const FIRST_MESSAGE_QUEUED_EVENT_CURSOR: u64 = 3;
+
+/// Raw decoding stays explicitly finite: both limits are stated outright so
+/// an upstream default change can never silently loosen test posture. The
+/// traversal ceiling sits far above any legal frame; the nesting ceiling far
+/// below stack-exhaustion depth.
+const DECODE_TRAVERSAL_LIMIT_WORDS: usize = 16 * 1024 * 1024;
+const DECODE_NESTING_LIMIT: i32 = 32;
 
 fn frame() -> Builder<HeapAllocator> {
     Builder::new(HeapAllocator::new())
@@ -105,9 +118,11 @@ fn encode(message: &Builder<HeapAllocator>) -> Vec<u8> {
 fn decode(
     bytes: &[u8],
 ) -> capnp::Result<capnp::message::Reader<capnp::serialize::BufferSegments<&[u8]>>> {
+    let mut options = ReaderOptions::new();
+    options.traversal_limit_in_words(Some(DECODE_TRAVERSAL_LIMIT_WORDS));
+    options.nesting_limit(DECODE_NESTING_LIMIT);
     let mut encoded = bytes;
-    let reader = serialize::read_message_from_flat_slice(&mut encoded, ReaderOptions::new())?;
-    Ok(reader)
+    serialize::read_message_from_flat_slice(&mut encoded, options)
 }
 
 /// Asserts the header fields survive a round trip unchanged.
@@ -661,11 +676,11 @@ fn assert_project_listing_round_trip(project_count: usize) -> capnp::Result<()> 
             .init_body()
             .init_response();
         response.set_request_id(CLIENT_REQUEST_ID);
-        let mut projects = response
-            .init_project_list()
-            .init_projects(u32::try_from(project_count).expect("fixture count fits u32"));
+        let count = u32::try_from(project_count).expect("fixture count fits u32");
+        let mut projects = response.init_project_list().init_projects(count);
 
-        for index in 0..project_count {
+        let mut index: u32 = 0;
+        while index < count {
             let project_id = if index == 1 {
                 SECOND_PROJECT_ID
             } else {
@@ -676,13 +691,8 @@ fn assert_project_listing_round_trip(project_count: usize) -> capnp::Result<()> 
             } else {
                 ATTACHED_AT_MILLIS
             };
-            set_project_row(
-                projects
-                    .reborrow()
-                    .get(u32::try_from(index).expect("fixture index fits u32")),
-                project_id,
-                attached_at,
-            );
+            set_project_row(projects.reborrow().get(index), project_id, attached_at);
+            index += 1;
         }
         encode(&message)
     };
@@ -950,14 +960,17 @@ fn round_trips_first_message_receipt_dispositions() -> capnp::Result<()> {
 }
 
 #[test]
-fn round_trips_all_events() -> capnp::Result<()> {
-    // Event: project attached.
-    let attached_event = {
+fn round_trips_project_attached_event_with_cursor() -> capnp::Result<()> {
+    // Event: project attached, carrying the session's first one-based
+    // cursor. Existing union arms stay frozen at @0-@2; only the appended
+    // cursor field is new.
+    let encoded = {
         let mut message = frame();
-        let mut attached = init_envelope(&mut message, PROJECT_ATTACHED_EVENT_ID)
+        let mut event_frame = init_envelope(&mut message, PROJECT_ATTACHED_EVENT_ID)
             .init_body()
-            .init_event()
-            .init_project_attached();
+            .init_event();
+        event_frame.set_cursor(PROJECT_ATTACHED_EVENT_CURSOR);
+        let mut attached = event_frame.reborrow().init_project_attached();
         attached.set_project_id(PROJECT_ID);
         attached.set_display_name(DISPLAY_NAME);
         attached.set_root_path(ROOT_PATH);
@@ -965,52 +978,66 @@ fn round_trips_all_events() -> capnp::Result<()> {
         encode(&message)
     };
 
-    {
-        let decoded = decode(&attached_event)?;
-        let envelope: envelope::Reader = decoded.get_root()?;
-        assert_server_envelope(envelope, PROJECT_ATTACHED_EVENT_ID)?;
-        match envelope.get_body().which()? {
-            envelope::body::Which::Event(event) => match event?.which()? {
+    let decoded = decode(&encoded)?;
+    let root: envelope::Reader = decoded.get_root()?;
+    assert_server_envelope(root, PROJECT_ATTACHED_EVENT_ID)?;
+    match root.get_body().which()? {
+        envelope::body::Which::Event(event) => {
+            let event = event?;
+            assert_eq!(event.get_cursor(), PROJECT_ATTACHED_EVENT_CURSOR);
+            match event.which()? {
                 event::Which::ProjectAttached(project) => assert_project(project?)?,
                 _ => panic!("expected projectAttached event"),
-            },
-            _ => panic!("expected event body"),
+            }
         }
+        _ => panic!("expected event body"),
     }
 
-    // Event: thread created.
-    let created_event = {
+    Ok(())
+}
+
+#[test]
+fn round_trips_thread_created_event_with_cursor() -> capnp::Result<()> {
+    // Event: thread created, cursor advanced contiguously to two.
+    let encoded = {
         let mut message = frame();
-        set_thread_summary(
-            init_envelope(&mut message, THREAD_CREATED_EVENT_ID)
-                .init_body()
-                .init_event()
-                .init_thread_created(),
-        );
+        let mut event_frame = init_envelope(&mut message, THREAD_CREATED_EVENT_ID)
+            .init_body()
+            .init_event();
+        event_frame.set_cursor(THREAD_CREATED_EVENT_CURSOR);
+        set_thread_summary(event_frame.reborrow().init_thread_created());
         encode(&message)
     };
 
-    {
-        let decoded = decode(&created_event)?;
-        let envelope: envelope::Reader = decoded.get_root()?;
-        assert_server_envelope(envelope, THREAD_CREATED_EVENT_ID)?;
-        match envelope.get_body().which()? {
-            envelope::body::Which::Event(event) => match event?.which()? {
+    let decoded = decode(&encoded)?;
+    let root: envelope::Reader = decoded.get_root()?;
+    assert_server_envelope(root, THREAD_CREATED_EVENT_ID)?;
+    match root.get_body().which()? {
+        envelope::body::Which::Event(event) => {
+            let event = event?;
+            assert_eq!(event.get_cursor(), THREAD_CREATED_EVENT_CURSOR);
+            match event.which()? {
                 event::Which::ThreadCreated(thread) => assert_thread(thread?)?,
                 _ => panic!("expected threadCreated event"),
-            },
-            _ => panic!("expected event body"),
+            }
         }
+        _ => panic!("expected event body"),
     }
 
+    Ok(())
+}
+
+#[test]
+fn round_trips_first_message_queued_event_with_cursor() -> capnp::Result<()> {
     // Event: first message queued, carrying the stable request correlation,
     // Forge's own durable message identity, and the bounded body losslessly.
-    let queued_event = {
+    let encoded = {
         let mut message = frame();
-        let mut queued = init_envelope(&mut message, FIRST_MESSAGE_QUEUED_EVENT_ID)
+        let mut event_frame = init_envelope(&mut message, FIRST_MESSAGE_QUEUED_EVENT_ID)
             .init_body()
-            .init_event()
-            .init_first_message_queued();
+            .init_event();
+        event_frame.set_cursor(FIRST_MESSAGE_QUEUED_EVENT_CURSOR);
+        let mut queued = event_frame.reborrow().init_first_message_queued();
         queued.set_request_id(CLIENT_REQUEST_ID);
         queued.set_message_id(FORGE_MESSAGE_ID);
         queued.set_thread_id(THREAD_ID);
@@ -1018,20 +1045,59 @@ fn round_trips_all_events() -> capnp::Result<()> {
         encode(&message)
     };
 
-    let decoded = decode(&queued_event)?;
-    let envelope: envelope::Reader = decoded.get_root()?;
-    assert_server_envelope(envelope, FIRST_MESSAGE_QUEUED_EVENT_ID)?;
-    match envelope.get_body().which()? {
-        envelope::body::Which::Event(event) => match event?.which()? {
-            event::Which::FirstMessageQueued(queued) => {
-                let queued = queued?;
-                assert_eq!(queued.get_request_id()?, CLIENT_REQUEST_ID);
-                assert_eq!(queued.get_message_id()?, FORGE_MESSAGE_ID);
-                assert_eq!(queued.get_thread_id()?, THREAD_ID);
-                assert_eq!(queued.get_body()?, MESSAGE_BODY);
+    let decoded = decode(&encoded)?;
+    let root: envelope::Reader = decoded.get_root()?;
+    assert_server_envelope(root, FIRST_MESSAGE_QUEUED_EVENT_ID)?;
+    match root.get_body().which()? {
+        envelope::body::Which::Event(event) => {
+            let event = event?;
+            match event.which()? {
+                event::Which::FirstMessageQueued(queued) => {
+                    let queued = queued?;
+                    assert_eq!(queued.get_request_id()?, CLIENT_REQUEST_ID);
+                    assert_eq!(queued.get_message_id()?, FORGE_MESSAGE_ID);
+                    assert_eq!(queued.get_thread_id()?, THREAD_ID);
+                    assert_eq!(queued.get_body()?, MESSAGE_BODY);
+                    assert_eq!(event.get_cursor(), FIRST_MESSAGE_QUEUED_EVENT_CURSOR);
+                }
+                _ => panic!("expected firstMessageQueued event"),
             }
-            _ => panic!("expected firstMessageQueued event"),
-        },
+        }
+        _ => panic!("expected event body"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn event_cursor_rules_need_owned_conversion_and_phase3_enforcement() -> capnp::Result<()> {
+    // Negative coverage available at the schema layer: the UInt64 wire type
+    // happily carries a zero cursor even though conforming senders start at
+    // 1 and increment contiguously. The wire preserves the violation
+    // verbatim; owned conversion rejects it as invalidInput, and gap,
+    // duplicate, and regression detection across a session's events (the
+    // resnapshot trigger) belongs to Phase 3 session machinery.
+    let malformed = {
+        let mut message = frame();
+        let mut event = init_envelope(&mut message, PROJECT_ATTACHED_EVENT_ID)
+            .init_body()
+            .init_event();
+        event.set_cursor(0);
+        event.reborrow().init_thread_created();
+        encode(&message)
+    };
+
+    let decoded = decode(&malformed)?;
+    let envelope: envelope::Reader = decoded.get_root()?;
+    match envelope.get_body().which()? {
+        envelope::body::Which::Event(event) => {
+            let event = event?;
+            assert_eq!(event.get_cursor(), 0);
+            match event.which()? {
+                event::Which::ThreadCreated(_) => {}
+                _ => panic!("expected threadCreated event"),
+            }
+        }
         _ => panic!("expected event body"),
     }
 

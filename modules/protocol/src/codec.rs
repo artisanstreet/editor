@@ -1,29 +1,38 @@
 //! Total conversion between owned protocol values and generated Cap'n Proto.
 
 use artisan_domain::{
-    AttachProject, Command, CreateThread, DIRECTORY_LISTING_MAX_ENTRIES,
-    DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry, DirectoryId, DirectoryKind, DirectoryListing,
-    DirectoryListingError, DirectoryPlace, DisplayName, DisplayNameError, Event,
-    FirstMessageQueued, IdentifierError, ListAttachedProjects, ListDirectories, ListProjectThreads,
-    MessageBody, MessageBodyError, MessageId, PROJECT_LISTING_MAX_PROJECTS, PlaceKind,
-    ProjectAttached, ProjectId, ProjectListing, ProjectListingError, ProjectSummary, Query,
-    QueueFirstMessage, QueuedMessage, ReceiptDisposition, RequestId, RootPath, RootPathError,
-    THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing, ThreadListingError,
-    ThreadSummary, ThreadTitle, ThreadTitleError, UnixMillis,
+    AttachProject, CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS, Command,
+    ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
+    ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
+    ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
+    ConversationTurn, ConversationUnsubscribe, CounterError, CreateThread,
+    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry, DirectoryId,
+    DirectoryKind, DirectoryListing, DirectoryListingError, DirectoryPlace, DisplayName,
+    DisplayNameError, Event, FirstMessageQueued, IdentifierError, IncrementalText,
+    IncrementalTextError, ItemId, ItemOrdinal, ListAttachedProjects, ListDirectories,
+    ListProjectThreads, MessageBody, MessageBodyError, MessageId, PROJECT_LISTING_MAX_PROJECTS,
+    PatchBatch, PatchBatchError, PatchId, PatchSequence, PlaceKind, ProjectAttached, ProjectId,
+    ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
+    QueryTurnCountError, QueueFirstMessage, QueuedMessage, ReceiptDisposition, RequestId, Revision,
+    RootPath, RootPathError, THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing,
+    ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal,
+    UnixMillis, UserMessageItem,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
 use thiserror::Error;
 
 use crate::artisan_capnp::{
-    self, directory_listing, envelope, event, list_directories_request, protocol_error, request,
-    response,
+    self, conversation_item, conversation_patch, conversation_query_request,
+    conversation_subscribe_request, conversation_subscription_started, directory_listing, envelope,
+    event, list_directories_request, protocol_error, query_range, request, response,
 };
 use crate::types::{
-    ClientRequest, ConnectionId, ErrorCode, ErrorDetail, FirstMessageReceipt, FrameId, Hello,
-    HelloCredential, LocalCapability, LocalCapabilityError, ProtocolFailure, ProtocolValueError,
-    ProtocolVersion, ReconnectCapability, ReconnectCapabilityError, ResponsePayload,
-    ServerResponse, VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    ClientRequest, ConnectionId, ConversationSubscriptionStarted, ConversationSubscriptionStopped,
+    ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello, HelloCredential,
+    LocalCapability, LocalCapabilityError, ProtocolFailure, ProtocolValueError, ProtocolVersion,
+    ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse,
+    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 
 /// Maximum Cap'n Proto graph traversal for one already-framed application
@@ -171,6 +180,46 @@ pub enum ProtocolDecodeError {
         #[source]
         source: ThreadListingError,
     },
+    /// A conversation counter violated its zero/one-based convention.
+    #[error("invalid {field}: {source}")]
+    Counter {
+        /// Counter-bearing field being decoded.
+        field: &'static str,
+        /// Domain counter validation failure.
+        #[source]
+        source: CounterError,
+    },
+    /// A streamed conversation text fragment exceeded its byte ceiling.
+    #[error("invalid conversation text fragment: {source}")]
+    IncrementalText {
+        /// Domain text validation failure.
+        #[source]
+        source: IncrementalTextError,
+    },
+    /// A conversation query requested an invalid turn count.
+    #[error("invalid conversation query turn count: {source}")]
+    QueryTurnCount {
+        /// Domain query-bound validation failure.
+        #[source]
+        source: QueryTurnCountError,
+    },
+    /// A decoded conversation snapshot violated structural invariants.
+    #[error("invalid conversation snapshot: {source}")]
+    ConversationSnapshot {
+        /// Domain snapshot validation failure.
+        #[source]
+        source: ConversationSnapshotError,
+    },
+    /// A decoded conversation patch batch violated replay invariants.
+    #[error("invalid conversation patch batch: {source}")]
+    PatchBatch {
+        /// Domain replay validation failure.
+        #[source]
+        source: PatchBatchError,
+    },
+    /// The placeholder conversation item union arm is never conforming input.
+    #[error("conversation item uses the reserved unmodeled union arm")]
+    UnmodeledConversationItem,
     /// Two wire correlation fields disagreed.
     #[error("{field} does not match its enclosing request correlation")]
     CorrelationMismatch {
@@ -212,6 +261,30 @@ impl From<ReconnectCapabilityError> for ProtocolDecodeError {
 impl From<VersionOfferError> for ProtocolDecodeError {
     fn from(source: VersionOfferError) -> Self {
         Self::VersionOffer { source }
+    }
+}
+
+impl From<IncrementalTextError> for ProtocolDecodeError {
+    fn from(source: IncrementalTextError) -> Self {
+        Self::IncrementalText { source }
+    }
+}
+
+impl From<QueryTurnCountError> for ProtocolDecodeError {
+    fn from(source: QueryTurnCountError) -> Self {
+        Self::QueryTurnCount { source }
+    }
+}
+
+impl From<ConversationSnapshotError> for ProtocolDecodeError {
+    fn from(source: ConversationSnapshotError) -> Self {
+        Self::ConversationSnapshot { source }
+    }
+}
+
+impl From<PatchBatchError> for ProtocolDecodeError {
+    fn from(source: PatchBatchError) -> Self {
+        Self::PatchBatch { source }
     }
 }
 
@@ -317,6 +390,18 @@ fn parse_message_id(value: String, field: &'static str) -> Result<MessageId, Pro
     MessageId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
 }
 
+fn parse_turn_id(value: String, field: &'static str) -> Result<TurnId, ProtocolDecodeError> {
+    TurnId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
+}
+
+fn parse_item_id(value: String, field: &'static str) -> Result<ItemId, ProtocolDecodeError> {
+    ItemId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
+}
+
+fn parse_patch_id(value: String, field: &'static str) -> Result<PatchId, ProtocolDecodeError> {
+    PatchId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
+}
+
 fn encode_body(
     mut root: envelope::Builder<'_>,
     body: &WireEnvelopeBody,
@@ -362,6 +447,9 @@ fn encode_body(
         WireEnvelopeBody::ProtocolError(value) => {
             encode_protocol_error(root.reborrow().init_body().init_protocol_error(), value);
         }
+        WireEnvelopeBody::PatchBatch(value) => {
+            encode_patch_batch(root.reborrow().init_body().init_patch_batch(), value)?;
+        }
     }
     Ok(())
 }
@@ -400,6 +488,49 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             let mut queue = builder.reborrow().init_queue_first_message();
             queue.set_thread_id(command.thread_id.as_str());
             queue.set_body(command.body.as_str());
+        }
+        ClientRequest::Conversation(ConversationRequest::Query(query)) => {
+            let mut encoded = builder.reborrow().init_conversation_query();
+            encoded.set_thread_id(query.thread_id.as_str());
+            match query.bounds {
+                ConversationQueryBounds::Window { maximum_turn_count } => {
+                    encoded
+                        .init_bounds()
+                        .init_window()
+                        .set_maximum_turn_count(maximum_turn_count.get());
+                }
+                ConversationQueryBounds::Range {
+                    before_turn_ordinal,
+                    minimum_turn_ordinal,
+                    maximum_turn_count,
+                } => {
+                    let mut range = encoded.init_bounds().init_range();
+                    range.set_before_turn_ordinal(before_turn_ordinal.get());
+                    let mut minimum = range.reborrow().init_minimum_turn_ordinal();
+                    if let Some(minimum_turn_ordinal) = minimum_turn_ordinal {
+                        minimum.set_minimum(minimum_turn_ordinal.get());
+                    } else {
+                        minimum.set_no_minimum(());
+                    }
+                    range.set_maximum_turn_count(maximum_turn_count.get());
+                }
+            }
+        }
+        ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
+            let mut encoded = builder.reborrow().init_conversation_subscribe();
+            encoded.set_thread_id(subscribe.thread_id.as_str());
+            let mut start = encoded.init_start();
+            if let Some(after) = subscribe.after {
+                start.set_resume_after(after.get());
+            } else {
+                start.set_fresh(());
+            }
+        }
+        ClientRequest::Conversation(ConversationRequest::Unsubscribe(unsubscribe)) => {
+            builder
+                .reborrow()
+                .init_conversation_unsubscribe()
+                .set_thread_id(unsubscribe.thread_id.as_str());
         }
     }
 }
@@ -471,12 +602,38 @@ fn encode_response(
             result.set_disposition(encode_disposition(receipt.disposition));
             result.set_state(artisan_capnp::QueuedState::Queued);
         }
+        ResponsePayload::ConversationSnapshot(snapshot) => {
+            encode_conversation_snapshot(
+                builder.reborrow().init_conversation_snapshot(),
+                snapshot,
+            )?;
+        }
+        ResponsePayload::ConversationSubscriptionStarted(started) => {
+            let encoded = builder.reborrow().init_conversation_subscription_started();
+            match started {
+                ConversationSubscriptionStarted::Fresh(start) => {
+                    encode_conversation_snapshot(encoded.init_fresh(), start.snapshot())?;
+                }
+                ConversationSubscriptionStarted::Resumed { thread_id, cursor } => {
+                    let mut point = encoded.init_resumed();
+                    point.set_thread_id(thread_id.as_str());
+                    point.set_cursor(cursor.get());
+                }
+            }
+        }
+        ResponsePayload::ConversationSubscriptionStopped(stopped) => {
+            builder
+                .reborrow()
+                .init_conversation_subscription_stopped()
+                .set_thread_id(stopped.thread_id.as_str());
+        }
     }
     Ok(())
 }
 
-fn encode_event(mut builder: artisan_capnp::event::Builder<'_>, value: &Event) {
-    match value {
+fn encode_event(mut builder: artisan_capnp::event::Builder<'_>, value: &ServerEvent) {
+    builder.set_cursor(value.cursor.get());
+    match &value.event {
         Event::ProjectAttached(event) => {
             encode_project(builder.reborrow().init_project_attached(), &event.project);
         }
@@ -562,6 +719,159 @@ fn encode_thread(mut builder: artisan_capnp::thread_summary::Builder<'_>, value:
     builder.set_updated_at_millis(value.updated_at.as_millis());
 }
 
+fn encode_conversation_snapshot(
+    mut builder: artisan_capnp::conversation_snapshot::Builder<'_>,
+    value: &ConversationSnapshot,
+) -> Result<(), ProtocolEncodeError> {
+    builder.set_thread_id(value.thread_id().as_str());
+    builder.set_cursor(value.cursor().get());
+
+    let mut turns = builder.reborrow().init_turns(list_length(
+        "conversationSnapshot.turns",
+        value.turns().len(),
+    )?);
+    for (index, turn) in value.turns().iter().enumerate() {
+        encode_conversation_turn(
+            turns
+                .reborrow()
+                .get(list_index("conversationSnapshot.turns", index)?),
+            turn,
+        );
+    }
+
+    let mut items = builder.reborrow().init_items(list_length(
+        "conversationSnapshot.items",
+        value.items().len(),
+    )?);
+    for (index, item) in value.items().iter().enumerate() {
+        encode_conversation_item(
+            items
+                .reborrow()
+                .get(list_index("conversationSnapshot.items", index)?),
+            item,
+        );
+    }
+
+    builder.set_updated_at_millis(value.updated_at().as_millis());
+    Ok(())
+}
+
+fn encode_conversation_turn(
+    mut builder: artisan_capnp::conversation_turn::Builder<'_>,
+    value: &ConversationTurn,
+) {
+    builder.set_turn_id(value.turn_id.as_str());
+    builder.set_ordinal(value.ordinal.get());
+    builder.set_revision(value.revision.get());
+    builder.set_lifecycle(encode_conversation_lifecycle(value.lifecycle));
+    builder.set_created_at_millis(value.created_at.as_millis());
+    builder.set_updated_at_millis(value.updated_at.as_millis());
+}
+
+fn encode_conversation_item(
+    builder: artisan_capnp::conversation_item::Builder<'_>,
+    value: &ConversationItem,
+) {
+    match value {
+        ConversationItem::UserMessage(message) => {
+            let mut encoded = builder.init_user_message();
+            encoded.set_item_id(message.item_id.as_str());
+            encoded.set_turn_id(message.turn_id.as_str());
+            encoded.set_ordinal(message.ordinal.get());
+            encoded.set_revision(message.revision.get());
+            encoded.set_lifecycle(encode_conversation_lifecycle(message.lifecycle));
+            encoded.set_body(message.body.as_str());
+            encoded.set_created_at_millis(message.created_at.as_millis());
+            encoded.set_updated_at_millis(message.updated_at.as_millis());
+        }
+    }
+}
+
+fn encode_patch_batch(
+    mut builder: artisan_capnp::patch_batch::Builder<'_>,
+    value: &PatchBatch,
+) -> Result<(), ProtocolEncodeError> {
+    builder.set_thread_id(value.thread_id().as_str());
+    builder.set_from_cursor(value.from_cursor().get());
+    builder.set_to_cursor(value.to_cursor().get());
+    let mut patches = builder
+        .reborrow()
+        .init_patches(list_length("patchBatch.patches", value.patches().len())?);
+    for (index, patch) in value.patches().iter().enumerate() {
+        encode_conversation_patch(
+            patches
+                .reborrow()
+                .get(list_index("patchBatch.patches", index)?),
+            patch,
+        );
+    }
+    Ok(())
+}
+
+fn encode_conversation_patch(
+    mut builder: artisan_capnp::conversation_patch::Builder<'_>,
+    value: &ConversationPatch,
+) {
+    builder.set_patch_id(value.patch_id().as_str());
+    builder.set_sequence(value.sequence().get());
+    match value {
+        ConversationPatch::TurnUpsert { turn, .. } => {
+            encode_conversation_turn(builder.init_turn_upsert(), turn);
+        }
+        ConversationPatch::ItemUpsert { item, .. } => {
+            encode_conversation_item(builder.init_item_upsert(), item);
+        }
+        ConversationPatch::ItemAppend {
+            item_id,
+            revision,
+            text,
+            ..
+        } => {
+            let mut append = builder.init_item_append();
+            append.set_item_id(item_id.as_str());
+            append.set_revision(revision.get());
+            append.set_text(text.as_str());
+        }
+        ConversationPatch::ItemLifecycle {
+            item_id,
+            revision,
+            lifecycle,
+            ..
+        } => {
+            let mut transition = builder.init_item_lifecycle();
+            transition.set_item_id(item_id.as_str());
+            transition.set_revision(revision.get());
+            transition.set_lifecycle(encode_conversation_lifecycle(*lifecycle));
+        }
+        ConversationPatch::TurnLifecycle {
+            turn_id,
+            revision,
+            lifecycle,
+            ..
+        } => {
+            let mut transition = builder.init_turn_lifecycle();
+            transition.set_turn_id(turn_id.as_str());
+            transition.set_revision(revision.get());
+            transition.set_lifecycle(encode_conversation_lifecycle(*lifecycle));
+        }
+    }
+}
+
+const fn encode_conversation_lifecycle(
+    value: ConversationLifecycle,
+) -> artisan_capnp::ConversationLifecycle {
+    match value {
+        ConversationLifecycle::Pending => artisan_capnp::ConversationLifecycle::Pending,
+        ConversationLifecycle::Streaming => artisan_capnp::ConversationLifecycle::Streaming,
+        ConversationLifecycle::Active => artisan_capnp::ConversationLifecycle::Active,
+        ConversationLifecycle::Waiting => artisan_capnp::ConversationLifecycle::Waiting,
+        ConversationLifecycle::Completed => artisan_capnp::ConversationLifecycle::Completed,
+        ConversationLifecycle::Failed => artisan_capnp::ConversationLifecycle::Failed,
+        ConversationLifecycle::Interrupted => artisan_capnp::ConversationLifecycle::Interrupted,
+        ConversationLifecycle::Cancelled => artisan_capnp::ConversationLifecycle::Cancelled,
+    }
+}
+
 const fn encode_disposition(value: ReceiptDisposition) -> artisan_capnp::ReceiptDisposition {
     match value {
         ReceiptDisposition::Accepted => artisan_capnp::ReceiptDisposition::Accepted,
@@ -618,6 +928,9 @@ fn decode_body(
         envelope::body::Which::ProtocolError(value) => Ok(WireEnvelopeBody::ProtocolError(
             decode_protocol_error(value?)?,
         )),
+        envelope::body::Which::PatchBatch(value) => {
+            Ok(WireEnvelopeBody::PatchBatch(decode_patch_batch(value?)?))
+        }
     }
 }
 
@@ -741,26 +1054,113 @@ fn decode_request(
             )))
         }
         request::Which::QueueFirstMessage(command) => {
-            let command = command?;
-            Ok(ClientRequest::Command(Command::QueueFirstMessage(
-                QueueFirstMessage {
-                    request_id,
-                    thread_id: parse_thread_id(
-                        read_text(
-                            command.get_thread_id(),
-                            "request.queueFirstMessage.threadId",
-                        )?,
-                        "request.queueFirstMessage.threadId",
-                    )?,
-                    body: MessageBody::parse(read_text(
-                        command.get_body(),
-                        "request.queueFirstMessage.body",
-                    )?)
-                    .map_err(|source| ProtocolDecodeError::MessageBody { source })?,
-                },
-            )))
+            decode_queue_first_message(command?, request_id)
+        }
+        request::Which::ConversationQuery(query) => decode_conversation_query_request(query?),
+        request::Which::ConversationSubscribe(subscribe) => {
+            decode_conversation_subscribe_request(subscribe?)
+        }
+        request::Which::ConversationUnsubscribe(unsubscribe) => {
+            decode_conversation_unsubscribe_request(unsubscribe?)
         }
     }
+}
+
+fn decode_queue_first_message(
+    command: artisan_capnp::queue_first_message_request::Reader<'_>,
+    request_id: RequestId,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    Ok(ClientRequest::Command(Command::QueueFirstMessage(
+        QueueFirstMessage {
+            request_id,
+            thread_id: parse_thread_id(
+                read_text(
+                    command.get_thread_id(),
+                    "request.queueFirstMessage.threadId",
+                )?,
+                "request.queueFirstMessage.threadId",
+            )?,
+            body: MessageBody::parse(read_text(
+                command.get_body(),
+                "request.queueFirstMessage.body",
+            )?)
+            .map_err(|source| ProtocolDecodeError::MessageBody { source })?,
+        },
+    )))
+}
+
+fn decode_conversation_query_request(
+    query: artisan_capnp::conversation_query_request::Reader<'_>,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(query.get_thread_id(), "request.conversationQuery.threadId")?,
+        "request.conversationQuery.threadId",
+    )?;
+    let bounds = match query.get_bounds().which()? {
+        conversation_query_request::bounds::Which::Window(window) => {
+            ConversationQueryBounds::Window {
+                maximum_turn_count: QueryTurnCount::new(u64::from(
+                    window?.get_maximum_turn_count(),
+                ))?,
+            }
+        }
+        conversation_query_request::bounds::Which::Range(range) => {
+            let range = range?;
+            let minimum_turn_ordinal = match range.get_minimum_turn_ordinal().which()? {
+                query_range::minimum_turn_ordinal::Which::NoMinimum(()) => None,
+                query_range::minimum_turn_ordinal::Which::Minimum(value) => {
+                    Some(TurnOrdinal::new(value))
+                }
+            };
+            ConversationQueryBounds::Range {
+                before_turn_ordinal: TurnOrdinal::new(range.get_before_turn_ordinal()),
+                minimum_turn_ordinal,
+                maximum_turn_count: QueryTurnCount::new(u64::from(range.get_maximum_turn_count()))?,
+            }
+        }
+    };
+    Ok(ClientRequest::Conversation(ConversationRequest::Query(
+        ConversationQuery { thread_id, bounds },
+    )))
+}
+
+fn decode_conversation_subscribe_request(
+    subscribe: artisan_capnp::conversation_subscribe_request::Reader<'_>,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(
+            subscribe.get_thread_id(),
+            "request.conversationSubscribe.threadId",
+        )?,
+        "request.conversationSubscribe.threadId",
+    )?;
+    let value = match subscribe.get_start().which()? {
+        conversation_subscribe_request::start::Which::Fresh(()) => {
+            ConversationSubscribe::fresh(thread_id)
+        }
+        conversation_subscribe_request::start::Which::ResumeAfter(cursor) => {
+            ConversationSubscribe::resume(thread_id, ConversationCursor::new(cursor))
+        }
+    };
+    Ok(ClientRequest::Conversation(ConversationRequest::Subscribe(
+        value,
+    )))
+}
+
+fn decode_conversation_unsubscribe_request(
+    unsubscribe: artisan_capnp::conversation_unsubscribe_request::Reader<'_>,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    Ok(ClientRequest::Conversation(
+        ConversationRequest::Unsubscribe(ConversationUnsubscribe {
+            thread_id: parse_thread_id(
+                read_text(
+                    unsubscribe.get_thread_id(),
+                    "request.conversationUnsubscribe.threadId",
+                )?,
+                "request.conversationUnsubscribe.threadId",
+            )?,
+        }),
+    ))
 }
 
 fn decode_response(
@@ -828,33 +1228,19 @@ fn decode_response(
                 disposition: decode_disposition(result.get_disposition()?),
             }
         }
-        response::Which::QueuedReceipt(receipt) => {
-            let receipt = receipt?;
-            let nested_request_id = parse_request_id(
-                read_text(receipt.get_request_id(), "response.queuedReceipt.requestId")?,
-                "response.queuedReceipt.requestId",
-            )?;
-            if nested_request_id != request_id {
-                return Err(ProtocolDecodeError::CorrelationMismatch {
-                    field: "response.queuedReceipt.requestId",
-                });
-            }
-            let state = receipt.get_state()?;
-            match state {
-                artisan_capnp::QueuedState::Queued => {}
-            }
-            ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
-                request_id: nested_request_id,
-                message_id: parse_message_id(
-                    read_text(receipt.get_message_id(), "response.queuedReceipt.messageId")?,
-                    "response.queuedReceipt.messageId",
-                )?,
-                thread_id: parse_thread_id(
-                    read_text(receipt.get_thread_id(), "response.queuedReceipt.threadId")?,
-                    "response.queuedReceipt.threadId",
-                )?,
-                disposition: decode_disposition(receipt.get_disposition()?),
-            })
+        response::Which::QueuedReceipt(receipt) => decode_queued_receipt(receipt?, &request_id)?,
+        response::Which::ConversationSnapshot(snapshot) => {
+            ResponsePayload::ConversationSnapshot(decode_conversation_snapshot(snapshot?)?)
+        }
+        response::Which::ConversationSubscriptionStarted(started) => {
+            ResponsePayload::ConversationSubscriptionStarted(
+                decode_conversation_subscription_started(started?)?,
+            )
+        }
+        response::Which::ConversationSubscriptionStopped(stopped) => {
+            ResponsePayload::ConversationSubscriptionStopped(
+                decode_conversation_subscription_stopped(stopped?)?,
+            )
         }
     };
     Ok(ServerResponse {
@@ -863,17 +1249,89 @@ fn decode_response(
     })
 }
 
-fn decode_event(value: artisan_capnp::event::Reader<'_>) -> Result<Event, ProtocolDecodeError> {
-    match value.which()? {
-        event::Which::ProjectAttached(project) => Ok(Event::ProjectAttached(ProjectAttached {
+fn decode_queued_receipt(
+    receipt: artisan_capnp::first_message_receipt::Reader<'_>,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let nested_request_id = parse_request_id(
+        read_text(receipt.get_request_id(), "response.queuedReceipt.requestId")?,
+        "response.queuedReceipt.requestId",
+    )?;
+    if &nested_request_id != request_id {
+        return Err(ProtocolDecodeError::CorrelationMismatch {
+            field: "response.queuedReceipt.requestId",
+        });
+    }
+    match receipt.get_state()? {
+        artisan_capnp::QueuedState::Queued => {}
+    }
+    Ok(ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
+        request_id: nested_request_id,
+        message_id: parse_message_id(
+            read_text(receipt.get_message_id(), "response.queuedReceipt.messageId")?,
+            "response.queuedReceipt.messageId",
+        )?,
+        thread_id: parse_thread_id(
+            read_text(receipt.get_thread_id(), "response.queuedReceipt.threadId")?,
+            "response.queuedReceipt.threadId",
+        )?,
+        disposition: decode_disposition(receipt.get_disposition()?),
+    }))
+}
+
+fn decode_conversation_subscription_started(
+    started: artisan_capnp::conversation_subscription_started::Reader<'_>,
+) -> Result<ConversationSubscriptionStarted, ProtocolDecodeError> {
+    match started.which()? {
+        conversation_subscription_started::Which::Fresh(snapshot) => {
+            Ok(ConversationSubscriptionStarted::Fresh(
+                ConversationSubscriptionStart::new(decode_conversation_snapshot(snapshot?)?),
+            ))
+        }
+        conversation_subscription_started::Which::Resumed(point) => {
+            let point = point?;
+            Ok(ConversationSubscriptionStarted::Resumed {
+                thread_id: parse_thread_id(
+                    read_text(
+                        point.get_thread_id(),
+                        "response.conversationSubscriptionStarted.resumed.threadId",
+                    )?,
+                    "response.conversationSubscriptionStarted.resumed.threadId",
+                )?,
+                cursor: ConversationCursor::new(point.get_cursor()),
+            })
+        }
+    }
+}
+
+fn decode_conversation_subscription_stopped(
+    stopped: artisan_capnp::conversation_subscription_stopped::Reader<'_>,
+) -> Result<ConversationSubscriptionStopped, ProtocolDecodeError> {
+    Ok(ConversationSubscriptionStopped {
+        thread_id: parse_thread_id(
+            read_text(
+                stopped.get_thread_id(),
+                "response.conversationSubscriptionStopped.threadId",
+            )?,
+            "response.conversationSubscriptionStopped.threadId",
+        )?,
+    })
+}
+
+fn decode_event(
+    value: artisan_capnp::event::Reader<'_>,
+) -> Result<ServerEvent, ProtocolDecodeError> {
+    let cursor = EventCursor::new(value.get_cursor())?;
+    let event = match value.which()? {
+        event::Which::ProjectAttached(project) => Event::ProjectAttached(ProjectAttached {
             project: decode_project(project?)?,
-        })),
-        event::Which::ThreadCreated(thread) => Ok(Event::ThreadCreated(ThreadCreated {
+        }),
+        event::Which::ThreadCreated(thread) => Event::ThreadCreated(ThreadCreated {
             thread: decode_thread(thread?)?,
-        })),
+        }),
         event::Which::FirstMessageQueued(queued) => {
             let queued = queued?;
-            Ok(Event::FirstMessageQueued(FirstMessageQueued {
+            Event::FirstMessageQueued(FirstMessageQueued {
                 message: QueuedMessage {
                     request_id: parse_request_id(
                         read_text(
@@ -899,9 +1357,10 @@ fn decode_event(value: artisan_capnp::event::Reader<'_>) -> Result<Event, Protoc
                     )?)
                     .map_err(|source| ProtocolDecodeError::MessageBody { source })?,
                 },
-            }))
+            })
         }
-    }
+    };
+    Ok(ServerEvent { cursor, event })
 }
 
 fn decode_protocol_error(
@@ -1047,6 +1506,208 @@ fn decode_thread(
         created_at: UnixMillis::from_millis(value.get_created_at_millis()),
         updated_at: UnixMillis::from_millis(value.get_updated_at_millis()),
     })
+}
+
+fn decode_conversation_snapshot(
+    value: artisan_capnp::conversation_snapshot::Reader<'_>,
+) -> Result<ConversationSnapshot, ProtocolDecodeError> {
+    let turns = value.get_turns()?;
+    let turn_count = turns.len() as usize;
+    let maximum_turn_count = usize::from(CONVERSATION_QUERY_MAX_TURNS);
+    if turn_count > maximum_turn_count {
+        return Err(ConversationSnapshotError::TooManyTurns {
+            count: turn_count,
+            maximum: maximum_turn_count,
+        }
+        .into());
+    }
+    let turns = turns
+        .iter()
+        .map(decode_conversation_turn)
+        .collect::<Result<Vec<_>, _>>()?;
+    let items = value
+        .get_items()?
+        .iter()
+        .map(decode_conversation_item)
+        .collect::<Result<Vec<_>, _>>()?;
+    ConversationSnapshot::new(
+        parse_thread_id(
+            read_text(value.get_thread_id(), "conversationSnapshot.threadId")?,
+            "conversationSnapshot.threadId",
+        )?,
+        ConversationCursor::new(value.get_cursor()),
+        turns,
+        items,
+        UnixMillis::from_millis(value.get_updated_at_millis()),
+    )
+    .map_err(ProtocolDecodeError::from)
+}
+
+fn decode_conversation_turn(
+    value: artisan_capnp::conversation_turn::Reader<'_>,
+) -> Result<ConversationTurn, ProtocolDecodeError> {
+    Ok(ConversationTurn {
+        turn_id: parse_turn_id(
+            read_text(value.get_turn_id(), "conversationTurn.turnId")?,
+            "conversationTurn.turnId",
+        )?,
+        ordinal: TurnOrdinal::new(value.get_ordinal()),
+        revision: Revision::new(value.get_revision()),
+        lifecycle: decode_conversation_lifecycle(value.get_lifecycle()?),
+        created_at: UnixMillis::from_millis(value.get_created_at_millis()),
+        updated_at: UnixMillis::from_millis(value.get_updated_at_millis()),
+    })
+}
+
+fn decode_conversation_item(
+    value: artisan_capnp::conversation_item::Reader<'_>,
+) -> Result<ConversationItem, ProtocolDecodeError> {
+    match value.which()? {
+        conversation_item::Which::UserMessage(message) => {
+            let message = message?;
+            Ok(ConversationItem::UserMessage(UserMessageItem {
+                item_id: parse_item_id(
+                    read_text(message.get_item_id(), "conversationItem.userMessage.itemId")?,
+                    "conversationItem.userMessage.itemId",
+                )?,
+                turn_id: parse_turn_id(
+                    read_text(message.get_turn_id(), "conversationItem.userMessage.turnId")?,
+                    "conversationItem.userMessage.turnId",
+                )?,
+                ordinal: ItemOrdinal::new(message.get_ordinal()),
+                revision: Revision::new(message.get_revision()),
+                lifecycle: decode_conversation_lifecycle(message.get_lifecycle()?),
+                body: MessageBody::parse(read_text(
+                    message.get_body(),
+                    "conversationItem.userMessage.body",
+                )?)
+                .map_err(|source| ProtocolDecodeError::MessageBody { source })?,
+                created_at: UnixMillis::from_millis(message.get_created_at_millis()),
+                updated_at: UnixMillis::from_millis(message.get_updated_at_millis()),
+            }))
+        }
+        conversation_item::Which::Unmodeled(()) => {
+            Err(ProtocolDecodeError::UnmodeledConversationItem)
+        }
+    }
+}
+
+fn decode_patch_batch(
+    value: artisan_capnp::patch_batch::Reader<'_>,
+) -> Result<PatchBatch, ProtocolDecodeError> {
+    let patches = value.get_patches()?;
+    let patch_count = patches.len() as usize;
+    if patch_count > CONVERSATION_PATCH_BATCH_MAX_PATCHES {
+        return Err(PatchBatchError::TooManyPatches {
+            count: patch_count,
+            maximum: CONVERSATION_PATCH_BATCH_MAX_PATCHES,
+        }
+        .into());
+    }
+    let patches = patches
+        .iter()
+        .map(decode_conversation_patch)
+        .collect::<Result<Vec<_>, _>>()?;
+    PatchBatch::new(
+        parse_thread_id(
+            read_text(value.get_thread_id(), "patchBatch.threadId")?,
+            "patchBatch.threadId",
+        )?,
+        ConversationCursor::new(value.get_from_cursor()),
+        ConversationCursor::new(value.get_to_cursor()),
+        patches,
+    )
+    .map_err(ProtocolDecodeError::from)
+}
+
+fn decode_conversation_patch(
+    value: artisan_capnp::conversation_patch::Reader<'_>,
+) -> Result<ConversationPatch, ProtocolDecodeError> {
+    let patch_id = parse_patch_id(
+        read_text(value.get_patch_id(), "conversationPatch.patchId")?,
+        "conversationPatch.patchId",
+    )?;
+    let sequence = PatchSequence::new(value.get_sequence()).map_err(|source| {
+        ProtocolDecodeError::Counter {
+            field: "conversationPatch.sequence",
+            source,
+        }
+    })?;
+    match value.which()? {
+        conversation_patch::Which::TurnUpsert(turn) => Ok(ConversationPatch::TurnUpsert {
+            patch_id,
+            sequence,
+            turn: decode_conversation_turn(turn?)?,
+        }),
+        conversation_patch::Which::ItemUpsert(item) => Ok(ConversationPatch::ItemUpsert {
+            patch_id,
+            sequence,
+            item: decode_conversation_item(item?)?,
+        }),
+        conversation_patch::Which::ItemAppend(append) => {
+            let append = append?;
+            Ok(ConversationPatch::ItemAppend {
+                patch_id,
+                sequence,
+                item_id: parse_item_id(
+                    read_text(append.get_item_id(), "conversationPatch.itemAppend.itemId")?,
+                    "conversationPatch.itemAppend.itemId",
+                )?,
+                revision: Revision::new(append.get_revision()),
+                text: IncrementalText::parse(read_text(
+                    append.get_text(),
+                    "conversationPatch.itemAppend.text",
+                )?)?,
+            })
+        }
+        conversation_patch::Which::ItemLifecycle(transition) => {
+            let transition = transition?;
+            Ok(ConversationPatch::ItemLifecycle {
+                patch_id,
+                sequence,
+                item_id: parse_item_id(
+                    read_text(
+                        transition.get_item_id(),
+                        "conversationPatch.itemLifecycle.itemId",
+                    )?,
+                    "conversationPatch.itemLifecycle.itemId",
+                )?,
+                revision: Revision::new(transition.get_revision()),
+                lifecycle: decode_conversation_lifecycle(transition.get_lifecycle()?),
+            })
+        }
+        conversation_patch::Which::TurnLifecycle(transition) => {
+            let transition = transition?;
+            Ok(ConversationPatch::TurnLifecycle {
+                patch_id,
+                sequence,
+                turn_id: parse_turn_id(
+                    read_text(
+                        transition.get_turn_id(),
+                        "conversationPatch.turnLifecycle.turnId",
+                    )?,
+                    "conversationPatch.turnLifecycle.turnId",
+                )?,
+                revision: Revision::new(transition.get_revision()),
+                lifecycle: decode_conversation_lifecycle(transition.get_lifecycle()?),
+            })
+        }
+    }
+}
+
+const fn decode_conversation_lifecycle(
+    value: artisan_capnp::ConversationLifecycle,
+) -> ConversationLifecycle {
+    match value {
+        artisan_capnp::ConversationLifecycle::Pending => ConversationLifecycle::Pending,
+        artisan_capnp::ConversationLifecycle::Streaming => ConversationLifecycle::Streaming,
+        artisan_capnp::ConversationLifecycle::Active => ConversationLifecycle::Active,
+        artisan_capnp::ConversationLifecycle::Waiting => ConversationLifecycle::Waiting,
+        artisan_capnp::ConversationLifecycle::Completed => ConversationLifecycle::Completed,
+        artisan_capnp::ConversationLifecycle::Failed => ConversationLifecycle::Failed,
+        artisan_capnp::ConversationLifecycle::Interrupted => ConversationLifecycle::Interrupted,
+        artisan_capnp::ConversationLifecycle::Cancelled => ConversationLifecycle::Cancelled,
+    }
 }
 
 const fn decode_disposition(value: artisan_capnp::ReceiptDisposition) -> ReceiptDisposition {
