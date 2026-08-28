@@ -13,58 +13,74 @@ use model_policy_controls_presentation::{
     project_model_policy_controls,
 };
 
-fn thinking(id: &'static str, group: &'static str) -> ThinkingOption<'static> {
+fn thinking(id: &str, group: &str) -> ThinkingOption {
     ThinkingOption::new(id, id, group, None, None)
 }
 
-fn speed(id: &'static str, default: bool, disabled: Option<bool>) -> SpeedOption<'static> {
+fn supported(default: &str, options: &[ThinkingOption]) -> ThinkingCapability {
+    ThinkingCapability::supported(default, options.to_vec())
+}
+
+fn speed(id: &str, default: bool, disabled: Option<bool>) -> SpeedOption {
     SpeedOption::new(id, id, id, None, default, disabled)
 }
 
-fn context(id: &'static str, native_suffix: &'static str) -> ContextWindowOption<'static> {
+fn context(id: &str, native_suffix: &str) -> ContextWindowOption {
     ContextWindowOption::new(id, id, id, None, native_suffix)
 }
 
-fn permission(id: &'static str) -> PermissionOption<'static> {
+fn context_capability(default: &str, options: &[ContextWindowOption]) -> ContextWindowCapability {
+    ContextWindowCapability::new(default, options.to_vec())
+}
+
+fn permission(id: &str) -> PermissionOption {
     PermissionOption::new(id, id, id, None)
 }
 
-fn model<'a>(
-    id: &'a str,
-    label: &'a str,
-    thinking: ThinkingCapability<'a>,
-    speeds: &'a [SpeedOption<'a>],
-    context: Option<ContextWindowCapability<'a>>,
-) -> Model<'a> {
-    Model::new(id, label, ModelCapabilities::new(thinking, speeds, context))
+fn policy(context_window: Option<&str>) -> ModelPolicy {
+    ModelPolicy::new(context_window.map(str::to_owned))
+}
+
+fn model(
+    id: &str,
+    label: &str,
+    thinking: ThinkingCapability,
+    speeds: &[SpeedOption],
+    context: Option<ContextWindowCapability>,
+) -> Model {
+    Model::new(
+        id,
+        label,
+        ModelCapabilities::new(thinking, speeds.to_vec(), context),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn input<'a>(
-    model: Model<'a>,
-    selected_model_id: &'a str,
-    thinking_level: &'a str,
-    speed_option_id: &'a str,
-    policy: Option<ModelPolicy<'a>>,
-    permission_mode: &'a str,
-    permission_default: Option<&'a str>,
-    variant_options: &'a [Model<'a>],
-    permission_options: &'a [PermissionOption<'a>],
-) -> ModelPolicyControlsInput<'a> {
-    ModelPolicyControlsInput {
+fn input(
+    model: Model,
+    selected_model_id: &str,
+    thinking_level: &str,
+    speed_option_id: &str,
+    policy: Option<ModelPolicy>,
+    permission_mode: &str,
+    permission_default: Option<&str>,
+    variant_options: &[Model],
+    permission_options: &[PermissionOption],
+) -> ModelPolicyControlsInput {
+    ModelPolicyControlsInput::new(
         model,
         selected_model_id,
         thinking_level,
         speed_option_id,
         policy,
         permission_mode,
-        permission_default,
-        variant_options,
-        permission_options,
-    }
+        permission_default.map(str::to_owned),
+        variant_options.to_vec(),
+        permission_options.to_vec(),
+    )
 }
 
-fn empty_model() -> Model<'static> {
+fn empty_model() -> Model {
     model(
         "model",
         "Model",
@@ -78,7 +94,7 @@ fn empty_model() -> Model<'static> {
 fn unsupported_thinking_exposes_no_options_or_current_value() {
     assert!(!ThinkingCapability::unsupported().is_supported());
     let model = empty_model();
-    let variants = [model];
+    let variants = [model.clone()];
     let permissions = [permission("restricted")];
     let selected_input = input(
         model,
@@ -102,21 +118,21 @@ fn unsupported_thinking_exposes_no_options_or_current_value() {
 
 #[test]
 fn supported_thinking_partitions_only_exact_groups_in_original_order() {
-    let thinking_options = [
+    let thinking_options = vec![
         ThinkingOption::new(
             "base-first",
             "  Base label  ",
             "base",
-            Some(""),
-            Some("  base advisory  "),
+            Some(String::new()),
+            Some("  base advisory  ".to_owned()),
         ),
         thinking("ignored", "unknown-group"),
         ThinkingOption::new(
             "special-first",
             "Special label",
             "special",
-            Some("special description"),
-            Some(""),
+            Some("special description".to_owned()),
+            Some(String::new()),
         ),
         thinking("base-second", "base"),
         thinking("special-second", "special"),
@@ -125,12 +141,12 @@ fn supported_thinking_partitions_only_exact_groups_in_original_order() {
     let model = model(
         "model",
         "Model label",
-        ThinkingCapability::supported("special-first", &thinking_options),
+        supported("special-first", &thinking_options),
         &[],
         None,
     );
-    let variants = [model];
-    let permissions: [PermissionOption<'static>; 0] = [];
+    let variants = [model.clone()];
+    let permissions: [PermissionOption; 0] = [];
     let selected_input = input(
         model,
         "model",
@@ -149,7 +165,7 @@ fn supported_thinking_partitions_only_exact_groups_in_original_order() {
         presentation
             .base_thinking_options
             .iter()
-            .map(|option| option.id)
+            .map(|option| option.id.as_str())
             .collect::<Vec<_>>(),
         ["base-first", "base-second"]
     );
@@ -157,40 +173,49 @@ fn supported_thinking_partitions_only_exact_groups_in_original_order() {
         presentation
             .special_thinking_options
             .iter()
-            .map(|option| option.id)
+            .map(|option| option.id.as_str())
             .collect::<Vec<_>>(),
         ["special-first", "special-second"]
     );
-    assert_eq!(presentation.current_thinking, Some("caller level \nexact"));
+    assert_eq!(
+        presentation.current_thinking,
+        Some("caller level \nexact".to_owned())
+    );
     assert!(presentation.show_thinking);
     assert_eq!(
         presentation.base_thinking_options[0].label,
         "  Base label  "
     );
-    assert_eq!(presentation.base_thinking_options[0].description, Some(""));
+    assert_eq!(
+        presentation.base_thinking_options[0].description,
+        Some(String::new())
+    );
     assert_eq!(
         presentation.base_thinking_options[0].advisory,
-        Some("  base advisory  ")
+        Some("  base advisory  ".to_owned())
     );
     assert_eq!(
         presentation.special_thinking_options[0].description,
-        Some("special description")
+        Some("special description".to_owned())
     );
-    assert_eq!(presentation.special_thinking_options[0].advisory, Some(""));
+    assert_eq!(
+        presentation.special_thinking_options[0].advisory,
+        Some(String::new())
+    );
 }
 
 #[test]
 fn non_selected_model_uses_thinking_default_instead_of_callers_level() {
-    let thinking_options = [thinking("default-level", "base")];
+    let thinking_options = vec![thinking("default-level", "base")];
     let model = model(
         "model",
         "Model",
-        ThinkingCapability::supported("default-level", &thinking_options),
+        supported("default-level", &thinking_options),
         &[],
         None,
     );
-    let variants = [model];
-    let permissions: [PermissionOption<'static>; 0] = [];
+    let variants = [model.clone()];
+    let permissions: [PermissionOption; 0] = [];
     let input = input(
         model,
         "other-model",
@@ -205,22 +230,22 @@ fn non_selected_model_uses_thinking_default_instead_of_callers_level() {
 
     assert_eq!(
         project_model_policy_controls(&input).current_thinking,
-        Some("default-level")
+        Some("default-level".to_owned())
     );
 }
 
 #[test]
 fn supported_empty_thinking_list_still_has_the_source_current_value() {
-    assert!(ThinkingCapability::supported("default", &[]).is_supported());
+    assert!(supported("default", &[]).is_supported());
     let model = model(
         "model",
         "Model",
-        ThinkingCapability::supported("capability-default", &[]),
+        supported("capability-default", &[]),
         &[],
         None,
     );
-    let variants = [model];
-    let permissions: [PermissionOption<'static>; 0] = [];
+    let variants = [model.clone()];
+    let permissions: [PermissionOption; 0] = [];
     let input = input(
         model,
         "model",
@@ -237,18 +262,21 @@ fn supported_empty_thinking_list_still_has_the_source_current_value() {
 
     assert!(presentation.base_thinking_options.is_empty());
     assert!(presentation.special_thinking_options.is_empty());
-    assert_eq!(presentation.current_thinking, Some("caller-level"));
+    assert_eq!(
+        presentation.current_thinking,
+        Some("caller-level".to_owned())
+    );
     assert!(presentation.show_thinking);
 }
 
 #[test]
 fn speed_candidates_exclude_every_defined_disabled_property_and_keep_order() {
-    let speeds = [
+    let speeds = vec![
         SpeedOption::new(
             "defined-false",
             "Defined false",
             "",
-            Some("advisory"),
+            Some("advisory".to_owned()),
             true,
             Some(false),
         ),
@@ -265,10 +293,10 @@ fn speed_candidates_exclude_every_defined_disabled_property_and_keep_order() {
         &speeds,
         None,
     );
-    let variants = [model];
-    let permissions: [PermissionOption<'static>; 0] = [];
+    let variants = [model.clone()];
+    let permissions: [PermissionOption; 0] = [];
     let selected_input = input(
-        model,
+        model.clone(),
         "model",
         "thinking",
         "chosen",
@@ -284,16 +312,16 @@ fn speed_candidates_exclude_every_defined_disabled_property_and_keep_order() {
         presentation
             .speed_options
             .iter()
-            .map(|option| option.id)
+            .map(|option| option.id.as_str())
             .collect::<Vec<_>>(),
         ["first-enabled", "default-enabled", "chosen", "chosen"]
     );
-    assert_eq!(presentation.current_speed, Some(speeds[4]));
+    assert_eq!(presentation.current_speed, Some(speeds[4].clone()));
     assert_eq!(presentation.speed_options[2].description, "chosen");
     assert_eq!(presentation.speed_options[0].advisory, None);
 
     let non_selected = input(
-        model,
+        model.clone(),
         "other-model",
         "thinking",
         "chosen",
@@ -305,7 +333,7 @@ fn speed_candidates_exclude_every_defined_disabled_property_and_keep_order() {
     );
     assert_eq!(
         project_model_policy_controls(&non_selected).current_speed,
-        Some(speeds[3])
+        Some(speeds[3].clone())
     );
 
     let unknown_selected = input(
@@ -321,13 +349,13 @@ fn speed_candidates_exclude_every_defined_disabled_property_and_keep_order() {
     );
     assert_eq!(
         project_model_policy_controls(&unknown_selected).current_speed,
-        Some(speeds[3])
+        Some(speeds[3].clone())
     );
 }
 
 #[test]
 fn speed_fallback_is_first_enabled_when_no_enabled_default_exists() {
-    let speeds = [
+    let speeds = vec![
         speed("first", false, None),
         speed("disabled-default", true, Some(false)),
     ];
@@ -338,8 +366,8 @@ fn speed_fallback_is_first_enabled_when_no_enabled_default_exists() {
         &speeds,
         None,
     );
-    let variants = [model];
-    let permissions: [PermissionOption<'static>; 0] = [];
+    let variants = [model.clone()];
+    let permissions: [PermissionOption; 0] = [];
     let input = input(
         model,
         "other",
@@ -354,48 +382,53 @@ fn speed_fallback_is_first_enabled_when_no_enabled_default_exists() {
 
     assert_eq!(
         project_model_policy_controls(&input).current_speed,
-        Some(speeds[0])
+        Some(speeds[0].clone())
     );
 }
 
 #[test]
 fn context_uses_selected_suffix_then_default_then_first() {
-    let contexts = [
+    let contexts = vec![
         ContextWindowOption::new(
             "first",
             "First label",
             "first description",
-            Some("first advisory"),
+            Some("first advisory".to_owned()),
             "",
         ),
         context("extended", "[1m]"),
-        ContextWindowOption::new("default", "Default label", "", Some(""), "[default]"),
+        ContextWindowOption::new(
+            "default",
+            "Default label",
+            "",
+            Some(String::new()),
+            "[default]",
+        ),
     ];
-    let capability = ContextWindowCapability::new("default", &contexts);
     let model_value = model(
         "model",
         "Model",
         ThinkingCapability::Unsupported,
         &[],
-        Some(capability),
+        Some(context_capability("default", &contexts)),
     );
-    let variants = [model_value];
-    let permissions: [PermissionOption<'static>; 0] = [];
+    let variants = [model_value.clone()];
+    let permissions: [PermissionOption; 0] = [];
 
     let selected_suffix = input(
-        model_value,
+        model_value.clone(),
         "model",
         "thinking",
         "speed",
-        Some(ModelPolicy::new(Some("[1m]"))),
+        Some(policy(Some("[1m]"))),
         "permission",
         None,
         &variants,
         &permissions,
     );
     let projected = project_model_policy_controls(&selected_suffix);
-    assert_eq!(projected.current_context, Some(contexts[1]));
-    assert_eq!(projected.context_options, Some(contexts.to_vec()));
+    assert_eq!(projected.current_context, Some(contexts[1].clone()));
+    assert_eq!(projected.context_options, Some(contexts.clone()));
     assert!(projected.show_context);
 
     let present_empty_suffix = input(
@@ -403,7 +436,7 @@ fn context_uses_selected_suffix_then_default_then_first() {
         "model",
         "thinking",
         "speed",
-        Some(ModelPolicy::new(Some(""))),
+        Some(policy(Some(""))),
         "permission",
         None,
         &variants,
@@ -411,13 +444,13 @@ fn context_uses_selected_suffix_then_default_then_first() {
     );
     assert_eq!(
         project_model_policy_controls(&present_empty_suffix).current_context,
-        Some(contexts[0])
+        Some(contexts[0].clone())
     );
 }
 
 #[test]
 fn context_falls_back_from_absent_or_unknown_suffix_to_default_then_first() {
-    let contexts = [
+    let contexts = vec![
         context("first", ""),
         context("default", "[default]"),
         context("other", "[other]"),
@@ -427,22 +460,18 @@ fn context_falls_back_from_absent_or_unknown_suffix_to_default_then_first() {
         "Model",
         ThinkingCapability::Unsupported,
         &[],
-        Some(ContextWindowCapability::new("default", &contexts)),
+        Some(context_capability("default", &contexts)),
     );
-    let variants = [model_value];
-    let permissions: [PermissionOption<'static>; 0] = [];
+    let variants = [model_value.clone()];
+    let permissions: [PermissionOption; 0] = [];
 
-    for policy in [
-        None,
-        Some(ModelPolicy::new(None)),
-        Some(ModelPolicy::new(Some("missing"))),
-    ] {
+    for policy_value in [None, Some(policy(None)), Some(policy(Some("missing")))] {
         let fallback = input(
-            model_value,
+            model_value.clone(),
             "model",
             "thinking",
             "speed",
-            policy,
+            policy_value,
             "permission",
             None,
             &variants,
@@ -450,16 +479,16 @@ fn context_falls_back_from_absent_or_unknown_suffix_to_default_then_first() {
         );
         assert_eq!(
             project_model_policy_controls(&fallback).current_context,
-            Some(contexts[1])
+            Some(contexts[1].clone())
         );
     }
 
     let non_selected_suffix = input(
-        model_value,
+        model_value.clone(),
         "other-model",
         "thinking",
         "speed",
-        Some(ModelPolicy::new(Some("[other]"))),
+        Some(policy(Some("[other]"))),
         "permission",
         None,
         &variants,
@@ -467,7 +496,7 @@ fn context_falls_back_from_absent_or_unknown_suffix_to_default_then_first() {
     );
     assert_eq!(
         project_model_policy_controls(&non_selected_suffix).current_context,
-        Some(contexts[1])
+        Some(contexts[1].clone())
     );
 
     let missing_default = model(
@@ -475,9 +504,9 @@ fn context_falls_back_from_absent_or_unknown_suffix_to_default_then_first() {
         "Model",
         ThinkingCapability::Unsupported,
         &[],
-        Some(ContextWindowCapability::new("missing", &contexts)),
+        Some(context_capability("missing", &contexts)),
     );
-    let missing_default_variants = [missing_default];
+    let missing_default_variants = [missing_default.clone()];
     let missing_default_input = input(
         missing_default,
         "model",
@@ -491,21 +520,21 @@ fn context_falls_back_from_absent_or_unknown_suffix_to_default_then_first() {
     );
     assert_eq!(
         project_model_policy_controls(&missing_default_input).current_context,
-        Some(contexts[0])
+        Some(contexts[0].clone())
     );
 }
 
 #[test]
 fn present_empty_context_is_distinct_from_absent_context_and_has_no_current_value() {
     let absent = empty_model();
-    let absent_variants = [absent];
-    let permissions: [PermissionOption<'static>; 0] = [];
+    let absent_variants = [absent.clone()];
+    let permissions: [PermissionOption; 0] = [];
     let absent_input = input(
         absent,
         "model",
         "thinking",
         "speed",
-        Some(ModelPolicy::new(Some("suffix"))),
+        Some(policy(Some("suffix"))),
         "permission",
         None,
         &absent_variants,
@@ -521,9 +550,9 @@ fn present_empty_context_is_distinct_from_absent_context_and_has_no_current_valu
         "Model",
         ThinkingCapability::Unsupported,
         &[],
-        Some(ContextWindowCapability::new("default", &[])),
+        Some(context_capability("default", &[])),
     );
-    let empty_context_variants = [empty_context_model];
+    let empty_context_variants = [empty_context_model.clone()];
     let empty_context_input = input(
         empty_context_model,
         "model",
@@ -543,21 +572,21 @@ fn present_empty_context_is_distinct_from_absent_context_and_has_no_current_valu
 
 #[test]
 fn permission_uses_live_mode_then_optional_default_then_first() {
-    let permissions = [
+    let permissions = vec![
         PermissionOption::new(
             "first",
             "First",
             "first description",
-            Some("first advisory"),
+            Some("first advisory".to_owned()),
         ),
         permission("default"),
         permission("live"),
     ];
     let model = empty_model();
-    let variants = [model];
+    let variants = [model.clone()];
 
     let live = input(
-        model,
+        model.clone(),
         "model",
         "thinking",
         "speed",
@@ -569,11 +598,11 @@ fn permission_uses_live_mode_then_optional_default_then_first() {
     );
     assert_eq!(
         project_model_policy_controls(&live).current_permission,
-        Some(permissions[2])
+        Some(permissions[2].clone())
     );
 
     let defaulted = input(
-        model,
+        model.clone(),
         "model",
         "thinking",
         "speed",
@@ -585,11 +614,11 @@ fn permission_uses_live_mode_then_optional_default_then_first() {
     );
     assert_eq!(
         project_model_policy_controls(&defaulted).current_permission,
-        Some(permissions[1])
+        Some(permissions[1].clone())
     );
 
     let first = input(
-        model,
+        model.clone(),
         "model",
         "thinking",
         "speed",
@@ -600,15 +629,18 @@ fn permission_uses_live_mode_then_optional_default_then_first() {
         &permissions,
     );
     let first_projection = project_model_policy_controls(&first);
-    assert_eq!(first_projection.current_permission, Some(permissions[0]));
-    assert_eq!(first_projection.permission_options, permissions.to_vec());
+    assert_eq!(
+        first_projection.current_permission,
+        Some(permissions[0].clone())
+    );
+    assert_eq!(first_projection.permission_options, permissions);
 
-    let duplicate_permissions = [
+    let duplicate_permissions = vec![
         permission("duplicate"),
         PermissionOption::new("duplicate", "second", "second", None),
     ];
     let duplicate_input = input(
-        model,
+        model.clone(),
         "model",
         "thinking",
         "speed",
@@ -620,10 +652,10 @@ fn permission_uses_live_mode_then_optional_default_then_first() {
     );
     assert_eq!(
         project_model_policy_controls(&duplicate_input).current_permission,
-        Some(duplicate_permissions[0])
+        Some(duplicate_permissions[0].clone())
     );
 
-    let empty_permissions: [PermissionOption<'static>; 0] = [];
+    let empty_permissions: Vec<PermissionOption> = Vec::new();
     let empty_input = input(
         model,
         "model",
@@ -643,10 +675,10 @@ fn permission_uses_live_mode_then_optional_default_then_first() {
 #[test]
 fn variant_and_speed_visibility_boundaries_match_the_source_conditions() {
     let base_model = empty_model();
-    let no_variants: [Model<'static>; 0] = [];
-    let one_variant = [base_model];
-    let two_variants = [base_model, base_model];
-    let no_permissions: [PermissionOption<'static>; 0] = [];
+    let no_variants: Vec<Model> = Vec::new();
+    let one_variant = [base_model.clone()];
+    let two_variants = [base_model.clone(), base_model.clone()];
+    let no_permissions: Vec<PermissionOption> = Vec::new();
 
     for (variants, expected) in [
         (&no_variants[..], false),
@@ -654,7 +686,7 @@ fn variant_and_speed_visibility_boundaries_match_the_source_conditions() {
         (&two_variants[..], true),
     ] {
         let input = input(
-            base_model,
+            base_model.clone(),
             "model",
             "thinking",
             "speed",
@@ -681,7 +713,7 @@ fn variant_and_speed_visibility_boundaries_match_the_source_conditions() {
             speeds,
             None,
         );
-        let speed_variants = [speed_model];
+        let speed_variants = [speed_model.clone()];
         let input = input(
             speed_model,
             "model",
@@ -700,16 +732,10 @@ fn variant_and_speed_visibility_boundaries_match_the_source_conditions() {
 #[test]
 fn thinking_and_context_visibility_boundaries_match_the_source_conditions() {
     let base_model = empty_model();
-    let one_variant = [base_model];
-    let no_permissions: [PermissionOption<'static>; 0] = [];
-    let supported_empty = model(
-        "model",
-        "Model",
-        ThinkingCapability::supported("default", &[]),
-        &[],
-        None,
-    );
-    let supported_variants = [supported_empty];
+    let one_variant = [base_model.clone()];
+    let no_permissions: Vec<PermissionOption> = Vec::new();
+    let supported_empty = model("model", "Model", supported("default", &[]), &[], None);
+    let supported_variants = [supported_empty.clone()];
     let supported_input = input(
         supported_empty,
         "model",
@@ -724,7 +750,7 @@ fn thinking_and_context_visibility_boundaries_match_the_source_conditions() {
     assert!(project_model_policy_controls(&supported_input).show_thinking);
     assert!(
         !project_model_policy_controls(&input(
-            base_model,
+            base_model.clone(),
             "model",
             "caller",
             "speed",
@@ -737,15 +763,15 @@ fn thinking_and_context_visibility_boundaries_match_the_source_conditions() {
         .show_thinking
     );
 
-    let context_option = [context("one", "")];
+    let context_option = vec![context("one", "")];
     let context_model = model(
         "model",
         "Model",
         ThinkingCapability::Unsupported,
         &[],
-        Some(ContextWindowCapability::new("one", &context_option)),
+        Some(context_capability("one", &context_option)),
     );
-    let context_variants = [context_model];
+    let context_variants = [context_model.clone()];
     let context_input = input(
         context_model,
         "model",
@@ -760,11 +786,11 @@ fn thinking_and_context_visibility_boundaries_match_the_source_conditions() {
     assert!(project_model_policy_controls(&context_input).show_context);
 
     let absent_input = input(
-        base_model,
+        base_model.clone(),
         "model",
         "thinking",
         "speed",
-        Some(ModelPolicy::new(Some("suffix"))),
+        Some(policy(Some("suffix"))),
         "one",
         None,
         &one_variant,
@@ -777,9 +803,9 @@ fn thinking_and_context_visibility_boundaries_match_the_source_conditions() {
         "Model",
         ThinkingCapability::Unsupported,
         &[],
-        Some(ContextWindowCapability::new("one", &[])),
+        Some(context_capability("one", &[])),
     );
-    let empty_context_variants = [empty_context_model];
+    let empty_context_variants = [empty_context_model.clone()];
     let empty_context_input = input(
         empty_context_model,
         "model",
@@ -797,8 +823,8 @@ fn thinking_and_context_visibility_boundaries_match_the_source_conditions() {
 #[test]
 fn permission_visibility_boundaries_match_the_source_conditions() {
     let base_model = empty_model();
-    let one_variant = [base_model];
-    let no_permissions: [PermissionOption<'static>; 0] = [];
+    let one_variant = [base_model.clone()];
+    let no_permissions: Vec<PermissionOption> = Vec::new();
     let one_permission = [permission("one")];
     let two_permissions = [permission("one"), permission("two")];
     for (permissions, expected) in [
@@ -807,7 +833,7 @@ fn permission_visibility_boundaries_match_the_source_conditions() {
         (&two_permissions[..], true),
     ] {
         let input = input(
-            base_model,
+            base_model.clone(),
             "model",
             "thinking",
             "speed",
@@ -826,30 +852,30 @@ fn permission_visibility_boundaries_match_the_source_conditions() {
 
 #[test]
 fn valid_actions_use_exact_candidates_and_duplicate_ids_choose_first_match() {
-    let thinking_options = [thinking("think", "base"), thinking("think", "special")];
-    let speeds = [
+    let thinking_options = vec![thinking("think", "base"), thinking("think", "special")];
+    let speeds = vec![
         speed("speed", false, None),
         SpeedOption::new(
             "speed",
             "second",
             "second",
-            Some("second advisory"),
+            Some("second advisory".to_owned()),
             true,
             None,
         ),
         speed("blocked", false, Some(false)),
     ];
-    let contexts = [context("context", "first"), context("context", "second")];
-    let permissions = [
+    let contexts = vec![context("context", "first"), context("context", "second")];
+    let permissions = vec![
         permission("permission"),
         PermissionOption::new("permission", "second", "second", None),
     ];
     let model_value = model(
         "model",
         "Model",
-        ThinkingCapability::supported("think", &thinking_options),
+        supported("think", &thinking_options),
         &speeds,
-        Some(ContextWindowCapability::new("context", &contexts)),
+        Some(context_capability("context", &contexts)),
     );
     let variant_one = model(
         "variant",
@@ -865,9 +891,9 @@ fn valid_actions_use_exact_candidates_and_duplicate_ids_choose_first_match() {
         &[],
         None,
     );
-    let variants = [variant_one, variant_two];
+    let variants = vec![variant_one.clone(), variant_two];
     let input = input(
-        model_value,
+        model_value.clone(),
         "model",
         "thinking",
         "speed",
@@ -879,54 +905,51 @@ fn valid_actions_use_exact_candidates_and_duplicate_ids_choose_first_match() {
     );
 
     assert_eq!(
-        admit_model_policy_action(&input, ModelPolicySelection::Thinking { id: "think" }),
+        admit_model_policy_action(&input, ModelPolicySelection::thinking("think")),
         Some(ModelPolicyAction::Thinking {
-            model: model_value,
-            option: thinking_options[0],
+            model: model_value.clone(),
+            option: thinking_options[0].clone(),
         })
     );
     assert_eq!(
-        admit_model_policy_action(&input, ModelPolicySelection::Speed { id: "speed" }),
+        admit_model_policy_action(&input, ModelPolicySelection::speed("speed")),
         Some(ModelPolicyAction::Speed {
-            model: model_value,
-            option: speeds[0],
+            model: model_value.clone(),
+            option: speeds[0].clone(),
         })
     );
     assert_eq!(
-        admit_model_policy_action(&input, ModelPolicySelection::Context { id: "context" }),
+        admit_model_policy_action(&input, ModelPolicySelection::context("context")),
         Some(ModelPolicyAction::Context {
-            model: model_value,
-            option: contexts[0],
+            model: model_value.clone(),
+            option: contexts[0].clone(),
         })
     );
     assert_eq!(
-        admit_model_policy_action(
-            &input,
-            ModelPolicySelection::Permission { id: "permission" }
-        ),
+        admit_model_policy_action(&input, ModelPolicySelection::permission("permission")),
         Some(ModelPolicyAction::Permission {
             model: model_value,
-            option: permissions[0],
+            option: permissions[0].clone(),
         })
     );
     assert_eq!(
-        admit_model_policy_action(&input, ModelPolicySelection::Variant { id: "variant" }),
+        admit_model_policy_action(&input, ModelPolicySelection::variant("variant")),
         Some(ModelPolicyAction::Variant { model: variant_one })
     );
 }
 
 #[test]
 fn invalid_actions_are_no_action_and_disabled_speed_is_not_a_candidate() {
-    let thinking_options = [thinking("valid-thinking", "base")];
-    let speeds = [speed("blocked", false, Some(false))];
+    let thinking_options = vec![thinking("valid-thinking", "base")];
+    let speeds = vec![speed("blocked", false, Some(false))];
     let model_value = model(
         "model",
         "Model",
-        ThinkingCapability::supported("valid-thinking", &thinking_options),
+        supported("valid-thinking", &thinking_options),
         &speeds,
         None,
     );
-    let variants = [model_value];
+    let variants = [model_value.clone()];
     let permissions = [permission("valid-permission")];
     let selected_input = input(
         model_value,
@@ -941,18 +964,18 @@ fn invalid_actions_are_no_action_and_disabled_speed_is_not_a_candidate() {
     );
 
     for selection in [
-        ModelPolicySelection::Thinking { id: "missing" },
-        ModelPolicySelection::Speed { id: "blocked" },
-        ModelPolicySelection::Speed { id: "missing" },
-        ModelPolicySelection::Context { id: "missing" },
-        ModelPolicySelection::Permission { id: "missing" },
-        ModelPolicySelection::Variant { id: "missing" },
+        ModelPolicySelection::thinking("missing"),
+        ModelPolicySelection::speed("blocked"),
+        ModelPolicySelection::speed("missing"),
+        ModelPolicySelection::context("missing"),
+        ModelPolicySelection::permission("missing"),
+        ModelPolicySelection::variant("missing"),
     ] {
         assert_eq!(admit_model_policy_action(&selected_input, selection), None);
     }
 
     let unsupported = model("model", "Model", ThinkingCapability::Unsupported, &[], None);
-    let unsupported_variants = [unsupported];
+    let unsupported_variants = [unsupported.clone()];
     let unsupported_input = input(
         unsupported,
         "model",
@@ -967,7 +990,7 @@ fn invalid_actions_are_no_action_and_disabled_speed_is_not_a_candidate() {
     assert_eq!(
         admit_model_policy_action(
             &unsupported_input,
-            ModelPolicySelection::Thinking { id: "anything" }
+            ModelPolicySelection::thinking("anything")
         ),
         None
     );
@@ -975,18 +998,18 @@ fn invalid_actions_are_no_action_and_disabled_speed_is_not_a_candidate() {
 
 #[test]
 fn valid_actions_do_not_depend_on_visibility() {
-    let thinking_options = [thinking("thinking", "base")];
-    let speeds = [speed("speed", false, None)];
-    let contexts = [context("context", "")];
-    let permissions = [permission("permission")];
+    let thinking_options = vec![thinking("thinking", "base")];
+    let speeds = vec![speed("speed", false, None)];
+    let contexts = vec![context("context", "")];
+    let permissions = vec![permission("permission")];
     let model_value = model(
         "model",
         "Model",
-        ThinkingCapability::supported("thinking", &thinking_options),
+        supported("thinking", &thinking_options),
         &speeds,
-        Some(ContextWindowCapability::new("context", &contexts)),
+        Some(context_capability("context", &contexts)),
     );
-    let variants = [model_value];
+    let variants = [model_value.clone()];
     let selected_input = input(
         model_value,
         "model",
@@ -1004,35 +1027,85 @@ fn valid_actions_do_not_depend_on_visibility() {
     assert!(!presentation.show_permission);
 
     assert!(matches!(
-        admit_model_policy_action(
-            &selected_input,
-            ModelPolicySelection::Thinking { id: "thinking" }
-        ),
+        admit_model_policy_action(&selected_input, ModelPolicySelection::thinking("thinking")),
         Some(ModelPolicyAction::Thinking { .. })
     ));
     assert!(matches!(
-        admit_model_policy_action(&selected_input, ModelPolicySelection::Speed { id: "speed" }),
+        admit_model_policy_action(&selected_input, ModelPolicySelection::speed("speed")),
         Some(ModelPolicyAction::Speed { .. })
     ));
     assert!(matches!(
-        admit_model_policy_action(
-            &selected_input,
-            ModelPolicySelection::Context { id: "context" }
-        ),
+        admit_model_policy_action(&selected_input, ModelPolicySelection::context("context")),
         Some(ModelPolicyAction::Context { .. })
     ));
     assert!(matches!(
         admit_model_policy_action(
             &selected_input,
-            ModelPolicySelection::Permission { id: "permission" }
+            ModelPolicySelection::permission("permission")
         ),
         Some(ModelPolicyAction::Permission { .. })
     ));
     assert!(matches!(
-        admit_model_policy_action(
-            &selected_input,
-            ModelPolicySelection::Variant { id: "model" }
-        ),
+        admit_model_policy_action(&selected_input, ModelPolicySelection::variant("model")),
         Some(ModelPolicyAction::Variant { .. })
     ));
+}
+
+#[test]
+fn projection_and_action_remain_usable_after_owned_input_is_dropped() {
+    let (projection, action) = {
+        let thinking_options = vec![ThinkingOption::new(
+            "thinking\nid",
+            "  retained label  ",
+            "base",
+            Some("retained description".to_owned()),
+            Some("retained advisory".to_owned()),
+        )];
+        let speeds = vec![speed("speed", false, None)];
+        let contexts = vec![context("context", "")];
+        let permissions = vec![permission("permission")];
+        let model_value = model(
+            "model\nid",
+            "retained model label",
+            supported("thinking\nid", &thinking_options),
+            &speeds,
+            Some(context_capability("context", &contexts)),
+        );
+        let variants = vec![model_value.clone()];
+        let input = ModelPolicyControlsInput::new(
+            model_value,
+            "model\nid",
+            "thinking\nid",
+            "speed",
+            Some(policy(Some(""))),
+            "permission",
+            None,
+            variants,
+            permissions,
+        );
+        let projection = project_model_policy_controls(&input);
+        let action =
+            admit_model_policy_action(&input, ModelPolicySelection::thinking("thinking\nid"));
+        (projection, action)
+    };
+
+    assert_eq!(projection.model.id, "model\nid");
+    assert_eq!(projection.model.label, "retained model label");
+    assert_eq!(projection.current_thinking, Some("thinking\nid".to_owned()));
+    assert_eq!(
+        projection.base_thinking_options[0].description,
+        Some("retained description".to_owned())
+    );
+    assert_eq!(
+        projection.base_thinking_options[0].advisory,
+        Some("retained advisory".to_owned())
+    );
+    match action {
+        Some(ModelPolicyAction::Thinking { model, option }) => {
+            assert_eq!(model.id, "model\nid");
+            assert_eq!(option.id, "thinking\nid");
+            assert_eq!(option.label, "  retained label  ");
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
 }

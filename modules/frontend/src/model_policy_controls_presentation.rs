@@ -3,9 +3,10 @@
 //! This module is the native counterpart of the derived values and selection
 //! guards in `routes/components/model-selector/policy-controls.svelte`. It
 //! deliberately stops at a renderer-neutral projection: an adapter owns
-//! catalog decoding, persistence, callbacks, and every UI concern. Inputs and
-//! outputs borrow the adapter's values, so this boundary preserves text,
-//! identifiers, duplicates, and source ordering without normalizing them.
+//! catalog decoding, persistence, callbacks, and every UI concern. The policy
+//! boundary owns its input and output records, so a projection or action can
+//! outlive the decoded/catalog source rows without normalizing their text,
+//! identifiers, duplicates, or source ordering.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -15,20 +16,20 @@
 /// The supported form intentionally permits arbitrary option identifiers and
 /// an arbitrary default because this module projects supplied data rather than
 /// validating a catalog.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ThinkingCapability<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThinkingCapability {
     /// Thinking is unavailable for this model.
     Unsupported,
     /// Thinking options and the capability's default are available.
     Supported {
         /// The exact capability default identifier.
-        default: &'a str,
+        default: String,
         /// Thinking options in their source order.
-        options: &'a [ThinkingOption<'a>],
+        options: Vec<ThinkingOption>,
     },
 }
 
-impl<'a> ThinkingCapability<'a> {
+impl ThinkingCapability {
     /// Creates an unsupported thinking capability.
     #[must_use]
     pub const fn unsupported() -> Self {
@@ -37,13 +38,16 @@ impl<'a> ThinkingCapability<'a> {
 
     /// Creates a supported thinking capability without validating its inputs.
     #[must_use]
-    pub const fn supported(default: &'a str, options: &'a [ThinkingOption<'a>]) -> Self {
-        Self::Supported { default, options }
+    pub fn supported(default: impl Into<String>, options: Vec<ThinkingOption>) -> Self {
+        Self::Supported {
+            default: default.into(),
+            options,
+        }
     }
 
     /// Returns whether this capability exposes thinking controls.
     #[must_use]
-    pub const fn is_supported(self) -> bool {
+    pub const fn is_supported(&self) -> bool {
         matches!(self, Self::Supported { .. })
     }
 }
@@ -52,34 +56,34 @@ impl<'a> ThinkingCapability<'a> {
 ///
 /// `label`, `description`, and `advisory` are supplied presentation text; the
 /// policy never derives, trims, or otherwise normalizes any of them.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ThinkingOption<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThinkingOption {
     /// The exact selectable identifier.
-    pub id: &'a str,
+    pub id: String,
     /// The exact display label.
-    pub label: &'a str,
+    pub label: String,
     /// The exact presentation group used for partitioning.
-    pub presentation_group: &'a str,
+    pub presentation_group: String,
     /// Optional exact descriptive text.
-    pub description: Option<&'a str>,
+    pub description: Option<String>,
     /// Optional exact advisory text.
-    pub advisory: Option<&'a str>,
+    pub advisory: Option<String>,
 }
 
-impl<'a> ThinkingOption<'a> {
-    /// Creates a thinking option from exact borrowed presentation values.
+impl ThinkingOption {
+    /// Creates a thinking option from exact presentation values.
     #[must_use]
-    pub const fn new(
-        id: &'a str,
-        label: &'a str,
-        presentation_group: &'a str,
-        description: Option<&'a str>,
-        advisory: Option<&'a str>,
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        presentation_group: impl Into<String>,
+        description: Option<String>,
+        advisory: Option<String>,
     ) -> Self {
         Self {
-            id,
-            label,
-            presentation_group,
+            id: id.into(),
+            label: label.into(),
+            presentation_group: presentation_group.into(),
             description,
             advisory,
         }
@@ -91,37 +95,37 @@ impl<'a> ThinkingOption<'a> {
 /// `disabled` models the source's optional property. Only `None` is an
 /// enabled candidate: `Some(false)` is still a defined property and is
 /// intentionally excluded by the legacy selector.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SpeedOption<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpeedOption {
     /// The exact selectable identifier.
-    pub id: &'a str,
+    pub id: String,
     /// The exact display label.
-    pub label: &'a str,
+    pub label: String,
     /// The exact descriptive text.
-    pub description: &'a str,
+    pub description: String,
     /// Optional exact advisory text.
-    pub advisory: Option<&'a str>,
+    pub advisory: Option<String>,
     /// Whether this option is the capability's default.
     pub default: bool,
     /// The source optional disabled property.
     pub disabled: Option<bool>,
 }
 
-impl<'a> SpeedOption<'a> {
-    /// Creates a speed option from exact borrowed presentation values.
+impl SpeedOption {
+    /// Creates a speed option from exact presentation values.
     #[must_use]
-    pub const fn new(
-        id: &'a str,
-        label: &'a str,
-        description: &'a str,
-        advisory: Option<&'a str>,
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        description: impl Into<String>,
+        advisory: Option<String>,
         default: bool,
         disabled: Option<bool>,
     ) -> Self {
         Self {
-            id,
-            label,
-            description,
+            id: id.into(),
+            label: label.into(),
+            description: description.into(),
             advisory,
             default,
             disabled,
@@ -130,106 +134,109 @@ impl<'a> SpeedOption<'a> {
 }
 
 /// One configurable context-window option.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ContextWindowOption<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextWindowOption {
     /// The exact selectable identifier.
-    pub id: &'a str,
+    pub id: String,
     /// The exact display label.
-    pub label: &'a str,
+    pub label: String,
     /// The exact descriptive text.
-    pub description: &'a str,
+    pub description: String,
     /// Optional exact advisory text.
-    pub advisory: Option<&'a str>,
+    pub advisory: Option<String>,
     /// The exact native suffix used to select this option.
-    pub native_suffix: &'a str,
+    pub native_suffix: String,
 }
 
-impl<'a> ContextWindowOption<'a> {
-    /// Creates a context option from exact borrowed presentation values.
+impl ContextWindowOption {
+    /// Creates a context option from exact presentation values.
     #[must_use]
-    pub const fn new(
-        id: &'a str,
-        label: &'a str,
-        description: &'a str,
-        advisory: Option<&'a str>,
-        native_suffix: &'a str,
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        description: impl Into<String>,
+        advisory: Option<String>,
+        native_suffix: impl Into<String>,
     ) -> Self {
         Self {
-            id,
-            label,
-            description,
+            id: id.into(),
+            label: label.into(),
+            description: description.into(),
             advisory,
-            native_suffix,
+            native_suffix: native_suffix.into(),
         }
     }
 }
 
 /// One permission option supplied by the harness capability.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PermissionOption<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionOption {
     /// The exact selectable identifier.
-    pub id: &'a str,
+    pub id: String,
     /// The exact display label.
-    pub label: &'a str,
+    pub label: String,
     /// The exact descriptive text.
-    pub description: &'a str,
+    pub description: String,
     /// Optional exact advisory text.
-    pub advisory: Option<&'a str>,
+    pub advisory: Option<String>,
 }
 
-impl<'a> PermissionOption<'a> {
-    /// Creates a permission option from exact borrowed presentation values.
+impl PermissionOption {
+    /// Creates a permission option from exact presentation values.
     #[must_use]
-    pub const fn new(
-        id: &'a str,
-        label: &'a str,
-        description: &'a str,
-        advisory: Option<&'a str>,
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        description: impl Into<String>,
+        advisory: Option<String>,
     ) -> Self {
         Self {
-            id,
-            label,
-            description,
+            id: id.into(),
+            label: label.into(),
+            description: description.into(),
             advisory,
         }
     }
 }
 
 /// The optional context-window capability of one model.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ContextWindowCapability<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextWindowCapability {
     /// The exact capability default option identifier.
-    pub default: &'a str,
+    pub default: String,
     /// Context options in their source order.
-    pub options: &'a [ContextWindowOption<'a>],
+    pub options: Vec<ContextWindowOption>,
 }
 
-impl<'a> ContextWindowCapability<'a> {
+impl ContextWindowCapability {
     /// Creates a context capability without validating its inputs.
     #[must_use]
-    pub const fn new(default: &'a str, options: &'a [ContextWindowOption<'a>]) -> Self {
-        Self { default, options }
+    pub fn new(default: impl Into<String>, options: Vec<ContextWindowOption>) -> Self {
+        Self {
+            default: default.into(),
+            options,
+        }
     }
 }
 
 /// Capabilities read by the model policy-controls component.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ModelCapabilities<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCapabilities {
     /// Thinking support, default, and options.
-    pub thinking: ThinkingCapability<'a>,
+    pub thinking: ThinkingCapability,
     /// All source speed options, including options with a defined disabled property.
-    pub speed_options: &'a [SpeedOption<'a>],
+    pub speed_options: Vec<SpeedOption>,
     /// The optional configurable context-window capability.
-    pub context_window: Option<ContextWindowCapability<'a>>,
+    pub context_window: Option<ContextWindowCapability>,
 }
 
-impl<'a> ModelCapabilities<'a> {
+impl ModelCapabilities {
     /// Creates the policy-relevant capabilities for one model.
     #[must_use]
-    pub const fn new(
-        thinking: ThinkingCapability<'a>,
-        speed_options: &'a [SpeedOption<'a>],
-        context_window: Option<ContextWindowCapability<'a>>,
+    pub fn new(
+        thinking: ThinkingCapability,
+        speed_options: Vec<SpeedOption>,
+        context_window: Option<ContextWindowCapability>,
     ) -> Self {
         Self {
             thinking,
@@ -240,39 +247,43 @@ impl<'a> ModelCapabilities<'a> {
 }
 
 /// A compact model choice with the capabilities needed by this policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Model<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Model {
     /// The exact model identifier used for selected-model comparison.
-    pub id: &'a str,
+    pub id: String,
     /// The exact model label retained for the eventual renderer.
-    pub label: &'a str,
+    pub label: String,
     /// The model's policy-relevant capabilities.
-    pub capabilities: ModelCapabilities<'a>,
+    pub capabilities: ModelCapabilities,
 }
 
-impl<'a> Model<'a> {
-    /// Creates a model choice from exact borrowed values.
+impl Model {
+    /// Creates a model choice from exact values.
     #[must_use]
-    pub const fn new(id: &'a str, label: &'a str, capabilities: ModelCapabilities<'a>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        capabilities: ModelCapabilities,
+    ) -> Self {
         Self {
-            id,
-            label,
+            id: id.into(),
+            label: label.into(),
             capabilities,
         }
     }
 }
 
 /// The policy field consulted for selected-model context suffix matching.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ModelPolicy<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelPolicy {
     /// An optional exact native context suffix.
-    pub context_window: Option<&'a str>,
+    pub context_window: Option<String>,
 }
 
-impl<'a> ModelPolicy<'a> {
+impl ModelPolicy {
     /// Creates a model policy from an optional exact context suffix.
     #[must_use]
-    pub const fn new(context_window: Option<&'a str>) -> Self {
+    pub fn new(context_window: Option<String>) -> Self {
         Self { context_window }
     }
 }
@@ -281,60 +292,91 @@ impl<'a> ModelPolicy<'a> {
 ///
 /// The fields correspond only to the values read by the source component.
 /// Rendering-disabled state, effects, callbacks, persistence, transport, and
-/// catalog registration are intentionally outside this boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ModelPolicyControlsInput<'a> {
+/// catalog registration are intentionally outside this boundary. Every field
+/// owns its text and collections so callers may drop their source rows after
+/// constructing this value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelPolicyControlsInput {
     /// The model whose controls are being projected.
-    pub model: Model<'a>,
+    pub model: Model,
     /// The exact id of the globally selected model.
-    pub selected_model_id: &'a str,
+    pub selected_model_id: String,
     /// The caller's current thinking level.
-    pub thinking_level: &'a str,
+    pub thinking_level: String,
     /// The caller's current speed option id.
-    pub speed_option_id: &'a str,
+    pub speed_option_id: String,
     /// The live model policy, if one has been supplied.
-    pub policy: Option<ModelPolicy<'a>>,
+    pub policy: Option<ModelPolicy>,
     /// The live permission mode used for first permission matching.
-    pub permission_mode: &'a str,
+    pub permission_mode: String,
     /// The optional permission default id used after the live mode.
-    pub permission_default: Option<&'a str>,
+    pub permission_default: Option<String>,
     /// Variant model choices in their source order.
-    pub variant_options: &'a [Model<'a>],
+    pub variant_options: Vec<Model>,
     /// Permission choices in their source order.
-    pub permission_options: &'a [PermissionOption<'a>],
+    pub permission_options: Vec<PermissionOption>,
+}
+
+impl ModelPolicyControlsInput {
+    /// Creates an owned set of policy-control inputs.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        model: Model,
+        selected_model_id: impl Into<String>,
+        thinking_level: impl Into<String>,
+        speed_option_id: impl Into<String>,
+        policy: Option<ModelPolicy>,
+        permission_mode: impl Into<String>,
+        permission_default: Option<String>,
+        variant_options: Vec<Model>,
+        permission_options: Vec<PermissionOption>,
+    ) -> Self {
+        Self {
+            model,
+            selected_model_id: selected_model_id.into(),
+            thinking_level: thinking_level.into(),
+            speed_option_id: speed_option_id.into(),
+            policy,
+            permission_mode: permission_mode.into(),
+            permission_default,
+            variant_options,
+            permission_options,
+        }
+    }
 }
 
 /// The renderer-neutral projection of the policy controls.
 ///
-/// Candidate vectors are copied as small borrowed records so filtered and
-/// partitioned lists remain explicit while every string still points at the
-/// supplied input. A present empty `context_options` value means the capability
-/// exists but has no options; `None` means that the capability is absent.
+/// Candidate vectors are owned copies so filtered and partitioned lists remain
+/// explicit while the projection remains usable after the input is dropped. A
+/// present empty `context_options` value means the capability exists but has
+/// no options; `None` means that the capability is absent.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ModelPolicyControlsPresentation<'a> {
+pub struct ModelPolicyControlsPresentation {
     /// The model whose controls were projected.
-    pub model: Model<'a>,
+    pub model: Model,
     /// Variant candidates, preserving source order and duplicates.
-    pub variant_options: Vec<Model<'a>>,
+    pub variant_options: Vec<Model>,
     /// Supported thinking options in the exact `base` group and source order.
-    pub base_thinking_options: Vec<ThinkingOption<'a>>,
+    pub base_thinking_options: Vec<ThinkingOption>,
     /// Supported thinking options in the exact `special` group and source order.
-    pub special_thinking_options: Vec<ThinkingOption<'a>>,
+    pub special_thinking_options: Vec<ThinkingOption>,
     /// Enabled speed candidates in source order.
-    pub speed_options: Vec<SpeedOption<'a>>,
+    pub speed_options: Vec<SpeedOption>,
     /// Context candidates when the capability is present, otherwise `None`.
-    pub context_options: Option<Vec<ContextWindowOption<'a>>>,
+    pub context_options: Option<Vec<ContextWindowOption>>,
     /// Permission candidates in source order.
-    pub permission_options: Vec<PermissionOption<'a>>,
+    pub permission_options: Vec<PermissionOption>,
     /// The selected-model level or non-selected model default, when supported.
-    pub current_thinking: Option<&'a str>,
+    pub current_thinking: Option<String>,
     /// The selected speed candidate after the source precedence chain.
-    pub current_speed: Option<SpeedOption<'a>>,
+    pub current_speed: Option<SpeedOption>,
     /// The selected context candidate after the source precedence chain.
-    pub current_context: Option<ContextWindowOption<'a>>,
+    pub current_context: Option<ContextWindowOption>,
     /// The selected permission candidate after the source precedence chain.
-    pub current_permission: Option<PermissionOption<'a>>,
+    pub current_permission: Option<PermissionOption>,
     /// Whether the variant control is visible.
     pub show_variant: bool,
     /// Whether the thinking control is visible.
@@ -348,132 +390,175 @@ pub struct ModelPolicyControlsPresentation<'a> {
 }
 
 /// A renderer-neutral attempted selection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ModelPolicySelection<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelPolicySelection {
     /// Attempt to select a thinking option by exact id.
-    Thinking { id: &'a str },
+    Thinking {
+        /// The exact requested option identifier.
+        id: String,
+    },
     /// Attempt to select a speed option by exact id.
-    Speed { id: &'a str },
+    Speed {
+        /// The exact requested option identifier.
+        id: String,
+    },
     /// Attempt to select a context option by exact id.
-    Context { id: &'a str },
+    Context {
+        /// The exact requested option identifier.
+        id: String,
+    },
     /// Attempt to select a permission option by exact id.
-    Permission { id: &'a str },
+    Permission {
+        /// The exact requested option identifier.
+        id: String,
+    },
     /// Attempt to select a variant model by exact id.
-    Variant { id: &'a str },
+    Variant {
+        /// The exact requested model identifier.
+        id: String,
+    },
+}
+
+impl ModelPolicySelection {
+    /// Creates a thinking selection request.
+    #[must_use]
+    pub fn thinking(id: impl Into<String>) -> Self {
+        Self::Thinking { id: id.into() }
+    }
+
+    /// Creates a speed selection request.
+    #[must_use]
+    pub fn speed(id: impl Into<String>) -> Self {
+        Self::Speed { id: id.into() }
+    }
+
+    /// Creates a context selection request.
+    #[must_use]
+    pub fn context(id: impl Into<String>) -> Self {
+        Self::Context { id: id.into() }
+    }
+
+    /// Creates a permission selection request.
+    #[must_use]
+    pub fn permission(id: impl Into<String>) -> Self {
+        Self::Permission { id: id.into() }
+    }
+
+    /// Creates a variant selection request.
+    #[must_use]
+    pub fn variant(id: impl Into<String>) -> Self {
+        Self::Variant { id: id.into() }
+    }
 }
 
 /// A typed action admitted by the model policy-controls boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ModelPolicyAction<'a> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelPolicyAction {
     /// Select the exact thinking option on the input model.
     Thinking {
         /// The model whose thinking policy changes.
-        model: Model<'a>,
+        model: Model,
         /// The first exact matching thinking option.
-        option: ThinkingOption<'a>,
+        option: ThinkingOption,
     },
     /// Select the exact enabled speed option on the input model.
     Speed {
         /// The model whose speed policy changes.
-        model: Model<'a>,
+        model: Model,
         /// The first exact matching enabled speed option.
-        option: SpeedOption<'a>,
+        option: SpeedOption,
     },
     /// Select the exact context option on the input model.
     Context {
         /// The model whose context policy changes.
-        model: Model<'a>,
+        model: Model,
         /// The first exact matching context option.
-        option: ContextWindowOption<'a>,
+        option: ContextWindowOption,
     },
     /// Select the exact permission option.
     Permission {
         /// The model associated with the control row.
-        model: Model<'a>,
+        model: Model,
         /// The first exact matching permission option.
-        option: PermissionOption<'a>,
+        option: PermissionOption,
     },
     /// Select the exact variant model.
     Variant {
         /// The first exact matching variant model.
-        model: Model<'a>,
+        model: Model,
     },
 }
 
-fn project_thinking_options<'a>(
-    input: &ModelPolicyControlsInput<'a>,
-) -> (
-    Vec<ThinkingOption<'a>>,
-    Vec<ThinkingOption<'a>>,
-    Option<&'a str>,
-) {
-    match input.model.capabilities.thinking {
+fn project_thinking_options(
+    input: &ModelPolicyControlsInput,
+) -> (Vec<ThinkingOption>, Vec<ThinkingOption>, Option<String>) {
+    match &input.model.capabilities.thinking {
         ThinkingCapability::Unsupported => (Vec::new(), Vec::new(), None),
         ThinkingCapability::Supported { default, options } => {
             let mut base = Vec::new();
             let mut special = Vec::new();
             for option in options {
-                match option.presentation_group {
-                    "base" => base.push(*option),
-                    "special" => special.push(*option),
+                match option.presentation_group.as_str() {
+                    "base" => base.push(option.clone()),
+                    "special" => special.push(option.clone()),
                     _ => {}
                 }
             }
             let current = if input.model.id == input.selected_model_id {
-                Some(input.thinking_level)
+                Some(input.thinking_level.clone())
             } else {
-                Some(default)
+                Some(default.clone())
             };
             (base, special, current)
         }
     }
 }
 
-fn enabled_speed_options<'a>(input: &ModelPolicyControlsInput<'a>) -> Vec<SpeedOption<'a>> {
+fn enabled_speed_options(input: &ModelPolicyControlsInput) -> Vec<SpeedOption> {
     input
         .model
         .capabilities
         .speed_options
         .iter()
-        .copied()
         .filter(|option| option.disabled.is_none())
+        .cloned()
         .collect()
 }
 
-fn current_speed<'a>(
-    input: &ModelPolicyControlsInput<'a>,
-    speed_options: &[SpeedOption<'a>],
-) -> Option<SpeedOption<'a>> {
+fn current_speed(
+    input: &ModelPolicyControlsInput,
+    speed_options: &[SpeedOption],
+) -> Option<SpeedOption> {
     let selected_speed = if input.model.id == input.selected_model_id {
         speed_options
             .iter()
             .find(|option| option.id == input.speed_option_id)
-            .copied()
+            .cloned()
     } else {
         None
     };
     selected_speed
-        .or_else(|| speed_options.iter().find(|option| option.default).copied())
-        .or_else(|| speed_options.first().copied())
+        .or_else(|| speed_options.iter().find(|option| option.default).cloned())
+        .or_else(|| speed_options.first().cloned())
 }
 
-fn project_context<'a>(
-    input: &ModelPolicyControlsInput<'a>,
+fn project_context(
+    input: &ModelPolicyControlsInput,
 ) -> (
-    Option<Vec<ContextWindowOption<'a>>>,
-    Option<ContextWindowOption<'a>>,
+    Option<Vec<ContextWindowOption>>,
+    Option<ContextWindowOption>,
 ) {
-    match input.model.capabilities.context_window {
+    match input.model.capabilities.context_window.as_ref() {
         None => (None, None),
         Some(capability) => {
             let suffix_match = if input.model.id == input.selected_model_id {
-                input.policy.and_then(|policy| {
-                    policy.context_window.and_then(|suffix| {
+                input.policy.as_ref().and_then(|policy| {
+                    policy.context_window.as_ref().and_then(|suffix| {
                         capability
                             .options
                             .iter()
-                            .find(|option| option.native_suffix == suffix)
-                            .copied()
+                            .find(|option| option.native_suffix == *suffix)
+                            .cloned()
                     })
                 })
             } else {
@@ -485,30 +570,30 @@ fn project_context<'a>(
                         .options
                         .iter()
                         .find(|option| option.id == capability.default)
-                        .copied()
+                        .cloned()
                 })
-                .or_else(|| capability.options.first().copied());
-            (Some(capability.options.to_vec()), current)
+                .or_else(|| capability.options.first().cloned());
+            (Some(capability.options.clone()), current)
         }
     }
 }
 
-fn current_permission<'a>(input: &ModelPolicyControlsInput<'a>) -> Option<PermissionOption<'a>> {
+fn current_permission(input: &ModelPolicyControlsInput) -> Option<PermissionOption> {
     input
         .permission_options
         .iter()
         .find(|option| option.id == input.permission_mode)
-        .copied()
+        .cloned()
         .or_else(|| {
-            input.permission_default.and_then(|default| {
+            input.permission_default.as_ref().and_then(|default| {
                 input
                     .permission_options
                     .iter()
-                    .find(|option| option.id == default)
-                    .copied()
+                    .find(|option| option.id == *default)
+                    .cloned()
             })
         })
-        .or_else(|| input.permission_options.first().copied())
+        .or_else(|| input.permission_options.first().cloned())
 }
 
 /// Projects model policy controls using the legacy selection and visibility rules.
@@ -518,9 +603,9 @@ fn current_permission<'a>(input: &ModelPolicyControlsInput<'a>) -> Option<Permis
 /// values use the same selected-model, suffix, default, and first-option
 /// precedence as the source component. No input value is normalized.
 #[must_use]
-pub fn project_model_policy_controls<'a>(
-    input: &ModelPolicyControlsInput<'a>,
-) -> ModelPolicyControlsPresentation<'a> {
+pub fn project_model_policy_controls(
+    input: &ModelPolicyControlsInput,
+) -> ModelPolicyControlsPresentation {
     let (base_thinking_options, special_thinking_options, current_thinking) =
         project_thinking_options(input);
     let speed_options = enabled_speed_options(input);
@@ -528,11 +613,11 @@ pub fn project_model_policy_controls<'a>(
     let (context_options, current_context) = project_context(input);
     let current_permission = current_permission(input);
 
-    let variant_options = input.variant_options.to_vec();
-    let permission_options = input.permission_options.to_vec();
+    let variant_options = input.variant_options.clone();
+    let permission_options = input.permission_options.clone();
 
     ModelPolicyControlsPresentation {
-        model: input.model,
+        model: input.model.clone(),
         show_variant: variant_options.len() > 1,
         show_thinking: current_thinking.is_some(),
         show_speed: speed_options.len() > 1,
@@ -559,19 +644,19 @@ pub fn project_model_policy_controls<'a>(
 /// validate candidate membership, while visibility controls whether a handler
 /// can normally be reached by a renderer.
 #[must_use]
-pub fn admit_model_policy_action<'a>(
-    input: &ModelPolicyControlsInput<'a>,
-    selection: ModelPolicySelection<'_>,
-) -> Option<ModelPolicyAction<'a>> {
+pub fn admit_model_policy_action(
+    input: &ModelPolicyControlsInput,
+    selection: ModelPolicySelection,
+) -> Option<ModelPolicyAction> {
     match selection {
         ModelPolicySelection::Thinking { id } => {
-            let ThinkingCapability::Supported { options, .. } = input.model.capabilities.thinking
+            let ThinkingCapability::Supported { options, .. } = &input.model.capabilities.thinking
             else {
                 return None;
             };
-            let option = options.iter().find(|option| option.id == id).copied()?;
+            let option = options.iter().find(|option| option.id == id).cloned()?;
             Some(ModelPolicyAction::Thinking {
-                model: input.model,
+                model: input.model.clone(),
                 option,
             })
         }
@@ -582,21 +667,21 @@ pub fn admit_model_policy_action<'a>(
                 .speed_options
                 .iter()
                 .find(|option| option.disabled.is_none() && option.id == id)
-                .copied()?;
+                .cloned()?;
             Some(ModelPolicyAction::Speed {
-                model: input.model,
+                model: input.model.clone(),
                 option,
             })
         }
         ModelPolicySelection::Context { id } => {
-            let capability = input.model.capabilities.context_window?;
+            let capability = input.model.capabilities.context_window.as_ref()?;
             let option = capability
                 .options
                 .iter()
                 .find(|option| option.id == id)
-                .copied()?;
+                .cloned()?;
             Some(ModelPolicyAction::Context {
-                model: input.model,
+                model: input.model.clone(),
                 option,
             })
         }
@@ -605,9 +690,9 @@ pub fn admit_model_policy_action<'a>(
                 .permission_options
                 .iter()
                 .find(|option| option.id == id)
-                .copied()?;
+                .cloned()?;
             Some(ModelPolicyAction::Permission {
-                model: input.model,
+                model: input.model.clone(),
                 option,
             })
         }
@@ -616,7 +701,7 @@ pub fn admit_model_policy_action<'a>(
                 .variant_options
                 .iter()
                 .find(|model| model.id == id)
-                .copied()?;
+                .cloned()?;
             Some(ModelPolicyAction::Variant { model })
         }
     }
