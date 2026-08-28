@@ -108,6 +108,25 @@ fn requested_languages_are_admitted_from_opener_like_lines_only() {
 }
 
 #[test]
+fn requested_language_whitespace_matches_legacy_javascript_boundaries() {
+    let markdown = concat!(
+        "```rust\u{001c}[main.rs]\n",
+        "```\n",
+        "~~~rust\u{0085}[other.py]\n",
+        "~~~\n",
+    );
+
+    assert!(requested_conversation_fence_languages(markdown).is_empty());
+    assert_eq!(
+        scan_conversation_fences(markdown),
+        vec![
+            fence(Some("rust\u{001c}"), None, "", true),
+            fence(Some("rust\u{0085}"), None, "", true),
+        ]
+    );
+}
+
+#[test]
 fn scan_preserves_labels_metadata_and_newline_terminated_bodies() {
     let markdown = concat!(
         "before\n",
@@ -271,7 +290,7 @@ fn multiple_fences_and_first_open_body_follow_streaming_transitions() {
 fn normalized_open_body_comparison_is_exact_except_for_trailing_newlines() {
     assert!(!is_open_conversation_fence_body("body", None));
     assert!(is_open_conversation_fence_body("body\n\n", Some("body")));
-    assert!(is_open_conversation_fence_body("body", Some("body\n\n")));
+    assert!(!is_open_conversation_fence_body("body", Some("body\n\n")));
     assert!(!is_open_conversation_fence_body("Body", Some("body")));
     assert!(!is_open_conversation_fence_body("body ", Some("body")));
     assert!(!is_open_conversation_fence_body("body\r", Some("body")));
