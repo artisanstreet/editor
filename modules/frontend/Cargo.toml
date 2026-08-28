@@ -73,6 +73,10 @@ name = "conversation_turn_navigator"
 path = "../../tests/frontend/conversation_turn_navigator.rs"
 
 [[test]]
+name = "dev_instance_policy"
+path = "../../tests/frontend/dev_instance_policy.rs"
+
+[[test]]
 name = "engine_usage_cache"
 path = "../../tests/frontend/engine_usage_cache.rs"
 
