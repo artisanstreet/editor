@@ -201,7 +201,7 @@ pub fn get_conversation_activity_category(kind: &str) -> ConversationActivityCat
         || value == "read.file"
         || value.contains("file.read")
         || value.contains("workspace.read")
-        || value.ends_with(".read")
+        || value.strip_suffix(".read").is_some()
     {
         return ConversationActivityCategory::FileRead;
     }
@@ -382,7 +382,7 @@ pub fn get_conversation_activity_group_presentation(
             .iter_mut()
             .find(|(agent_id, _)| agent_id == &subagent.agent_id)
         {
-            *display_name = subagent.display_name.clone();
+            display_name.clone_from(&subagent.display_name);
         } else {
             named_agents.push((subagent.agent_id.clone(), subagent.display_name.clone()));
         }
@@ -403,7 +403,7 @@ pub fn get_conversation_activity_group_presentation(
 
 /// Maps one provider-neutral activity row to stable human copy.
 ///
-/// Older OpenCode rows may carry `tool` as their kind and the real tool name
+/// Older `OpenCode` rows may carry `tool` as their kind and the real tool name
 /// as `label`; that label is reclassified before generic-tool presentation.
 /// Unknown kinds return the original label verbatim. All dynamic output is
 /// owned by the returned value.
@@ -492,6 +492,7 @@ fn activity_state(status: ConversationLifecycle) -> ActivityState {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn activity_copy(category: ConversationActivityCategory, state: ActivityState) -> String {
     match (category, state) {
         (ConversationActivityCategory::AppInspect, ActivityState::Active) => {
@@ -639,7 +640,7 @@ fn normalize_kind(kind: &str) -> String {
     kind.to_lowercase().replace(['-', '_'], ".")
 }
 
-/// JavaScript's `trim()` and `\s` use this exact WhiteSpace set in the
+/// JavaScript's `trim()` and `\s` use this exact `WhiteSpace` set in the
 /// regular expressions used by the source mapper. Rust's `char::is_whitespace`
 /// additionally accepts U+0085, while JavaScript does not, so it cannot be
 /// substituted here.

@@ -364,6 +364,7 @@ fn every_category_count_has_exact_zero_one_and_many_copy() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn every_category_and_lifecycle_combination_has_exact_row_copy() {
     let cases = [
         (
@@ -724,6 +725,7 @@ fn unknown_labels_are_returned_verbatim_without_validation_or_normalization() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn subagent_grouping_matches_javascript_map_identity_and_name_rules() {
     let cases = [
         (
