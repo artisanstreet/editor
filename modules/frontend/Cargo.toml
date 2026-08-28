@@ -49,6 +49,10 @@ name = "conversation_turn_navigator"
 path = "../../tests/frontend/conversation_turn_navigator.rs"
 
 [[test]]
+name = "engine_usage_cache"
+path = "../../tests/frontend/engine_usage_cache.rs"
+
+[[test]]
 name = "file_icon"
 path = "../../tests/frontend/file_icon.rs"
 
