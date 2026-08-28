@@ -237,8 +237,8 @@ impl UsageReport {
     #[must_use]
     pub fn new(authentication: UsageAuthentication, account_email: Option<String>) -> Self {
         Self {
-            account_email,
             authentication,
+            account_email,
         }
     }
 }
@@ -310,8 +310,7 @@ fn installation_progress_label(report: &InstallationReport) -> String {
 
     report
         .activity_phase
-        .map(InstallationPhase::label)
-        .unwrap_or("Installing…")
+        .map_or("Installing…", InstallationPhase::label)
         .to_owned()
 }
 
@@ -325,6 +324,7 @@ fn installation_progress_label(report: &InstallationReport) -> String {
 /// normalizing, or otherwise changing their presence or contents, and the
 /// returned state owns every string it exposes.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn project_managed_harness_setup(input: HarnessSetupInput) -> HarnessSetupState {
     if !input.available {
         return HarnessSetupState {
