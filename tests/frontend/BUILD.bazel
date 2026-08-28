@@ -116,6 +116,17 @@ rust_test(
 )
 
 rust_test(
+    name = "onboarding_route_test",
+    srcs = ["onboarding_route.rs"],
+    crate_name = "onboarding_route_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "project_picker_test",
     srcs = ["project_picker.rs"],
     crate_name = "project_picker_test",

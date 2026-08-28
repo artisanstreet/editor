@@ -16,6 +16,7 @@ pub mod conversation_diff_stat;
 pub mod conversation_presentation;
 pub mod conversation_projection;
 pub mod image_viewer;
+pub mod onboarding_route;
 pub mod project_picker;
 pub mod proof;
 pub mod reasoning_display;
