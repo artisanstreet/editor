@@ -1,5 +1,5 @@
 {
-  "checksum": "a8cffadeafcc8a93eaa5fbdadd136825bc591a86f0122bf6f4a642047fcf5d46",
+  "checksum": "921b019b7b0779dba7a47b711c42946b46d93d58fad96fb6d7b2bca9969c0674",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1824,7 +1824,14 @@
               "target": "zeroize"
             }
           ],
-          "selects": {}
+          "selects": {
+            "cfg(target_os = \"windows\")": [
+              {
+                "id": "native-dialog 0.9.7",
+                "target": "native_dialog"
+              }
+            ]
+          }
         },
         "deps_dev": {
           "common": [
@@ -2358,6 +2365,45 @@
         "version": "0.2.1"
       },
       "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "ascii 1.1.0": {
+      "name": "ascii",
+      "version": "1.1.0",
+      "package_url": "https://github.com/tomprogrammer/rust-ascii",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/ascii/1.1.0/download",
+          "sha256": "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "ascii",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "ascii",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2015",
+        "version": "1.1.0"
+      },
+      "license": "Apache-2.0 OR MIT",
       "license_ids": [
         "Apache-2.0",
         "MIT"
@@ -12531,6 +12577,45 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "env_home 0.1.0": {
+      "name": "env_home",
+      "version": "0.1.0",
+      "package_url": "https://github.com/notpeter/env-home",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/env_home/0.1.0/download",
+          "sha256": "c7f84e12ccf0a7ddc17a6c41c93326024c42920d7ee630d04950e6926645c0fe"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "env_home",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "env_home",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2015",
+        "version": "0.1.0"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "equator 0.4.2": {
       "name": "equator",
       "version": "0.4.2",
@@ -14622,6 +14707,45 @@
         },
         "edition": "2018",
         "version": "1.2.2"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "formatx 0.2.4": {
+      "name": "formatx",
+      "version": "0.2.4",
+      "package_url": "https://github.com/clitic/formatx",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/formatx/0.2.4/download",
+          "sha256": "d8866fac38f53fc87fa3ae1b09ddd723e0482f8fa74323518b4c59df2c55a00a"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "formatx",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "formatx",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2021",
+        "version": "0.2.4"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -25020,6 +25144,122 @@
       ],
       "license_file": "LICENSE.md"
     },
+    "native-dialog 0.9.7": {
+      "name": "native-dialog",
+      "version": "0.9.7",
+      "package_url": "https://github.com/balthild/native-dialog-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/native-dialog/0.9.7/download",
+          "sha256": "971a75894502033d79718a00a86e03595caa1a3620e0cba1985a5fde8d2e0b66"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "native_dialog",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "native_dialog",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "windows_dpi_awareness"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "formatx 0.2.4",
+              "target": "formatx"
+            },
+            {
+              "id": "raw-window-handle 0.6.2",
+              "target": "raw_window_handle"
+            },
+            {
+              "id": "thiserror 2.0.20",
+              "target": "thiserror"
+            }
+          ],
+          "selects": {
+            "cfg(all(unix, not(target_os = \"macos\"), not(target_os = \"ios\"), not(target_os = \"android\")))": [
+              {
+                "id": "ascii 1.1.0",
+                "target": "ascii"
+              },
+              {
+                "id": "versions 7.0.0",
+                "target": "versions"
+              },
+              {
+                "id": "which 7.0.3",
+                "target": "which"
+              }
+            ],
+            "cfg(target_os = \"macos\")": [
+              {
+                "id": "block2 0.6.2",
+                "target": "block2"
+              },
+              {
+                "id": "dispatch2 0.3.1",
+                "target": "dispatch2"
+              },
+              {
+                "id": "objc2 0.6.4",
+                "target": "objc2"
+              },
+              {
+                "id": "objc2-app-kit 0.3.2",
+                "target": "objc2_app_kit"
+              },
+              {
+                "id": "objc2-core-foundation 0.3.2",
+                "target": "objc2_core_foundation"
+              },
+              {
+                "id": "objc2-core-graphics 0.3.2",
+                "target": "objc2_core_graphics"
+              },
+              {
+                "id": "objc2-foundation 0.3.2",
+                "target": "objc2_foundation"
+              }
+            ],
+            "cfg(target_os = \"windows\")": [
+              {
+                "id": "wfd 0.1.8",
+                "target": "wfd"
+              },
+              {
+                "id": "winapi 0.3.9",
+                "target": "winapi"
+              }
+            ]
+          }
+        },
+        "edition": "2024",
+        "version": "0.9.7"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
     "new_debug_unreachable 1.0.6": {
       "name": "new_debug_unreachable",
       "version": "1.0.6",
@@ -26632,6 +26872,55 @@
       ],
       "license_file": null
     },
+    "objc2-core-graphics 0.3.2": {
+      "name": "objc2-core-graphics",
+      "version": "0.3.2",
+      "package_url": "https://github.com/madsmtm/objc2",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/objc2-core-graphics/0.3.2/download",
+          "sha256": "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "objc2_core_graphics",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "objc2_core_graphics",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "objc2-core-foundation 0.3.2",
+              "target": "objc2_core_foundation"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.3.2"
+      },
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT",
+        "Zlib"
+      ],
+      "license_file": null
+    },
     "objc2-encode 4.1.0": {
       "name": "objc2-encode",
       "version": "4.1.0",
@@ -26758,6 +27047,46 @@
       "license": "MIT",
       "license_ids": [
         "MIT"
+      ],
+      "license_file": null
+    },
+    "objc2-io-surface 0.3.2": {
+      "name": "objc2-io-surface",
+      "version": "0.3.2",
+      "package_url": "https://github.com/madsmtm/objc2",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/objc2-io-surface/0.3.2/download",
+          "sha256": "180788110936d59bab6bd83b6060ffdfffb3b922ba1396b312ae795e1de9d81d"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "objc2_io_surface",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "objc2_io_surface",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2021",
+        "version": "0.3.2"
+      },
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT",
+        "Zlib"
       ],
       "license_file": null
     },
@@ -46157,6 +46486,57 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "versions 7.0.0": {
+      "name": "versions",
+      "version": "7.0.0",
+      "package_url": "https://github.com/fosskers/rs-versions",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/versions/7.0.0/download",
+          "sha256": "80a7e511ce1795821207a837b7b1c8d8aca0c648810966ad200446ae58f6667f"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "versions",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "versions",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "itertools 0.14.0",
+              "target": "itertools"
+            },
+            {
+              "id": "nom 8.0.0",
+              "target": "nom"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "7.0.0"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
     "vswhom 0.1.0": {
       "name": "vswhom",
       "version": "0.1.0",
@@ -47856,6 +48236,57 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "wfd 0.1.8": {
+      "name": "wfd",
+      "version": "0.1.8",
+      "package_url": "https://www.github.com/ben-wallis/wfd",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/wfd/0.1.8/download",
+          "sha256": "0c17bbfb155305bcb79144f568c3b796275ba4db5d5856597bc85acefe29b819"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "wfd",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "wfd",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "libc 0.2.189",
+              "target": "libc"
+            },
+            {
+              "id": "winapi 0.3.9",
+              "target": "winapi"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.1.8"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
     "which 6.0.3": {
       "name": "which",
       "version": "6.0.3",
@@ -47915,6 +48346,72 @@
         },
         "edition": "2021",
         "version": "6.0.3"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE.txt"
+    },
+    "which 7.0.3": {
+      "name": "which",
+      "version": "7.0.3",
+      "package_url": "https://github.com/harryfei/which-rs.git",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/which/7.0.3/download",
+          "sha256": "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "which",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "which",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "either 1.18.0",
+              "target": "either"
+            }
+          ],
+          "selects": {
+            "cfg(any(unix, target_os = \"wasi\", target_os = \"redox\"))": [
+              {
+                "id": "rustix 1.1.4",
+                "target": "rustix"
+              }
+            ],
+            "cfg(any(windows, unix, target_os = \"redox\"))": [
+              {
+                "id": "env_home 0.1.0",
+                "target": "env_home"
+              }
+            ],
+            "cfg(windows)": [
+              {
+                "id": "winsafe 0.0.19",
+                "target": "winsafe"
+              }
+            ]
+          }
+        },
+        "edition": "2021",
+        "version": "7.0.3"
       },
       "license": "MIT",
       "license_ids": [
@@ -48007,9 +48504,13 @@
           "common": [
             "knownfolders",
             "objbase",
+            "shellapi",
             "shlobj",
+            "shobjidl",
+            "shobjidl_core",
             "winbase",
-            "winerror"
+            "winerror",
+            "winuser"
           ],
           "selects": {}
         },
@@ -55671,6 +56172,11 @@
       "x86_64-unknown-linux-gnu",
       "x86_64-unknown-nixos-gnu"
     ],
+    "cfg(all(unix, not(target_os = \"macos\"), not(target_os = \"ios\"), not(target_os = \"android\")))": [
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-nixos-gnu"
+    ],
     "cfg(all(windows, not(target_arch = \"arm64ec\")))": [
       "x86_64-pc-windows-msvc"
     ],
@@ -55940,6 +56446,7 @@
     "capnpc 0.27.0",
     "getrandom 0.4.3",
     "gpui 0.2.2",
+    "native-dialog 0.9.7",
     "pulldown-cmark 0.13.4",
     "quinn 0.11.11",
     "rustls 0.23.43",

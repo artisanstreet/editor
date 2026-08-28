@@ -1,5 +1,14 @@
 load("@rules_rust//rust:defs.bzl", "rust_test")
 
+# Contract-named helper test sources are exported so the backend package can
+# declare them as library source inputs; they compile as private cfg(test)
+# modules of the backend crate, not as standalone integration crates.
+exports_files([
+    "directory_helper.rs",
+    "directory_helper_fixture.rs",
+    "directory_helper_unit.rs",
+])
+
 rust_test(
     name = "app_test",
     srcs = ["app.rs"],
@@ -11,6 +20,18 @@ rust_test(
         "@crates//:tokio",
     ],
     edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+# The helper tests compile as private cfg(test) modules of the backend crate
+# itself (path-linked from src/directory_helper.rs), so this target builds
+# the backend crate root in test mode with no separate sources: rules_rust
+# crate and srcs are incompatible.
+rust_test(
+    name = "directory_helper_test",
+    crate = "//modules/backend:backend",
     lint_config = "//:workspace_lints",
     size = "small",
     visibility = ["//:__pkg__"],

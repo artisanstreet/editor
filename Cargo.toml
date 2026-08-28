@@ -25,6 +25,9 @@ capnp = "=0.27.0"
 capnpc = "=0.27.0"
 getrandom = { version = "=0.4.3", default-features = false }
 gpui = { version = "=0.2.2", features = ["inspector", "test-support"] }
+native-dialog = { version = "=0.9.7", default-features = false, features = [
+    "windows_dpi_awareness",
+] }
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 quinn = { version = "=0.11.11", default-features = false, features = [
     "runtime-tokio",

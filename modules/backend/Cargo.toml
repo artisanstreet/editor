@@ -17,6 +17,9 @@ sea-orm.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+native-dialog.workspace = true
+
 [dev-dependencies]
 rcgen.workspace = true
 rustls-pki-types.workspace = true
