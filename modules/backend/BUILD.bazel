@@ -45,6 +45,7 @@ rust_library(
         "src/storage.rs",
         "src/telemetry_preferences_control_policy.rs",
         "src/thread_liveness_policy.rs",
+        "src/thread_resource_quiescence_policy.rs",
         "//tests/backend:directory_controller.rs",
         "//tests/backend:directory_helper.rs",
         "//tests/backend:directory_helper_fixture.rs",
