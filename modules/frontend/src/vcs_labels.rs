@@ -90,33 +90,45 @@ fn pathname_segments(pathname: &str) -> Vec<&str> {
 
 /// Parses the absolute hierarchical URLs supplied by the repository protocol.
 ///
-/// The backend supplies HTTPS web URLs, but the JavaScript source does not
-/// branch on the scheme, so every valid scheme-shaped hierarchical URL is
-/// accepted here. Only the URL fields read by `labels.ts` are retained:
-/// hostname and pathname. Query strings, fragments, credentials, and ports
-/// therefore never leak into a displayed label.
+/// The JavaScript source reads hostname and pathname from a WHATWG URL. The
+/// adapter therefore performs the URL work needed by the reached special
+/// schemes: backslashes become slashes, host names are canonicalized, path
+/// bytes are escaped, and dot segments are removed. Query strings, fragments,
+/// credentials, and ports never leak into a displayed label.
 fn parse_url(web_url: &str) -> Option<ParsedUrl> {
-    let web_url = trim_url_whitespace(web_url);
-    let scheme_end = web_url.find("://")?;
+    let sanitized = remove_url_tabs_and_newlines(web_url);
+    let web_url = trim_url_whitespace(&sanitized);
+    let scheme_end = web_url.find(':')?;
     let scheme = &web_url[..scheme_end];
     if !valid_scheme(scheme) {
         return None;
     }
 
-    let rest = &web_url[scheme_end + 3..];
-    if rest.is_empty() {
-        return None;
-    }
-
-    // Special URL schemes treat additional leading slashes as part of the
-    // authority delimiter. This preserves the browser URL behavior for an
-    // input such as `https:///owner/repository`, which resolves to host
-    // `owner` and pathname `/repository` rather than throwing.
-    let rest = if special_scheme(scheme) {
-        rest.trim_start_matches('/')
+    let rest = &web_url[scheme_end + 1..];
+    if special_scheme(scheme) {
+        // Special schemes treat backslashes as slash delimiters and consume
+        // all leading slash delimiters while finding the authority.
+        let rest = rest.replace('\\', "/");
+        let rest = rest.trim_start_matches('/');
+        parse_hierarchical_url(rest)
     } else {
-        rest
-    };
+        let rest = rest.strip_prefix("//")?;
+        parse_hierarchical_url(rest)
+    }
+}
+
+fn remove_url_tabs_and_newlines(value: &str) -> String {
+    value
+        .chars()
+        .filter(|&character| !matches!(character, '\t' | '\n' | '\r'))
+        .collect()
+}
+
+fn trim_url_whitespace(value: &str) -> &str {
+    value.trim_matches(|character: char| character <= ' ')
+}
+
+fn parse_hierarchical_url(rest: &str) -> Option<ParsedUrl> {
     if rest.is_empty() {
         return None;
     }
@@ -137,16 +149,12 @@ fn parse_url(web_url: &str) -> Option<ParsedUrl> {
     let pathname = if pathname.is_empty() {
         "/".to_owned()
     } else if pathname.starts_with('/') {
-        pathname.to_owned()
+        normalize_pathname(pathname)
     } else {
         return None;
     };
 
     Some(ParsedUrl { hostname, pathname })
-}
-
-fn trim_url_whitespace(value: &str) -> &str {
-    value.trim_matches([' ', '\t', '\n', '\r'])
 }
 
 fn valid_scheme(scheme: &str) -> bool {
@@ -167,38 +175,278 @@ fn special_scheme(scheme: &str) -> bool {
 }
 
 fn parse_hostname(host_port: &str) -> Option<String> {
-    if host_port.is_empty() || host_port.contains([' ', '\t', '\n', '\r', '\0']) {
+    if host_port.is_empty() {
         return None;
     }
 
-    let hostname = if host_port.starts_with('[') {
+    if host_port.starts_with('[') {
         let closing_bracket = host_port.find(']')?;
+        let inner = &host_port[1..closing_bracket];
+        if inner.is_empty() || inner.contains(['[', ']', ' ', '\t', '\n', '\r', '\0']) {
+            return None;
+        }
         let after_bracket = &host_port[closing_bracket + 1..];
         if !valid_port_suffix(after_bracket) {
             return None;
         }
-        &host_port[..=closing_bracket]
-    } else {
-        let (hostname, port) = match host_port.split_once(':') {
-            Some((hostname, port)) => (hostname, Some(port)),
-            None => (host_port, None),
-        };
-        if host_port[hostname.len() + usize::from(port.is_some())..].contains(':') {
-            return None;
-        }
-        if let Some(port) = port
-            && !valid_port(port)
-        {
-            return None;
-        }
-        hostname
-    };
+        return Some(format!("[{}]", inner.to_ascii_lowercase()));
+    }
 
-    if hostname.is_empty() || hostname.contains(['/', '?', '#', '@', '\0']) {
+    let (hostname, port) = match host_port.rfind(':') {
+        Some(colon) => {
+            let hostname = &host_port[..colon];
+            let port = &host_port[colon + 1..];
+            if hostname.contains(':') {
+                return None;
+            }
+            (hostname, Some(port))
+        }
+        None => (host_port, None),
+    };
+    if let Some(port) = port
+        && !valid_port(port)
+    {
+        return None;
+    }
+    if hostname.is_empty() {
         return None;
     }
 
-    Some(hostname.to_ascii_lowercase())
+    let hostname = decode_host_percent(hostname)?;
+    if hostname
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return None;
+    }
+    if hostname.contains(['/', '?', '#', '@', '[', ']', '\\', ':']) {
+        return None;
+    }
+
+    hostname_to_ascii(&hostname)
+}
+
+fn decode_host_percent(hostname: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(hostname.len());
+    let mut characters = hostname.chars();
+    while let Some(character) = characters.next() {
+        if character == '%' {
+            let high = hex_value(characters.next()?)?;
+            let low = hex_value(characters.next()?)?;
+            bytes.push((high << 4) | low);
+        } else {
+            let mut buffer = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn hex_value(character: char) -> Option<u8> {
+    let value = match character {
+        '0'..='9' => u32::from(character) - u32::from('0'),
+        'a'..='f' => u32::from(character) - u32::from('a') + 10,
+        'A'..='F' => u32::from(character) - u32::from('A') + 10,
+        _ => return None,
+    };
+    u8::try_from(value).ok()
+}
+
+fn hostname_to_ascii(hostname: &str) -> Option<String> {
+    let normalized_dots: String = hostname
+        .chars()
+        .map(|character| match character {
+            '\u{3002}' | '\u{FF0E}' | '\u{FF61}' => '.',
+            _ => character,
+        })
+        .collect();
+    let labels: Vec<&str> = normalized_dots.split('.').collect();
+    let mut ascii = String::with_capacity(normalized_dots.len());
+    for (index, label) in labels.iter().enumerate() {
+        if index > 0 {
+            ascii.push('.');
+        }
+        ascii.push_str(&punycode_label(label)?);
+    }
+    Some(ascii)
+}
+
+fn punycode_label(label: &str) -> Option<String> {
+    const BASE: u32 = 36;
+    const INITIAL_BIAS: u32 = 72;
+    const INITIAL_N: u32 = 128;
+    const TMAX: u32 = 26;
+    const TMIN: u32 = 1;
+
+    let label = label.to_lowercase();
+    let codepoints: Vec<u32> = label.chars().map(u32::from).collect();
+    let codepoint_count = u32::try_from(codepoints.len()).ok()?;
+    let basic_count = codepoints
+        .iter()
+        .filter(|&&codepoint| codepoint < 0x80)
+        .count();
+    let basic_count = u32::try_from(basic_count).ok()?;
+    let mut output = String::new();
+    for &codepoint in &codepoints {
+        if codepoint < 0x80 {
+            output.push(char::from_u32(codepoint)?);
+        }
+    }
+    if basic_count == codepoint_count {
+        return Some(output);
+    }
+    output.insert_str(0, "xn--");
+    if basic_count > 0 {
+        output.push('-');
+    }
+
+    let mut handled = basic_count;
+    let mut next_codepoint = INITIAL_N;
+    let mut delta = 0_u64;
+    let mut bias = INITIAL_BIAS;
+
+    while handled < codepoint_count {
+        let next = codepoints
+            .iter()
+            .copied()
+            .filter(|&codepoint| codepoint >= next_codepoint)
+            .min()?;
+        let increment =
+            u64::from(next - next_codepoint).checked_mul(u64::from(handled).checked_add(1)?)?;
+        delta = delta.checked_add(increment)?;
+        next_codepoint = next;
+
+        for &codepoint in &codepoints {
+            if codepoint < next_codepoint {
+                delta = delta.checked_add(1)?;
+            }
+            if codepoint == next_codepoint {
+                let mut quotient = delta;
+                let mut divisor = BASE;
+                loop {
+                    let threshold = if divisor <= bias {
+                        TMIN
+                    } else if divisor >= bias + TMAX {
+                        TMAX
+                    } else {
+                        divisor - bias
+                    };
+                    if quotient < u64::from(threshold) {
+                        break;
+                    }
+                    let base_minus_threshold = BASE - threshold;
+                    let remainder =
+                        (quotient - u64::from(threshold)) % u64::from(base_minus_threshold);
+                    let digit = threshold.checked_add(u32::try_from(remainder).ok()?)?;
+                    output.push(encode_punycode_digit(digit)?);
+                    quotient = (quotient - u64::from(threshold)) / u64::from(base_minus_threshold);
+                    divisor = divisor.checked_add(BASE)?;
+                }
+                output.push(encode_punycode_digit(u32::try_from(quotient).ok()?)?);
+                bias = adapt_punycode_bias(delta, handled + 1, handled == basic_count);
+                delta = 0;
+                handled = handled.checked_add(1)?;
+            }
+        }
+        delta = delta.checked_add(1)?;
+        next_codepoint = next_codepoint.checked_add(1)?;
+    }
+
+    Some(output)
+}
+
+fn encode_punycode_digit(digit: u32) -> Option<char> {
+    match digit {
+        0..=25 => char::from_u32(u32::from(b'a') + digit),
+        26..=35 => char::from_u32(u32::from(b'0') + digit - 26),
+        _ => None,
+    }
+}
+
+fn adapt_punycode_bias(delta: u64, number_handled: u32, first: bool) -> u32 {
+    const DAMP: u64 = 700;
+    const SKEW: u32 = 38;
+
+    let mut delta = if first { delta / DAMP } else { delta / 2 };
+    delta += delta / u64::from(number_handled);
+    let mut bias = 0_u32;
+    while delta > 455 {
+        delta /= 35;
+        bias += 36;
+    }
+    let scaled = u32::try_from((delta * 36) / (delta + u64::from(SKEW))).unwrap_or(u32::MAX);
+    bias + scaled
+}
+
+fn normalize_pathname(pathname: &str) -> String {
+    let encoded = percent_encode_path(pathname);
+    let segments: Vec<&str> = encoded.split('/').collect();
+    let mut normalized = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        let is_last = index + 1 == segments.len();
+        if is_single_dot_segment(segment) {
+            if is_last {
+                normalized.push("");
+            }
+        } else if is_double_dot_segment(segment) {
+            if normalized.len() > 1 {
+                normalized.pop();
+            }
+            if is_last {
+                normalized.push("");
+            }
+        } else {
+            normalized.push(segment);
+        }
+    }
+    normalized.join("/")
+}
+
+fn is_single_dot_segment(segment: &str) -> bool {
+    segment == "." || segment.eq_ignore_ascii_case("%2e")
+}
+
+fn is_double_dot_segment(segment: &str) -> bool {
+    segment == ".."
+        || segment.eq_ignore_ascii_case("%2e.")
+        || segment.eq_ignore_ascii_case(".%2e")
+        || segment.eq_ignore_ascii_case("%2e%2e")
+}
+
+fn percent_encode_path(pathname: &str) -> String {
+    let mut encoded = String::with_capacity(pathname.len());
+    for character in pathname.chars() {
+        if matches!(character, '\t' | '\n' | '\r') {
+            continue;
+        }
+        if character.is_ascii() {
+            let byte = u8::try_from(u32::from(character)).unwrap_or_default();
+            if path_byte_requires_encoding(byte) {
+                push_percent_encoded_byte(&mut encoded, byte);
+            } else {
+                encoded.push(character);
+            }
+        } else {
+            let mut buffer = [0; 4];
+            for &byte in character.encode_utf8(&mut buffer).as_bytes() {
+                push_percent_encoded_byte(&mut encoded, byte);
+            }
+        }
+    }
+    encoded
+}
+
+fn path_byte_requires_encoding(byte: u8) -> bool {
+    byte <= 0x20
+        || byte == 0x7f
+        || matches!(byte, b'"' | b'<' | b'>' | b'^' | b'\x60' | b'{' | b'}')
+}
+
+fn push_percent_encoded_byte(output: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    output.push('%');
+    output.push(char::from(HEX[usize::from(byte >> 4)]));
+    output.push(char::from(HEX[usize::from(byte & 0x0f)]));
 }
 
 fn valid_port_suffix(suffix: &str) -> bool {

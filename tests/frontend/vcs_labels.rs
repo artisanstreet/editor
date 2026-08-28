@@ -161,6 +161,261 @@ fn special_url_syntax_keeps_the_browser_host_and_path_order() {
 }
 
 #[test]
+fn special_url_dot_segments_match_normalized_pathnames() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "https://example.com/a/../repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+        (
+            "https://example.com/a/./repo",
+            "repo",
+            "a/repo",
+            "example.com/a/repo",
+        ),
+        (
+            "https://example.com/../repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+        (
+            "https://example.com/./repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+        (
+            "https://example.com/../../repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+        (
+            "https://example.com/a/b/../../repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+        (
+            "https://example.com/a//../repo",
+            "repo",
+            "a/repo",
+            "example.com/a/repo",
+        ),
+        (
+            "https://example.com/a///../repo",
+            "repo",
+            "a/repo",
+            "example.com/a//repo",
+        ),
+        (
+            "https://example.com/a/..",
+            "example.com",
+            "example.com",
+            "example.com",
+        ),
+        (
+            "https://example.com/..",
+            "example.com",
+            "example.com",
+            "example.com",
+        ),
+        (
+            "https://example.com/.",
+            "example.com",
+            "example.com",
+            "example.com",
+        ),
+        (
+            "https://example.com/./",
+            "example.com",
+            "example.com",
+            "example.com",
+        ),
+        ("https://example.com/a/.", "a", "a", "example.com/a"),
+        (
+            "https://example.com/a/../",
+            "example.com",
+            "example.com",
+            "example.com",
+        ),
+    ];
+
+    for &(input, link, qualified, destination) in cases {
+        assert_eq!(repository_link_label(input), link, "input {input:?}");
+        assert_eq!(
+            repository_qualified_label(input),
+            qualified,
+            "input {input:?}"
+        );
+        assert_eq!(
+            repository_destination_label(input),
+            destination,
+            "input {input:?}"
+        );
+    }
+}
+
+#[test]
+fn special_url_backslashes_match_normalized_pathnames() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "https://example.com\\owner\\repo",
+            "repo",
+            "owner/repo",
+            "example.com/owner/repo",
+        ),
+        (
+            "https://example.com\\\\owner\\\\repo",
+            "repo",
+            "owner/repo",
+            "example.com//owner//repo",
+        ),
+        (
+            "https:\\example.com\\owner\\repo",
+            "repo",
+            "owner/repo",
+            "example.com/owner/repo",
+        ),
+        (
+            "https:\\\\example.com\\\\owner\\\\repo",
+            "repo",
+            "owner/repo",
+            "example.com//owner//repo",
+        ),
+        (
+            "https://example.com/owner\\repo",
+            "repo",
+            "owner/repo",
+            "example.com/owner/repo",
+        ),
+    ];
+
+    for &(input, link, qualified, destination) in cases {
+        assert_eq!(repository_link_label(input), link, "input {input:?}");
+        assert_eq!(
+            repository_qualified_label(input),
+            qualified,
+            "input {input:?}"
+        );
+        assert_eq!(
+            repository_destination_label(input),
+            destination,
+            "input {input:?}"
+        );
+    }
+}
+
+#[test]
+fn host_and_path_unicode_are_canonicalized_without_dependencies() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "https://例え.テスト/こんにちは/世界",
+            "%E4%B8%96%E7%95%8C",
+            "%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF/%E4%B8%96%E7%95%8C",
+            "xn--r8jz45g.xn--zckzah/%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF/%E4%B8%96%E7%95%8C",
+        ),
+        (
+            "https://例え.テスト/所有者/リポジトリ",
+            "%E3%83%AA%E3%83%9D%E3%82%B8%E3%83%88%E3%83%AA",
+            "%E6%89%80%E6%9C%89%E8%80%85/%E3%83%AA%E3%83%9D%E3%82%B8%E3%83%88%E3%83%AA",
+            "xn--r8jz45g.xn--zckzah/%E6%89%80%E6%9C%89%E8%80%85/%E3%83%AA%E3%83%9D%E3%82%B8%E3%83%88%E3%83%AA",
+        ),
+        (
+            "https://example.com/owner/my repo",
+            "my%20repo",
+            "owner/my%20repo",
+            "example.com/owner/my%20repo",
+        ),
+        (
+            "https://example.com/owner/a^b{c}|d\x60e\"f<g>h",
+            "a%5Eb%7Bc%7D|d%60e%22f%3Cg%3Eh",
+            "owner/a%5Eb%7Bc%7D|d%60e%22f%3Cg%3Eh",
+            "example.com/owner/a%5Eb%7Bc%7D|d%60e%22f%3Cg%3Eh",
+        ),
+        (
+            "https://example.com/owner/é 中/😀",
+            "%F0%9F%98%80",
+            "%C3%A9%20%E4%B8%AD/%F0%9F%98%80",
+            "example.com/owner/%C3%A9%20%E4%B8%AD/%F0%9F%98%80",
+        ),
+    ];
+
+    for &(input, link, qualified, destination) in cases {
+        assert_eq!(repository_link_label(input), link, "input {input:?}");
+        assert_eq!(
+            repository_qualified_label(input),
+            qualified,
+            "input {input:?}"
+        );
+        assert_eq!(
+            repository_destination_label(input),
+            destination,
+            "input {input:?}"
+        );
+    }
+}
+
+#[test]
+fn existing_escapes_are_preserved_and_encoded_dot_segments_normalize() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "https://example.com/%E2%9C%93/%e2%9c%93/%41/%4a",
+            "%4a",
+            "%41/%4a",
+            "example.com/%E2%9C%93/%e2%9c%93/%41/%4a",
+        ),
+        (
+            "https://example.com/a%20b/%E3%81%82/%2F/%zz/%2e/%2E%2e",
+            "%2F",
+            "%E3%81%82/%2F",
+            "example.com/a%20b/%E3%81%82/%2F",
+        ),
+        (
+            "https://example.com/owner/%2e%2e/repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+        (
+            "https://example.com/owner/%2E./repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+        (
+            "https://example.com/owner/.%2e/repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+        (
+            "https://example.com/owner/%2e%2E/repo",
+            "repo",
+            "repo",
+            "example.com/repo",
+        ),
+    ];
+
+    for &(input, link, qualified, destination) in cases {
+        assert_eq!(repository_link_label(input), link, "input {input:?}");
+        assert_eq!(
+            repository_qualified_label(input),
+            qualified,
+            "input {input:?}"
+        );
+        assert_eq!(
+            repository_destination_label(input),
+            destination,
+            "input {input:?}"
+        );
+    }
+}
+
+#[test]
 fn unknown_hosts_use_the_same_default_host_label() {
     let cases = [
         ("https://unknown.invalid", "unknown.invalid"),
