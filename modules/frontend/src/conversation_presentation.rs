@@ -44,6 +44,7 @@ pub const fn work_session_initially_open(input: WorkSessionInitialOpenInput) -> 
 
 /// Inputs used to derive the rendered disclosure presentation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct WorkSessionDisclosureInput {
     /// Whether the details snippet is defined and can be mounted.
     pub details_defined: bool,
