@@ -75,6 +75,7 @@ pub mod runtime_surface;
 pub mod session_tool_policy;
 pub mod setup_label_transition_policy;
 pub mod shell;
+pub mod speed_presentation;
 pub mod subscription_projection;
 pub mod telemetry_bootstrap_policy;
 pub mod telemetry_preferences;
