@@ -14,6 +14,7 @@ pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
 pub mod engine_owner;
 pub mod file_identity_policy;
+pub mod git_remote_url_policy;
 pub mod graph_advancement_policy;
 pub mod harness_config_registry_policy;
 pub mod host_identity_policy;

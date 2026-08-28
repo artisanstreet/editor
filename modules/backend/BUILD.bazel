@@ -35,6 +35,7 @@ rust_library(
         "src/engine_owner/framing.rs",
         "src/engine_owner/observation.rs",
         "src/file_identity_policy.rs",
+        "src/git_remote_url_policy.rs",
         "src/graph_advancement_policy.rs",
         "src/harness_config_registry_policy.rs",
         "src/host_identity_policy.rs",
