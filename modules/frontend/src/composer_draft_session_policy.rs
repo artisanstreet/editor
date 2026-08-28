@@ -502,10 +502,12 @@ impl ComposerDraftSession {
         }
 
         self.restore_attempted = true;
-        let draft_key = self
-            .draft_key
-            .as_deref()
-            .expect("the missing key was checked before consuming restore");
+        let Some(draft_key) = self.draft_key.as_deref() else {
+            return ComposerDraftRestoreResult {
+                attempted: true,
+                ..ComposerDraftRestoreResult::default()
+            };
+        };
         let Some(stored) = store.read(draft_key) else {
             return ComposerDraftRestoreResult {
                 attempted: true,
