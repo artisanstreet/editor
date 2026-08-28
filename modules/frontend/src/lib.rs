@@ -19,6 +19,7 @@ pub mod conversation_presentation;
 pub mod conversation_projection;
 pub mod conversation_scroll_position;
 pub mod conversation_turn_navigator;
+pub mod file_icon;
 pub mod image_inspection_store;
 pub mod image_policy;
 pub mod image_viewer;
