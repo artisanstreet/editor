@@ -401,6 +401,7 @@ version = "0.0.0"
 dependencies = [
  "artisan-domain",
  "artisan-protocol",
+ "capnp",
  "quinn",
  "rcgen",
  "rustls",

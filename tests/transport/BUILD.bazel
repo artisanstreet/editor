@@ -182,3 +182,29 @@ rust_test(
     size = "small",
     visibility = ["//:__pkg__"],
 )
+
+rust_test(
+    name = "client_session_test",
+    srcs = [
+        "client_session.rs",
+    ],
+    crate_name = "client_session_test",
+    crate_root = "client_session.rs",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/protocol:protocol",
+        "//modules/transport:transport",
+        "@crates//:capnp",
+        "@crates//:quinn",
+        "@crates//:rcgen",
+        "@crates//:rustls-pki-types",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    # Every case runs one real loopback pairing under bounded watchdogs,
+    # including positive peer-side closure witnesses; that exceeds the
+    # small timeout budget on slower hosts.
+    size = "medium",
+    visibility = ["//:__pkg__"],
+)

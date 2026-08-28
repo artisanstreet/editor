@@ -1,5 +1,5 @@
 {
-  "checksum": "921b019b7b0779dba7a47b711c42946b46d93d58fad96fb6d7b2bca9969c0674",
+  "checksum": "3a35b739fc6e48ab3f3833df6731b79f7fcef91ec535ce8dadedeac7a68d5018",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2207,6 +2207,10 @@
         },
         "deps_dev": {
           "common": [
+            {
+              "id": "capnp 0.27.0",
+              "target": "capnp"
+            },
             {
               "id": "rcgen 0.14.9",
               "target": "rcgen"
