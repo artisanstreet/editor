@@ -27,6 +27,7 @@ pub mod image_inspection_store;
 pub mod image_policy;
 pub mod image_viewer;
 pub mod latest_request_gate;
+pub mod markdown_fence_policy;
 pub mod math_rendering_policy;
 pub mod motion_spring;
 pub mod new_thread_interaction;

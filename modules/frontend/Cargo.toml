@@ -77,6 +77,10 @@ name = "latest_request_gate"
 path = "../../tests/frontend/latest_request_gate.rs"
 
 [[test]]
+name = "markdown_fence_policy"
+path = "../../tests/frontend/markdown_fence_policy.rs"
+
+[[test]]
 name = "math_rendering_policy"
 path = "../../tests/frontend/math_rendering_policy.rs"
 

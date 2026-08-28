@@ -26,6 +26,7 @@ rust_library(
         "src/image_viewer.rs",
         "src/latest_request_gate.rs",
         "src/lib.rs",
+        "src/markdown_fence_policy.rs",
         "src/math_rendering_policy.rs",
         "src/motion_spring.rs",
         "src/new_thread_interaction.rs",
