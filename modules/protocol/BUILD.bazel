@@ -14,6 +14,17 @@ capnp_codegen(
     out_dir = "src",
 )
 
+# Product application protocol (Phase 2): `schema/artisan.capnp`.
+# Same declared-tool action as the proof; generated output stays out of
+# source control.
+capnp_codegen(
+    name = "artisan_protocol_codegen",
+    compiler = "@capnp_tools_windows_x86_64//:capnp.exe",
+    plugin = "//scripts/capnp_codegen:capnpc_rust",
+    srcs = ["schema/artisan.capnp"],
+    out_dir = "src",
+)
+
 rust_library(
     name = "protocol",
     srcs = glob(
@@ -21,7 +32,10 @@ rust_library(
         # Generated bindings arrive as action outputs, never as source-tree
         # files; excluding the pattern keeps provisioning unambiguous.
         exclude = ["src/*_capnp.rs"],
-    ) + [":phase1_proof_codegen"],
+    ) + [
+        ":phase1_proof_codegen",
+        ":artisan_protocol_codegen",
+    ],
     crate_name = "artisan_protocol",
     deps = [
         "//modules/domain:domain",

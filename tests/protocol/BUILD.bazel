@@ -15,3 +15,20 @@ rust_test(
     size = "small",
     visibility = ["//:__pkg__"],
 )
+
+# Phase 2 product schema test: every message family of
+# `modules/protocol/schema/artisan.capnp` round-trips through the generated
+# bindings, still via the public `artisan_protocol` surface.
+rust_test(
+    name = "product_roundtrip_test",
+    srcs = ["product_roundtrip.rs"],
+    crate_name = "product_roundtrip_test",
+    deps = [
+        "//modules/protocol:protocol",
+        "@crates//:capnp",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
