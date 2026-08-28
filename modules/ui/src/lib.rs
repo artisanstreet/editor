@@ -1,6 +1,7 @@
 //! Shared Artisan presentation and interaction primitives for `GPUI` consumers.
 
 pub mod asset_seam;
+pub mod button;
 pub mod markdown;
 pub mod motion;
 pub mod theme;
