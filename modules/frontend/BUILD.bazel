@@ -82,6 +82,7 @@ rust_library(
         "src/project_picker.rs",
         "src/reader_attention.rs",
         "src/reasoning_display.rs",
+        "src/repository_mark.rs",
         "src/route_navigation.rs",
         "src/route_navigation_adapter.rs",
         "src/run_usage_policy.rs",

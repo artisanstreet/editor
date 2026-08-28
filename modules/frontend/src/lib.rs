@@ -83,6 +83,7 @@ pub mod project_picker;
 pub mod proof;
 pub mod reader_attention;
 pub mod reasoning_display;
+pub mod repository_mark;
 pub mod route_navigation;
 pub mod route_navigation_adapter;
 pub mod run_usage_policy;
