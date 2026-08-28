@@ -20,6 +20,7 @@ rust_library(
         "src/latest_request_gate.rs",
         "src/lib.rs",
         "src/motion_spring.rs",
+        "src/notification_preferences.rs",
         "src/onboarding_route.rs",
         "src/proof.rs",
         "src/project_picker.rs",
