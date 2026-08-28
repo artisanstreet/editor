@@ -11,8 +11,8 @@ use context_usage_gauge_policy::{
     CONTEXT_USAGE_CLOSE_DELAY, CONTEXT_USAGE_DESCRIPTION_ID, CONTEXT_USAGE_MAX_WIDTH_CLASS,
     CONTEXT_USAGE_OPEN_DELAY, CONTEXT_USAGE_SIDE_OFFSET_PX, CONTEXT_USAGE_WIDTH_CLASS,
     ContextUsageDetailsInput, ContextUsageGaugeInput, ContextUsageRingInput, GaugeControlOwnership,
-    HoverCardAlign, HoverCardMaterial, HoverCardPresentation, HoverCardSide,
-    project_context_usage_gauge,
+    HoverCardAlign, HoverCardMaterial, HoverCardMaxWidthIntent, HoverCardPresentation,
+    HoverCardSide, HoverCardWidthIntent, project_context_usage_gauge,
 };
 
 fn input<'a>(
@@ -74,7 +74,11 @@ fn accessible_label_rounds_raw_percent_like_javascript_math_round() {
     for (percent, expected_rounded, expected_label) in cases {
         let projection =
             project_context_usage_gauge(input("description", percent, 90.0, None, 1.0));
-        assert_eq!(projection.trigger.label_percent, expected_rounded);
+        assert!(
+            (projection.trigger.label_percent - expected_rounded).abs() < f64::EPSILON,
+            "rounded label percent for {percent}: got {}, expected {expected_rounded}",
+            projection.trigger.label_percent
+        );
         assert_eq!(projection.trigger.aria_label, expected_label);
     }
 }
@@ -118,13 +122,13 @@ fn timing_placement_width_and_glass_material_are_typed_constants() {
     );
     assert_eq!(presentation.width.preferred_rem, 18);
     assert_eq!(
-        presentation.width.utility_class(),
+        HoverCardWidthIntent::utility_class(),
         CONTEXT_USAGE_WIDTH_CLASS
     );
     assert_eq!(presentation.max_width.maximum_rem, 20);
     assert_eq!(presentation.max_width.viewport_inset_rem, 2);
     assert_eq!(
-        presentation.max_width.utility_class(),
+        HoverCardMaxWidthIntent::utility_class(),
         CONTEXT_USAGE_MAX_WIDTH_CLASS
     );
     assert_eq!(presentation.material, HoverCardMaterial::ShaderGlassSurface);
@@ -166,7 +170,8 @@ fn non_finite_label_inputs_are_deterministic_without_affecting_forwarded_values(
     assert!(nan.trigger.label_percent.is_nan());
     assert_eq!(nan.trigger.aria_label, "Context window NaN% full");
     assert!(nan.ring.percent.is_nan());
-    assert_eq!(nan.ring.compaction_percent, f64::INFINITY);
+    assert!(nan.ring.compaction_percent.is_infinite());
+    assert!(nan.ring.compaction_percent.is_sign_positive());
 
     let infinity = project_context_usage_gauge(input(
         "description",
@@ -176,6 +181,7 @@ fn non_finite_label_inputs_are_deterministic_without_affecting_forwarded_values(
         f64::NAN,
     ));
     assert_eq!(infinity.trigger.aria_label, "Context window Infinity% full");
-    assert_eq!(infinity.ring.compaction_percent, f64::NEG_INFINITY);
+    assert!(infinity.ring.compaction_percent.is_infinite());
+    assert!(infinity.ring.compaction_percent.is_sign_negative());
     assert!(infinity.details.window_tokens.is_nan());
 }

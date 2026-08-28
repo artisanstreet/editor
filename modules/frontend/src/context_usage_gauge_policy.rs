@@ -110,7 +110,7 @@ impl HoverCardWidthIntent {
 
     /// Returns the exact utility class represented by this intent.
     #[must_use]
-    pub const fn utility_class(self) -> &'static str {
+    pub const fn utility_class() -> &'static str {
         CONTEXT_USAGE_WIDTH_CLASS
     }
 }
@@ -133,7 +133,7 @@ impl HoverCardMaxWidthIntent {
 
     /// Returns the exact utility class represented by this intent.
     #[must_use]
-    pub const fn utility_class(self) -> &'static str {
+    pub const fn utility_class() -> &'static str {
         CONTEXT_USAGE_MAX_WIDTH_CLASS
     }
 }
