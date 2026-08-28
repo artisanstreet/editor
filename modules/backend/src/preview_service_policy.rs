@@ -25,6 +25,12 @@ pub type PreviewTargetIdError = PreviewServiceError;
 /// This follows the source service's string length boundary: it does not trim
 /// or normalize the value, and `char::count` deliberately counts scalar values
 /// rather than UTF-8 bytes or grapheme clusters.
+///
+/// # Errors
+///
+/// Returns [`PreviewServiceError::InvalidTargetId`] when `target_id` contains
+/// zero or more than [`MAX_PREVIEW_TARGET_ID_SCALARS`] Unicode scalar values.
+/// The error carries no target-ID payload.
 pub fn validate_preview_target_id(target_id: &str) -> Result<(), PreviewServiceError> {
     let scalar_count = target_id.chars().count();
     if (MIN_PREVIEW_TARGET_ID_SCALARS..=MAX_PREVIEW_TARGET_ID_SCALARS).contains(&scalar_count) {
@@ -34,6 +40,13 @@ pub fn validate_preview_target_id(target_id: &str) -> Result<(), PreviewServiceE
     }
 }
 
+/// Validates a preview target identifier using the canonical policy boundary.
+///
+/// # Errors
+///
+/// Returns [`PreviewServiceError::InvalidTargetId`] when `target_id` contains
+/// zero or more than [`MAX_PREVIEW_TARGET_ID_SCALARS`] Unicode scalar values.
+/// The error is payload-free and does not retain the invalid identifier.
 pub fn validate_target_id(target_id: &str) -> Result<(), PreviewServiceError> {
     validate_preview_target_id(target_id)
 }
@@ -285,6 +298,15 @@ impl PreviewServicePolicy {
         Self
     }
 
+    /// Validates a target identifier before describing its repository read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PreviewServiceError::InvalidTargetId`] when the converted
+    /// target identifier contains zero or more than
+    /// [`MAX_PREVIEW_TARGET_ID_SCALARS`] Unicode scalar values. No
+    /// [`PreviewServiceAction::GetTarget`] action is emitted for that outcome,
+    /// and the error carries no identifier payload.
     pub fn get<T>(target_id: T) -> Result<PreviewServiceAction, PreviewServiceError>
     where
         T: Into<String>,
@@ -367,6 +389,15 @@ impl PreviewServicePolicy {
     }
 }
 
+/// Validates a target identifier and describes its repository read.
+///
+/// # Errors
+///
+/// Returns [`PreviewServiceError::InvalidTargetId`] when the converted
+/// target identifier contains zero or more than
+/// [`MAX_PREVIEW_TARGET_ID_SCALARS`] Unicode scalar values. No
+/// [`PreviewServiceAction::GetTarget`] action is emitted for that outcome,
+/// and the error carries no identifier payload.
 pub fn get<T>(target_id: T) -> Result<PreviewServiceAction, PreviewServiceError>
 where
     T: Into<String>,
