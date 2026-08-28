@@ -92,6 +92,7 @@ pub mod session_tool_policy;
 pub mod setup_label_transition_policy;
 pub mod shell;
 pub mod shell_layout;
+pub mod shell_presentation_state;
 pub mod speed_presentation;
 pub mod subscription_projection;
 pub mod tab_derivations;
