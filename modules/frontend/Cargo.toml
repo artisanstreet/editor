@@ -25,6 +25,10 @@ name = "artisan_error_code"
 path = "../../tests/frontend/artisan_error_code.rs"
 
 [[test]]
+name = "browser_dom_boundary"
+path = "../../tests/frontend/browser_dom_boundary.rs"
+
+[[test]]
 name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 

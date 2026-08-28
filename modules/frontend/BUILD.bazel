@@ -8,6 +8,7 @@ rust_library(
         "src/attention.rs",
         "src/attention_reconnect.rs",
         "src/artisan_error_code.rs",
+        "src/browser_dom_boundary.rs",
         "src/composer.rs",
         "src/context_usage_description.rs",
         "src/context_usage_model_name.rs",
