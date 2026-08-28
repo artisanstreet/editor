@@ -61,6 +61,10 @@ name = "harness_config_registry_policy"
 path = "../../tests/backend/harness_config_registry_policy.rs"
 
 [[test]]
+name = "host_machines_policy"
+path = "../../tests/backend/host_machines_policy.rs"
+
+[[test]]
 name = "subscription_patch_selection_policy"
 path = "../../tests/backend/subscription_patch_selection_policy.rs"
 
