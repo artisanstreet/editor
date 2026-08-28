@@ -12,6 +12,7 @@ rust_library(
         "src/artisan_error_code.rs",
         "src/browser_dom_boundary.rs",
         "src/composer.rs",
+        "src/composer_draft_session_policy.rs",
         "src/context_usage_description.rs",
         "src/context_usage_gauge_policy.rs",
         "src/context_usage_model_name.rs",
