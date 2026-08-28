@@ -17,6 +17,10 @@ name = "attention"
 path = "../../tests/frontend/attention.rs"
 
 [[test]]
+name = "artisan_error_code"
+path = "../../tests/frontend/artisan_error_code.rs"
+
+[[test]]
 name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 

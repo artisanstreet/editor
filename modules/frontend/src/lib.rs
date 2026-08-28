@@ -7,6 +7,7 @@
 //! rendering them: [`attention`], [`composer`], [`transcript`], and
 //! [`thread_list_selection`].
 
+pub mod artisan_error_code;
 pub mod attention;
 pub mod command_ranking;
 pub mod composer;
