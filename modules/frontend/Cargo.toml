@@ -113,6 +113,10 @@ name = "reader_attention"
 path = "../../tests/frontend/reader_attention.rs"
 
 [[test]]
+name = "runtime_surface"
+path = "../../tests/frontend/runtime_surface.rs"
+
+[[test]]
 name = "thread_list_navigation"
 path = "../../tests/frontend/thread_list_navigation.rs"
 
