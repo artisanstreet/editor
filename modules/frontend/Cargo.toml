@@ -133,6 +133,10 @@ name = "mobile_breakpoint_policy"
 path = "../../tests/frontend/mobile_breakpoint_policy.rs"
 
 [[test]]
+name = "model_favorites_presentation"
+path = "../../tests/frontend/model_favorites_presentation.rs"
+
+[[test]]
 name = "motion_spring"
 path = "../../tests/frontend/motion_spring.rs"
 
