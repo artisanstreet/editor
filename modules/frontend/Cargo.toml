@@ -57,6 +57,10 @@ name = "conversation_projection"
 path = "../../tests/frontend/conversation_projection.rs"
 
 [[test]]
+name = "conversation_relative_age"
+path = "../../tests/frontend/conversation_relative_age.rs"
+
+[[test]]
 name = "conversation_scroll_position"
 path = "../../tests/frontend/conversation_scroll_position.rs"
 
