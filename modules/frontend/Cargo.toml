@@ -305,6 +305,10 @@ name = "transcript"
 path = "../../tests/frontend/transcript.rs"
 
 [[test]]
+name = "usage_reset_duration"
+path = "../../tests/frontend/usage_reset_duration.rs"
+
+[[test]]
 name = "workspace_header_presentation"
 path = "../../tests/frontend/workspace_header_presentation.rs"
 
