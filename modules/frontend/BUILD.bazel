@@ -13,6 +13,7 @@ rust_library(
         "src/lib.rs",
         "src/proof.rs",
         "src/project_picker.rs",
+        "src/reasoning_display.rs",
         "src/shell.rs",
         "src/subscription_projection.rs",
         "src/thread_list_selection.rs",
