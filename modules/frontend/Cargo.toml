@@ -29,6 +29,10 @@ name = "context_usage_description"
 path = "../../tests/frontend/context_usage_description.rs"
 
 [[test]]
+name = "context_usage_model_name"
+path = "../../tests/frontend/context_usage_model_name.rs"
+
+[[test]]
 name = "conversation_presentation"
 path = "../../tests/frontend/conversation_presentation.rs"
 
