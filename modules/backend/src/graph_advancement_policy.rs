@@ -239,6 +239,13 @@ impl GraphAdvancementPolicy {
 
     /// Static spelling of [`Self::advance`] for callers that do not retain a
     /// policy value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphAdvancementError::IterationLimitExceeded`] when the
+    /// finite bound is exhausted before an empty terminal wave. The returned
+    /// error retains all events produced before the bound, and the aggregate
+    /// callback is not invoked.
     pub fn advance_graph<Event, DependencyEvaluator, JoinEvaluator, GroupUpdater>(
         input: impl Into<GraphTransitionInput>,
         max_iterations: usize,
