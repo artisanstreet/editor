@@ -1,5 +1,6 @@
 //! Domain-typed repositories for the native schema.
 
+mod dispatch_payload;
 mod first_message;
 mod message_dispatch;
 mod project_catalog;
@@ -13,6 +14,7 @@ use artisan_domain::{
     UnixMillis,
 };
 
+pub use dispatch_payload::MessageDispatchPayload;
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
 pub use message_dispatch::{
     ClaimMessageDispatch, ClaimedMessageDispatch, CompleteMessageDispatch, DispatchFailureReason,
