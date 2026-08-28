@@ -16,6 +16,7 @@ rust_library(
         "src/conversation_projection/validation.rs",
         "src/image_viewer.rs",
         "src/lib.rs",
+        "src/motion_spring.rs",
         "src/onboarding_route.rs",
         "src/proof.rs",
         "src/project_picker.rs",

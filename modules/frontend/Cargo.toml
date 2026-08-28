@@ -37,6 +37,10 @@ name = "conversation_projection"
 path = "../../tests/frontend/conversation_projection.rs"
 
 [[test]]
+name = "motion_spring"
+path = "../../tests/frontend/motion_spring.rs"
+
+[[test]]
 name = "native_shell"
 path = "../../tests/frontend/native_shell.rs"
 
