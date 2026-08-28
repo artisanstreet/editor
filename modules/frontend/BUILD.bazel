@@ -58,6 +58,7 @@ rust_library(
         "src/telemetry_bootstrap_policy.rs",
         "src/telemetry_preferences.rs",
         "src/thread_list_selection.rs",
+        "src/thread_title_policy.rs",
         "src/transcript.rs",
     ],
     crate_name = "artisan_frontend",
