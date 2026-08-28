@@ -15,6 +15,7 @@ pub mod directory_selection;
 pub mod engine_owner;
 pub mod listener;
 pub mod preview_service_policy;
+pub mod product_telemetry_capture_policy;
 pub mod request_handler;
 pub mod storage;
 
