@@ -731,6 +731,58 @@ Completion evidence:
 
 One controlling agent owns the active phase, architecture, shared manifests, integration, and the claim that the phase is complete. Subagents accelerate bounded work; they do not collectively design the system by accident.
 
+### VP and phase-lead operating model
+
+After the Phase 1 foundation, the controlling Codex agent acts as the port's VP:
+it owns architecture, dependency gates, portfolio order, the authoritative stack,
+cross-phase interfaces, final review, and completion claims. Ten persistent Codex
+phase leads own the project-management portfolio for Phases 2 through 11, one
+lead per phase:
+
+| Lead | Portfolio |
+| --- | --- |
+| Phase 2 lead | Domain and application protocol |
+| Phase 3 lead | QUIC transport |
+| Phase 4 lead | SQLite and SeaORM |
+| Phase 5 lead | Rust backend vertical slice |
+| Phase 6 lead | UI archaeology and SVG asset foundation |
+| Phase 7 lead | Shared GPUI framework |
+| Phase 8 lead | GPUI frontend vertical slice |
+| Phase 9 lead | Packaged end-to-end proof |
+| Phase 10 lead | Capability-by-capability native development |
+| Phase 11 lead | Browser and legacy retirement |
+
+Harness concurrency is a scheduling limit, not a reason to collapse portfolios.
+The VP activates phase leads in dependency-aware waves while retaining their
+phase identity for later follow-up work. A later-phase lead may perform bounded
+read-only reconnaissance early, but may not implement through an unapproved
+dependency or turn an unresolved product decision into an assumption.
+
+Phase leads are orchestrators. They decompose approved work into small packets,
+launch and regularly babysit external `opencode2` terminal workers, inspect their
+process and session state, recover the same session after transient provider
+failures, review all output, and report evidence to the VP. Workers use isolated
+Git worktrees and exclusive file ownership. Their summaries are not acceptance
+evidence, and no worker or phase lead may merge.
+
+The preferred worker model is Ox Alpha Max, currently selected as
+`opencode/x-preview-f-free#max`. If that model is rate-limited or unavailable,
+the phase lead refreshes `opencode2 models` and selects the available model that
+is named `Deepseek v4 flash` or `Deepseek v4 flash free`, using its maximum-effort
+variant. Those catalogue names refer to the requested DeepSeek V4 Flash 0731
+fallback even when the date is not displayed. The lead must not silently
+substitute a different model. If neither fallback name is exposed by the active
+provider catalogue, the lead records that fact and pauses or retries the original
+session with bounded backoff rather than claiming the fallback ran.
+
+All port PRs remain in the one existing GitHub stack, stack `#19`. A new branch
+is created from the current stack top through `gh stack`, its PR targets the
+branch immediately below it, and it is submitted back into the same stack.
+Phase leads and workers do not create side stacks, retarget work directly to
+`master`, merge PRs, or rewrite an already reviewed lower stack entry without
+VP approval. The VP alone integrates worker commits, runs the authoritative
+checks, submits stack entries, and decides when a phase gate has passed.
+
 ### Work packet contract
 
 Every delegated packet contains:
