@@ -1120,6 +1120,17 @@ rust_test(
 )
 
 rust_test(
+    name = "steering_pending_lip_test",
+    srcs = ["steering_pending_lip.rs"],
+    crate_name = "steering_pending_lip_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "subscription_projection_test",
     srcs = ["subscription_projection.rs"],
     crate_name = "subscription_projection_test",

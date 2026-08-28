@@ -106,6 +106,7 @@ rust_library(
         "src/shell_presentation_state.rs",
         "src/setup_label_transition_policy.rs",
         "src/speed_presentation.rs",
+        "src/steering_pending_lip.rs",
         "src/subscription_projection.rs",
         "src/tab_derivations.rs",
         "src/telemetry_bootstrap_policy.rs",
