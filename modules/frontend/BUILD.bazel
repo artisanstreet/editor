@@ -68,6 +68,7 @@ rust_library(
         "src/thread_title_policy.rs",
         "src/thread_title_settings_policy.rs",
         "src/transcript.rs",
+        "src/workspace_header_presentation.rs",
     ],
     crate_name = "artisan_frontend",
     deps = [

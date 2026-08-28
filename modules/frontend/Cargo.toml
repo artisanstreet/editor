@@ -232,5 +232,9 @@ path = "../../tests/frontend/thread_title_settings_policy.rs"
 name = "transcript"
 path = "../../tests/frontend/transcript.rs"
 
+[[test]]
+name = "workspace_header_presentation"
+path = "../../tests/frontend/workspace_header_presentation.rs"
+
 [lints]
 workspace = true
