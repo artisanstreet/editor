@@ -300,6 +300,95 @@ async fn lease_denies_early_reclaim_and_recovers_at_expiry() {
 }
 
 #[tokio::test]
+async fn exhausted_queued_head_does_not_block_later_claimable_dispatch() {
+    let (database, repository) = memory_database().await;
+    seed_foundation(&database).await;
+    seed_dispatch(
+        &database,
+        "message-exhausted",
+        "request-exhausted",
+        0,
+        3,
+        3,
+        i32::MAX,
+    )
+    .await;
+    seed_dispatch(&database, "message-ready", "request-ready", 1, 4, 4, 0).await;
+    let exhausted_before = dispatch(&database, "message-exhausted").await;
+
+    let claimed = repository
+        .claim_next_message_dispatch(claim(0x11, 10, 20))
+        .await
+        .expect("claim should skip the exhausted head")
+        .expect("later eligible dispatch should be claimed");
+    assert_eq!(claimed.message_id.as_str(), "message-ready");
+    assert_eq!(claimed.attempt_count, 1);
+
+    let exhausted_after = dispatch(&database, "message-exhausted").await;
+    assert_eq!(exhausted_after, exhausted_before);
+    let ready_after = dispatch(&database, "message-ready").await;
+    assert_eq!(ready_after.state, DispatchState::Leased);
+    assert_eq!(ready_after.attempt_count, 1);
+    assert_eq!(ready_after.lease_expires_at_ms, Some(20));
+
+    let exhausted = repository
+        .claim_next_message_dispatch(claim(0x22, 10, 30))
+        .await;
+    assert!(matches!(
+        exhausted,
+        Err(RepositoryError::DispatchAttemptLimit { message_id })
+            if message_id.as_str() == "message-exhausted"
+    ));
+    assert_eq!(
+        dispatch(&database, "message-exhausted").await,
+        exhausted_before
+    );
+}
+
+#[tokio::test]
+async fn exhausted_expired_lease_does_not_block_later_claimable_dispatch() {
+    let (database, repository) = memory_database().await;
+    seed_foundation(&database).await;
+    seed_dispatch(
+        &database,
+        "message-exhausted",
+        "request-exhausted",
+        0,
+        3,
+        3,
+        i32::MAX,
+    )
+    .await;
+    seed_dispatch(&database, "message-ready", "request-ready", 1, 4, 4, 0).await;
+    let mut exhausted = dispatch(&database, "message-exhausted")
+        .await
+        .into_active_model();
+    exhausted.state = Set(DispatchState::Leased);
+    exhausted.lease_owner = Set(Some("11".repeat(32)));
+    exhausted.lease_expires_at_ms = Set(Some(5));
+    exhausted.last_error = Set(Some("worker crashed on final attempt".to_owned()));
+    exhausted.updated_at_ms = Set(4);
+    exhausted
+        .update(&database)
+        .await
+        .expect("expired exhausted fixture should update");
+    let exhausted_before = dispatch(&database, "message-exhausted").await;
+
+    let claimed = repository
+        .claim_next_message_dispatch(claim(0x22, 10, 20))
+        .await
+        .expect("claim should skip the exhausted expired lease")
+        .expect("later eligible dispatch should be claimed");
+    assert_eq!(claimed.message_id.as_str(), "message-ready");
+    assert_eq!(claimed.attempt_count, 1);
+
+    assert_eq!(
+        dispatch(&database, "message-exhausted").await,
+        exhausted_before
+    );
+}
+
+#[tokio::test]
 async fn invalid_transitions_leave_the_dispatch_unchanged() {
     let (database, repository) = memory_database().await;
     seed_foundation(&database).await;
