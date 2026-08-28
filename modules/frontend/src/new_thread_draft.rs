@@ -30,6 +30,7 @@ pub fn new_thread_draft_key(workspace_id: Option<&str>) -> String {
 /// event or UI-framework type. A later lifecycle integration can translate
 /// its event into this input without making this pure policy own prevention,
 /// navigation, persistence, or thread creation.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NewThreadActivation {
     /// Whether the Alt/Option modifier was held.
@@ -46,6 +47,7 @@ pub struct NewThreadActivation {
 
 impl NewThreadActivation {
     /// Creates an activation projection from the button and modifier state.
+    #[allow(clippy::fn_params_excessive_bools)]
     #[must_use]
     pub const fn new(
         button: u8,
