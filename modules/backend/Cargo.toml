@@ -37,6 +37,10 @@ name = "agent_name_catalog_policy"
 path = "../../tests/backend/agent_name_catalog_policy.rs"
 
 [[test]]
+name = "agent_orchestrator_start_failure_policy"
+path = "../../tests/backend/agent_orchestrator_start_failure_policy.rs"
+
+[[test]]
 name = "app_test"
 path = "../../tests/backend/app.rs"
 

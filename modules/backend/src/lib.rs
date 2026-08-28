@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 pub mod agent_name_allocation_policy;
 pub mod agent_name_catalog_policy;
+pub mod agent_orchestrator_start_failure_policy;
 pub mod app;
 pub mod builtin_tool_capabilities_policy;
 pub mod command_admission;
