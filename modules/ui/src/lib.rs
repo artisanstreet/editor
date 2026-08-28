@@ -1,5 +1,6 @@
 //! Shared Artisan presentation and interaction primitives for `GPUI` consumers.
 
+pub mod alert;
 pub mod asset_seam;
 pub mod avatar;
 pub mod badge;
