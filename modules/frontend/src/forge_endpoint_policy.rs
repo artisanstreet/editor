@@ -129,13 +129,12 @@ pub fn decode_loopback_forge_endpoint(candidate: &str) -> Option<String> {
     }
 
     let after_scheme = candidate.get(scheme_end + 1..)?;
-    if !after_scheme.starts_with("//") {
-        return None;
-    }
-
-    let authority_source = after_scheme.get(2..)?;
+    let authority_start = after_scheme
+        .find(|character: char| character != '/' && character != '\\')
+        .unwrap_or(after_scheme.len());
+    let authority_source = after_scheme.get(authority_start..)?;
     let authority_end = authority_source
-        .find(['/', '?', '#'])
+        .find(['/', '\\', '?', '#'])
         .unwrap_or(authority_source.len());
     let authority = &authority_source[..authority_end];
     let (host, port) = parse_authority(authority)?;
@@ -242,7 +241,7 @@ fn parse_authority(authority: &str) -> Option<(String, String)> {
     let separator = authority.rfind(':')?;
     let host = authority.get(..separator)?;
     let port_text = authority.get(separator + 1..)?;
-    if host.is_empty() || host.contains(':') || host != "127.0.0.1" {
+    if host.is_empty() || host.contains(':') || !is_loopback_ipv4_host(host) {
         return None;
     }
 
@@ -264,4 +263,104 @@ fn parse_non_default_port(port_text: &str) -> Option<String> {
     }
 
     Some(port.to_string())
+}
+
+fn is_loopback_ipv4_host(host: &str) -> bool {
+    percent_decode_host(host).and_then(|decoded| parse_ipv4_host(&decoded)) == Some([127, 0, 0, 1])
+}
+
+fn percent_decode_host(host: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(host.len());
+    let mut bytes = host.bytes();
+    while let Some(byte) = bytes.next() {
+        let decoded_byte = if byte == b'%' {
+            let high = hex_digit(bytes.next()?)?;
+            let low = hex_digit(bytes.next()?)?;
+            high * 16 + low
+        } else {
+            byte
+        };
+        if !decoded_byte.is_ascii() {
+            return None;
+        }
+        decoded.push(char::from(decoded_byte));
+    }
+    Some(decoded)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_ipv4_host(host: &str) -> Option<[u8; 4]> {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() {
+        return None;
+    }
+
+    let mut parts = [0_u64; 4];
+    let mut part_count = 0;
+    for part in host.split('.') {
+        if part_count == parts.len() {
+            return None;
+        }
+        parts[part_count] = parse_ipv4_number(part)?;
+        part_count += 1;
+    }
+
+    let last_index = part_count.checked_sub(1)?;
+    let last_limit = 1_u64 << (8 * (5 - part_count));
+    if parts[last_index] >= last_limit
+        || parts[..last_index]
+            .iter()
+            .any(|part| *part > u64::from(u8::MAX))
+    {
+        return None;
+    }
+
+    let mut address = parts[last_index];
+    for (index, part) in parts[..last_index].iter().enumerate() {
+        address = address.checked_add(*part << (8 * (3 - index)))?;
+    }
+
+    Some(u32::try_from(address).ok()?.to_be_bytes())
+}
+
+fn parse_ipv4_number(part: &str) -> Option<u64> {
+    if part.is_empty() {
+        return None;
+    }
+
+    let bytes = part.as_bytes();
+    let (digits, radix): (&str, u64) =
+        if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
+            (part.get(2..)?, 16)
+        } else if bytes.len() > 1 && bytes[0] == b'0' {
+            (part, 8)
+        } else {
+            (part, 10)
+        };
+    if digits.is_empty() {
+        return None;
+    }
+
+    let mut value = 0_u64;
+    for digit in digits.bytes() {
+        let value_digit = match digit {
+            b'0'..=b'9' => u64::from(digit - b'0'),
+            b'a'..=b'f' => u64::from(digit - b'a' + 10),
+            b'A'..=b'F' => u64::from(digit - b'A' + 10),
+            _ => return None,
+        };
+        if value_digit >= radix {
+            return None;
+        }
+        value = value.checked_mul(radix)?.checked_add(value_digit)?;
+    }
+    Some(value)
 }

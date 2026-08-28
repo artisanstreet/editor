@@ -4,11 +4,11 @@
 mod forge_endpoint_policy;
 
 use forge_endpoint_policy::{
-    FORGE_ENDPOINT_STORAGE_KEY, ForgeEndpointAdoptionResult, ForgeEndpointStorageIntent,
-    ForgeEndpointStorageReadResult, ForgeEndpointStorageWriteOutcome,
-    ForgeEndpointStorageWriteResult, MAX_FORGE_ENDPOINT_CODE_UNITS, adopt_forge_endpoint,
-    complete_forge_endpoint_adoption, decode_loopback_forge_endpoint, endpoint_bearing_page,
-    forge_http_url, is_endpoint_bearing_page, resolve_forge_endpoint,
+    adopt_forge_endpoint, complete_forge_endpoint_adoption, decode_loopback_forge_endpoint,
+    endpoint_bearing_page, forge_http_url, is_endpoint_bearing_page, resolve_forge_endpoint,
+    ForgeEndpointAdoptionResult, ForgeEndpointStorageIntent, ForgeEndpointStorageReadResult,
+    ForgeEndpointStorageWriteOutcome, ForgeEndpointStorageWriteResult, FORGE_ENDPOINT_STORAGE_KEY,
+    MAX_FORGE_ENDPOINT_CODE_UNITS,
 };
 
 #[test]
@@ -56,6 +56,54 @@ fn loopback_http_origins_normalize_and_discard_url_suffixes() {
             decode_loopback_forge_endpoint(candidate).as_deref(),
             Some(expected),
             "candidate {candidate:?} normalization"
+        );
+    }
+}
+
+#[test]
+fn whatwg_special_http_and_numeric_ipv4_forms_normalize_for_admission() {
+    let accepted = [
+        ("http:127.0.0.1:4312", "http://127.0.0.1:4312"),
+        ("http:/127.0.0.1:4312", "http://127.0.0.1:4312"),
+        ("http:\\127.0.0.1:4312", "http://127.0.0.1:4312"),
+        ("http:\\\\127.0.0.1:4312", "http://127.0.0.1:4312"),
+        ("http://///127.0.0.1:4312", "http://127.0.0.1:4312"),
+        ("http://127.0.0.1:4312\\path", "http://127.0.0.1:4312"),
+        ("http://127.1:4312", "http://127.0.0.1:4312"),
+        ("http://127.0.0.1.:4312", "http://127.0.0.1:4312"),
+        ("http://127.0.1:4312", "http://127.0.0.1:4312"),
+        ("http://0177.0.0.1:4312", "http://127.0.0.1:4312"),
+        ("http://017700000001:4312", "http://127.0.0.1:4312"),
+        ("http://0x7f.0.0.1:4312", "http://127.0.0.1:4312"),
+        ("http://0x7f000001:4312", "http://127.0.0.1:4312"),
+        ("http://2130706433:4312", "http://127.0.0.1:4312"),
+        ("http://%31%32%37.0.0.1:4312", "http://127.0.0.1:4312"),
+        ("http://127.0.0.1%2e:4312", "http://127.0.0.1:4312"),
+    ];
+
+    for (candidate, expected) in accepted {
+        assert_eq!(
+            decode_loopback_forge_endpoint(candidate).as_deref(),
+            Some(expected),
+            "candidate {candidate:?} normalization"
+        );
+    }
+
+    let rejected = [
+        "http://127.2:4312",
+        "http://0177.0.0.2:4312",
+        "http://0x7f000002:4312",
+        "http://2130706434:4312",
+        "http://08.0.0.1:4312",
+        "http://127.0.0.1..:4312",
+        "http://4294967296:4312",
+    ];
+
+    for candidate in rejected {
+        assert_eq!(
+            decode_loopback_forge_endpoint(candidate),
+            None,
+            "candidate {candidate:?} must be rejected"
         );
     }
 }
