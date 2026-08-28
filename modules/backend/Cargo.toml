@@ -57,6 +57,10 @@ name = "listener"
 path = "../../tests/backend/listener.rs"
 
 [[test]]
+name = "preview_service_policy"
+path = "../../tests/backend/preview_service_policy.rs"
+
+[[test]]
 name = "request_handler"
 path = "../../tests/backend/request_handler.rs"
 
