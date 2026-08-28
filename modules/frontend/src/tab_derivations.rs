@@ -62,6 +62,11 @@ pub enum TabDerivationError {
 /// `Set`: it preserves state ordering and excludes every state tab whose ID is
 /// present in the final visible list.  A missing active ID causes no
 /// promotion.
+///
+/// # Errors
+///
+/// Returns [`TabDerivationError::NonFiniteMaxVisible`] when `max_visible` is
+/// `NaN` or infinite.
 #[must_use = "handle the derived tab lists or limit error"]
 pub fn derive_tab_overflow(
     state: &WorkspaceState,
