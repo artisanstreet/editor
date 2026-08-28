@@ -97,16 +97,18 @@ pub struct EditorSessionStartedTelemetryIntent {
 ///
 /// The widened subtraction mirrors `ready - started` while avoiding signed
 /// overflow for synthetic or malformed extreme inputs. No clock is read.
-#[allow(clippy::cast_lossless, clippy::cast_possible_truncation)]
 #[must_use]
-pub const fn time_to_ready_ms(started_at_ms: i64, ready_at_ms: i64) -> u64 {
-    let elapsed_ms = ready_at_ms as i128 - started_at_ms as i128;
+pub fn time_to_ready_ms(started_at_ms: i64, ready_at_ms: i64) -> u64 {
+    let elapsed_ms = i128::from(ready_at_ms) - i128::from(started_at_ms);
     if elapsed_ms <= 0 {
         0
-    } else if elapsed_ms >= MAX_TIME_TO_READY_MS as i128 {
+    } else if elapsed_ms >= i128::from(MAX_TIME_TO_READY_MS) {
         MAX_TIME_TO_READY_MS
     } else {
-        elapsed_ms as u64
+        match u64::try_from(elapsed_ms) {
+            Ok(value) => value,
+            Err(_) => MAX_TIME_TO_READY_MS,
+        }
     }
 }
 
