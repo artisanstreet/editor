@@ -321,6 +321,7 @@ dependencies = [
  "artisan-database",
  "artisan-domain",
  "artisan-migrations",
+ "artisan-protocol",
  "artisan-transport",
  "zeroize",
 ]
