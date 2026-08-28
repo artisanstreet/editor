@@ -53,9 +53,10 @@
 //!   current renderer does not claim a screen reader consumes them.
 
 use artisan_assets::AssetId;
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Div, Hsla, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
-    Styled, Window, div, px,
+    AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce,
+    SharedString, Styled, Window, div, px,
 };
 
 use crate::asset_seam::asset_glyph;
@@ -354,9 +355,12 @@ impl Alert {
 
 impl RenderOnce for Alert {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let style = self.style;
         let has_action = self.action.is_some();
         let has_icon = self.icon.is_some();
+        let has_title = self.title.is_some();
+        let has_description = self.description.is_some();
+        let has_content = self.content.is_some();
+        let style = self.style;
 
         let prefix = self
             .debug_selector
@@ -419,9 +423,10 @@ impl RenderOnce for Alert {
             .w_full();
 
         if let Some(icon) = self.icon {
+            let icon_selector_clone = icon_selector.clone();
             let mut icon_element = div()
                 .flex_shrink_0()
-                .debug_selector(move || icon_selector)
+                .debug_selector(move || icon_selector_clone)
                 .child(
                     asset_glyph(icon)
                         .size(style.icon_size)
@@ -442,11 +447,12 @@ impl RenderOnce for Alert {
             .flex_1();
 
         if let Some(title) = self.title {
+            let title_selector_clone = title_selector.clone();
             let title_element = div()
                 .min_w_0()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(style.foreground)
-                .debug_selector(move || title_selector)
+                .debug_selector(move || title_selector_clone)
                 .child(title);
             content_column = content_column.child(title_element);
         } else if has_icon {
@@ -455,54 +461,52 @@ impl RenderOnce for Alert {
         }
 
         if let Some(description) = self.description {
+            let description_selector_clone = description_selector.clone();
             let description_element = div()
                 .min_w_0()
                 .text_size(style.text_size)
                 .text_color(style.description_foreground)
-                .debug_selector(move || description_selector)
+                .debug_selector(move || description_selector_clone)
                 .child(description);
             content_column = content_column.child(description_element);
         }
 
         if let Some(content) = self.content {
+            let content_selector_clone = content_selector.clone();
             let freeform = div()
                 .min_w_0()
-                .debug_selector(move || content_selector)
+                .debug_selector(move || content_selector_clone)
                 .child(content);
             content_column = content_column.child(freeform);
-        }
-
-        // When there is no icon, title, description, or freeform content the
-        // column is still mounted (as the alert's text slot) so the action
-        // reservation and border remain inspectable; no placeholder child is
-        // needed.
-        if self.title.is_none() && self.description.is_none() && self.content.is_none() && !has_icon
-        {
-            // Keep the row structure stable even for an empty alert: the root
-            // remains a valid inline surface and the action placement is
-            // unchanged.
-            let _ = title_selector;
-            let _ = description_selector;
-            let _ = content_selector;
         }
 
         row = row.child(content_column);
         root = root.child(row);
 
         if let Some(action) = self.action {
+            let action_selector_clone = action_selector.clone();
             let action_wrapper = div()
                 .absolute()
                 .top(style.action_top)
                 .right(style.action_right)
-                .debug_selector(move || action_selector)
+                .debug_selector(move || action_selector_clone)
                 .child(action);
             root = root.child(action_wrapper);
         }
 
-        // Suppress unused selector warning when both icon and content cases
-        // are absent simultaneously; the root still paints the bordered
-        // surface.
-        let _ = icon_selector;
+        // Keep selector strings live after the conditional clones so the
+        // `debug_selector` suffix convention remains stable and unused
+        // variable lints stay quiet regardless of which branches executed.
+        let _ = (
+            title_selector,
+            description_selector,
+            content_selector,
+            icon_selector,
+            action_selector,
+            has_title,
+            has_description,
+            has_content,
+        );
 
         root
     }
