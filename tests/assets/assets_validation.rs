@@ -20,6 +20,10 @@
 //! - manifest schema via the pinned `toml` crate: duplicate keys rejected by
 //!   the parser itself, exact field sets per row kind, id/family grammar,
 //!   normalized no-escape paths (origins included), use-site closure;
+//! - catalog presentation policy independent of the validator-derived
+//!   `monochrome` property: monochrome-derived default with exactly the two
+//!   evidenced authored-color brand exceptions, deterministic across lookups
+//!   for every one of the 104 ids;
 //! - standalone-SVG validity and policy via `roxmltree` document parsing:
 //!   DOCTYPE/ENTITY declarations, script/foreignObject elements, every `on*`
 //!   event attribute, and non-allowlisted href/src values are rejected, while
@@ -30,7 +34,9 @@ use core::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
-use artisan_assets::{AssetId, LICENSE_FILES, MANIFEST_TOML, get as catalog_get, license, lookup};
+use artisan_assets::{
+    AssetId, LICENSE_FILES, MANIFEST_TOML, Presentation, get as catalog_get, license, lookup,
+};
 
 // ------------------------------------------------------------ runfiles
 
@@ -1211,6 +1217,93 @@ fn physical_bytes_equal_embedded_source_and_raw_digest() {
 
         assert_safe_svg(physical, id);
     }
+}
+
+#[test]
+fn presentation_policy_is_independent_of_monochrome_with_exactly_two_exceptions() {
+    // docs/ui/ASSETS.md §10: `monochrome` is the validator-derived artwork
+    // property, while legacy EngineMark/RepositoryMark flags were rendering
+    // policy ("single-color logo that must invert with the theme"). The
+    // catalog records native presentation separately from artwork structure:
+    // the default derives from `monochrome`, overridden by exactly the brand
+    // marks whose legacy call sites proved their authored single-hue colors
+    // must survive — Claude clay #D97757 (engine `claude`, provider
+    // `anthropic`) and DeepSeek blue #4D6BFE (provider `deepseek`).
+    const AUTHORED_COLOR_EXCEPTIONS: [&str; 2] = ["svgl.claude-ai", "svgl.deepseek"];
+
+    let mut tinted = 0usize;
+    let mut full_color = 0usize;
+    let mut monochrome_tinted = 0usize;
+    let mut monochrome_full_color: Vec<&str> = Vec::new();
+
+    for asset in artisan_assets::ALL {
+        let presentation = catalog_get(asset.id).presentation;
+        match presentation {
+            Presentation::Tinted => tinted += 1,
+            Presentation::FullColor => full_color += 1,
+        }
+        if asset.monochrome {
+            match presentation {
+                Presentation::Tinted => monochrome_tinted += 1,
+                Presentation::FullColor => monochrome_full_color.push(asset.id.as_str()),
+            }
+        } else {
+            assert_eq!(
+                presentation,
+                Presentation::FullColor,
+                "{}: polychrome artwork must render full-color",
+                asset.id
+            );
+        }
+
+        // Determinism: both catalog paths agree for every id.
+        let via_lookup = lookup(asset.id.as_str())
+            .expect("catalog id resolves")
+            .presentation;
+        assert_eq!(
+            presentation, via_lookup,
+            "{}: presentation is deterministic across lookups",
+            asset.id
+        );
+    }
+
+    // The divergence set is exactly the two evidenced exceptions: no other
+    // monochrome asset may bypass theme tinting.
+    monochrome_full_color.sort_unstable();
+    assert_eq!(
+        monochrome_full_color, AUTHORED_COLOR_EXCEPTIONS,
+        "authored-color overrides beyond the evidenced brand marks"
+    );
+
+    // Exhaustive counts over all 104 ids: 12 polychrome artworks plus the two
+    // authored-color exceptions render full-color; every other asset tints.
+    assert_eq!(artisan_assets::ALL.len(), 104);
+    assert_eq!(full_color, 14);
+    assert_eq!(tinted, 90);
+    assert_eq!(monochrome_tinted, 90);
+
+    // The exceptions really carry their authored single-hue colors in the
+    // embedded bytes while their structural monochrome stays true.
+    for id in AUTHORED_COLOR_EXCEPTIONS {
+        let asset = lookup(id).expect("exception id resolves");
+        assert!(asset.monochrome, "{id}: artwork monochrome stays true");
+        assert_eq!(asset.presentation, Presentation::FullColor);
+    }
+    let claude = lookup("svgl.claude-ai").expect("claude-ai");
+    assert!(claude.source.contains("#D97757"), "authored clay missing");
+    let deepseek = lookup("svgl.deepseek").expect("deepseek");
+    assert!(deepseek.source.contains("#4D6BFE"), "authored blue missing");
+
+    // Ordinary Tabler/currentColor controls stay tinted. currentColor brand
+    // artwork (`svgl.qwen`) adapts through text color exactly like its legacy
+    // rendering and must not be flipped to full-color raster, which would pin
+    // it to black.
+    let check = lookup("tabler.check").expect("control glyph");
+    assert!(check.monochrome);
+    assert_eq!(check.presentation, Presentation::Tinted);
+    let qwen = lookup("svgl.qwen").expect("qwen");
+    assert!(qwen.monochrome && qwen.source.contains("currentColor"));
+    assert_eq!(qwen.presentation, Presentation::Tinted);
 }
 
 #[test]

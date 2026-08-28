@@ -4,10 +4,10 @@
 //! Static UI artwork enters GPUI through exactly two verified pipelines, and
 //! the choice between them belongs to catalog metadata, never to callers:
 //!
-//! - **Monochrome** assets rasterize through GPUI's alpha-mask `svg()`
+//! - **Tinted** assets rasterize through GPUI's alpha-mask `svg()`
 //!   renderer and take their painted color from GPUI text color, so theme
 //!   tinting stays an ordinary [`gpui::Styled`] refinement at the call site.
-//! - **Multicolor** assets render through `img()` with an explicitly
+//! - **Full-color** assets render through `img()` with an explicitly
 //!   constructed [`ImageSource::Resource`] of the [`gpui::Resource::Embedded`]
 //!   variant. The explicit variant matters: upstream `From<&str>`
 //!   classifies bare catalog keys such as `"svgl.gitlab"` as URIs (they parse
@@ -26,7 +26,7 @@
 //!
 //! - The public API accepts only [`AssetId`]. There is no string, path, or
 //!   caller-supplied tint flag anywhere on the primary surface; the route is
-//!   derived from `Asset::monochrome` inside [`asset_glyph`] and cannot be
+//!   derived from `Asset::presentation` inside [`asset_glyph`] and cannot be
 //!   forged from outside the catalog expansion.
 //! - The adapter returns only `Ok` values. GPUI re-exports the result type
 //!   its [`AssetSource`] signatures require (`gpui::Result`), and the
@@ -46,15 +46,13 @@ use gpui::{
 
 /// Which GPUI pipeline presents a cataloged asset.
 ///
-/// Derived exclusively from catalog metadata; callers can observe the choice
-/// (tests, layout decisions) but cannot construct or influence it.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Presentation {
-    /// Alpha-masked `svg()` rendering, painted in GPUI text color.
-    Tinted,
-    /// Full-color `img()` rendering over explicitly embedded bytes.
-    FullColor,
-}
+/// The typed policy itself lives in the sealed catalog
+/// (`artisan_assets::Presentation`, with the evidenced exceptions to the
+/// monochrome default documented there); this re-export keeps the seam's
+/// public surface self-contained. The choice for any given id is fixed by
+/// catalog metadata: callers can observe it (tests, layout decisions) but
+/// cannot construct or influence the route an id takes.
+pub use artisan_assets::Presentation;
 
 /// The already-routed GPUI element behind an [`AssetGlyph`].
 ///
@@ -77,18 +75,22 @@ pub struct AssetGlyph(GlyphRoute);
 
 /// Prepares `id` for presentation along its catalog-derived route.
 ///
-/// Monochrome assets (per `artisan_assets::get(id).monochrome`) take the
-/// tinted alpha-mask route; everything else keeps its authored colors.
+/// Assets whose catalog policy is [`Presentation::Tinted`] rasterize through
+/// the alpha-mask route and paint in GPUI text color;
+/// [`Presentation::FullColor`] assets keep their authored colors over
+/// explicitly embedded bytes. The policy is catalog metadata
+/// (`artisan_assets::get(id).presentation`), not a caller argument.
 #[must_use]
 pub fn asset_glyph(id: AssetId) -> AssetGlyph {
-    if artisan_assets::get(id).monochrome {
-        AssetGlyph(GlyphRoute::Tinted(svg().path(id.as_str())))
-    } else {
-        // Explicitly embedded: `img(key)` alone would misclassify the key as
-        // a URI and attempt an HTTP fetch.
-        AssetGlyph(GlyphRoute::FullColor(img(ImageSource::Resource(
-            Resource::Embedded(SharedString::from(id.as_str())),
-        ))))
+    match artisan_assets::get(id).presentation {
+        Presentation::Tinted => AssetGlyph(GlyphRoute::Tinted(svg().path(id.as_str()))),
+        Presentation::FullColor => {
+            // Explicitly embedded: `img(key)` alone would misclassify the key
+            // as a URI and attempt an HTTP fetch.
+            AssetGlyph(GlyphRoute::FullColor(img(ImageSource::Resource(
+                Resource::Embedded(SharedString::from(id.as_str())),
+            ))))
+        }
     }
 }
 
