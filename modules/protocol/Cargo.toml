@@ -8,6 +8,7 @@ version.workspace = true
 [dependencies]
 artisan-domain = { path = "../domain" }
 capnp.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 

@@ -1,5 +1,5 @@
 {
-  "checksum": "043c9dd98f1f6596b37eb43eb76b86a50835d09a1397c94f6ce411989db3b060",
+  "checksum": "bf3417425beb252ab941fb1ec9bc63af5b03e3a461a7c6d201e21b6353b5bbfa",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2070,6 +2070,10 @@
             {
               "id": "capnp 0.27.0",
               "target": "capnp"
+            },
+            {
+              "id": "subtle 2.6.1",
+              "target": "subtle"
             },
             {
               "id": "thiserror 2.0.20",
@@ -55888,6 +55892,7 @@
     "sea-orm 2.0.2",
     "sea-orm-migration 2.0.2",
     "sqlx-sqlite 0.9.0",
+    "subtle 2.6.1",
     "syntect 5.3.0",
     "thiserror 2.0.20",
     "tokio 1.53.1",
