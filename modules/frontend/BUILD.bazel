@@ -32,6 +32,7 @@ rust_library(
         "src/conversation_turn_navigator.rs",
         "src/dev_instance_policy.rs",
         "src/editor_route_gate_policy.rs",
+        "src/editor_view_state_policy.rs",
         "src/editor_workspace_identity.rs",
         "src/engine_section_indicator_policy.rs",
         "src/engine_usage_cache.rs",
