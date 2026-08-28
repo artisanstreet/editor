@@ -1,13 +1,13 @@
 [package]
-name = "artisan-protocol"
+name = "artisan-capnp-codegen"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-artisan-domain = { path = "../domain" }
 capnp.workspace = true
+capnpc.workspace = true
 
 [lints]
 workspace = true

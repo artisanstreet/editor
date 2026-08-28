@@ -1,5 +1,5 @@
 {
-  "checksum": "d1635d6c8afbcb840c1c7aa1c3018f78a81ca881d3cbf49baeba995eb2dea3b4",
+  "checksum": "5ddea25b812c9b6fd85b7f7b6117f1e40ba0ef51f86fb3fcce0a852730ccbd0d",
   "crates": {
     "aho-corasick 1.1.5": {
       "name": "aho-corasick",
@@ -158,6 +158,39 @@
         "compile_data_glob": [
           "**"
         ],
+        "edition": "2024",
+        "version": "0.0.0"
+      },
+      "license": "BSD-3-Clause",
+      "license_ids": [
+        "BSD-3-Clause"
+      ],
+      "license_file": null
+    },
+    "artisan-capnp-codegen 0.0.0": {
+      "name": "artisan-capnp-codegen",
+      "version": "0.0.0",
+      "package_url": null,
+      "repository": null,
+      "targets": [],
+      "library_target_name": null,
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "capnp 0.27.0",
+              "target": "capnp"
+            },
+            {
+              "id": "capnpc 0.27.0",
+              "target": "capnpc"
+            }
+          ],
+          "selects": {}
+        },
         "edition": "2024",
         "version": "0.0.0"
       },
@@ -358,6 +391,15 @@
         "compile_data_glob": [
           "**"
         ],
+        "deps": {
+          "common": [
+            {
+              "id": "capnp 0.27.0",
+              "target": "capnp"
+            }
+          ],
+          "selects": {}
+        },
         "edition": "2024",
         "version": "0.0.0"
       },
@@ -1178,6 +1220,99 @@
         },
         "edition": "2021",
         "version": "1.12.1"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
+    "capnp 0.27.0": {
+      "name": "capnp",
+      "version": "0.27.0",
+      "package_url": "https://github.com/capnproto/capnproto-rust",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/capnp/0.27.0/download",
+          "sha256": "6ebfc0da565e747b1640e029bfbda72f61f39fcddfc8b465b4ae3f3e8b649f78"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "capnp",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "capnp",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "alloc",
+            "default",
+            "std"
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.27.0"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
+    },
+    "capnpc 0.27.0": {
+      "name": "capnpc",
+      "version": "0.27.0",
+      "package_url": "https://github.com/capnproto/capnproto-rust",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/capnpc/0.27.0/download",
+          "sha256": "82ca16312ddb64529d31c8dc46148671c22e57b80134fa5f17811ad5a6a79492"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "capnpc",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "capnpc",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "capnp 0.27.0",
+              "target": "capnp"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.27.0"
       },
       "license": "MIT",
       "license_ids": [
@@ -2531,6 +2666,45 @@
         },
         "edition": "2021",
         "version": "1.18.0"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "embedded-io 0.7.1": {
+      "name": "embedded-io",
+      "version": "0.7.1",
+      "package_url": "https://github.com/rust-embedded/embedded-hal",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/embedded-io/0.7.1/download",
+          "sha256": "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "embedded_io",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "embedded_io",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2021",
+        "version": "0.7.1"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -13379,6 +13553,7 @@
   "workspace_members": {
     "artisan-assets 0.0.0": "modules/assets",
     "artisan-backend 0.0.0": "modules/backend",
+    "artisan-capnp-codegen 0.0.0": "scripts/capnp_codegen",
     "artisan-database 0.0.0": "modules/database",
     "artisan-domain 0.0.0": "modules/domain",
     "artisan-frontend 0.0.0": "modules/frontend",
@@ -13511,6 +13686,8 @@
     ]
   },
   "direct_deps": [
+    "capnp 0.27.0",
+    "capnpc 0.27.0",
     "quinn 0.11.11",
     "rustls 0.23.43",
     "rustls-pki-types 1.15.1",
