@@ -10,6 +10,7 @@ artisan-database = { path = "../database" }
 artisan-domain = { path = "../domain" }
 artisan-migrations = { path = "../migrations" }
 artisan-transport = { path = "../transport" }
+zeroize.workspace = true
 
 [lints]
 workspace = true
