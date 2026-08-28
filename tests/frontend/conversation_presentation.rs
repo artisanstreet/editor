@@ -98,6 +98,7 @@ fn initially_open_matches_working_for_every_input_combination() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn disclosure_matches_every_four_boolean_truth_table_case() {
     struct Case {
         input: WorkSessionDisclosureInput,
