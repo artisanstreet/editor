@@ -34,6 +34,7 @@ rust_library(
         "src/engine_owner/observation.rs",
         "src/lib.rs",
         "src/listener.rs",
+        "src/preview_service_policy.rs",
         "src/request_handler.rs",
         "src/storage.rs",
         "//tests/backend:directory_controller.rs",
