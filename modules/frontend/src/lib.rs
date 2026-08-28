@@ -10,6 +10,7 @@
 pub mod artisan_error_code;
 pub mod attention;
 pub mod attention_reconnect;
+pub mod browser_dom_boundary;
 pub mod command_ranking;
 pub mod composer;
 pub mod context_usage_description;
