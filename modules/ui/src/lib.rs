@@ -8,5 +8,6 @@ pub mod markdown;
 pub mod motion;
 pub mod separator;
 pub mod theme;
+pub mod tooltip;
 
 pub use artisan_assets::AssetId;
