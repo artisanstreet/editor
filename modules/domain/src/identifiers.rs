@@ -167,3 +167,18 @@ wire_identifier! {
     /// target thread id, and the bounded body.
     MessageId
 }
+
+wire_identifier! {
+    /// Forge-minted identity of one canonical conversation turn.
+    TurnId
+}
+
+wire_identifier! {
+    /// Forge-minted identity of one renderer-visible conversation item.
+    ItemId
+}
+
+wire_identifier! {
+    /// Forge-minted identity of one replayable conversation patch.
+    PatchId
+}

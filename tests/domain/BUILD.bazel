@@ -56,3 +56,14 @@ rust_test(
     size = "small",
     visibility = ["//:__pkg__"],
 )
+
+rust_test(
+    name = "conversation_test",
+    srcs = ["conversation.rs"],
+    crate_name = "conversation_test",
+    deps = ["//modules/domain:domain"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
