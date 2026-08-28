@@ -11,6 +11,7 @@ pub mod active_thread_light_policy;
 pub mod activity_status_labels;
 pub mod approval_presentation;
 pub mod artisan_error_code;
+pub mod attachment_tray_policy;
 pub mod attention;
 pub mod attention_reconnect;
 pub mod attention_title_policy;
