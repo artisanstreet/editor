@@ -37,6 +37,10 @@ name = "conversation_projection"
 path = "../../tests/frontend/conversation_projection.rs"
 
 [[test]]
+name = "image_inspection_store"
+path = "../../tests/frontend/image_inspection_store.rs"
+
+[[test]]
 name = "latest_request_gate"
 path = "../../tests/frontend/latest_request_gate.rs"
 
