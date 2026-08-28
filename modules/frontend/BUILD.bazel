@@ -15,6 +15,7 @@ rust_library(
         "src/conversation_presentation.rs",
         "src/conversation_projection.rs",
         "src/conversation_projection/validation.rs",
+        "src/conversation_scroll_position.rs",
         "src/image_inspection_store.rs",
         "src/image_policy.rs",
         "src/image_viewer.rs",
