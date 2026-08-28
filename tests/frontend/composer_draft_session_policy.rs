@@ -4,9 +4,9 @@
 mod composer_draft_session_policy;
 
 use composer_draft_session_policy::{
-    ComposerDraft, ComposerDraftDocument, ComposerDraftSession, ComposerDraftStore,
-    ComposerDraftToken, ComposerDraftWriteResult, ComposerImageAttachment,
-    InMemoryComposerDraftStore,
+    ComposerDraft, ComposerDraftDocument, ComposerDraftPersistResult, ComposerDraftRestoreResult,
+    ComposerDraftSession, ComposerDraftStore, ComposerDraftToken, ComposerDraftWriteResult,
+    ComposerImageAttachment, InMemoryComposerDraftStore,
 };
 
 fn document(text: &str, tokens: &[(&str, usize)]) -> ComposerDraftDocument {
@@ -84,9 +84,12 @@ fn absent_key_is_a_noop_for_persist_restore_and_clear() {
             &document("ignored", &[("ignored", 1)]),
             &[attachment("ignored", true)],
         ),
-        Default::default()
+        ComposerDraftPersistResult::default()
     );
-    assert_eq!(session.restore(&mut store, true), Default::default());
+    assert_eq!(
+        session.restore(&mut store, true),
+        ComposerDraftRestoreResult::default()
+    );
     assert!(!session.restore_attempted());
     assert!(!session.clear(&mut store));
     assert_eq!(store.get("other"), Some(&existing));
@@ -100,7 +103,10 @@ fn missing_target_does_not_consume_the_restore_opportunity() {
     let mut session = ComposerDraftSession::for_key("draft");
 
     assert_eq!(session.draft_key(), Some("draft"));
-    assert_eq!(session.restore(&mut store, false), Default::default());
+    assert_eq!(
+        session.restore(&mut store, false),
+        ComposerDraftRestoreResult::default()
+    );
     assert!(!session.restore_attempted());
 
     let restored = session.restore(&mut store, true);
@@ -108,7 +114,10 @@ fn missing_target_does_not_consume_the_restore_opportunity() {
     assert!(restored.restored.is_some());
     assert!(restored.persisted);
     assert!(session.restore_attempted());
-    assert_eq!(session.restore(&mut store, true), Default::default());
+    assert_eq!(
+        session.restore(&mut store, true),
+        ComposerDraftRestoreResult::default()
+    );
 }
 
 #[test]
@@ -124,7 +133,10 @@ fn first_available_target_consumes_restore_even_when_store_is_empty() {
     assert!(!first.persisted);
 
     let _ = store.write("draft", stored_draft("late", &[attachment("late", true)]));
-    assert_eq!(session.restore(&mut store, true), Default::default());
+    assert_eq!(
+        session.restore(&mut store, true),
+        ComposerDraftRestoreResult::default()
+    );
 }
 
 #[test]
@@ -156,7 +168,7 @@ fn restore_releases_not_ready_values_and_persists_only_ready_values() {
         Some(vec!["ready"])
     );
     assert_eq!(
-        store.get("draft").map(|draft| draft.document()),
+        store.get("draft").map(ComposerDraft::document),
         Some(saved.document())
     );
 }
@@ -283,7 +295,6 @@ fn release_unretained_checks_all_keys_and_preserves_live_order() {
         "other",
         stored_draft("other", &[attachment("shared", true)]),
     );
-    let session = ComposerDraftSession::for_key("current");
     let live = vec![
         attachment("shared", true),
         attachment("orphan", true),
@@ -291,13 +302,13 @@ fn release_unretained_checks_all_keys_and_preserves_live_order() {
     ];
 
     assert_eq!(
-        ids(&session.release_unretained(&store, &live)),
+        ids(&ComposerDraftSession::release_unretained(&store, &live)),
         vec!["orphan"]
     );
 
     store.clear("other");
     assert_eq!(
-        ids(&session.release_unretained(&store, &live)),
+        ids(&ComposerDraftSession::release_unretained(&store, &live)),
         vec!["shared", "orphan"]
     );
 }
@@ -317,9 +328,7 @@ fn clear_removes_only_the_current_key_and_does_not_release_values() {
     assert!(!store.contains("current"));
     assert_eq!(store.get("other"), Some(&other));
     assert_eq!(
-        session
-            .release_unretained(&store, &[attachment("one", true)])
-            .len(),
+        ComposerDraftSession::release_unretained(&store, &[attachment("one", true)]).len(),
         1
     );
 }

@@ -552,7 +552,6 @@ impl ComposerDraftSession {
     /// at most once.
     #[must_use]
     pub fn release_unretained<S: ComposerDraftStore>(
-        &self,
         store: &S,
         attachments: &[ComposerImageAttachment],
     ) -> Vec<ComposerImageAttachment> {
