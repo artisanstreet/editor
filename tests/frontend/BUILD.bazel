@@ -292,6 +292,15 @@ rust_test(
 )
 
 rust_test(
+    name = "telemetry_bootstrap_policy_test",
+    srcs = ["telemetry_bootstrap_policy.rs"],
+    crate_name = "telemetry_bootstrap_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+)
+
+rust_test(
     name = "telemetry_preferences_test",
     srcs = ["telemetry_preferences.rs"],
     crate_name = "telemetry_preferences_test",

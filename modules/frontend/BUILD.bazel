@@ -43,6 +43,7 @@ rust_library(
         "src/runtime_surface.rs",
         "src/shell.rs",
         "src/subscription_projection.rs",
+        "src/telemetry_bootstrap_policy.rs",
         "src/telemetry_preferences.rs",
         "src/thread_list_selection.rs",
         "src/transcript.rs",
