@@ -40,6 +40,7 @@ rust_library(
         "src/product_telemetry_capture_policy.rs",
         "src/request_handler.rs",
         "src/storage.rs",
+        "src/thread_liveness_policy.rs",
         "//tests/backend:directory_controller.rs",
         "//tests/backend:directory_helper.rs",
         "//tests/backend:directory_helper_fixture.rs",
