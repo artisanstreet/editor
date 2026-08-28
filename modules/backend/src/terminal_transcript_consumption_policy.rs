@@ -145,11 +145,11 @@ impl RootRunObservation {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PendingTranscriptObservation {
     /// Root run named by the inbox row.
-    pub root_run_id: String,
+    pub root_run: String,
     /// Engine named by the inbox row.
-    pub engine_id: String,
+    pub engine: String,
     /// Provider-native child thread named by the inbox row.
-    pub agent_native_thread_id: String,
+    pub agent_native_thread: String,
 }
 
 impl PendingTranscriptObservation {
@@ -161,9 +161,9 @@ impl PendingTranscriptObservation {
         agent_native_thread_id: impl Into<String>,
     ) -> Self {
         Self {
-            root_run_id: root_run_id.into(),
-            engine_id: engine_id.into(),
-            agent_native_thread_id: agent_native_thread_id.into(),
+            root_run: root_run_id.into(),
+            engine: engine_id.into(),
+            agent_native_thread: agent_native_thread_id.into(),
         }
     }
 }
@@ -211,11 +211,11 @@ impl TerminalTranscriptInboxObservation {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct NativeSubagentBinding {
     /// Engine identity in the durable binding.
-    pub engine_id: String,
+    pub engine: String,
     /// Root-run identity in the durable binding.
-    pub root_run_id: String,
+    pub root_run: String,
     /// Provider-native child thread identity in the durable binding.
-    pub agent_native_thread_id: String,
+    pub agent_native_thread: String,
 }
 
 impl NativeSubagentBinding {
@@ -227,9 +227,9 @@ impl NativeSubagentBinding {
         agent_native_thread_id: impl Into<String>,
     ) -> Self {
         Self {
-            engine_id: engine_id.into(),
-            root_run_id: root_run_id.into(),
-            agent_native_thread_id: agent_native_thread_id.into(),
+            engine: engine_id.into(),
+            root_run: root_run_id.into(),
+            agent_native_thread: agent_native_thread_id.into(),
         }
     }
 
@@ -237,9 +237,9 @@ impl NativeSubagentBinding {
     /// durable child-binding predicate.
     #[must_use]
     pub fn matches(&self, pending: &PendingTranscriptObservation) -> bool {
-        self.engine_id == pending.engine_id
-            && self.root_run_id == pending.root_run_id
-            && self.agent_native_thread_id == pending.agent_native_thread_id
+        self.engine == pending.engine
+            && self.root_run == pending.root_run
+            && self.agent_native_thread == pending.agent_native_thread
     }
 }
 
@@ -295,7 +295,7 @@ impl UnprocessedTranscriptGuard {
 
     /// Confirms that this guard means `processed_at IS NULL`.
     #[must_use]
-    pub const fn is_unprocessed(self) -> bool {
+    pub const fn is_unprocessed() -> bool {
         true
     }
 }

@@ -26,8 +26,8 @@ fn pending() -> TerminalTranscriptInboxObservation {
     ))
 }
 
-fn root(status: RootRunStatus) -> Option<RootRunObservation> {
-    Some(RootRunObservation::new(status))
+fn root(status: RootRunStatus) -> RootRunObservation {
+    RootRunObservation::new(status)
 }
 
 fn binding(
@@ -111,7 +111,7 @@ fn missing_and_already_processed_inbox_facts_are_noops() {
         for status in RootRunStatus::ALL {
             let decision = terminal_transcript_consumption_decision(input(
                 inbox.clone(),
-                root(status),
+                Some(root(status)),
                 Vec::new(),
             ));
             assert_eq!(decision, TerminalTranscriptConsumptionDecision::Noop);
@@ -133,7 +133,7 @@ fn every_active_root_status_is_a_noop_without_considering_bindings() {
     for status in RootRunStatus::ACTIVE {
         let decision = TerminalTranscriptConsumptionPolicy::consume(input(
             pending(),
-            root(status),
+            Some(root(status)),
             vec![binding(
                 "different-engine",
                 "different-root",
@@ -149,7 +149,11 @@ fn every_active_root_status_is_a_noop_without_considering_bindings() {
 fn every_known_settled_status_deletes_only_an_unbound_pending_observation() {
     for status in RootRunStatus::SETTLED {
         assert_eq!(
-            terminal_transcript_consumption_decision(input(pending(), root(status), Vec::new())),
+            terminal_transcript_consumption_decision(input(
+                pending(),
+                Some(root(status)),
+                Vec::new(),
+            )),
             expected_delete()
         );
     }
@@ -160,7 +164,7 @@ fn an_exact_durable_binding_preserves_the_observation_for_child_projection() {
     for status in RootRunStatus::SETTLED {
         let decision = terminal_transcript_consumption_decision(input(
             pending(),
-            root(status),
+            Some(root(status)),
             vec![binding(ENGINE_ID, ROOT_RUN_ID, NATIVE_THREAD_ID)],
         ));
 
@@ -186,10 +190,10 @@ fn each_partially_mismatched_binding_is_unbound_and_deletes() {
     ];
 
     for status in RootRunStatus::SETTLED {
-        for (label, candidate) in cases.iter() {
+        for (label, candidate) in &cases {
             let decision = terminal_transcript_consumption_decision(input(
                 pending(),
-                root(status.clone()),
+                Some(root(status.clone())),
                 vec![candidate.clone()],
             ));
 
@@ -202,7 +206,7 @@ fn each_partially_mismatched_binding_is_unbound_and_deletes() {
 fn one_exact_binding_wins_over_other_partial_candidates() {
     let decision = terminal_transcript_consumption_decision(input(
         pending(),
-        root(RootRunStatus::Completed),
+        Some(root(RootRunStatus::Completed)),
         vec![
             binding("engine:other", ROOT_RUN_ID, NATIVE_THREAD_ID),
             binding(ENGINE_ID, ROOT_RUN_ID, NATIVE_THREAD_ID),
@@ -217,7 +221,7 @@ fn one_exact_binding_wins_over_other_partial_candidates() {
 fn delete_action_has_exact_identity_and_unprocessed_guard() {
     let decision = terminal_transcript_consumption_decision(input(
         pending(),
-        root(RootRunStatus::Failed),
+        Some(root(RootRunStatus::Failed)),
         Vec::new(),
     ));
     let action = decision
@@ -232,7 +236,7 @@ fn delete_action_has_exact_identity_and_unprocessed_guard() {
         }
     );
     assert_eq!(action.observation_id(), OBSERVATION_ID);
-    assert!(action.guard().is_unprocessed());
+    assert!(UnprocessedTranscriptGuard::is_unprocessed());
     assert!(!decision.is_noop());
 }
 
@@ -243,7 +247,7 @@ fn action_uses_the_consume_identity_without_rewriting_it() {
         TerminalTranscriptConsumptionPolicy::decide(TerminalTranscriptConsumptionInput::new(
             exact_identity,
             pending(),
-            root(RootRunStatus::Interrupted),
+            Some(root(RootRunStatus::Interrupted)),
             Vec::<NativeSubagentBinding>::new(),
         ));
 
@@ -261,7 +265,7 @@ fn unknown_statuses_follow_the_oracles_non_active_set_membership_rule() {
     assert_eq!(
         terminal_transcript_consumption_decision(input(
             pending(),
-            root(future_settled),
+            Some(root(future_settled)),
             Vec::new()
         )),
         expected_delete()
@@ -271,7 +275,11 @@ fn unknown_statuses_follow_the_oracles_non_active_set_membership_rule() {
         let status = RootRunStatus::Other(active_spelling.to_owned());
         assert!(status.is_active());
         assert_eq!(
-            terminal_transcript_consumption_decision(input(pending(), root(status), Vec::new())),
+            terminal_transcript_consumption_decision(input(
+                pending(),
+                Some(root(status)),
+                Vec::new(),
+            )),
             TerminalTranscriptConsumptionDecision::Noop
         );
     }
@@ -281,7 +289,7 @@ fn unknown_statuses_follow_the_oracles_non_active_set_membership_rule() {
 fn repeated_evaluations_are_pure_and_do_not_consume_the_input() {
     let facts = input(
         pending(),
-        root(RootRunStatus::Cancelled),
+        Some(root(RootRunStatus::Cancelled)),
         vec![binding("engine:other", ROOT_RUN_ID, NATIVE_THREAD_ID)],
     );
     let first = TerminalTranscriptConsumptionPolicy::decide(facts.clone());
