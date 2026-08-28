@@ -77,6 +77,7 @@ rust_clippy(
         "//tests/ui:gpui_harness_test",
         "//tests/ui:markdown_seam_test",
         "//tests/ui:motion_policy_test",
+        "//tests/ui:separator_test",
         "//tests/ui:theme_tokens_test",
     ],
 )
@@ -130,6 +131,7 @@ rustfmt_test(
         "//tests/ui:gpui_harness_test",
         "//tests/ui:markdown_seam_test",
         "//tests/ui:motion_policy_test",
+        "//tests/ui:separator_test",
         "//tests/ui:theme_tokens_test",
     ],
     transitive = True,
@@ -181,6 +183,7 @@ test_suite(
         "//tests/ui:gpui_harness_test",
         "//tests/ui:markdown_seam_test",
         "//tests/ui:motion_policy_test",
+        "//tests/ui:separator_test",
         "//tests/ui:theme_tokens_test",
     ],
 )
