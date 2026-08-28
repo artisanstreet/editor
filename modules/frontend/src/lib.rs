@@ -35,6 +35,7 @@ pub mod project_picker;
 pub mod proof;
 pub mod reader_attention;
 pub mod reasoning_display;
+pub mod runtime_surface;
 pub mod shell;
 pub mod subscription_projection;
 pub mod telemetry_preferences;
