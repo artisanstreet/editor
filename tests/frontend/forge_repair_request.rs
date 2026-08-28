@@ -3,6 +3,9 @@
 //! The production module is path-linked so this packet does not require
 //! shared frontend registration, a browser host, or any runtime dependency.
 
+#[path = "../../modules/frontend/src/attention_title_policy.rs"]
+#[allow(dead_code)]
+mod attention_title_policy;
 #[path = "../../modules/frontend/src/forge_repair_request.rs"]
 mod forge_repair_request;
 
@@ -11,13 +14,13 @@ use forge_repair_request::{
 };
 
 const ATTENTION_JOINER: &str = "\u{2060}";
-const REPAIR_MARKER: &str = "\u{2060}\u{2060}";
+const REPAIR_MARKER: &str = FORGE_REPAIR_TITLE_MARKER;
 
 #[derive(Clone, Copy, Debug)]
 struct TitleCase {
     label: &'static str,
     title: &'static str,
-    attention_count: Option<usize>,
+    attention_count: Option<f64>,
     awaiting_answer: bool,
     expected: &'static str,
 }
@@ -42,9 +45,9 @@ fn request_intent_preserves_attention_count_and_question_state() {
     let mut state = ForgeRepairRequestState::new();
     state.request();
 
-    let intent = state.title_rewrite_intent(Some(3), true);
+    let intent = state.title_rewrite_intent(Some(3.75), true);
 
-    assert_eq!(intent.attention_count(), Some(3));
+    assert_eq!(intent.attention_count(), Some(3.75));
     assert!(intent.awaiting_answer());
     assert!(intent.requests_forge_repair());
     assert_eq!(
@@ -76,7 +79,7 @@ fn requested_title_rewrites_match_the_shared_marker_table() {
         TitleCase {
             label: "attention-marked",
             title: "(2)\u{2060} Workspace",
-            attention_count: Some(4),
+            attention_count: Some(4.0),
             awaiting_answer: false,
             expected: "(4)\u{2060} Workspace\u{2060}\u{2060}",
         },
@@ -104,7 +107,7 @@ fn repeated_requests_converge_to_one_repair_suffix() {
     state.request();
     state.request();
 
-    let intent = state.title_rewrite_intent(Some(8), true);
+    let intent = state.title_rewrite_intent(Some(8.0), true);
     let first = intent.apply_to("[Dev] (999?)\u{2060} Workspace");
     let second = intent.apply_to(&first);
 
@@ -155,10 +158,10 @@ fn attention_marker_formats_zero_question_and_regular_counts_exactly() {
     state.request();
 
     let cases = [
-        (Some(0), false, "(0)\u{2060} Workspace\u{2060}\u{2060}"),
-        (Some(0), true, "(?)\u{2060} Workspace\u{2060}\u{2060}"),
+        (Some(0.0), false, "(0)\u{2060} Workspace\u{2060}\u{2060}"),
+        (Some(0.0), true, "(?)\u{2060} Workspace\u{2060}\u{2060}"),
         (
-            Some(1234),
+            Some(1234.0),
             true,
             "(1234?)\u{2060} Workspace\u{2060}\u{2060}",
         ),

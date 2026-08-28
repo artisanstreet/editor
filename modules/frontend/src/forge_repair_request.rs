@@ -8,21 +8,17 @@
 //! attention state. Applying that intent is pure string construction; a host
 //! owns any eventual title write and its failure cannot roll back this flag.
 //!
-//! The title rules intentionally stay with this small intent because the
-//! repair marker shares one title string with the development and attention
-//! markers. This keeps their ordering and ownership rules convergent without
-//! accessing a browser title, DOM, shell, or protocol service.
+//! The title intent delegates composition to the shared attention-title
+//! authority because the repair marker shares one title string with the
+//! development and attention markers. This keeps their ordering, parsing,
+//! and JavaScript-number rules convergent without accessing a browser title,
+//! DOM, shell, or protocol service.
 
 #![allow(clippy::module_name_repetitions)]
 
-/// The exact visible development marker used at the front of a title.
-pub const DEV_TITLE_MARKER: &str = "[Dev]";
-
-/// The invisible doubled U+2060 WORD JOINER used to request Forge repair.
-pub const FORGE_REPAIR_TITLE_MARKER: &str = "\u{2060}\u{2060}";
-
-const DEV_TITLE_PREFIX: &str = "[Dev] ";
-const ATTENTION_WORD_JOINER: &str = "\u{2060}";
+pub use crate::attention_title_policy::{
+    DEV_TITLE_MARKER, FORGE_REPAIR_TITLE_MARKER, attention_marked_title,
+};
 
 /// Renderer state for the outstanding Forge-repair request.
 ///
@@ -72,7 +68,7 @@ impl ForgeRepairRequestState {
     #[must_use]
     pub const fn title_rewrite_intent(
         self,
-        attention_count: Option<usize>,
+        attention_count: Option<f64>,
         awaiting_answer: bool,
     ) -> ForgeRepairTitleIntent {
         ForgeRepairTitleIntent::new(attention_count, awaiting_answer, self.requested)
@@ -84,9 +80,9 @@ impl ForgeRepairRequestState {
 /// This carries the existing attention state rather than replacing it with a
 /// repair-only title. The caller can pass the intent to [`Self::apply_to`]
 /// whenever the title writer observes a route title or a request change.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ForgeRepairTitleIntent {
-    attention_count: Option<usize>,
+    attention_count: Option<f64>,
     awaiting_answer: bool,
     requests_forge_repair: bool,
 }
@@ -96,7 +92,7 @@ impl ForgeRepairTitleIntent {
     /// request flag.
     #[must_use]
     pub const fn new(
-        attention_count: Option<usize>,
+        attention_count: Option<f64>,
         awaiting_answer: bool,
         requests_forge_repair: bool,
     ) -> Self {
@@ -109,7 +105,7 @@ impl ForgeRepairTitleIntent {
 
     /// Returns the attention count that will be written, if any.
     #[must_use]
-    pub const fn attention_count(self) -> Option<usize> {
+    pub const fn attention_count(self) -> Option<f64> {
         self.attention_count
     }
 
@@ -135,92 +131,4 @@ impl ForgeRepairTitleIntent {
             self.awaiting_answer,
         )
     }
-}
-
-/// Formats the protocol attention marker for an already-derived count.
-///
-/// A zero count with an open question uses the standalone `(?)` form. Every
-/// other count uses decimal digits, optionally followed by `?`, and exactly
-/// one U+2060 WORD JOINER. The count is a Rust collection count, so truncation
-/// and numeric coercion have already happened at the caller's boundary.
-#[must_use]
-pub fn attention_title_marker_for(count: usize, awaiting_answer: bool) -> String {
-    if count == 0 && awaiting_answer {
-        return format!("(?){ATTENTION_WORD_JOINER}");
-    }
-
-    let question = if awaiting_answer { "?" } else { "" };
-    format!("({count}{question}){ATTENTION_WORD_JOINER}")
-}
-
-/// Rewrites a title using the shared development, attention, and repair rules.
-///
-/// The exact `[Dev] ` prefix remains first. Only a leading attention marker
-/// with one to four ASCII digits (optionally followed by `?`), or the
-/// standalone `(?)` form, is considered owned and removed. Plain
-/// parenthesized route titles and malformed marker-like text stay untouched.
-/// Every existing doubled U+2060 repair marker is removed before at most one
-/// requested marker is appended.
-///
-/// `None` omits the attention marker and ignores `awaiting_answer`, matching
-/// the source helper's `undefined` count branch. The function does not access
-/// or write a document title.
-#[must_use]
-pub fn attention_marked_title(
-    title: &str,
-    attention_count: Option<usize>,
-    requests_forge_repair: bool,
-    awaiting_answer: bool,
-) -> String {
-    let (development_prefix, bare_title) = match title.strip_prefix(DEV_TITLE_PREFIX) {
-        Some(bare_title) => (DEV_TITLE_PREFIX, bare_title),
-        None => ("", title),
-    };
-
-    let bare_title =
-        strip_attention_marker_prefix(bare_title).replace(FORGE_REPAIR_TITLE_MARKER, "");
-    let repair_suffix = if requests_forge_repair {
-        FORGE_REPAIR_TITLE_MARKER
-    } else {
-        ""
-    };
-
-    match attention_count {
-        Some(count) => format!(
-            "{development_prefix}{} {bare_title}{repair_suffix}",
-            attention_title_marker_for(count, awaiting_answer)
-        ),
-        None => format!("{development_prefix}{bare_title}{repair_suffix}"),
-    }
-}
-
-/// Removes one owned attention marker from the start of a title.
-fn strip_attention_marker_prefix(title: &str) -> &str {
-    let Some(body) = title.strip_prefix('(') else {
-        return title;
-    };
-
-    let bytes = body.as_bytes();
-    let mut index = 0;
-
-    if bytes.first() == Some(&b'?') {
-        index = 1;
-    } else {
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-
-        if index == 0 || index > 4 {
-            return title;
-        }
-
-        if bytes.get(index) == Some(&b'?') {
-            index += 1;
-        }
-    }
-
-    let Some(rest) = body.get(index..) else {
-        return title;
-    };
-    rest.strip_prefix(")\u{2060} ").unwrap_or(title)
 }
