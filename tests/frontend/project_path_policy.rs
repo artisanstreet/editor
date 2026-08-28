@@ -107,7 +107,10 @@ fn drive_anchors_home_collapse_and_root_rendering_are_exact() {
         ),
         (r"C:/users/sander", None, None, Some("~\\")),
         (r"C:/", None, None, Some("C:\\")),
-        ("C:", None, None, Some("C:/")),
+        ("C:", None, None, Some("C:\\")),
+        ("d:", None, None, Some("d:\\")),
+        ("D:", None, Some(PathSeparator::ForwardSlash), Some("D:/")),
+        ("c:", None, Some(PathSeparator::Backslash), Some("c:\\")),
         (r"C:/Users", None, None, Some(r"C:\Users")),
         (
             r"C:/Home/sander/app",
@@ -278,6 +281,9 @@ fn explicit_separator_preferences_override_both_dialects() {
             SeparatorPreference::Native,
             Some(r"~\Desktop"),
         ),
+        ("C:", None, SeparatorPreference::Native, Some("C:\\")),
+        ("d:", None, SeparatorPreference::ForwardSlash, Some("d:/")),
+        ("D:", None, SeparatorPreference::Backslash, Some("D:\\")),
         (
             r"C:\Users\sander\Desktop\app",
             Some("app"),

@@ -164,7 +164,7 @@ fn parse_path<'a>(root_path: &'a str, display_name: Option<&'a str>) -> Option<P
     if let Some((drive, remainder)) = parse_drive(normalized) {
         return Some(ProjectPath {
             anchor: drive.to_owned(),
-            dialect,
+            dialect: PathDialect::Windows,
             display_name,
             segments: split_segments(remainder),
             suffix: None,
