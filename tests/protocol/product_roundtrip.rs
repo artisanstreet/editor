@@ -15,7 +15,7 @@
 use artisan_domain::PROJECT_LISTING_MAX_PROJECTS;
 use artisan_protocol::artisan_capnp::{
     DirectoryEntryKind, ErrorCode, PlaceKind, QueuedState, ReceiptDisposition, directory_listing,
-    envelope, event, list_attached_projects_request, list_directories_request, project,
+    envelope, event, hello, list_attached_projects_request, list_directories_request, project,
     project_list, protocol_error, request, response, thread_summary,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
@@ -34,8 +34,20 @@ const HELLO_CAPABILITY: [u8; 32] = [
     0x5a, 0x2e, 0x91, 0xc4, 0x07, 0xbb, 0x63, 0x18, 0xf0, 0x4d, 0xaa, 0x39, 0x76, 0x0e, 0xd2, 0x81,
     0x9b, 0x44, 0x6c, 0xef, 0x13, 0x58, 0xa7, 0x20, 0xcd, 0x8f, 0x71, 0xb6, 0x02, 0xe9, 0x3d, 0x94,
 ];
+/// Single-use reconnect credential supplied by a reconnecting client.
+const RECONNECT_CAPABILITY: [u8; 32] = [
+    0xc3, 0x17, 0x4a, 0xf2, 0x69, 0xd8, 0x05, 0xbe, 0x71, 0xac, 0x93, 0x26, 0xe4, 0x5b, 0x18, 0xfd,
+    0x80, 0x62, 0xdf, 0x37, 0xa9, 0x14, 0xcb, 0x70, 0x52, 0xe6, 0x9d, 0x48, 0xb1, 0x2f, 0x86, 0x03,
+];
+/// Fresh single-use reconnect credential rotated by a successful Welcome.
+const ROTATED_RECONNECT_CAPABILITY: [u8; 32] = [
+    0xd4, 0x28, 0x5b, 0x03, 0x7a, 0xe9, 0x16, 0xcf, 0x82, 0xbd, 0xa4, 0x37, 0xf5, 0x6c, 0x29, 0x0e,
+    0x91, 0x73, 0xe0, 0x48, 0xba, 0x25, 0xdc, 0x81, 0x63, 0xf7, 0xae, 0x59, 0xc2, 0x30, 0x97, 0x14,
+];
 /// Deliberately malformed capability length for negative coverage.
 const SHORT_CAPABILITY: [u8; 31] = [0xa5_u8; 31];
+/// Deliberately malformed reconnect credential length for negative coverage.
+const SHORT_RECONNECT_CAPABILITY: [u8; 31] = [0x3c_u8; 31];
 const ROOT_DIRECTORY_ID: &str = "root_home";
 const DESKTOP_DIRECTORY_ID: &str = "root_desktop";
 const DIRECTORY_ID: &str = "directory_4a5b6c";
@@ -162,21 +174,29 @@ fn assert_project_row(
 }
 
 #[test]
-fn negotiates_hello_to_welcome_with_capability() -> capnp::Result<()> {
+fn negotiates_hello_to_welcome_with_rotating_credentials() -> capnp::Result<()> {
     // Client offer: preferred version stamped on the envelope, full
-    // supported list and the one-time capability inside the hello body.
-    let client = {
-        let mut message = frame();
-        let mut hello = init_envelope(&mut message, CLIENT_REQUEST_ID)
-            .init_body()
-            .init_hello();
-        let mut versions = hello.reborrow().init_supported_versions(1);
-        versions.set(0, PROTOCOL_VERSION);
-        hello.set_capability(&HELLO_CAPABILITY);
-        encode(&message)
-    };
+    // supported list, and the single-use credential inside the hello body.
+    for (reconnect, capability) in [
+        (false, &HELLO_CAPABILITY[..]),
+        (true, &RECONNECT_CAPABILITY[..]),
+    ] {
+        let client = {
+            let mut message = frame();
+            let mut hello = init_envelope(&mut message, CLIENT_REQUEST_ID)
+                .init_body()
+                .init_hello();
+            let mut versions = hello.reborrow().init_supported_versions(1);
+            versions.set(0, PROTOCOL_VERSION);
+            let mut credential = hello.reborrow().init_credential();
+            if reconnect {
+                credential.set_reconnect(capability);
+            } else {
+                credential.set_initial(capability);
+            }
+            encode(&message)
+        };
 
-    {
         let decoded = decode(&client)?;
         let envelope: envelope::Reader = decoded.get_root()?;
         assert_envelope_header(envelope, CLIENT_REQUEST_ID)?;
@@ -185,15 +205,23 @@ fn negotiates_hello_to_welcome_with_capability() -> capnp::Result<()> {
                 let hello = hello?;
                 let offered: Vec<u32> = hello.get_supported_versions()?.iter().collect();
                 assert_eq!(offered, vec![PROTOCOL_VERSION]);
-                // The full 32-byte capability survives the round trip intact;
-                // it stays opaque bytes here and is never rendered anywhere.
-                assert_eq!(hello.get_capability()?, &HELLO_CAPABILITY[..]);
+                match hello.get_credential().which()? {
+                    hello::credential::Which::Initial(received) => {
+                        assert!(!reconnect, "reconnect input decoded as initial credential");
+                        assert_eq!(received?, capability);
+                    }
+                    hello::credential::Which::Reconnect(received) => {
+                        assert!(reconnect, "initial input decoded as reconnect credential");
+                        assert_eq!(received?, capability);
+                    }
+                }
             }
             _ => panic!("expected hello body"),
         }
     }
 
-    // Server answer: exactly one negotiated version plus a connection id.
+    // Server answer: exactly one negotiated version, a connection id, and
+    // the next rotated single-use reconnect credential.
     let server = {
         let mut message = frame();
         let mut welcome = init_envelope(&mut message, WELCOME_FRAME_ID)
@@ -201,6 +229,7 @@ fn negotiates_hello_to_welcome_with_capability() -> capnp::Result<()> {
             .init_welcome();
         welcome.set_negotiated_version(PROTOCOL_VERSION);
         welcome.set_connection_id(CONNECTION_ID);
+        welcome.set_reconnect_capability(&ROTATED_RECONNECT_CAPABILITY);
         encode(&message)
     };
 
@@ -212,6 +241,10 @@ fn negotiates_hello_to_welcome_with_capability() -> capnp::Result<()> {
             let welcome = welcome?;
             assert_eq!(welcome.get_negotiated_version(), PROTOCOL_VERSION);
             assert_eq!(welcome.get_connection_id()?, CONNECTION_ID);
+            assert_eq!(
+                welcome.get_reconnect_capability()?,
+                &ROTATED_RECONNECT_CAPABILITY[..]
+            );
         }
         _ => panic!("expected welcome body"),
     }
@@ -230,20 +263,94 @@ fn capability_length_needs_owned_conversion_enforcement() -> capnp::Result<()> {
         init_envelope(&mut message, CLIENT_REQUEST_ID)
             .init_body()
             .init_hello()
-            .set_capability(&SHORT_CAPABILITY);
+            .init_credential()
+            .set_initial(&SHORT_CAPABILITY);
         encode(&message)
     };
 
     let decoded = decode(&malformed)?;
     let envelope: envelope::Reader = decoded.get_root()?;
+    assert_envelope_header(envelope, CLIENT_REQUEST_ID)?;
     match envelope.get_body().which()? {
-        envelope::body::Which::Hello(hello) => {
-            let received = hello?.get_capability()?;
-            assert_eq!(received.len(), SHORT_CAPABILITY.len());
-            assert_ne!(received.len(), HELLO_CAPABILITY.len());
-            assert_eq!(received, &SHORT_CAPABILITY[..]);
-        }
+        envelope::body::Which::Hello(hello) => match hello?.get_credential().which()? {
+            hello::credential::Which::Initial(received) => {
+                let received = received?;
+                assert_eq!(received.len(), SHORT_CAPABILITY.len());
+                assert_ne!(received.len(), HELLO_CAPABILITY.len());
+                assert_eq!(received, &SHORT_CAPABILITY[..]);
+            }
+            hello::credential::Which::Reconnect(_) => {
+                panic!("expected initial credential union arm")
+            }
+        },
         _ => panic!("expected hello body"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn reconnect_hello_capability_length_needs_owned_conversion_enforcement() -> capnp::Result<()> {
+    let malformed = {
+        let mut message = frame();
+        init_envelope(&mut message, CLIENT_REQUEST_ID)
+            .init_body()
+            .init_hello()
+            .init_credential()
+            .set_reconnect(&SHORT_RECONNECT_CAPABILITY);
+        encode(&message)
+    };
+
+    let decoded = decode(&malformed)?;
+    let envelope: envelope::Reader = decoded.get_root()?;
+    assert_envelope_header(envelope, CLIENT_REQUEST_ID)?;
+    match envelope.get_body().which()? {
+        envelope::body::Which::Hello(hello) => match hello?.get_credential().which()? {
+            hello::credential::Which::Initial(_) => {
+                panic!("expected reconnect credential union arm")
+            }
+            hello::credential::Which::Reconnect(received) => {
+                let received = received?;
+                assert_eq!(received.len(), SHORT_RECONNECT_CAPABILITY.len());
+                assert_ne!(received.len(), RECONNECT_CAPABILITY.len());
+                assert_eq!(received, &SHORT_RECONNECT_CAPABILITY[..]);
+            }
+        },
+        _ => panic!("expected hello body"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn reconnect_capability_length_needs_owned_conversion_enforcement() -> capnp::Result<()> {
+    // Negative coverage available at the schema layer: a malformed 31-byte
+    // reconnect credential still DECODES, exactly like the initial
+    // capability. The exact-32-byte rule for every rotated Welcome
+    // credential belongs to owned conversion code, which returns typed
+    // invalidInput rejections there; single-use consumption and session
+    // binding belong to Phase 3.
+    let malformed = {
+        let mut message = frame();
+        init_envelope(&mut message, WELCOME_FRAME_ID)
+            .init_body()
+            .init_welcome()
+            .set_reconnect_capability(&SHORT_RECONNECT_CAPABILITY);
+        encode(&message)
+    };
+
+    let decoded = decode(&malformed)?;
+    let envelope: envelope::Reader = decoded.get_root()?;
+    assert_envelope_header(envelope, WELCOME_FRAME_ID)?;
+    match envelope.get_body().which()? {
+        envelope::body::Which::Welcome(welcome) => {
+            let welcome = welcome?;
+            let received = welcome.get_reconnect_capability()?;
+            assert_eq!(received.len(), SHORT_RECONNECT_CAPABILITY.len());
+            assert_ne!(received.len(), ROTATED_RECONNECT_CAPABILITY.len());
+            assert_eq!(received, &SHORT_RECONNECT_CAPABILITY[..]);
+        }
+        _ => panic!("expected welcome body"),
     }
 
     Ok(())

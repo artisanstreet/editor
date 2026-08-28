@@ -15,17 +15,26 @@ use artisan_domain::{
 use artisan_protocol::artisan_capnp::{ErrorCode as WireErrorCode, envelope};
 use artisan_protocol::{
     CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ClientRequest, ConnectionId, ErrorCode,
-    ErrorDetail, FirstMessageReceipt, FrameId, Hello, LocalCapability, LocalCapabilityError,
-    ProtocolDecodeError, ProtocolEncodeError, ProtocolFailure, ProtocolValueError, ProtocolVersion,
-    ResponsePayload, ServerResponse, VersionOffer, VersionOfferError, Welcome, WireEnvelope,
-    WireEnvelopeBody, decode_envelope, encode_envelope,
+    ErrorDetail, FirstMessageReceipt, FrameId, Hello, HelloCredential, LocalCapability,
+    LocalCapabilityError, ProtocolDecodeError, ProtocolEncodeError, ProtocolFailure,
+    ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
+    ReconnectCapabilityError, ResponsePayload, ServerResponse, VersionOffer, VersionOfferError,
+    Welcome, WireEnvelope, WireEnvelopeBody, decode_envelope, encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
 
-const CAPABILITY: [u8; 32] = [
+const INITIAL_CAPABILITY: [u8; 32] = [
     0x11, 0x82, 0x33, 0xa4, 0x55, 0xc6, 0x77, 0xe8, 0x19, 0x2a, 0x3b, 0x4c, 0x5d, 0x6e, 0x7f, 0x80,
     0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7, 0x08, 0x29, 0x3a, 0x4b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90,
+];
+const RECONNECT_HELLO_CAPABILITY: [u8; RECONNECT_CAPABILITY_BYTES] = [
+    0x23, 0x94, 0x45, 0xb6, 0x67, 0xd8, 0x89, 0xfa, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x70, 0x81, 0x92,
+    0xa3, 0xb4, 0xc5, 0xd6, 0xe7, 0xf8, 0x09, 0x1a, 0x3b, 0x4c, 0x5d, 0x6e, 0x7f, 0x80, 0x91, 0xa2,
+];
+const ROTATED_RECONNECT_CAPABILITY: [u8; RECONNECT_CAPABILITY_BYTES] = [
+    0x35, 0xa6, 0x57, 0xc8, 0x79, 0xea, 0x9b, 0x0c, 0x4d, 0x5e, 0x6f, 0x70, 0x81, 0x92, 0xa3, 0xb4,
+    0xc5, 0xd6, 0xe7, 0xf8, 0x09, 0x1a, 0x2b, 0x3c, 0x5d, 0x6e, 0x7f, 0x80, 0x91, 0xa2, 0xb3, 0xc4,
 ];
 
 // These ambiguity checks fail to compile if the secret accidentally gains a
@@ -38,6 +47,10 @@ const _: fn() = || {
     impl<T: ?Sized> AmbiguousIfDebug<()> for T {}
     impl<T: ?Sized + std::fmt::Debug> AmbiguousIfDebug<DebugMarker> for T {}
     let _ = <LocalCapability as AmbiguousIfDebug<_>>::marker;
+    let _ = <ReconnectCapability as AmbiguousIfDebug<_>>::marker;
+    let _ = <HelloCredential as AmbiguousIfDebug<_>>::marker;
+    let _ = <Hello as AmbiguousIfDebug<_>>::marker;
+    let _ = <Welcome as AmbiguousIfDebug<_>>::marker;
 };
 
 const _: fn() = || {
@@ -48,6 +61,10 @@ const _: fn() = || {
     impl<T: ?Sized> AmbiguousIfDisplay<()> for T {}
     impl<T: ?Sized + std::fmt::Display> AmbiguousIfDisplay<DisplayMarker> for T {}
     let _ = <LocalCapability as AmbiguousIfDisplay<_>>::marker;
+    let _ = <ReconnectCapability as AmbiguousIfDisplay<_>>::marker;
+    let _ = <HelloCredential as AmbiguousIfDisplay<_>>::marker;
+    let _ = <Hello as AmbiguousIfDisplay<_>>::marker;
+    let _ = <Welcome as AmbiguousIfDisplay<_>>::marker;
 };
 
 const _: fn() = || {
@@ -58,6 +75,10 @@ const _: fn() = || {
     impl<T: ?Sized> AmbiguousIfClone<()> for T {}
     impl<T: Clone> AmbiguousIfClone<CloneMarker> for T {}
     let _ = <LocalCapability as AmbiguousIfClone<_>>::marker;
+    let _ = <ReconnectCapability as AmbiguousIfClone<_>>::marker;
+    let _ = <HelloCredential as AmbiguousIfClone<_>>::marker;
+    let _ = <Hello as AmbiguousIfClone<_>>::marker;
+    let _ = <Welcome as AmbiguousIfClone<_>>::marker;
 };
 
 fn request_id(value: &str) -> RequestId {
@@ -109,7 +130,8 @@ fn assert_roundtrip(value: &WireEnvelope) -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn capability_is_exact_length_and_errors_never_render_secret_material() {
-    assert!(LocalCapability::try_from_slice(&CAPABILITY).is_ok());
+    assert!(LocalCapability::try_from_slice(&INITIAL_CAPABILITY).is_ok());
+    assert!(ReconnectCapability::try_from_slice(&RECONNECT_HELLO_CAPABILITY).is_ok());
 
     let short = [0xab; 31];
     let Err(error) = LocalCapability::try_from_slice(&short) else {
@@ -126,6 +148,24 @@ fn capability_is_exact_length_and_errors_never_render_secret_material() {
     assert_eq!(
         rendered,
         "local capability is 31 bytes; exactly 32 bytes are required"
+    );
+    assert!(!rendered.contains("0xab"));
+    assert!(!rendered.contains("[171"));
+
+    let Err(error) = ReconnectCapability::try_from_slice(&short) else {
+        panic!("31-byte reconnect capability must be rejected");
+    };
+    assert_eq!(
+        error,
+        ReconnectCapabilityError::InvalidLength {
+            length: 31,
+            expected: RECONNECT_CAPABILITY_BYTES,
+        }
+    );
+    let rendered = error.to_string();
+    assert_eq!(
+        rendered,
+        "reconnect capability is 31 bytes; exactly 32 bytes are required"
     );
     assert!(!rendered.contains("0xab"));
     assert!(!rendered.contains("[171"));
@@ -173,20 +213,32 @@ fn version_offer_and_protocol_metadata_enforce_boundaries() {
 
 #[test]
 fn handshake_frames_roundtrip_without_secret_formatting() -> Result<(), Box<dyn Error>> {
-    let hello = envelope(
-        "client-hello-1",
+    let initial_hello = envelope(
+        "client-initial-hello-1",
         WireEnvelopeBody::Hello(Hello {
             supported_versions: VersionOffer::new(vec![1])?,
-            capability: LocalCapability::from_bytes(CAPABILITY),
+            credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
         }),
     );
-    assert_roundtrip(&hello)?;
+    assert_roundtrip(&initial_hello)?;
+
+    let reconnect_hello = envelope(
+        "client-reconnect-hello-1",
+        WireEnvelopeBody::Hello(Hello {
+            supported_versions: VersionOffer::new(vec![1])?,
+            credential: HelloCredential::Reconnect(ReconnectCapability::from_bytes(
+                RECONNECT_HELLO_CAPABILITY,
+            )),
+        }),
+    );
+    assert_roundtrip(&reconnect_hello)?;
 
     let welcome = envelope(
         "server-welcome-1",
         WireEnvelopeBody::Welcome(Welcome {
             negotiated_version: ProtocolVersion::V1,
             connection_id: ConnectionId::parse("connection-1")?,
+            reconnect_capability: ReconnectCapability::from_bytes(ROTATED_RECONNECT_CAPABILITY),
         }),
     );
     assert_roundtrip(&welcome)
@@ -457,25 +509,87 @@ fn malformed_version_and_capability_return_typed_errors() {
         })
     ));
 
-    let short_capability = {
+    let short_initial_capability = {
         let mut message = raw_envelope();
         let mut root = message.init_root::<envelope::Builder>();
         root.set_protocol_version(1);
         root.set_message_id("hello-frame");
         let mut hello = root.reborrow().init_body().init_hello();
         hello.reborrow().init_supported_versions(1).set(0, 1);
-        hello.set_capability(&[0x5a; 31]);
+        hello.reborrow().init_credential().set_initial(&[0x5a; 31]);
         serialize::write_message_to_words(&message)
     };
+    let Err(error) = decode_envelope(&short_initial_capability) else {
+        panic!("31-byte initial hello capability must be rejected");
+    };
     assert!(matches!(
-        decode_envelope(&short_capability),
-        Err(ProtocolDecodeError::LocalCapability {
+        &error,
+        ProtocolDecodeError::LocalCapability {
             source: LocalCapabilityError::InvalidLength {
                 length: 31,
                 expected: 32
             }
-        })
+        }
     ));
+    let rendered = error.to_string();
+    assert!(!rendered.contains("0x5a"));
+    assert!(!rendered.contains("[90"));
+
+    let short_reconnect_capability = {
+        let mut message = raw_envelope();
+        let mut root = message.init_root::<envelope::Builder>();
+        root.set_protocol_version(1);
+        root.set_message_id("reconnect-hello-frame");
+        let mut hello = root.reborrow().init_body().init_hello();
+        hello.reborrow().init_supported_versions(1).set(0, 1);
+        hello
+            .reborrow()
+            .init_credential()
+            .set_reconnect(&[0x6b; 31]);
+        serialize::write_message_to_words(&message)
+    };
+    let Err(error) = decode_envelope(&short_reconnect_capability) else {
+        panic!("31-byte reconnect hello capability must be rejected");
+    };
+    assert!(matches!(
+        &error,
+        ProtocolDecodeError::ReconnectCapability {
+            source: ReconnectCapabilityError::InvalidLength {
+                length: 31,
+                expected: RECONNECT_CAPABILITY_BYTES,
+            }
+        }
+    ));
+    let rendered = error.to_string();
+    assert!(!rendered.contains("0x6b"));
+    assert!(!rendered.contains("[107"));
+
+    let short_welcome_capability = {
+        let mut message = raw_envelope();
+        let mut root = message.init_root::<envelope::Builder>();
+        root.set_protocol_version(1);
+        root.set_message_id("welcome-frame");
+        let mut welcome = root.reborrow().init_body().init_welcome();
+        welcome.set_negotiated_version(1);
+        welcome.set_connection_id("connection-1");
+        welcome.set_reconnect_capability(&[0x7c; 31]);
+        serialize::write_message_to_words(&message)
+    };
+    let Err(error) = decode_envelope(&short_welcome_capability) else {
+        panic!("31-byte rotated welcome capability must be rejected");
+    };
+    assert!(matches!(
+        &error,
+        ProtocolDecodeError::ReconnectCapability {
+            source: ReconnectCapabilityError::InvalidLength {
+                length: 31,
+                expected: RECONNECT_CAPABILITY_BYTES,
+            }
+        }
+    ));
+    let rendered = error.to_string();
+    assert!(!rendered.contains("0x7c"));
+    assert!(!rendered.contains("[124"));
 }
 
 fn raw_hello(version_count: u32) -> Vec<u8> {
@@ -488,7 +602,26 @@ fn raw_hello(version_count: u32) -> Vec<u8> {
     for index in 0..version_count {
         versions.set(index, 1);
     }
-    hello.set_capability(&CAPABILITY);
+    hello
+        .reborrow()
+        .init_credential()
+        .set_initial(&INITIAL_CAPABILITY);
+    serialize::write_message_to_words(&message)
+}
+
+fn raw_hello_credential(reconnect: bool) -> Vec<u8> {
+    let mut message = raw_envelope();
+    let mut root = message.init_root::<envelope::Builder>();
+    root.set_protocol_version(1);
+    root.set_message_id("hello-credential-frame");
+    let mut hello = root.reborrow().init_body().init_hello();
+    hello.reborrow().init_supported_versions(1).set(0, 1);
+    let mut credential = hello.reborrow().init_credential();
+    if reconnect {
+        credential.set_reconnect(&INITIAL_CAPABILITY);
+    } else {
+        credential.set_initial(&INITIAL_CAPABILITY);
+    }
     serialize::write_message_to_words(&message)
 }
 
@@ -631,6 +764,29 @@ fn unknown_wire_enum_discriminant_is_typed() {
 }
 
 #[test]
+fn unknown_hello_credential_discriminant_is_typed() {
+    let mut malformed = raw_hello_credential(false);
+    let comparison = raw_hello_credential(true);
+    let differing: Vec<usize> = malformed
+        .iter()
+        .zip(comparison)
+        .enumerate()
+        .filter_map(|(index, (left, right))| (left != &right).then_some(index))
+        .collect();
+    assert_eq!(
+        differing.len(),
+        1,
+        "only the credential union ordinal should differ"
+    );
+    malformed[differing[0]] = u8::MAX;
+
+    assert!(matches!(
+        decode_envelope(&malformed),
+        Err(ProtocolDecodeError::UnknownDiscriminant { value: 255 })
+    ));
+}
+
+#[test]
 fn decoder_accepts_exactly_one_message_without_trailing_bytes() {
     let encoded = encode_envelope(&envelope(
         "server-welcome-frame",
@@ -638,6 +794,7 @@ fn decoder_accepts_exactly_one_message_without_trailing_bytes() {
             negotiated_version: ProtocolVersion::V1,
             connection_id: ConnectionId::parse("connection-1")
                 .expect("fixture connection id is valid"),
+            reconnect_capability: ReconnectCapability::from_bytes(ROTATED_RECONNECT_CAPABILITY),
         }),
     ))
     .expect("fixture envelope encodes");
