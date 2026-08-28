@@ -33,6 +33,10 @@ name = "attention_reconnect"
 path = "../../tests/frontend/attention_reconnect.rs"
 
 [[test]]
+name = "attention_title_policy"
+path = "../../tests/frontend/attention_title_policy.rs"
+
+[[test]]
 name = "artisan_error_code"
 path = "../../tests/frontend/artisan_error_code.rs"
 
