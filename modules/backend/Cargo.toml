@@ -12,6 +12,7 @@ artisan-migrations = { path = "../migrations" }
 artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 getrandom.workspace = true
+sea-orm.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
