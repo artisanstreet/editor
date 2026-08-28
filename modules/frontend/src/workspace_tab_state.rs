@@ -290,7 +290,7 @@ pub fn file_tab_id(file_id: &str) -> String {
 
 /// Returns the deterministic JSON-tuple identity of a diff-preview tab.
 ///
-/// This matches JSON.stringify(["diff", file_id, change_id]), including JSON
+/// This matches JSON.stringify(["diff", \`file_id\`, \`change_id\`]), including JSON
 /// string escaping for identifiers containing quotes, backslashes, or control
 /// characters.
 #[must_use]
