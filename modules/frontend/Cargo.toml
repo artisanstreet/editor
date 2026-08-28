@@ -77,6 +77,10 @@ name = "native_shell"
 path = "../../tests/frontend/native_shell.rs"
 
 [[test]]
+name = "new_thread_interaction"
+path = "../../tests/frontend/new_thread_interaction.rs"
+
+[[test]]
 name = "notification_events"
 path = "../../tests/frontend/notification_events.rs"
 
