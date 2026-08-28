@@ -17,12 +17,42 @@ rust_test(
 )
 
 rust_test(
+    name = "project_picker_test",
+    srcs = ["project_picker.rs"],
+    crate_name = "project_picker_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "thread_list_selection_test",
     srcs = ["thread_list_navigation.rs"],
     crate_name = "thread_list_navigation_test",
     deps = [
         "//modules/domain:domain",
         "//modules/frontend:frontend",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "project_picker_native_test",
+    srcs = ["project_picker_native.rs"],
+    crate_name = "project_picker_native_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
