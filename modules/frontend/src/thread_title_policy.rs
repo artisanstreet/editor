@@ -149,10 +149,10 @@ impl<'a> ThreadTitleInput<'a> {
 /// of one. An owned future mode can therefore be moved directly into this
 /// function, while a mode retained by a caller can be passed by reference.
 #[must_use]
-pub fn thread_display_title<'a>(
-    input: ThreadTitleInput<'a>,
+pub fn thread_display_title(
+    input: ThreadTitleInput<'_>,
     mode: impl Borrow<ThreadTitleMode>,
-) -> &'a str {
+) -> &str {
     if input.title_locked {
         return input.title;
     }
