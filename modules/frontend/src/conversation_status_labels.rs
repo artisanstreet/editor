@@ -26,6 +26,13 @@ fn fallback_thinking_vocabulary() -> Vec<String> {
         .collect()
 }
 
+fn fallback_thinking_word() -> String {
+    match FALLBACK_THINKING_WORDS.first() {
+        Some(word) => (*word).to_owned(),
+        None => String::new(),
+    }
+}
+
 /// Returns whether every supplied word is non-empty and occurs exactly once.
 ///
 /// Validation is deliberately exact: whitespace is part of a word, just as it
@@ -114,12 +121,19 @@ pub fn thinking_word_for<T: AsRef<str>>(
     vocabulary: &[T],
 ) -> String {
     let words = resolve_thinking_vocabulary(vocabulary);
-    let vocabulary_length = u64::try_from(words.len()).expect("a slice length always fits in u64");
-    let index = usize::try_from(
-        u64::from(utf16_fnv1a(seed)).wrapping_add(visibility_generation) % vocabulary_length,
-    )
-    .expect("the selected vocabulary index fits in usize");
-    words[index].clone()
+    let vocabulary_length = match u64::try_from(words.len()) {
+        Ok(length) if length != 0 => length,
+        Ok(_) | Err(_) => return fallback_thinking_word(),
+    };
+    let selected_index =
+        u64::from(utf16_fnv1a(seed)).wrapping_add(visibility_generation) % vocabulary_length;
+    let Ok(index) = usize::try_from(selected_index) else {
+        return fallback_thinking_word();
+    };
+    match words.get(index) {
+        Some(word) => word.clone(),
+        None => fallback_thinking_word(),
+    }
 }
 
 /// Returns the exact pre-response provider wait label when an engine is known.

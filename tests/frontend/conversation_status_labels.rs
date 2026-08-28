@@ -187,6 +187,15 @@ fn selection_is_deterministic_for_repeated_same_epoch_requests() {
 }
 
 #[test]
+fn maximum_generation_selection_is_non_panicking_and_deterministic() {
+    let first = thinking_word_for("maximum-generation", u64::MAX, &TEST_WORDS);
+    let second = thinking_word_for("maximum-generation", u64::MAX, &TEST_WORDS);
+
+    assert_eq!(first, second);
+    assert!(TEST_WORDS.iter().any(|word| *word == first));
+}
+
+#[test]
 fn visibility_advances_only_on_a_real_reappearance() {
     let mut state = ThinkingVisibilityState::new();
     assert_eq!(state.generation(), 0);
