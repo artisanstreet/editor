@@ -34,7 +34,7 @@ pub enum RepositoryHost {
     Gitlab,
     /// A network host with no recognized service family.
     Other,
-    /// SourceHut (`*.sr.ht`).
+    /// `SourceHut` (`*.sr.ht`).
     Sourcehut,
     /// No usable network hostname was present.
     Unknown,
@@ -65,7 +65,7 @@ impl RepositoryHost {
     #[allow(non_upper_case_globals)]
     pub const GitLab: Self = Self::Gitlab;
 
-    /// Mixed-case alias for the SourceHut product name.
+    /// Mixed-case alias for the `SourceHut` product name.
     #[allow(non_upper_case_globals)]
     pub const SourceHut: Self = Self::Sourcehut;
 }
@@ -232,7 +232,10 @@ fn parse_port(port: &str) -> Option<()> {
         return None;
     }
 
-    (port.parse::<u32>().ok()? <= u32::from(u16::MAX)).then_some(())
+    port.parse::<u32>()
+        .ok()
+        .is_some_and(|port| u16::try_from(port).is_ok())
+        .then_some(())
 }
 
 fn parse_authority_host(authority: &str, special: bool) -> Option<String> {
@@ -460,10 +463,10 @@ pub fn repository_host_for(url: &str) -> RepositoryHost {
         return RepositoryHost::Unknown;
     };
 
-    if !parts.networked {
-        RepositoryHost::Unknown
-    } else {
+    if parts.networked {
         classify_hostname(&parts.hostname)
+    } else {
+        RepositoryHost::Unknown
     }
 }
 
