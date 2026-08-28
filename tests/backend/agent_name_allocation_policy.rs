@@ -18,6 +18,10 @@ fn choose(
     choose_available_agent_name(name_bank, existing_display_names, selector)
 }
 
+fn utf16_code_unit_count(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
 #[test]
 fn empty_bank_uses_agent_fallback_and_preserves_ordered_selection() {
     assert_eq!(choose(&[], &[], 0), Ok(FALLBACK_AGENT_NAME.to_owned()));
@@ -162,6 +166,30 @@ fn exact_boundary_base_remains_whole_before_suffixing() {
             "b".repeat(VISIBLE_NAME_MAXIMUM - " 2".chars().count())
         ))
     );
+}
+
+#[test]
+fn non_bmp_suffixes_fit_the_utf16_visible_name_limit_without_replacement() {
+    let base = "🦀".repeat(VISIBLE_NAME_MAXIMUM / 2);
+    let expected = format!("{} 2", "🦀".repeat((VISIBLE_NAME_MAXIMUM - 2) / 2));
+
+    let selected = choose(&[base.as_str()], &[base.as_str()], 0).expect("available suffix");
+
+    assert_eq!(selected, expected);
+    assert_eq!(utf16_code_unit_count(&selected), VISIBLE_NAME_MAXIMUM);
+    assert!(!selected.contains('\u{fffd}'));
+}
+
+#[test]
+fn non_bmp_suffixes_retain_the_longest_valid_scalar_prefix() {
+    let base = format!("{}x🦀", "🦀".repeat(30));
+    let expected = format!("{}x 2", "🦀".repeat(30));
+
+    let selected = choose(&[base.as_str()], &[base.as_str()], 0).expect("available suffix");
+
+    assert_eq!(selected, expected);
+    assert!(utf16_code_unit_count(&selected) <= VISIBLE_NAME_MAXIMUM);
+    assert!(!selected.contains('\u{fffd}'));
 }
 
 #[test]

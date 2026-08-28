@@ -10,7 +10,8 @@
 
 use std::{collections::BTreeSet, fmt};
 
-/// Maximum visible-name length used when a numeric generation needs a suffix.
+/// Maximum visible-name length in UTF-16 code units when a numeric generation
+/// needs a suffix.
 pub const VISIBLE_NAME_MAXIMUM: usize = 64;
 
 /// The display-name spelling permanently reserved for the coordinator.
@@ -176,17 +177,44 @@ fn candidate_for(base: &str, generation: usize) -> String {
 
     let suffix = format!(" {generation}");
     let bounded_suffix = suffix_tail(&suffix, VISIBLE_NAME_MAXIMUM);
-    let suffix_length = bounded_suffix.chars().count();
+    let suffix_length = utf16_code_unit_count(&bounded_suffix);
     let base_length = VISIBLE_NAME_MAXIMUM.saturating_sub(suffix_length);
-    let bounded_base = base.chars().take(base_length).collect::<String>();
+    let bounded_base = utf16_prefix(base, base_length);
     format!("{bounded_base}{bounded_suffix}")
 }
 
 fn suffix_tail(value: &str, maximum: usize) -> String {
-    let length = value.chars().count();
-    if length <= maximum {
-        return value.to_owned();
+    let mut retained_reversed = String::new();
+    let mut used = 0_usize;
+
+    for character in value.chars().rev() {
+        let character_length = character.len_utf16();
+        if character_length > maximum.saturating_sub(used) {
+            break;
+        }
+        retained_reversed.push(character);
+        used += character_length;
     }
 
-    value.chars().skip(length - maximum).collect()
+    retained_reversed.chars().rev().collect()
+}
+
+fn utf16_prefix(value: &str, maximum: usize) -> String {
+    let mut bounded = String::new();
+    let mut used = 0_usize;
+
+    for character in value.chars() {
+        let character_length = character.len_utf16();
+        if character_length > maximum.saturating_sub(used) {
+            break;
+        }
+        bounded.push(character);
+        used += character_length;
+    }
+
+    bounded
+}
+
+fn utf16_code_unit_count(value: &str) -> usize {
+    value.encode_utf16().count()
 }
