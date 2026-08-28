@@ -278,7 +278,6 @@ pub struct ModelPolicyMutationError<Cause> {
 
 impl<Cause> ModelPolicyMutationError<Cause> {
     /// Wraps a persistence cause.
-    #[must_use]
     pub const fn new(cause: Cause) -> Self {
         Self { cause }
     }
@@ -345,6 +344,11 @@ impl ModelPolicyController {
     /// A changed authoritative value clears the repair key. Repeating the
     /// exact same authoritative value preserves that key, matching the
     /// source controller's structural comparison.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the controller's internal invariant is violated: after
+    /// setting `authoritative`, an effective current policy must be available.
     pub fn set_authoritative(&self, policy: SessionPolicy) -> SessionPolicy {
         let mut state = lock_unpoisoned(&self.state);
         let changed = state.authoritative.as_ref() != Some(&policy);
@@ -400,6 +404,12 @@ impl ModelPolicyController {
     /// value winning. On the first failure, both desired and in-flight state
     /// are cleared exactly as the legacy controller does; the authoritative
     /// policy and repair key are retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelPolicyMutationError`] when persistence returns a cause.
+    /// The exact typed cause is wrapped and returned after desired and
+    /// in-flight state have been cleared.
     pub fn flush<Persist, Cause>(
         &self,
         mut persist: Persist,
