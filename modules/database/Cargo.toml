@@ -25,6 +25,14 @@ name = "file_connection"
 path = "../../tests/database/file_connection.rs"
 
 [[test]]
+name = "message_dispatch"
+path = "../../tests/database/message_dispatch.rs"
+
+[[test]]
+name = "message_dispatch_lifecycle"
+path = "../../tests/database/message_dispatch_lifecycle.rs"
+
+[[test]]
 name = "seaorm_sqlite"
 path = "../../tests/database/seaorm_sqlite.rs"
 
