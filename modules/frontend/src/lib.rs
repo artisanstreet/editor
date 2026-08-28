@@ -91,6 +91,7 @@ pub mod thread_route_gate_policy;
 pub mod thread_title_policy;
 pub mod thread_title_settings_policy;
 pub mod transcript;
+pub mod usage_recovery_settings_policy;
 pub mod usage_reset_duration;
 pub mod vcs_labels;
 pub mod workspace_header_presentation;
