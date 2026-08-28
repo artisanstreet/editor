@@ -923,6 +923,17 @@ rust_test(
 )
 
 rust_test(
+    name = "vcs_labels_test",
+    srcs = ["vcs_labels.rs"],
+    crate_name = "vcs_labels_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "workspace_header_presentation_test",
     srcs = ["workspace_header_presentation.rs"],
     crate_name = "workspace_header_presentation_test",

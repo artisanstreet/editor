@@ -88,6 +88,7 @@ rust_library(
         "src/thread_title_settings_policy.rs",
         "src/transcript.rs",
         "src/usage_reset_duration.rs",
+        "src/vcs_labels.rs",
         "src/workspace_header_presentation.rs",
     ],
     crate_name = "artisan_frontend",
