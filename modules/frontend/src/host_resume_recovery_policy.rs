@@ -38,6 +38,11 @@ impl HostResumeRecoveryOptions {
     /// every positive excess interval to authorize recovery. The heartbeat
     /// must remain positive because a zero value would make an outer monitor
     /// loop spin without yielding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostResumeRecoveryConfigError::ZeroHeartbeat`] when the
+    /// supplied heartbeat resolves to zero.
     pub const fn resolve(self) -> Result<HostResumeRecoveryConfig, HostResumeRecoveryConfigError> {
         let heartbeat_ms = match self.heartbeat_ms {
             Some(value) => value,
@@ -293,6 +298,11 @@ pub fn host_resume_recovery_decision_with_config(
 /// This convenience function mirrors one iteration of the legacy monitor. It
 /// returns one decision and then stops; the caller owns any later observation
 /// and the transport's retry policy.
+///
+/// # Errors
+///
+/// Returns [`HostResumeRecoveryConfigError::ZeroHeartbeat`] when the supplied
+/// heartbeat resolves to zero.
 pub fn host_resume_recovery_decision(
     started_at_ms: i64,
     resumed_at_ms: i64,
