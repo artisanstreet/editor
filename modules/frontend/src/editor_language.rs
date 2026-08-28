@@ -152,9 +152,7 @@ fn find_mapping(table: &[(&str, EditorLanguageId)], candidate: &str) -> Option<E
 }
 
 fn file_name(path: &str) -> &str {
-    path.rsplit(|character| matches!(character, '/' | '\\'))
-        .next()
-        .unwrap_or_default()
+    path.rsplit(['/', '\\']).next().unwrap_or_default()
 }
 
 fn file_extension(file_name: &str) -> &str {
