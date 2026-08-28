@@ -7,11 +7,15 @@
 mod usage_interruption_model_policy;
 
 use usage_interruption_model_policy::{
-    DecodedUsageInterruptionAlternatives, MAX_USAGE_EVIDENCE_TEXT_SCALARS,
+    DecodedUsageInterruptionAlternatives, MAX_USAGE_EVIDENCE_TEXT_UTF16_UNITS,
     UsageInterruptionAlternative, UsageInterruptionDecodeError, UsageInterruptionModelPolicy,
     UsageInterruptionRow, UsageInterruptionSnapshot, decode_usage_interruption_row,
     sanitise_usage_evidence_text, sanitize_usage_evidence_text,
 };
+
+fn utf16_units(value: &str) -> usize {
+    value.encode_utf16().count()
+}
 
 fn empty_row() -> UsageInterruptionRow {
     UsageInterruptionRow {
@@ -241,10 +245,15 @@ fn sanitization_trims_after_control_replacement() {
 }
 
 #[test]
-fn sanitization_accepts_exactly_256_and_truncates_257_scalars() {
-    let exact = "a".repeat(MAX_USAGE_EVIDENCE_TEXT_SCALARS);
+fn sanitization_observes_bmp_utf16_unit_boundaries() {
+    let below = "a".repeat(255);
+    let exact = "a".repeat(MAX_USAGE_EVIDENCE_TEXT_UTF16_UNITS);
     let over = format!("{exact}b");
 
+    assert_eq!(
+        sanitise_usage_evidence_text(Some(&below)).as_deref(),
+        Some(below.as_str())
+    );
     assert_eq!(
         sanitise_usage_evidence_text(Some(&exact)).as_deref(),
         Some(exact.as_str())
@@ -256,10 +265,54 @@ fn sanitization_accepts_exactly_256_and_truncates_257_scalars() {
     assert_eq!(
         sanitise_usage_evidence_text(Some(&over))
             .expect("bounded evidence")
-            .chars()
+            .encode_utf16()
             .count(),
         256
     );
+}
+
+#[test]
+fn sanitization_observes_non_bmp_utf16_unit_boundaries() {
+    let at_255 = format!("{}🙂", "a".repeat(253));
+    let at_256 = format!("{}🙂", "a".repeat(254));
+    let at_257 = format!("{}🙂", "a".repeat(255));
+
+    assert_eq!(utf16_units(&at_255), 255);
+    assert_eq!(utf16_units(&at_256), 256);
+    assert_eq!(utf16_units(&at_257), 257);
+    assert_eq!(sanitise_usage_evidence_text(Some(&at_255)), Some(at_255));
+    assert_eq!(sanitise_usage_evidence_text(Some(&at_256)), Some(at_256));
+    assert_eq!(
+        sanitise_usage_evidence_text(Some(&at_257)),
+        Some("a".repeat(255))
+    );
+}
+
+#[test]
+fn sanitization_observes_mixed_utf16_unit_boundaries() {
+    let prefix = "🙂".repeat(127);
+    let at_255 = format!("{prefix}a");
+    let at_256 = format!("{prefix}ab");
+    let at_257 = format!("{prefix}abc");
+
+    assert_eq!(utf16_units(&at_255), 255);
+    assert_eq!(utf16_units(&at_256), 256);
+    assert_eq!(utf16_units(&at_257), 257);
+    assert_eq!(sanitise_usage_evidence_text(Some(&at_255)), Some(at_255));
+    assert_eq!(sanitise_usage_evidence_text(Some(&at_256)), Some(at_256));
+    assert_eq!(
+        sanitise_usage_evidence_text(Some(&at_257)),
+        Some(format!("{prefix}ab"))
+    );
+}
+
+#[test]
+fn one_unit_left_before_emoji_does_not_split_the_scalar() {
+    let input = format!("{}🙂tail", "a".repeat(255));
+    let cleaned = sanitise_usage_evidence_text(Some(&input)).expect("bounded evidence");
+
+    assert_eq!(cleaned, "a".repeat(255));
+    assert_eq!(utf16_units(&cleaned), 255);
 }
 
 #[test]
@@ -270,16 +323,13 @@ fn empty_cleaned_evidence_is_absent() {
 }
 
 #[test]
-fn non_ascii_evidence_is_preserved_and_bounded_by_scalar_values() {
+fn non_ascii_evidence_is_preserved_and_bounded_by_utf16_units() {
     let input = "ø界🙂".repeat(100);
-    let expected = input.chars().take(256).collect::<String>();
+    let expected = "ø界🙂".repeat(64);
     let cleaned = sanitise_usage_evidence_text(Some(&input));
 
     assert_eq!(cleaned, Some(expected));
-    assert_eq!(
-        cleaned.as_deref().map(str::chars).map(Iterator::count),
-        Some(256)
-    );
+    assert_eq!(cleaned.as_deref().map(utf16_units), Some(256));
 }
 
 #[test]

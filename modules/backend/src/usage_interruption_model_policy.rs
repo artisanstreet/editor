@@ -10,8 +10,8 @@
 
 use std::fmt;
 
-/// Maximum number of Unicode scalar values retained in provider evidence.
-pub const MAX_USAGE_EVIDENCE_TEXT_SCALARS: usize = 256;
+/// Maximum number of UTF-16 code units retained in provider evidence.
+pub const MAX_USAGE_EVIDENCE_TEXT_UTF16_UNITS: usize = 256;
 
 /// One provider-verified alternative model supplied by the persistence
 /// decoder.
@@ -286,8 +286,9 @@ pub fn decode_usage_interruption_row(
 ///
 /// Every C0 control scalar (U+0000 through U+001F) and DEL (U+007F)
 /// becomes one ordinary space. The result is then trimmed and bounded to the
-/// first `MAX_USAGE_EVIDENCE_TEXT_SCALARS` Unicode scalar values. Missing or
-/// empty cleaned text is returned as None.
+/// first `MAX_USAGE_EVIDENCE_TEXT_UTF16_UNITS` UTF-16 code units without
+/// splitting a Unicode scalar value. Missing or empty cleaned text is returned
+/// as None.
 #[must_use = "use the sanitized evidence text"]
 pub fn sanitise_usage_evidence_text(value: Option<&str>) -> Option<String> {
     let value = value?;
@@ -302,10 +303,16 @@ pub fn sanitise_usage_evidence_text(value: Option<&str>) -> Option<String> {
         })
         .collect::<String>();
     let trimmed = cleaned.trim();
-    let bounded = trimmed
-        .chars()
-        .take(MAX_USAGE_EVIDENCE_TEXT_SCALARS)
-        .collect::<String>();
+    let mut bounded = String::new();
+    let mut used_units = 0;
+    for character in trimmed.chars() {
+        let character_units = character.len_utf16();
+        if used_units + character_units > MAX_USAGE_EVIDENCE_TEXT_UTF16_UNITS {
+            break;
+        }
+        bounded.push(character);
+        used_units += character_units;
+    }
 
     (!bounded.is_empty()).then_some(bounded)
 }
