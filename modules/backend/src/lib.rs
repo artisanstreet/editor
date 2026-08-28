@@ -33,6 +33,7 @@ pub mod subscription_patch_selection_policy;
 pub mod telemetry_preferences_control_policy;
 pub mod terminal_transcript_consumption_policy;
 pub mod thread_liveness_policy;
+pub mod thread_metadata_refiner_policy;
 pub mod thread_resource_quiescence_policy;
 pub mod usage_interruption_model_policy;
 pub mod wake_lock_policy;

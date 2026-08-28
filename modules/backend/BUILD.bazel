@@ -55,6 +55,7 @@ rust_library(
         "src/telemetry_preferences_control_policy.rs",
         "src/terminal_transcript_consumption_policy.rs",
         "src/thread_liveness_policy.rs",
+        "src/thread_metadata_refiner_policy.rs",
         "src/thread_resource_quiescence_policy.rs",
         "src/usage_interruption_model_policy.rs",
         "src/wake_lock_policy.rs",
