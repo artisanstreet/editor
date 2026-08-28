@@ -40,6 +40,7 @@ pub mod mobile_breakpoint_policy;
 pub mod motion_spring;
 pub mod new_thread_interaction;
 pub mod notification_events;
+pub mod notification_web_presenter_policy;
 pub mod notification_preferences;
 pub mod onboarding_route;
 pub mod project_identity_policy;
