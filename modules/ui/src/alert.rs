@@ -354,6 +354,116 @@ impl Alert {
     }
 }
 
+struct AlertSelectors {
+    root: String,
+    title: String,
+    description: String,
+    content: String,
+    icon: String,
+    action: String,
+}
+
+fn resolve_alert_selectors(prefix: &Option<String>) -> AlertSelectors {
+    AlertSelectors {
+        root: prefix
+            .clone()
+            .unwrap_or_else(|| ALERT_ROOT_SELECTOR.to_string()),
+        title: prefix.as_ref().map_or_else(
+            || ALERT_TITLE_SELECTOR.to_string(),
+            |selector| format!("{selector}-title"),
+        ),
+        description: prefix.as_ref().map_or_else(
+            || ALERT_DESCRIPTION_SELECTOR.to_string(),
+            |selector| format!("{selector}-description"),
+        ),
+        content: prefix.as_ref().map_or_else(
+            || ALERT_CONTENT_SELECTOR.to_string(),
+            |selector| format!("{selector}-content"),
+        ),
+        icon: prefix.as_ref().map_or_else(
+            || ALERT_ICON_SELECTOR.to_string(),
+            |selector| format!("{selector}-icon"),
+        ),
+        action: prefix.as_ref().map_or_else(
+            || ALERT_ACTION_SELECTOR.to_string(),
+            |selector| format!("{selector}-action"),
+        ),
+    }
+}
+
+fn alert_root_container(style: AlertStyle, has_action: bool, root_selector: String) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap(style.content_gap)
+        .px(style.horizontal_padding)
+        .py(style.vertical_padding)
+        .rounded(style.corner_radius)
+        .border_1()
+        .border_color(style.border_color)
+        .bg(style.background)
+        .text_color(style.foreground)
+        .text_size(style.text_size)
+        .overflow_hidden()
+        .when(has_action, |element| {
+            element.pr(style.action_reserved_padding)
+        })
+        .debug_selector(move || root_selector)
+}
+
+fn alert_content_column(
+    style: AlertStyle,
+    selectors: &AlertSelectors,
+    title: Option<SharedString>,
+    description: Option<SharedString>,
+    content: Option<AnyElement>,
+    has_icon: bool,
+) -> Div {
+    let mut column = div()
+        .flex()
+        .flex_col()
+        .gap(style.content_gap)
+        .min_w_0()
+        .flex_1();
+
+    if let Some(title) = title {
+        let selector = selectors.title.clone();
+        let title_element = div()
+            .min_w_0()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(style.foreground)
+            .debug_selector(move || selector)
+            .child(title);
+        column = column.child(title_element);
+    } else if has_icon {
+        // Keep layout stable when an icon is present without a title.
+    }
+
+    if let Some(description) = description {
+        let selector = selectors.description.clone();
+        let description_element = div()
+            .min_w_0()
+            .text_size(style.text_size)
+            .text_color(style.description_foreground)
+            .debug_selector(move || selector)
+            .child(description);
+        column = column.child(description_element);
+    }
+
+    if let Some(content) = content {
+        let selector = selectors.content.clone();
+        let freeform = div()
+            .min_w_0()
+            .debug_selector(move || selector)
+            .child(content);
+        column = column.child(freeform);
+    }
+
+    column
+}
+
 impl RenderOnce for Alert {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let has_action = self.action.is_some();
@@ -363,59 +473,11 @@ impl RenderOnce for Alert {
         let has_content = self.content.is_some();
         let style = self.style;
 
-        let prefix = self
-            .debug_selector
-            .as_ref()
-            .map(|selector| selector.to_string());
+        let prefix = self.debug_selector.as_ref().map(ToString::to_string);
+        let selectors = resolve_alert_selectors(&prefix);
 
-        let root_selector = prefix
-            .clone()
-            .unwrap_or_else(|| ALERT_ROOT_SELECTOR.to_string());
-        let title_selector = prefix
-            .as_ref()
-            .map(|selector| format!("{selector}-title"))
-            .unwrap_or_else(|| ALERT_TITLE_SELECTOR.to_string());
-        let description_selector = prefix
-            .as_ref()
-            .map(|selector| format!("{selector}-description"))
-            .unwrap_or_else(|| ALERT_DESCRIPTION_SELECTOR.to_string());
-        let content_selector = prefix
-            .as_ref()
-            .map(|selector| format!("{selector}-content"))
-            .unwrap_or_else(|| ALERT_CONTENT_SELECTOR.to_string());
-        let icon_selector = prefix
-            .as_ref()
-            .map(|selector| format!("{selector}-icon"))
-            .unwrap_or_else(|| ALERT_ICON_SELECTOR.to_string());
-        let action_selector = prefix
-            .as_ref()
-            .map(|selector| format!("{selector}-action"))
-            .unwrap_or_else(|| ALERT_ACTION_SELECTOR.to_string());
+        let mut root = alert_root_container(style, has_action, selectors.root.clone());
 
-        // Root container: bordered, rounded, padded inline alert.
-        let mut root = div()
-            .relative()
-            .flex()
-            .flex_col()
-            .w_full()
-            .gap(style.content_gap)
-            .px(style.horizontal_padding)
-            .py(style.vertical_padding)
-            .rounded(style.corner_radius)
-            .border_1()
-            .border_color(style.border_color)
-            .bg(style.background)
-            .text_color(style.foreground)
-            .text_size(style.text_size)
-            .overflow_hidden()
-            .when(has_action, |element| {
-                element.pr(style.action_reserved_padding)
-            })
-            .debug_selector(move || root_selector);
-
-        // The main row: optional leading icon + vertical content column.
-        // The flex-row reproduces the legacy `has-[>svg]:grid-cols-[auto_1fr]`
-        // two-column treatment with a fixed 10 px gap.
         let mut row: Div = div()
             .flex()
             .flex_row()
@@ -424,86 +486,47 @@ impl RenderOnce for Alert {
             .w_full();
 
         if let Some(icon) = self.icon {
-            let icon_selector_clone = icon_selector.clone();
+            let icon_selector = selectors.icon.clone();
             let mut icon_element = div()
                 .flex_shrink_0()
-                .debug_selector(move || icon_selector_clone)
+                .debug_selector(move || icon_selector)
                 .child(
                     asset_glyph(icon)
                         .size(style.icon_size)
                         .text_color(style.foreground),
                 );
-            // Align the 16 px icon with the first text baseline (the legacy
-            // `*:[svg]:translate-y-0.5` nudge is 2 px; GPUI carries it as a
-            // plain top offset on the icon wrapper).
             icon_element = icon_element.mt(px(2.0));
             row = row.child(icon_element);
         }
 
-        let mut content_column = div()
-            .flex()
-            .flex_col()
-            .gap(style.content_gap)
-            .min_w_0()
-            .flex_1();
-
-        if let Some(title) = self.title {
-            let title_selector_clone = title_selector.clone();
-            let title_element = div()
-                .min_w_0()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(style.foreground)
-                .debug_selector(move || title_selector_clone)
-                .child(title);
-            content_column = content_column.child(title_element);
-        } else if has_icon {
-            // Ensure icon selector still resolves when title is absent but we
-            // consumed the else branch above: no-op, keeps layout stable.
-        }
-
-        if let Some(description) = self.description {
-            let description_selector_clone = description_selector.clone();
-            let description_element = div()
-                .min_w_0()
-                .text_size(style.text_size)
-                .text_color(style.description_foreground)
-                .debug_selector(move || description_selector_clone)
-                .child(description);
-            content_column = content_column.child(description_element);
-        }
-
-        if let Some(content) = self.content {
-            let content_selector_clone = content_selector.clone();
-            let freeform = div()
-                .min_w_0()
-                .debug_selector(move || content_selector_clone)
-                .child(content);
-            content_column = content_column.child(freeform);
-        }
-
+        let content_column = alert_content_column(
+            style,
+            &selectors,
+            self.title,
+            self.description,
+            self.content,
+            has_icon,
+        );
         row = row.child(content_column);
         root = root.child(row);
 
         if let Some(action) = self.action {
-            let action_selector_clone = action_selector.clone();
+            let action_selector = selectors.action.clone();
             let action_wrapper = div()
                 .absolute()
                 .top(style.action_top)
                 .right(style.action_right)
-                .debug_selector(move || action_selector_clone)
+                .debug_selector(move || action_selector)
                 .child(action);
             root = root.child(action_wrapper);
         }
 
-        // Keep selector strings live after the conditional clones so the
-        // `debug_selector` suffix convention remains stable and unused
-        // variable lints stay quiet regardless of which branches executed.
         let _ = (
-            title_selector,
-            description_selector,
-            content_selector,
-            icon_selector,
-            action_selector,
+            selectors.title,
+            selectors.description,
+            selectors.content,
+            selectors.icon,
+            selectors.action,
             has_title,
             has_description,
             has_content,
