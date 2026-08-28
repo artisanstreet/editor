@@ -352,6 +352,17 @@ rust_test(
 )
 
 rust_test(
+    name = "subscription_patch_selection_policy_test",
+    srcs = ["subscription_patch_selection_policy.rs"],
+    crate_name = "subscription_patch_selection_policy_test",
+    deps = ["//modules/backend:backend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "telemetry_preferences_control_policy_test",
     srcs = ["telemetry_preferences_control_policy.rs"],
     crate_name = "telemetry_preferences_control_policy_test",

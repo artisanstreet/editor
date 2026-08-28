@@ -47,6 +47,7 @@ rust_library(
         "src/request_handler.rs",
         "src/sqlite_write_retry_policy.rs",
         "src/storage.rs",
+        "src/subscription_patch_selection_policy.rs",
         "src/telemetry_preferences_control_policy.rs",
         "src/thread_liveness_policy.rs",
         "src/thread_resource_quiescence_policy.rs",

@@ -25,6 +25,7 @@ pub mod product_telemetry_capture_policy;
 pub mod request_handler;
 pub mod sqlite_write_retry_policy;
 pub mod storage;
+pub mod subscription_patch_selection_policy;
 pub mod telemetry_preferences_control_policy;
 pub mod thread_liveness_policy;
 pub mod thread_resource_quiescence_policy;
