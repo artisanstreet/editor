@@ -11,6 +11,7 @@ artisan-domain = { path = "../domain" }
 artisan-migrations = { path = "../migrations" }
 artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
+thiserror.workspace = true
 zeroize.workspace = true
 
 [lints]
