@@ -33,6 +33,10 @@ rcgen.workspace = true
 rustls-pki-types.workspace = true
 
 [[test]]
+name = "agent_name_catalog_policy"
+path = "../../tests/backend/agent_name_catalog_policy.rs"
+
+[[test]]
 name = "app_test"
 path = "../../tests/backend/app.rs"
 
