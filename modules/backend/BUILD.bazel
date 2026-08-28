@@ -6,6 +6,7 @@ rust_library(
     name = "backend",
     srcs = [
         "src/app.rs",
+        "src/credential_authority.rs",
         "src/lib.rs",
         "src/request_handler.rs",
         "src/storage.rs",
