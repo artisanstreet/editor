@@ -17,6 +17,8 @@ fn compact_formatting_matches_typescript_contract() {
         (999, "999"),
         (1_000, "1k"),
         (1_001, "1k"),
+        (1_250, "1.3k"),
+        (1_750, "1.8k"),
         (1_499, "1.5k"),
         (1_500, "1.5k"),
         (1_999, "2k"),
@@ -33,6 +35,8 @@ fn compact_formatting_matches_typescript_contract() {
         (999_999, "1000k"),
         (1_000_000, "1M"),
         (1_040_000, "1M"),
+        (1_250_000, "1.3M"),
+        (1_750_000, "1.8M"),
         (1_490_000, "1.5M"),
         (1_500_000, "1.5M"),
         (9_949_000, "9.9M"),
@@ -43,6 +47,8 @@ fn compact_formatting_matches_typescript_contract() {
         (999_500_000, "1000M"),
         (1_000_000_000, "1B"),
         (1_040_000_000, "1B"),
+        (1_250_000_000, "1.3B"),
+        (1_750_000_000, "1.8B"),
         (1_500_000_000, "1.5B"),
         (9_949_000_000, "9.9B"),
         (9_950_000_000, "9.9B"),
@@ -477,6 +483,26 @@ fn ordering_does_not_affect_sums() {
             additions: 30,
             deletions: 3,
             unavailable_files: 1
+        }
+    );
+}
+
+#[test]
+fn malformed_overflow_saturates_instead_of_wrapping_visible_counts() {
+    assert_eq!(
+        aggregate_diff_stats(&[
+            DiffStat::Known {
+                additions: u64::MAX,
+                deletions: u64::MAX,
+            },
+            DiffStat::Known {
+                additions: 1,
+                deletions: 1,
+            },
+        ]),
+        DiffStat::Known {
+            additions: u64::MAX,
+            deletions: u64::MAX,
         }
     );
 }

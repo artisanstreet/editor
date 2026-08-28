@@ -37,9 +37,7 @@ pub fn format_compact_diff_count(value: u64) -> String {
         #[allow(clippy::cast_precision_loss)]
         let thousands = value as f64 / 1_000.0;
         return if thousands < 10.0 {
-            let formatted = format!("{thousands:.1}");
-            let trimmed = formatted.strip_suffix(".0").unwrap_or(&formatted);
-            format!("{trimmed}k")
+            format_sub_ten(thousands, 'k')
         } else {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let rounded = thousands.round() as u64;
@@ -50,9 +48,7 @@ pub fn format_compact_diff_count(value: u64) -> String {
         #[allow(clippy::cast_precision_loss)]
         let millions = value as f64 / 1_000_000.0;
         return if millions < 10.0 {
-            let formatted = format!("{millions:.1}");
-            let trimmed = formatted.strip_suffix(".0").unwrap_or(&formatted);
-            format!("{trimmed}M")
+            format_sub_ten(millions, 'M')
         } else {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let rounded = millions.round() as u64;
@@ -62,14 +58,28 @@ pub fn format_compact_diff_count(value: u64) -> String {
     #[allow(clippy::cast_precision_loss)]
     let billions = value as f64 / 1_000_000_000.0;
     if billions < 10.0 {
-        let formatted = format!("{billions:.1}");
-        let trimmed = formatted.strip_suffix(".0").unwrap_or(&formatted);
-        format!("{trimmed}B")
+        format_sub_ten(billions, 'B')
     } else {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let rounded = billions.round() as u64;
         format!("{rounded}B")
     }
+}
+
+fn format_sub_ten(value: f64, suffix: char) -> String {
+    // Rust formatting and JavaScript `toFixed` differ only on exact halfway
+    // values: Rust uses ties-to-even, while JS chooses the larger decimal.
+    // At one decimal place, the only positive binary-exact halfway values
+    // have a `.25` or `.75` fraction. `.75` already rounds upward under both
+    // rules; `.25` needs the explicit JS result.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let formatted = if value.fract() == 0.25 {
+        format!("{}.3", value.trunc() as u64)
+    } else {
+        format!("{value:.1}")
+    };
+    let trimmed = formatted.strip_suffix(".0").unwrap_or(&formatted);
+    format!("{trimmed}{suffix}")
 }
 
 /// Typed diff for one file, mirroring `ConversationItem["diff"]` plus the
@@ -223,8 +233,9 @@ impl DiffStat {
 /// - Ordering of the input is preserved for presentation grouping but does
 ///   not affect the numeric sums, which are commutative.
 ///
-/// Sums are computed deterministically with wrapping-free `u64` addition;
-/// caller inputs from the protocol are bounded well below `u64::MAX`.
+/// Sums use saturating `u64` addition. Protocol inputs are bounded far below
+/// `u64::MAX`, while saturation keeps malformed synthetic input from wrapping
+/// a large visible count back to zero.
 #[must_use]
 pub fn aggregate_diff_stats(diffs: &[DiffStat]) -> DiffStat {
     if diffs.is_empty() {
@@ -237,15 +248,15 @@ pub fn aggregate_diff_stats(diffs: &[DiffStat]) -> DiffStat {
     for diff in diffs {
         match *diff {
             DiffStat::Unavailable => {
-                unavailable_files = unavailable_files.wrapping_add(1);
+                unavailable_files = unavailable_files.saturating_add(1);
             }
             DiffStat::Known {
                 additions: a,
                 deletions: d,
             } => {
                 has_counts = true;
-                additions = additions.wrapping_add(a);
-                deletions = deletions.wrapping_add(d);
+                additions = additions.saturating_add(a);
+                deletions = deletions.saturating_add(d);
             }
             DiffStat::Partial {
                 additions: a,
@@ -253,9 +264,9 @@ pub fn aggregate_diff_stats(diffs: &[DiffStat]) -> DiffStat {
                 unavailable_files: u,
             } => {
                 has_counts = true;
-                additions = additions.wrapping_add(a);
-                deletions = deletions.wrapping_add(d);
-                unavailable_files = unavailable_files.wrapping_add(u);
+                additions = additions.saturating_add(a);
+                deletions = deletions.saturating_add(d);
+                unavailable_files = unavailable_files.saturating_add(u);
             }
         }
     }
