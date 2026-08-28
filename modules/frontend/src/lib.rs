@@ -26,6 +26,7 @@ pub mod context_usage_gauge_policy;
 pub mod context_usage_model_name;
 pub mod context_usage_tone;
 pub mod conversation_diff_stat;
+pub mod conversation_error_card_policy;
 pub mod conversation_presentation;
 pub mod conversation_projection;
 pub mod conversation_relative_age;
