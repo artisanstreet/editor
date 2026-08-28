@@ -16,7 +16,7 @@ fn id(value: &str) -> ToolId {
     ToolId::from(value)
 }
 
-fn assert_available(result: ToolCapabilityResolution, expected_id: &str) {
+fn assert_available(result: &ToolCapabilityResolution, expected_id: &str) {
     assert_eq!(result.state, CapabilityState::Available);
     assert_eq!(result.tool_id.as_str(), expected_id);
     assert_eq!(result.unavailable_reason, None);
@@ -24,7 +24,7 @@ fn assert_available(result: ToolCapabilityResolution, expected_id: &str) {
 }
 
 fn assert_unavailable(
-    result: ToolCapabilityResolution,
+    result: &ToolCapabilityResolution,
     expected_id: &str,
     expected_reason: &'static str,
 ) {
@@ -119,9 +119,9 @@ fn each_registry_present_missing_and_failed_outcome_is_resolved() {
             let result = resolve(id(tool_id), WORKSPACE_ID, outcomes_for(registry, outcome));
 
             match outcome {
-                RegistryOutcome::Present => assert_available(result, tool_id),
+                RegistryOutcome::Present => assert_available(&result, tool_id),
                 RegistryOutcome::Missing | RegistryOutcome::Failed => {
-                    assert_unavailable(result, tool_id, WORKSPACE_CAPABILITY_UNAVAILABLE_REASON)
+                    assert_unavailable(&result, tool_id, WORKSPACE_CAPABILITY_UNAVAILABLE_REASON);
                 }
             }
             assert_eq!(selected_registry(&id(tool_id)), Some(registry), "{label}");
@@ -150,13 +150,13 @@ fn missing_workspace_precedes_every_registry_outcome() {
     for tool_id in workspace_tools {
         for outcome in outcomes {
             let result = resolve(id(tool_id), None, RegistryOutcomes::all(outcome));
-            assert_unavailable(result, tool_id, WORKSPACE_REQUIRED_REASON);
+            assert_unavailable(&result, tool_id, WORKSPACE_REQUIRED_REASON);
         }
     }
 
     // A defined but empty JavaScript string is still a present workspace ID.
     assert_available(
-        resolve(
+        &resolve(
             id("workspace.file.read"),
             Some(""),
             RegistryOutcomes::new(
@@ -190,7 +190,7 @@ fn non_workspace_tools_are_unconditionally_available() {
 
     for tool_id in tool_ids {
         for registries in outcomes {
-            assert_available(resolve(id(tool_id), None, registries), tool_id);
+            assert_available(&resolve(id(tool_id), None, registries), tool_id);
         }
     }
 }
@@ -209,13 +209,13 @@ fn preview_prefix_is_unconditionally_unavailable_and_precedes_workspace_rules() 
                 workspace_id,
                 RegistryOutcomes::all(RegistryOutcome::Present),
             );
-            assert_unavailable(result, tool_id, PREVIEW_UNAVAILABLE_REASON);
+            assert_unavailable(&result, tool_id, PREVIEW_UNAVAILABLE_REASON);
         }
     }
 
     // `startsWith("preview.")` is intentionally narrower than `startsWith("preview")`.
     assert_available(
-        resolve(
+        &resolve(
             id("preview"),
             None,
             RegistryOutcomes::all(RegistryOutcome::Failed),
@@ -233,7 +233,7 @@ fn language_service_is_unconditionally_unavailable_and_has_exact_reason() {
             RegistryOutcomes::all(RegistryOutcome::Present),
         );
         assert_unavailable(
-            result,
+            &result,
             "workspace.language.status",
             LANGUAGE_SERVICE_UNAVAILABLE_REASON,
         );
@@ -248,7 +248,7 @@ fn selected_registry_outcome_is_the_only_registry_that_matters() {
         RegistryOutcome::Missing,
     ));
     assert_available(
-        policy.get(id("workspace.file.read"), WORKSPACE_ID),
+        &policy.get(id("workspace.file.read"), WORKSPACE_ID),
         "workspace.file.read",
     );
 
@@ -258,7 +258,7 @@ fn selected_registry_outcome_is_the_only_registry_that_matters() {
         RegistryOutcome::Missing,
     ));
     assert_available(
-        policy.resolve(id("workspace.file.list"), WORKSPACE_ID),
+        &policy.resolve(id("workspace.file.list"), WORKSPACE_ID),
         "workspace.file.list",
     );
 
@@ -268,7 +268,7 @@ fn selected_registry_outcome_is_the_only_registry_that_matters() {
         RegistryOutcome::Present,
     ));
     assert_available(
-        policy.resolve(id("git.diff.read"), WORKSPACE_ID),
+        &policy.resolve(id("git.diff.read"), WORKSPACE_ID),
         "git.diff.read",
     );
 }
@@ -283,6 +283,6 @@ fn exact_tool_id_is_carried_through_without_registry_custody() {
         RegistryOutcomes::all(RegistryOutcome::Failed),
     );
 
-    assert_available(result.clone(), &expected_id);
+    assert_available(&result, &expected_id);
     assert_eq!(result.tool_id.into_string(), expected_id);
 }

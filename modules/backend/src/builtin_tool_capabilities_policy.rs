@@ -210,7 +210,7 @@ impl BuiltInToolCapabilityPolicy {
 
     /// Returns the injected outcomes retained by this policy.
     #[must_use]
-    pub const fn registries(&self) -> RegistryOutcomes {
+    pub const fn registries(self) -> RegistryOutcomes {
         self.registries
     }
 
@@ -220,13 +220,13 @@ impl BuiltInToolCapabilityPolicy {
     /// is present just as any defined JavaScript string is present; the ID is
     /// not inspected, normalized, or copied into the result.
     #[must_use]
-    pub fn resolve(&self, tool_id: ToolId, workspace_id: Option<&str>) -> ToolCapabilityResolution {
+    pub fn resolve(self, tool_id: ToolId, workspace_id: Option<&str>) -> ToolCapabilityResolution {
         resolve_with_registries(tool_id, workspace_id, self.registries)
     }
 
     /// Resolves one tool using a method name parallel to the source registry's `Get`.
     #[must_use]
-    pub fn get(&self, tool_id: ToolId, workspace_id: Option<&str>) -> ToolCapabilityResolution {
+    pub fn get(self, tool_id: ToolId, workspace_id: Option<&str>) -> ToolCapabilityResolution {
         self.resolve(tool_id, workspace_id)
     }
 }
