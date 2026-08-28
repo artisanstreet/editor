@@ -6,6 +6,12 @@
 //! rounding. Tests are written against values, never against the implementation
 //! re-deriving the expected result.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::float_cmp
+)]
+
 use artisan_frontend::context_usage_tone::{
     ContextTone, DANGER_FROM, GaugeToneMix, WARN_FROM, context_gauge_tone_mix,
     context_usage_percent, context_usage_percent_opt, gauge_display_percent, gauge_fill_percent,
