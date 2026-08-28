@@ -217,6 +217,10 @@ name = "runtime_surface"
 path = "../../tests/frontend/runtime_surface.rs"
 
 [[test]]
+name = "setup_label_transition_policy"
+path = "../../tests/frontend/setup_label_transition_policy.rs"
+
+[[test]]
 name = "thread_hover_rail_policy"
 path = "../../tests/frontend/thread_hover_rail_policy.rs"
 

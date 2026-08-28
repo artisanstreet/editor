@@ -61,6 +61,7 @@ rust_library(
         "src/runtime_fixture_support.rs",
         "src/runtime_surface.rs",
         "src/shell.rs",
+        "src/setup_label_transition_policy.rs",
         "src/subscription_projection.rs",
         "src/telemetry_bootstrap_policy.rs",
         "src/telemetry_preferences.rs",
