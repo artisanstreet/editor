@@ -81,6 +81,10 @@ name = "markdown_fence_policy"
 path = "../../tests/frontend/markdown_fence_policy.rs"
 
 [[test]]
+name = "marketplace_fixture_policy"
+path = "../../tests/frontend/marketplace_fixture_policy.rs"
+
+[[test]]
 name = "math_rendering_policy"
 path = "../../tests/frontend/math_rendering_policy.rs"
 
