@@ -25,6 +25,7 @@ pub mod conversation_relative_age;
 pub mod conversation_scroll_position;
 pub mod conversation_turn_footer_policy;
 pub mod conversation_turn_navigator;
+pub mod dev_instance_policy;
 pub mod engine_usage_cache;
 pub mod file_icon;
 pub mod forge_recovery_health;
