@@ -15,6 +15,7 @@ rust_library(
     srcs = [
         "src/agent_name_allocation_policy.rs",
         "src/app.rs",
+        "src/builtin_tool_capabilities_policy.rs",
         "src/connection.rs",
         "src/credential_authority.rs",
         "src/command_admission.rs",
