@@ -81,6 +81,10 @@ name = "markdown_fence_policy"
 path = "../../tests/frontend/markdown_fence_policy.rs"
 
 [[test]]
+name = "markdown_test_parser_policy"
+path = "../../tests/frontend/markdown_test_parser_policy.rs"
+
+[[test]]
 name = "markdown_warmup_policy"
 path = "../../tests/frontend/markdown_warmup_policy.rs"
 

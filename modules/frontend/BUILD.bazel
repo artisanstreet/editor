@@ -27,6 +27,7 @@ rust_library(
         "src/latest_request_gate.rs",
         "src/lib.rs",
         "src/markdown_fence_policy.rs",
+        "src/markdown_test_parser_policy.rs",
         "src/markdown_warmup_policy.rs",
         "src/marketplace_fixture_policy.rs",
         "src/math_rendering_policy.rs",
