@@ -37,6 +37,7 @@ rust_library(
         "src/lib.rs",
         "src/listener.rs",
         "src/preview_service_policy.rs",
+        "src/product_telemetry_capture_policy.rs",
         "src/request_handler.rs",
         "src/storage.rs",
         "//tests/backend:directory_controller.rs",
