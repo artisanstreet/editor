@@ -4,12 +4,14 @@
 //! dependency-free and does not require shared crate registration, UI code, or
 //! the native asset catalog.
 
+use std::str::FromStr;
+
 #[path = "../../modules/frontend/src/repository_mark.rs"]
 mod repository_mark;
 
 use repository_mark::{
-    DEFAULT_MARK_SIZE, RepositoryHost, RepositoryLogo, RepositoryMark, repository_chip_mark_class,
-    repository_mark_class, repository_mark_for,
+    DEFAULT_MARK_SIZE, RepositoryHost, RepositoryLogo, RepositoryMark, UnknownRepositoryHost,
+    repository_chip_mark_class, repository_mark_class, repository_mark_for,
 };
 
 const WHITE_MARK: &str = "brightness-0 invert";
@@ -32,15 +34,19 @@ fn host_vocabulary_is_exhaustive_and_round_trips_exact_protocol_spellings() {
     assert_eq!(RepositoryHost::ALL, expected.map(|(host, _)| host));
     for (host, spelling) in expected {
         assert_eq!(host.as_str(), spelling);
-        assert_eq!(RepositoryHost::from_str(spelling), Some(host));
+        assert_eq!(RepositoryHost::from_str(spelling), Ok(host));
+        assert_eq!(spelling.parse::<RepositoryHost>(), Ok(host));
     }
 
     for spelling in ["", "GitHub", "source-hut", " azure"] {
         assert_eq!(
             RepositoryHost::from_str(spelling),
-            None,
+            Err(UnknownRepositoryHost),
             "spelling={spelling:?}"
         );
+        let error = spelling.parse::<RepositoryHost>().unwrap_err();
+        assert_eq!(error, UnknownRepositoryHost, "spelling={spelling:?}");
+        assert_eq!(error.to_string(), "unknown repository host");
     }
 }
 

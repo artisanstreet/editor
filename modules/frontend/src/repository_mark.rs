@@ -6,6 +6,8 @@
 //! loading Svelte components or vendored artwork. A renderer can map
 //! [`RepositoryLogo`] to its own native asset catalog later.
 
+use std::{fmt, str::FromStr};
+
 /// Repository hosting services represented by the legacy presentation table.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RepositoryHost {
@@ -23,7 +25,7 @@ pub enum RepositoryHost {
     GitLab,
     /// A reachable host without a recognized provider identity.
     Other,
-    /// SourceHut.
+    /// `SourceHut`.
     Sourcehut,
     /// A remote without a usable host identity.
     Unknown,
@@ -59,21 +61,35 @@ impl RepositoryHost {
             Self::Unknown => "unknown",
         }
     }
+}
 
-    /// Parses one exact protocol spelling.
-    #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
+/// Payload-free error returned when a repository-host spelling is unknown.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct UnknownRepositoryHost;
+
+impl fmt::Display for UnknownRepositoryHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unknown repository host")
+    }
+}
+
+impl std::error::Error for UnknownRepositoryHost {}
+
+impl FromStr for RepositoryHost {
+    type Err = UnknownRepositoryHost;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "azure" => Some(Self::Azure),
-            "bitbucket" => Some(Self::Bitbucket),
-            "codeberg" => Some(Self::Codeberg),
-            "gitea" => Some(Self::Gitea),
-            "github" => Some(Self::GitHub),
-            "gitlab" => Some(Self::GitLab),
-            "other" => Some(Self::Other),
-            "sourcehut" => Some(Self::Sourcehut),
-            "unknown" => Some(Self::Unknown),
-            _ => None,
+            "azure" => Ok(Self::Azure),
+            "bitbucket" => Ok(Self::Bitbucket),
+            "codeberg" => Ok(Self::Codeberg),
+            "gitea" => Ok(Self::Gitea),
+            "github" => Ok(Self::GitHub),
+            "gitlab" => Ok(Self::GitLab),
+            "other" => Ok(Self::Other),
+            "sourcehut" => Ok(Self::Sourcehut),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(UnknownRepositoryHost),
         }
     }
 }
@@ -98,7 +114,7 @@ pub enum RepositoryLogo {
     Codeberg,
     /// The Gitea mark.
     Gitea,
-    /// The SourceHut mark.
+    /// The `SourceHut` mark.
     Sourcehut,
 }
 
@@ -189,7 +205,7 @@ pub const fn repository_mark_for(host: Option<RepositoryHost>) -> RepositoryMark
             chip: "bg-[#FC6D26]",
             chip_mark: WHITE_MARK_CLASSES,
         },
-        Some(RepositoryHost::Other) | Some(RepositoryHost::Unknown) | None => PLAIN_GIT_MARK,
+        Some(RepositoryHost::Other | RepositoryHost::Unknown) | None => PLAIN_GIT_MARK,
         Some(RepositoryHost::Sourcehut) => RepositoryMark {
             logo: RepositoryLogo::Sourcehut,
             monochrome: false,
@@ -219,7 +235,7 @@ pub fn repository_mark_class(mark: RepositoryMark, size: Option<&str>) -> String
 /// `None` preserves the TypeScript helper's `size-4` default; `Some(size)`
 /// inserts the caller-provided size verbatim. The remaining classes come from
 /// the mark's exact chip-mark policy, including the opposing-face dark rule
-/// used by GitHub and SourceHut.
+/// used by GitHub and `SourceHut`.
 #[must_use]
 pub fn repository_chip_mark_class(mark: RepositoryMark, size: Option<&str>) -> String {
     let size = size.unwrap_or(DEFAULT_MARK_SIZE);
