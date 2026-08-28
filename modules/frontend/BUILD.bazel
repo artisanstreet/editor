@@ -43,6 +43,7 @@ rust_library(
         "src/math_rendering_policy.rs",
         "src/mobile_breakpoint_policy.rs",
         "src/model_favorites_presentation.rs",
+        "src/model_selection_presentation.rs",
         "src/motion_spring.rs",
         "src/new_thread_interaction.rs",
         "src/notification_events.rs",
