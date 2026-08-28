@@ -35,6 +35,7 @@ pub mod conversation_scroll_position;
 pub mod conversation_turn_footer_policy;
 pub mod conversation_turn_navigator;
 pub mod dev_instance_policy;
+pub mod dropdown_highlight_settle;
 pub mod editor_diagnostic_mapping;
 pub mod editor_route_gate_policy;
 pub mod editor_view_state_policy;

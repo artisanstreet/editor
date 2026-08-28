@@ -113,6 +113,10 @@ name = "dev_instance_policy"
 path = "../../tests/frontend/dev_instance_policy.rs"
 
 [[test]]
+name = "dropdown_highlight_settle"
+path = "../../tests/frontend/dropdown_highlight_settle.rs"
+
+[[test]]
 name = "editor_diagnostic_mapping"
 path = "../../tests/frontend/editor_diagnostic_mapping.rs"
 
