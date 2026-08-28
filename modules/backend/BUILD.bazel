@@ -41,6 +41,7 @@ rust_library(
         "src/preview_service_policy.rs",
         "src/product_telemetry_capture_policy.rs",
         "src/request_handler.rs",
+        "src/sqlite_write_retry_policy.rs",
         "src/storage.rs",
         "src/telemetry_preferences_control_policy.rs",
         "src/thread_liveness_policy.rs",
