@@ -67,6 +67,7 @@ rust_library(
         "src/new_thread_draft.rs",
         "src/new_thread_interaction.rs",
         "src/new_thread_sentence_policy.rs",
+        "src/notification_contract.rs",
         "src/notification_events.rs",
         "src/notification_web_presenter_policy.rs",
         "src/notification_preferences.rs",
