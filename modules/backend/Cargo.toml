@@ -61,6 +61,10 @@ name = "harness_config_registry_policy"
 path = "../../tests/backend/harness_config_registry_policy.rs"
 
 [[test]]
+name = "usage_interruption_model_policy"
+path = "../../tests/backend/usage_interruption_model_policy.rs"
+
+[[test]]
 name = "listener"
 path = "../../tests/backend/listener.rs"
 
