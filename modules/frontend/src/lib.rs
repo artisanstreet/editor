@@ -64,6 +64,7 @@ pub mod telemetry_bootstrap_policy;
 pub mod telemetry_preferences;
 pub mod thread_list_selection;
 pub mod thread_title_policy;
+pub mod thread_title_settings_policy;
 pub mod transcript;
 
 use std::process::ExitCode;
