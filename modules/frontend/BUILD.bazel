@@ -16,6 +16,7 @@ rust_library(
         "src/browser_dom_boundary.rs",
         "src/component_gallery_policy.rs",
         "src/composer.rs",
+        "src/composer_action_failure.rs",
         "src/composer_draft_session_policy.rs",
         "src/context_usage_description.rs",
         "src/context_usage_gauge_policy.rs",
