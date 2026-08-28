@@ -20,7 +20,11 @@ fn development_detection_requires_a_non_null_object_and_exact_true() {
         ("top-level true", Some(DecodedHealth::Boolean(true)), false),
         ("number", Some(DecodedHealth::Number), false),
         ("string", Some(DecodedHealth::String), false),
-        ("array", Some(DecodedHealth::Array), false),
+        (
+            "array with missing development",
+            Some(DecodedHealth::array(None)),
+            false,
+        ),
         (
             "object with missing development",
             Some(DecodedHealth::object(None)),
@@ -70,6 +74,64 @@ fn development_detection_requires_a_non_null_object_and_exact_true() {
     for (case, health, expected) in cases {
         assert_eq!(is_development_instance(health), expected, "case={case}");
     }
+}
+
+#[test]
+fn arrays_follow_the_same_reachable_development_rule_as_objects() {
+    let cases = [
+        ("missing", DecodedHealth::array(None), false),
+        (
+            "null",
+            DecodedHealth::array(Some(DecodedHealthValue::Null)),
+            false,
+        ),
+        (
+            "number",
+            DecodedHealth::array(Some(DecodedHealthValue::Number)),
+            false,
+        ),
+        (
+            "string",
+            DecodedHealth::array(Some(DecodedHealthValue::String)),
+            false,
+        ),
+        (
+            "nested array",
+            DecodedHealth::array(Some(DecodedHealthValue::Array)),
+            false,
+        ),
+        (
+            "nested object",
+            DecodedHealth::array(Some(DecodedHealthValue::Object)),
+            false,
+        ),
+        (
+            "false",
+            DecodedHealth::array(Some(DecodedHealthValue::Boolean(false))),
+            false,
+        ),
+        (
+            "true",
+            DecodedHealth::array(Some(DecodedHealthValue::Boolean(true))),
+            true,
+        ),
+    ];
+
+    for (case, health, expected) in cases {
+        assert_eq!(
+            is_development_instance(Some(health)),
+            expected,
+            "array case={case}"
+        );
+    }
+
+    // The decoded projection intentionally does not discard a property based
+    // on whether JavaScript reached it as an own or prototype property.
+    let own_property = DecodedHealth::array(Some(DecodedHealthValue::Boolean(true)));
+    let prototype_reachable_property =
+        DecodedHealth::array(Some(DecodedHealthValue::Boolean(true)));
+    assert!(is_development_instance(Some(own_property)));
+    assert!(is_development_instance(Some(prototype_reachable_property)));
 }
 
 #[test]

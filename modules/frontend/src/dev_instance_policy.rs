@@ -36,14 +36,14 @@ pub enum DecodedHealthValue {
 
 /// The decoded health input relevant to development-instance detection.
 ///
-/// `Object` retains only the reachable `development` property. `Some` means
-/// the property exists, whether it was an own property or was reachable from
-/// the decoded object's prototype in the source runtime; `None` means the
-/// property is missing. Other object fields are irrelevant to this policy.
+/// `Object` and `Array` retain only the reachable `development` property.
+/// `Some` means the property exists, whether it was an own property or was
+/// reachable from the decoded value's prototype in the source runtime;
+/// `None` means the property is missing. Other fields are irrelevant to this
+/// policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodedHealth {
-    /// No value was decoded by the caller; use the outer `Option` for this
-    /// absence when calling [`is_development_instance`].
+    /// A decoded JSON null value.
     Null,
     /// A decoded boolean, which is not an object health body.
     Boolean(bool),
@@ -51,9 +51,16 @@ pub enum DecodedHealth {
     Number,
     /// A decoded JSON string, which is not an object health body.
     String,
-    /// A decoded JSON array, which is not an object health body here because
-    /// it has no reachable `development` property in the decoded projection.
-    Array,
+    /// A decoded array and its reachable `development` property, if any.
+    ///
+    /// JavaScript arrays satisfy `typeof value === "object"`, so an array
+    /// with an own or prototype-reachable property follows the same rule as
+    /// an ordinary object. `None` means that property is missing.
+    Array {
+        /// The decoded value reached through `development`, or `None` when
+        /// the property is absent.
+        development: Option<DecodedHealthValue>,
+    },
     /// A decoded object and its reachable `development` property, if any.
     Object {
         /// The decoded value reached through `development`, or `None` when
@@ -69,21 +76,32 @@ impl DecodedHealth {
     pub const fn object(development: Option<DecodedHealthValue>) -> Self {
         Self::Object { development }
     }
+
+    /// Creates the array projection with its already-decoded reachable
+    /// `development` property.
+    #[must_use]
+    pub const fn array(development: Option<DecodedHealthValue>) -> Self {
+        Self::Array { development }
+    }
 }
 
 /// Returns whether a decoded `/health` value identifies a development Forge.
 ///
 /// This is deliberately strict: the value must be present, non-null, an
-/// object, and have a reachable `development` value that is exactly the
-/// boolean `true`. Missing values, null, all non-object values, and every
-/// other property type return `false`.
+/// object-like value, and have a reachable `development` value that is
+/// exactly the boolean `true`. Missing values, null, primitive values, and
+/// every other property type return `false`.
 #[must_use]
 pub const fn is_development_instance(health: Option<DecodedHealth>) -> bool {
     matches!(
         health,
-        Some(DecodedHealth::Object {
-            development: Some(DecodedHealthValue::Boolean(true)),
-        })
+        Some(
+            DecodedHealth::Object {
+                development: Some(DecodedHealthValue::Boolean(true)),
+            } | DecodedHealth::Array {
+                development: Some(DecodedHealthValue::Boolean(true)),
+            },
+        )
     )
 }
 
