@@ -280,15 +280,9 @@ pub const fn resolve_update_telemetry_preferences(
     }
 }
 
-/// The result type for the absent-capture fallback.
-pub type CaptureTelemetryFallbackResult = Result<(), std::convert::Infallible>;
-
 /// Models the controller's absent capture operation as a successful no-op.
 ///
 /// A real adapter may invoke its capture transport when present; this helper
 /// only represents the `client.CaptureTelemetryIntent ?? (() => Effect.void)`
 /// branch and therefore cannot fail or emit an event.
-#[must_use]
-pub const fn capture_telemetry_intent_fallback() -> CaptureTelemetryFallbackResult {
-    Ok(())
-}
+pub const fn capture_telemetry_intent_fallback() {}
