@@ -24,27 +24,21 @@ pub const usage_meter_segments: u8 = USAGE_METER_SEGMENTS;
 ///
 /// This mirrors the sidebar's
 /// `Math.ceil((Math.min(100, Math.max(0, percent_used)) / 100) * 14) / 14`
-/// policy. Native code compares against the inverse tick boundaries with an
-/// inclusive upper bound, which keeps an exactly representable boundary on
-/// its tick even when the equivalent multiply/divide expression would round
-/// above it. A value just above that boundary still advances to the next
-/// tick, as `Math.ceil` requires.
+/// policy. The division by `100` intentionally happens before multiplication
+/// by `14`, matching JavaScript's operation order. Reassociating that
+/// expression changes some IEEE-754 boundary readings, so the source order is
+/// part of this native contract.
 ///
 /// `NaN`, positive infinity, and negative infinity are treated as malformed
 /// readings and return `0.0`. This makes the API total over `f64` while
 /// retaining the visible-zero behavior for an absent or unusable reading.
 #[must_use]
 pub fn usage_segment_fraction(percent_used: f64) -> f64 {
-    if !percent_used.is_finite() || percent_used <= 0.0 {
+    if !percent_used.is_finite() {
         return 0.0;
     }
 
     let clamped_percent = percent_used.clamp(0.0, 100.0);
     let segments = f64::from(USAGE_METER_SEGMENTS);
-    let mut ticks = 1;
-    while ticks < USAGE_METER_SEGMENTS && clamped_percent > f64::from(ticks) * 100.0 / segments {
-        ticks += 1;
-    }
-
-    f64::from(ticks) / segments
+    (clamped_percent / 100.0 * segments).ceil() / segments
 }

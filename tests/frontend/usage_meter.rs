@@ -18,9 +18,34 @@ fn tick_boundary(tick: u8) -> f64 {
     f64::from(tick) * 100.0 / f64::from(USAGE_METER_SEGMENTS)
 }
 
+fn previous_representable(value: f64) -> f64 {
+    f64::from_bits(value.to_bits() - 1)
+}
+
 fn next_representable(value: f64) -> f64 {
     f64::from_bits(value.to_bits() + 1)
 }
+
+// Expected tick counts from the JavaScript oracle for
+// `tick * 100 / usage_meter_segments`, its previous representable value, and
+// its next representable value. These intentionally preserve JavaScript's
+// operation-order rounding instead of imposing the mathematically intuitive
+// boundary tick.
+const JAVASCRIPT_BOUNDARY_CASES: [(u8, u8, u8, u8); 13] = [
+    (1, 1, 2, 2),
+    (2, 2, 3, 3),
+    (3, 3, 3, 3),
+    (4, 4, 5, 5),
+    (5, 5, 5, 6),
+    (6, 6, 6, 6),
+    (7, 7, 7, 8),
+    (8, 8, 9, 9),
+    (9, 9, 9, 10),
+    (10, 10, 10, 11),
+    (11, 11, 11, 12),
+    (12, 12, 12, 12),
+    (13, 13, 13, 14),
+];
 
 #[test]
 fn constants_expose_the_fourteen_tick_contract() {
@@ -53,27 +78,22 @@ fn quantization_table_preserves_zero_visibility_and_clamping() {
 }
 
 #[test]
-fn every_exact_tick_boundary_returns_its_exact_segment_fraction() {
-    for tick in 1..USAGE_METER_SEGMENTS {
+fn boundary_and_adjacent_values_match_javascript_operation_order() {
+    for (tick, expected_below, expected_at, expected_above) in JAVASCRIPT_BOUNDARY_CASES {
         let boundary = tick_boundary(tick);
-        assert_eq!(
-            usage_segment_fraction(boundary),
-            expected_fraction(tick),
-            "exact boundary tick={tick}, percent_used={boundary}"
-        );
-    }
-}
+        let cases = [
+            (previous_representable(boundary), expected_below, "below"),
+            (boundary, expected_at, "at"),
+            (next_representable(boundary), expected_above, "above"),
+        ];
 
-#[test]
-fn every_just_over_boundary_advances_by_one_tick() {
-    for tick in 1..USAGE_METER_SEGMENTS {
-        let boundary = tick_boundary(tick);
-        let just_over = next_representable(boundary);
-        assert_eq!(
-            usage_segment_fraction(just_over),
-            expected_fraction(tick + 1),
-            "just over tick={tick}, percent_used={just_over}"
-        );
+        for (percent_used, ticks, position) in cases {
+            assert_eq!(
+                usage_segment_fraction(percent_used),
+                expected_fraction(ticks),
+                "{position} boundary tick={tick}, percent_used={percent_used}"
+            );
+        }
     }
 }
 
