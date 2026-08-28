@@ -19,6 +19,7 @@ const LEGACY_CONTENT_GAP_PX: f32 = 2.0;
 const LEGACY_ICON_GAP_PX: f32 = 10.0;
 const LEGACY_ICON_SIZE_PX: f32 = 16.0;
 const LEGACY_TEXT_SIZE_PX: f32 = 14.0;
+const LEGACY_BORDER_WIDTH_PX: f32 = 1.0;
 const LEGACY_ACTION_RESERVED_PX: f32 = 72.0;
 const LEGACY_ACTION_RIGHT_PX: f32 = 12.0;
 const LEGACY_ACTION_TOP_PX: f32 = 10.0;
@@ -301,15 +302,15 @@ fn rendered_icon_alert_preserves_horizontal_gap_geometry(cx: &mut TestAppContext
         .debug_bounds(ALERT_TITLE_SELECTOR)
         .expect("title must be present");
 
-    // The icon sits inset by the horizontal padding (16 px) and the top
-    // padding (12 px + 2 px baseline nudge).
+    // The icon sits inset by the 1 px border + horizontal padding (16 px)
+    // and the 1 px border + top padding (12 px + 2 px baseline nudge).
     assert_eq!(
         icon.origin.x - root.origin.x,
-        px(LEGACY_HORIZONTAL_PADDING_PX)
+        px(LEGACY_BORDER_WIDTH_PX + LEGACY_HORIZONTAL_PADDING_PX)
     );
     assert_eq!(
         icon.origin.y - root.origin.y,
-        px(LEGACY_VERTICAL_PADDING_PX + 2.0)
+        px(LEGACY_BORDER_WIDTH_PX + LEGACY_VERTICAL_PADDING_PX + 2.0)
     );
     assert_eq!(icon.size.width, px(LEGACY_ICON_SIZE_PX));
     assert_eq!(icon.size.height, px(LEGACY_ICON_SIZE_PX));
@@ -337,11 +338,15 @@ fn rendered_action_alert_mounts_absolute_action(cx: &mut TestAppContext) {
         .debug_bounds(ALERT_ACTION_SELECTOR)
         .expect("action must be present");
 
-    // Absolute `top-2.5 right-3` within the 12 px padded root.
-    assert_eq!(action.origin.y - root.origin.y, px(LEGACY_ACTION_TOP_PX));
+    // Absolute `top-2.5 right-3` within the bordered root (1 px border +
+    // 12 px padding offsets).
+    assert_eq!(
+        action.origin.y - root.origin.y,
+        px(LEGACY_BORDER_WIDTH_PX + LEGACY_ACTION_TOP_PX)
+    );
     assert_eq!(
         (root.origin.x + root.size.width) - (action.origin.x + action.size.width),
-        px(LEGACY_ACTION_RIGHT_PX)
+        px(LEGACY_BORDER_WIDTH_PX + LEGACY_ACTION_RIGHT_PX)
     );
     // The root reserves 72 px on the right so content cannot overlap the
     // absolute action; the root's width already includes that reservation.
