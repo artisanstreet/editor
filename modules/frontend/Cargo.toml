@@ -101,6 +101,10 @@ name = "math_rendering_policy"
 path = "../../tests/frontend/math_rendering_policy.rs"
 
 [[test]]
+name = "mobile_breakpoint_policy"
+path = "../../tests/frontend/mobile_breakpoint_policy.rs"
+
+[[test]]
 name = "motion_spring"
 path = "../../tests/frontend/motion_spring.rs"
 

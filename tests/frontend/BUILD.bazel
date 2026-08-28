@@ -303,6 +303,17 @@ rust_test(
 )
 
 rust_test(
+    name = "mobile_breakpoint_policy_test",
+    srcs = ["mobile_breakpoint_policy.rs"],
+    crate_name = "mobile_breakpoint_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "motion_spring_test",
     srcs = ["motion_spring.rs"],
     crate_name = "motion_spring_test",

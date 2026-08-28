@@ -32,6 +32,7 @@ rust_library(
         "src/markdown_warmup_policy.rs",
         "src/marketplace_fixture_policy.rs",
         "src/math_rendering_policy.rs",
+        "src/mobile_breakpoint_policy.rs",
         "src/motion_spring.rs",
         "src/new_thread_interaction.rs",
         "src/notification_events.rs",
