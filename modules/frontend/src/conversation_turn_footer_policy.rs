@@ -198,7 +198,7 @@ impl ConversationTurnFooterPolicy {
     pub fn settle_copy(&mut self, outcome: CopyOutcome) {
         match outcome {
             CopyOutcome::Succeeded => self.copy_message.clear(),
-            CopyOutcome::Failed => self.copy_message = COPY_FAILURE_MESSAGE.to_owned(),
+            CopyOutcome::Failed => COPY_FAILURE_MESSAGE.clone_into(&mut self.copy_message),
         }
     }
 
