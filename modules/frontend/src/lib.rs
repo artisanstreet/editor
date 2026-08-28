@@ -75,6 +75,7 @@ pub mod notification_web_presenter_policy;
 pub mod object_url_boundary;
 pub mod onboarding_harness_presentation;
 pub mod onboarding_route;
+pub mod project_catalog;
 pub mod project_identity_policy;
 pub mod project_picker;
 pub mod proof;
