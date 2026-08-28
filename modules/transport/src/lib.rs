@@ -11,6 +11,7 @@ pub mod application;
 pub mod endpoint;
 pub mod error;
 pub mod frame;
+pub mod handshake;
 
 pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
 pub use endpoint::{
@@ -19,3 +20,7 @@ pub use endpoint::{
 };
 pub use error::TransportError;
 pub use frame::{FrameError, MAX_FRAME_LEN, read_frame, write_frame};
+pub use handshake::{
+    ClientHello, HandshakeError, HandshakeMessageKind, ServerWelcome, client_handshake,
+    receive_client_hello, send_server_welcome,
+};
