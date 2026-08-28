@@ -8,6 +8,7 @@ rust_library(
     crate_name = "artisan_ui",
     deps = [
         "//modules/assets:assets",
+        "@crates//:gpui",
         "@crates//:pulldown-cmark",
         "@crates//:syntect",
         "@crates//:thiserror",
