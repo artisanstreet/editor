@@ -31,6 +31,10 @@ name = "command_receipt_entities"
 path = "../../tests/database/command_receipt_entities.rs"
 
 [[test]]
+name = "conversation_execution_core_entities"
+path = "../../tests/database/conversation_execution_core_entities.rs"
+
+[[test]]
 name = "project_threads"
 path = "../../tests/database/project_threads.rs"
 

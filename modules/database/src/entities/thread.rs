@@ -27,6 +27,10 @@ pub enum Relation {
     Messages,
     #[sea_orm(has_many = "super::command_receipt::Entity")]
     CommandReceipts,
+    #[sea_orm(has_one = "super::conversation_state::Entity")]
+    ConversationState,
+    #[sea_orm(has_many = "super::conversation_ordinal::Entity")]
+    ConversationOrdinals,
 }
 
 impl Related<super::attached_project::Entity> for Entity {
@@ -44,6 +48,18 @@ impl Related<super::message::Entity> for Entity {
 impl Related<super::command_receipt::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::CommandReceipts.def()
+    }
+}
+
+impl Related<super::conversation_state::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ConversationState.def()
+    }
+}
+
+impl Related<super::conversation_ordinal::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ConversationOrdinals.def()
     }
 }
 
