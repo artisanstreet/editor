@@ -1,5 +1,14 @@
 load("@rules_rust//rust:defs.bzl", "rust_test")
 
+# White-box unit tests for the ui library's private tinted-route helper.
+# The file is compiled as a cfg(test) child module of `crate::asset_seam`
+# (declared there), and the `tinted_svg_unit_test` target in
+# //modules/ui/BUILD.bazel builds it via `crate = ":ui"`.
+exports_files(
+    ["tinted_svg.rs"],
+    visibility = ["//visibility:public"],
+)
+
 rust_test(
     name = "composer_state_test",
     srcs = ["composer_state.rs"],
@@ -152,6 +161,20 @@ rust_test(
     name = "progress_test",
     srcs = ["progress.rs"],
     crate_name = "progress_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "icon_test",
+    srcs = ["icon.rs"],
+    crate_name = "icon_test",
     deps = [
         "//modules/ui:ui",
         "@crates//:gpui",

@@ -4,6 +4,7 @@ pub mod asset_seam;
 pub mod badge;
 pub mod button;
 pub mod card;
+pub mod icon;
 pub mod markdown;
 pub mod motion;
 pub mod progress;
