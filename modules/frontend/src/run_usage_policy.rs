@@ -269,7 +269,7 @@ impl<T> RunUsagePolicy<T> {
     /// newer lease is currently active: the legacy `Select` closure can
     /// reselect and become current again. Only a same-owner, same-run request
     /// is a no-op.
-    pub fn select(&mut self, lease: &RunUsageLease, run_id: Option<&str>)
+    pub fn select(&mut self, lease: RunUsageLease, run_id: Option<&str>)
     where
         T: Clone,
     {
@@ -341,7 +341,7 @@ impl<T> RunUsagePolicy<T> {
     /// A matching release interrupts its live subscription first, clears all
     /// ownership, and publishes `None`. A stale release emits no action and
     /// cannot disturb a newer owner.
-    pub fn release(&mut self, lease: &RunUsageLease)
+    pub fn release(&mut self, lease: RunUsageLease)
     where
         T: Clone,
     {

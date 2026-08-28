@@ -58,11 +58,11 @@ fn acquire_selects_an_initial_run_and_publishes_before_starting_it() {
 
 #[test]
 fn owner_ids_are_monotonic_across_releases_and_undefined_acquires() {
-    let mut policy: run_usage_policy::RunUsageController<u32> = Default::default();
+    let mut policy: run_usage_policy::RunUsageController<u32> = RunUsagePolicy::default();
 
     let first = policy.acquire(None).expect("first owner");
     policy.take_actions();
-    policy.release(&first);
+    policy.release(first);
     policy.take_actions();
 
     let second = policy.acquire(None).expect("second owner");
@@ -92,7 +92,7 @@ fn same_owner_and_same_run_is_a_no_op_even_after_a_ready_update() {
         })]
     );
 
-    policy.select(&lease, Some("run-a"));
+    policy.select(lease, Some("run-a"));
 
     assert!(policy.take_actions().is_empty());
     assert_eq!(
@@ -131,7 +131,7 @@ fn deselection_interrupts_and_publishes_none_while_retaining_the_owner() {
     let lease = policy.acquire(Some("run-a")).expect("lease");
     policy.take_actions();
 
-    policy.select(&lease, None);
+    policy.select(lease, None);
 
     assert_eq!(
         policy.take_actions(),
@@ -143,7 +143,7 @@ fn deselection_interrupts_and_publishes_none_while_retaining_the_owner() {
     assert_eq!(policy.active_owner_id(), Some(lease.owner_id()));
     assert_eq!(policy.active_run_id(), None);
 
-    policy.select(&lease, None);
+    policy.select(lease, None);
     assert!(policy.take_actions().is_empty());
     policy.accept_update(lease.owner_id(), "run-a", 7);
     policy.accept_failure(lease.owner_id(), "run-a");
@@ -223,12 +223,12 @@ fn matching_release_interrupts_and_stale_release_is_a_no_op() {
     let current = policy.acquire(Some("run-b")).expect("current lease");
     policy.take_actions();
 
-    policy.release(&old);
+    policy.release(old);
     assert!(policy.take_actions().is_empty());
     assert_eq!(policy.active_owner_id(), Some(current.owner_id()));
     assert_eq!(policy.active_run_id(), Some("run-b"));
 
-    policy.release(&current);
+    policy.release(current);
     assert_eq!(
         policy.take_actions(),
         vec![
@@ -239,7 +239,7 @@ fn matching_release_interrupts_and_stale_release_is_a_no_op() {
     assert_eq!(policy.active_owner_id(), None);
     assert_eq!(policy.state(), &RunUsageState::None);
 
-    policy.release(&current);
+    policy.release(current);
     assert!(policy.take_actions().is_empty());
 }
 
@@ -251,7 +251,7 @@ fn an_old_lease_can_reselect_and_replace_a_newer_owner_like_the_legacy_controlle
     let newer = policy.acquire(Some("run-b")).expect("newer lease");
     policy.take_actions();
 
-    policy.select(&old, Some("run-a"));
+    policy.select(old, Some("run-a"));
 
     assert_eq!(
         policy.take_actions(),
@@ -292,7 +292,7 @@ fn subscription_host_actions_are_explicitly_application_owned() {
         }
     }
 
-    policy.release(&lease);
+    policy.release(lease);
     let release_actions = policy.take_actions();
     assert!(matches!(
         release_actions.first(),
