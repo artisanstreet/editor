@@ -6,6 +6,8 @@
 //! plain owned data: no engine, run, or provider concepts appear because
 //! engine dispatch is explicitly outside this milestone.
 
+use std::collections::HashSet;
+
 use thiserror::Error;
 
 use crate::bounds::{
@@ -182,8 +184,11 @@ pub struct ProjectSummary {
     pub attached_at: UnixMillis,
 }
 
-/// Failure raised when a project listing would exceed its documented bound.
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+/// Failure raised when a project listing would violate its documented bounds.
+///
+/// Variants carry Forge-minted identities, so this error is deliberately
+/// not [`Copy`] and never renders the offending row's payload.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ProjectListingError {
     /// Too many project summaries were supplied.
     #[error("project listing holds {count} projects; the maximum is {maximum}")]
@@ -193,23 +198,34 @@ pub enum ProjectListingError {
         /// Documented ceiling ([`PROJECT_LISTING_MAX_PROJECTS`]).
         maximum: usize,
     },
+    /// Two summaries reused the same Forge-minted project identity.
+    #[error("project listing contains duplicate project id {project_id}")]
+    DuplicateProject {
+        /// Reused identity.
+        project_id: ProjectId,
+    },
 }
 
 /// One bounded listing of every currently attached project.
 ///
 /// This is the rediscovery read of the milestone: a returning client asks
 /// once and receives the complete attached-project catalog in Forge-supplied
-/// order, never an unbounded array.
+/// order, never an unbounded array. Each row projects one durable
+/// `attached_projects` primary key, so a listing names each project identity
+/// at most once; duplicates can only arise from corrupt or hostile input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectListing(Vec<ProjectSummary>);
 
 impl ProjectListing {
-    /// Builds a listing after enforcing the documented collection bound.
+    /// Builds a listing after enforcing the documented collection bound and
+    /// identity uniqueness.
     ///
     /// # Errors
     ///
     /// Returns [`ProjectListingError::TooManyProjects`] when more than
-    /// [`PROJECT_LISTING_MAX_PROJECTS`] summaries are supplied.
+    /// [`PROJECT_LISTING_MAX_PROJECTS`] summaries are supplied, and
+    /// [`ProjectListingError::DuplicateProject`] naming the first repeated
+    /// identity when two summaries reuse one project id.
     pub fn new(projects: Vec<ProjectSummary>) -> Result<Self, ProjectListingError> {
         let count = projects.len();
         if count > PROJECT_LISTING_MAX_PROJECTS {
@@ -217,6 +233,15 @@ impl ProjectListing {
                 count,
                 maximum: PROJECT_LISTING_MAX_PROJECTS,
             });
+        }
+
+        let mut project_ids = HashSet::with_capacity(count);
+        for project in &projects {
+            if !project_ids.insert(project.project_id.clone()) {
+                return Err(ProjectListingError::DuplicateProject {
+                    project_id: project.project_id.clone(),
+                });
+            }
         }
 
         Ok(Self(projects))
@@ -252,8 +277,11 @@ pub struct ThreadSummary {
     pub updated_at: UnixMillis,
 }
 
-/// Failure raised when a thread listing would exceed its documented bound.
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+/// Failure raised when a thread listing would violate its documented bounds.
+///
+/// Variants carry Forge-minted identities, so this error is deliberately
+/// not [`Copy`] and never renders the offending row's payload.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ThreadListingError {
     /// Too many thread summaries were supplied.
     #[error("thread listing holds {count} threads; the maximum is {maximum}")]
@@ -263,19 +291,32 @@ pub enum ThreadListingError {
         /// Documented ceiling ([`THREAD_LISTING_MAX_THREADS`]).
         maximum: usize,
     },
+    /// Two summaries reused the same Forge-minted thread identity.
+    #[error("thread listing contains duplicate thread id {thread_id}")]
+    DuplicateThread {
+        /// Reused identity.
+        thread_id: ThreadId,
+    },
 }
 
 /// One bounded, project-scoped thread listing.
+///
+/// Each row projects one durable `threads` primary key, so a listing names
+/// each thread identity at most once; duplicates can only arise from corrupt
+/// or hostile input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreadListing(Vec<ThreadSummary>);
 
 impl ThreadListing {
-    /// Builds a listing after enforcing the documented collection bound.
+    /// Builds a listing after enforcing the documented collection bound and
+    /// identity uniqueness.
     ///
     /// # Errors
     ///
     /// Returns [`ThreadListingError::TooManyThreads`] when more than
-    /// [`THREAD_LISTING_MAX_THREADS`] summaries are supplied.
+    /// [`THREAD_LISTING_MAX_THREADS`] summaries are supplied, and
+    /// [`ThreadListingError::DuplicateThread`] naming the first repeated
+    /// identity when two summaries reuse one thread id.
     pub fn new(threads: Vec<ThreadSummary>) -> Result<Self, ThreadListingError> {
         let count = threads.len();
         if count > THREAD_LISTING_MAX_THREADS {
@@ -283,6 +324,15 @@ impl ThreadListing {
                 count,
                 maximum: THREAD_LISTING_MAX_THREADS,
             });
+        }
+
+        let mut thread_ids = HashSet::with_capacity(count);
+        for thread in &threads {
+            if !thread_ids.insert(thread.thread_id.clone()) {
+                return Err(ThreadListingError::DuplicateThread {
+                    thread_id: thread.thread_id.clone(),
+                });
+            }
         }
 
         Ok(Self(threads))

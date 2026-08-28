@@ -108,6 +108,33 @@ fn thread_listing_enforces_its_deliberate_bound() {
 }
 
 #[test]
+fn thread_listing_rejects_a_repeated_thread_identity() {
+    // Each summary projects one durable threads primary key, so a listing
+    // naming one thread twice is corrupt input, not a longer list.
+    let project = ProjectId::parse("proj-dup").expect("the fixture is valid");
+    let duplicated = vec![
+        thread_summary(project.clone(), 4),
+        thread_summary(project.clone(), 2),
+        thread_summary(project.clone(), 4),
+    ];
+    assert_eq!(
+        ThreadListing::new(duplicated),
+        Err(ThreadListingError::DuplicateThread {
+            thread_id: ThreadId::parse("th-4").expect("the fixture is valid"),
+        }),
+        "the first repeated identity is named"
+    );
+
+    // Distinct identities at any count keep listing normally.
+    let distinct = vec![
+        thread_summary(project.clone(), 1),
+        thread_summary(project, 2),
+    ];
+    let listing = ThreadListing::new(distinct).expect("distinct identities fit");
+    assert_eq!(listing.threads().len(), 2);
+}
+
+#[test]
 fn commands_carry_request_ids_and_never_forge_minted_inputs() {
     let attach_request = RequestId::parse("req-attach-1").expect("the fixture is valid");
     let attach_command = Command::AttachProject(AttachProject {

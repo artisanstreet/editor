@@ -396,10 +396,15 @@ fn every_response_family_roundtrips_with_independent_server_frames() -> Result<(
         "server-frame-project-list",
         WireEnvelopeBody::Response(ServerResponse {
             request_id: request_id("request-project-list"),
-            payload: ResponsePayload::ProjectListing(ProjectListing::new(vec![
-                project();
-                PROJECT_LISTING_MAX_PROJECTS
-            ])?),
+            payload: ResponsePayload::ProjectListing(ProjectListing::new(
+                (0..PROJECT_LISTING_MAX_PROJECTS)
+                    .map(|index| ProjectSummary {
+                        project_id: ProjectId::parse(format!("project-{index}"))
+                            .expect("fixture project id is valid"),
+                        ..project()
+                    })
+                    .collect(),
+            )?),
         }),
     ))?;
 
