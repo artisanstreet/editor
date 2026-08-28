@@ -19,6 +19,7 @@ rust_library(
         "src/conversation_turn_navigator.rs",
         "src/engine_usage_cache.rs",
         "src/file_icon.rs",
+        "src/forge_recovery_health.rs",
         "src/image_inspection_store.rs",
         "src/image_policy.rs",
         "src/image_viewer.rs",

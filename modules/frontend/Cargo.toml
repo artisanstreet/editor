@@ -57,6 +57,10 @@ name = "file_icon"
 path = "../../tests/frontend/file_icon.rs"
 
 [[test]]
+name = "forge_recovery_health"
+path = "../../tests/frontend/forge_recovery_health.rs"
+
+[[test]]
 name = "image_inspection_store"
 path = "../../tests/frontend/image_inspection_store.rs"
 
