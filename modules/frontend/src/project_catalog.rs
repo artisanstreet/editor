@@ -195,7 +195,7 @@ pub const EMPTY_MONOGRAM: &str = "··";
 #[must_use]
 pub fn project_monogram(name: &str) -> String {
     let parts = name
-        .split(|character| matches!(character, '-' | '_' | '.' | ' ' | '/' | '\\'))
+        .split(['-', '_', '.', ' ', '/', '\\'])
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
 
