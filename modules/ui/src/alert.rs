@@ -363,28 +363,28 @@ struct AlertSelectors {
     action: String,
 }
 
-fn resolve_alert_selectors(prefix: &Option<String>) -> AlertSelectors {
+fn resolve_alert_selectors(prefix: Option<&String>) -> AlertSelectors {
     AlertSelectors {
         root: prefix
-            .clone()
+            .cloned()
             .unwrap_or_else(|| ALERT_ROOT_SELECTOR.to_string()),
-        title: prefix.as_ref().map_or_else(
+        title: prefix.map_or_else(
             || ALERT_TITLE_SELECTOR.to_string(),
             |selector| format!("{selector}-title"),
         ),
-        description: prefix.as_ref().map_or_else(
+        description: prefix.map_or_else(
             || ALERT_DESCRIPTION_SELECTOR.to_string(),
             |selector| format!("{selector}-description"),
         ),
-        content: prefix.as_ref().map_or_else(
+        content: prefix.map_or_else(
             || ALERT_CONTENT_SELECTOR.to_string(),
             |selector| format!("{selector}-content"),
         ),
-        icon: prefix.as_ref().map_or_else(
+        icon: prefix.map_or_else(
             || ALERT_ICON_SELECTOR.to_string(),
             |selector| format!("{selector}-icon"),
         ),
-        action: prefix.as_ref().map_or_else(
+        action: prefix.map_or_else(
             || ALERT_ACTION_SELECTOR.to_string(),
             |selector| format!("{selector}-action"),
         ),
@@ -474,7 +474,7 @@ impl RenderOnce for Alert {
         let style = self.style;
 
         let prefix = self.debug_selector.as_ref().map(ToString::to_string);
-        let selectors = resolve_alert_selectors(&prefix);
+        let selectors = resolve_alert_selectors(prefix.as_ref());
 
         let mut root = alert_root_container(style, has_action, selectors.root.clone());
 
