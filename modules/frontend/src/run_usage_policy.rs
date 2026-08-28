@@ -345,17 +345,14 @@ impl<T> RunUsagePolicy<T> {
     where
         T: Clone,
     {
-        let Some(active) = self.active.as_ref() else {
+        let Some(active) = self.active.take() else {
             return;
         };
         if active.owner_id != lease.owner_id {
+            self.active = Some(active);
             return;
         }
 
-        let active = self
-            .active
-            .take()
-            .expect("active run usage was checked immediately above");
         if let Some(run_id) = active.run_id {
             self.push_host(RunUsageHostAction::InterruptSubscription(
                 RunUsageSubscriptionRequest::app(active.owner_id, run_id),
@@ -384,26 +381,23 @@ impl<T> RunUsagePolicy<T> {
             ));
         }
 
-        match requested_run_id {
-            Some(run_id) => {
-                self.active = Some(ActiveRunUsage {
-                    owner_id,
-                    run_id: Some(run_id.clone()),
-                });
-                self.publish(RunUsageState::Loading {
-                    run_id: run_id.clone(),
-                });
-                self.push_host(RunUsageHostAction::StartAuthoritativeSubscription(
-                    RunUsageSubscriptionRequest::app(owner_id, run_id),
-                ));
-            }
-            None => {
-                self.active = Some(ActiveRunUsage {
-                    owner_id,
-                    run_id: None,
-                });
-                self.publish(RunUsageState::None);
-            }
+        if let Some(run_id) = requested_run_id {
+            self.active = Some(ActiveRunUsage {
+                owner_id,
+                run_id: Some(run_id.clone()),
+            });
+            self.publish(RunUsageState::Loading {
+                run_id: run_id.clone(),
+            });
+            self.push_host(RunUsageHostAction::StartAuthoritativeSubscription(
+                RunUsageSubscriptionRequest::app(owner_id, run_id),
+            ));
+        } else {
+            self.active = Some(ActiveRunUsage {
+                owner_id,
+                run_id: None,
+            });
+            self.publish(RunUsageState::None);
         }
     }
 
