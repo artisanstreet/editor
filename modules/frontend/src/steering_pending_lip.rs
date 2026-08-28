@@ -205,7 +205,7 @@ pub fn begin_pending_steering_lip<Submission: Clone>(
         .next_generation
         .checked_add(1)
         .ok_or(SteeringPendingLipError::GenerationExhausted)?;
-    let begun = PendingSteeringLip::new(generation, started_at, submission.clone());
+    let begun = PendingSteeringLip::new(generation, started_at, submission);
     let mut pending = Vec::with_capacity(state.pending.len() + 1);
     pending.push(begun.clone());
     pending.extend(state.pending.iter().cloned());
