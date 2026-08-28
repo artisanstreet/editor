@@ -108,6 +108,17 @@ rust_test(
 )
 
 rust_test(
+    name = "conversation_scroll_position_test",
+    srcs = ["conversation_scroll_position.rs"],
+    crate_name = "conversation_scroll_position_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "image_inspection_store_test",
     srcs = ["image_inspection_store.rs"],
     crate_name = "image_inspection_store_test",
