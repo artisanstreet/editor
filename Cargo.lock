@@ -343,8 +343,10 @@ dependencies = [
  "artisan-migrations",
  "sea-orm",
  "sqlx-sqlite",
+ "subtle",
  "thiserror 2.0.20",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

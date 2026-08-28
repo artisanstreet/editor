@@ -12,7 +12,9 @@ sea-orm.workspace = true
 # Windows. Enabling the driver's paired feature keeps its `Executor` impl and
 # optional serde edge coherent in the Bazel graph.
 sqlx-sqlite.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 artisan-migrations = { path = "../migrations" }
