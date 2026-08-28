@@ -21,6 +21,7 @@ pub mod image_policy;
 pub mod image_viewer;
 pub mod latest_request_gate;
 pub mod motion_spring;
+pub mod notification_preferences;
 pub mod onboarding_route;
 pub mod project_picker;
 pub mod proof;
