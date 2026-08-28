@@ -12,6 +12,7 @@ pub mod command_ranking;
 pub mod composer;
 pub mod context_usage_tone;
 pub mod conversation_diff_stat;
+pub mod conversation_presentation;
 pub mod conversation_projection;
 pub mod image_viewer;
 pub mod project_picker;
