@@ -37,6 +37,10 @@ name = "native_shell"
 path = "../../tests/frontend/native_shell.rs"
 
 [[test]]
+name = "onboarding_route"
+path = "../../tests/frontend/onboarding_route.rs"
+
+[[test]]
 name = "project_picker"
 path = "../../tests/frontend/project_picker.rs"
 
