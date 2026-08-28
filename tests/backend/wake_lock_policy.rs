@@ -9,7 +9,7 @@ use wake_lock_policy::{UnsettledWorkSnapshot, WakeLockAssessment, assess_unsettl
 
 const APPROVAL_GRACE_MS: i64 = 5 * 60_000;
 
-fn snapshot<'a>(progressing_count: usize, approvals: &'a [i64]) -> UnsettledWorkSnapshot<'a> {
+fn snapshot(progressing_count: usize, approvals: &[i64]) -> UnsettledWorkSnapshot<'_> {
     UnsettledWorkSnapshot::new(progressing_count, approvals)
 }
 
