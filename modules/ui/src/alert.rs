@@ -207,6 +207,7 @@ pub struct AlertSemantics {
 
 /// A reusable inline GPUI alert with explicit title/description/content
 /// composition and optional icon/action affordances.
+#[derive(IntoElement)]
 pub struct Alert {
     style: AlertStyle,
     title: Option<SharedString>,

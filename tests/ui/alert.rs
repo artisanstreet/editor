@@ -6,10 +6,7 @@ use artisan_ui::alert::{
     alert_description, alert_root, alert_title,
 };
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
-use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, TestAppContext,
-    Window, div, px,
-};
+use gpui::{Context, IntoElement, ParentElement, Render, Styled, TestAppContext, Window, div, px};
 
 const CUSTOM_PREFIX: &str = "custom-alert";
 
@@ -51,7 +48,7 @@ impl Render for IconProbe {
         // Use a sealed catalog asset; the exact glyph identity is not
         // semantically load-bearing for the bounds tests below.
         let alert = Alert::new(self.style)
-            .icon(artisan_ui::AssetId::TABLER_INFO_CIRCLE)
+            .icon(artisan_ui::AssetId::TABLER_WORLD)
             .title("Note")
             .description("Inline notice with an icon.")
             .debug_selector(ALERT_ROOT_SELECTOR);
@@ -213,7 +210,7 @@ fn semantics_retain_role_variant_and_composition_flags() {
     let filled = Alert::new(AlertStyle::resolve(theme, AlertVariant::Destructive))
         .title("Title")
         .description("Description")
-        .icon(artisan_ui::AssetId::TABLER_INFO_CIRCLE)
+        .icon(artisan_ui::AssetId::TABLER_WORLD)
         .content(div().child("body"))
         .action(div().child("undo"));
     let filled_semantics = filled.semantics();
@@ -250,7 +247,7 @@ fn compile_only_helpers_chain_styled_refinements() {
     let alert = Alert::new(style)
         .title("T")
         .description("D")
-        .icon(artisan_ui::AssetId::TABLER_INFO_CIRCLE)
+        .icon(artisan_ui::AssetId::TABLER_WORLD)
         .content(div().child("extra"))
         .action(div().child("act"))
         .debug_selector("chain-test");
