@@ -8,7 +8,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex, TryLockError, Weak};
 
@@ -139,42 +139,38 @@ impl ConversationCommitNotifier {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        match state.entries.entry(thread_id) {
-            HashMapEntry::Occupied(mut occupied) => {
-                let (generation, receiver) = {
-                    let entry = occupied.get_mut();
-                    entry.subscriber_count += 1;
-                    (entry.generation, entry.sender.subscribe())
-                };
-                let thread_id = occupied.key().clone();
-                Ok(ConversationCommitSubscription::new(
-                    &self.registry,
-                    thread_id,
-                    generation,
-                    receiver,
-                ))
-            }
-            HashMapEntry::Vacant(vacant) => {
-                let generation_value = state.next_generation;
-                let Some(generation) = NonZeroU64::new(generation_value) else {
-                    return Err(ConversationCommitSubscribeError::GenerationExhausted);
-                };
+        if let Some((generation, receiver)) = state.entries.get_mut(&thread_id).map(|entry| {
+            entry.subscriber_count += 1;
+            (entry.generation, entry.sender.subscribe())
+        }) {
+            Ok(ConversationCommitSubscription::new(
+                &self.registry,
+                thread_id.clone(),
+                generation,
+                receiver,
+            ))
+        } else {
+            let generation_value = state.next_generation;
+            let Some(generation) = NonZeroU64::new(generation_value) else {
+                return Err(ConversationCommitSubscribeError::GenerationExhausted);
+            };
 
-                state.next_generation = generation_value.checked_add(1).unwrap_or_default();
-                let (sender, receiver) = watch::channel(());
-                let thread_id = vacant.key().clone();
-                vacant.insert(Entry {
+            state.next_generation = generation_value.checked_add(1).unwrap_or_default();
+            let (sender, receiver) = watch::channel(());
+            state.entries.insert(
+                thread_id.clone(),
+                Entry {
                     generation,
                     sender,
                     subscriber_count: 1,
-                });
-                Ok(ConversationCommitSubscription::new(
-                    &self.registry,
-                    thread_id,
-                    generation,
-                    receiver,
-                ))
-            }
+                },
+            );
+            Ok(ConversationCommitSubscription::new(
+                &self.registry,
+                thread_id,
+                generation,
+                receiver,
+            ))
         }
     }
 
