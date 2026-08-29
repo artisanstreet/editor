@@ -5,6 +5,10 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "editor"
+path = "src/main.rs"
+
 [dependencies]
 artisan-assets = { path = "../assets" }
 artisan-domain = { path = "../domain" }

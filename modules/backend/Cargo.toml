@@ -5,6 +5,10 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
 [dependencies]
 artisan-database = { path = "../database" }
 artisan-domain = { path = "../domain" }

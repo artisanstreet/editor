@@ -6,6 +6,8 @@ exports_files([
     "Cargo.Bazel.lock",
     "Cargo.lock",
     "Cargo.toml",
+    "modules/cli/Cargo.toml",
+    "modules/installer/Cargo.toml",
 ])
 
 rust_lint_config(
@@ -147,6 +149,7 @@ rust_clippy(
         "//tests/frontend:subscription_projection_test",
         "//tests/frontend:thread_list_selection_test",
         "//tests/frontend:transcript_test",
+        "//tests/packaging:cargo_binary_identity_test",
         "//tests/packaging:portable_archive_test",
         "//tests/packaging:portable_layout_test",
         "//tests/packaging:versioned_layout_test",
@@ -318,6 +321,7 @@ rustfmt_test(
         "//tests/frontend:subscription_projection_test",
         "//tests/frontend:thread_list_selection_test",
         "//tests/frontend:transcript_test",
+        "//tests/packaging:cargo_binary_identity_test",
         "//tests/packaging:portable_archive_test",
         "//tests/packaging:portable_layout_test",
         "//tests/packaging:versioned_layout_test",
@@ -485,6 +489,7 @@ test_suite(
         "//tests/frontend:subscription_projection_test",
         "//tests/frontend:thread_list_selection_test",
         "//tests/frontend:transcript_test",
+        "//tests/packaging:cargo_binary_identity_test",
         "//tests/packaging:portable_archive_test",
         "//tests/packaging:portable_layout_test",
         "//tests/packaging:versioned_layout_test",
