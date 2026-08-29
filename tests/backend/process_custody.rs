@@ -5,9 +5,6 @@
 //! test environment is never mutated and no separate fixture executable is
 //! needed.
 
-#[path = "../../modules/backend/src/process_custody.rs"]
-mod process_custody;
-
 use std::{
     env, fs,
     io::{self, BufRead, BufReader, Read, Write},
@@ -19,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use process_custody::{ForgeProcessCustody, ForgeProcessCustodyError};
+use artisan_backend::{ForgeProcessCustody, ForgeProcessCustodyError};
 
 const CHILD_SCENARIO_ENV: &str = "ARTISAN_BACKEND_PROCESS_CUSTODY_TEST_SCENARIO";
 const CHILD_LOCK_PATH_ENV: &str = "ARTISAN_BACKEND_PROCESS_CUSTODY_TEST_LOCK_PATH";

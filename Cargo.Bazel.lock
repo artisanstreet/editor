@@ -1,5 +1,5 @@
 {
-  "checksum": "f4bc66fe79186d0375b39e2292862555d88019356ad1a36fb6621f7320f857b6",
+  "checksum": "08f2793a09ad5463dee04861ca7bff5cc99275a368cb53fd8f4863c975f56989",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2203,6 +2203,10 @@
             {
               "id": "bytes 1.12.1",
               "target": "bytes"
+            },
+            {
+              "id": "fs2 0.4.3",
+              "target": "fs2"
             },
             {
               "id": "getrandom 0.4.3",
