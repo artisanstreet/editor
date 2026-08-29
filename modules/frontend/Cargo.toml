@@ -11,6 +11,7 @@ artisan-domain = { path = "../domain" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
+url.workspace = true
 
 [[test]]
 name = "active_thread_light_policy"
@@ -327,6 +328,10 @@ path = "../../tests/frontend/reader_attention.rs"
 [[test]]
 name = "repository_mark"
 path = "../../tests/frontend/repository_mark.rs"
+
+[[test]]
+name = "rich_link_url"
+path = "../../tests/frontend/rich_link_url.rs"
 
 [[test]]
 name = "route_navigation"

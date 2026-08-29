@@ -1,5 +1,5 @@
 {
-  "checksum": "a56e87c755f21257aa7e02b30299e47a0a30a3fc30c7c2c9b01d1d4dae9899f2",
+  "checksum": "b64e44a2319c0ed9cd75fb746510e3a4374e2ebb3e2a3bffebccdf03e9d5e7d0",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1840,6 +1840,10 @@
               "target": "sea_orm"
             },
             {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
+            },
+            {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
@@ -1870,10 +1874,6 @@
             {
               "id": "rustls-pki-types 1.15.1",
               "target": "rustls_pki_types"
-            },
-            {
-              "id": "serde_json 1.0.151",
-              "target": "serde_json"
             }
           ],
           "selects": {}
@@ -1949,6 +1949,10 @@
             {
               "id": "sea-orm 2.0.2",
               "target": "sea_orm"
+            },
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
             },
             {
               "id": "sqlx-sqlite 0.9.0",
@@ -2058,6 +2062,10 @@
             {
               "id": "gpui 0.2.2",
               "target": "gpui"
+            },
+            {
+              "id": "url 2.5.8",
+              "target": "url"
             }
           ],
           "selects": {}
@@ -56695,18 +56703,19 @@
     "rustls-pki-types 1.15.1",
     "sea-orm 2.0.2",
     "sea-orm-migration 2.0.2",
+    "serde_json 1.0.151",
     "sha2 0.11.0",
     "sqlx-sqlite 0.9.0",
     "subtle 2.6.1",
     "syntect 5.3.0",
     "thiserror 2.0.20",
     "tokio 1.53.1",
+    "url 2.5.8",
     "zeroize 1.9.0"
   ],
   "direct_dev_deps": [
     "rcgen 0.14.9",
     "roxmltree 0.20.0",
-    "serde_json 1.0.151",
     "toml 1.1.4+spec-1.1.0"
   ],
   "unused_patches": []

@@ -933,6 +933,17 @@ rust_test(
 )
 
 rust_test(
+    name = "rich_link_url_test",
+    srcs = ["rich_link_url.rs"],
+    crate_name = "rich_link_url_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "route_navigation_test",
     srcs = ["route_navigation.rs"],
     crate_name = "route_navigation_test",
