@@ -1201,6 +1201,17 @@ rust_test(
 )
 
 rust_test(
+    name = "terminal_presentation_test",
+    srcs = ["terminal_presentation.rs"],
+    crate_name = "terminal_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "thread_environment_presentation_test",
     srcs = ["thread_environment_presentation.rs"],
     crate_name = "thread_environment_presentation_test",
