@@ -253,6 +253,10 @@ name = "notification_preferences"
 path = "../../tests/frontend/notification_preferences.rs"
 
 [[test]]
+name = "object_url_boundary"
+path = "../../tests/frontend/object_url_boundary.rs"
+
+[[test]]
 name = "onboarding_harness_presentation"
 path = "../../tests/frontend/onboarding_harness_presentation.rs"
 
