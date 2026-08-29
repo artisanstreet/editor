@@ -23,6 +23,7 @@ rust_library(
         "src/composer_gesture.rs",
         "src/context_auto_compaction.rs",
         "src/context_usage_description.rs",
+        "src/context_usage_details_policy.rs",
         "src/context_usage_gauge_policy.rs",
         "src/context_usage_model_name.rs",
         "src/context_usage_tone.rs",

@@ -26,6 +26,7 @@ pub mod composer_draft_session_policy;
 pub mod composer_gesture;
 pub mod context_auto_compaction;
 pub mod context_usage_description;
+pub mod context_usage_details_policy;
 pub mod context_usage_gauge_policy;
 pub mod context_usage_model_name;
 pub mod context_usage_tone;
