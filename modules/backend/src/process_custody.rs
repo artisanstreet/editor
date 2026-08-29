@@ -306,13 +306,13 @@ impl ForgeProcessCustody {
 
 impl Drop for ForgeProcessCustody {
     fn drop(&mut self) {
-        // Keep the exact descriptor as the lifetime-bearing field; borrowing
-        // it here also makes that ownership explicit to dead-code analysis.
-        let _file = &self.file;
+        // Release the in-process claim first. Rust drops the owned `File`
+        // field only after this method returns, so the OS lock remains held
+        // while the claim is removed.
         release_process_path(&self.lock_path);
         // The exact `File` field is deliberately not unlocked or unlinked
-        // here. Its ordinary drop releases the OS lock after this method
-        // returns, and the path remains available for the next process.
+        // here. Its ordinary field drop releases the OS lock after this
+        // method returns, and the path remains available for the next process.
     }
 }
 
