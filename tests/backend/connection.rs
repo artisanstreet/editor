@@ -26,24 +26,28 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use artisan_backend::conversation_subscription_registry::SubscriptionState;
 use artisan_backend::{
     AuthenticationStageError, ConnectionLimits, CredentialAuthenticationError, CredentialAuthority,
     ForgeApp, ForgeConfig, ForgeConnection, RequestHandler, RequestStageError, ServerFrameStamp,
     WelcomeMetadata,
 };
 use artisan_database::{
-    AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, SqliteConfig,
+    AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
+    CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
+    ProviderBindingBytes, QueueFirstMessageInput, RunLaunchCredentials, RunStartKey, SqliteConfig,
 };
 use artisan_domain::{
-    AttachProject, Command, DirectoryId, DisplayName, ListAttachedProjects, ListDirectories,
-    MessageBody, MessageId, ProjectId, Query, QueueFirstMessage, ReceiptDisposition, RequestId,
-    RootPath, ThreadId, ThreadTitle, UnixMillis,
+    AttachProject, Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
+    ConversationUnsubscribe, DirectoryId, DisplayName, ItemId, ListAttachedProjects,
+    ListDirectories, MessageBody, MessageId, PatchId, ProjectId, Query, QueueFirstMessage,
+    ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadTitle, TurnId, UnixMillis,
 };
 use artisan_protocol::{
-    APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ErrorCode, FirstMessageReceipt,
-    FrameId, Hello, HelloCredential, LocalCapability, ProtocolDecodeError, ProtocolVersion,
-    ReconnectCapability, ResponsePayload, ServerResponse, VersionOffer, WireEnvelope,
-    WireEnvelopeBody, encode_envelope,
+    APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ConversationSubscriptionStarted,
+    ConversationSubscriptionStopped, ErrorCode, FirstMessageReceipt, FrameId, Hello,
+    HelloCredential, LocalCapability, ProtocolDecodeError, ProtocolVersion, ReconnectCapability,
+    ResponsePayload, ServerResponse, VersionOffer, WireEnvelope, WireEnvelopeBody, encode_envelope,
 };
 use artisan_transport::{
     CancelHandle, DeadlineError, EnvelopeReceiveError, FrameError, HandshakeError,
@@ -431,6 +435,102 @@ fn queue_first_message_command(frame: &str) -> WireEnvelope {
             body: MessageBody::parse("first body").expect("valid fixture body"),
         })),
     )
+}
+
+fn fresh_subscription_request(frame: &str, thread_id: ThreadId) -> WireEnvelope {
+    request_envelope(
+        frame,
+        ClientRequest::Conversation(ConversationRequest::Subscribe(
+            ConversationSubscribe::fresh(thread_id),
+        )),
+    )
+}
+
+fn resume_subscription_request(
+    frame: &str,
+    thread_id: ThreadId,
+    after: ConversationCursor,
+) -> WireEnvelope {
+    request_envelope(
+        frame,
+        ClientRequest::Conversation(ConversationRequest::Subscribe(
+            ConversationSubscribe::resume(thread_id, after),
+        )),
+    )
+}
+
+fn unsubscribe_request(frame: &str, thread_id: ThreadId) -> WireEnvelope {
+    request_envelope(
+        frame,
+        ClientRequest::Conversation(ConversationRequest::Unsubscribe(ConversationUnsubscribe {
+            thread_id,
+        })),
+    )
+}
+
+async fn seed_subscription_thread(app: &ForgeApp) -> Result<ThreadId, Box<dyn Error>> {
+    let repository = app.repository();
+    repository.attach_project(attach_input()).await?;
+    repository.create_thread(create_thread_input()).await?;
+    repository.queue_first_message(queue_input()).await?;
+
+    // Finish the same public repository workflow that creates durable
+    // conversation patches, so the resume case exercises the replay-batch
+    // preparation branch while still asserting activation at the request
+    // cursor.
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: DispatchLeaseOwner::new([0x11; 32]),
+            claimed_at: UnixMillis::from_millis(400),
+            lease_expires_at: UnixMillis::from_millis(900),
+        })
+        .await?
+        .ok_or("seed dispatch should be claimable")?;
+    let run_id = artisan_domain::RunId::parse("run-1")?;
+    let turn_id = TurnId::parse("turn-1")?;
+    let item_id = ItemId::parse("item-1")?;
+    let first_patch_id = PatchId::parse("patch-1-first")?;
+    let second_patch_id = PatchId::parse("patch-1-second")?;
+    let run_start_key = RunStartKey::new([0x44; 32]);
+    let credentials = RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]);
+    let launched = repository
+        .launch_claimed_run(LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &run_id,
+            turn_id: &turn_id,
+            item_id: &item_id,
+            first_patch_id: &first_patch_id,
+            second_patch_id: &second_patch_id,
+            operated_at: UnixMillis::from_millis(500),
+            run_start_key: &run_start_key,
+            credentials: &credentials,
+        })
+        .await?;
+    let launched = match launched {
+        LaunchClaimedRunOutcome::Started(receipt)
+        | LaunchClaimedRunOutcome::AlreadyStarted(receipt) => receipt,
+    };
+    let binding = ProviderBindingBytes::new(vec![0xab; 16])?;
+    let bound = repository
+        .bind_run_provider(BindRunProvider {
+            claimed: &claimed,
+            receipt: &launched,
+            run_start_key: &run_start_key,
+            credentials: &credentials,
+            expected_launch_at: UnixMillis::from_millis(500),
+            bound_at: UnixMillis::from_millis(600),
+            binding_version: 1,
+            binding_bytes: &binding,
+        })
+        .await?;
+    if !matches!(
+        bound,
+        BindRunProviderOutcome::Bound(_) | BindRunProviderOutcome::AlreadyBound(_)
+    ) {
+        return Err("seed provider binding did not persist".into());
+    }
+
+    Ok(ThreadId::parse("thread-1")?)
 }
 
 fn welcome_metadata() -> WelcomeMetadata {
@@ -845,6 +945,232 @@ async fn bootstrap_admission_serves_a_real_listing_and_finishes_every_stream()
         owner,
     )
     .await?;
+
+    drop(owner);
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_subscription_activates_at_snapshot_cursor_after_response_fin()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("subscription-fresh").await;
+    let thread_id = seed_subscription_thread(&app).await?;
+    let handler = RequestHandler::with_subscriptions(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+
+    let (client, owner) = admitted_client(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+    )
+    .await?;
+
+    let (reply, owner) = round_trip(
+        &client,
+        fresh_subscription_request("frame-subscribe-fresh", thread_id.clone()),
+        response_stamp("forge-subscribe-fresh-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated fresh-subscription response");
+    };
+    assert_eq!(response.request_id.as_str(), "frame-subscribe-fresh");
+    let ResponsePayload::ConversationSubscriptionStarted(ConversationSubscriptionStarted::Fresh(
+        start,
+    )) = response.payload
+    else {
+        panic!("expected a fresh conversation subscription response");
+    };
+    assert_eq!(start.snapshot().thread_id(), &thread_id);
+    let response_cursor = start.snapshot().cursor();
+
+    // `round_trip` returns only after the consuming owner has returned, so
+    // this view observes the post-FIN activation rather than the preparation
+    // state held while the response was still in flight.
+    let active = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("fresh subscription should remain registered");
+    assert_eq!(active.state(), SubscriptionState::Active);
+    assert_eq!(active.cursor(), response_cursor);
+
+    drop(owner);
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_subscription_activates_at_requested_cursor_after_response_fin()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("subscription-resume").await;
+    let thread_id = seed_subscription_thread(&app).await?;
+    let handler = RequestHandler::with_subscriptions(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+
+    let (client, owner) = admitted_client(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+    )
+    .await?;
+
+    let requested_cursor = ConversationCursor::new(1);
+    let (reply, owner) = round_trip(
+        &client,
+        resume_subscription_request(
+            "frame-subscribe-resume",
+            thread_id.clone(),
+            requested_cursor,
+        ),
+        response_stamp("forge-subscribe-resume-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated resume response");
+    };
+    assert_eq!(response.request_id.as_str(), "frame-subscribe-resume");
+    let ResponsePayload::ConversationSubscriptionStarted(
+        ConversationSubscriptionStarted::Resumed {
+            thread_id: response_thread_id,
+            cursor,
+        },
+    ) = response.payload
+    else {
+        panic!("expected a resumed conversation subscription response");
+    };
+    assert_eq!(response_thread_id, thread_id);
+    assert_eq!(cursor, requested_cursor);
+
+    // The preparation seam intentionally discards any replay batch endpoint;
+    // activation must retain the cursor named by the response.
+    let active = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("resumed subscription should remain registered");
+    assert_eq!(active.state(), SubscriptionState::Active);
+    assert_eq!(active.cursor(), requested_cursor);
+
+    drop(owner);
+    expect_application_close(&client.connection).await;
+    drop(client);
+    drop(handler);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsubscribe_is_idempotent_on_a_sequential_connection_without_activation_work()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("subscription-unsubscribe").await;
+    let thread_id = seed_subscription_thread(&app).await?;
+    let handler = RequestHandler::with_subscriptions(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+
+    let (client, owner) = admitted_client(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+    )
+    .await?;
+
+    let (reply, owner) = round_trip(
+        &client,
+        fresh_subscription_request("frame-unsubscribe-seed", thread_id.clone()),
+        response_stamp("forge-unsubscribe-seed-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated seed response");
+    };
+    assert!(matches!(
+        response.payload,
+        ResponsePayload::ConversationSubscriptionStarted(ConversationSubscriptionStarted::Fresh(_))
+    ));
+    assert_eq!(
+        handler
+            .subscription_view(&thread_id)
+            .await
+            .expect("seed subscription should be active")
+            .state(),
+        SubscriptionState::Active
+    );
+
+    let (reply, owner) = round_trip(
+        &client,
+        unsubscribe_request("frame-unsubscribe", thread_id.clone()),
+        response_stamp("forge-unsubscribe-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated unsubscribe response");
+    };
+    assert_eq!(response.request_id.as_str(), "frame-unsubscribe");
+    let ResponsePayload::ConversationSubscriptionStopped(stopped) = response.payload else {
+        panic!("expected an idempotent stopped response");
+    };
+    assert_eq!(
+        stopped,
+        ConversationSubscriptionStopped {
+            thread_id: thread_id.clone()
+        }
+    );
+    assert!(handler.subscription_view(&thread_id).await.is_none());
+
+    // A second stop crosses the same sequential owner and proves the absent
+    // path is the same successful no-work acknowledgement.
+    let (reply, owner) = round_trip(
+        &client,
+        unsubscribe_request("frame-unsubscribe-again", thread_id.clone()),
+        response_stamp("forge-unsubscribe-again-frame"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::Response(response) = reply.body else {
+        panic!("expected a correlated repeated-unsubscribe response");
+    };
+    assert_eq!(response.request_id.as_str(), "frame-unsubscribe-again");
+    let ResponsePayload::ConversationSubscriptionStopped(stopped) = response.payload else {
+        panic!("expected an idempotent stopped response for an absent entry");
+    };
+    assert_eq!(stopped, ConversationSubscriptionStopped { thread_id });
+    assert!(
+        handler
+            .subscription_view(&ThreadId::parse("thread-1")?)
+            .await
+            .is_none()
+    );
 
     drop(owner);
     expect_application_close(&client.connection).await;

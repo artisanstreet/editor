@@ -31,9 +31,10 @@
 //! The ready owner keeps Quinn private and retains the exclusive
 //! credential-authority lease for its full lifetime;
 //! [`ForgeConnection::respond_next`] consumes the owner and returns it only
-//! after one complete, deadline-bounded, successful dispatch. Cancellation
-//! of the caller's shared [`CancelHandle`] is observed, never invoked, and
-//! this leaf never closes the shared endpoint or database.
+//! after one complete, deadline-bounded, successful dispatch, including reply
+//! write and send-side FIN plus any local post-write subscription activation.
+//! Cancellation of the caller's shared [`CancelHandle`] is observed, never
+//! invoked, and this leaf never closes the shared endpoint or database.
 //!
 //! # Correlation lifetimes
 //!
@@ -54,11 +55,13 @@ use artisan_protocol::{
 };
 use artisan_transport::{
     CancelHandle, DeadlineError, HandshakeError, OperationKind, ServerDispatchError,
-    dispatch_server_request, receive_client_hello, run_with_deadline, send_server_welcome,
+    dispatch_server_request_with_receipt, receive_client_hello, run_with_deadline,
+    send_server_welcome,
 };
 use quinn::{ClosedStream, Connection, RecvStream, SendStream, VarInt};
 use thiserror::Error;
 
+use crate::conversation_subscription_registry::ActivateError;
 use crate::credential_authority::{
     CredentialAuthenticationError, CredentialAuthority, CredentialEntropyError,
     ReconnectRotationError,
@@ -169,6 +172,11 @@ pub enum RequestStageError {
     /// envelope, not a dispatcher-local failure.
     #[error("request dispatch failed")]
     Dispatch(#[from] ServerDispatchError<Infallible>),
+
+    /// A prepared conversation subscription could not be activated after its
+    /// correlated response was written and the server send side finished.
+    #[error("activating the conversation subscription failed")]
+    Activate(#[from] ActivateError),
 }
 
 /// One admitted, authenticated Forge connection owned exclusively by its
@@ -286,14 +294,19 @@ impl ForgeConnection<'_, '_, '_> {
     /// the incoming frame-derived request id stayed authoritative, the
     /// public [`RequestHandler`] answered it, the correlated reply crossed
     /// the wire under the supplied fresh server frame stamp and the
-    /// negotiated protocol version, and the server send side was finished.
+    /// negotiated protocol version, the server send side was finished, and
+    /// any local post-write subscription activation completed. A successful
+    /// call proves neither peer application nor durable acknowledgement,
+    /// patch replay, or delivery.
     /// The caller may loop sequentially; every dispatch accepts the next
     /// bidirectional stream on this connection.
     ///
     /// A handler [`artisan_protocol::ProtocolFailure`] is a wire result: it
     /// is mapped onto a correlated `ProtocolError` envelope like any other
     /// answer. The dispatcher's local failure type stays [`Infallible`]
-    /// because this adapter performs no fallible local work.
+    /// because this adapter performs no fallible local work. A subscription
+    /// activation failure is reported separately after the dispatcher's
+    /// successful write and finish.
     ///
     /// On error — or when the returned future is dropped mid-dispatch — the
     /// private stream guard stops the inbound direction and resets the
@@ -427,28 +440,34 @@ async fn drive_request(
 
     // The incoming frame-derived request id stays authoritative; the
     // adapter only maps the handler's typed outcomes onto the wire and can
-    // never fail locally.
-    dispatch_server_request(send, recv, |incoming| async move {
-        let answered = handler
-            .respond(&incoming.request_id, &incoming.request)
-            .await;
+    // never fail locally. The receipt remains opaque until the transport has
+    // validated, written, and finished the correlated reply.
+    let receipt = dispatch_server_request_with_receipt(send, recv, |incoming| async move {
+        let (answered, receipt) = handler
+            .respond_with_receipt(&incoming.request_id, &incoming.request)
+            .await
+            .into_parts();
         let body = match answered {
             Ok(response) => WireEnvelopeBody::Response(response),
             Err(failure) => WireEnvelopeBody::ProtocolError(failure),
         };
-        Ok::<WireEnvelope, Infallible>(WireEnvelope {
-            protocol_version,
-            frame_id: stamp.frame_id,
-            sent_at: stamp.sent_at,
-            body,
-        })
+        Ok::<(WireEnvelope, crate::request_handler::RequestHandlerReceipt), Infallible>((
+            WireEnvelope {
+                protocol_version,
+                frame_id: stamp.frame_id,
+                sent_at: stamp.sent_at,
+                body,
+            },
+            receipt,
+        ))
     })
     .await?;
 
     // The dispatcher finishes the server send side only on success, so this
-    // record makes the cleanup rule precise: never reset a finished send
-    // side, even when a later failure abandons the stage.
+    // record must happen before the local activation await. Never reset a
+    // finished send side, even when activation later fails or is cancelled.
     streams.mark_send_finished();
+    handler.activate_after_response(receipt).await?;
     Ok(())
 }
 
