@@ -1,7 +1,7 @@
 //! Source-only proof of the four approved Cargo binary output identities.
 //!
 //! The registered target embeds these manifests through `compile_data`:
-//! `//modules/cli:Cargo.toml`, `//modules/installer:Cargo.toml`,
+//! `//:modules/cli/Cargo.toml`, `//:modules/installer/Cargo.toml`,
 //! `//modules/frontend:Cargo.toml`, and `//modules/backend:Cargo.toml`.
 //! This proof reads only the closed `[[bin]]` name/path surface. It does not
 //! build a Cargo or Bazel binary, touch the filesystem, launch a process, or
