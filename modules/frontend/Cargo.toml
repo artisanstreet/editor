@@ -206,6 +206,10 @@ name = "latest_request_gate"
 path = "../../tests/frontend/latest_request_gate.rs"
 
 [[test]]
+name = "machine_switch"
+path = "../../tests/frontend/machine_switch.rs"
+
+[[test]]
 name = "markdown_fence_policy"
 path = "../../tests/frontend/markdown_fence_policy.rs"
 
