@@ -33,6 +33,7 @@
 //! can preempt a client-side close with an implicit one.
 
 use std::error::Error;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -650,19 +651,25 @@ async fn handshake_then_witness_closed(
 }
 
 /// Opens exactly one server-owned delivery stream, writes only the prefix and
-/// one body byte of one envelope, then releases the client's biased receive
-/// selection. That selection polls the receive branch before the release
-/// branch, so the stream is accepted and blocked inside its frame read before
-/// the client abandons it. The server witnesses the receiver's synchronous
-/// STOP before serving one ordinary request on the still-live connection.
+/// one body byte of one envelope, and waits until the client has polled the
+/// receive future again after that write. The client-side future is then
+/// known to have accepted the stream and to be blocked inside its frame read;
+/// the server witnesses the receiver's synchronous STOP before serving one
+/// ordinary request on the still-live session connection.
 async fn serve_fragmented_delivery(
     mut connections: tokio::sync::mpsc::Receiver<Connection>,
-    fragment_written: tokio::sync::oneshot::Sender<()>,
+    mut receive_polls: tokio::sync::mpsc::Receiver<()>,
+    ready: tokio::sync::oneshot::Sender<()>,
 ) -> Result<Connection, Box<dyn Error>> {
     let connection = next_connection(&mut connections).await?;
     let welcome = welcome_envelope()?;
     let (_hello, _handshake_send, _handshake_receive) =
         drive_handshake(&connection, &welcome).await?;
+
+    tokio::time::timeout(TEST_DEADLINE, receive_polls.recv())
+        .await
+        .map_err(|_| "delivery receive future did not start")?
+        .ok_or("delivery receive poll witness was dropped before acceptance")?;
 
     let mut delivery_send = tokio::time::timeout(TEST_DEADLINE, connection.open_uni())
         .await
@@ -673,7 +680,12 @@ async fn serve_fragmented_delivery(
         "the scripted envelope must have a body byte after its four-byte prefix"
     );
     delivery_send.write_all(&framed[..5]).await?;
-    fragment_written
+
+    tokio::time::timeout(TEST_DEADLINE, receive_polls.recv())
+        .await
+        .map_err(|_| "delivery receive future did not poll after the fragment")?
+        .ok_or("delivery receive poll witness was dropped before the STOP")?;
+    ready
         .send(())
         .map_err(|()| "the client abandoned before receiving the mid-frame witness")?;
 
@@ -807,8 +819,9 @@ async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), B
     let (certificate, private_key, pin) = ephemeral_identity();
     let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
 
+    let (poll_tx, poll_rx) = tokio::sync::mpsc::channel(8);
     let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
-    let server_side = serve_fragmented_delivery(server.take_connections(), ready_tx);
+    let server_side = serve_fragmented_delivery(server.take_connections(), poll_rx, ready_tx);
     let client = async {
         let (session, _) = ClientSession::connect(
             target(server.addr),
@@ -822,10 +835,17 @@ async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), B
         let (session, receiver) = session.take_delivery()?;
         let delivery_cancel = CancelHandle::new();
         let mut receive = Box::pin(receiver.recv(&delivery_cancel));
+        let mut witnessed = Box::pin(std::future::poll_fn(move |context| {
+            let poll = receive.as_mut().poll(context);
+            if poll.is_pending() {
+                let _witnessed = poll_tx.try_send(());
+            }
+            poll
+        }));
 
         tokio::select! {
             biased;
-            _ = &mut receive => {
+            _ = &mut witnessed => {
                 panic!("fragmented delivery receive completed before the abort");
             }
             ready = &mut ready_rx => {
@@ -835,10 +855,10 @@ async fn fragmented_delivery_abandonment(cancel_mid_frame: bool) -> Result<(), B
 
         if cancel_mid_frame {
             delivery_cancel.cancel();
-            let result = receive.await;
+            let result = witnessed.await;
             assert!(matches!(result, Err(DeliveryLost)));
         } else {
-            drop(receive);
+            drop(witnessed);
         }
 
         let request_cancel = CancelHandle::new();
