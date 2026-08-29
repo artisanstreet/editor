@@ -8,8 +8,6 @@
 //! `lease_expires_at_ms <= operated_at`. No writes are performed, no provider
 //! is contacted, and no lease expiry is interpreted as process death.
 
-use std::collections::HashSet;
-
 use artisan_domain::{ItemId, MessageId, RunId, ThreadId, TurnId, UnixMillis};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use thiserror::Error;
@@ -30,11 +28,12 @@ SELECT
   ar.updated_at_ms AS run_updated_at_ms,
   md.lease_expires_at_ms AS lease_expires_at_ms,
   md.updated_at_ms AS dispatch_updated_at_ms,
-  ci.item_id AS assistant_item_id
+  (SELECT COUNT(*) FROM conversation_items ci2 WHERE ci2.run_id = ar.run_id AND ci2.item_kind = 'assistant_message') AS item_count,
+  (SELECT ci3.item_id FROM conversation_items ci3 WHERE ci3.run_id = ar.run_id AND ci3.item_kind = 'assistant_message' LIMIT 1) AS assistant_item_id,
+  (SELECT ci3.thread_id FROM conversation_items ci3 WHERE ci3.run_id = ar.run_id AND ci3.item_kind = 'assistant_message' LIMIT 1) AS assistant_item_thread_id,
+  (SELECT ci3.turn_id FROM conversation_items ci3 WHERE ci3.run_id = ar.run_id AND ci3.item_kind = 'assistant_message' LIMIT 1) AS assistant_item_turn_id
 FROM assistant_runs ar
 JOIN message_dispatches md ON md.message_id = ar.origin_message_id
-LEFT JOIN conversation_items ci
-  ON ci.run_id = ar.run_id AND ci.item_kind = 'assistant_message'
 WHERE md.state = 'running'
   AND ar.lifecycle IN ('launching','running','waiting','cancel_requested')
   AND md.lease_expires_at_ms IS NOT NULL
@@ -233,11 +232,13 @@ impl Repository {
     /// via `origin_message_id = message_id` is considered. Only rows whose
     /// non-null `lease_expires_at_ms <= operated_at` are returned, in
     /// deterministic `lease_expires_at ASC, run_id ASC` order, limited by the
-    /// validated query limit. At most one assistant message item per run is
-    /// allowed; `None` is valid for launching/before-first-batch and a
-    /// duplicate is a typed corruption error. Any persisted identity string that
-    /// cannot be parsed into its domain type, or a non-positive generation,
-    /// fails closed with a typed corruption error.
+    /// validated query limit. The per-run assistant-message count is evaluated
+    /// before the candidate limit is applied; more than one assistant message
+    /// for a run is a typed corruption error even at limit `1`. When one item
+    /// exists its `thread_id`/`turn_id` must agree with the run's
+    /// `thread_id`/`origin_turn_id`. Any persisted identity string that cannot
+    /// be parsed into its domain type, or a non-positive generation, fails
+    /// closed with a typed corruption error.
     ///
     /// # Errors
     ///
@@ -245,6 +246,7 @@ impl Repository {
     /// limit and [`StartupReconciliationError::Repository`] for `CorruptData`,
     /// `Invariant`, or `Database` failures. No raw SQL or secret material is
     /// exposed.
+    #[allow(clippy::too_many_lines)]
     pub async fn list_startup_reconciliation_candidates(
         &self,
         query: StartupReconciliationQuery,
@@ -274,9 +276,8 @@ impl Repository {
             })?;
 
         let mut candidates: Vec<StartupReconciliationCandidate> = Vec::with_capacity(rows.len());
-        let mut seen_run_ids: HashSet<String> = HashSet::new();
 
-        for row in rows.iter() {
+        for row in &rows {
             let run_id_raw: String = row.try_get_by_index::<String>(0).map_err(|e| {
                 StartupReconciliationError::Repository(corrupt_data("assistant_runs", "run_id", &e))
             })?;
@@ -336,18 +337,58 @@ impl Repository {
                     &e,
                 ))
             })?;
+            let item_count: i64 = row.try_get_by_index::<i64>(9).map_err(|e| {
+                StartupReconciliationError::Repository(corrupt_data(
+                    "conversation_items",
+                    "run_id",
+                    &e,
+                ))
+            })?;
             let assistant_item_raw: Option<String> =
-                row.try_get_by_index::<Option<String>>(9).map_err(|e| {
+                row.try_get_by_index::<Option<String>>(10).map_err(|e| {
                     StartupReconciliationError::Repository(corrupt_data(
                         "conversation_items",
                         "item_id",
                         &e,
                     ))
                 })?;
+            let assistant_item_thread_raw: Option<String> =
+                row.try_get_by_index::<Option<String>>(11).map_err(|e| {
+                    StartupReconciliationError::Repository(corrupt_data(
+                        "conversation_items",
+                        "thread_id",
+                        &e,
+                    ))
+                })?;
+            let assistant_item_turn_raw: Option<String> =
+                row.try_get_by_index::<Option<String>>(12).map_err(|e| {
+                    StartupReconciliationError::Repository(corrupt_data(
+                        "conversation_items",
+                        "turn_id",
+                        &e,
+                    ))
+                })?;
+
+            // Per-run assistant-message count is evaluated before the candidate limit;
+            // more than one item is corruption even at limit 1. Never select an arbitrary item.
+            if item_count > 1 {
+                return Err(StartupReconciliationError::Repository(corrupt_data(
+                    "conversation_items",
+                    "run_id",
+                    "duplicate assistant message item for one run",
+                )));
+            }
+            if item_count < 0 {
+                return Err(StartupReconciliationError::Repository(corrupt_data(
+                    "conversation_items",
+                    "run_id",
+                    "negative assistant item count",
+                )));
+            }
 
             // Fail closed when selected persisted values cannot form valid domain types.
             let run_id = parse_identifier("assistant_runs", "run_id", &run_id_raw, |v| {
-                RunId::parse(v.to_owned()).map_err(|e| e)
+                RunId::parse(v.to_owned())
             })?;
             let thread_id = parse_identifier("assistant_runs", "thread_id", &thread_id_raw, |v| {
                 ThreadId::parse(v.to_owned())
@@ -370,24 +411,69 @@ impl Repository {
                 )));
             }
             let lifecycle = StartupRunLifecycle::parse(&lifecycle_raw)?;
-            let assistant_item_id = match assistant_item_raw {
-                None => None,
-                Some(raw) => Some(parse_identifier(
+
+            let assistant_item_id = if item_count == 0 {
+                if assistant_item_raw.is_some()
+                    || assistant_item_thread_raw.is_some()
+                    || assistant_item_turn_raw.is_some()
+                {
+                    return Err(StartupReconciliationError::Repository(corrupt_data(
+                        "conversation_items",
+                        "item_id",
+                        "assistant item count 0 but item present",
+                    )));
+                }
+                None
+            } else {
+                // item_count == 1
+                let raw = assistant_item_raw.ok_or_else(|| {
+                    StartupReconciliationError::Repository(corrupt_data(
+                        "conversation_items",
+                        "item_id",
+                        "assistant item count 1 but item_id is null",
+                    ))
+                })?;
+                let item_thread_raw = assistant_item_thread_raw.ok_or_else(|| {
+                    StartupReconciliationError::Repository(corrupt_data(
+                        "conversation_items",
+                        "thread_id",
+                        "assistant item thread_id is null",
+                    ))
+                })?;
+                let item_turn_raw = assistant_item_turn_raw.ok_or_else(|| {
+                    StartupReconciliationError::Repository(corrupt_data(
+                        "conversation_items",
+                        "turn_id",
+                        "assistant item turn_id is null",
+                    ))
+                })?;
+                // Validate that the item's thread/turn agree with the run's identities.
+                // Do not hide a mismatched item by returning None.
+                if item_thread_raw != thread_id_raw {
+                    return Err(StartupReconciliationError::Repository(corrupt_data(
+                        "conversation_items",
+                        "thread_id",
+                        &format!(
+                            "assistant item thread `{item_thread_raw}` disagrees with run thread `{thread_id_raw}`"
+                        ),
+                    )));
+                }
+                if item_turn_raw != turn_id_raw {
+                    return Err(StartupReconciliationError::Repository(corrupt_data(
+                        "conversation_items",
+                        "turn_id",
+                        &format!(
+                            "assistant item turn `{item_turn_raw}` disagrees with run origin turn `{turn_id_raw}`"
+                        ),
+                    )));
+                }
+                Some(parse_identifier(
                     "conversation_items",
                     "item_id",
                     &raw,
                     |v| ItemId::parse(v.to_owned()),
-                )?),
+                )?)
             };
-
-            // Duplicate run identity in result set implies duplicate assistant items via the LEFT JOIN.
-            if !seen_run_ids.insert(run_id_raw.clone()) {
-                return Err(StartupReconciliationError::Repository(corrupt_data(
-                    "conversation_items",
-                    "run_id",
-                    "duplicate assistant message item for one run",
-                )));
-            }
 
             candidates.push(StartupReconciliationCandidate {
                 run_id,

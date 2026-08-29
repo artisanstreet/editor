@@ -1,4 +1,4 @@
-use artisan_database::entities::{self, AssistantRunLifecycle, DispatchState};
+use artisan_database::entities::{self, AssistantRunLifecycle};
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch, CreateThreadInput,
     ProviderBindingBytes, QueueFirstMessageInput, Repository, RepositoryError,
@@ -10,13 +10,13 @@ use artisan_domain::{
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, DbBackend,
+    EntityTrait, Statement,
 };
 
 const OWNER_BYTES: [u8; 32] = [0xa1; 32];
 const LEASE_BYTES: [u8; 32] = [0xb2; 32];
 const CLAIM_TOKEN_BYTES: [u8; 32] = [0xc3; 32];
-const START_KEY_BYTES: [u8; 32] = [0xd4; 32];
 const DISPATCH_OWNER_BYTE: u8 = 0x11;
 
 const THREAD_CREATED_AT_MS: i64 = 10;
@@ -103,7 +103,15 @@ async fn queue_claim_launch(
     let item = ItemId::parse(format!("item-{}", run_id)).expect("item");
     let p1 = PatchId::parse(format!("patch-{}-a", run_id)).expect("p");
     let p2 = PatchId::parse(format!("patch-{}-b", run_id)).expect("p");
-    let start_key = RunStartKey::new(START_KEY_BYTES);
+    let start_key = {
+        let mut bytes = [0u8; 32];
+        for (idx, byte) in run_id.bytes().cycle().take(32).enumerate() {
+            bytes[idx] = byte ^ 0x5a;
+        }
+        // ensure distinct from constant to avoid accidental collision with earlier single-run tests
+        bytes[0] = bytes[0].wrapping_add(run_id.len() as u8);
+        RunStartKey::new(bytes)
+    };
     let creds = RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES);
     let outcome = repository
         .launch_claimed_run(artisan_database::LaunchClaimedRun {
@@ -305,12 +313,14 @@ async fn unexpired_pairs_omitted_and_become_visible_only_at_expiry() {
 async fn terminal_and_queued_leased_dispatches_are_omitted() {
     let (database, repository) = memory_database().await;
     seed_project_and_thread(&database, &repository, "thread-1").await;
+    seed_project_and_thread(&database, &repository, "thread-q").await;
+    seed_project_and_thread(&database, &repository, "thread-l").await;
     // queued dispatch without claim
     repository
         .queue_first_message(QueueFirstMessageInput {
             request_id: RequestId::parse("req-q").expect("req"),
             message_id: MessageId::parse("message-q").expect("mid"),
-            thread_id: ThreadId::parse("thread-1").expect("tid"),
+            thread_id: ThreadId::parse("thread-q").expect("tid"),
             body: MessageBody::parse("queued").expect("body"),
             accepted_at: UnixMillis::from_millis(ACCEPTED_AT_MS),
         })
@@ -321,7 +331,7 @@ async fn terminal_and_queued_leased_dispatches_are_omitted() {
         .queue_first_message(QueueFirstMessageInput {
             request_id: RequestId::parse("req-l").expect("req"),
             message_id: MessageId::parse("message-l").expect("mid"),
-            thread_id: ThreadId::parse("thread-1").expect("tid"),
+            thread_id: ThreadId::parse("thread-l").expect("tid"),
             body: MessageBody::parse("leased").expect("body"),
             accepted_at: UnixMillis::from_millis(ACCEPTED_AT_MS),
         })
@@ -507,7 +517,7 @@ async fn ordering_and_limit_behaviour() {
         let msg = format!("msg-{run}");
         let turn = format!("turn-{run}");
         seed_project_and_thread(&database, &repository, &thread).await;
-        let (mut claimed, _receipt, _sk, _creds) =
+        let (_claimed, _receipt, _sk, _creds) =
             queue_claim_launch(&repository, &database, &thread, &msg, run, &turn).await;
         // override lease expiry to desired value via direct update
         let dispatch = entities::message_dispatch::Entity::find_by_id(msg.clone())
@@ -518,7 +528,6 @@ async fn ordering_and_limit_behaviour() {
         let mut active: entities::message_dispatch::ActiveModel = dispatch.into();
         active.lease_expires_at_ms = Set(Some(expiry));
         active.update(&database).await.expect("update expiry");
-        let _ = claimed;
     }
     let q_all = StartupReconciliationQuery::new(UnixMillis::from_millis(500), 64).expect("q");
     let all = repository
@@ -677,15 +686,19 @@ async fn corrupted_identity_fails_typed() {
         "turn-1",
     )
     .await;
-    // corrupt thread_id to contain whitespace (schema allows, domain rejects)
-    let run_row = entities::assistant_run::Entity::find_by_id("run-1".to_owned())
-        .one(&database)
+    // Corrupt the run_id itself to contain whitespace. For a launching run with
+    // no assistant items, there are no child rows referencing run_id, so the
+    // PK update is schema-permitted and reaches discovery.
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE assistant_runs SET run_id = ? WHERE run_id = ?",
+        ["bad run".into(), "run-1".into()],
+    );
+    database
+        .execute_raw(stmt)
         .await
-        .expect("find")
-        .expect("run");
-    let mut active: entities::assistant_run::ActiveModel = run_row.into();
-    active.thread_id = Set("bad thread".to_owned());
-    active.update(&database).await.expect("update");
+        .expect("update run_id to whitespace");
     let query = StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), 10)
         .expect("q");
     let err = repository
@@ -697,7 +710,7 @@ async fn corrupted_identity_fails_typed() {
             RepositoryError::CorruptData { table, field, .. },
         ) => {
             assert_eq!(table, "assistant_runs");
-            assert_eq!(field, "thread_id");
+            assert_eq!(field, "run_id");
         }
         other => panic!("expected CorruptData, got {other:?}"),
     }
@@ -796,12 +809,14 @@ async fn duplicate_assistant_item_fails_typed() {
     .await
     .expect("ordinal");
     second_item.insert(&database).await.expect("second item");
-    let query = StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), 10)
+    // Prove the SQL limit cannot mask the duplicate: even at limit 1 the per-run
+    // count before limiting must be detected.
+    let query = StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), 1)
         .expect("q");
     let err = repository
         .list_startup_reconciliation_candidates(query)
         .await
-        .expect_err("duplicate should fail");
+        .expect_err("duplicate should fail even at limit 1");
     match err {
         artisan_database::StartupReconciliationError::Repository(
             RepositoryError::CorruptData { table, field, .. },
@@ -811,26 +826,4 @@ async fn duplicate_assistant_item_fails_typed() {
         }
         other => panic!("expected duplicate CorruptData, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn corrupted_generation_fails_typed() {
-    let (database, repository) = memory_database().await;
-    seed_project_and_thread(&database, &repository, "thread-1").await;
-    let _ = queue_claim_launch(
-        &repository,
-        &database,
-        "thread-1",
-        "message-1",
-        "run-1",
-        "turn-1",
-    )
-    .await;
-    // Generation corruption: use statement that bypasses state_shape by updating generation to 0
-    // This will be rejected by SQLite CHECK if we try directly; we verify our code would catch it if it existed.
-    // Instead we test that a run with whitespace message_id is caught as CorruptData (generation path is covered by same typed error).
-    let err = StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), 10)
-        .expect("q");
-    // No generation corruption row is insertable without disabling CHECK, but we assert the error variant exists
-    let _ = err;
 }
