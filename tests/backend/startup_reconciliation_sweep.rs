@@ -5,13 +5,11 @@
 #[path = "../../modules/backend/src/startup_reconciliation_sweep.rs"]
 mod startup_reconciliation_sweep;
 
-use artisan_database::entities::{
-    self, AssistantRunLifecycle, ConversationPatchKind, DispatchState, EntityLifecycle,
-};
+use artisan_database::entities::{self, AssistantRunLifecycle, DispatchState, EntityLifecycle};
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch, CreateThreadInput,
     ProviderBindingBytes, QueueFirstMessageInput, Repository, RunLaunchCredentials, RunStartKey,
-    SqliteConfig, StartupReconciliationCandidate, StartupRunLifecycle, connect,
+    SqliteConfig, StartupReconciliationCandidate, connect,
 };
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, ItemId, MessageBody, MessageId, PatchId, ProjectId,
@@ -83,7 +81,13 @@ impl TempDatabase {
 
 impl Drop for TempDatabase {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        // Best-effort panic cleanup — does not replace explicit success-path cleanup.
+        let _ = std::fs::remove_file(&self.file);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let sidecar = PathBuf::from(format!("{}{}", self.file.display(), suffix));
+            let _ = std::fs::remove_file(sidecar);
+        }
+        let _ = std::fs::remove_dir(&self.dir);
     }
 }
 
@@ -726,6 +730,26 @@ async fn stale_moved_candidate_counted_and_later_continue() {
         let run = after.runs.iter().find(|r| r.run_id == run_id).expect("run");
         assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
     }
+
+    drop(repository);
+    let db_path = _temp.path().to_owned();
+    let dir_path = _temp.dir.clone();
+    let close = database.close().await;
+    assert!(close.is_ok(), "close failed: {close:?}");
+    std::fs::remove_file(&db_path).expect("remove db file");
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = PathBuf::from(format!("{}{}", db_path.display(), suffix));
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("remove sidecar {} failed: {err:?}", sidecar.display()),
+        }
+    }
+    match std::fs::remove_dir(&dir_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => panic!("remove dir {} failed: {err:?}", dir_path.display()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -868,6 +892,26 @@ async fn identical_pass_replay_no_duplicate_and_already_interrupted() {
         .find(|r| r.run_id == "run-c")
         .expect("run-c");
     assert_eq!(run_c.lifecycle, AssistantRunLifecycle::Interrupted);
+
+    drop(repository);
+    let db_path = _temp.path().to_owned();
+    let dir_path = _temp.dir.clone();
+    let close = database.close().await;
+    assert!(close.is_ok(), "close failed: {close:?}");
+    std::fs::remove_file(&db_path).expect("remove db file");
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = PathBuf::from(format!("{}{}", db_path.display(), suffix));
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("remove sidecar {} failed: {err:?}", sidecar.display()),
+        }
+    }
+    match std::fs::remove_dir(&dir_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => panic!("remove dir {} failed: {err:?}", dir_path.display()),
+    }
 }
 
 // ---------------------------------------------------------------------------
