@@ -129,7 +129,7 @@ where
         .ok_or_else(|| "expected generate or sign mode".to_owned())?;
     match mode.as_str() {
         "generate" => generate(parse_generate_args(args)?),
-        "sign" => sign(parse_sign_args(args)?),
+        "sign" => sign(&parse_sign_args(args)?),
         _ => Err("expected generate or sign mode".to_owned()),
     }
 }
@@ -353,7 +353,7 @@ fn generate(options: GenerateOptions) -> Result<(), String> {
     fs::write(&options.output, bytes).map_err(|_| "could not write release manifest".to_owned())
 }
 
-fn sign(options: SignOptions) -> Result<(), String> {
+fn sign(options: &SignOptions) -> Result<(), String> {
     validate_identifier(&options.key_id, "requested key id")?;
     let manifest_bytes =
         fs::read(&options.manifest).map_err(|_| "could not read release manifest".to_owned())?;
@@ -455,7 +455,7 @@ fn manifest_from_archive(
 fn read_archive_entries(bytes: &[u8]) -> Result<Vec<String>, String> {
     let mut zip_archive = ZipArchive::new(Cursor::new(bytes))
         .map_err(|_| "declared archive is not a valid ZIP".to_owned())?;
-    if zip_archive.len() == 0 {
+    if zip_archive.is_empty() {
         return Err("ZIP must contain at least one regular file".to_owned());
     }
     if zip_archive.len() > MAX_ARCHIVE_ENTRIES {
@@ -528,10 +528,10 @@ fn validate_archive_entries(entries: &[String]) -> Result<(), String> {
     let mut previous = None;
     for name in entries {
         validate_archive_member_name(name)?;
-        if let Some(previous) = previous {
-            if name.as_str() < previous {
-                return Err("archive members must be bytewise sorted".to_owned());
-            }
+        if let Some(previous) = previous
+            && name.as_str() < previous
+        {
+            return Err("archive members must be bytewise sorted".to_owned());
         }
         if !exact.insert(name.clone()) {
             return Err("archive members must be unique".to_owned());
@@ -1180,7 +1180,7 @@ mod tests {
         fs::write(&manifest_path, &manifest).expect("write test manifest");
         fs::write(&key_path, signing_key_bytes).expect("write test key");
 
-        sign(SignOptions {
+        sign(&SignOptions {
             manifest: manifest_path,
             key_file: key_path,
             key_id: "development".to_owned(),
