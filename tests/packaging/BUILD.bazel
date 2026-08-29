@@ -50,7 +50,7 @@ rust_test(
     srcs = ["cargo_binary_identity.rs"],
     compile_data = [
         "//modules/cli:Cargo.toml",
-        "//:modules/installer/Cargo.toml",
+        "//modules/installer:Cargo.toml",
         "//modules/backend:Cargo.toml",
         "//modules/frontend:Cargo.toml",
     ],
