@@ -378,6 +378,10 @@ name = "setup_label_transition_policy"
 path = "../../tests/frontend/setup_label_transition_policy.rs"
 
 [[test]]
+name = "shell_command"
+path = "../../tests/frontend/shell_command.rs"
+
+[[test]]
 name = "shell_layout"
 path = "../../tests/frontend/shell_layout.rs"
 
