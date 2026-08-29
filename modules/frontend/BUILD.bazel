@@ -32,6 +32,7 @@ rust_library(
         "src/conversation_projection/validation.rs",
         "src/conversation_relative_age.rs",
         "src/conversation_scroll_position.rs",
+        "src/conversation_status_labels.rs",
         "src/conversation_turn_footer_policy.rs",
         "src/conversation_turn_navigator.rs",
         "src/dev_instance_policy.rs",

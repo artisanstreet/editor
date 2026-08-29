@@ -34,6 +34,7 @@ pub mod conversation_presentation;
 pub mod conversation_projection;
 pub mod conversation_relative_age;
 pub mod conversation_scroll_position;
+pub mod conversation_status_labels;
 pub mod conversation_turn_footer_policy;
 pub mod conversation_turn_navigator;
 pub mod dev_instance_policy;
