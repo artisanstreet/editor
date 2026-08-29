@@ -112,6 +112,7 @@ rust_library(
         "src/thread_environment_presentation.rs",
         "src/thread_hover_rail_policy.rs",
         "src/thread_list_selection.rs",
+        "src/thread_navigation_core.rs",
         "src/thread_panel_policy.rs",
         "src/thread_read_tracker.rs",
         "src/thread_retention_settings_policy.rs",

@@ -410,6 +410,10 @@ name = "thread_list_navigation"
 path = "../../tests/frontend/thread_list_navigation.rs"
 
 [[test]]
+name = "thread_navigation_core"
+path = "../../tests/frontend/thread_navigation_core.rs"
+
+[[test]]
 name = "thread_panel_policy"
 path = "../../tests/frontend/thread_panel_policy.rs"
 
