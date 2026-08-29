@@ -128,7 +128,7 @@ pub enum Commands {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Copy, Debug, Subcommand)]
 pub enum TelemetryCommand {
     /// Print the two independent consent choices without exposing installation identity.
     Status {
