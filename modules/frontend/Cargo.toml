@@ -362,6 +362,10 @@ name = "runtime_surface"
 path = "../../tests/frontend/runtime_surface.rs"
 
 [[test]]
+name = "scoped_attachment_queue"
+path = "../../tests/frontend/scoped_attachment_queue.rs"
+
+[[test]]
 name = "session_projection"
 path = "../../tests/frontend/session_projection.rs"
 
