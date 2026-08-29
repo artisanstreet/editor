@@ -2,6 +2,7 @@
 
 use std::process::ExitCode;
 
+pub mod activated_conversation_replay;
 pub mod agent_name_allocation_policy;
 pub mod agent_name_catalog_policy;
 pub mod agent_orchestrator_start_failure_policy;

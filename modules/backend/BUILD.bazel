@@ -13,6 +13,7 @@ exports_files(
 rust_library(
     name = "backend",
     srcs = [
+        "src/activated_conversation_replay.rs",
         "src/agent_name_allocation_policy.rs",
         "src/agent_name_catalog_policy.rs",
         "src/agent_orchestrator_start_failure_policy.rs",
