@@ -457,6 +457,17 @@ rust_test(
 )
 
 rust_test(
+    name = "model_policy_controls_presentation_test",
+    srcs = ["model_policy_controls_presentation.rs"],
+    crate_name = "model_policy_controls_presentation_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "model_selection_presentation_test",
     srcs = ["model_selection_presentation.rs"],
     crate_name = "model_selection_presentation_test",
