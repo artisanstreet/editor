@@ -69,6 +69,7 @@ pub mod proof;
 pub mod reader_attention;
 pub mod reasoning_display;
 pub mod route_navigation;
+pub mod route_navigation_adapter;
 pub mod run_usage_policy;
 pub mod runtime_fixture_policy;
 pub mod runtime_fixture_support;
