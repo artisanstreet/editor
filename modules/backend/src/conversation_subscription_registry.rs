@@ -204,8 +204,10 @@ struct Entry {
 /// two registries that arrived at the same entries through the same generation
 /// history compare equal, while differing generation histories do not. The map
 /// is deterministic (`BTreeMap`) and contains no interior mutability, clocks,
-/// or global state.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// or global state. The registry is intentionally not [`Clone`] — the
+/// per-connection owner must remain a single authority whose leases cannot be
+/// duplicated by copying the table.
+#[derive(Debug, Eq, PartialEq)]
 pub struct ConversationSubscriptionRegistry {
     entries: BTreeMap<ThreadId, Entry>,
     next_generation: u64,
@@ -239,33 +241,6 @@ impl ConversationSubscriptionRegistry {
         self.entries.len()
     }
 
-    /// Returns whether a subscription exists for `thread_id`.
-    #[must_use]
-    pub fn contains(&self, thread_id: &ThreadId) -> bool {
-        self.entries.contains_key(thread_id)
-    }
-
-    /// Returns the current cursor for `thread_id`, if any.
-    #[must_use]
-    pub fn cursor(&self, thread_id: &ThreadId) -> Option<ConversationCursor> {
-        self.entries.get(thread_id).map(|entry| entry.cursor)
-    }
-
-    /// Returns the current state for `thread_id`, if any.
-    #[must_use]
-    pub fn state(&self, thread_id: &ThreadId) -> Option<SubscriptionState> {
-        self.entries.get(thread_id).map(|entry| entry.state)
-    }
-
-    /// Returns the current lease for `thread_id`, if any.
-    #[must_use]
-    pub fn lease(&self, thread_id: &ThreadId) -> Option<SubscriptionLease> {
-        self.entries.get(thread_id).map(|entry| SubscriptionLease {
-            thread_id: thread_id.clone(),
-            generation: entry.generation,
-        })
-    }
-
     /// Returns a read-only snapshot view for `thread_id`, if any.
     #[must_use]
     pub fn view(&self, thread_id: &ThreadId) -> Option<SubscriptionView> {
@@ -279,35 +254,12 @@ impl ConversationSubscriptionRegistry {
         })
     }
 
-    /// Alias for [`Self::view`] for callers preferring `get` spelling.
-    #[must_use]
-    pub fn get(&self, thread_id: &ThreadId) -> Option<SubscriptionView> {
-        self.view(thread_id)
-    }
-
     /// Registers a pending subscription for `thread_id` at `cursor`.
     ///
     /// If an entry already exists for the thread it is atomically replaced
     /// with the new pending entry and a strictly newer lease. The old lease
     /// is immediately stale. Generation allocation is strictly monotonic and
     /// never reuses zero; exhaustion fails without mutating the registry.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RegisterError::GenerationExhausted`] when the connection-local
-    /// generation counter cannot advance without wrapping or reusing zero. The
-    /// registry is unchanged in that case.
-    pub fn register(
-        &mut self,
-        thread_id: ThreadId,
-        cursor: ConversationCursor,
-    ) -> Result<SubscriptionLease, RegisterError> {
-        self.register_pending(thread_id, cursor)
-    }
-
-    /// Registers a pending subscription for `thread_id` at `cursor`.
-    ///
-    /// See [`Self::register`] for the replacement and exhaustion semantics.
     ///
     /// # Errors
     ///
@@ -404,11 +356,14 @@ impl ConversationSubscriptionRegistry {
     /// internal non-empty and contiguous guarantees are trusted; this method
     /// does not rebuild a second patch-order vocabulary.
     ///
+    /// The cursor advances only after the later writer reports a successful
+    /// publication.
+    ///
     /// # Errors
     ///
     /// Returns a typed [`ApplyBatchError`] without mutating state for any
     /// precondition violation.
-    pub fn apply_batch(
+    pub fn publish_batch(
         &mut self,
         lease: &SubscriptionLease,
         batch: &PatchBatch,
@@ -434,20 +389,5 @@ impl ConversationSubscriptionRegistry {
         }
         entry.cursor = batch.to_cursor();
         Ok(entry.cursor)
-    }
-
-    /// Alias for [`Self::apply_batch`] for callers preferring a publication
-    /// spelling.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same typed [`ApplyBatchError`] as [`Self::apply_batch`]
-    /// without mutating state for any precondition violation.
-    pub fn publish_batch(
-        &mut self,
-        lease: &SubscriptionLease,
-        batch: &PatchBatch,
-    ) -> Result<ConversationCursor, ApplyBatchError> {
-        self.apply_batch(lease, batch)
     }
 }
