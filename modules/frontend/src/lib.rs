@@ -19,6 +19,7 @@ pub mod browser_dom_boundary;
 pub mod command_ranking;
 pub mod component_gallery_policy;
 pub mod composer;
+pub mod composer_action_failure;
 pub mod composer_draft_session_policy;
 pub mod context_usage_description;
 pub mod context_usage_gauge_policy;
