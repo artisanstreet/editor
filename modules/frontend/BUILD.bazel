@@ -15,6 +15,7 @@ rust_library(
         "src/attachment_tray_policy.rs",
         "src/authoritative_subscription_policy.rs",
         "src/browser_dom_boundary.rs",
+        "src/clipboard_write_boundary.rs",
         "src/component_gallery_policy.rs",
         "src/composer.rs",
         "src/composer_action_failure.rs",
