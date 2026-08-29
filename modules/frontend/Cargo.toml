@@ -301,6 +301,10 @@ name = "project_identity_policy"
 path = "../../tests/frontend/project_identity_policy.rs"
 
 [[test]]
+name = "project_path_policy"
+path = "../../tests/frontend/project_path_policy.rs"
+
+[[test]]
 name = "telemetry_bootstrap_policy"
 path = "../../tests/frontend/telemetry_bootstrap_policy.rs"
 
