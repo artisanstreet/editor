@@ -52,6 +52,55 @@ async fn memory_repository() -> (DatabaseConnection, Repository) {
     (database.clone(), Repository::new(database))
 }
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+struct TempDatabase {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl TempDatabase {
+    fn new(label: &str) -> Self {
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "artisan-sweep-{}-{}-{}",
+            label,
+            std::process::id(),
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let file = dir.join("test.db");
+        Self { dir, file }
+    }
+
+    fn path(&self) -> &Path {
+        &self.file
+    }
+}
+
+impl Drop for TempDatabase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+async fn temp_repository(label: &str) -> (DatabaseConnection, Repository, TempDatabase) {
+    let temp = TempDatabase::new(label);
+    let database = connect(
+        SqliteConfig::file(temp.path())
+            .min_connections(1)
+            .max_connections(4)
+            .sqlx_logging(false),
+    )
+    .await
+    .expect("temp db");
+    migrate_to_current(&database).await.expect("migrate");
+    (database.clone(), Repository::new(database), temp)
+}
+
 async fn seed_project_and_thread(
     database: &DatabaseConnection,
     repository: &Repository,
@@ -341,47 +390,6 @@ impl StartupReconciliationPatchSource for MismatchedShapeSource {
     }
 }
 
-struct StalingSource {
-    database: DatabaseConnection,
-    target_run: String,
-}
-
-impl StartupReconciliationPatchSource for StalingSource {
-    fn patch_ids_for(
-        &mut self,
-        candidate: &StartupReconciliationCandidate,
-    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
-        if candidate.run_id.as_str() == self.target_run {
-            // Bump run updated_at to make fence stale before dispose.
-            let run_id = candidate.run_id.as_str().to_owned();
-            let db = self.database.clone();
-            // Use blocking runtime? We are sync here, need to spawn blocking.
-            // For test, we can use tokio::task::block_in_place if in runtime.
-            // Instead use futures::executor::block_on?
-            // Simplify: use try to update via spawn and block.
-            let handle = tokio::runtime::Handle::try_current();
-            if let Ok(handle) = handle {
-                handle.block_on(async {
-                    let run = entities::assistant_run::Entity::find_by_id(run_id.clone())
-                        .one(&db)
-                        .await
-                        .expect("find")
-                        .expect("run");
-                    let mut active: entities::assistant_run::ActiveModel = run.into();
-                    active.updated_at_ms = Set(candidate.run_updated_at.as_millis() + 999);
-                    active.update(&db).await.expect("update");
-                });
-            }
-        }
-        let turn_patch =
-            PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("turn patch");
-        let item_patch = candidate.assistant_item_id.as_ref().map(|_| {
-            PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("item patch")
-        });
-        Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 1. empty pass
 // ---------------------------------------------------------------------------
@@ -613,7 +621,7 @@ async fn launching_no_item_and_running_with_item_both_interrupted_with_correct_s
 
 #[tokio::test]
 async fn stale_moved_candidate_counted_and_later_continue() {
-    let (database, repository) = memory_repository().await;
+    let (database, repository, _temp) = temp_repository("stale-moved").await;
     for (thread, msg, run, turn) in [
         ("thread-a", "msg-a", "run-a", "turn-a"),
         ("thread-b", "msg-b", "run-b", "turn-b"),
@@ -626,10 +634,59 @@ async fn stale_moved_candidate_counted_and_later_continue() {
     let before = fetch_all(&database).await;
     let before_patches = before.patches.len();
 
-    // Stale the middle candidate (run-b) via source side effect.
-    let mut source = StalingSource {
-        database: database.clone(),
-        target_run: "run-b".to_owned(),
+    // Deterministic move after discovery and before disposition of run-b.
+    let (tx_req, rx_req) = std::sync::mpsc::sync_channel::<()>(0);
+    let (tx_ack, rx_ack) = std::sync::mpsc::sync_channel::<Result<(), String>>(0);
+    let db_for_thread = database.clone();
+    let external = std::thread::spawn(move || {
+        rx_req.recv().expect("request");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = rt.block_on(async {
+            let run = entities::assistant_run::Entity::find_by_id("run-b".to_owned())
+                .one(&db_for_thread)
+                .await
+                .expect("find")
+                .expect("run");
+            let mut active: entities::assistant_run::ActiveModel = run.into();
+            active.updated_at_ms = Set(9999);
+            active.update(&db_for_thread).await.expect("update");
+            Ok::<(), String>(())
+        });
+        tx_ack.send(result).expect("ack");
+    });
+
+    struct SignalingStaleSource {
+        target: String,
+        tx: std::sync::mpsc::SyncSender<()>,
+        rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    }
+
+    impl StartupReconciliationPatchSource for SignalingStaleSource {
+        fn patch_ids_for(
+            &mut self,
+            candidate: &StartupReconciliationCandidate,
+        ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+            if candidate.run_id.as_str() == self.target {
+                self.tx.send(()).expect("send");
+                self.rx.recv().expect("recv").expect("external ok");
+            }
+            let turn_patch =
+                PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
+            let item_patch = candidate
+                .assistant_item_id
+                .as_ref()
+                .map(|_| PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"));
+            Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
+        }
+    }
+
+    let mut source = SignalingStaleSource {
+        target: "run-b".to_owned(),
+        tx: tx_req,
+        rx: rx_ack,
     };
     let input =
         StartupReconciliationSweepInput::new(UnixMillis::from_millis(SWEEP_OPERATED_AT_MS), 10)
@@ -638,6 +695,7 @@ async fn stale_moved_candidate_counted_and_later_continue() {
     let report = sweep_startup_reconciliation(&repository, input, &mut source)
         .await
         .expect("sweep should succeed with skipped");
+    external.join().expect("external thread panicked");
 
     assert_eq!(report.discovered, 3);
     assert_eq!(report.attempted, 3);
@@ -649,7 +707,7 @@ async fn stale_moved_candidate_counted_and_later_continue() {
     // Only two interrupted candidates created patches (1 each) => 2 new patches.
     assert_eq!(after.patches.len(), before_patches + 2);
 
-    // run-b should be unchanged (still launching).
+    // run-b should be unchanged (still launching) — move was not a disposition.
     let run_b = after
         .runs
         .iter()
@@ -676,120 +734,140 @@ async fn stale_moved_candidate_counted_and_later_continue() {
 
 #[tokio::test]
 async fn identical_pass_replay_no_duplicate_and_already_interrupted() {
-    let (database, repository) = memory_repository().await;
-    seed_project_and_thread(&database, &repository, "thread-1").await;
-    let (_cl, _rc, _sk, _cr) =
-        queue_claim_launch(&repository, "thread-1", "message-1", "run-1", "turn-1").await;
-    seed_project_and_thread(&database, &repository, "thread-2").await;
-    let (claimed2, receipt2, sk2, creds2) =
-        queue_claim_launch(&repository, "thread-2", "message-2", "run-2", "turn-2").await;
-    let bound2 = bind_running(&repository, &claimed2, &receipt2, &sk2, &creds2).await;
-    let assistant_item = ItemId::parse("assistant-2").expect("aid");
-    commit_running_item(
-        &repository,
-        &claimed2,
-        &receipt2,
-        &bound2,
-        &sk2,
-        &creds2,
-        &assistant_item,
-        &PatchId::parse("p-turn-pre").expect("p"),
-        &PatchId::parse("p-item-pre").expect("p"),
-    )
-    .await;
+    let (database, repository, _temp) = temp_repository("replay").await;
+    for (thread, msg, run, turn) in [
+        ("thread-a", "msg-a", "run-a", "turn-a"),
+        ("thread-b", "msg-b", "run-b", "turn-b"),
+        ("thread-c", "msg-c", "run-c", "turn-c"),
+    ] {
+        seed_project_and_thread(&database, &repository, thread).await;
+        let (_cl, _rc, _sk, _cr) = queue_claim_launch(&repository, thread, msg, run, turn).await;
+    }
 
-    let input =
-        StartupReconciliationSweepInput::new(UnixMillis::from_millis(SWEEP_OPERATED_AT_MS), 10)
-            .expect("input");
-
-    // First sweep with deterministic source.
-    let mut source1 = DeterministicSource;
-    let report1 = sweep_startup_reconciliation(&repository, input, &mut source1)
-        .await
-        .expect("first sweep");
-    assert_eq!(report1.discovered, 2);
-    assert_eq!(report1.interrupted, 2);
-    let after_first = fetch_all(&database).await;
-    let patches_after_first = after_first.patches.len();
-    let states_after_first: Vec<_> = after_first
+    let before = fetch_all(&database).await;
+    let before_patches = before.patches.len();
+    let before_states: Vec<(String, i64)> = before
         .states
         .iter()
         .map(|s| (s.thread_id.clone(), s.last_patch_sequence))
         .collect();
 
-    // Now test disposition replay directly: calling dispose with same candidate snapshot and same patch ids should be AlreadyInterrupted without duplicate.
-    // We need the original candidate snapshots before first sweep. Re-discover with same operated_at would be empty now, so we test via direct dispose replay using the after_first state? Instead we test that a second sweep with same deterministic source creates no new patches (empty discovery) - proves no duplicate.
-    let mut source2 = DeterministicSource;
-    let report2 = sweep_startup_reconciliation(&repository, input, &mut source2)
+    // Deterministic identical replay after discovery and before disposition of run-b.
+    let (tx_req, rx_req) = std::sync::mpsc::sync_channel::<(
+        StartupReconciliationCandidate,
+        PatchId,
+        Option<PatchId>,
+    )>(0);
+    let (tx_ack, rx_ack) = std::sync::mpsc::sync_channel::<Result<(), String>>(0);
+    let repo_for_thread = repository.clone();
+    let external = std::thread::spawn(move || {
+        let (candidate, turn_patch, item_patch) = rx_req.recv().expect("request");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = rt.block_on(async {
+            repo_for_thread
+                .dispose_expired_startup_candidate(
+                    artisan_database::StartupReconciliationDisposition {
+                        candidate: &candidate,
+                        operated_at: UnixMillis::from_millis(SWEEP_OPERATED_AT_MS),
+                        turn_patch_id: &turn_patch,
+                        item_patch_id: item_patch.as_ref(),
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"))
+        });
+        tx_ack.send(result).expect("ack");
+    });
+
+    struct SignalingReplaySource {
+        target: String,
+        tx: std::sync::mpsc::SyncSender<(StartupReconciliationCandidate, PatchId, Option<PatchId>)>,
+        rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    }
+
+    impl StartupReconciliationPatchSource for SignalingReplaySource {
+        fn patch_ids_for(
+            &mut self,
+            candidate: &StartupReconciliationCandidate,
+        ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+            let turn_patch =
+                PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
+            let item_patch = candidate
+                .assistant_item_id
+                .as_ref()
+                .map(|_| PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"));
+            if candidate.run_id.as_str() == self.target {
+                let candidate_clone = candidate.clone();
+                let turn_clone = turn_patch.clone();
+                let item_clone = item_patch.clone();
+                self.tx
+                    .send((candidate_clone, turn_clone, item_clone))
+                    .expect("send");
+                self.rx.recv().expect("recv").expect("external dispose ok");
+            }
+            Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
+        }
+    }
+
+    let mut source = SignalingReplaySource {
+        target: "run-b".to_owned(),
+        tx: tx_req,
+        rx: rx_ack,
+    };
+    let input =
+        StartupReconciliationSweepInput::new(UnixMillis::from_millis(SWEEP_OPERATED_AT_MS), 10)
+            .expect("input");
+    let report = sweep_startup_reconciliation(&repository, input, &mut source)
         .await
-        .expect("second sweep");
-    // After first sweep, no candidates remain, so second is empty.
-    assert_eq!(report2.discovered, 0);
-    assert_eq!(report2.interrupted, 0);
-    let after_second = fetch_all(&database).await;
-    assert_eq!(after_second.patches.len(), patches_after_first);
-    assert_eq!(
-        after_second
+        .expect("sweep");
+    external.join().expect("external thread panicked");
+
+    assert_eq!(report.discovered, 3);
+    assert_eq!(report.attempted, 3);
+    assert_eq!(report.interrupted, 2);
+    assert_eq!(report.already_interrupted, 1);
+    assert_eq!(report.skipped_moved, 0);
+
+    let after = fetch_all(&database).await;
+    // External actor created 1 patch for run-b, sweep created 1 each for run-a/c and none duplicate for run-b => 3 new patches.
+    assert_eq!(after.patches.len(), before_patches + 3);
+    // No duplicate patch identities.
+    let mut seen = std::collections::HashSet::new();
+    for patch in &after.patches {
+        assert!(
+            seen.insert(patch.patch_id.clone()),
+            "duplicate patch {}",
+            patch.patch_id
+        );
+    }
+    // Counter advance: each thread that was interrupted advances exactly once; run-b's counter was advanced by external actor, not doubled.
+    for (thread_id, before_seq) in before_states {
+        let after_state = after
             .states
             .iter()
-            .map(|s| (s.thread_id.clone(), s.last_patch_sequence))
-            .collect::<Vec<_>>(),
-        states_after_first
-    );
-
-    // More direct replay test: manually replay disposal of run-1 with same patch ids via direct repository call, asserting AlreadyInterrupted and no duplicate.
-    // Need to reconstruct candidate as it was before first sweep. Instead, test sweep-level replay by pre-sealing one candidate before sweep's dispose.
-    let (database3, repository3) = memory_repository().await;
-    seed_project_and_thread(&database3, &repository3, "thread-1").await;
-    let (_cl3, _rc3, _sk3, _cr3) =
-        queue_claim_launch(&repository3, "thread-1", "message-1", "run-1", "turn-1").await;
-    seed_project_and_thread(&database3, &repository3, "thread-2").await;
-    let (_cl4, _rc4, _sk4, _cr4) =
-        queue_claim_launch(&repository3, "thread-2", "message-2", "run-2", "turn-2").await;
-
-    let candidates_before = repository3
-        .list_startup_reconciliation_candidates(
-            artisan_database::StartupReconciliationQuery::new(
-                UnixMillis::from_millis(SWEEP_OPERATED_AT_MS),
-                10,
-            )
-            .expect("q"),
-        )
-        .await
-        .expect("candidates");
-    let candidate_run1 = candidates_before
+            .find(|s| s.thread_id == thread_id)
+            .expect("state");
+        assert_eq!(after_state.last_patch_sequence, before_seq + 1);
+    }
+    // Durable rows: run-b was already interrupted by external actor, sweep reports it as AlreadyInterrupted without duplicate.
+    let run_b = after
+        .runs
         .iter()
-        .find(|c| c.run_id.as_str() == "run-1")
-        .expect("run-1")
-        .clone();
-    // Pre-seal run-1 with deterministic patches via direct dispose.
-    let turn_patch_pre =
-        PatchId::parse(format!("turn-{}", candidate_run1.run_id.as_str())).expect("p");
-    repository3
-        .dispose_expired_startup_candidate(artisan_database::StartupReconciliationDisposition {
-            candidate: &candidate_run1,
-            operated_at: UnixMillis::from_millis(SWEEP_OPERATED_AT_MS),
-            turn_patch_id: &turn_patch_pre,
-            item_patch_id: None,
-        })
-        .await
-        .expect("pre-seal");
-    let after_preseal = fetch_all(&database3).await;
-    let patches_preseal = after_preseal.patches.len();
-
-    // Now sweep should encounter run-1 as AlreadyInterrupted and run-2 as Interrupted.
-    let mut deterministic = DeterministicSource;
-    let report3 = sweep_startup_reconciliation(&repository3, input, &mut deterministic)
-        .await
-        .expect("sweep with one pre-sealed");
-    assert_eq!(report3.discovered, 2);
-    // One AlreadyInterrupted (run-1) + one Interrupted (run-2)
-    assert_eq!(report3.already_interrupted, 1);
-    assert_eq!(report3.interrupted, 1);
-    assert_eq!(report3.attempted, 2);
-    let after_sweep = fetch_all(&database3).await;
-    // Only one new patch for run-2 (run-1 was replay, no duplicate)
-    assert_eq!(after_sweep.patches.len(), patches_preseal + 1);
+        .find(|r| r.run_id == "run-b")
+        .expect("run-b");
+    assert_eq!(run_b.lifecycle, AssistantRunLifecycle::Interrupted);
+    assert_eq!(run_b.updated_at_ms, SWEEP_OPERATED_AT_MS);
+    // Later candidate still committed.
+    let run_c = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-c")
+        .expect("run-c");
+    assert_eq!(run_c.lifecycle, AssistantRunLifecycle::Interrupted);
 }
 
 // ---------------------------------------------------------------------------
@@ -817,14 +895,14 @@ async fn patch_source_failure_before_candidate_n_leaves_n_untouched() {
         .await
         .expect_err("should fail on second candidate");
 
-    match err {
+    match &err {
         StartupReconciliationSweepError::PatchSource {
             report,
             failing_index,
             failing_run_id,
             ..
         } => {
-            assert_eq!(failing_index, 1);
+            assert_eq!(*failing_index, 1);
             assert_eq!(failing_run_id.as_str(), "run-b");
             assert_eq!(report.discovered, 2);
             assert_eq!(report.interrupted, 1);
