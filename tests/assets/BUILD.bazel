@@ -8,7 +8,7 @@ rust_test(
     deps = [
         "//modules/assets:assets",
         "@crates//:roxmltree",
-        "@crates//:sha2",
+        "@crates//:sha2-0.11.0",
         "@crates//:toml",
     ],
     edition = "2024",

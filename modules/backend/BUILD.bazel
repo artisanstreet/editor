@@ -84,7 +84,7 @@ rust_library(
         "//modules/transport:transport",
         "@crates//:base64",
         "@crates//:bytes",
-        "@crates//:getrandom",
+        "@crates//:getrandom-0.4.3",
         "@crates//:http",
         "@crates//:http-body-util",
         "@crates//:hyper",
