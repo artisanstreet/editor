@@ -1,5 +1,5 @@
 {
-  "checksum": "b64e44a2319c0ed9cd75fb746510e3a4374e2ebb3e2a3bffebccdf03e9d5e7d0",
+  "checksum": "81e10fcf3c0a0da8ba5991143ee792afded1058281acd7d7014be7ed376591cb",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1861,6 +1861,10 @@
               {
                 "id": "native-dialog 0.9.7",
                 "target": "native_dialog"
+              },
+              {
+                "id": "winapi-util 0.1.11",
+                "target": "winapi_util"
               }
             ]
           }
@@ -56711,6 +56715,7 @@
     "thiserror 2.0.20",
     "tokio 1.53.1",
     "url 2.5.8",
+    "winapi-util 0.1.11",
     "zeroize 1.9.0"
   ],
   "direct_dev_deps": [

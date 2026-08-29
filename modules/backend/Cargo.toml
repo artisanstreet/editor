@@ -27,6 +27,7 @@ zeroize.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 native-dialog.workspace = true
+winapi-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
