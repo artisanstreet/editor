@@ -825,6 +825,20 @@ struct FoundEntry {
     value: String,
 }
 
+struct ParsedPaths {
+    package_root: CompanyRoot,
+    bin_dir: SafeLeaf,
+    versions_dir: SafeLeaf,
+    resources_dir: SafeLeaf,
+    licenses_dir: SafeLeaf,
+    installation_file: SafeLeaf,
+    payload_manifest_file: SafeLeaf,
+    ae_executable: SafeLeaf,
+    installer_executable: SafeLeaf,
+    editor_executable: SafeLeaf,
+    forge_executable: SafeLeaf,
+}
+
 fn scan_entries(text: &str) -> Result<Vec<FoundEntry>, ContractError> {
     if text.contains('\r') {
         return Err(ContractError::Syntax(SyntaxError::CarriageReturn));
@@ -943,109 +957,136 @@ fn parse_exact_role(
     }
 }
 
-fn parse_contract(text: &str) -> Result<VersionedLayout, ContractError> {
-    let entries = scan_entries(text)?;
-    let schema_version = required_entry(&entries, KEY_SCHEMA_VERSION)?;
-    if schema_version != "2" {
-        return Err(ContractError::Value(ValueError::WrongLiteral {
+fn parse_schema_version(entries: &[FoundEntry]) -> Result<u8, ContractError> {
+    let found = required_entry(entries, KEY_SCHEMA_VERSION)?;
+    if found == "2" {
+        Ok(2)
+    } else {
+        Err(ContractError::Value(ValueError::WrongLiteral {
             key: KEY_SCHEMA_VERSION,
             expected: "2",
-            found: schema_version.to_owned(),
-        }));
+            found: found.to_owned(),
+        }))
     }
-    let proof_scope = ProofScope::parse(required_entry(&entries, KEY_PROOF_SCOPE)?)?;
-    let package_root = parse_exact_root(required_entry(&entries, KEY_PACKAGE_ROOT)?)?;
-    let bin_dir = parse_exact_leaf(KEY_BIN_DIR, required_entry(&entries, KEY_BIN_DIR)?, "bin")?;
-    let versions_dir = parse_exact_leaf(
-        KEY_VERSIONS_DIR,
-        required_entry(&entries, KEY_VERSIONS_DIR)?,
-        "versions",
-    )?;
-    let resources_dir = parse_exact_leaf(
-        KEY_RESOURCES_DIR,
-        required_entry(&entries, KEY_RESOURCES_DIR)?,
-        "resources",
-    )?;
-    let licenses_dir = parse_exact_leaf(
-        KEY_LICENSES_DIR,
-        required_entry(&entries, KEY_LICENSES_DIR)?,
-        "licenses",
-    )?;
-    let installation_file = parse_exact_leaf(
-        KEY_INSTALLATION_FILE,
-        required_entry(&entries, KEY_INSTALLATION_FILE)?,
-        "installation.json",
-    )?;
-    let payload_manifest_file = parse_exact_leaf(
-        KEY_PAYLOAD_MANIFEST_FILE,
-        required_entry(&entries, KEY_PAYLOAD_MANIFEST_FILE)?,
-        "payload-manifest.json",
-    )?;
-    let ae_executable = parse_exact_leaf(
-        KEY_AE_EXECUTABLE,
-        required_entry(&entries, KEY_AE_EXECUTABLE)?,
-        "ae",
-    )?;
-    let installer_executable = parse_exact_leaf(
-        KEY_INSTALLER_EXECUTABLE,
-        required_entry(&entries, KEY_INSTALLER_EXECUTABLE)?,
-        "installer",
-    )?;
-    let editor_executable = parse_exact_leaf(
-        KEY_EDITOR_EXECUTABLE,
-        required_entry(&entries, KEY_EDITOR_EXECUTABLE)?,
-        "editor",
-    )?;
-    let forge_executable = parse_exact_leaf(
-        KEY_FORGE_EXECUTABLE,
-        required_entry(&entries, KEY_FORGE_EXECUTABLE)?,
-        "forge",
-    )?;
-    let stable_launcher_role = parse_exact_role(
+}
+
+fn parse_paths(entries: &[FoundEntry]) -> Result<ParsedPaths, ContractError> {
+    Ok(ParsedPaths {
+        package_root: parse_exact_root(required_entry(entries, KEY_PACKAGE_ROOT)?)?,
+        bin_dir: parse_exact_leaf(KEY_BIN_DIR, required_entry(entries, KEY_BIN_DIR)?, "bin")?,
+        versions_dir: parse_exact_leaf(
+            KEY_VERSIONS_DIR,
+            required_entry(entries, KEY_VERSIONS_DIR)?,
+            "versions",
+        )?,
+        resources_dir: parse_exact_leaf(
+            KEY_RESOURCES_DIR,
+            required_entry(entries, KEY_RESOURCES_DIR)?,
+            "resources",
+        )?,
+        licenses_dir: parse_exact_leaf(
+            KEY_LICENSES_DIR,
+            required_entry(entries, KEY_LICENSES_DIR)?,
+            "licenses",
+        )?,
+        installation_file: parse_exact_leaf(
+            KEY_INSTALLATION_FILE,
+            required_entry(entries, KEY_INSTALLATION_FILE)?,
+            "installation.json",
+        )?,
+        payload_manifest_file: parse_exact_leaf(
+            KEY_PAYLOAD_MANIFEST_FILE,
+            required_entry(entries, KEY_PAYLOAD_MANIFEST_FILE)?,
+            "payload-manifest.json",
+        )?,
+        ae_executable: parse_exact_leaf(
+            KEY_AE_EXECUTABLE,
+            required_entry(entries, KEY_AE_EXECUTABLE)?,
+            "ae",
+        )?,
+        installer_executable: parse_exact_leaf(
+            KEY_INSTALLER_EXECUTABLE,
+            required_entry(entries, KEY_INSTALLER_EXECUTABLE)?,
+            "installer",
+        )?,
+        editor_executable: parse_exact_leaf(
+            KEY_EDITOR_EXECUTABLE,
+            required_entry(entries, KEY_EDITOR_EXECUTABLE)?,
+            "editor",
+        )?,
+        forge_executable: parse_exact_leaf(
+            KEY_FORGE_EXECUTABLE,
+            required_entry(entries, KEY_FORGE_EXECUTABLE)?,
+            "forge",
+        )?,
+    })
+}
+
+fn parse_roles(
+    entries: &[FoundEntry],
+) -> Result<(ExecutableRole, ExecutableRole, BrokerPolicy), ContractError> {
+    let stable_launcher = parse_exact_role(
         KEY_STABLE_LAUNCHER_ROLE,
-        required_entry(&entries, KEY_STABLE_LAUNCHER_ROLE)?,
+        required_entry(entries, KEY_STABLE_LAUNCHER_ROLE)?,
         "ae",
         ExecutableRole::Ae,
     )?;
-    let bootstrap_role = parse_exact_role(
+    let bootstrap = parse_exact_role(
         KEY_BOOTSTRAP_ROLE,
-        required_entry(&entries, KEY_BOOTSTRAP_ROLE)?,
+        required_entry(entries, KEY_BOOTSTRAP_ROLE)?,
         "installer",
         ExecutableRole::Installer,
     )?;
-    let broker_role = if required_entry(&entries, KEY_BROKER_ROLE)? == "forbidden" {
+    let broker = required_entry(entries, KEY_BROKER_ROLE)?;
+    let broker_role = if broker == "forbidden" {
         BrokerPolicy::Forbidden
     } else {
         return Err(ContractError::Value(ValueError::WrongLiteral {
             key: KEY_BROKER_ROLE,
             expected: "forbidden",
-            found: required_entry(&entries, KEY_BROKER_ROLE)?.to_owned(),
+            found: broker.to_owned(),
         }));
     };
-    let mutable_state = MutableStateLocation::parse(required_entry(&entries, KEY_MUTABLE_STATE)?)?;
-    let source_tree_fallback = ProductionFallback::parse(
-        KEY_SOURCE_TREE_FALLBACK,
-        required_entry(&entries, KEY_SOURCE_TREE_FALLBACK)?,
-    )?;
-    let runfiles_fallback = ProductionFallback::parse(
-        KEY_RUNFILES_FALLBACK,
-        required_entry(&entries, KEY_RUNFILES_FALLBACK)?,
-    )?;
+    Ok((stable_launcher, bootstrap, broker_role))
+}
 
+fn parse_policy(
+    entries: &[FoundEntry],
+) -> Result<(MutableStateLocation, ProductionFallback, ProductionFallback), ContractError> {
+    Ok((
+        MutableStateLocation::parse(required_entry(entries, KEY_MUTABLE_STATE)?)?,
+        ProductionFallback::parse(
+            KEY_SOURCE_TREE_FALLBACK,
+            required_entry(entries, KEY_SOURCE_TREE_FALLBACK)?,
+        )?,
+        ProductionFallback::parse(
+            KEY_RUNFILES_FALLBACK,
+            required_entry(entries, KEY_RUNFILES_FALLBACK)?,
+        )?,
+    ))
+}
+
+fn parse_contract(text: &str) -> Result<VersionedLayout, ContractError> {
+    let entries = scan_entries(text)?;
+    let schema_version = parse_schema_version(&entries)?;
+    let proof_scope = ProofScope::parse(required_entry(&entries, KEY_PROOF_SCOPE)?)?;
+    let paths = parse_paths(&entries)?;
+    let (stable_launcher_role, bootstrap_role, broker_role) = parse_roles(&entries)?;
+    let (mutable_state, source_tree_fallback, runfiles_fallback) = parse_policy(&entries)?;
     let layout = VersionedLayout {
-        schema_version: 2,
+        schema_version,
         proof_scope,
-        package_root,
-        bin_dir,
-        versions_dir,
-        resources_dir,
-        licenses_dir,
-        installation_file,
-        payload_manifest_file,
-        ae_executable,
-        installer_executable,
-        editor_executable,
-        forge_executable,
+        package_root: paths.package_root,
+        bin_dir: paths.bin_dir,
+        versions_dir: paths.versions_dir,
+        resources_dir: paths.resources_dir,
+        licenses_dir: paths.licenses_dir,
+        installation_file: paths.installation_file,
+        payload_manifest_file: paths.payload_manifest_file,
+        ae_executable: paths.ae_executable,
+        installer_executable: paths.installer_executable,
+        editor_executable: paths.editor_executable,
+        forge_executable: paths.forge_executable,
         stable_launcher_role,
         bootstrap_role,
         broker_role,
@@ -1081,8 +1122,7 @@ fn remove_key(template: &str, key: &str) -> String {
         .split('\n')
         .filter(|line| {
             line.split_once('=')
-                .map(|(raw_key, _)| raw_key.trim_ascii() != key)
-                .unwrap_or(true)
+                .map_or(true, |(raw_key, _)| raw_key.trim_ascii() != key)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1097,6 +1137,14 @@ fn member_specs(members: &[LayoutMember]) -> Vec<(&str, MemberKind)> {
         .iter()
         .map(|member| (member.path(), member.kind()))
         .collect()
+}
+
+fn executable_extension_matches(member: &LayoutMember, target: TargetPlatform) -> bool {
+    if member.kind() == MemberKind::Directory || !member.path().contains("/bin/") {
+        return true;
+    }
+    let has_exe_suffix = member.path().to_ascii_lowercase().ends_with(".exe");
+    has_exe_suffix == matches!(target, TargetPlatform::Windows)
 }
 
 fn expected_specs(target: TargetPlatform, version: &str) -> Vec<(String, MemberKind)> {
@@ -1205,9 +1253,7 @@ fn windows_materialization_has_exact_members_and_exe_suffix() -> Result<(), Box<
     );
     assert!(members.iter().all(|member| {
         !member.path().contains("<version>")
-            && (!member.path().contains("/bin/")
-                || member.kind() == MemberKind::Directory
-                || member.path().ends_with(".exe"))
+            && executable_extension_matches(member, TargetPlatform::Windows)
     }));
     layout.validate_members(TargetPlatform::Windows, version, &members)?;
     Ok(())
@@ -1227,7 +1273,7 @@ fn non_windows_materialization_has_exact_members_without_exe_suffix() -> Result<
     assert!(
         members
             .iter()
-            .all(|member| !member.path().ends_with(".exe"))
+            .all(|member| executable_extension_matches(member, TargetPlatform::NonWindows))
     );
     assert!(
         members
