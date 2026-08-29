@@ -3023,10 +3023,12 @@ async fn handler_unsubscribe_and_replacement_stale_retained_publication_leases()
     .await;
     stop_wire.expect("unsubscribe should answer");
     assert!(stop_receipt.is_no_work());
-    assert!(retained_registrar
-        .subscription_view(&thread_id)
-        .await
-        .is_none());
+    assert!(
+        retained_registrar
+            .subscription_view(&thread_id)
+            .await
+            .is_none()
+    );
     assert_eq!(
         retained_registrar
             .record_published_batch(&initial_lease, &initial_batch)
