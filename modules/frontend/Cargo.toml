@@ -385,6 +385,10 @@ name = "thread_panel_policy"
 path = "../../tests/frontend/thread_panel_policy.rs"
 
 [[test]]
+name = "thread_read_tracker"
+path = "../../tests/frontend/thread_read_tracker.rs"
+
+[[test]]
 name = "thread_retention_settings_policy"
 path = "../../tests/frontend/thread_retention_settings_policy.rs"
 
