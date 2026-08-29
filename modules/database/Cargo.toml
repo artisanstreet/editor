@@ -93,5 +93,9 @@ path = "../../tests/database/startup_reconciliation.rs"
 name = "startup_reconciliation_disposition"
 path = "../../tests/database/startup_reconciliation_disposition.rs"
 
+[[test]]
+name = "conversation_patch_replay"
+path = "../../tests/database/conversation_patch_replay.rs"
+
 [lints]
 workspace = true
