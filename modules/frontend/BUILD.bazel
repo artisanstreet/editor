@@ -113,6 +113,7 @@ rust_library(
         "src/thread_title_policy.rs",
         "src/thread_title_settings_policy.rs",
         "src/transcript.rs",
+        "src/usage_meter.rs",
         "src/usage_recovery_settings_policy.rs",
         "src/usage_reset_duration.rs",
         "src/vcs_diff_presentation.rs",
