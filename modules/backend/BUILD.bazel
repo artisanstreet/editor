@@ -90,7 +90,10 @@ rust_library(
         "@crates//:tokio",
         "@crates//:zeroize",
     ] + select({
-        "@platforms//os:windows": ["@crates//:native-dialog"],
+        "@platforms//os:windows": [
+            "@crates//:native-dialog",
+            "@crates//:winapi-util",
+        ],
         "//conditions:default": [],
     }),
     edition = "2024",
