@@ -2,7 +2,7 @@
 //!
 //! This is the dependency-free Rust counterpart of
 //! `modules/frontend/src/lib/editor/language.ts`'s identification policy. It
-//! deliberately stops before CodeMirror grammar loading: callers receive a
+//! deliberately stops before `CodeMirror` grammar loading: callers receive a
 //! closed language identifier and can decide how to render or highlight it.
 
 #![allow(clippy::module_name_repetitions)]
