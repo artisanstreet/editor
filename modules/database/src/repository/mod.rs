@@ -1,5 +1,6 @@
 //! Domain-typed repositories for the native schema.
 
+mod conversation_patch_replay;
 mod conversation_projection;
 mod dispatch_payload;
 mod first_message;
@@ -20,6 +21,7 @@ use artisan_domain::{
     UnixMillis,
 };
 
+pub use conversation_patch_replay::ConversationPatchReplay;
 pub use dispatch_payload::MessageDispatchPayload;
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
 pub use message_dispatch::{
