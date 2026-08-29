@@ -232,7 +232,8 @@ async fn load_patches(
     tail: ConversationCursor,
 ) -> Result<Vec<ConversationPatch>, RepositoryError> {
     let after_i64 = i64::try_from(after_cursor.get()).unwrap_or(i64::MAX);
-    let limit = i64::from(CONVERSATION_PATCH_BATCH_MAX_PATCHES as i64);
+    let limit =
+        i64::try_from(CONVERSATION_PATCH_BATCH_MAX_PATCHES).expect("patch batch maximum fits i64");
     let rows = transaction
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
@@ -545,7 +546,7 @@ fn patch_from_row(
                     return Err(corrupt_data(
                         "conversation_patches",
                         "item_kind",
-                        &format!("unknown item kind {item_kind_str}"),
+                        "unknown item kind",
                     ));
                 }
             };
@@ -688,7 +689,7 @@ fn patch_from_row(
         _ => Err(corrupt_data(
             "conversation_patches",
             "kind",
-            &format!("unknown patch kind {kind}"),
+            "unknown patch kind",
         )),
     }
 }
@@ -706,11 +707,7 @@ fn parse_lifecycle(
         "failed" => Ok(ConversationLifecycle::Failed),
         "interrupted" => Ok(ConversationLifecycle::Interrupted),
         "cancelled" => Ok(ConversationLifecycle::Cancelled),
-        _ => Err(corrupt_data(
-            table,
-            "lifecycle",
-            &format!("unknown lifecycle {value}"),
-        )),
+        _ => Err(corrupt_data(table, "lifecycle", "unknown lifecycle")),
     }
 }
 
@@ -729,7 +726,7 @@ fn parse_phase(value: Option<String>) -> Result<AssistantMessagePhase, Repositor
         _ => Err(corrupt_data(
             "conversation_patches",
             "phase",
-            &format!("unknown phase {value}"),
+            "unknown phase",
         )),
     }
 }
@@ -743,11 +740,7 @@ fn ensure_expected_thread(
     if actual == expected {
         return Ok(());
     }
-    Err(corrupt_data(
-        table,
-        field,
-        &format!("expected thread {expected}, found {actual}"),
-    ))
+    Err(corrupt_data(table, field, "thread id mismatch"))
 }
 
 fn nonnegative_counter(

@@ -1,10 +1,10 @@
-use artisan_database::entities::{
-    self, ConversationItemKind, ConversationPatchKind, EntityLifecycle, OrdinalKind, RenderPhase,
-};
+#![allow(clippy::pedantic)]
+use artisan_database::entities::{self};
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch, CommitRunBatch,
-    CreateThreadInput, ProviderBindingBytes, QueueFirstMessageInput, Repository, RepositoryError,
-    RunBatchScope, RunLaunchCredentials, RunStartKey, SqliteConfig, connect,
+    ConversationPatchReplay, CreateThreadInput, ProviderBindingBytes, QueueFirstMessageInput,
+    Repository, RepositoryError, RunBatchScope, RunLaunchCredentials, RunStartKey, SqliteConfig,
+    connect,
 };
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, ConversationCursor, ConversationItem,
@@ -19,6 +19,7 @@ use sea_orm::{
 const OWNER_BYTES: [u8; 32] = [0xa1; 32];
 const LEASE_BYTES: [u8; 32] = [0xb2; 32];
 const CLAIM_TOKEN_BYTES: [u8; 32] = [0xc3; 32];
+#[allow(dead_code)]
 const START_KEY_BYTES: [u8; 32] = [0xd4; 32];
 const DISPATCH_OWNER_BYTE: u8 = 0x11;
 
@@ -90,19 +91,27 @@ struct LaunchFixture {
 }
 
 fn launch_fixture(run: &str, turn: &str, item: &str, p1: &str, p2: &str) -> LaunchFixture {
+    let mut key_bytes = [0u8; 32];
+    let run_bytes = run.as_bytes();
+    for (idx, byte) in key_bytes.iter_mut().enumerate() {
+        *byte = run_bytes[idx % run_bytes.len()].wrapping_add(idx as u8);
+    }
+    if key_bytes == [0u8; 32] {
+        key_bytes[0] = 0x01;
+    }
     LaunchFixture {
         run_id: RunId::parse(run).expect("run"),
         turn_id: TurnId::parse(turn).expect("turn"),
         item_id: ItemId::parse(item).expect("item"),
         first_patch: PatchId::parse(p1).expect("p1"),
         second_patch: PatchId::parse(p2).expect("p2"),
-        start_key: RunStartKey::new(START_KEY_BYTES),
+        start_key: RunStartKey::new(key_bytes),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
     }
 }
 
 async fn queue_claim_launch_bind(
-    database: &DatabaseConnection,
+    _database: &DatabaseConnection,
     repository: &Repository,
     thread_id: &ThreadId,
     message_id: &str,
@@ -191,25 +200,11 @@ fn batch_scope<'a>(
     }
 }
 
-// The following imports are conditional on the new replay module being
-// registered. Until VP adds `mod conversation_patch_replay` and its
-// public re-export, this test file intentionally does not compile via
-// `cargo test` (see task receipt). The logic below is correct and will
-// compile once the two owned files are wired.
-#[allow(unused_imports)]
-use artisan_database::Repository as _CheckRepo;
-
-// Helper to call replay once the symbol is available. We use a
-// fully-qualified lookup that will resolve after registration.
 async fn read_replay(
     repository: &Repository,
     thread_id: &ThreadId,
     cursor: ConversationCursor,
-) -> Result<artisan_database::ConversationPatchReplay, RepositoryError> {
-    // This indirection keeps the file syntactically valid before the
-    // re-export exists: we rely on the method being present on Repository.
-    // If the crate has not yet registered the module, this will fail to
-    // compile, which is the expected honest signal.
+) -> Result<ConversationPatchReplay, RepositoryError> {
     repository
         .read_conversation_patch_replay(thread_id, cursor)
         .await
@@ -233,7 +228,7 @@ async fn known_empty_thread_is_current_zero() {
         .await
         .expect("empty should be current");
     match result {
-        artisan_database::ConversationPatchReplay::Current { cursor } => {
+        ConversationPatchReplay::Current { cursor } => {
             assert_eq!(cursor.get(), 0);
         }
         other => panic!("expected Current, got {other:?}"),
@@ -272,7 +267,7 @@ async fn cursor_beyond_tail_is_resnapshot_required_and_no_mutation() {
     let beyond = ConversationCursor::new(999);
     let result = read_replay(&repo, &tid, beyond).await.expect("resnapshot");
     match result {
-        artisan_database::ConversationPatchReplay::ResnapshotRequired {
+        ConversationPatchReplay::ResnapshotRequired {
             requested_cursor,
             current_cursor,
         } => {
@@ -298,7 +293,7 @@ async fn cursor_beyond_tail_is_resnapshot_required_and_no_mutation() {
         .await
         .expect("empty beyond");
     match res2 {
-        artisan_database::ConversationPatchReplay::ResnapshotRequired {
+        ConversationPatchReplay::ResnapshotRequired {
             requested_cursor,
             current_cursor,
         } => {
@@ -323,7 +318,7 @@ async fn cursor_equal_tail_is_current_never_empty_batch() {
     let result = read_replay(&repo, &tid, tail).await.expect("current");
     assert!(matches!(
         result,
-        artisan_database::ConversationPatchReplay::Current { cursor } if cursor.get()==2
+        ConversationPatchReplay::Current { cursor } if cursor.get()==2
     ));
     // Empty thread at zero is also Current, not empty batch.
     let tid2 = seed_thread(&db, &repo, "thread-current-empty").await;
@@ -332,7 +327,7 @@ async fn cursor_equal_tail_is_current_never_empty_batch() {
         .expect("empty current");
     assert!(matches!(
         r2,
-        artisan_database::ConversationPatchReplay::Current { cursor } if cursor.get()==0
+        ConversationPatchReplay::Current { cursor } if cursor.get()==0
     ));
 }
 
@@ -386,7 +381,7 @@ async fn more_than_64_patches_return_first_64_and_next_contiguous() {
         .await
         .expect("first batch read");
     let batch1 = match first {
-        artisan_database::ConversationPatchReplay::Batch(b) => b,
+        ConversationPatchReplay::Batch(b) => b,
         other => panic!("expected Batch, got {other:?}"),
     };
     assert_eq!(batch1.patches().len(), 64);
@@ -399,7 +394,7 @@ async fn more_than_64_patches_return_first_64_and_next_contiguous() {
         .await
         .expect("second batch");
     let batch2 = match second {
-        artisan_database::ConversationPatchReplay::Batch(b) => b,
+        ConversationPatchReplay::Batch(b) => b,
         other => panic!("expected second Batch, got {other:?}"),
     };
     assert_eq!(batch2.patches().len(), 2);
@@ -413,14 +408,14 @@ async fn more_than_64_patches_return_first_64_and_next_contiguous() {
         .expect("current after");
     assert!(matches!(
         current,
-        artisan_database::ConversationPatchReplay::Current { cursor } if cursor.get()==66
+        ConversationPatchReplay::Current { cursor } if cursor.get()==66
     ));
     // Contiguity: first patch after cursor 10 is 11, etc.
     let mid = read_replay(&repo, &tid, ConversationCursor::new(10))
         .await
         .expect("mid");
     match mid {
-        artisan_database::ConversationPatchReplay::Batch(b) => {
+        ConversationPatchReplay::Batch(b) => {
             assert_eq!(b.from_cursor().get(), 10);
             assert_eq!(b.patches().first().unwrap().sequence().get(), 11);
         }
@@ -470,14 +465,6 @@ async fn all_five_variants_round_trip() {
     // Append
     let frag = IncrementalText::parse(" fragment").expect("frag");
     let patch_append = PatchId::parse("patch-append-5").expect("p");
-    let scope2 = batch_scope(
-        &claimed,
-        &launched,
-        &bound,
-        &launch.start_key,
-        &launch.credentials,
-        UnixMillis::from_millis(BATCH_AT_MS),
-    );
     repo.commit_run_batch(CommitRunBatch {
         scope: RunBatchScope {
             claimed: &claimed,
@@ -533,7 +520,7 @@ async fn all_five_variants_round_trip() {
     let mut cursor = ConversationCursor::default();
     loop {
         match read_replay(&repo, &tid, cursor).await.expect("replay") {
-            artisan_database::ConversationPatchReplay::Batch(batch) => {
+            ConversationPatchReplay::Batch(batch) => {
                 all_patches.extend(batch.patches().to_vec());
                 cursor = batch.to_cursor();
                 if cursor.get() == 7 {
@@ -736,7 +723,7 @@ async fn replay_after_mid_cursor_and_thread_isolation() {
         .await
         .expect("mid");
     match mid {
-        artisan_database::ConversationPatchReplay::Batch(b) => {
+        ConversationPatchReplay::Batch(b) => {
             assert_eq!(b.from_cursor().get(), 1);
             assert_eq!(b.patches().first().unwrap().sequence().get(), 2);
             // Must contain exactly contiguous tail portion but capped.
@@ -751,7 +738,7 @@ async fn replay_after_mid_cursor_and_thread_isolation() {
         .await
         .expect("b patches");
     match batch_b {
-        artisan_database::ConversationPatchReplay::Batch(b) => {
+        ConversationPatchReplay::Batch(b) => {
             assert_eq!(b.patches().len(), 2);
             for p in b.patches() {
                 let tid = match p {
@@ -867,23 +854,19 @@ async fn malformed_payload_is_bounded_corruption() {
     );
     let (_c, _l, _b) =
         queue_claim_launch_bind(&db, &repo, &tid, "msg-mal", "req-mal", &launch).await;
-    // Corrupt a body to exceed limit (65537 bytes) via direct SQL.
-    // SQLite CHECK normally prevents it, but we bypass via foreign_keys off and direct update.
-    db.execute_unprepared("PRAGMA foreign_keys = OFF")
+    db.execute_unprepared("PRAGMA ignore_check_constraints = ON")
         .await
         .expect("pragma");
     let long_body = "a".repeat(65537);
-    // Use parameterized statement via sea_orm raw? Use execute_unprepared with string interpolation
-    // We need to escape: long_body is all 'a', safe.
     let sql = format!(
         "UPDATE conversation_patches SET body = '{}' WHERE patch_id = 'p-mal-b'",
         long_body
     );
     let res = db.execute_unprepared(&sql).await;
-    // If CHECK prevented, res will be error; then we test a different malformation: invalid identifier.
+    db.execute_unprepared("PRAGMA ignore_check_constraints = OFF")
+        .await
+        .expect("pragma off");
     if res.is_err() {
-        // Fallback malformation: invalid patch id with whitespace (violates identifier rule, but
-        // CHECK does not forbid whitespace in patch_id column; the reader must detect).
         db.execute_unprepared(
             "UPDATE conversation_patches SET patch_id = 'bad id' WHERE patch_id = 'p-mal-b'",
         )
@@ -893,9 +876,12 @@ async fn malformed_payload_is_bounded_corruption() {
             .await
             .expect_err("bad identifier should be corrupt");
         assert!(matches!(err, RepositoryError::CorruptData { .. }));
-        // Ensure error is bounded: debug does not contain long_body or fragment.
         let debug = format!("{err:?}");
+        let display = format!("{err}");
         assert!(!debug.contains(&long_body));
+        assert!(!display.contains(&long_body));
+        assert!(!debug.contains("bad id"));
+        assert!(!display.contains("bad id"));
         return;
     }
     let err = read_replay(&repo, &tid, ConversationCursor::default())
@@ -903,11 +889,10 @@ async fn malformed_payload_is_bounded_corruption() {
         .expect_err("long body corrupt");
     assert!(matches!(err, RepositoryError::CorruptData { .. }));
     let debug = format!("{err:?}");
+    let display = format!("{err}");
     assert!(!debug.contains(&long_body));
-    // Additional malformed phase
-    db.execute_unprepared("PRAGMA foreign_keys = ON")
-        .await
-        .expect("pragma on");
+    assert!(!display.contains(&long_body));
+    assert!(!debug.contains("a".repeat(10).as_str()) || debug.len() < 500);
 }
 
 #[tokio::test]
@@ -950,10 +935,9 @@ async fn malformed_counter_and_timestamp_is_corruption() {
     );
     let (_c, _l, _b) =
         queue_claim_launch_bind(&db, &repo, &tid, "msg-counter", "req-counter", &launch).await;
-    db.execute_unprepared("PRAGMA foreign_keys = OFF")
+    db.execute_unprepared("PRAGMA ignore_check_constraints = ON")
         .await
         .expect("pragma");
-    // Negative revision
     db.execute_unprepared(
         "UPDATE conversation_patches SET revision = -1 WHERE patch_id = 'p-counter-a'",
     )
@@ -963,7 +947,6 @@ async fn malformed_counter_and_timestamp_is_corruption() {
         .await
         .expect_err("negative revision corrupt");
     assert!(matches!(err, RepositoryError::CorruptData { .. }));
-    // Restore revision and corrupt sequence to zero
     db.execute_unprepared(
         "UPDATE conversation_patches SET revision = 0 WHERE patch_id = 'p-counter-a'",
     )
@@ -978,14 +961,200 @@ async fn malformed_counter_and_timestamp_is_corruption() {
         .await
         .expect_err("zero seq corrupt");
     assert!(matches!(err2, RepositoryError::CorruptData { .. }));
-    // Corrupt state last_patch_sequence to negative
     db.execute_unprepared(
         "UPDATE conversation_state SET last_patch_sequence = -5 WHERE thread_id = 'thread-counter'",
     )
     .await
     .expect("neg tail");
+    db.execute_unprepared("PRAGMA ignore_check_constraints = OFF")
+        .await
+        .expect("pragma off");
     let err3 = read_replay(&repo, &tid, ConversationCursor::new(0))
         .await
         .expect_err("neg tail corrupt");
     assert!(matches!(err3, RepositoryError::CorruptData { .. }));
+    // Ensure fixed table/field names remain but no raw string leakage is required for counters;
+    // counter values may appear but bodies must not.
+    let debug = format!("{err:?} {err2:?} {err3:?}");
+    assert!(!debug.contains("first body"));
+}
+
+#[tokio::test]
+async fn sentinel_enum_and_thread_mismatch_are_content_free() {
+    let (db, repo) = memory_database().await;
+    let tid = seed_thread(&db, &repo, "thread-sentinel").await;
+    let launch = launch_fixture(
+        "run-sentinel",
+        "turn-sentinel",
+        "item-sentinel",
+        "p-sentinel-a",
+        "p-sentinel-b",
+    );
+    let (_c, _l, _b) =
+        queue_claim_launch_bind(&db, &repo, &tid, "msg-sentinel", "req-sentinel", &launch).await;
+
+    const SENTINEL_KIND: &str = "SENTINEL_KIND_XYZ";
+    const SENTINEL_ITEM_KIND: &str = "SENTINEL_ITEM_KIND_XYZ";
+    const SENTINEL_LIFECYCLE: &str = "SENTINEL_LIFECYCLE_XYZ";
+    const SENTINEL_PHASE: &str = "SENTINEL_PHASE_XYZ";
+    const SENTINEL_THREAD: &str = "thread-sentinel-other";
+
+    // Create other thread for mismatch test.
+    let other_tid = seed_thread(&db, &repo, SENTINEL_THREAD).await;
+
+    // Helper to assert content-free.
+    async fn assert_sentinel_not_leaked(repo: &Repository, tid: &ThreadId, sentinel: &str) {
+        let err = read_replay(repo, tid, ConversationCursor::default())
+            .await
+            .expect_err("sentinel should be corrupt");
+        assert!(matches!(err, RepositoryError::CorruptData { .. }));
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        assert!(
+            !display.contains(sentinel),
+            "Display leaked sentinel {sentinel}: {display}"
+        );
+        assert!(
+            !debug.contains(sentinel),
+            "Debug leaked sentinel {sentinel}: {debug}"
+        );
+    }
+
+    // Unknown patch kind
+    db.execute_unprepared("PRAGMA ignore_check_constraints = ON")
+        .await
+        .expect("pragma");
+    db.execute_unprepared(&format!(
+        "UPDATE conversation_patches SET kind = '{SENTINEL_KIND}' WHERE patch_id = 'p-sentinel-a'"
+    ))
+    .await
+    .expect("update kind");
+    assert_sentinel_not_leaked(&repo, &tid, SENTINEL_KIND).await;
+    db.execute_unprepared(
+        "UPDATE conversation_patches SET kind = 'turn_upsert' WHERE patch_id = 'p-sentinel-a'",
+    )
+    .await
+    .expect("restore kind");
+
+    // Unknown item kind (need item_upsert patch)
+    db.execute_unprepared(&format!(
+        "UPDATE conversation_patches SET item_kind = '{SENTINEL_ITEM_KIND}' WHERE patch_id = 'p-sentinel-b'"
+    ))
+    .await
+    .expect("update item kind");
+    assert_sentinel_not_leaked(&repo, &tid, SENTINEL_ITEM_KIND).await;
+    db.execute_unprepared(
+        "UPDATE conversation_patches SET item_kind = 'user_message' WHERE patch_id = 'p-sentinel-b'",
+    )
+    .await
+    .expect("restore item kind");
+
+    // Unknown lifecycle (turn_upsert lifecycle)
+    db.execute_unprepared(&format!(
+        "UPDATE conversation_patches SET lifecycle = '{SENTINEL_LIFECYCLE}' WHERE patch_id = 'p-sentinel-a'"
+    ))
+    .await
+    .expect("update lifecycle");
+    assert_sentinel_not_leaked(&repo, &tid, SENTINEL_LIFECYCLE).await;
+    db.execute_unprepared(
+        "UPDATE conversation_patches SET lifecycle = 'pending' WHERE patch_id = 'p-sentinel-a'",
+    )
+    .await
+    .expect("restore lifecycle");
+
+    // Unknown phase (assistant item path: create assistant item first, then corrupt)
+    let assistant_id = ItemId::parse("assistant-sentinel").expect("id");
+    let body = AssistantBody::parse("body").expect("body");
+    let p_act = PatchId::parse("p-sentinel-act").expect("p");
+    let p_start = PatchId::parse("p-sentinel-start").expect("p");
+    // Need to fetch claimed/launched/bound for this thread again; easiest is to queue a new run on same thread?
+    // Instead we test phase corruption via direct update on the assistant upsert we will create now using a second launch?
+    // For simplicity, test phase corruption on a freshly inserted assistant patch via direct SQL update after creating it through the normal path.
+    // Create assistant patch via a batch on this thread.
+    // Retrieve the bound run for this thread (reuse previous launch but need correct scope)
+    // To avoid complexity, we directly test phase corruption by updating the existing p-sentinel-b which is user_message (no phase);
+    // instead create a separate thread with assistant item.
+    let tid_phase = seed_thread(&db, &repo, "thread-sentinel-phase").await;
+    let launch_phase = launch_fixture(
+        "run-sentinel-phase",
+        "turn-sentinel-phase",
+        "item-sentinel-phase",
+        "p-sentinel-phase-a",
+        "p-sentinel-phase-b",
+    );
+    let (claimed_p, launched_p, bound_p) = queue_claim_launch_bind(
+        &db,
+        &repo,
+        &tid_phase,
+        "msg-sentinel-phase",
+        "req-sentinel-phase",
+        &launch_phase,
+    )
+    .await;
+    let scope_p = batch_scope(
+        &claimed_p,
+        &launched_p,
+        &bound_p,
+        &launch_phase.start_key,
+        &launch_phase.credentials,
+        UnixMillis::from_millis(BOUND_AT_MS),
+    );
+    repo.commit_run_batch(CommitRunBatch {
+        scope: scope_p,
+        batch_sequence: 1,
+        operated_at: UnixMillis::from_millis(BATCH_AT_MS),
+        activate_turn_patch_id: Some(&p_act),
+        changes: &[AssistantChange::Start {
+            item_id: &assistant_id,
+            phase: AssistantMessagePhase::Final,
+            body: &body,
+            patch_id: &p_start,
+        }],
+        checkpoint: CheckpointUpdate::Keep,
+    })
+    .await
+    .expect("assistant batch");
+    db.execute_unprepared(&format!(
+        "UPDATE conversation_patches SET phase = '{SENTINEL_PHASE}' WHERE patch_id = 'p-sentinel-start'"
+    ))
+    .await
+    .expect("update phase");
+    assert_sentinel_not_leaked(&repo, &tid_phase, SENTINEL_PHASE).await;
+    db.execute_unprepared(
+        "UPDATE conversation_patches SET phase = 'final' WHERE patch_id = 'p-sentinel-start'",
+    )
+    .await
+    .expect("restore phase");
+
+    // Thread mismatch: corrupt thread_id to other thread's id (FK violation)
+    db.execute_unprepared("PRAGMA foreign_keys = OFF")
+        .await
+        .expect("pragma fk off");
+    db.execute_unprepared(&format!(
+        "UPDATE conversation_patches SET thread_id = '{SENTINEL_THREAD}' WHERE patch_id = 'p-sentinel-a'"
+    ))
+    .await
+    .expect("update thread");
+    let err = read_replay(&repo, &tid, ConversationCursor::default())
+        .await
+        .expect_err("thread mismatch corrupt");
+    assert!(matches!(err, RepositoryError::CorruptData { .. }));
+    let display = format!("{err}");
+    let debug = format!("{err:?}");
+    assert!(!display.contains(SENTINEL_THREAD));
+    assert!(!debug.contains(SENTINEL_THREAD));
+    assert!(!display.contains("thread-sentinel"));
+    // Restore thread and pragma
+    db.execute_unprepared(
+        "UPDATE conversation_patches SET thread_id = 'thread-sentinel' WHERE patch_id = 'p-sentinel-a'",
+    )
+    .await
+    .expect("restore thread");
+    db.execute_unprepared("PRAGMA foreign_keys = ON")
+        .await
+        .expect("pragma fk on");
+    db.execute_unprepared("PRAGMA ignore_check_constraints = OFF")
+        .await
+        .expect("pragma off");
+    let _ = other_tid;
 }
