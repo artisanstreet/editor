@@ -93,14 +93,14 @@ fn take_argument(input: &str) -> Argument<'_> {
         _ => None,
     };
 
-    if let Some(quote) = quote {
-        if let Some(offset) = text[1..].find(quote) {
-            let close = offset + 1;
-            return Argument {
-                rest: &text[close + 1..],
-                value: &text[1..close],
-            };
-        }
+    if let Some(quote) = quote
+        && let Some(offset) = text[1..].find(quote)
+    {
+        let close = offset + 1;
+        return Argument {
+            rest: &text[close + 1..],
+            value: &text[1..close],
+        };
     }
 
     let Some((break_at, _)) = text
@@ -120,7 +120,7 @@ fn take_argument(input: &str) -> Argument<'_> {
 }
 
 fn executable_name(path: &str) -> String {
-    let file = path.rfind(|character| matches!(character, '/' | '\\'));
+    let file = path.rfind(['/', '\\']);
     let file = file.map_or(path, |separator| &path[separator + 1..]);
     let lowered = file.to_lowercase();
     lowered.strip_suffix(".exe").unwrap_or(&lowered).to_owned()
@@ -143,7 +143,7 @@ fn unquote(text: &str) -> &str {
         return text;
     }
 
-    let quote = first as char;
+    let quote = char::from(first);
     if text.ends_with(quote) {
         &text[1..text.len() - 1]
     } else {

@@ -54,10 +54,10 @@ fn powershell_wrappers_accept_quoted_windows_and_unix_paths() {
             "Write-Output hello",
         ),
         (
-            r#"'C:\Program Files\PowerShell\7\PoWeRsHeLl.ExE' -C 'Get-Process'"#,
+            r"'C:\Program Files\PowerShell\7\PoWeRsHeLl.ExE' -C 'Get-Process'",
             "Get-Process",
         ),
-        (r#"/opt/bin/POWERSHELL.EXE -c echo ready"#, "echo ready"),
+        (r"/opt/bin/POWERSHELL.EXE -c echo ready", "echo ready"),
         ("pwsh -command Write-Output\tready", "Write-Output ready"),
     ]);
 }
@@ -71,7 +71,7 @@ fn posix_wrappers_cover_each_exact_flag_and_path_separator() {
             "printf 'hello world'",
         ),
         (r#"C:\Tools\SH.ExE -ic 'printf "sh"'"#, "printf \"sh\""),
-        (r#"/bin/ZsH.EXE -lic 'echo zsh'"#, "echo zsh"),
+        (r"/bin/ZsH.EXE -lic 'echo zsh'", "echo zsh"),
         (r#"C:/Tools/dAsH -LIC 'printf "dash"'"#, "printf \"dash\""),
     ]);
 }
@@ -83,10 +83,7 @@ fn cmd_wrapper_accepts_c_and_k_with_case_insensitive_exe_suffix() {
             r#""C:\Windows\System32\CMD.EXE" /c "dir C:\Temp""#,
             "dir C:\\Temp",
         ),
-        (
-            r#"C:/Windows/System32/cMd.eXe /K 'echo ready'"#,
-            "echo ready",
-        ),
+        (r"C:/Windows/System32/cMd.eXe /K 'echo ready'", "echo ready"),
     ]);
 }
 
@@ -113,13 +110,10 @@ fn wrapper_flag_sets_are_exact_and_case_insensitive() {
 fn leading_argument_quotes_are_required_for_paths_with_spaces() {
     assert_cases(&[
         (r#""C:\Program Files\PowerShell\pwsh.exe" -c echo"#, "echo"),
+        (r"'C:\Program Files\PowerShell\pwsh.exe' -c 'echo'", "echo"),
         (
-            r#"'C:\Program Files\PowerShell\pwsh.exe' -c 'echo'"#,
-            "echo",
-        ),
-        (
-            r#"C:\Program Files\PowerShell\pwsh.exe -c echo"#,
-            r#"C:\Program Files\PowerShell\pwsh.exe -c echo"#,
+            r"C:\Program Files\PowerShell\pwsh.exe -c echo",
+            r"C:\Program Files\PowerShell\pwsh.exe -c echo",
         ),
         (
             r#""C:\Program Files\PowerShell\pwsh.exe -c echo"#,
@@ -131,13 +125,13 @@ fn leading_argument_quotes_are_required_for_paths_with_spaces() {
 #[test]
 fn basename_matching_uses_both_separators_and_only_a_final_exe_suffix() {
     assert_cases(&[
-        (r#"C:/one\two/PoWeRsHeLl.ExE -c echo"#, "echo"),
-        (r#"C:\one/two\BASH.eXe -lc echo"#, "echo"),
+        (r"C:/one\two/PoWeRsHeLl.ExE -c echo", "echo"),
+        (r"C:\one/two\BASH.eXe -lc echo", "echo"),
         (
-            r#"/usr/bin/pwsh.exe.bak -c echo"#,
-            r#"/usr/bin/pwsh.exe.bak -c echo"#,
+            r"/usr/bin/pwsh.exe.bak -c echo",
+            r"/usr/bin/pwsh.exe.bak -c echo",
         ),
-        (r#"/usr/bin/pwsh.ex -c echo"#, r#"/usr/bin/pwsh.ex -c echo"#),
+        (r"/usr/bin/pwsh.ex -c echo", r"/usr/bin/pwsh.ex -c echo"),
     ]);
 }
 
@@ -151,7 +145,7 @@ fn one_matching_body_quote_pair_is_removed_without_shell_parsing() {
             r#"bash -c "printf \"hello world\"""#,
             r#"printf \"hello world\""#,
         ),
-        (r#"bash -c 'echo one; echo two'"#, "echo one; echo two"),
+        (r"bash -c 'echo one; echo two'", "echo one; echo two"),
     ]);
 }
 
@@ -159,8 +153,8 @@ fn one_matching_body_quote_pair_is_removed_without_shell_parsing() {
 fn malformed_body_quotes_are_preserved_after_a_recognized_prefix() {
     assert_cases(&[
         (r#"bash -c "echo"#, "\"echo"),
-        (r#"bash -c 'echo"#, "'echo"),
-        (r#"bash -c 'echo' trailing"#, "'echo' trailing"),
+        (r"bash -c 'echo", "'echo"),
+        (r"bash -c 'echo' trailing", "'echo' trailing"),
     ]);
 }
 
