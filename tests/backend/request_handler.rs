@@ -11,21 +11,25 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use artisan_backend::conversation_subscription_registry::{ActivateError, SubscriptionState};
 use artisan_backend::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeStorage, RequestHandler,
 };
 use artisan_database::{
-    AttachProjectInput, CreateThreadInput, MessageDispatchPayload, QueueFirstMessageInput,
-    Repository, SqliteConfig,
+    AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
+    CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
+    MessageDispatchPayload, ProviderBindingBytes, QueueFirstMessageInput, Repository,
+    RunLaunchCredentials, RunStartKey, SqliteConfig,
 };
 use artisan_domain::{
-    Command, ConversationQuery, ConversationQueryBounds, ConversationRequest,
+    Command, ConversationCursor, ConversationQuery, ConversationQueryBounds, ConversationRequest,
     ConversationSubscribe, ConversationUnsubscribe, DirectoryId, DisplayName, ListAttachedProjects,
     ListDirectories, ListProjectThreads, MessageBody, MessageId, ProjectId, Query, QueryTurnCount,
     ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_protocol::{
-    ClientRequest, ErrorCode, FirstMessageReceipt, ProtocolFailure, ResponsePayload, ServerResponse,
+    ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt,
+    ProtocolFailure, ResponsePayload, ServerResponse,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -293,6 +297,96 @@ async fn read_dispatch(
         .read_message_dispatch_payload(&MessageId::parse(message_id).expect("valid message id"))
         .await
         .expect("dispatch readback should work")
+}
+
+/// Seeds one conversation with two durable patch sequences through the public
+/// repository workflow used by the real dispatch path.
+async fn seed_conversation(repository: &Repository, thread_id: &str, label: &str) {
+    let project_id = format!("project-{label}");
+    repository
+        .attach_project(attach_input(
+            &format!("request-project-{label}"),
+            &format!("directory-project-{label}"),
+            &project_id,
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input(
+            &format!("request-thread-{label}"),
+            &project_id,
+            thread_id,
+        ))
+        .await
+        .expect("seed thread should persist");
+    repository
+        .queue_first_message(message_input(
+            &format!("request-message-{label}"),
+            thread_id,
+            &format!("message-{label}"),
+            "durable conversation seed",
+        ))
+        .await
+        .expect("seed message should persist");
+
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: DispatchLeaseOwner::new([0x11; 32]),
+            claimed_at: UnixMillis::from_millis(400),
+            lease_expires_at: UnixMillis::from_millis(900),
+        })
+        .await
+        .expect("seed dispatch claim should persist")
+        .expect("seed dispatch should be claimable");
+    let run_id = artisan_domain::RunId::parse(format!("run-{label}")).expect("valid run id");
+    let turn_id = artisan_domain::TurnId::parse(format!("turn-{label}")).expect("valid turn id");
+    let item_id = artisan_domain::ItemId::parse(format!("item-{label}")).expect("valid item id");
+    let first_patch_id =
+        artisan_domain::PatchId::parse(format!("patch-{label}-first")).expect("valid patch id");
+    let second_patch_id =
+        artisan_domain::PatchId::parse(format!("patch-{label}-second")).expect("valid patch id");
+    let mut run_start_key_bytes = [0x44; 32];
+    for (index, byte) in label.as_bytes().iter().take(32).enumerate() {
+        run_start_key_bytes[index] = *byte;
+    }
+    let run_start_key = RunStartKey::new(run_start_key_bytes);
+    let credentials = RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]);
+    let launched = repository
+        .launch_claimed_run(LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &run_id,
+            turn_id: &turn_id,
+            item_id: &item_id,
+            first_patch_id: &first_patch_id,
+            second_patch_id: &second_patch_id,
+            operated_at: UnixMillis::from_millis(500),
+            run_start_key: &run_start_key,
+            credentials: &credentials,
+        })
+        .await
+        .expect("seed run launch should persist");
+    let launched = match launched {
+        LaunchClaimedRunOutcome::Started(receipt)
+        | LaunchClaimedRunOutcome::AlreadyStarted(receipt) => receipt,
+    };
+    let binding = ProviderBindingBytes::new(vec![0xab; 16]).expect("valid provider binding");
+    let bound = repository
+        .bind_run_provider(BindRunProvider {
+            claimed: &claimed,
+            receipt: &launched,
+            run_start_key: &run_start_key,
+            credentials: &credentials,
+            expected_launch_at: UnixMillis::from_millis(500),
+            bound_at: UnixMillis::from_millis(600),
+            binding_version: 1,
+            binding_bytes: &binding,
+        })
+        .await
+        .expect("seed provider binding should persist");
+    assert!(matches!(
+        bound,
+        BindRunProviderOutcome::Bound(_) | BindRunProviderOutcome::AlreadyBound(_)
+    ));
 }
 
 #[tokio::test]
@@ -1880,4 +1974,432 @@ async fn concurrent_same_request_queue_converges_on_one_durable_identity() {
 
     let payload = payload.expect("the winning acceptance should keep its durable dispatch");
     assert_eq!(payload.correlation_id.as_str(), "queue-request");
+}
+
+#[tokio::test]
+async fn receipt_handler_fresh_subscribe_returns_real_snapshot_pending_then_active() {
+    let (_temporary, storage) = opened_storage("receipt-fresh").await;
+    let repository = storage.repository();
+    let thread_id = ThreadId::parse("thread-receipt-fresh").expect("valid thread id");
+    seed_conversation(repository, thread_id.as_str(), "receipt-fresh").await;
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+
+    let (wire, receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-fresh"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_id.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    let response = wire.expect("fresh subscription should answer");
+    assert_eq!(response.request_id, request("frame-receipt-fresh"));
+    let ResponsePayload::ConversationSubscriptionStarted(ConversationSubscriptionStarted::Fresh(
+        start,
+    )) = response.payload
+    else {
+        panic!("expected a fresh conversation subscription response");
+    };
+    assert_eq!(start.snapshot().thread_id(), &thread_id);
+    assert_eq!(start.snapshot().cursor().get(), 2);
+    assert!(!receipt.is_no_work());
+
+    let pending = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("fresh subscription should be visible");
+    assert_eq!(pending.state(), SubscriptionState::Pending);
+    assert_eq!(pending.cursor().get(), 2);
+
+    let activated = handler
+        .activate_after_response(receipt)
+        .await
+        .expect("fresh receipt should activate")
+        .expect("fresh receipt should carry activation work");
+    assert_eq!(activated.lease(), pending.lease());
+    assert_eq!(activated.cursor().get(), 2);
+
+    let active = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("activated subscription should remain visible");
+    assert_eq!(active.state(), SubscriptionState::Active);
+    assert_eq!(active.cursor().get(), 2);
+    assert_eq!(active.lease(), activated.lease());
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn receipt_handler_resume_current_and_batch_register_at_requested_cursor() {
+    let (_temporary, storage) = opened_storage("receipt-resume").await;
+    let repository = storage.repository();
+    let current_thread = ThreadId::parse("thread-receipt-current").expect("valid thread id");
+    let batch_thread = ThreadId::parse("thread-receipt-batch").expect("valid thread id");
+    seed_conversation(repository, current_thread.as_str(), "receipt-current").await;
+    seed_conversation(repository, batch_thread.as_str(), "receipt-batch").await;
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+
+    let (current_wire, current_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-current"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::resume(current_thread.clone(), ConversationCursor::new(2)),
+            )),
+        )
+        .await
+        .into_parts();
+    let current = current_wire.expect("current resume should answer");
+    assert!(!current_receipt.is_no_work());
+    match current.payload {
+        ResponsePayload::ConversationSubscriptionStarted(
+            ConversationSubscriptionStarted::Resumed { thread_id, cursor },
+        ) => {
+            assert_eq!(thread_id, current_thread);
+            assert_eq!(cursor, ConversationCursor::new(2));
+        }
+        other => panic!("expected a current resume response: {other:?}"),
+    }
+    let current_view = handler
+        .subscription_view(&current_thread)
+        .await
+        .expect("current resume should be visible");
+    assert_eq!(current_view.state(), SubscriptionState::Pending);
+    assert_eq!(current_view.cursor(), ConversationCursor::new(2));
+
+    let (batch_wire, batch_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-batch"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::resume(batch_thread.clone(), ConversationCursor::new(0)),
+            )),
+        )
+        .await
+        .into_parts();
+    let batch = batch_wire.expect("batch resume should answer");
+    assert!(!batch_receipt.is_no_work());
+    match batch.payload {
+        ResponsePayload::ConversationSubscriptionStarted(
+            ConversationSubscriptionStarted::Resumed { thread_id, cursor },
+        ) => {
+            assert_eq!(thread_id, batch_thread);
+            assert_eq!(cursor, ConversationCursor::new(0));
+        }
+        other => panic!("expected a batch resume response: {other:?}"),
+    }
+    let batch_view = handler
+        .subscription_view(&batch_thread)
+        .await
+        .expect("batch resume should be visible");
+    assert_eq!(batch_view.state(), SubscriptionState::Pending);
+    assert_eq!(batch_view.cursor(), ConversationCursor::new(0));
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn receipt_handler_beyond_tail_is_stable_and_preserves_existing_entry() {
+    let (_temporary, storage) = opened_storage("receipt-beyond-tail").await;
+    let repository = storage.repository();
+    let thread_id = ThreadId::parse("thread-receipt-beyond").expect("valid thread id");
+    seed_conversation(repository, thread_id.as_str(), "receipt-beyond").await;
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+
+    let (fresh_wire, old_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-existing"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_id.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    fresh_wire.expect("initial subscription should answer");
+    let before = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("initial subscription should be visible");
+
+    let (wire, receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-beyond"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::resume(thread_id.clone(), ConversationCursor::new(999)),
+            )),
+        )
+        .await
+        .into_parts();
+    let failure = wire.expect_err("beyond-tail resume should fail");
+    assert_eq!(failure.code, ErrorCode::InvalidInput);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("frame-receipt-beyond")));
+    assert_eq!(
+        failure.detail.as_str(),
+        "a fresh conversation resnapshot is required"
+    );
+    assert!(!failure.detail.as_str().contains("999"));
+    assert!(!failure.detail.as_str().contains(thread_id.as_str()));
+    assert!(receipt.is_no_work());
+    assert_eq!(
+        handler
+            .subscription_view(&thread_id)
+            .await
+            .expect("existing subscription should remain visible"),
+        before
+    );
+    drop(old_receipt);
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn receipt_handler_repository_failure_has_existing_classification_and_no_mutation() {
+    let (_temporary, storage) = opened_storage("receipt-repository-failure").await;
+    let repository = storage.repository();
+    let existing_thread = ThreadId::parse("thread-receipt-existing").expect("valid thread id");
+    seed_conversation(repository, existing_thread.as_str(), "receipt-existing").await;
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+
+    let (existing_wire, existing_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-existing-seed"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(existing_thread.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    existing_wire.expect("existing subscription should answer");
+    let before = handler
+        .subscription_view(&existing_thread)
+        .await
+        .expect("existing subscription should be visible");
+
+    let missing_thread = ThreadId::parse("thread-receipt-missing").expect("valid thread id");
+    let (wire, receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-repository-failure"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(missing_thread),
+            )),
+        )
+        .await
+        .into_parts();
+    let failure = wire.expect_err("unknown thread should fail through the repository classifier");
+    assert_eq!(failure.code, ErrorCode::ThreadUnknown);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.request_id,
+        Some(request("frame-receipt-repository-failure"))
+    );
+    assert!(receipt.is_no_work());
+    assert_eq!(
+        handler
+            .subscription_view(&existing_thread)
+            .await
+            .expect("existing entry should remain visible"),
+        before
+    );
+    drop(existing_receipt);
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn receipt_handler_replacement_stales_old_receipt_and_activates_only_new_lease() {
+    let (_temporary, storage) = opened_storage("receipt-replacement").await;
+    let repository = storage.repository();
+    let thread_id = ThreadId::parse("thread-receipt-replacement").expect("valid thread id");
+    seed_conversation(repository, thread_id.as_str(), "receipt-replacement").await;
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+
+    let (first_wire, first_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-first"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_id.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    first_wire.expect("first subscription should answer");
+    let first_view = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("first subscription should be visible");
+
+    let (second_wire, second_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-second"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::resume(thread_id.clone(), ConversationCursor::new(0)),
+            )),
+        )
+        .await
+        .into_parts();
+    let second = second_wire.expect("replacement subscription should answer");
+    assert!(matches!(
+        second.payload,
+        ResponsePayload::ConversationSubscriptionStarted(
+            ConversationSubscriptionStarted::Resumed { .. }
+        )
+    ));
+    let second_view = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("replacement subscription should be visible");
+    assert_ne!(first_view.lease(), second_view.lease());
+    assert_eq!(second_view.cursor(), ConversationCursor::new(0));
+    assert_eq!(second_view.state(), SubscriptionState::Pending);
+
+    assert_eq!(
+        handler.activate_after_response(first_receipt).await,
+        Err(ActivateError::StaleLease)
+    );
+    let activated = handler
+        .activate_after_response(second_receipt)
+        .await
+        .expect("replacement receipt should activate")
+        .expect("replacement receipt should carry activation work");
+    assert_eq!(activated.lease(), second_view.lease());
+    assert_eq!(activated.cursor(), ConversationCursor::new(0));
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn receipt_handler_unsubscribe_is_immediate_and_idempotent_without_receipt() {
+    let (_temporary, storage) = opened_storage("receipt-unsubscribe").await;
+    let repository = storage.repository();
+    let thread_id = ThreadId::parse("thread-receipt-stop").expect("valid thread id");
+    seed_conversation(repository, thread_id.as_str(), "receipt-stop").await;
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+
+    let (subscribe_wire, subscribe_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-stop-subscribe"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_id.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    subscribe_wire.expect("subscription should answer");
+
+    let (stop_wire, stop_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-stop"),
+            &ClientRequest::Conversation(ConversationRequest::Unsubscribe(
+                ConversationUnsubscribe {
+                    thread_id: thread_id.clone(),
+                },
+            )),
+        )
+        .await
+        .into_parts();
+    let stop = stop_wire.expect("stop should answer");
+    assert!(stop_receipt.is_no_work());
+    assert_eq!(
+        stop.payload,
+        ResponsePayload::ConversationSubscriptionStopped(
+            artisan_protocol::ConversationSubscriptionStopped {
+                thread_id: thread_id.clone(),
+            }
+        )
+    );
+    assert!(handler.subscription_view(&thread_id).await.is_none());
+    assert_eq!(
+        handler.activate_after_response(subscribe_receipt).await,
+        Err(ActivateError::StaleLease)
+    );
+
+    let (repeat_wire, repeat_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-stop-repeat"),
+            &ClientRequest::Conversation(ConversationRequest::Unsubscribe(
+                ConversationUnsubscribe {
+                    thread_id: thread_id.clone(),
+                },
+            )),
+        )
+        .await
+        .into_parts();
+    let repeat = repeat_wire.expect("repeated stop should answer");
+    assert!(repeat_receipt.is_no_work());
+    assert_eq!(repeat.payload, stop.payload);
+    assert!(handler.subscription_view(&thread_id).await.is_none());
+
+    let unknown_thread = ThreadId::parse("thread-receipt-stop-unknown").expect("valid thread id");
+    let (unknown_wire, unknown_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-receipt-stop-unknown"),
+            &ClientRequest::Conversation(ConversationRequest::Unsubscribe(
+                ConversationUnsubscribe {
+                    thread_id: unknown_thread.clone(),
+                },
+            )),
+        )
+        .await
+        .into_parts();
+    let unknown = unknown_wire.expect("unknown stop should answer");
+    assert!(unknown_receipt.is_no_work());
+    assert_eq!(
+        unknown.payload,
+        ResponsePayload::ConversationSubscriptionStopped(
+            artisan_protocol::ConversationSubscriptionStopped {
+                thread_id: unknown_thread,
+            }
+        )
+    );
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn receipt_handler_non_subscription_query_and_command_match_respond_without_work() {
+    let (_temporary, storage) = opened_storage("receipt-delegation").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "request-receipt-project",
+            "directory-receipt-project",
+            "project-receipt",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input(
+            "request-receipt-thread",
+            "project-receipt",
+            "thread-receipt-query",
+        ))
+        .await
+        .expect("seed thread should persist");
+    let handler = RequestHandler::with_subscriptions(repository.clone());
+
+    let query = ClientRequest::Conversation(ConversationRequest::Query(ConversationQuery {
+        thread_id: ThreadId::parse("thread-receipt-query").expect("valid thread id"),
+        bounds: ConversationQueryBounds::Window {
+            maximum_turn_count: QueryTurnCount::new(1).expect("valid count"),
+        },
+    }));
+    let ordinary_query = handler
+        .respond(&request("frame-receipt-query"), &query)
+        .await;
+    let (receipt_query, query_receipt) = handler
+        .respond_with_receipt(&request("frame-receipt-query"), &query)
+        .await
+        .into_parts();
+    assert_eq!(receipt_query, ordinary_query);
+    assert!(query_receipt.is_no_work());
+
+    let command = ClientRequest::Command(Command::AttachProject(artisan_domain::AttachProject {
+        request_id: request("request-receipt-project"),
+        directory_id: DirectoryId::parse("directory-receipt-project").expect("valid directory id"),
+    }));
+    let ordinary_command = handler
+        .respond(&request("request-receipt-project"), &command)
+        .await;
+    let (receipt_command, command_receipt) = handler
+        .respond_with_receipt(&request("request-receipt-project"), &command)
+        .await
+        .into_parts();
+    assert_eq!(receipt_command, ordinary_command);
+    assert!(command_receipt.is_no_work());
+    storage.close().await.expect("storage should close");
 }
