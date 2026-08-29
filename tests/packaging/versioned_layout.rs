@@ -1122,7 +1122,7 @@ fn remove_key(template: &str, key: &str) -> String {
         .split('\n')
         .filter(|line| {
             line.split_once('=')
-                .map_or(true, |(raw_key, _)| raw_key.trim_ascii() != key)
+                .is_none_or(|(raw_key, _)| raw_key.trim_ascii() != key)
         })
         .collect::<Vec<_>>()
         .join("\n")
