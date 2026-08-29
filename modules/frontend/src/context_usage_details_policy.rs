@@ -14,7 +14,7 @@
 //! reports totals only and Artisan does not retain the assembled prompt.
 //!
 //! NaN, positive infinity, and negative infinity are intentionally rejected
-//! with [ContextUsageDetailsError]. The legacy JavaScript component receives
+//! with [`ContextUsageDetailsError`]. The legacy JavaScript component receives
 //! finite numbers from its caller; fabricating prose or a progress value for a
 //! non-finite reading would turn an invalid reading into a false fact. Finite
 //! negative, over-capacity, and fractional values remain deterministic.
@@ -82,7 +82,7 @@ impl PercentProse {
         &self.sentence
     }
 
-    /// Alias for Self::sentence for renderers that call presentation text
+    /// Alias for `Self::sentence` for renderers that call presentation text
     /// rather than prose a sentence.
     #[must_use]
     pub fn text(&self) -> &str {
@@ -96,7 +96,7 @@ impl PercentProse {
     }
 }
 
-/// The model-capacity prose fact shown below PercentProse.
+/// The model-capacity prose fact shown below `PercentProse`.
 ///
 /// Its compact token text is intentionally a separate fact from the rounded
 /// percentage. Capacity is formatted as a whole compact English unit and does
@@ -122,7 +122,7 @@ impl ModelCapacityProse {
         &self.compact_window_tokens
     }
 
-    /// Alias for Self::compact_window_tokens for capacity-oriented callers.
+    /// Alias for `Self::compact_window_tokens` for capacity-oriented callers.
     #[must_use]
     pub fn compact_tokens(&self) -> &str {
         self.compact_window_tokens()
@@ -134,7 +134,7 @@ impl ModelCapacityProse {
         &self.sentence
     }
 
-    /// Alias for Self::sentence for renderers that call presentation text
+    /// Alias for `Self::sentence` for renderers that call presentation text
     /// rather than prose a sentence.
     #[must_use]
     pub fn text(&self) -> &str {
@@ -146,7 +146,7 @@ impl ModelCapacityProse {
 ///
 /// The raw percentage is clamped to 0..=100, exactly as the Svelte
 /// Math.min(100, Math.max(0, percent)) expression does. It remains distinct
-/// from PercentProse, whose rounded value is intentionally not clamped.
+/// from `PercentProse`, whose rounded value is intentionally not clamped.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProgressFill {
     value: f64,
@@ -185,15 +185,15 @@ pub struct ContextUsageDetails {
 impl ContextUsageDetails {
     /// Projects the finite values used by the legacy details component.
     ///
-    /// None means the JavaScript model_name was absent and selects
-    /// FALLBACK_MODEL_NAME. Some("") remains an explicitly supplied empty
+    /// None means the JavaScript `model_name` was absent and selects
+    /// `FALLBACK_MODEL_NAME`. Some("") remains an explicitly supplied empty
     /// name. Negative percentages remain negative in the prose and clamp to
     /// zero only in the progress fill; percentages above 100 remain above 100
     /// in the prose and clamp to 100 only in the fill.
     ///
     /// # Errors
     ///
-    /// Returns NonFinitePercent or NonFiniteWindowTokens for a non-finite
+    /// Returns `NonFinitePercent` or `NonFiniteWindowTokens` for a non-finite
     /// input. No presentation fact is constructed for such a reading.
     pub fn new(
         model_name: Option<&str>,
@@ -233,8 +233,13 @@ impl ContextUsageDetails {
         })
     }
 
-    /// Alias for Self::new that makes the rejection boundary explicit at
+    /// Alias for `Self::new` that makes the rejection boundary explicit at
     /// call sites that already use try_* naming.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same error as `Self::new` when `percent` or
+    /// `window_tokens` is non-finite.
     pub fn try_new(
         model_name: Option<&str>,
         percent: f64,
@@ -269,6 +274,11 @@ impl ContextUsageDetails {
 }
 
 /// Projects one context-details card without constructing a policy object.
+///
+/// # Errors
+///
+/// Returns the same error as `ContextUsageDetails::new` when `percent`
+/// or `window_tokens` is non-finite.
 pub fn context_usage_details(
     model_name: Option<&str>,
     percent: f64,
@@ -278,6 +288,11 @@ pub fn context_usage_details(
 }
 
 /// Alias naming the module's policy boundary explicitly.
+///
+/// # Errors
+///
+/// Returns the same error as `context_usage_details` when `percent` or
+/// `window_tokens` is non-finite.
 pub fn project_context_usage_details(
     model_name: Option<&str>,
     percent: f64,
@@ -298,7 +313,7 @@ pub fn project_context_usage_details(
 ///
 /// # Errors
 ///
-/// Returns NonFiniteWindowTokens for NaN or either infinity. This is the same
+/// Returns `NonFiniteWindowTokens` for NaN or either infinity. This is the same
 /// intentional rejection used by the full projection.
 pub fn format_compact_tokens(value: f64) -> Result<String, ContextUsageDetailsError> {
     if !value.is_finite() {
@@ -308,6 +323,11 @@ pub fn format_compact_tokens(value: f64) -> Result<String, ContextUsageDetailsEr
 }
 
 /// Alias for callers that name the value by its role in the card.
+///
+/// # Errors
+///
+/// Returns the same error as `format_compact_tokens` for a non-finite
+/// capacity.
 pub fn format_compact_window_tokens(value: f64) -> Result<String, ContextUsageDetailsError> {
     format_compact_tokens(value)
 }
