@@ -55,6 +55,7 @@ pub mod forge_recovery_health;
 pub mod forge_repair_request;
 pub mod gradient_avatar;
 pub mod harness_setup_policy;
+pub mod host_identity_controller;
 pub mod host_resume_recovery_policy;
 pub mod hover_pill_geometry_policy;
 pub mod hover_pill_group_policy;
