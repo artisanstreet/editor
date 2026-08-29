@@ -110,11 +110,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
     if existing_release.is_dir() {
         let lifecycle_ae = release_cli(&existing_release)?;
         let existing_protocol = read_existing_protocol(&options.install_root)?;
-        let bootstrap = existing_release.join("bin").join(if cfg!(windows) {
-            "ae-installer.exe"
-        } else {
-            "ae-installer"
-        });
+        let bootstrap = versioned_installer_path(&existing_release);
         if !bootstrap.is_file() {
             return Err(InstallerError::MissingInstaller(bootstrap));
         }
@@ -191,11 +187,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         std::fs::rename(&stage, &release).map_err(io(&release))?;
         let lifecycle_ae = release_cli(&release)?;
         let existing_protocol = read_existing_protocol(&options.install_root)?;
-        let bootstrap = release.join("bin").join(if cfg!(windows) {
-            "ae-installer.exe"
-        } else {
-            "ae-installer"
-        });
+        let bootstrap = versioned_installer_path(&release);
         if !bootstrap.is_file() {
             return Err(InstallerError::MissingInstaller(bootstrap));
         }
@@ -523,6 +515,14 @@ fn release_cli(release: &Path) -> Result<PathBuf> {
     Ok(executable)
 }
 
+fn versioned_installer_path(release: &Path) -> PathBuf {
+    release.join("bin").join(if cfg!(windows) {
+        "installer.exe"
+    } else {
+        "installer"
+    })
+}
+
 #[cfg(windows)]
 fn schedule_stable_cli_replacement(source: &Path, destination: &Path) -> Result<()> {
     detached_background_command("cmd.exe")
@@ -643,11 +643,7 @@ pub fn repair(root: &Path) -> Result<()> {
     let state = read_installed_state(root)?;
     validate_state_root(root, &state)?;
     let release = root.join("versions").join(&state.active_version);
-    let bootstrap = release.join("bin").join(if cfg!(windows) {
-        "ae-installer.exe"
-    } else {
-        "ae-installer"
-    });
+    let bootstrap = versioned_installer_path(&release);
     if !bootstrap.is_file() {
         return Err(InstallerError::MissingInstaller(bootstrap));
     }
@@ -993,12 +989,22 @@ mod tests {
     fn permanent_lifecycle_binary_has_a_stable_archive_location() {
         let root = tempdir().expect("temp");
         let release = root.path().join("versions").join("1.2.3");
-        let expected = release.join("bin").join(if cfg!(windows) {
+        let expected =
+            root.path()
+                .join("versions")
+                .join("1.2.3")
+                .join("bin")
+                .join(if cfg!(windows) {
+                    "installer.exe"
+                } else {
+                    "installer"
+                });
+        assert_eq!(super::versioned_installer_path(&release), expected);
+        assert!(!expected.ends_with(if cfg!(windows) {
             "ae-installer.exe"
         } else {
             "ae-installer"
-        });
-        assert!(expected.starts_with(root.path().join("versions")));
+        }));
     }
 
     #[test]
