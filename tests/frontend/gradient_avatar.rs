@@ -232,7 +232,7 @@ fn svg_has_exact_standalone_framing_and_selected_colors() {
 
     assert!(svg.starts_with(
         &format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 16 16\" width=\"100%\" height=\"100%\" preserveAspectRatio=\"xMidYMid slice\" shape-rendering=\"crispEdges\" aria-hidden=\"true\"><rect width=\"16\" height=\"16\" fill=\"{}\"/><g fill=\"{}\">",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" width=\"100%\" height=\"100%\" preserveAspectRatio=\"xMidYMid slice\" shape-rendering=\"crispEdges\" aria-hidden=\"true\"><rect width=\"16\" height=\"16\" fill=\"{}\"/><g fill=\"{}\">",
             color.from, color.to
         )
     ));

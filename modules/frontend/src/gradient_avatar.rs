@@ -251,7 +251,7 @@ pub fn gradient_avatar_svg(seed: &str, title: Option<&str>) -> String {
         .collect::<String>();
 
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 {AVATAR_CELLS} {AVATAR_CELLS}\" width=\"100%\" height=\"100%\" preserveAspectRatio=\"xMidYMid slice\" shape-rendering=\"crispEdges\"{label}><rect width=\"{AVATAR_CELLS}\" height=\"{AVATAR_CELLS}\" fill=\"{}\"/><g fill=\"{}\">{lit}</g></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {AVATAR_CELLS} {AVATAR_CELLS}\" width=\"100%\" height=\"100%\" preserveAspectRatio=\"xMidYMid slice\" shape-rendering=\"crispEdges\"{label}><rect width=\"{AVATAR_CELLS}\" height=\"{AVATAR_CELLS}\" fill=\"{}\"/><g fill=\"{}\">{lit}</g></svg>",
         color.from, color.to
     )
 }
