@@ -83,6 +83,7 @@ rust_library(
         "src/proof.rs",
         "src/project_catalog.rs",
         "src/project_identity_policy.rs",
+        "src/project_path_policy.rs",
         "src/project_picker.rs",
         "src/reader_attention.rs",
         "src/reasoning_display.rs",
