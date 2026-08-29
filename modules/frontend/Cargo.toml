@@ -41,6 +41,10 @@ name = "artisan_error_code"
 path = "../../tests/frontend/artisan_error_code.rs"
 
 [[test]]
+name = "attachment_tray_policy"
+path = "../../tests/frontend/attachment_tray_policy.rs"
+
+[[test]]
 name = "authoritative_subscription_policy"
 path = "../../tests/frontend/authoritative_subscription_policy.rs"
 
