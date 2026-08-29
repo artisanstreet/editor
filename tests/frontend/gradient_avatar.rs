@@ -129,12 +129,12 @@ fn bayer_grid_and_avatar_constants_are_pinned() {
 #[test]
 fn hash_uses_utf16_code_units_for_ascii_bmp_and_supplementary_text() {
     let cases = [
-        ("", 0x811c9dc5_u32),
-        ("a", 0xe40c292c_u32),
-        ("hello", 0x4f9f2cab_u32),
-        ("Å", 0x400b2700_u32),
-        ("😀", 0xcb31c4b8_u32),
-        ("A😀é", 0x7d547f90_u32),
+        ("", 0x811c_9dc5_u32),
+        ("a", 0xe40c_292c_u32),
+        ("hello", 0x4f9f_2cab_u32),
+        ("Å", 0x400b_2700_u32),
+        ("😀", 0xcb31_c4b8_u32),
+        ("A😀é", 0x7d54_7f90_u32),
     ];
 
     for (seed, expected) in cases {

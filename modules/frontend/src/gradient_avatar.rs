@@ -9,6 +9,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+use std::fmt::Write as _;
+
 /// One chromatic Tailwind palette entry used by a gradient avatar.
 ///
 /// `from` is the darker 600 shade used for the tile background and `to` is the
@@ -154,10 +156,10 @@ pub struct GradientAvatarRun {
 /// followed by `>>> 0`.
 #[must_use]
 pub fn gradient_avatar_seed_hash(seed: &str) -> u32 {
-    let mut hash = 0x811c9dc5_u32;
+    let mut hash = 0x811c_9dc5_u32;
     for code_unit in seed.encode_utf16() {
         hash ^= u32::from(code_unit);
-        hash = hash.wrapping_mul(0x01000193);
+        hash = hash.wrapping_mul(0x0100_0193);
     }
     hash
 }
@@ -185,8 +187,8 @@ fn lit_runs() -> Vec<GradientAvatarRun> {
             let lit = if x < AVATAR_CELLS {
                 let horizontal_progress = (x as f64 + 0.5) / AVATAR_CELLS as f64;
                 let vertical_progress = 1.0 - (y as f64 + 0.5) / AVATAR_CELLS as f64;
-                let density =
-                    MAXIMUM_DENSITY.min(clamp((horizontal_progress + vertical_progress) / 2.0));
+                let density = MAXIMUM_DENSITY
+                    .min(clamp(f64::midpoint(horizontal_progress, vertical_progress)));
                 density > BAYER4[y & 3][x & 3]
             } else {
                 false
@@ -240,15 +242,15 @@ pub fn gradient_avatar_svg(seed: &str, title: Option<&str>) -> String {
         None => " aria-hidden=\"true\"".to_owned(),
         Some(title) => format!(" role=\"img\" aria-label=\"{}\"", escape_attribute(title)),
     };
-    let lit = gradient_avatar_runs()
-        .into_iter()
-        .map(|run| {
-            format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"1\"/>",
-                run.x, run.y, run.width
-            )
-        })
-        .collect::<String>();
+    let mut lit = String::new();
+    for run in gradient_avatar_runs() {
+        write!(
+            &mut lit,
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"1\"/>",
+            run.x, run.y, run.width
+        )
+        .expect("writing SVG run markup to a String cannot fail");
+    }
 
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {AVATAR_CELLS} {AVATAR_CELLS}\" width=\"100%\" height=\"100%\" preserveAspectRatio=\"xMidYMid slice\" shape-rendering=\"crispEdges\"{label}><rect width=\"{AVATAR_CELLS}\" height=\"{AVATAR_CELLS}\" fill=\"{}\"/><g fill=\"{}\">{lit}</g></svg>",
