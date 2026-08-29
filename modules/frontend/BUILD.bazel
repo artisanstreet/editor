@@ -38,6 +38,7 @@ rust_library(
         "src/file_icon.rs",
         "src/forge_recovery_health.rs",
         "src/harness_setup_policy.rs",
+        "src/hover_pill_geometry_policy.rs",
         "src/hover_pill_group_policy.rs",
         "src/image_inspection_store.rs",
         "src/image_policy.rs",
