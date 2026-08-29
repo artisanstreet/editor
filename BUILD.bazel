@@ -6,7 +6,6 @@ exports_files([
     "Cargo.Bazel.lock",
     "Cargo.lock",
     "Cargo.toml",
-    "modules/cli/Cargo.toml",
     "modules/installer/Cargo.toml",
 ])
 
@@ -28,6 +27,9 @@ rust_clippy(
         "//modules/assets:assets",
         "//modules/backend:backend",
         "//modules/backend:forge",
+        "//modules/cli:ae",
+        "//modules/cli:cli",
+        "//modules/cli:cli_unit_test",
         "//modules/database:database",
         "//modules/domain:domain",
         "//modules/frontend:editor",
@@ -207,6 +209,9 @@ rustfmt_test(
     size = "small",
     targets = [
         "//modules/backend:forge",
+        "//modules/cli:ae",
+        "//modules/cli:cli",
+        "//modules/cli:cli_unit_test",
         "//modules/frontend:editor",
         "//modules/ui:tinted_svg_unit_test",
         "//scripts/capnp_codegen:capnpc_rust",
@@ -379,6 +384,7 @@ test_suite(
     name = "tests",
     tests = [
         ":format_test",
+        "//modules/cli:cli_unit_test",
         "//modules/ui:tinted_svg_unit_test",
         "//tests/assets:assets_validation_test",
         "//tests/backend:agent_name_allocation_policy_test",

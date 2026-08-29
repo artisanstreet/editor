@@ -2,6 +2,7 @@
 members = [
     "modules/assets",
     "modules/backend",
+    "modules/cli",
     "modules/database",
     "modules/domain",
     "modules/frontend",
