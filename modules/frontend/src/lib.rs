@@ -13,6 +13,7 @@ pub mod approval_presentation;
 pub mod artisan_error_code;
 pub mod attention;
 pub mod attention_reconnect;
+pub mod attention_title_policy;
 pub mod authoritative_subscription_policy;
 pub mod browser_dom_boundary;
 pub mod command_ranking;

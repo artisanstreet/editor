@@ -10,6 +10,7 @@ rust_library(
         "src/approval_presentation.rs",
         "src/attention.rs",
         "src/attention_reconnect.rs",
+        "src/attention_title_policy.rs",
         "src/artisan_error_code.rs",
         "src/authoritative_subscription_policy.rs",
         "src/browser_dom_boundary.rs",
