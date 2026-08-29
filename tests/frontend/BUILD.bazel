@@ -1065,6 +1065,17 @@ rust_test(
 )
 
 rust_test(
+    name = "shell_command_test",
+    srcs = ["shell_command.rs"],
+    crate_name = "shell_command_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "shell_layout_test",
     srcs = ["shell_layout.rs"],
     crate_name = "shell_layout_test",
