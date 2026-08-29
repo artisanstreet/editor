@@ -123,6 +123,7 @@ pub mod thread_title_settings_policy;
 pub mod transcript;
 pub mod usage_meter;
 pub mod usage_recovery_settings_policy;
+pub mod usage_refresh_claims;
 pub mod usage_reset_duration;
 pub mod vcs_diff_presentation;
 pub mod vcs_labels;

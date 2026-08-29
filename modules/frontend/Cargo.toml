@@ -450,6 +450,10 @@ name = "usage_recovery_settings_policy"
 path = "../../tests/frontend/usage_recovery_settings_policy.rs"
 
 [[test]]
+name = "usage_refresh_claims"
+path = "../../tests/frontend/usage_refresh_claims.rs"
+
+[[test]]
 name = "usage_reset_duration"
 path = "../../tests/frontend/usage_reset_duration.rs"
 

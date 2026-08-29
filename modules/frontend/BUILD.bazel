@@ -122,6 +122,7 @@ rust_library(
         "src/transcript.rs",
         "src/usage_meter.rs",
         "src/usage_recovery_settings_policy.rs",
+        "src/usage_refresh_claims.rs",
         "src/usage_reset_duration.rs",
         "src/vcs_diff_presentation.rs",
         "src/vcs_labels.rs",
