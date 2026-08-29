@@ -28,6 +28,7 @@ pub mod preview_service_policy;
 pub mod product_telemetry_capture_policy;
 pub mod request_handler;
 pub mod sqlite_write_retry_policy;
+pub mod startup_reconciliation_sweep;
 pub mod storage;
 pub mod subscription_patch_selection_policy;
 pub mod telemetry_preferences_control_policy;
