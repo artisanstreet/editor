@@ -8,7 +8,10 @@ load(":portable_archive.bzl", "portable_archive")
 # compile_data and fails closed on schema drift. Producer rules (archive
 # assembly) are deferred decisions and intentionally absent here.
 exports_files(
-    ["portable_layout.txt"],
+    [
+        "portable_layout.txt",
+        "versioned_layout.txt",
+    ],
     visibility = ["//tests/packaging:__pkg__"],
 )
 
