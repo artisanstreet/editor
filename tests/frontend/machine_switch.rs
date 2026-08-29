@@ -114,7 +114,7 @@ fn http_branch_uses_only_pair_fragment_and_handles_empty_values() {
 }
 
 #[test]
-fn desktop_branch_preserves_query_then_fragment_order() {
+fn desktop_branch_interpolates_nonce_verbatim_before_encoded_fragment() {
     assert_eq!(
         build_machine_switch_url(
             "artisan:",
@@ -124,7 +124,7 @@ fn desktop_branch_preserves_query_then_fragment_order() {
             "n /é?#&",
             HANDOFF_PARAMETER,
         ),
-        "artisan://app/?artisan-handoff=n%20%2F%C3%A9%3F%23%26#pair=p%2F%C3%A9%3F%26&forge=http%3A%2F%2F127.0.0.1%3A45870%2Fapi%2F%3Fx%3D1%26y%3D2"
+        "artisan://app/?artisan-handoff=n /é?#&#pair=p%2F%C3%A9%3F%26&forge=http%3A%2F%2F127.0.0.1%3A45870%2Fapi%2F%3Fx%3D1%26y%3D2"
     );
 }
 

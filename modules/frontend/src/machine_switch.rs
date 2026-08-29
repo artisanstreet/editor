@@ -100,7 +100,8 @@ pub fn encode_uri_component(value: &str) -> String {
 /// current page origin, injects the caller-supplied handoff query parameter,
 /// and appends the pair/Forge fragment in that exact order. Only one trailing
 /// slash is removed from the endpoint in the HTTP(S) branch; no other URL
-/// normalization is performed.
+/// normalization is performed. The desktop/non-HTTP nonce is interpolated
+/// byte-for-byte, while the pair code and endpoint are URI-component encoded.
 ///
 /// Rust's protocol module does not currently expose the shared
 /// `desktop_handoff_navigation_parameter` constant. Until it does, callers
@@ -122,7 +123,7 @@ pub fn build_machine_switch_url(
 
     format!(
         "{page_origin}/?{handoff_navigation_parameter}={}#pair={}&forge={}",
-        encode_uri_component(nonce),
+        nonce,
         encode_uri_component(pair_code),
         encode_uri_component(endpoint),
     )
