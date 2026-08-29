@@ -374,6 +374,10 @@ name = "scoped_attachment_queue"
 path = "../../tests/frontend/scoped_attachment_queue.rs"
 
 [[test]]
+name = "scoped_attachment_runner_policy"
+path = "../../tests/frontend/scoped_attachment_runner_policy.rs"
+
+[[test]]
 name = "session_projection"
 path = "../../tests/frontend/session_projection.rs"
 
