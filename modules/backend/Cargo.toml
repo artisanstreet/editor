@@ -50,6 +50,10 @@ name = "connection"
 path = "../../tests/backend/connection.rs"
 
 [[test]]
+name = "conversation_subscription_registry"
+path = "../../tests/backend/conversation_subscription_registry.rs"
+
+[[test]]
 name = "directory_selection"
 path = "../../tests/backend/directory_selection.rs"
 
