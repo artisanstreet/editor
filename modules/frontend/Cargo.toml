@@ -109,6 +109,10 @@ name = "editor_route_gate_policy"
 path = "../../tests/frontend/editor_route_gate_policy.rs"
 
 [[test]]
+name = "editor_view_state_policy"
+path = "../../tests/frontend/editor_view_state_policy.rs"
+
+[[test]]
 name = "editor_workspace_identity"
 path = "../../tests/frontend/editor_workspace_identity.rs"
 
