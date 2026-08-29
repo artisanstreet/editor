@@ -107,7 +107,7 @@ impl CubicBezier {
         let mut iterations = 0;
 
         while high - low > BISECTION_TOLERANCE && iterations < MAX_BISECTION_ITERATIONS {
-            mid = (low + high) / 2.0;
+            mid = f64::midpoint(low, high);
             if Self::sample_curve(mid, self.x1, self.x2) < x {
                 low = mid;
             } else {
@@ -267,7 +267,7 @@ fn parse_float_prefix(input: &str) -> Option<f64> {
     }
 
     let integer_start = index;
-    while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
         index += 1;
     }
     let mut has_digit = index != integer_start;
@@ -275,7 +275,7 @@ fn parse_float_prefix(input: &str) -> Option<f64> {
     if bytes.get(index) == Some(&b'.') {
         index += 1;
         let fraction_start = index;
-        while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
             index += 1;
         }
         has_digit |= index != fraction_start;
@@ -292,16 +292,13 @@ fn parse_float_prefix(input: &str) -> Option<f64> {
             exponent_index += 1;
         }
         let exponent_digits_start = exponent_index;
-        while bytes
-            .get(exponent_index)
-            .is_some_and(|byte| byte.is_ascii_digit())
-        {
+        while bytes.get(exponent_index).is_some_and(u8::is_ascii_digit) {
             exponent_index += 1;
         }
-        if exponent_index != exponent_digits_start {
-            index = exponent_index;
-        } else {
+        if exponent_index == exponent_digits_start {
             index = exponent_start;
+        } else {
+            index = exponent_index;
         }
     }
 
