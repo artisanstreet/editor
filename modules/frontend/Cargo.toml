@@ -422,6 +422,10 @@ name = "tab_derivations"
 path = "../../tests/frontend/tab_derivations.rs"
 
 [[test]]
+name = "terminal_presentation"
+path = "../../tests/frontend/terminal_presentation.rs"
+
+[[test]]
 name = "thread_environment_presentation"
 path = "../../tests/frontend/thread_environment_presentation.rs"
 
