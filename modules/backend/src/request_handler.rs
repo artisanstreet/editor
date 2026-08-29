@@ -48,7 +48,7 @@ use crate::command_admission::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, SystemCommandOrigin,
 };
 use crate::conversation_subscription_preparation::{
-    prepare_conversation_subscription, stop_conversation_subscription, PrepareSubscriptionError,
+    PrepareSubscriptionError, prepare_conversation_subscription, stop_conversation_subscription,
 };
 use crate::conversation_subscription_registry::{
     ActivateError, ApplyBatchError, ConversationSubscriptionRegistry, RegisterError,
