@@ -193,5 +193,5 @@ fn recent_time_formatting_handles_signed_extremes_without_overflow() {
     );
 
     let very_old = format_recent_thread_time(i64::MIN, i64::MAX);
-    assert_eq!(very_old, "106751991167 days ago");
+    assert_eq!(very_old, "213503982334 days ago");
 }

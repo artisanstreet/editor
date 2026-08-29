@@ -177,7 +177,7 @@ fn elapsed_milliseconds(now_ms: i64, activity_ms: i64) -> u64 {
         // distinguishes a logically negative duration from a very large
         // positive one. Saturate the latter so formatting remains total.
         None if now_ms < activity_ms => 0,
-        None => i64::MAX as u64,
+        None => u64::MAX,
     }
 }
 
