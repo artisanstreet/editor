@@ -6,8 +6,8 @@
 mod context_usage_details_policy;
 
 use context_usage_details_policy::{
-    context_usage_details, format_compact_tokens, ContextUsageDetails, ContextUsageDetailsError,
-    FALLBACK_MODEL_NAME,
+    ContextUsageDetails, ContextUsageDetailsError, FALLBACK_MODEL_NAME, context_usage_details,
+    format_compact_tokens,
 };
 
 #[test]
