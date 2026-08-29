@@ -412,14 +412,14 @@ fn run_parent_scenarios() {
     let first = ForgeProcessCustody::acquire(&created_path).expect("missing lock should create");
     assert!(created_path.is_file());
     assert_owner_only_mode(&created_path);
-    assert!(
-        fs::read(&created_path)
-            .expect("created lock should be readable")
-            .is_empty()
-    );
     assert_contention(acquire_error(&created_path));
     drop(first);
     assert!(created_path.is_file(), "drop must not unlink the lock file");
+    assert!(
+        fs::read(&created_path)
+            .expect("created lock should be readable after custody drops")
+            .is_empty()
+    );
     let mut later_process = spawn_fixture(&created_path, CHILD_HOLD);
     assert_eq!(later_process.wait_for_marker(), CHILD_READY_MARKER);
     later_process.release();
@@ -471,12 +471,12 @@ fn run_parent_scenarios() {
     let sentinel_path = directory.path().join("sentinel.lock");
     let sentinel = b"sentinel payload must survive";
     fs::write(&sentinel_path, sentinel).expect("sentinel lock should be created");
-    let sentinel_guard =
-        ForgeProcessCustody::acquire(&sentinel_path).expect("regular lock should be accepted");
     assert_eq!(
-        fs::read(&sentinel_path).expect("sentinel should remain readable"),
+        fs::read(&sentinel_path).expect("sentinel should be readable before custody"),
         sentinel
     );
+    let sentinel_guard =
+        ForgeProcessCustody::acquire(&sentinel_path).expect("regular lock should be accepted");
     drop(sentinel_guard);
     assert_eq!(
         fs::read(&sentinel_path).expect("sentinel should remain after drop"),
