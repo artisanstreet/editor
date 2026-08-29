@@ -121,16 +121,16 @@ impl HostIdentityGeneration {
 pub enum HostIdentityInput {
     /// Ask the shared state to admit a refresh if no identity or request is
     /// currently present.
-    RefreshRequested,
+    Refresh,
     /// Report a successful result for an admitted generation.
-    RefreshSucceeded {
+    Complete {
         /// Generation returned by the corresponding admission action.
         generation: HostIdentityGeneration,
         /// Decoded identity to publish if the generation is still current.
         snapshot: HostIdentitySnapshot,
     },
     /// Report that an admitted generation failed without producing an identity.
-    RefreshFailed {
+    Fail {
         /// Generation returned by the corresponding admission action.
         generation: HostIdentityGeneration,
     },
@@ -140,13 +140,13 @@ impl HostIdentityInput {
     /// Creates the refresh-admission input.
     #[must_use]
     pub const fn refresh() -> Self {
-        Self::RefreshRequested
+        Self::Refresh
     }
 
     /// Creates a successful completion input.
     #[must_use]
     pub fn complete(generation: HostIdentityGeneration, snapshot: HostIdentitySnapshot) -> Self {
-        Self::RefreshSucceeded {
+        Self::Complete {
             generation,
             snapshot,
         }
@@ -155,7 +155,7 @@ impl HostIdentityInput {
     /// Creates a failed-completion input.
     #[must_use]
     pub const fn fail(generation: HostIdentityGeneration) -> Self {
-        Self::RefreshFailed { generation }
+        Self::Fail { generation }
     }
 }
 
@@ -294,12 +294,12 @@ impl HostIdentityState {
     #[must_use]
     pub fn apply(&mut self, input: HostIdentityInput) -> HostIdentityAction {
         match input {
-            HostIdentityInput::RefreshRequested => self.admit_refresh(),
-            HostIdentityInput::RefreshSucceeded {
+            HostIdentityInput::Refresh => self.admit_refresh(),
+            HostIdentityInput::Complete {
                 generation,
                 snapshot,
             } => self.complete_refresh(generation, snapshot),
-            HostIdentityInput::RefreshFailed { generation } => self.fail_refresh(generation),
+            HostIdentityInput::Fail { generation } => self.fail_refresh(generation),
         }
     }
 

@@ -21,21 +21,24 @@ fn snapshot(hostname: &str, display_name: &str, username: &str) -> HostIdentityS
     }
 }
 
+struct Case {
+    name: &'static str,
+    input: HostIdentityInput,
+    expected_action: HostIdentityAction,
+    expected_snapshot: Option<HostIdentitySnapshot>,
+    expected_in_flight: Option<HostIdentityGeneration>,
+    expected_current_generation: HostIdentityGeneration,
+}
+
+// This intentionally long, contiguous table keeps each transition beside the
+// sequential state it produces.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn refresh_custody_follows_one_deterministic_state_table() {
     let first_generation = HostIdentityGeneration::new(1);
     let second_generation = HostIdentityGeneration::new(2);
     let identity = snapshot("DESKTOP-A", "Alice", "alice");
     let replacement = snapshot("DESKTOP-B", "Bob", "bob");
-
-    struct Case {
-        name: &'static str,
-        input: HostIdentityInput,
-        expected_action: HostIdentityAction,
-        expected_snapshot: Option<HostIdentitySnapshot>,
-        expected_in_flight: Option<HostIdentityGeneration>,
-        expected_current_generation: HostIdentityGeneration,
-    }
 
     let cases = vec![
         Case {
