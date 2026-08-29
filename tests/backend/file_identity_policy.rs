@@ -115,8 +115,10 @@ fn descriptor_identity_failure_is_returned_without_a_path_fallback() {
     let descriptor = File::open("NUL").expect("Windows NUL descriptor should open");
     let error = read_file_identity(&descriptor).expect_err("NUL has no file identity");
 
-    assert_eq!(error.kind(), std::io::ErrorKind::Other);
-    assert!(error.to_string().contains("file identity helper"));
+    assert!(
+        error.raw_os_error().is_some(),
+        "descriptor identity failure should preserve the native OS error: {error}"
+    );
 }
 
 #[cfg(not(any(unix, windows)))]
