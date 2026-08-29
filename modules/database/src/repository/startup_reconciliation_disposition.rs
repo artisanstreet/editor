@@ -398,6 +398,7 @@ fn lifecycle_str(lifecycle: super::startup_reconciliation::StartupRunLifecycle) 
 // Replay classification
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 async fn classify_replay(
     transaction: &sea_orm::DatabaseTransaction,
     command: &StartupReconciliationDisposition<'_>,
@@ -600,21 +601,15 @@ struct DispositionContext {
 
 struct LoadedState {
     thread_id: String,
-    next_renderer_ordinal: i64,
     last_patch_sequence: i64,
-    updated_at_ms: i64,
 }
 
 struct LoadedTurn {
     turn_id: String,
-    thread_id: String,
-    ordinal: i64,
     revision: i64,
-    lifecycle: EntityLifecycle,
-    created_at_ms: i64,
-    updated_at_ms: i64,
 }
 
+#[allow(clippy::too_many_lines, clippy::collapsible_if)]
 async fn load_disposition_context(
     transaction: &sea_orm::DatabaseTransaction,
     command: &StartupReconciliationDisposition<'_>,
@@ -831,18 +826,11 @@ async fn load_disposition_context(
     Ok(DispositionContext {
         state: LoadedState {
             thread_id: state_row.thread_id,
-            next_renderer_ordinal: state_row.next_renderer_ordinal,
             last_patch_sequence: state_row.last_patch_sequence,
-            updated_at_ms: state_row.updated_at_ms,
         },
         turn: LoadedTurn {
             turn_id: turn_row.turn_id,
-            thread_id: turn_row.thread_id,
-            ordinal: turn_row.ordinal,
             revision: turn_row.revision,
-            lifecycle: turn_row.lifecycle,
-            created_at_ms: turn_row.created_at_ms,
-            updated_at_ms: turn_row.updated_at_ms,
         },
         item: item_row,
     })
@@ -870,6 +858,7 @@ fn next_revision_value(current: i64) -> Result<i64, StartupReconciliationDisposi
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn persist_disposition(
     transaction: &sea_orm::DatabaseTransaction,
     command: &StartupReconciliationDisposition<'_>,
@@ -1036,6 +1025,7 @@ RETURNING thread_id
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_lifecycle_patch(
     transaction: &sea_orm::DatabaseTransaction,
     thread_id: &str,

@@ -1,14 +1,12 @@
 use artisan_database::entities::{
-    self, AssistantRunLifecycle, ConversationPatchKind, DispatchState, EntityLifecycle,
-    OrdinalKind, RenderPhase,
+    self, AssistantRunLifecycle, ConversationPatchKind, DispatchState, EntityLifecycle, RenderPhase,
 };
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch,
     ClaimedMessageDispatch, ProviderBindingBytes, QueueFirstMessageInput, Repository,
-    RepositoryError, RunLaunchCredentials, RunStartKey, SqliteConfig,
-    StartupReconciliationDisposition, StartupReconciliationDispositionError,
-    StartupReconciliationDispositionOutcome, StartupReconciliationQuery, StartupRunLifecycle,
-    connect,
+    RunLaunchCredentials, RunStartKey, SqliteConfig, StartupReconciliationDisposition,
+    StartupReconciliationDispositionError, StartupReconciliationDispositionOutcome,
+    StartupReconciliationQuery, StartupRunLifecycle, connect,
 };
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, ItemId, MessageBody, MessageId, PatchId, ProjectId,
@@ -160,31 +158,36 @@ async fn bind_running(
         .await
         .expect("bind");
     match outcome {
-        artisan_database::BindRunProviderOutcome::Bound(r) => r,
-        artisan_database::BindRunProviderOutcome::AlreadyBound(r) => r,
+        artisan_database::BindRunProviderOutcome::Bound(r)
+        | artisan_database::BindRunProviderOutcome::AlreadyBound(r) => r,
     }
 }
 
+struct RunningBatchFixtures<'a> {
+    repository: &'a Repository,
+    claimed: &'a ClaimedMessageDispatch,
+    receipt: &'a artisan_database::LaunchedRunReceipt,
+    bound: &'a artisan_database::BoundRunReceipt,
+    start_key: &'a RunStartKey,
+    creds: &'a RunLaunchCredentials,
+}
+
 async fn commit_running_item(
-    repository: &Repository,
-    claimed: &ClaimedMessageDispatch,
-    receipt: &artisan_database::LaunchedRunReceipt,
-    bound: &artisan_database::BoundRunReceipt,
-    start_key: &RunStartKey,
-    creds: &RunLaunchCredentials,
+    fixtures: &RunningBatchFixtures<'_>,
     item_id: &ItemId,
     patch_turn: &PatchId,
     patch_item: &PatchId,
 ) {
     let body = AssistantBody::parse("hello assistant").expect("body");
-    repository
+    fixtures
+        .repository
         .commit_run_batch(artisan_database::CommitRunBatch {
             scope: artisan_database::RunBatchScope {
-                claimed,
-                launched: receipt,
-                bound,
-                run_start_key: start_key,
-                credentials: creds,
+                claimed: fixtures.claimed,
+                launched: fixtures.receipt,
+                bound: fixtures.bound,
+                run_start_key: fixtures.start_key,
+                credentials: fixtures.creds,
                 expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
                 expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
             },
@@ -220,7 +223,7 @@ async fn fetch_all(database: &DatabaseConnection) -> AllRows {
     runs.sort_by(|a, b| a.run_id.cmp(&b.run_id));
     turns.sort_by(|a, b| a.turn_id.cmp(&b.turn_id));
     items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
-    patches.sort_by(|a, b| a.sequence.cmp(&b.sequence));
+    patches.sort_by_key(|a| a.sequence);
     states.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
     AllRows {
         dispatches,
@@ -247,10 +250,11 @@ struct AllRows {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn expired_launching_no_item_single_turn_patch() {
     let (database, repository) = memory_database().await;
     seed_project_and_thread(&database, &repository, "thread-1").await;
-    let (claimed, receipt, _sk, _creds) = queue_claim_launch(
+    let (_claimed, _receipt, _sk, _creds) = queue_claim_launch(
         &repository,
         &database,
         "thread-1",
@@ -403,6 +407,7 @@ async fn expired_launching_no_item_single_turn_patch() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn expired_running_with_item_two_patches_binding_retained() {
     let (database, repository) = memory_database().await;
     seed_project_and_thread(&database, &repository, "thread-1").await;
@@ -420,12 +425,14 @@ async fn expired_running_with_item_two_patches_binding_retained() {
     let p_turn_act = PatchId::parse("p-turn-act").expect("p");
     let p_item_start = PatchId::parse("p-item-start").expect("p");
     commit_running_item(
-        &repository,
-        &claimed,
-        &receipt,
-        &bound,
-        &sk,
-        &creds,
+        &RunningBatchFixtures {
+            repository: &repository,
+            claimed: &claimed,
+            receipt: &receipt,
+            bound: &bound,
+            start_key: &sk,
+            creds: &creds,
+        },
         &assistant_item,
         &p_turn_act,
         &p_item_start,
@@ -484,7 +491,7 @@ async fn expired_running_with_item_two_patches_binding_retained() {
         .expect("candidate");
     assert_eq!(candidate.lifecycle, StartupRunLifecycle::Running);
     assert_eq!(
-        candidate.assistant_item_id.as_ref().map(|v| v.as_str()),
+        candidate.assistant_item_id.as_ref().map(ItemId::as_str),
         Some("assistant-1")
     );
 
@@ -824,12 +831,14 @@ async fn idempotent_replay_with_item_no_duplicate() {
     let p_turn_act = PatchId::parse("p-turn-act2").expect("p");
     let p_item_start = PatchId::parse("p-item-start2").expect("p");
     commit_running_item(
-        &repository,
-        &claimed,
-        &receipt,
-        &bound,
-        &sk,
-        &creds,
+        &RunningBatchFixtures {
+            repository: &repository,
+            claimed: &claimed,
+            receipt: &receipt,
+            bound: &bound,
+            start_key: &sk,
+            creds: &creds,
+        },
         &assistant_item,
         &p_turn_act,
         &p_item_start,
@@ -936,12 +945,14 @@ async fn mismatched_item_input_fails_typed_and_rolls_back() {
     let bound = bind_running(&repository2, &claimed, &receipt, &sk, &creds).await;
     let assistant_item = ItemId::parse("assistant-1").expect("aid");
     commit_running_item(
-        &repository2,
-        &claimed,
-        &receipt,
-        &bound,
-        &sk,
-        &creds,
+        &RunningBatchFixtures {
+            repository: &repository2,
+            claimed: &claimed,
+            receipt: &receipt,
+            bound: &bound,
+            start_key: &sk,
+            creds: &creds,
+        },
         &assistant_item,
         &PatchId::parse("p-turn-act3").expect("p"),
         &PatchId::parse("p-item-start3").expect("p"),
@@ -991,12 +1002,14 @@ async fn duplicate_patch_identity_fails_typed_and_rolls_back() {
     let bound = bind_running(&repository, &claimed, &receipt, &sk, &creds).await;
     let assistant_item = ItemId::parse("assistant-1").expect("aid");
     commit_running_item(
-        &repository,
-        &claimed,
-        &receipt,
-        &bound,
-        &sk,
-        &creds,
+        &RunningBatchFixtures {
+            repository: &repository,
+            claimed: &claimed,
+            receipt: &receipt,
+            bound: &bound,
+            start_key: &sk,
+            creds: &creds,
+        },
         &assistant_item,
         &PatchId::parse("p-turn-dup").expect("p"),
         &PatchId::parse("p-item-dup").expect("p"),
@@ -1218,12 +1231,14 @@ async fn terminal_runs_never_touched() {
     let bound = bind_running(&repository, &claimed, &receipt, &sk, &creds).await;
     let assistant_item = ItemId::parse("assistant-1").expect("aid");
     commit_running_item(
-        &repository,
-        &claimed,
-        &receipt,
-        &bound,
-        &sk,
-        &creds,
+        &RunningBatchFixtures {
+            repository: &repository,
+            claimed: &claimed,
+            receipt: &receipt,
+            bound: &bound,
+            start_key: &sk,
+            creds: &creds,
+        },
         &assistant_item,
         &PatchId::parse("p-turn-term").expect("p"),
         &PatchId::parse("p-item-term").expect("p"),
@@ -1428,12 +1443,14 @@ async fn error_bounds_and_provider_binding_bytes_preserved() {
 
     let assistant_item = ItemId::parse("assistant-1").expect("aid");
     commit_running_item(
-        &repository,
-        &claimed,
-        &receipt,
-        &bound,
-        &sk,
-        &creds,
+        &RunningBatchFixtures {
+            repository: &repository,
+            claimed: &claimed,
+            receipt: &receipt,
+            bound: &bound,
+            start_key: &sk,
+            creds: &creds,
+        },
         &assistant_item,
         &PatchId::parse("p-turn-err").expect("p"),
         &PatchId::parse("p-item-err").expect("p"),
@@ -1476,7 +1493,7 @@ async fn error_bounds_and_provider_binding_bytes_preserved() {
     );
     assert!(after_run.error_code.as_deref().unwrap().len() <= 128);
     assert!(after_run.error_message.as_deref().unwrap().len() <= 1024);
-    assert!(after_run.error_message.as_deref().unwrap().len() >= 1);
+    assert!(!after_run.error_message.as_deref().unwrap().is_empty());
     let after_dispatch = entities::message_dispatch::Entity::find_by_id("message-1")
         .one(&database)
         .await
