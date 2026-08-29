@@ -257,6 +257,10 @@ name = "runtime_surface"
 path = "../../tests/frontend/runtime_surface.rs"
 
 [[test]]
+name = "session_tool_policy"
+path = "../../tests/frontend/session_tool_policy.rs"
+
+[[test]]
 name = "setup_label_transition_policy"
 path = "../../tests/frontend/setup_label_transition_policy.rs"
 
