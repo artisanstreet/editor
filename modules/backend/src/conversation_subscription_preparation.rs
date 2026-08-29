@@ -1,7 +1,7 @@
 //! Durable conversation subscription preparation seam.
 //!
 //! Prepares fresh and resume acknowledgements from durable state and registers
-//! the resulting thread as [`SubscriptionState::Pending`] at exactly the cursor
+//! the resulting thread as `SubscriptionState::Pending` at exactly the cursor
 //! declared to the client. The seam never activates delivery, publishes patches,
 //! notifies, writes transport frames, or owns a connection. A successful
 //! durable read always precedes any registry mutation, and successful
