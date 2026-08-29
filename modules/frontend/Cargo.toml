@@ -194,6 +194,10 @@ name = "harness_setup_policy"
 path = "../../tests/frontend/harness_setup_policy.rs"
 
 [[test]]
+name = "host_identity_controller"
+path = "../../tests/frontend/host_identity_controller.rs"
+
+[[test]]
 name = "host_resume_recovery_policy"
 path = "../../tests/frontend/host_resume_recovery_policy.rs"
 

@@ -53,6 +53,7 @@ rust_library(
         "src/forge_repair_request.rs",
         "src/gradient_avatar.rs",
         "src/harness_setup_policy.rs",
+        "src/host_identity_controller.rs",
         "src/host_resume_recovery_policy.rs",
         "src/hover_pill_geometry_policy.rs",
         "src/hover_pill_group_policy.rs",
