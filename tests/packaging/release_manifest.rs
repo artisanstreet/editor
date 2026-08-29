@@ -11,8 +11,9 @@ const PACKAGE_SOURCE: &str = include_str!("../../packaging/release/BUILD.bazel")
 
 #[test]
 fn development_target_freezes_the_windows_x64_metadata() {
-    let target_source = PACKAGE_SOURCE
-        .split_once("release_manifest(\n    name = \"development_release_manifest\"\n")
+    let package_source = PACKAGE_SOURCE.replace("\r\n", "\n");
+    let target_source = package_source
+        .split_once("release_manifest(\n    name = \"development_release_manifest\",\n")
         .and_then(|(_, remaining)| remaining.split_once("\n)\n\n# This target"))
         .map(|(fields, _)| fields)
         .expect("development manifest target");
