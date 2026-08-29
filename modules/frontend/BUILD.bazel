@@ -54,6 +54,7 @@ rust_library(
         "src/model_selection_presentation.rs",
         "src/motion_spring.rs",
         "src/new_thread_interaction.rs",
+        "src/new_thread_sentence_policy.rs",
         "src/notification_events.rs",
         "src/notification_web_presenter_policy.rs",
         "src/notification_preferences.rs",
