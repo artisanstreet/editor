@@ -21,11 +21,18 @@
 //! access, so exact replays, queries, persisted lookup conflicts, and
 //! unsupported capabilities never consult it. Conflicts discovered by the
 //! later transaction can follow fresh origin acquisition.
+//!
+//! Bounded [`artisan_domain::ConversationQuery`] reads are answered directly
+//! from the durable projection reader
+//! [`Repository::read_conversation_snapshot`]; subscription start and stop
+//! remain unbacked in this build pending a per-connection registrar and
+//! answer with a typed non-retryable `Internal` failure that names the missing
+//! subscription capability rather than claiming registration.
 
 use artisan_database::{CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError};
 use artisan_domain::{
-    Command, CreateThread, DirectoryId, MessageId, Query, QueueFirstMessage, RequestId, ThreadId,
-    UnixMillis,
+    Command, ConversationRequest, CreateThread, DirectoryId, MessageId, Query, QueueFirstMessage,
+    RequestId, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, ErrorCode, ErrorDetail, FirstMessageReceipt, ProtocolFailure, ResponsePayload,
@@ -135,8 +142,8 @@ impl RequestHandler {
         match request {
             ClientRequest::Query(query) => self.query_outcome(request_id, query).await,
             ClientRequest::Command(command) => self.command_outcome(request_id, command).await,
-            ClientRequest::Conversation(_) => {
-                Err(unbacked_failure(request_id, "conversation projection"))
+            ClientRequest::Conversation(conversation) => {
+                self.conversation_outcome(request_id, conversation).await
             }
             // No native picker exists in this build; the separately owned
             // process/admission packet integrates the real chooser. Answer
@@ -343,6 +350,43 @@ impl RequestHandler {
                 disposition: result.receipt.disposition,
             }),
         ))
+    }
+
+    /// Answers conversation reads and subscription control.
+    ///
+    /// `ConversationRequest::Query` calls `Repository::read_conversation_snapshot`
+    /// exactly once and preserves the caller's correlated `RequestId`. A query
+    /// carries no command id and never consults [`CommandOrigin`]. Failures map
+    /// through [`repository_failure`]: absent thread is `ThreadUnknown`,
+    /// corrupt or invariant persisted state is non-retryable `Internal`, and
+    /// database operation failures are retryable `Internal`. Subscribe and
+    /// unsubscribe remain unbacked in this build pending a per-connection
+    /// registrar and answer with a subscription-specific non-retryable
+    /// `Internal` failure.
+    async fn conversation_outcome(
+        &self,
+        request_id: &RequestId,
+        conversation: &ConversationRequest,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        match conversation {
+            ConversationRequest::Query(query) => {
+                let snapshot = self
+                    .repository
+                    .read_conversation_snapshot(query)
+                    .await
+                    .map_err(|error| repository_failure(&error, request_id))?;
+                Ok(outcome(
+                    request_id,
+                    ResponsePayload::ConversationSnapshot(snapshot),
+                ))
+            }
+            ConversationRequest::Subscribe(_) => {
+                Err(unbacked_failure(request_id, "conversation subscription"))
+            }
+            ConversationRequest::Unsubscribe(_) => {
+                Err(unbacked_failure(request_id, "conversation unsubscription"))
+            }
+        }
     }
 }
 
