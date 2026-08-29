@@ -186,6 +186,10 @@ name = "forge_repair_request"
 path = "../../tests/frontend/forge_repair_request.rs"
 
 [[test]]
+name = "gradient_avatar"
+path = "../../tests/frontend/gradient_avatar.rs"
+
+[[test]]
 name = "harness_setup_policy"
 path = "../../tests/frontend/harness_setup_policy.rs"
 
