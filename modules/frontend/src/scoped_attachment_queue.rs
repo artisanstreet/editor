@@ -97,6 +97,12 @@ impl<Input> ScopedAttachmentQueue<Input> {
     /// counter is checked so it can never wrap around and reuse an earlier
     /// key; exhausting the representable `u64` suffix is unrecoverable for
     /// this queue and panics rather than violating key uniqueness.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the next attachment-id suffix is `u64::MAX`, because
+    /// incrementing it would overflow and the queue refuses to wrap and
+    /// reuse an earlier key.
     #[must_use]
     pub fn attach(&mut self, input: Input) -> AttachmentKey {
         let key = format!("attachment:{}", self.next_attachment_id);
@@ -174,7 +180,6 @@ impl<Input> ScopedAttachmentQueue<Input> {
     }
 
     /// Iterates over pending keys in the order in which they will be taken.
-    #[must_use]
     pub fn pending_keys(&self) -> impl Iterator<Item = &str> {
         self.pending_keys.iter().map(String::as_str)
     }
