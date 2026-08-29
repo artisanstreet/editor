@@ -133,15 +133,14 @@ impl FixtureChild {
 
     fn finish(&mut self) -> ExitStatus {
         self.release();
-        let status = match self.wait_until(CHILD_EXIT_TIMEOUT) {
-            Ok(status) => status,
-            Err(_) => {
-                if let Some(child) = self.child.as_mut() {
-                    let _kill_result = child.kill();
-                }
-                self.wait_until(CHILD_KILL_TIMEOUT)
-                    .expect("killed custody fixture must be reaped within the bounded grace")
+        let status = if let Ok(status) = self.wait_until(CHILD_EXIT_TIMEOUT) {
+            status
+        } else {
+            if let Some(child) = self.child.as_mut() {
+                let _kill_result = child.kill();
             }
+            self.wait_until(CHILD_KILL_TIMEOUT)
+                .expect("killed custody fixture must be reaped within the bounded grace")
         };
         self.join_marker_reader();
         status
@@ -327,9 +326,8 @@ fn run_child_fixture() -> ! {
     }
 
     child_watchdog();
-    let custody = match ForgeProcessCustody::acquire(&lock_path) {
-        Ok(custody) => custody,
-        Err(_) => process::exit(CHILD_FAILURE_EXIT),
+    let Ok(custody) = ForgeProcessCustody::acquire(&lock_path) else {
+        process::exit(CHILD_FAILURE_EXIT);
     };
     write_child_marker(CHILD_READY_MARKER);
     child_wait_for_release();
@@ -388,7 +386,7 @@ fn assert_owner_only_mode(path: &Path) {
 #[cfg(not(unix))]
 fn assert_owner_only_mode(_: &Path) {}
 
-fn assert_contention(error: ForgeProcessCustodyError) {
+fn assert_contention(error: &ForgeProcessCustodyError) {
     assert!(
         error.is_contention(),
         "second custody acquisition should be typed contention: {error}"
@@ -412,7 +410,7 @@ fn run_parent_scenarios() {
     let first = ForgeProcessCustody::acquire(&created_path).expect("missing lock should create");
     assert!(created_path.is_file());
     assert_owner_only_mode(&created_path);
-    assert_contention(acquire_error(&created_path));
+    assert_contention(&acquire_error(&created_path));
     drop(first);
     assert!(created_path.is_file(), "drop must not unlink the lock file");
     assert!(
@@ -453,7 +451,7 @@ fn run_parent_scenarios() {
         first_contended ^ second_contended,
         "the losing creator must report typed contention; outcomes were {first_outcome:?} and {second_outcome:?}"
     );
-    assert_contention(acquire_error(&race_path));
+    assert_contention(&acquire_error(&race_path));
 
     if first_won {
         race_first.release();
@@ -494,7 +492,7 @@ fn run_parent_scenarios() {
     let held_by_child_path = directory.path().join("child-held.lock");
     let mut holder = spawn_fixture(&held_by_child_path, CHILD_HOLD);
     assert_eq!(holder.wait_for_marker(), CHILD_READY_MARKER);
-    assert_contention(acquire_error(&held_by_child_path));
+    assert_contention(&acquire_error(&held_by_child_path));
     holder.release();
     assert!(holder.finish().success());
     let later_guard = ForgeProcessCustody::acquire(&held_by_child_path)
@@ -503,9 +501,9 @@ fn run_parent_scenarios() {
 
     let moved_path = directory.path().join("moved.lock");
     let moved = move_guard(ForgeProcessCustody::acquire(&moved_path).expect("move fixture"));
-    assert_contention(acquire_error(&moved_path));
+    assert_contention(&acquire_error(&moved_path));
     let moved_again = move_guard(moved);
-    assert_contention(acquire_error(&moved_path));
+    assert_contention(&acquire_error(&moved_path));
     drop(moved_again);
     let after_move = ForgeProcessCustody::acquire(&moved_path)
         .expect("dropping the moved guard should release custody");
