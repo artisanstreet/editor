@@ -2264,6 +2264,106 @@ async fn receipt_handler_replacement_stales_old_receipt_and_activates_only_new_l
 }
 
 #[tokio::test]
+async fn receipt_handler_rejects_cross_handler_receipts_before_activation() {
+    let (_temporary, storage) = opened_storage("receipt-cross-handler").await;
+    let repository = storage.repository();
+    let thread_id = ThreadId::parse("thread-receipt-cross-handler").expect("valid thread id");
+    seed_conversation(repository, thread_id.as_str(), "receipt-cross-handler").await;
+    let handler_a = RequestHandler::with_subscriptions(repository.clone());
+    let handler_b = RequestHandler::with_subscriptions(repository.clone());
+
+    let (a_wire, a_receipt) = handler_a
+        .respond_with_receipt(
+            &request("frame-receipt-cross-a"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_id.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    a_wire.expect("handler A subscription should answer");
+    let (b_wire, b_receipt) = handler_b
+        .respond_with_receipt(
+            &request("frame-receipt-cross-b"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_id.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    b_wire.expect("handler B subscription should answer");
+
+    let a_before = handler_a
+        .subscription_view(&thread_id)
+        .await
+        .expect("handler A subscription should be visible");
+    let b_before = handler_b
+        .subscription_view(&thread_id)
+        .await
+        .expect("handler B subscription should be visible");
+    assert_eq!(a_before.lease(), b_before.lease());
+    assert_eq!(a_before.state(), SubscriptionState::Pending);
+    assert_eq!(b_before.state(), SubscriptionState::Pending);
+
+    assert_eq!(
+        handler_b.activate_after_response(a_receipt).await,
+        Err(ActivateError::StaleLease)
+    );
+    assert_eq!(
+        handler_b.subscription_view(&thread_id).await,
+        Some(b_before.clone())
+    );
+
+    let b_activated = handler_b
+        .activate_after_response(b_receipt)
+        .await
+        .expect("handler B receipt should activate")
+        .expect("handler B receipt should carry activation work");
+    assert_eq!(b_activated.lease(), b_before.lease());
+    assert_eq!(b_activated.cursor(), b_before.cursor());
+    assert_eq!(
+        handler_b
+            .subscription_view(&thread_id)
+            .await
+            .expect("handler B active subscription should remain visible")
+            .state(),
+        SubscriptionState::Active
+    );
+
+    let (a_replacement_wire, a_replacement_receipt) = handler_a
+        .respond_with_receipt(
+            &request("frame-receipt-cross-a-replacement"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::resume(thread_id.clone(), ConversationCursor::new(2)),
+            )),
+        )
+        .await
+        .into_parts();
+    a_replacement_wire.expect("handler A replacement subscription should answer");
+    let a_replacement = handler_a
+        .subscription_view(&thread_id)
+        .await
+        .expect("handler A replacement should be visible");
+    assert_eq!(a_replacement.state(), SubscriptionState::Pending);
+    let a_activated = handler_a
+        .activate_after_response(a_replacement_receipt)
+        .await
+        .expect("handler A receipt should activate")
+        .expect("handler A receipt should carry activation work");
+    assert_eq!(a_activated.lease(), a_replacement.lease());
+    assert_eq!(a_activated.cursor(), a_replacement.cursor());
+    assert_eq!(
+        handler_a
+            .subscription_view(&thread_id)
+            .await
+            .expect("handler A active subscription should remain visible")
+            .state(),
+        SubscriptionState::Active
+    );
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
 async fn receipt_handler_unsubscribe_is_immediate_and_idempotent_without_receipt() {
     let (_temporary, storage) = opened_storage("receipt-unsubscribe").await;
     let repository = storage.repository();

@@ -30,6 +30,8 @@
 //! registrar. That path prepares subscriptions as `Pending` and leaves their
 //! activation to its caller after the response has been written.
 
+use std::sync::Arc;
+
 use artisan_database::{CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError};
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
@@ -65,13 +67,24 @@ const RESNAPSHOT_REQUIRED_DETAIL: &str = "a fresh conversation resnapshot is req
 const SUBSCRIPTION_GENERATION_EXHAUSTED_DETAIL: &str =
     "conversation subscription registration capacity is exhausted";
 
+/// Private, non-zero-sized allocation identity for one handler-owned
+/// subscription registrar.
+type SubscriptionRegistrarIdentity = u8;
+
+/// One private activation capability carried by a local request receipt.
+#[derive(Debug)]
+struct SubscriptionActivation {
+    registrar: Arc<SubscriptionRegistrarIdentity>,
+    lease: SubscriptionLease,
+}
+
 /// The wire result and local post-write work for one handled request.
 ///
 /// The response result is exactly the value a connection adapter can map to a
 /// wire response or correlated protocol error. The receipt remains local and
 /// is never part of that wire value.
 #[must_use]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct RequestHandlerResponse {
     response: Result<ServerResponse, ProtocolFailure>,
     receipt: RequestHandlerReceipt,
@@ -106,13 +119,15 @@ impl RequestHandlerResponse {
 /// Local post-write work produced by a subscription-enabled request.
 ///
 /// A receipt is single-owner and deliberately does not implement [`Clone`].
-/// Its private lease storage prevents callers from fabricating an activation
-/// receipt for an arbitrary or different registry. `None` means that no
-/// post-write work exists; `Some` contains exactly one prepared lease.
+/// Its private lease and per-handler registrar identity prevent callers from
+/// fabricating an activation receipt or using one with a different handler.
+/// The identity is checked by allocation identity before registry activation.
+/// `None` means that no post-write work exists; `Some` contains exactly one
+/// prepared lease and its registrar capability.
 #[must_use]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct RequestHandlerReceipt {
-    activation: Option<SubscriptionLease>,
+    activation: Option<SubscriptionActivation>,
 }
 
 impl RequestHandlerReceipt {
@@ -126,9 +141,9 @@ impl RequestHandlerReceipt {
         Self { activation: None }
     }
 
-    fn activate(lease: SubscriptionLease) -> Self {
+    fn activate(registrar: Arc<SubscriptionRegistrarIdentity>, lease: SubscriptionLease) -> Self {
         Self {
-            activation: Some(lease),
+            activation: Some(SubscriptionActivation { registrar, lease }),
         }
     }
 }
@@ -171,6 +186,7 @@ pub struct RequestHandler {
     repository: Repository,
     origin: AdmissionOrigin,
     subscriptions: Option<Mutex<ConversationSubscriptionRegistry>>,
+    subscription_identity: Option<Arc<SubscriptionRegistrarIdentity>>,
 }
 
 /// Handler-owned admission source: the real system boundary by default, or
@@ -215,6 +231,7 @@ impl RequestHandler {
             repository,
             origin: AdmissionOrigin::system(),
             subscriptions: None,
+            subscription_identity: None,
         }
     }
 
@@ -232,6 +249,7 @@ impl RequestHandler {
             repository,
             origin: AdmissionOrigin::Injected(origin),
             subscriptions: None,
+            subscription_identity: None,
         }
     }
 
@@ -243,10 +261,12 @@ impl RequestHandler {
     /// calls continue to use the unbacked subscription behavior.
     #[must_use]
     pub fn with_subscriptions(repository: Repository) -> Self {
+        let subscription_identity = Arc::new(0_u8);
         Self {
             repository,
             origin: AdmissionOrigin::system(),
             subscriptions: Some(Mutex::new(ConversationSubscriptionRegistry::new())),
+            subscription_identity: Some(subscription_identity),
         }
     }
 
@@ -332,8 +352,10 @@ impl RequestHandler {
     /// response write and send-side finish.
     ///
     /// A no-work receipt returns `Ok(None)` without locking the registry. A
-    /// subscription receipt locks this handler's one registry and attempts
-    /// exactly one typed activation; the caller owns the wire-order proof.
+    /// receipt from another handler is rejected by private allocation identity
+    /// before this handler's registry is locked or activated. A receipt from
+    /// this handler locks its one registry and attempts exactly one typed
+    /// activation; the caller owns the wire-order proof.
     ///
     /// # Errors
     ///
@@ -345,15 +367,24 @@ impl RequestHandler {
         &self,
         receipt: RequestHandlerReceipt,
     ) -> Result<Option<ActivatedConversationSubscription>, ActivateError> {
-        let Some(lease) = receipt.activation else {
+        let Some(activation) = receipt.activation else {
             return Ok(None);
         };
+        let Some(subscription_identity) = self.subscription_identity.as_ref() else {
+            return Err(ActivateError::StaleLease);
+        };
+        if !Arc::ptr_eq(subscription_identity, &activation.registrar) {
+            return Err(ActivateError::StaleLease);
+        }
         let Some(subscriptions) = self.subscriptions.as_ref() else {
             return Err(ActivateError::StaleLease);
         };
         let mut registry = subscriptions.lock().await;
-        let cursor = registry.activate(&lease)?;
-        Ok(Some(ActivatedConversationSubscription { lease, cursor }))
+        let cursor = registry.activate(&activation.lease)?;
+        Ok(Some(ActivatedConversationSubscription {
+            lease: activation.lease,
+            cursor,
+        }))
     }
 
     /// Returns an owned read-only view of one handler-local subscription.
@@ -376,6 +407,11 @@ impl RequestHandler {
                 self.respond(request_id, request).await,
             );
         };
+        let Some(subscription_identity) = self.subscription_identity.as_ref() else {
+            return RequestHandlerResponse::without_receipt(
+                self.respond(request_id, request).await,
+            );
+        };
         let mut registry = subscriptions.lock().await;
         match prepare_conversation_subscription(&self.repository, &mut registry, subscribe).await {
             Ok(prepared) => {
@@ -385,7 +421,7 @@ impl RequestHandler {
                         request_id,
                         ResponsePayload::ConversationSubscriptionStarted(started),
                     )),
-                    RequestHandlerReceipt::activate(lease),
+                    RequestHandlerReceipt::activate(subscription_identity.clone(), lease),
                 )
             }
             Err(error) => {
