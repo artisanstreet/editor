@@ -11,6 +11,7 @@ rust_library(
         "src/attention_reconnect.rs",
         "src/artisan_error_code.rs",
         "src/browser_dom_boundary.rs",
+        "src/component_gallery_policy.rs",
         "src/composer.rs",
         "src/composer_draft_session_policy.rs",
         "src/context_usage_description.rs",

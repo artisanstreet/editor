@@ -37,6 +37,10 @@ name = "browser_dom_boundary"
 path = "../../tests/frontend/browser_dom_boundary.rs"
 
 [[test]]
+name = "component_gallery_policy"
+path = "../../tests/frontend/component_gallery_policy.rs"
+
+[[test]]
 name = "composer_draft_session_policy"
 path = "../../tests/frontend/composer_draft_session_policy.rs"
 
