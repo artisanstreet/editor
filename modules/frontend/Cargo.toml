@@ -77,6 +77,10 @@ name = "context_usage_model_name"
 path = "../../tests/frontend/context_usage_model_name.rs"
 
 [[test]]
+name = "conversation_error_card_policy"
+path = "../../tests/frontend/conversation_error_card_policy.rs"
+
+[[test]]
 name = "conversation_presentation"
 path = "../../tests/frontend/conversation_presentation.rs"
 
