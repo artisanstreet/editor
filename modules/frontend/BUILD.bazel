@@ -90,6 +90,7 @@ rust_library(
         "src/session_tool_policy.rs",
         "src/shell.rs",
         "src/shell_layout.rs",
+        "src/shell_presentation_state.rs",
         "src/setup_label_transition_policy.rs",
         "src/speed_presentation.rs",
         "src/subscription_projection.rs",
