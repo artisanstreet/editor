@@ -1341,6 +1341,17 @@ rust_test(
 )
 
 rust_test(
+    name = "usage_window_motion_test",
+    srcs = ["usage_window_motion.rs"],
+    crate_name = "usage_window_motion_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "vcs_diff_presentation_test",
     srcs = ["vcs_diff_presentation.rs"],
     crate_name = "vcs_diff_presentation_test",

@@ -466,6 +466,10 @@ name = "usage_reset_duration"
 path = "../../tests/frontend/usage_reset_duration.rs"
 
 [[test]]
+name = "usage_window_motion"
+path = "../../tests/frontend/usage_window_motion.rs"
+
+[[test]]
 name = "vcs_diff_presentation"
 path = "../../tests/frontend/vcs_diff_presentation.rs"
 
