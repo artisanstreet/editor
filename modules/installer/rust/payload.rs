@@ -48,7 +48,7 @@ fn collect(directory: &Path, prefix: &str, files: &mut BTreeMap<String, String>)
         let entry = entry.map_err(io(directory))?;
         let path = entry.path();
         let name = entry.file_name().into_string().map_err(|name| {
-            InstallerError::Archive(format!("payload name is not Unicode: {name:?}"))
+            InstallerError::Archive(format!("payload name is not Unicode: {}", name.display()))
         })?;
         let relative = if prefix.is_empty() {
             name
