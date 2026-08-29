@@ -6,11 +6,11 @@
 mod model_selection_presentation;
 
 use model_selection_presentation::{
+    ContextWindowCapability, ContextWindowChoice, ModelChoice, ModelDefinition, PermissionLevel,
+    PermissionMode, PermissionOption, ReasoningEffort, SandboxMode, SavedModelDefaults,
+    SessionDefaults, SessionPolicy, SessionPolicyPatch, ThinkingCapability, ThinkingLevel,
     apply_policy_patch, context_for_defaults, models_for_engine, permissions_for_selection,
-    thinking_for_defaults, ContextWindowCapability, ContextWindowChoice, ModelChoice,
-    ModelDefinition, PermissionLevel, PermissionMode, PermissionOption, ReasoningEffort,
-    SandboxMode, SavedModelDefaults, SessionDefaults, SessionPolicy, SessionPolicyPatch,
-    ThinkingCapability, ThinkingLevel,
+    thinking_for_defaults,
 };
 
 fn model(
