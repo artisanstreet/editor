@@ -24,6 +24,9 @@ pub mod phase1_proof_capnp;
 #[allow(clippy::pedantic)]
 pub mod artisan_capnp;
 
+/// Dependency-free classification and presentation for conversation activity rows.
+pub mod conversation_activity;
+
 mod codec;
 mod types;
 
