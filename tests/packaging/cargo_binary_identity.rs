@@ -74,8 +74,8 @@ fn parse_binary_target(manifest: &str) -> Result<BinaryTarget, ParseError> {
         }
 
         if line.starts_with('[') {
-            let is_binary_block = parse_section_header(line)?;
-            if is_binary_block {
+            let section_is_bin = parse_section_header(line)?;
+            if section_is_bin {
                 if saw_binary_block {
                     return Err(ParseError::DuplicateBinaryBlock);
                 }
@@ -86,13 +86,10 @@ fn parse_binary_target(manifest: &str) -> Result<BinaryTarget, ParseError> {
                 in_binary_block = false;
                 in_other_section = true;
             }
-            continue;
-        }
-
-        if in_binary_block {
+        } else if in_binary_block {
             parse_binary_field(line, &mut name, &mut path)?;
         } else if in_other_section {
-            continue;
+            // Unrelated Cargo sections are intentionally opaque.
         } else {
             return Err(ParseError::TrailingGarbage);
         }
