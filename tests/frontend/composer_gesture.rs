@@ -32,7 +32,7 @@ fn submit() -> ComposerSubmitKeyInput<'static> {
 }
 
 fn retained_images(
-    decision: ComposerGestureDecision,
+    decision: &ComposerGestureDecision,
     expected_files: Vec<ComposerFileMetadata>,
     expected_point: Option<ComposerDropPoint>,
 ) {
@@ -91,7 +91,7 @@ fn drop_filters_images_case_sensitively_and_preserves_file_order_and_point() {
     let point = ComposerDropPoint::new(-12.5, 98.25);
 
     retained_images(
-        classify_drop(Some(&incoming), point),
+        &classify_drop(Some(&incoming), point),
         vec![file("image/png"), file("image/svg+xml"), file("image/")],
         Some(point),
     );
@@ -121,7 +121,7 @@ fn paste_filters_in_order_prevents_default_and_has_no_point() {
     );
 
     retained_images(
-        classify_paste(Some(&incoming)),
+        &classify_paste(Some(&incoming)),
         vec![file("image/gif"), file("image/jpeg")],
         None,
     );
