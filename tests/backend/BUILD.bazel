@@ -331,6 +331,21 @@ rust_test(
 )
 
 rust_test(
+    name = "conversation_commit_notifier_test",
+    srcs = ["conversation_commit_notifier.rs"],
+    crate_name = "conversation_commit_notifier_test",
+    deps = [
+        "//modules/domain:domain",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "conversation_delivery_writer_test",
     srcs = ["conversation_delivery_writer.rs"],
     crate_name = "conversation_delivery_writer_test",
