@@ -142,6 +142,10 @@ name = "editor_diagnostic_mapping"
 path = "../../tests/frontend/editor_diagnostic_mapping.rs"
 
 [[test]]
+name = "editor_language"
+path = "../../tests/frontend/editor_language.rs"
+
+[[test]]
 name = "editor_route_gate_policy"
 path = "../../tests/frontend/editor_route_gate_policy.rs"
 
