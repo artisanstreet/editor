@@ -93,6 +93,7 @@ pub mod shell;
 pub mod shell_layout;
 pub mod speed_presentation;
 pub mod subscription_projection;
+pub mod tab_derivations;
 pub mod telemetry_bootstrap_policy;
 pub mod telemetry_preferences;
 pub mod thread_environment_presentation;

@@ -337,6 +337,10 @@ name = "speed_presentation"
 path = "../../tests/frontend/speed_presentation.rs"
 
 [[test]]
+name = "tab_derivations"
+path = "../../tests/frontend/tab_derivations.rs"
+
+[[test]]
 name = "thread_environment_presentation"
 path = "../../tests/frontend/thread_environment_presentation.rs"
 
