@@ -9,6 +9,7 @@ mod project_threads;
 mod run_binding;
 mod run_launch;
 mod run_observation;
+mod startup_reconciliation;
 
 use sea_orm::{DatabaseConnection, DbErr};
 use thiserror::Error;
@@ -42,6 +43,10 @@ pub use run_observation::terminal::{
 pub use run_observation::{
     AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome, EngineCheckpoint,
     RunBatchReceiptInfo, RunBatchScope, RunObservationError,
+};
+pub use startup_reconciliation::{
+    StartupReconciliationCandidate, StartupReconciliationCandidates, StartupReconciliationError,
+    StartupReconciliationQuery, StartupRunLifecycle,
 };
 
 /// Typed failures at the native persistence boundary.
