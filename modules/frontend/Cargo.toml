@@ -245,6 +245,10 @@ name = "new_thread_sentence_policy"
 path = "../../tests/frontend/new_thread_sentence_policy.rs"
 
 [[test]]
+name = "notification_contract"
+path = "../../tests/frontend/notification_contract.rs"
+
+[[test]]
 name = "notification_events"
 path = "../../tests/frontend/notification_events.rs"
 

@@ -68,6 +68,7 @@ pub mod motion_spring;
 pub mod new_thread_draft;
 pub mod new_thread_interaction;
 pub mod new_thread_sentence_policy;
+pub mod notification_contract;
 pub mod notification_events;
 pub mod notification_preferences;
 pub mod notification_web_presenter_policy;
