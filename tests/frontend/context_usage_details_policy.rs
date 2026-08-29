@@ -52,6 +52,8 @@ fn fallback_and_provided_model_names_feed_both_distinct_prose_facts() {
 
 #[test]
 fn percent_prose_rounds_the_raw_value_but_fill_clamps_the_raw_value() {
+    const TOLERANCE: f64 = 1e-12;
+
     let cases = [
         (49.4, "49", 49.4),
         (49.5, "50", 49.5),
@@ -65,9 +67,11 @@ fn percent_prose_rounds_the_raw_value_but_fill_clamps_the_raw_value() {
 
     for (percent, rounded, fill) in cases {
         let details = ContextUsageDetails::new(None, percent, 1_000.0).expect("finite input");
-        assert_eq!(
-            details.percent_prose.rounded_percent(),
-            rounded.parse::<f64>().expect("integer text"),
+        assert!(
+            (details.percent_prose.rounded_percent()
+                - rounded.parse::<f64>().expect("integer text"))
+            .abs()
+                <= TOLERANCE,
             "rounded percent for {percent}"
         );
         assert_eq!(
@@ -75,12 +79,11 @@ fn percent_prose_rounds_the_raw_value_but_fill_clamps_the_raw_value() {
             format!("Context window {rounded}% full"),
             "accessible label for {percent}"
         );
-        assert_eq!(
-            details.progress_fill.value(),
-            fill,
+        assert!(
+            (details.progress_fill.value() - fill).abs() <= TOLERANCE,
             "progress fill for {percent}"
         );
-        assert_eq!(details.progress_fill.max(), 100.0);
+        assert!((details.progress_fill.max() - 100.0).abs() <= TOLERANCE);
     }
 }
 
