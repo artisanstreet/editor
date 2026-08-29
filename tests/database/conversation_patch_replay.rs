@@ -1,5 +1,4 @@
-#![allow(clippy::pedantic)]
-use artisan_database::entities::{self};
+use artisan_database::entities;
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch, CommitRunBatch,
     ConversationPatchReplay, CreateThreadInput, ProviderBindingBytes, QueueFirstMessageInput,
@@ -19,8 +18,6 @@ use sea_orm::{
 const OWNER_BYTES: [u8; 32] = [0xa1; 32];
 const LEASE_BYTES: [u8; 32] = [0xb2; 32];
 const CLAIM_TOKEN_BYTES: [u8; 32] = [0xc3; 32];
-#[allow(dead_code)]
-const START_KEY_BYTES: [u8; 32] = [0xd4; 32];
 const DISPATCH_OWNER_BYTE: u8 = 0x11;
 
 const THREAD_CREATED_AT_MS: i64 = 10;
@@ -94,7 +91,8 @@ fn launch_fixture(run: &str, turn: &str, item: &str, p1: &str, p2: &str) -> Laun
     let mut key_bytes = [0u8; 32];
     let run_bytes = run.as_bytes();
     for (idx, byte) in key_bytes.iter_mut().enumerate() {
-        *byte = run_bytes[idx % run_bytes.len()].wrapping_add(idx as u8);
+        let idx_u8 = u8::try_from(idx).expect("fixture index fits u8");
+        *byte = run_bytes[idx % run_bytes.len()].wrapping_add(idx_u8);
     }
     if key_bytes == [0u8; 32] {
         key_bytes[0] = 0x01;
@@ -156,12 +154,11 @@ async fn queue_claim_launch_bind(
         })
         .await
         .expect("launch");
-    let launched = match launch_outcome {
-        artisan_database::LaunchClaimedRunOutcome::Started(r) => r,
-        _ => panic!("started"),
+    let artisan_database::LaunchClaimedRunOutcome::Started(launched) = launch_outcome else {
+        panic!("started")
     };
     let binding = ProviderBindingBytes::new(vec![0xab; 16]).expect("binding");
-    let bound = match repository
+    let artisan_database::BindRunProviderOutcome::Bound(bound) = repository
         .bind_run_provider(BindRunProvider {
             claimed: &claimed,
             receipt: &launched,
@@ -174,9 +171,8 @@ async fn queue_claim_launch_bind(
         })
         .await
         .expect("bind")
-    {
-        artisan_database::BindRunProviderOutcome::Bound(r) => r,
-        _ => panic!("bound"),
+    else {
+        panic!("bound")
     };
     (claimed, launched, bound)
 }
@@ -424,6 +420,10 @@ async fn more_than_64_patches_return_first_64_and_next_contiguous() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "round-trip fixture validates all five patch kinds with explicit stamps"
+)]
 async fn all_five_variants_round_trip() {
     let (db, repo) = memory_database().await;
     let tid = seed_thread(&db, &repo, "thread-5var").await;
@@ -565,7 +565,7 @@ async fn all_five_variants_round_trip() {
                     assert_eq!(u.created_at.as_millis(), OPERATED_AT_MS);
                     assert_eq!(u.updated_at.as_millis(), OPERATED_AT_MS);
                 }
-                _ => panic!("expected user"),
+                ConversationItem::AssistantMessage(_) => panic!("expected user"),
             }
         }
         other => panic!("seq2 {other:?}"),
@@ -606,7 +606,7 @@ async fn all_five_variants_round_trip() {
                     assert_eq!(a.created_at.as_millis(), BATCH_AT_MS);
                     assert_eq!(a.updated_at.as_millis(), BATCH_AT_MS);
                 }
-                _ => panic!("expected assistant"),
+                ConversationItem::UserMessage(_) => panic!("expected assistant"),
             }
         }
         other => panic!("seq4 {other:?}"),
@@ -858,10 +858,8 @@ async fn malformed_payload_is_bounded_corruption() {
         .await
         .expect("pragma");
     let long_body = "a".repeat(65537);
-    let sql = format!(
-        "UPDATE conversation_patches SET body = '{}' WHERE patch_id = 'p-mal-b'",
-        long_body
-    );
+    let sql =
+        format!("UPDATE conversation_patches SET body = '{long_body}' WHERE patch_id = 'p-mal-b'");
     let res = db.execute_unprepared(&sql).await;
     db.execute_unprepared("PRAGMA ignore_check_constraints = OFF")
         .await
@@ -980,6 +978,11 @@ async fn malformed_counter_and_timestamp_is_corruption() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    reason = "sentinel fixture exercises five enum paths and thread mismatch in one disposable DB"
+)]
 async fn sentinel_enum_and_thread_mismatch_are_content_free() {
     let (db, repo) = memory_database().await;
     let tid = seed_thread(&db, &repo, "thread-sentinel").await;
