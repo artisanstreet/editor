@@ -70,6 +70,10 @@ name = "composer_draft_session_policy"
 path = "../../tests/frontend/composer_draft_session_policy.rs"
 
 [[test]]
+name = "composer_gesture"
+path = "../../tests/frontend/composer_gesture.rs"
+
+[[test]]
 name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 
