@@ -221,6 +221,7 @@ async fn bind_running(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn commit_running_item(
     repository: &Repository,
     claimed: &artisan_database::ClaimedMessageDispatch,
@@ -394,6 +395,117 @@ impl StartupReconciliationPatchSource for MismatchedShapeSource {
     }
 }
 
+struct OrderingSource {
+    order: Vec<String>,
+}
+
+impl StartupReconciliationPatchSource for OrderingSource {
+    fn patch_ids_for(
+        &mut self,
+        candidate: &StartupReconciliationCandidate,
+    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+        self.order.push(candidate.run_id.as_str().to_owned());
+        let turn_patch = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
+        Ok(StartupReconciliationPatches::new(turn_patch, None))
+    }
+}
+
+struct ShapeValidatingSource {
+    calls: Vec<(String, bool)>,
+}
+
+impl StartupReconciliationPatchSource for ShapeValidatingSource {
+    fn patch_ids_for(
+        &mut self,
+        candidate: &StartupReconciliationCandidate,
+    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+        let has_item = candidate.assistant_item_id.is_some();
+        self.calls
+            .push((candidate.run_id.as_str().to_owned(), has_item));
+        let turn_patch = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
+        let item_patch = if has_item {
+            Some(PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"))
+        } else {
+            None
+        };
+        assert_eq!(has_item, item_patch.is_some());
+        Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
+    }
+}
+
+struct SignalingStaleSource {
+    target: String,
+    tx: std::sync::mpsc::SyncSender<()>,
+    rx: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
+impl StartupReconciliationPatchSource for SignalingStaleSource {
+    fn patch_ids_for(
+        &mut self,
+        candidate: &StartupReconciliationCandidate,
+    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+        if candidate.run_id.as_str() == self.target {
+            self.tx.send(()).expect("send");
+            self.rx.recv().expect("recv").expect("external ok");
+        }
+        let turn_patch = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
+        let item_patch = candidate
+            .assistant_item_id
+            .as_ref()
+            .map(|_| PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"));
+        Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
+    }
+}
+
+struct SignalingReplaySource {
+    target: String,
+    tx: std::sync::mpsc::SyncSender<(StartupReconciliationCandidate, PatchId, Option<PatchId>)>,
+    rx: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
+impl StartupReconciliationPatchSource for SignalingReplaySource {
+    fn patch_ids_for(
+        &mut self,
+        candidate: &StartupReconciliationCandidate,
+    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+        let turn_patch = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
+        let item_patch = candidate
+            .assistant_item_id
+            .as_ref()
+            .map(|_| PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"));
+        if candidate.run_id.as_str() == self.target {
+            let candidate_clone = candidate.clone();
+            let turn_clone = turn_patch.clone();
+            let item_clone = item_patch.clone();
+            self.tx
+                .send((candidate_clone, turn_clone, item_clone))
+                .expect("send");
+            self.rx.recv().expect("recv").expect("external dispose ok");
+        }
+        Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
+    }
+}
+
+struct FirstOkSecondMismatched {
+    calls: usize,
+}
+
+impl StartupReconciliationPatchSource for FirstOkSecondMismatched {
+    fn patch_ids_for(
+        &mut self,
+        candidate: &StartupReconciliationCandidate,
+    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+        self.calls += 1;
+        if self.calls == 1 {
+            let turn = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
+            assert!(candidate.assistant_item_id.is_none());
+            return Ok(StartupReconciliationPatches::new(turn, None));
+        }
+        let turn = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
+        Ok(StartupReconciliationPatches::new(turn, None))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 1. empty pass
 // ---------------------------------------------------------------------------
@@ -476,21 +588,6 @@ async fn deterministic_discovery_order_and_limit_honored() {
     }
     let input_two =
         StartupReconciliationSweepInput::new(UnixMillis::from_millis(500), 2).expect("input");
-    // Capture order via custom source that records run_id order.
-    struct OrderingSource {
-        order: Vec<String>,
-    }
-    impl StartupReconciliationPatchSource for OrderingSource {
-        fn patch_ids_for(
-            &mut self,
-            candidate: &StartupReconciliationCandidate,
-        ) -> Result<StartupReconciliationPatches, PatchSourceError> {
-            self.order.push(candidate.run_id.as_str().to_owned());
-            let turn_patch =
-                PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
-            Ok(StartupReconciliationPatches::new(turn_patch, None))
-        }
-    }
     let mut ordering = OrderingSource { order: Vec::new() };
     let report_two = sweep_startup_reconciliation(&repository2, input_two, &mut ordering)
         .await
@@ -531,30 +628,6 @@ async fn launching_no_item_and_running_with_item_both_interrupted_with_correct_s
 
     let before = fetch_all(&database).await;
     let before_patches = before.patches.len();
-
-    struct ShapeValidatingSource {
-        calls: Vec<(String, bool)>,
-    }
-    impl StartupReconciliationPatchSource for ShapeValidatingSource {
-        fn patch_ids_for(
-            &mut self,
-            candidate: &StartupReconciliationCandidate,
-        ) -> Result<StartupReconciliationPatches, PatchSourceError> {
-            let has_item = candidate.assistant_item_id.is_some();
-            self.calls
-                .push((candidate.run_id.as_str().to_owned(), has_item));
-            let turn_patch =
-                PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
-            let item_patch = if has_item {
-                Some(PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"))
-            } else {
-                None
-            };
-            // Validate shape agreement: has_item must match item_patch Some.
-            assert_eq!(has_item, item_patch.is_some());
-            Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
-        }
-    }
 
     let mut source = ShapeValidatingSource { calls: Vec::new() };
     let input =
@@ -625,7 +698,7 @@ async fn launching_no_item_and_running_with_item_both_interrupted_with_correct_s
 
 #[tokio::test]
 async fn stale_moved_candidate_counted_and_later_continue() {
-    let (database, repository, _temp) = temp_repository("stale-moved").await;
+    let (database, repository, temp) = temp_repository("stale-moved").await;
     for (thread, msg, run, turn) in [
         ("thread-a", "msg-a", "run-a", "turn-a"),
         ("thread-b", "msg-b", "run-b", "turn-b"),
@@ -661,31 +734,6 @@ async fn stale_moved_candidate_counted_and_later_continue() {
         });
         tx_ack.send(result).expect("ack");
     });
-
-    struct SignalingStaleSource {
-        target: String,
-        tx: std::sync::mpsc::SyncSender<()>,
-        rx: std::sync::mpsc::Receiver<Result<(), String>>,
-    }
-
-    impl StartupReconciliationPatchSource for SignalingStaleSource {
-        fn patch_ids_for(
-            &mut self,
-            candidate: &StartupReconciliationCandidate,
-        ) -> Result<StartupReconciliationPatches, PatchSourceError> {
-            if candidate.run_id.as_str() == self.target {
-                self.tx.send(()).expect("send");
-                self.rx.recv().expect("recv").expect("external ok");
-            }
-            let turn_patch =
-                PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
-            let item_patch = candidate
-                .assistant_item_id
-                .as_ref()
-                .map(|_| PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"));
-            Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
-        }
-    }
 
     let mut source = SignalingStaleSource {
         target: "run-b".to_owned(),
@@ -732,8 +780,8 @@ async fn stale_moved_candidate_counted_and_later_continue() {
     }
 
     drop(repository);
-    let db_path = _temp.path().to_owned();
-    let dir_path = _temp.dir.clone();
+    let db_path = temp.path().to_owned();
+    let dir_path = temp.dir.clone();
     let close = database.close().await;
     assert!(close.is_ok(), "close failed: {close:?}");
     std::fs::remove_file(&db_path).expect("remove db file");
@@ -757,8 +805,9 @@ async fn stale_moved_candidate_counted_and_later_continue() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn identical_pass_replay_no_duplicate_and_already_interrupted() {
-    let (database, repository, _temp) = temp_repository("replay").await;
+    let (database, repository, temp) = temp_repository("replay").await;
     for (thread, msg, run, turn) in [
         ("thread-a", "msg-a", "run-a", "turn-a"),
         ("thread-b", "msg-b", "run-b", "turn-b"),
@@ -806,36 +855,6 @@ async fn identical_pass_replay_no_duplicate_and_already_interrupted() {
         });
         tx_ack.send(result).expect("ack");
     });
-
-    struct SignalingReplaySource {
-        target: String,
-        tx: std::sync::mpsc::SyncSender<(StartupReconciliationCandidate, PatchId, Option<PatchId>)>,
-        rx: std::sync::mpsc::Receiver<Result<(), String>>,
-    }
-
-    impl StartupReconciliationPatchSource for SignalingReplaySource {
-        fn patch_ids_for(
-            &mut self,
-            candidate: &StartupReconciliationCandidate,
-        ) -> Result<StartupReconciliationPatches, PatchSourceError> {
-            let turn_patch =
-                PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
-            let item_patch = candidate
-                .assistant_item_id
-                .as_ref()
-                .map(|_| PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"));
-            if candidate.run_id.as_str() == self.target {
-                let candidate_clone = candidate.clone();
-                let turn_clone = turn_patch.clone();
-                let item_clone = item_patch.clone();
-                self.tx
-                    .send((candidate_clone, turn_clone, item_clone))
-                    .expect("send");
-                self.rx.recv().expect("recv").expect("external dispose ok");
-            }
-            Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
-        }
-    }
 
     let mut source = SignalingReplaySource {
         target: "run-b".to_owned(),
@@ -894,8 +913,8 @@ async fn identical_pass_replay_no_duplicate_and_already_interrupted() {
     assert_eq!(run_c.lifecycle, AssistantRunLifecycle::Interrupted);
 
     drop(repository);
-    let db_path = _temp.path().to_owned();
-    let dir_path = _temp.dir.clone();
+    let db_path = temp.path().to_owned();
+    let dir_path = temp.dir.clone();
     let close = database.close().await;
     assert!(close.is_ok(), "close failed: {close:?}");
     std::fs::remove_file(&db_path).expect("remove db file");
@@ -955,7 +974,7 @@ async fn patch_source_failure_before_candidate_n_leaves_n_untouched() {
             // Ensure error display is bounded and does not leak patch material.
             let display = format!("{err}");
             // The wrapped error's display is content-free.
-            assert!(display.contains("1"), "display should contain index");
+            assert!(display.contains('1'), "display should contain index");
             // Report is prefix, not including failing candidate.
             let _ = report;
         }
@@ -1095,6 +1114,7 @@ async fn invalid_limit_is_typed_and_no_mutation() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn patch_shape_disagreement_is_typed_and_no_mutation_of_failing_candidate() {
     let (database, repository) = memory_repository().await;
     seed_project_and_thread(&database, &repository, "thread-1").await;
@@ -1118,29 +1138,6 @@ async fn patch_shape_disagreement_is_typed_and_no_mutation_of_failing_candidate(
         &PatchId::parse("p-item-pre").expect("p"),
     )
     .await;
-
-    // First candidate (run-1) has no item, second (run-2) has item. We'll make source fail shape on second candidate after first succeeds.
-    struct FirstOkSecondMismatched {
-        calls: usize,
-    }
-    impl StartupReconciliationPatchSource for FirstOkSecondMismatched {
-        fn patch_ids_for(
-            &mut self,
-            candidate: &StartupReconciliationCandidate,
-        ) -> Result<StartupReconciliationPatches, PatchSourceError> {
-            self.calls += 1;
-            if self.calls == 1 {
-                // run-1: correct (no item)
-                let turn =
-                    PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
-                assert!(candidate.assistant_item_id.is_none());
-                return Ok(StartupReconciliationPatches::new(turn, None));
-            }
-            // run-2: has item but we omit it => shape mismatch
-            let turn = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
-            Ok(StartupReconciliationPatches::new(turn, None))
-        }
-    }
 
     let before = fetch_all(&database).await;
     let input =

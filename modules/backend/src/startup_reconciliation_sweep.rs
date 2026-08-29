@@ -253,6 +253,11 @@ pub enum StartupReconciliationSweepError {
 /// disposition failures. Each error that carries a `report` has committed only
 /// its prefix.
 #[allow(clippy::result_large_err)]
+// The coordinator is intrinsically sequential and bounded: it must handle
+// discovery, patch-source validation, and three disposition outcomes in one
+// pass without changing behavior or public API. Splitting would obscure the
+// single-pass invariant.
+#[allow(clippy::too_many_lines)]
 pub async fn sweep_startup_reconciliation<S>(
     repository: &Repository,
     input: StartupReconciliationSweepInput,
@@ -270,7 +275,9 @@ where
             StartupReconciliationError::InvalidLimit { limit } => {
                 StartupReconciliationSweepError::InvalidLimit { limit }
             }
-            other => StartupReconciliationSweepError::Discovery { source: other },
+            err @ StartupReconciliationError::Repository(_) => {
+                StartupReconciliationSweepError::Discovery { source: err }
+            }
         },
     )?;
 
