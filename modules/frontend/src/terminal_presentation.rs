@@ -288,14 +288,12 @@ pub fn terminal_command_line(session: &TerminalSession) -> String {
 pub fn terminal_display_name(session: &TerminalSession) -> String {
     let program = session
         .executable
-        .rsplit(|character| matches!(character, '/' | '\\'))
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(session.executable.as_str());
     let bare = strip_executable_suffix(program);
 
-    shell_display_name(bare)
-        .map(str::to_owned)
-        .unwrap_or_else(|| bare.to_owned())
+    shell_display_name(bare).map_or_else(|| bare.to_owned(), str::to_owned)
 }
 
 /// Removes one case-insensitive executable suffix from the basename.
