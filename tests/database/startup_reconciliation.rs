@@ -55,7 +55,7 @@ async fn seed_project_and_thread(
     let _ = entities::attached_project::Entity::insert(project)
         .exec(database)
         .await;
-    let req = format!("req-{}", thread_id);
+    let req = format!("req-{thread_id}");
     let _ = repository
         .create_thread(CreateThreadInput {
             request_id: RequestId::parse(req).expect("req"),
@@ -82,7 +82,7 @@ async fn queue_claim_launch(
     RunLaunchCredentials,
 ) {
     let queue = QueueFirstMessageInput {
-        request_id: RequestId::parse(format!("req-{}", message_id)).expect("req"),
+        request_id: RequestId::parse(format!("req-{message_id}")).expect("req"),
         message_id: MessageId::parse(message_id).expect("mid"),
         thread_id: ThreadId::parse(thread_id).expect("tid"),
         body: MessageBody::parse("hello").expect("body"),
@@ -100,16 +100,17 @@ async fn queue_claim_launch(
         .expect("claimed");
     let run = RunId::parse(run_id).expect("run");
     let turn = TurnId::parse(turn_id).expect("turn");
-    let item = ItemId::parse(format!("item-{}", run_id)).expect("item");
-    let p1 = PatchId::parse(format!("patch-{}-a", run_id)).expect("p");
-    let p2 = PatchId::parse(format!("patch-{}-b", run_id)).expect("p");
+    let item = ItemId::parse(format!("item-{run_id}")).expect("item");
+    let p1 = PatchId::parse(format!("patch-{run_id}-a")).expect("p");
+    let p2 = PatchId::parse(format!("patch-{run_id}-b")).expect("p");
     let start_key = {
         let mut bytes = [0u8; 32];
         for (idx, byte) in run_id.bytes().cycle().take(32).enumerate() {
             bytes[idx] = byte ^ 0x5a;
         }
         // ensure distinct from constant to avoid accidental collision with earlier single-run tests
-        bytes[0] = bytes[0].wrapping_add(run_id.len() as u8);
+        let len_u8 = u8::try_from(run_id.len()).unwrap_or(255);
+        bytes[0] = bytes[0].wrapping_add(len_u8);
         RunStartKey::new(bytes)
     };
     let creds = RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES);
@@ -127,9 +128,8 @@ async fn queue_claim_launch(
         })
         .await
         .expect("launch");
-    let receipt = match outcome {
-        artisan_database::LaunchClaimedRunOutcome::Started(r) => r,
-        _ => panic!("started"),
+    let artisan_database::LaunchClaimedRunOutcome::Started(receipt) = outcome else {
+        panic!("started");
     };
     let _ = database;
     (claimed, receipt, start_key, creds)
@@ -137,6 +137,145 @@ async fn queue_claim_launch(
 
 // After VP registration these types are re-exported from `artisan_database`.
 use artisan_database::{StartupReconciliationQuery, StartupRunLifecycle};
+
+async fn snapshot(db: &DatabaseConnection) -> Vec<(String, i64, i64)> {
+    let dispatches = entities::message_dispatch::Entity::find()
+        .all(db)
+        .await
+        .expect("d");
+    let runs = entities::assistant_run::Entity::find()
+        .all(db)
+        .await
+        .expect("r");
+    let mut v = Vec::new();
+    for d in dispatches {
+        v.push((
+            d.message_id,
+            d.updated_at_ms,
+            d.lease_expires_at_ms.unwrap_or(-1),
+        ));
+    }
+    for r in runs {
+        v.push((r.run_id, r.updated_at_ms, r.generation));
+    }
+    v.sort();
+    v
+}
+
+async fn bind_and_complete_terminal(
+    repository: &Repository,
+    _database: &DatabaseConnection,
+    claimed: &artisan_database::ClaimedMessageDispatch,
+    receipt: &artisan_database::LaunchedRunReceipt,
+    sk: &RunStartKey,
+    creds: &RunLaunchCredentials,
+) -> (artisan_database::BoundRunReceipt, ItemId) {
+    let binding = ProviderBindingBytes::new(vec![0xab; 8]).expect("b");
+    let artisan_database::BindRunProviderOutcome::Bound(bound) = repository
+        .bind_run_provider(BindRunProvider {
+            claimed,
+            receipt,
+            run_start_key: sk,
+            credentials: creds,
+            expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
+            bound_at: UnixMillis::from_millis(BOUND_AT_MS),
+            binding_version: 1,
+            binding_bytes: &binding,
+        })
+        .await
+        .expect("bind")
+    else {
+        panic!("bound");
+    };
+    let body = AssistantBody::parse("x").expect("b");
+    let aid = ItemId::parse("assistant-1").expect("aid");
+    let p_turn = PatchId::parse("pt-1").expect("p");
+    let p_item = PatchId::parse("pi-1").expect("p");
+    repository
+        .commit_run_batch(artisan_database::CommitRunBatch {
+            scope: artisan_database::RunBatchScope {
+                claimed,
+                launched: receipt,
+                bound: &bound,
+                run_start_key: sk,
+                credentials: creds,
+                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
+                expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
+            },
+            batch_sequence: 1,
+            operated_at: UnixMillis::from_millis(BATCH_AT_MS),
+            activate_turn_patch_id: Some(&p_turn),
+            changes: &[AssistantChange::Start {
+                item_id: &aid,
+                phase: AssistantMessagePhase::Final,
+                body: &body,
+                patch_id: &p_item,
+            }],
+            checkpoint: CheckpointUpdate::Keep,
+        })
+        .await
+        .expect("batch");
+    let completed_at = UnixMillis::from_millis(BATCH_AT_MS + 10);
+    repository
+        .complete_run(artisan_database::CompleteRun {
+            scope: artisan_database::RunBatchScope {
+                claimed,
+                launched: receipt,
+                bound: &bound,
+                run_start_key: sk,
+                credentials: creds,
+                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
+                expected_updated_at: UnixMillis::from_millis(BATCH_AT_MS),
+            },
+            operated_at: completed_at,
+            item_id: &aid,
+            expected_revision: artisan_domain::Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Final,
+            item_patch_id: &PatchId::parse("p-complete-item").expect("p"),
+            turn_patch_id: &PatchId::parse("p-complete-turn").expect("p"),
+        })
+        .await
+        .expect("complete");
+    (bound, aid)
+}
+
+async fn insert_second_assistant_item(
+    database: &DatabaseConnection,
+    thread_id: &str,
+    turn_id: &str,
+    run_id: &str,
+) {
+    entities::conversation_ordinal::ActiveModel {
+        thread_id: Set(thread_id.to_owned()),
+        ordinal: Set(5),
+        kind: Set(entities::OrdinalKind::Item),
+        entity_id: Set("assistant-2".to_owned()),
+    }
+    .insert(database)
+    .await
+    .expect("ordinal");
+    entities::conversation_item::ActiveModel {
+        item_id: Set("assistant-2".to_owned()),
+        thread_id: Set(thread_id.to_owned()),
+        turn_id: Set(turn_id.to_owned()),
+        ordinal: Set(5),
+        kind: Set(entities::OrdinalKind::Item),
+        revision: Set(0),
+        lifecycle: Set(entities::EntityLifecycle::Streaming),
+        item_kind: Set(entities::ConversationItemKind::AssistantMessage),
+        source_message_id: Set(None),
+        run_id: Set(Some(run_id.to_owned())),
+        native_item_key: Set(None),
+        phase: Set(Some(entities::RenderPhase::Final)),
+        body: Set("second".to_owned()),
+        created_at_ms: Set(BATCH_AT_MS),
+        updated_at_ms: Set(BATCH_AT_MS),
+    }
+    .insert(database)
+    .await
+    .expect("second item");
+}
 
 #[tokio::test]
 async fn expired_launching_candidate_with_no_assistant_item() {
@@ -242,7 +381,7 @@ async fn expired_running_candidate_with_assistant_item() {
     let c = &candidates[0];
     assert_eq!(c.lifecycle, StartupRunLifecycle::Running);
     assert_eq!(
-        c.assistant_item_id.as_ref().map(|i| i.as_str()),
+        c.assistant_item_id.as_ref().map(ItemId::as_str),
         Some("assistant-1")
     );
 }
@@ -356,75 +495,8 @@ async fn terminal_and_queued_leased_dispatches_are_omitted() {
         "turn-1",
     )
     .await;
-    let binding = ProviderBindingBytes::new(vec![0xab; 8]).expect("b");
-    let bound = match repository
-        .bind_run_provider(BindRunProvider {
-            claimed: &claimed,
-            receipt: &receipt,
-            run_start_key: &sk,
-            credentials: &creds,
-            expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
-            bound_at: UnixMillis::from_millis(BOUND_AT_MS),
-            binding_version: 1,
-            binding_bytes: &binding,
-        })
-        .await
-        .expect("bind")
-    {
-        artisan_database::BindRunProviderOutcome::Bound(b) => b,
-        _ => panic!("bound"),
-    };
-    // create assistant item via batch then complete terminally
-    let body = AssistantBody::parse("x").expect("b");
-    let aid = ItemId::parse("assistant-1").expect("aid");
-    let p_turn = PatchId::parse("pt-1").expect("p");
-    let p_item = PatchId::parse("pi-1").expect("p");
-    repository
-        .commit_run_batch(artisan_database::CommitRunBatch {
-            scope: artisan_database::RunBatchScope {
-                claimed: &claimed,
-                launched: &receipt,
-                bound: &bound,
-                run_start_key: &sk,
-                credentials: &creds,
-                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
-                expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
-            },
-            batch_sequence: 1,
-            operated_at: UnixMillis::from_millis(BATCH_AT_MS),
-            activate_turn_patch_id: Some(&p_turn),
-            changes: &[AssistantChange::Start {
-                item_id: &aid,
-                phase: AssistantMessagePhase::Final,
-                body: &body,
-                patch_id: &p_item,
-            }],
-            checkpoint: CheckpointUpdate::Keep,
-        })
-        .await
-        .expect("batch");
-    let completed_at = UnixMillis::from_millis(BATCH_AT_MS + 10);
-    repository
-        .complete_run(artisan_database::CompleteRun {
-            scope: artisan_database::RunBatchScope {
-                claimed: &claimed,
-                launched: &receipt,
-                bound: &bound,
-                run_start_key: &sk,
-                credentials: &creds,
-                expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
-                expected_updated_at: UnixMillis::from_millis(BATCH_AT_MS),
-            },
-            operated_at: completed_at,
-            item_id: &aid,
-            expected_revision: artisan_domain::Revision::new(0),
-            body: &body,
-            phase: AssistantMessagePhase::Final,
-            item_patch_id: &PatchId::parse("p-complete-item").expect("p"),
-            turn_patch_id: &PatchId::parse("p-complete-turn").expect("p"),
-        })
-        .await
-        .expect("complete");
+    let (_bound, _aid) =
+        bind_and_complete_terminal(&repository, &database, &claimed, &receipt, &sk, &creds).await;
     let query =
         StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS + 1000), 10)
             .expect("q");
@@ -589,29 +661,6 @@ async fn repeated_query_does_not_mutate() {
         "turn-1",
     )
     .await;
-    async fn snapshot(db: &DatabaseConnection) -> Vec<(String, i64, i64)> {
-        let dispatches = entities::message_dispatch::Entity::find()
-            .all(db)
-            .await
-            .expect("d");
-        let runs = entities::assistant_run::Entity::find()
-            .all(db)
-            .await
-            .expect("r");
-        let mut v = Vec::new();
-        for d in dispatches {
-            v.push((
-                d.message_id,
-                d.updated_at_ms,
-                d.lease_expires_at_ms.unwrap_or(-1),
-            ));
-        }
-        for r in runs {
-            v.push((r.run_id, r.updated_at_ms, r.generation));
-        }
-        v.sort();
-        v
-    }
     let before = snapshot(&database).await;
     let query = StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), 10)
         .expect("q");
@@ -689,7 +738,6 @@ async fn corrupted_identity_fails_typed() {
     // Corrupt the run_id itself to contain whitespace. For a launching run with
     // no assistant items, there are no child rows referencing run_id, so the
     // PK update is schema-permitted and reaches discovery.
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
     let stmt = Statement::from_sql_and_values(
         DbBackend::Sqlite,
         "UPDATE assistant_runs SET run_id = ? WHERE run_id = ?",
@@ -780,35 +828,7 @@ async fn duplicate_assistant_item_fails_typed() {
         })
         .await
         .expect("batch");
-    // insert second assistant item for same run via direct insert (schema allows because native_item_key null)
-    let second_item = entities::conversation_item::ActiveModel {
-        item_id: Set("assistant-2".to_owned()),
-        thread_id: Set("thread-1".to_owned()),
-        turn_id: Set("turn-1".to_owned()),
-        ordinal: Set(5),
-        kind: Set(entities::OrdinalKind::Item),
-        revision: Set(0),
-        lifecycle: Set(entities::EntityLifecycle::Streaming),
-        item_kind: Set(entities::ConversationItemKind::AssistantMessage),
-        source_message_id: Set(None),
-        run_id: Set(Some("run-1".to_owned())),
-        native_item_key: Set(None),
-        phase: Set(Some(entities::RenderPhase::Final)),
-        body: Set("second".to_owned()),
-        created_at_ms: Set(BATCH_AT_MS),
-        updated_at_ms: Set(BATCH_AT_MS),
-    };
-    // also need ordinal ledger
-    entities::conversation_ordinal::ActiveModel {
-        thread_id: Set("thread-1".to_owned()),
-        ordinal: Set(5),
-        kind: Set(entities::OrdinalKind::Item),
-        entity_id: Set("assistant-2".to_owned()),
-    }
-    .insert(&database)
-    .await
-    .expect("ordinal");
-    second_item.insert(&database).await.expect("second item");
+    insert_second_assistant_item(&database, "thread-1", "turn-1", "run-1").await;
     // Prove the SQL limit cannot mask the duplicate: even at limit 1 the per-run
     // count before limiting must be detected.
     let query = StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), 1)
