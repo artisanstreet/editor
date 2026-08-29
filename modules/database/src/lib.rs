@@ -21,5 +21,7 @@ pub use repository::{
     QueueFirstMessageInput, QueueFirstMessageResult, Repository, RepositoryError,
     RequeueMessageDispatch, RunBatchReceiptInfo, RunBatchScope, RunBindingError, RunErrorCode,
     RunErrorMessage, RunLaunchCredentials, RunLaunchError, RunObservationError, RunStartKey,
-    TerminalRunReceipt, TransitionedMessageDispatch,
+    StartupReconciliationCandidate, StartupReconciliationCandidates, StartupReconciliationError,
+    StartupReconciliationQuery, StartupRunLifecycle, TerminalRunReceipt,
+    TransitionedMessageDispatch,
 };

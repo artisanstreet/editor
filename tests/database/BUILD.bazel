@@ -298,6 +298,23 @@ rust_test(
 )
 
 rust_test(
+    name = "startup_reconciliation",
+    srcs = ["startup_reconciliation.rs"],
+    crate_name = "startup_reconciliation",
+    deps = [
+        "//modules/database:database",
+        "//modules/domain:domain",
+        "//modules/migrations:migrations",
+        "@crates//:sea-orm",
+        "@crates//:tokio",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "conversation_projection_test",
     srcs = ["conversation_projection.rs"],
     crate_name = "conversation_projection_test",
