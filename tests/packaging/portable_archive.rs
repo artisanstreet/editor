@@ -309,10 +309,10 @@ fn layout_entries() -> BTreeMap<String, String> {
 }
 
 fn layout_value<'a>(entries: &'a BTreeMap<String, String>, key: &str) -> &'a str {
-    entries
-        .get(key)
-        .map(String::as_str)
-        .unwrap_or_else(|| panic!("missing versioned layout key {key}"))
+    entries.get(key).map_or_else(
+        || panic!("missing versioned layout key {key}"),
+        String::as_str,
+    )
 }
 
 fn expected_member_names() -> Vec<String> {
@@ -442,9 +442,12 @@ fn assert_member_contract(centrals: &[CentralEntry], locals: &[LocalEntry]) {
         assert!(!lower.contains("broker"), "Broker payload is forbidden");
         assert!(!lower.contains("electron"), "Electron payload is forbidden");
         assert!(!lower.contains("node"), "Node payload is forbidden");
-        assert!(!lower.ends_with(".pdb"), "PDB payload is forbidden");
         assert!(
-            !lower.ends_with(".dll"),
+            !ends_with_case_insensitive(&name, ".pdb"),
+            "PDB payload is forbidden"
+        );
+        assert!(
+            !ends_with_case_insensitive(&name, ".dll"),
             "undeclared DLL payload is forbidden"
         );
         assert!(!lower.contains(".ts"), "TypeScript payload is forbidden");
@@ -453,6 +456,12 @@ fn assert_member_contract(centrals: &[CentralEntry], locals: &[LocalEntry]) {
         assert!(!lower.contains("execroot"), "host path is forbidden");
         assert!(!lower.contains("bazel-out"), "host path is forbidden");
     }
+}
+
+fn ends_with_case_insensitive(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
 }
 
 fn assert_no_zip64_or_host_metadata(
