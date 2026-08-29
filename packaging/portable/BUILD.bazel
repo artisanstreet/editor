@@ -7,7 +7,10 @@ load(":portable_archive.bzl", "versioned_payload_archive")
 # directories.
 exports_files(
     ["versioned_layout.txt"],
-    visibility = ["//tests/packaging:__pkg__"],
+    visibility = [
+        "//packaging/release:__pkg__",
+        "//tests/packaging:__pkg__",
+    ],
 )
 
 rust_binary(
