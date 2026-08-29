@@ -58,6 +58,7 @@ rust_library(
         "src/image_viewer.rs",
         "src/latest_request_gate.rs",
         "src/lib.rs",
+        "src/machine_switch.rs",
         "src/markdown_fence_policy.rs",
         "src/markdown_language_registry_policy.rs",
         "src/markdown_test_parser_policy.rs",
