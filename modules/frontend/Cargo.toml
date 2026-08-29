@@ -321,6 +321,10 @@ name = "transcript"
 path = "../../tests/frontend/transcript.rs"
 
 [[test]]
+name = "usage_recovery_settings_policy"
+path = "../../tests/frontend/usage_recovery_settings_policy.rs"
+
+[[test]]
 name = "usage_reset_duration"
 path = "../../tests/frontend/usage_reset_duration.rs"
 
