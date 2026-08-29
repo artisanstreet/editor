@@ -76,6 +76,7 @@ pub mod telemetry_preferences;
 pub mod thread_environment_presentation;
 pub mod thread_hover_rail_policy;
 pub mod thread_list_selection;
+pub mod thread_panel_policy;
 pub mod thread_title_policy;
 pub mod thread_title_settings_policy;
 pub mod transcript;
