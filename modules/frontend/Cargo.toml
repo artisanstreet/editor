@@ -117,6 +117,10 @@ name = "conversation_status_labels"
 path = "../../tests/frontend/conversation_status_labels.rs"
 
 [[test]]
+name = "conversation_steering"
+path = "../../tests/frontend/conversation_steering.rs"
+
+[[test]]
 name = "conversation_turn_footer_policy"
 path = "../../tests/frontend/conversation_turn_footer_policy.rs"
 
