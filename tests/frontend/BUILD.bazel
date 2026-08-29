@@ -416,6 +416,17 @@ rust_test(
 )
 
 rust_test(
+    name = "forge_endpoint_policy_test",
+    srcs = ["forge_endpoint_policy.rs"],
+    crate_name = "forge_endpoint_policy_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "forge_recovery_health_test",
     srcs = ["forge_recovery_health.rs"],
     crate_name = "forge_recovery_health_test",

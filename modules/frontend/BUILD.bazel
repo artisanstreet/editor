@@ -43,6 +43,7 @@ rust_library(
         "src/engine_section_indicator_policy.rs",
         "src/engine_usage_cache.rs",
         "src/file_icon.rs",
+        "src/forge_endpoint_policy.rs",
         "src/forge_recovery_health.rs",
         "src/harness_setup_policy.rs",
         "src/host_resume_recovery_policy.rs",

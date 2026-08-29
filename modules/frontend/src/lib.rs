@@ -45,6 +45,7 @@ pub mod editor_workspace_identity;
 pub mod engine_section_indicator_policy;
 pub mod engine_usage_cache;
 pub mod file_icon;
+pub mod forge_endpoint_policy;
 pub mod forge_recovery_health;
 pub mod harness_setup_policy;
 pub mod host_resume_recovery_policy;
