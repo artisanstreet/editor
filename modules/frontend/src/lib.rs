@@ -107,6 +107,7 @@ pub mod shell_command;
 pub mod shell_layout;
 pub mod shell_presentation_state;
 pub mod speed_presentation;
+pub mod steering_pending_lip;
 pub mod subscription_projection;
 pub mod tab_derivations;
 pub mod telemetry_bootstrap_policy;

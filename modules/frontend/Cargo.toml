@@ -398,6 +398,10 @@ name = "speed_presentation"
 path = "../../tests/frontend/speed_presentation.rs"
 
 [[test]]
+name = "steering_pending_lip"
+path = "../../tests/frontend/steering_pending_lip.rs"
+
+[[test]]
 name = "tab_derivations"
 path = "../../tests/frontend/tab_derivations.rs"
 
