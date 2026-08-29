@@ -158,6 +158,10 @@ impl<Input> ScopedAttachmentRunnerPolicy<Input> {
     /// The suffix is monotonically increasing and checked rather than allowed
     /// to wrap and reuse an earlier key. Exhausting the representable suffix
     /// is unrecoverable for one policy and therefore panics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `u64` attachment-key suffix is exhausted.
     #[must_use]
     pub fn attach(&mut self, input: Input) -> AttachmentKey {
         let key = format!("attachment:{}", self.next_attachment_id);
