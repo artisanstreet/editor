@@ -78,6 +78,10 @@ name = "host_machines_policy"
 path = "../../tests/backend/host_machines_policy.rs"
 
 [[test]]
+name = "startup_reconciliation_sweep"
+path = "../../tests/backend/startup_reconciliation_sweep.rs"
+
+[[test]]
 name = "subscription_patch_selection_policy"
 path = "../../tests/backend/subscription_patch_selection_policy.rs"
 

@@ -50,6 +50,7 @@ rust_library(
         "src/product_telemetry_capture_policy.rs",
         "src/request_handler.rs",
         "src/sqlite_write_retry_policy.rs",
+        "src/startup_reconciliation_sweep.rs",
         "src/storage.rs",
         "src/subscription_patch_selection_policy.rs",
         "src/telemetry_preferences_control_policy.rs",
