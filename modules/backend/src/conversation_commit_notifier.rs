@@ -128,7 +128,6 @@ impl ConversationCommitNotifier {
     ///
     /// Returns [`ConversationCommitSubscribeError::GenerationExhausted`]
     /// without mutating the registry when no new entry generation remains.
-    #[must_use]
     pub fn subscribe(
         &self,
         thread_id: ThreadId,

@@ -62,6 +62,7 @@ async fn subscription_retains_publish_before_first_wait() {
     let mut subscription = notifier
         .subscribe(thread_id.clone())
         .expect("subscription should be accepted");
+    assert_eq!(subscription.thread_id(), &thread_id);
 
     assert_eq!(
         notifier.publish(&thread_id),
