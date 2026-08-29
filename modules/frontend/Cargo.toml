@@ -109,6 +109,10 @@ name = "dev_instance_policy"
 path = "../../tests/frontend/dev_instance_policy.rs"
 
 [[test]]
+name = "editor_diagnostic_mapping"
+path = "../../tests/frontend/editor_diagnostic_mapping.rs"
+
+[[test]]
 name = "editor_route_gate_policy"
 path = "../../tests/frontend/editor_route_gate_policy.rs"
 
