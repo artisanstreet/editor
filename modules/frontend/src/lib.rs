@@ -127,6 +127,7 @@ pub mod usage_meter;
 pub mod usage_recovery_settings_policy;
 pub mod usage_refresh_claims;
 pub mod usage_reset_duration;
+pub mod usage_window_motion;
 pub mod vcs_diff_presentation;
 pub mod vcs_labels;
 pub mod workspace_header_presentation;
