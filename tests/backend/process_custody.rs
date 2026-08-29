@@ -26,9 +26,13 @@ const CHILD_LOCK_PATH_ENV: &str = "ARTISAN_BACKEND_PROCESS_CUSTODY_TEST_LOCK_PAT
 const CHILD_FILTER: &str = "process_custody_child_fixture";
 const CHILD_HOLD: &str = "hold";
 const CHILD_CONTEND: &str = "contend";
+const CHILD_CREATE_RACE: &str = "create-race";
 const CHILD_READY_MARKER: &str = "FORGE_PROCESS_CUSTODY_READY";
+const CHILD_BARRIER_READY_MARKER: &str = "FORGE_PROCESS_CUSTODY_BARRIER_READY";
 const CHILD_CONTENDED_MARKER: &str = "FORGE_PROCESS_CUSTODY_CONTENDED";
 const CHILD_ACQUIRED_MARKER: &str = "FORGE_PROCESS_CUSTODY_ACQUIRED";
+const CHILD_RACE_CONTENDED_MARKER: &str = "FORGE_PROCESS_CUSTODY_RACE_CONTENDED";
+const CHILD_RACE_ACQUIRED_MARKER: &str = "FORGE_PROCESS_CUSTODY_RACE_ACQUIRED";
 const CHILD_FAILURE_EXIT: i32 = 86;
 const CHILD_PROTOCOL_FAILURE_EXIT: i32 = 87;
 const CHILD_WATCHDOG_EXIT: i32 = 88;
@@ -117,6 +121,19 @@ impl FixtureChild {
         drop(self.stdin.take());
     }
 
+    fn release_barrier(&mut self) {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .expect("custody fixture barrier stdin should remain open");
+        stdin
+            .write_all(&[1_u8])
+            .expect("custody fixture barrier should be released");
+        stdin
+            .flush()
+            .expect("custody fixture barrier should be flushed");
+    }
+
     fn finish(&mut self) -> ExitStatus {
         self.release();
         let status = match self.wait_until(CHILD_EXIT_TIMEOUT) {
@@ -196,17 +213,30 @@ fn spawn_fixture(path: &Path, scenario: &str) -> FixtureChild {
         .stderr
         .take()
         .expect("custody fixture stderr should be piped");
-    let (sender, marker) = mpsc::sync_channel(1);
+    let (sender, marker) = mpsc::channel();
     let marker_reader = thread::spawn(move || {
-        let mut line = String::new();
-        let result = BufReader::new(stderr).read_line(&mut line).map(|count| {
-            if count == 0 {
-                None
-            } else {
-                Some(line.trim_end_matches(['\r', '\n']).to_owned())
+        let mut reader = BufReader::new(stderr);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    let _send_result = sender.send(Ok(None));
+                    break;
+                }
+                Ok(_) => {
+                    if sender
+                        .send(Ok(Some(line.trim_end_matches(['\r', '\n']).to_owned())))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _send_result = sender.send(Err(error));
+                    break;
+                }
             }
-        });
-        let _send_result = sender.send(result);
+        }
     });
 
     FixtureChild {
@@ -243,6 +273,12 @@ fn child_wait_for_release() {
     let _read_result = stdin.read(&mut byte);
 }
 
+fn child_wait_for_barrier() -> bool {
+    let mut stdin = io::stdin().lock();
+    let mut byte = [0_u8; 1];
+    stdin.read_exact(&mut byte).is_ok()
+}
+
 fn run_child_fixture() -> ! {
     let scenario = match env::var_os(CHILD_SCENARIO_ENV) {
         Some(value) => match value.to_str() {
@@ -265,6 +301,26 @@ fn run_child_fixture() -> ! {
             Ok(_) => {
                 write_child_marker(CHILD_ACQUIRED_MARKER);
                 process::exit(CHILD_FAILURE_EXIT);
+            }
+            Err(_) => process::exit(CHILD_FAILURE_EXIT),
+        }
+    }
+    if scenario == CHILD_CREATE_RACE {
+        child_watchdog();
+        write_child_marker(CHILD_BARRIER_READY_MARKER);
+        if !child_wait_for_barrier() {
+            process::exit(CHILD_PROTOCOL_FAILURE_EXIT);
+        }
+        match ForgeProcessCustody::acquire(&lock_path) {
+            Ok(custody) => {
+                write_child_marker(CHILD_RACE_ACQUIRED_MARKER);
+                child_wait_for_release();
+                drop(custody);
+                process::exit(CHILD_SUCCESS_EXIT);
+            }
+            Err(error) if error.is_contention() => {
+                write_child_marker(CHILD_RACE_CONTENDED_MARKER);
+                process::exit(CHILD_SUCCESS_EXIT);
             }
             Err(_) => process::exit(CHILD_FAILURE_EXIT),
         }
@@ -374,6 +430,46 @@ fn run_parent_scenarios() {
     let after_drop = ForgeProcessCustody::acquire(&created_path)
         .expect("dropping the first guard should release custody");
     drop(after_drop);
+
+    let race_path = directory.path().join("create-race.lock");
+    assert!(!race_path.exists());
+    let mut race_first = spawn_fixture(&race_path, CHILD_CREATE_RACE);
+    let mut race_second = spawn_fixture(&race_path, CHILD_CREATE_RACE);
+    assert_eq!(race_first.wait_for_marker(), CHILD_BARRIER_READY_MARKER);
+    assert_eq!(race_second.wait_for_marker(), CHILD_BARRIER_READY_MARKER);
+    // Both children have reached the pipe barrier before either release byte
+    // is written, so neither creator is started by a timing guess.
+    race_first.release_barrier();
+    race_second.release_barrier();
+
+    let first_outcome = race_first.wait_for_marker();
+    let second_outcome = race_second.wait_for_marker();
+    let first_won = first_outcome == CHILD_RACE_ACQUIRED_MARKER;
+    let second_won = second_outcome == CHILD_RACE_ACQUIRED_MARKER;
+    let first_contended = first_outcome == CHILD_RACE_CONTENDED_MARKER;
+    let second_contended = second_outcome == CHILD_RACE_CONTENDED_MARKER;
+    assert!(
+        first_won ^ second_won,
+        "simultaneous missing-file creators must have exactly one winner; outcomes were {first_outcome:?} and {second_outcome:?}"
+    );
+    assert!(
+        first_contended ^ second_contended,
+        "the losing creator must report typed contention; outcomes were {first_outcome:?} and {second_outcome:?}"
+    );
+    assert_contention(acquire_error(&race_path));
+
+    if first_won {
+        race_first.release();
+    } else {
+        race_second.release();
+    }
+    assert!(race_first.finish().success());
+    assert!(race_second.finish().success());
+
+    let mut later_race_process = spawn_fixture(&race_path, CHILD_HOLD);
+    assert_eq!(later_race_process.wait_for_marker(), CHILD_READY_MARKER);
+    later_race_process.release();
+    assert!(later_race_process.finish().success());
 
     let sentinel_path = directory.path().join("sentinel.lock");
     let sentinel = b"sentinel payload must survive";

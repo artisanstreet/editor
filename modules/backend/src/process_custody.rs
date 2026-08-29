@@ -7,6 +7,12 @@
 //! it alive until after the application shuts down. The lock file is only an
 //! operating-system lock carrier: this module never writes ownership data to
 //! it and never removes it when custody ends.
+//!
+//! Callers must select the lock path inside a stable, application-owned parent
+//! namespace that is not writable by an untrusted actor while Forge runs. The
+//! acquisition checks are fail-closed for the filesystem shape they observe;
+//! they do not make that path namespace immutable against a later rename or
+//! reparse-point replacement.
 
 use std::{
     collections::HashSet,
@@ -27,8 +33,9 @@ use fs2::FileExt;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// The Windows flag that makes `CreateFile` open a reparse point itself
-/// instead of following it. Normal files continue to open normally, while a
-/// replacement race cannot silently turn the final lock path into a link.
+/// instead of following it. Normal files continue to open normally. It
+/// protects the final-entry open from following a reparse point, but does not
+/// make the parent namespace immutable across separate path operations.
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
@@ -254,6 +261,12 @@ impl ForgeProcessCustody {
     /// regular file before it is opened. The returned guard retains the exact
     /// read/write file used for the single nonblocking lock attempt.
     ///
+    /// The caller is responsible for selecting a stable, application-owned
+    /// parent namespace that untrusted actors cannot modify while Forge runs.
+    /// These checks do not freeze the namespace against an adversarial rename
+    /// or reparse-point replacement between path operations or after
+    /// acquisition; custody is held by the retained file descriptor.
+    ///
     /// # Errors
     ///
     /// Returns a path-shape error for missing, non-directory, symbolic-link,
@@ -424,8 +437,10 @@ fn open_lock_file(path: &Path) -> Result<File, ForgeProcessCustodyError> {
 }
 
 /// Verifies metadata from the retained descriptor as well as the path
-/// inspection. This keeps a successfully created/opened guard tied to a
-/// regular, non-reparse file even if the directory entry changes afterwards.
+/// inspection. A successfully created/opened guard remains tied to the
+/// regular, non-reparse file represented by that descriptor, but this check
+/// does not freeze or protect the directory entry if the namespace changes
+/// afterwards.
 fn validate_open_file(path: &Path, file: &File) -> Result<(), ForgeProcessCustodyError> {
     let metadata = file
         .metadata()
