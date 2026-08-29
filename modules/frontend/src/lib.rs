@@ -102,6 +102,7 @@ pub mod usage_recovery_settings_policy;
 pub mod usage_reset_duration;
 pub mod vcs_labels;
 pub mod workspace_header_presentation;
+pub mod workspace_tab_state;
 
 use std::process::ExitCode;
 
