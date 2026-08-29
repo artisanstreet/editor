@@ -33,6 +33,10 @@ name = "artisan_error_code"
 path = "../../tests/frontend/artisan_error_code.rs"
 
 [[test]]
+name = "authoritative_subscription_policy"
+path = "../../tests/frontend/authoritative_subscription_policy.rs"
+
+[[test]]
 name = "browser_dom_boundary"
 path = "../../tests/frontend/browser_dom_boundary.rs"
 

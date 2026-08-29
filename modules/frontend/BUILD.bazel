@@ -10,6 +10,7 @@ rust_library(
         "src/attention.rs",
         "src/attention_reconnect.rs",
         "src/artisan_error_code.rs",
+        "src/authoritative_subscription_policy.rs",
         "src/browser_dom_boundary.rs",
         "src/component_gallery_policy.rs",
         "src/composer.rs",
