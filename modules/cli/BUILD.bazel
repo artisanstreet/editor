@@ -56,6 +56,9 @@ rust_test(
     name = "cli_unit_test",
     crate = ":cli",
     deps = ["@crates//:tempfile"],
+    env = {
+        "LOCALAPPDATA": "C:\\ArtisanBazelTestLocalAppData",
+    },
     edition = "2024",
     lint_config = "//:workspace_lints",
     size = "small",
