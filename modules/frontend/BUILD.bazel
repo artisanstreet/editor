@@ -48,6 +48,7 @@ rust_library(
         "src/file_icon.rs",
         "src/forge_endpoint_policy.rs",
         "src/forge_recovery_health.rs",
+        "src/forge_repair_request.rs",
         "src/harness_setup_policy.rs",
         "src/host_resume_recovery_policy.rs",
         "src/hover_pill_geometry_policy.rs",

@@ -50,6 +50,7 @@ pub mod engine_usage_cache;
 pub mod file_icon;
 pub mod forge_endpoint_policy;
 pub mod forge_recovery_health;
+pub mod forge_repair_request;
 pub mod harness_setup_policy;
 pub mod host_resume_recovery_policy;
 pub mod hover_pill_geometry_policy;
