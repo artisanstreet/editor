@@ -7,10 +7,16 @@
 
 const RULE_SOURCE: &str = include_str!("../../packaging/release/release_manifest.bzl");
 const TOOL_SOURCE: &str = include_str!("../../packaging/release/rust/release_tool.rs");
-const PACKAGE_SOURCE: &str = include_str!("BUILD.bazel");
+const PACKAGE_SOURCE: &str = include_str!("../../packaging/release/BUILD.bazel");
 
 #[test]
 fn development_target_freezes_the_windows_x64_metadata() {
+    let target_source = PACKAGE_SOURCE
+        .split_once("release_manifest(\n    name = \"development_release_manifest\"\n")
+        .and_then(|(_, remaining)| remaining.split_once("\n)\n\n# This target"))
+        .map(|(fields, _)| fields)
+        .expect("development manifest target");
+
     for expected in [
         "archive = \"//packaging/portable:versioned_payload_archive\"",
         "format_version = 1",
@@ -27,9 +33,10 @@ fn development_target_freezes_the_windows_x64_metadata() {
         "libc = \"\"",
         "archive_format = \"zip\"",
         "file_name = \"artisan-editor-versioned-payload.zip\"",
+        "visibility = [\"//visibility:public\"]",
     ] {
         assert!(
-            PACKAGE_SOURCE.contains(expected),
+            target_source.contains(expected),
             "missing target contract: {expected}"
         );
     }

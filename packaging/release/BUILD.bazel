@@ -5,11 +5,19 @@ load(
     "rust_test",
     "rustfmt_test",
 )
+load("//packaging/release:release_manifest.bzl", "release_manifest")
+
 exports_files(
     [
         "release_manifest.bzl",
         "rust/release_tool.rs",
     ],
+    visibility = ["//tests/packaging:__pkg__"],
+)
+
+filegroup(
+    name = "release_build_source",
+    srcs = ["BUILD.bazel"],
     visibility = ["//tests/packaging:__pkg__"],
 )
 
@@ -29,6 +37,27 @@ rust_binary(
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
+    visibility = ["//visibility:public"],
+)
+
+release_manifest(
+    name = "development_release_manifest",
+    archive = "//packaging/portable:versioned_payload_archive",
+    format_version = 1,
+    product_version = "0.0.0",
+    editor_forge_compatibility_version = "0.0.0",
+    channel = "nightly",
+    signing_key_id = "development",
+    algorithm = "ed25519",
+    minimum_installer_version = "0.0.0",
+    minimum_cli_version = "0.0.0",
+    artifact_id = "windows-x64",
+    platform = "windows",
+    architecture = "x64",
+    libc = "",
+    archive_format = "zip",
+    file_name = "artisan-editor-versioned-payload.zip",
+    output_name = "release-manifest.json",
     visibility = ["//visibility:public"],
 )
 
