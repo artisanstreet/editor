@@ -63,6 +63,7 @@ rust_library(
         "src/model_policy_controls_presentation.rs",
         "src/model_selection_presentation.rs",
         "src/motion_spring.rs",
+        "src/new_thread_draft.rs",
         "src/new_thread_interaction.rs",
         "src/new_thread_sentence_policy.rs",
         "src/notification_events.rs",
