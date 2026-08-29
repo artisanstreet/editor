@@ -5,15 +5,13 @@ use artisan_backend::conversation_subscription_registry::{
     ConversationSubscriptionRegistry, SubscriptionState, UnsubscribeOutcome,
 };
 use artisan_database::{
-    AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch, CommitRunBatch,
-    CreateThreadInput, ProviderBindingBytes, QueueFirstMessageInput, Repository, RepositoryError,
-    RunBatchScope, RunLaunchCredentials, RunStartKey, SqliteConfig, connect,
+    BindRunProvider, ClaimMessageDispatch, CreateThreadInput, ProviderBindingBytes,
+    QueueFirstMessageInput, Repository, RepositoryError, RunLaunchCredentials, RunStartKey,
+    SqliteConfig, connect,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, ConversationCursor, ConversationSnapshot,
-    ConversationSubscribe, ConversationSubscriptionStart, ConversationUnsubscribe, ItemId,
-    MessageBody, MessageId, PatchId, ProjectId, RequestId, ThreadId, ThreadTitle, TurnId,
-    UnixMillis,
+    ConversationCursor, ConversationSubscribe, ConversationUnsubscribe, ItemId, MessageBody,
+    MessageId, PatchId, ProjectId, RequestId, ThreadId, ThreadTitle, TurnId, UnixMillis,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_protocol::{ConversationSubscriptionStarted, ConversationSubscriptionStopped};
@@ -57,7 +55,6 @@ async fn seed_thread(
         .await
         .expect("project insert");
     }
-    // Use repository create_thread for clean state; ignore error if exists
     let _ = repository
         .create_thread(CreateThreadInput {
             request_id: RequestId::parse(format!("req-{thread_id}")).expect("req"),
@@ -168,8 +165,8 @@ async fn queue_claim_launch_bind(
 
 #[tokio::test]
 async fn fresh_preparation_returns_snapshot_pending_at_exact_cursor_and_preserves_thread() {
-    let (_db, repo) = memory_repository().await;
-    let tid = seed_thread(&_db, &repo, "thread-fresh-1").await;
+    let (database, repo) = memory_repository().await;
+    let tid = seed_thread(&database, &repo, "thread-fresh-1").await;
     let launch = launch_fixture(
         "run-fresh-1",
         "turn-fresh-1",
@@ -183,7 +180,6 @@ async fn fresh_preparation_returns_snapshot_pending_at_exact_cursor_and_preserve
     let prepared = prepare_conversation_subscription(&repo, &mut registry, &subscribe)
         .await
         .expect("fresh should succeed");
-    // Accessors preserve values
     let started = prepared.started();
     let lease = prepared.lease();
     assert_eq!(lease.thread_id(), &tid);
@@ -192,33 +188,30 @@ async fn fresh_preparation_returns_snapshot_pending_at_exact_cursor_and_preserve
         ConversationSubscriptionStarted::Fresh(start) => {
             assert_eq!(start.snapshot().thread_id(), &tid);
             assert_eq!(start.snapshot().cursor().get(), 2);
-            // registry Pending at exact cursor
             let view = registry.view(&tid).expect("view");
             assert_eq!(view.state(), SubscriptionState::Pending);
             assert_eq!(view.cursor(), start.snapshot().cursor());
             assert_eq!(view.cursor().get(), 2);
             assert_eq!(view.lease(), lease);
         }
-        other => panic!("expected Fresh, got {other:?}"),
+        ConversationSubscriptionStarted::Resumed { .. } => {
+            panic!("expected Fresh, got Resumed")
+        }
     }
-    // into_parts preserves
     let (started2, lease2) = prepared.into_parts();
     assert_eq!(lease2.thread_id(), &tid);
     assert_eq!(lease2.generation().get(), 1);
     match started2 {
         ConversationSubscriptionStarted::Fresh(s) => assert_eq!(s.snapshot().cursor().get(), 2),
-        _ => panic!("into_parts fresh"),
+        ConversationSubscriptionStarted::Resumed { .. } => panic!("expected Fresh in into_parts"),
     }
-    // No Clone on PreparedConversationSubscription is required; verify it does not implement Clone by compile-time check
-    // (if it did, this test would still pass, but we ensure no accidental Clone is relied upon)
 }
 
 #[tokio::test]
 async fn unknown_thread_fresh_failure_leaves_existing_registry_unchanged() {
-    let (_db, repo) = memory_repository().await;
-    let tid_existing = seed_thread(&_db, &repo, "thread-existing").await;
+    let (database, repo) = memory_repository().await;
+    let tid_existing = seed_thread(&database, &repo, "thread-existing").await;
     let mut registry = ConversationSubscriptionRegistry::new();
-    // Register existing same-thread and other-thread entries
     let lease_a = registry
         .register_pending(tid_existing.clone(), ConversationCursor::new(5))
         .expect("register a");
@@ -246,19 +239,17 @@ async fn unknown_thread_fresh_failure_leaves_existing_registry_unchanged() {
     {
         assert_eq!(thread_id, unknown);
     }
-    // Existing entries unchanged
     assert_eq!(registry.view(&tid_existing).unwrap(), before_a);
     assert_eq!(registry.view(&tid_other).unwrap(), before_other);
     assert_eq!(registry.len(), len_before);
-    // Leases still stales check: old leases still valid for their threads
     assert_eq!(registry.view(&tid_existing).unwrap().lease(), &lease_a);
     assert_eq!(registry.view(&tid_other).unwrap().lease(), &lease_other);
 }
 
 #[tokio::test]
 async fn resume_at_current_tail_returns_resumed_and_pending_at_requested_cursor() {
-    let (_db, repo) = memory_repository().await;
-    let tid = seed_thread(&_db, &repo, "thread-resume-current").await;
+    let (database, repo) = memory_repository().await;
+    let tid = seed_thread(&database, &repo, "thread-resume-current").await;
     let launch = launch_fixture(
         "run-resume-cur",
         "turn-resume-cur",
@@ -267,7 +258,6 @@ async fn resume_at_current_tail_returns_resumed_and_pending_at_requested_cursor(
         "patch-cur-b",
     );
     queue_claim_launch_bind(&repo, &tid, "msg-cur", "req-cur", &launch).await;
-    // Tail after launch is 2
     let mut registry = ConversationSubscriptionRegistry::new();
     let after = ConversationCursor::new(2);
     let prepared = prepare_conversation_subscription(
@@ -282,7 +272,9 @@ async fn resume_at_current_tail_returns_resumed_and_pending_at_requested_cursor(
             assert_eq!(thread_id, &tid);
             assert_eq!(*cursor, after);
         }
-        other => panic!("expected Resumed, got {other:?}"),
+        ConversationSubscriptionStarted::Fresh(_) => {
+            panic!("expected Resumed, got Fresh")
+        }
     }
     let view = registry.view(&tid).expect("view");
     assert_eq!(view.state(), SubscriptionState::Pending);
@@ -292,8 +284,8 @@ async fn resume_at_current_tail_returns_resumed_and_pending_at_requested_cursor(
 
 #[tokio::test]
 async fn resume_behind_tail_with_batch_still_registers_at_requested_cursor_not_batch_endpoint() {
-    let (_db, repo) = memory_repository().await;
-    let tid = seed_thread(&_db, &repo, "thread-resume-batch").await;
+    let (database, repo) = memory_repository().await;
+    let tid = seed_thread(&database, &repo, "thread-resume-batch").await;
     let launch = launch_fixture(
         "run-batch",
         "turn-batch",
@@ -302,9 +294,6 @@ async fn resume_behind_tail_with_batch_still_registers_at_requested_cursor_not_b
         "patch-batch-b",
     );
     queue_claim_launch_bind(&repo, &tid, "msg-batch", "req-batch", &launch).await;
-    // Add one more batch to make tail 4
-    // Need to commit a run batch to advance tail
-    // Fetch claimed/launched/bound again via extra queue? Easier: use tail 2 and request 0 which is Batch case (0->2)
     let mut registry = ConversationSubscriptionRegistry::new();
     let after = ConversationCursor::new(0);
     let prepared = prepare_conversation_subscription(
@@ -314,26 +303,24 @@ async fn resume_behind_tail_with_batch_still_registers_at_requested_cursor_not_b
     )
     .await
     .expect("resume behind tail should succeed");
-    // Must be Resumed at requested cursor (0), not at batch endpoint (2) or tail
     match prepared.started() {
         ConversationSubscriptionStarted::Resumed { thread_id, cursor } => {
             assert_eq!(thread_id, &tid);
             assert_eq!(*cursor, ConversationCursor::new(0));
         }
-        other => panic!("{other:?}"),
+        ConversationSubscriptionStarted::Fresh(_) => {
+            panic!("expected Resumed, got Fresh")
+        }
     }
     let view = registry.view(&tid).expect("view");
     assert_eq!(view.cursor(), ConversationCursor::new(0));
     assert_eq!(view.state(), SubscriptionState::Pending);
-    // Does not publish: still Pending, not Active, and no batch published
-    // Verify that registry still requires activation
-    // publish would fail with NotActive if we tried, but we don't attempt here
 }
 
 #[tokio::test]
 async fn resume_beyond_tail_returns_both_cursors_and_leaves_existing_unchanged() {
-    let (_db, repo) = memory_repository().await;
-    let tid = seed_thread(&_db, &repo, "thread-beyond").await;
+    let (database, repo) = memory_repository().await;
+    let tid = seed_thread(&database, &repo, "thread-beyond").await;
     let launch = launch_fixture(
         "run-beyond",
         "turn-beyond",
@@ -363,9 +350,10 @@ async fn resume_beyond_tail_returns_both_cursors_and_leaves_existing_unchanged()
             assert_eq!(requested_cursor, beyond);
             assert_eq!(current_cursor.get(), 2);
         }
-        other => panic!("expected ResnapshotRequired, got {other:?}"),
+        PrepareSubscriptionError::Repository(_) | PrepareSubscriptionError::Register(_) => {
+            panic!("expected ResnapshotRequired, got Repository or Register")
+        }
     }
-    // Existing registration unchanged
     let view_after = registry.view(&tid).expect("view after");
     assert_eq!(view_after, view_before);
     assert_eq!(view_after.lease(), &lease_before);
@@ -375,8 +363,8 @@ async fn resume_beyond_tail_returns_both_cursors_and_leaves_existing_unchanged()
 
 #[tokio::test]
 async fn second_successful_preparation_replaces_first_lease_and_pending_at_new_cursor() {
-    let (_db, repo) = memory_repository().await;
-    let tid = seed_thread(&_db, &repo, "thread-replace").await;
+    let (database, repo) = memory_repository().await;
+    let tid = seed_thread(&database, &repo, "thread-replace").await;
     let launch = launch_fixture(
         "run-replace",
         "turn-replace",
@@ -386,7 +374,6 @@ async fn second_successful_preparation_replaces_first_lease_and_pending_at_new_c
     );
     queue_claim_launch_bind(&repo, &tid, "msg-rep", "req-rep", &launch).await;
     let mut registry = ConversationSubscriptionRegistry::new();
-    // First fresh at cursor 2
     let first = prepare_conversation_subscription(
         &repo,
         &mut registry,
@@ -397,7 +384,6 @@ async fn second_successful_preparation_replaces_first_lease_and_pending_at_new_c
     let lease1 = first.lease().clone();
     assert_eq!(registry.view(&tid).unwrap().lease(), &lease1);
     assert_eq!(registry.view(&tid).unwrap().cursor().get(), 2);
-    // Second resume at cursor 0 (different)
     let second = prepare_conversation_subscription(
         &repo,
         &mut registry,
@@ -412,12 +398,10 @@ async fn second_successful_preparation_replaces_first_lease_and_pending_at_new_c
     assert_eq!(view.lease(), &lease2);
     assert_eq!(view.cursor(), ConversationCursor::new(0));
     assert_eq!(view.state(), SubscriptionState::Pending);
-    // Old lease is stale
     assert_eq!(
         registry.activate(&lease1),
         Err(artisan_backend::conversation_subscription_registry::ActivateError::StaleLease)
     );
-    // New lease can activate
     assert!(registry.activate(&lease2).is_ok());
 }
 
@@ -428,7 +412,6 @@ async fn stop_returns_removed_and_absent_idempotently() {
     let lease = registry
         .register_pending(tid.clone(), ConversationCursor::new(3))
         .expect("register");
-    // Activate to have Active state, then stop
     registry.activate(&lease).expect("activate");
     let view_before = registry.view(&tid).unwrap();
     let stopped = stop_conversation_subscription(
@@ -437,7 +420,6 @@ async fn stop_returns_removed_and_absent_idempotently() {
             thread_id: tid.clone(),
         },
     );
-    // Response is always thread_id
     assert_eq!(stopped.response().thread_id, tid);
     assert_eq!(
         stopped.response(),
@@ -452,15 +434,15 @@ async fn stop_returns_removed_and_absent_idempotently() {
             assert_eq!(removed.cursor(), ConversationCursor::new(3));
             assert_eq!(removed.lease(), view_before.lease());
         }
-        other => panic!("expected Removed, got {other:?}"),
+        UnsubscribeOutcome::Absent => {
+            panic!("expected Removed, got Absent")
+        }
     }
-    // into_parts preserves
     let (resp, outcome) = stopped.into_parts();
     assert_eq!(resp.thread_id, tid);
     assert!(matches!(outcome, UnsubscribeOutcome::Removed(_)));
     assert!(registry.view(&tid).is_none());
 
-    // Repeated stop returns Absent with same acknowledgement
     let second = stop_conversation_subscription(
         &mut registry,
         &ConversationUnsubscribe {
@@ -473,7 +455,6 @@ async fn stop_returns_removed_and_absent_idempotently() {
     assert_eq!(resp2.thread_id, tid);
     assert!(matches!(out2, UnsubscribeOutcome::Absent));
 
-    // Unknown thread also Absent
     let unknown = ThreadId::parse("thread-unknown-stop").expect("tid");
     let third = stop_conversation_subscription(
         &mut registry,
@@ -486,10 +467,9 @@ async fn stop_returns_removed_and_absent_idempotently() {
 }
 
 #[tokio::test]
-async fn fresh_and_resumed_accessors_preserve_values_and_generation_exhaustion_is_typed() {
-    // Test accessor preservation already done partially, but explicit
-    let (_db, repo) = memory_repository().await;
-    let tid = seed_thread(&_db, &repo, "thread-accessor").await;
+async fn prepared_and_stopped_accessors_preserve_exact_values() {
+    let (database, repo) = memory_repository().await;
+    let tid = seed_thread(&database, &repo, "thread-accessor").await;
     let mut registry = ConversationSubscriptionRegistry::new();
     let prepared = prepare_conversation_subscription(
         &repo,
@@ -504,9 +484,8 @@ async fn fresh_and_resumed_accessors_preserve_values_and_generation_exhaustion_i
     assert_eq!(started_ref, started_owned);
     assert_eq!(lease_ref, lease_owned);
 
-    // Stop accessor
     let mut reg2 = ConversationSubscriptionRegistry::new();
-    let lease = reg2
+    let pending_lease = reg2
         .register_pending(tid.clone(), ConversationCursor::new(0))
         .expect("reg");
     let stopped = stop_conversation_subscription(
@@ -515,6 +494,10 @@ async fn fresh_and_resumed_accessors_preserve_values_and_generation_exhaustion_i
             thread_id: tid.clone(),
         },
     );
+    match stopped.outcome() {
+        UnsubscribeOutcome::Removed(removed) => assert_eq!(removed.lease(), &pending_lease),
+        other => panic!("expected Removed, got {other:?}"),
+    }
     let resp_ref = stopped.response().clone();
     let out_ref = stopped.outcome().clone();
     let (resp_owned, out_owned) = stopped.into_parts();
@@ -523,19 +506,14 @@ async fn fresh_and_resumed_accessors_preserve_values_and_generation_exhaustion_i
 }
 
 #[tokio::test]
-async fn repository_failure_and_generation_exhaustion_preserve_no_partial_mutation() {
-    let (_db, repo) = memory_repository().await;
-    let tid = seed_thread(&_db, &repo, "thread-gen").await;
+async fn repository_failures_preserve_existing_registry_state() {
+    let (database, repo) = memory_repository().await;
+    let tid = seed_thread(&database, &repo, "thread-gen").await;
     let mut registry = ConversationSubscriptionRegistry::new();
-    // Fill generation to exhaustion? We can simulate by constructing registry with next_generation = 0
-    // Since next_generation is private, we cannot directly set it. Instead we test that a Repository failure preserves registry.
-    // For generation exhaustion we can only test that Register error preserves atomic contract via many registrations
-    // But we can test repository failure path.
     let lease_before = registry
         .register_pending(tid.clone(), ConversationCursor::new(1))
         .expect("initial");
     let view_before = registry.view(&tid).unwrap();
-    // Fresh with unknown thread should be Repository error and leave registry unchanged
     let unknown = ThreadId::parse("unknown-gen-thread").expect("tid");
     let err = prepare_conversation_subscription(
         &repo,
@@ -548,7 +526,6 @@ async fn repository_failure_and_generation_exhaustion_preserve_no_partial_mutati
     assert_eq!(registry.view(&tid).unwrap(), view_before);
     assert_eq!(registry.view(&tid).unwrap().lease(), &lease_before);
 
-    // Also test resume Repository error (unknown thread)
     let err2 = prepare_conversation_subscription(
         &repo,
         &mut registry,
