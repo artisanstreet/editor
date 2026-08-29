@@ -496,7 +496,7 @@ async fn prepared_and_stopped_accessors_preserve_exact_values() {
     );
     match stopped.outcome() {
         UnsubscribeOutcome::Removed(removed) => assert_eq!(removed.lease(), &pending_lease),
-        other => panic!("expected Removed, got {other:?}"),
+        UnsubscribeOutcome::Absent => panic!("expected Removed, got Absent"),
     }
     let resp_ref = stopped.response().clone();
     let out_ref = stopped.outcome().clone();
