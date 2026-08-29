@@ -10,6 +10,7 @@ mod run_binding;
 mod run_launch;
 mod run_observation;
 mod startup_reconciliation;
+mod startup_reconciliation_disposition;
 
 use sea_orm::{DatabaseConnection, DbErr};
 use thiserror::Error;
@@ -47,6 +48,10 @@ pub use run_observation::{
 pub use startup_reconciliation::{
     StartupReconciliationCandidate, StartupReconciliationCandidates, StartupReconciliationError,
     StartupReconciliationQuery, StartupRunLifecycle,
+};
+pub use startup_reconciliation_disposition::{
+    StartupReconciliationDisposition, StartupReconciliationDispositionError,
+    StartupReconciliationDispositionOutcome, StartupReconciliationDispositionReceipt,
 };
 
 /// Typed failures at the native persistence boundary.
