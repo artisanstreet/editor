@@ -4,9 +4,8 @@ use std::{
 };
 
 use serde::{
-    Deserialize,
+    Deserialize, Serialize,
     de::{self, Deserializer, MapAccess, Visitor},
-    Serialize,
 };
 #[cfg(test)]
 use sha2::{Digest, Sha256};
@@ -535,8 +534,8 @@ impl NativeOpenCode2Authority {
         state: &NativeOpenCode2State,
     ) -> Result<Vec<u8>, NativeOpenCode2StateError> {
         validate_install_state(&state.inner, &self.install_spec)?;
-        let bytes = serde_json::to_vec(&state.inner)
-            .map_err(|_| NativeOpenCode2StateError::Encode)?;
+        let bytes =
+            serde_json::to_vec(&state.inner).map_err(|_| NativeOpenCode2StateError::Encode)?;
         if bytes.len() > MAX_STATE_BYTES {
             return Err(NativeOpenCode2StateError::TooLarge);
         }
@@ -784,9 +783,7 @@ fn map_atomic_replace_error(error: &NativeInstanceError) -> NativeOpenCode2State
         | NativeInstanceError::FileHashMismatch
         | NativeInstanceError::InvalidPath(_)
         | NativeInstanceError::Io { .. }
-        | NativeInstanceError::InvalidManifest => {
-            NativeOpenCode2StateError::AtomicPublishFailed
-        }
+        | NativeInstanceError::InvalidManifest => NativeOpenCode2StateError::AtomicPublishFailed,
     }
 }
 
@@ -928,9 +925,7 @@ mod tests {
     #[test]
     fn install_state_constructor_retains_only_the_previous_active_generation() {
         let authority = NativeOpenCode2Authority::new();
-        let first = authority
-            .new_install_state("generation-a", None)
-            .unwrap();
+        let first = authority.new_install_state("generation-a", None).unwrap();
         let second = authority
             .new_install_state("generation-b", Some(&first))
             .unwrap();
@@ -950,9 +945,7 @@ mod tests {
         let engine_root = root.path().join("toolchain").join("opencode2");
         std::fs::create_dir_all(&engine_root).unwrap();
 
-        let first = authority
-            .new_install_state("generation-a", None)
-            .unwrap();
+        let first = authority.new_install_state("generation-a", None).unwrap();
         let first_bytes = authority.encode_install_state(&first).unwrap();
         let first_text = String::from_utf8(first_bytes.clone()).unwrap();
         assert!(!first_text.contains("previous"));
@@ -963,10 +956,7 @@ mod tests {
         ));
         assert_eq!(std::fs::read_dir(&engine_root).unwrap().count(), 1);
 
-        let first_read = authority
-            .read_install_state(&engine_root)
-            .unwrap()
-            .unwrap();
+        let first_read = authority.read_install_state(&engine_root).unwrap().unwrap();
         assert_eq!(
             authority.encode_install_state(&first_read).unwrap(),
             first_bytes
@@ -985,10 +975,7 @@ mod tests {
         ));
         assert_eq!(std::fs::read_dir(&engine_root).unwrap().count(), 1);
 
-        let second_read = authority
-            .read_install_state(&engine_root)
-            .unwrap()
-            .unwrap();
+        let second_read = authority.read_install_state(&engine_root).unwrap().unwrap();
         assert_eq!(second_read.inner.active.directory, "generation-b");
         assert_eq!(
             second_read.inner.previous.as_ref().unwrap().directory,
@@ -1036,9 +1023,7 @@ mod tests {
             authority.encode_install_state(&malformed),
             Err(NativeOpenCode2StateError::ActiveGenerationUntrusted)
         );
-        assert!(!format!("{}", NativeOpenCode2StateError::UnsafePath).contains(
-            "toolchain"
-        ));
+        assert!(!format!("{}", NativeOpenCode2StateError::UnsafePath).contains("toolchain"));
     }
 
     #[test]
@@ -1154,7 +1139,9 @@ mod tests {
         ));
         assert!(
             !is_supported_platform()
-                || NativeOpenCode2Authority::new().resolve_active(&instance).is_err()
+                || NativeOpenCode2Authority::new()
+                    .resolve_active(&instance)
+                    .is_err()
         );
     }
 

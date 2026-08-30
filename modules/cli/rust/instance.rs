@@ -1069,8 +1069,8 @@ pub(crate) fn replace_native_file(
 
     let verified = (|| {
         check_ancestors_all(path, true)?;
-        let destination_id = inspect_native_destination(path)?
-            .ok_or(NativeInstanceError::NotFound)?;
+        let destination_id =
+            inspect_native_destination(path)?.ok_or(NativeInstanceError::NotFound)?;
         if destination_id != temporary_id {
             return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
         }
