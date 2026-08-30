@@ -190,7 +190,7 @@ pub fn start(spec: &ForgeLaunchSpec, foreground: bool) -> Result<StartResult> {
     if foreground {
         start_foreground(spec)
     } else {
-        spawn_background_forge(spec)
+        spawn_background_forge(spec).map(|pid| StartResult::Spawned { pid })
     }
 }
 
