@@ -223,8 +223,11 @@ fn legacy_root_is_nonempty(legacy_root: &Path) -> Result<bool> {
 }
 
 fn is_legacy_root(root: &Path) -> bool {
-    root.file_name()
-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Artisan"))
+    matches!(
+        comparable_components(root).last(),
+        Some(ComparableComponent::Normal(name))
+            if name.eq_ignore_ascii_case("Artisan")
+    )
 }
 
 fn require_native_manifest(root: &Path) -> Result<()> {
@@ -362,6 +365,8 @@ mod tests {
         fs,
         path::{Path, PathBuf},
     };
+
+    use serde_json::json;
 
     use super::*;
 
@@ -546,6 +551,62 @@ mod tests {
                 .exists()
         );
         assert_eq!(fs::read(legacy.join("old-state.json")).unwrap(), b"legacy");
+    }
+
+    #[test]
+    fn explicit_legacy_root_gate_normalizes_child_parent_spellings() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Artisan");
+        fs::create_dir_all(root.join("child")).unwrap();
+        let spellings = [root.clone(), root.join("child").join("..")];
+
+        for spelling in &spellings {
+            let error = discover_root_from(
+                Some(spelling),
+                None,
+                None,
+                NativePlatform::current(),
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Artisan is not installed correctly: installation manifest does not own the requested root"
+            );
+        }
+
+        let manifest = json!({
+            "activation_state": "active",
+            "finalization_state": "complete",
+            "active_version": "1.2.3",
+            "install_root": root,
+            "permanent_ae_path": directory
+                .path()
+                .join("Artisan")
+                .join("bin")
+                .join(if cfg!(windows) { "ae.exe" } else { "ae" }),
+        });
+        fs::write(
+            directory.path().join("Artisan").join("installation.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        for spelling in &spellings {
+            let selected = discover_root_from(
+                Some(spelling),
+                None,
+                None,
+                NativePlatform::current(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(same_path(&selected, &root));
+        }
     }
 
     #[cfg(debug_assertions)]

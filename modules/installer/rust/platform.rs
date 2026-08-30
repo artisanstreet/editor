@@ -175,25 +175,79 @@ fn legacy_root_is_nonempty(legacy_root: &Path) -> Result<bool> {
 }
 
 fn is_legacy_root(root: &Path) -> bool {
-    root.file_name()
-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Artisan"))
+    matches!(
+        comparable_components(root).last(),
+        Some(ComparableComponent::Normal(name))
+            if name.eq_ignore_ascii_case("Artisan")
+    )
 }
 
 fn require_native_manifest(root: &Path) -> Result<()> {
     let path = root.join("installation.json");
     let bytes = fs::read(&path).map_err(|_| invalid_root())?;
     let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid_root())?;
-    let Some(value) = document
+    let Some(install_root) = document
         .get("install_root")
         .and_then(serde_json::Value::as_str)
     else {
         return Err(invalid_root());
     };
-    if same_path(Path::new(value), root) {
-        Ok(())
-    } else {
-        Err(invalid_root())
+    if !same_path(Path::new(install_root), root) {
+        return Err(invalid_root());
     }
+    if document
+        .get("activation_state")
+        .and_then(serde_json::Value::as_str)
+        != Some("active")
+    {
+        return Err(InstallerError::InvalidInstallation(
+            "installation is not fully activated; run `ae doctor --fix`".into(),
+        ));
+    }
+    let Some(active_version) = document
+        .get("active_version")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Err(InstallerError::InvalidInstallation(
+            "active version is invalid".into(),
+        ));
+    };
+    if !is_safe_version(active_version) {
+        return Err(InstallerError::InvalidInstallation(
+            "active version is invalid".into(),
+        ));
+    }
+    let Some(permanent_ae_path) = document
+        .get("permanent_ae_path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Err(InstallerError::InvalidInstallation(
+            "permanent ae path is invalid".into(),
+        ));
+    };
+    let stable_name = if cfg!(windows) { "ae.exe" } else { "ae" };
+    if !same_path(
+        Path::new(permanent_ae_path),
+        &root.join("bin").join(stable_name),
+    ) {
+        return Err(InstallerError::InvalidInstallation(
+            "permanent ae path is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_safe_version(value: &str) -> bool {
+    if value.is_empty()
+        || value.contains('\0')
+        || value
+            .chars()
+            .any(|character| matches!(character, '/' | '\\'))
+    {
+        return false;
+    }
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn invalid_root() -> InstallerError {
@@ -417,25 +471,99 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_selected_legacy_root_requires_an_owned_native_manifest() {
+    fn explicitly_selected_legacy_root_requires_a_complete_owned_native_manifest() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("Artisan");
-        fs::create_dir_all(&root).unwrap();
-        assert!(
-            resolve_install_root_from(Some(&root), None, None, "linux", None, None, None,).is_err()
-        );
+        fs::create_dir_all(root.join("child")).unwrap();
+        let spellings = [root.clone(), root.join("child").join("..")];
+        let stable_name = if cfg!(windows) { "ae.exe" } else { "ae" };
+
         fs::write(
             root.join("installation.json"),
             serde_json::to_vec(&json!({ "install_root": root })).unwrap(),
         )
         .unwrap();
+        for spelling in &spellings {
+            assert_eq!(
+                resolve_install_root_from(Some(spelling), None, None, "linux", None, None, None,)
+                    .unwrap_err()
+                    .to_string(),
+                "installation state is invalid: installation is not fully activated; run `ae doctor --fix`"
+            );
+        }
+
+        fs::write(
+            root.join("installation.json"),
+            serde_json::to_vec(&json!({
+                "activation_state": "active",
+                "active_version": "../escape",
+                "install_root": root,
+                "permanent_ae_path": root.join("bin").join(stable_name),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(
-            resolve_install_root_from(Some(&root), None, None, "linux", None, None, None,).unwrap(),
-            root
+            resolve_install_root_from(Some(&root), None, None, "linux", None, None, None,)
+                .unwrap_err()
+                .to_string(),
+            "installation state is invalid: active version is invalid"
         );
+
+        for permanent_ae_path in [
+            root.join("bin").join("not-ae"),
+            root.with_file_name("Artisan-evil")
+                .join("bin")
+                .join(stable_name),
+        ] {
+            fs::write(
+                root.join("installation.json"),
+                serde_json::to_vec(&json!({
+                    "activation_state": "active",
+                    "active_version": "1.2.3",
+                    "install_root": root,
+                    "permanent_ae_path": permanent_ae_path,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                resolve_install_root_from(Some(&root), None, None, "linux", None, None, None,)
+                    .unwrap_err()
+                    .to_string(),
+                "installation state is invalid: permanent ae path is invalid"
+            );
+        }
+
+        fs::write(
+            root.join("installation.json"),
+            serde_json::to_vec(&json!({
+                "activation_state": "active",
+                "finalization_state": "complete",
+                "active_version": "1.2.3",
+                "install_root": root,
+                "permanent_ae_path": root.join("bin").join(stable_name),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for spelling in &spellings {
+            assert_eq!(
+                resolve_install_root_from(Some(spelling), None, None, "linux", None, None, None,)
+                    .unwrap(),
+                spelling.clone()
+            );
+        }
         assert_eq!(
             fs::read_to_string(root.join("installation.json")).unwrap(),
-            serde_json::to_string(&json!({ "install_root": root })).unwrap()
+            serde_json::to_string(&json!({
+                "activation_state": "active",
+                "finalization_state": "complete",
+                "active_version": "1.2.3",
+                "install_root": root,
+                "permanent_ae_path": root.join("bin").join(stable_name),
+            }))
+            .unwrap()
         );
     }
 

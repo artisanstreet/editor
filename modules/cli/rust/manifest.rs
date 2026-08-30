@@ -116,15 +116,8 @@ fn is_safe_version(value: &str) -> bool {
 }
 
 fn is_owned_permanent_ae_path(root: &Path, path: &Path) -> bool {
-    let names: &[&str] = if cfg!(windows) {
-        &["ae.exe", "ae.cmd", "ae.bat"]
-    } else {
-        &["ae"]
-    };
-    names
-        .iter()
-        .map(|name| root.join("bin").join(name))
-        .any(|expected| same_path(path, &expected))
+    let name = if cfg!(windows) { "ae.exe" } else { "ae" };
+    same_path(path, &root.join("bin").join(name))
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -296,6 +289,23 @@ mod tests {
         ];
         for permanent_ae_path in invalid_paths {
             let path = write_manifest(&root, &root, Some("1.2.3"), permanent_ae_path.as_deref());
+            let error = InstallationManifest::load_for_root(&path, &root).unwrap_err();
+            assert!(error.to_string().contains("permanent ae path is invalid"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_script_launchers_are_not_native_manifest_launchers() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Artisan Street");
+        for launcher in ["ae.cmd", "ae.bat"] {
+            let path = write_manifest(
+                &root,
+                &root,
+                Some("1.2.3"),
+                Some(&root.join("bin").join(launcher)),
+            );
             let error = InstallationManifest::load_for_root(&path, &root).unwrap_err();
             assert!(error.to_string().contains("permanent ae path is invalid"));
         }
