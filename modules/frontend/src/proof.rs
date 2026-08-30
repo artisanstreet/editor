@@ -321,15 +321,10 @@ impl Render for ProofSurface {
                 }
                 conversation_panel
             })
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child(format!(
-                        "conversation effects queued: {}",
-                        self.conversation_effects.len()
-                    )),
-            )
+            .child(div().text_sm().text_color(rgb(MUTED)).child(format!(
+                "conversation effects queued: {}",
+                self.conversation_effects.len()
+            )))
     }
 }
 
