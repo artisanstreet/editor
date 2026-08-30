@@ -154,7 +154,7 @@ pub enum EngineCommand {
     },
     /// Install the certified native `OpenCode2` engine.
     Install,
-    /// Manage explicit certified OpenCode2 profile homes.
+    /// Manage explicit certified `OpenCode2` profile homes.
     Profile {
         #[command(subcommand)]
         command: EngineProfileCommand,

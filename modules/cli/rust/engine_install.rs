@@ -376,7 +376,7 @@ impl InstallLock {
     }
 }
 
-/// Acquires the existing OpenCode2 installation lock for another CLI module.
+/// Acquires the existing `OpenCode2` installation lock for another CLI module.
 ///
 /// Profile registration and installation must serialize through this one
 /// guard; the profile surface does not create a parallel lock protocol.

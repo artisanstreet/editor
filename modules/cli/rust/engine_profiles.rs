@@ -27,19 +27,19 @@ const PROFILE_FIELDS: &[&str] = &["profile_id", "home"];
 
 #[derive(Debug, Subcommand)]
 pub enum EngineProfileCommand {
-    /// Register one explicit OpenCode2 profile home.
+    /// Register one explicit `OpenCode2` profile home.
     Register {
         #[arg(long, required = true, value_parser = parse_engine_profile_id)]
         profile_id: EngineProfileId,
         #[arg(long, required = true, value_enum)]
         home: EngineProfileHomeArg,
     },
-    /// List registered OpenCode2 profile homes.
+    /// List registered `OpenCode2` profile homes.
     List {
         #[arg(long)]
         json: bool,
     },
-    /// Read one exact registered OpenCode2 profile home.
+    /// Read one exact registered `OpenCode2` profile home.
     Read {
         #[arg(long, required = true, value_parser = parse_engine_profile_id)]
         profile_id: EngineProfileId,
@@ -442,7 +442,7 @@ pub(crate) fn register_profile(
     if outcome == ProfileRegistrationOutcome::AlreadyRegistered {
         let profile_home = derived_profile_home(instance, profile_id, home)?;
         credentials::validate_private_directory(&profile_home)
-            .map_err(map_private_directory_error)?;
+            .map_err(|error| map_private_directory_error(&error))?;
         lock.fence_instance(instance)
             .map_err(|_| NativeOpenCode2ProfileError::ProfileLockUnavailable)?;
         return Ok(ProfileRegistrationOutcome::AlreadyRegistered);
@@ -450,7 +450,8 @@ pub(crate) fn register_profile(
     let bytes = encode_profile_registry(&registry)?;
 
     let profile_home = derived_profile_home(instance, profile_id, home)?;
-    credentials::ensure_private_directory(&profile_home).map_err(map_private_directory_error)?;
+    credentials::ensure_private_directory(&profile_home)
+        .map_err(|error| map_private_directory_error(&error))?;
     lock.fence_instance(instance)
         .map_err(|_| NativeOpenCode2ProfileError::ProfileLockUnavailable)?;
     match instance::replace_native_file(&registry_path, &bytes)
@@ -655,7 +656,7 @@ fn encode_profile_registry(
 }
 
 fn map_private_directory_error(
-    error: credentials::ForgeCredentialError,
+    error: &credentials::ForgeCredentialError,
 ) -> NativeOpenCode2ProfileError {
     match error {
         credentials::ForgeCredentialError::InvalidHome(_)
@@ -711,7 +712,7 @@ mod tests {
     #[test]
     fn profile_registry_rejects_unknown_duplicate_missing_trailing_and_unsupported_values() {
         let malformed = [
-            br#"{}"#.as_slice(),
+            br"{}".as_slice(),
             br#"{"engine_id":"opencode2","format_version":1,"profiles":[],"extra":true}"#,
             br#"{"engine_id":"opencode2","engine_id":"opencode2","format_version":1,"profiles":[]}"#,
             br#"{"engine_id":"opencode2","format_version":1,"profiles":[{"profile_id":"a","home":"named","extra":true}]}"#,
