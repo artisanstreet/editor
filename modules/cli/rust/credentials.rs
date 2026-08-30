@@ -1198,10 +1198,14 @@ fn is_icacls_success_summary(line: &str) -> bool {
     let Some(processed) = processed.strip_suffix(" files") else {
         return false;
     };
-    let Some(failed) = failed.strip_suffix(" files.") else {
+    let Some(failed) = failed.strip_suffix(" files") else {
         return false;
     };
-    processed.parse::<u64>().is_ok() && failed.parse::<u64>().is_ok()
+    let failed = failed.strip_suffix('.').unwrap_or(failed);
+    let (Ok(processed), Ok(failed)) = (processed.parse::<u64>(), failed.parse::<u64>()) else {
+        return false;
+    };
+    processed == 1 && failed == 0
 }
 
 fn plan_icacls_removals(
@@ -2088,8 +2092,8 @@ pub fn ensure_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCred
 #[cfg(test)]
 mod parser_tests {
     use super::{
-        CurrentIdentity, parse_icacls_output_with_path, parse_icacls_strict_with_identity,
-        parse_icacls_strict_with_path, plan_icacls_removals,
+        CurrentIdentity, is_icacls_success_summary, parse_icacls_output_with_path,
+        parse_icacls_strict_with_identity, parse_icacls_strict_with_path, plan_icacls_removals,
     };
 
     #[test]
@@ -2153,6 +2157,26 @@ mod parser_tests {
         assert!(parse_icacls_strict_with_path(&trailing, sid, false, file_path).is_err());
         let localized = format!("{dir_path} {sid}:(OI)(CI)(F)\nDacl access");
         assert!(parse_icacls_output_with_path(&localized, sid, dir_path).is_err());
+    }
+
+    #[test]
+    fn icacls_success_summary_requires_one_successful_target() {
+        for summary in [
+            "successfully processed 1 files; failed processing 0 files",
+            "successfully processed 1 files; failed processing 0 files.",
+        ] {
+            assert!(is_icacls_success_summary(summary));
+        }
+        for summary in [
+            "successfully processed 2 files; failed processing 0 files",
+            "successfully processed 1 files; failed processing 1 files",
+            "successfully processed one files; failed processing 0 files",
+            "successfully processed 1 files; failed processing 0 files. trailing",
+            "successfully processed 1 files; failed processing 0 files..",
+            "erfolgreich verarbeitet 1 files; failed processing 0 files",
+        ] {
+            assert!(!is_icacls_success_summary(summary));
+        }
     }
 
     #[test]
