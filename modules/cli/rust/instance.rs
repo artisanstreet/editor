@@ -1,6 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
+    num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
@@ -272,6 +273,560 @@ fn sync_directory(path: &Path) -> Result<()> {
     fs::metadata(path)
         .map(|_| ())
         .map_err(io("inspect Artisan home directory"))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeInstanceError {
+    InvalidPath(PathBuf),
+    Io {
+        context: &'static str,
+        path: PathBuf,
+    },
+    InvalidManifest(String),
+    UnsafePath(PathBuf),
+}
+
+impl std::fmt::Display for NativeInstanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPath(path) => write!(f, "invalid absolute path: {}", path.display()),
+            Self::Io { context, path } => {
+                write!(f, "{context} at {}: [REDACTED]", path.display())
+            }
+            Self::InvalidManifest(message) => write!(f, "invalid instance manifest: {message}"),
+            Self::UnsafePath(path) => {
+                write!(
+                    f,
+                    "refusing unsafe filesystem operation on {}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for NativeInstanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPath(path) => f
+                .debug_tuple("InvalidPath")
+                .field(&path.display().to_string())
+                .finish(),
+            Self::Io { context, path } => f
+                .debug_struct("Io")
+                .field("context", context)
+                .field("path", &path.display().to_string())
+                .finish(),
+            Self::InvalidManifest(_) => f
+                .debug_tuple("InvalidManifest")
+                .field(&"[REDACTED]")
+                .finish(),
+            Self::UnsafePath(path) => f
+                .debug_tuple("UnsafePath")
+                .field(&path.display().to_string())
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for NativeInstanceError {}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeInstanceFile {
+    schema: String,
+    version: u64,
+    database_path: PathBuf,
+    custody_path: PathBuf,
+    readiness_path: PathBuf,
+    credentials_manifest: PathBuf,
+    listener: NativeListenerFile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeListenerFile {
+    admission_timeout_ms: u64,
+    handshake_timeout_ms: u64,
+    request_timeout_ms: u64,
+    drain_timeout_ms: u64,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeListenerConfig {
+    admission_timeout_ms: u64,
+    handshake_timeout_ms: u64,
+    request_timeout_ms: u64,
+    drain_timeout_ms: u64,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+}
+
+impl NativeListenerConfig {
+    pub fn new(
+        admission_timeout_ms: u64,
+        handshake_timeout_ms: u64,
+        request_timeout_ms: u64,
+        drain_timeout_ms: u64,
+        admission_capacity: NonZeroU32,
+        requests_per_connection: NonZeroU32,
+    ) -> Self {
+        Self {
+            admission_timeout_ms,
+            handshake_timeout_ms,
+            request_timeout_ms,
+            drain_timeout_ms,
+            admission_capacity,
+            requests_per_connection,
+        }
+    }
+
+    pub fn admission_timeout_ms(&self) -> u64 {
+        self.admission_timeout_ms
+    }
+
+    pub fn handshake_timeout_ms(&self) -> u64 {
+        self.handshake_timeout_ms
+    }
+
+    pub fn request_timeout_ms(&self) -> u64 {
+        self.request_timeout_ms
+    }
+
+    pub fn drain_timeout_ms(&self) -> u64 {
+        self.drain_timeout_ms
+    }
+
+    pub fn admission_capacity(&self) -> NonZeroU32 {
+        self.admission_capacity
+    }
+
+    pub fn requests_per_connection(&self) -> NonZeroU32 {
+        self.requests_per_connection
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeInstanceConfig {
+    database_path: PathBuf,
+    custody_path: PathBuf,
+    readiness_path: PathBuf,
+    credentials_manifest: PathBuf,
+    listener: NativeListenerConfig,
+}
+
+impl NativeInstanceConfig {
+    pub fn new(
+        database_path: PathBuf,
+        custody_path: PathBuf,
+        readiness_path: PathBuf,
+        credentials_manifest: PathBuf,
+        listener: NativeListenerConfig,
+    ) -> Result<Self, NativeInstanceError> {
+        for path in [
+            &database_path,
+            &custody_path,
+            &readiness_path,
+            &credentials_manifest,
+        ] {
+            if !path.is_absolute() || path.as_os_str().is_empty() || path.parent().is_none() {
+                return Err(NativeInstanceError::InvalidPath((*path).clone()));
+            }
+        }
+        Ok(Self {
+            database_path,
+            custody_path,
+            readiness_path,
+            credentials_manifest,
+            listener,
+        })
+    }
+
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
+    pub fn custody_path(&self) -> &Path {
+        &self.custody_path
+    }
+
+    pub fn readiness_path(&self) -> &Path {
+        &self.readiness_path
+    }
+
+    pub fn credentials_manifest(&self) -> &Path {
+        &self.credentials_manifest
+    }
+
+    pub fn listener(&self) -> &NativeListenerConfig {
+        &self.listener
+    }
+
+    pub fn native_path(home: &Path) -> PathBuf {
+        home.join("instance-v2.json")
+    }
+
+    pub fn load(path: &Path) -> Result<Self, NativeInstanceError> {
+        reject_native_symlink(path)?;
+        let bytes = fs::read(path).map_err(|_| NativeInstanceError::Io {
+            context: "read instance file",
+            path: path.to_path_buf(),
+        })?;
+        let file: NativeInstanceFile = serde_json::from_slice(&bytes)
+            .map_err(|e| NativeInstanceError::InvalidManifest(format!("{e}")))?;
+        if file.schema != "artisan-instance-v2" {
+            return Err(NativeInstanceError::InvalidManifest(
+                "invalid schema".into(),
+            ));
+        }
+        if file.version != 2 {
+            return Err(NativeInstanceError::InvalidManifest(
+                "invalid version".into(),
+            ));
+        }
+        Self::new(
+            file.database_path,
+            file.custody_path,
+            file.readiness_path,
+            file.credentials_manifest,
+            NativeListenerConfig::new(
+                file.listener.admission_timeout_ms,
+                file.listener.handshake_timeout_ms,
+                file.listener.request_timeout_ms,
+                file.listener.drain_timeout_ms,
+                file.listener.admission_capacity,
+                file.listener.requests_per_connection,
+            ),
+        )
+    }
+
+    pub fn write(&self, path: &Path) -> Result<(), NativeInstanceError> {
+        reject_native_symlink_parent(path)?;
+        reject_unsafe_native_destination(path)?;
+        let file = NativeInstanceFile {
+            schema: "artisan-instance-v2".to_string(),
+            version: 2,
+            database_path: self.database_path.clone(),
+            custody_path: self.custody_path.clone(),
+            readiness_path: self.readiness_path.clone(),
+            credentials_manifest: self.credentials_manifest.clone(),
+            listener: NativeListenerFile {
+                admission_timeout_ms: self.listener.admission_timeout_ms,
+                handshake_timeout_ms: self.listener.handshake_timeout_ms,
+                request_timeout_ms: self.listener.request_timeout_ms,
+                drain_timeout_ms: self.listener.drain_timeout_ms,
+                admission_capacity: self.listener.admission_capacity,
+                requests_per_connection: self.listener.requests_per_connection,
+            },
+        };
+        let bytes = serde_json::to_vec_pretty(&file)
+            .map_err(|e| NativeInstanceError::InvalidManifest(format!("{e}")))?;
+        write_native_atomic(path, &bytes)
+    }
+
+    pub fn load_from_home(home: &Path) -> Result<Self, NativeInstanceError> {
+        Self::load(&Self::native_path(home))
+    }
+
+    pub fn write_to_home(&self, home: &Path) -> Result<(), NativeInstanceError> {
+        self.write(&Self::native_path(home))
+    }
+}
+
+pub fn load_native_config(path: &Path) -> Result<NativeInstanceConfig, NativeInstanceError> {
+    NativeInstanceConfig::load(path)
+}
+
+pub fn write_native_config(
+    path: &Path,
+    config: &NativeInstanceConfig,
+) -> Result<(), NativeInstanceError> {
+    config.write(path)
+}
+
+fn reject_native_symlink(path: &Path) -> Result<(), NativeInstanceError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
+        }
+        Ok(meta) if !meta.is_file() => Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(NativeInstanceError::Io {
+            context: "inspect instance file",
+            path: path.to_path_buf(),
+        }),
+    }
+}
+
+fn reject_unsafe_native_destination(path: &Path) -> Result<(), NativeInstanceError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(NativeInstanceError::Io {
+            context: "inspect instance destination",
+            path: path.to_path_buf(),
+        }),
+    }
+}
+
+fn reject_native_symlink_parent(path: &Path) -> Result<(), NativeInstanceError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
+    for ancestor in parent.ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        match fs::symlink_metadata(ancestor) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(NativeInstanceError::UnsafePath(ancestor.to_path_buf()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(NativeInstanceError::Io {
+                    context: "inspect parent",
+                    path: ancestor.to_path_buf(),
+                });
+            }
+        }
+        if ancestor == parent {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn write_native_atomic(path: &Path, bytes: &[u8]) -> Result<(), NativeInstanceError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
+    fs::create_dir_all(directory).map_err(|_| NativeInstanceError::Io {
+        context: "create directory",
+        path: directory.to_path_buf(),
+    })?;
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce)
+        .map_err(|e| NativeInstanceError::InvalidManifest(format!("random failed: {e}")))?;
+    let nonce_hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let temp_name = format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("instance"),
+        nonce_hex
+    );
+    let temporary = directory.join(temp_name);
+    let result = (|| -> Result<(), NativeInstanceError> {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|_| NativeInstanceError::Io {
+                context: "create temporary instance file",
+                path: temporary.clone(),
+            })?;
+        file.write_all(bytes).map_err(|_| NativeInstanceError::Io {
+            context: "write temporary instance file",
+            path: temporary.clone(),
+        })?;
+        file.sync_all().map_err(|_| NativeInstanceError::Io {
+            context: "sync temporary instance file",
+            path: temporary.clone(),
+        })?;
+        drop(file);
+        reject_unsafe_native_destination(path)?;
+        fs::rename(&temporary, path).map_err(|_| NativeInstanceError::Io {
+            context: "activate instance file",
+            path: path.to_path_buf(),
+        })?;
+        #[cfg(unix)]
+        {
+            let _ = fs::File::open(directory).and_then(|dir| dir.sync_all());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use std::num::NonZeroU32;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "artisan-native-{label}-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample_listener() -> NativeListenerConfig {
+        NativeListenerConfig::new(
+            1000,
+            2000,
+            3000,
+            4000,
+            NonZeroU32::new(10).unwrap(),
+            NonZeroU32::new(20).unwrap(),
+        )
+    }
+
+    fn sample_config(home: &Path) -> NativeInstanceConfig {
+        NativeInstanceConfig::new(
+            home.join("data").join("artisan.sqlite"),
+            home.join("custody").join("lock"),
+            home.join("readiness").join("ready"),
+            home.join("credentials").join("manifest.json"),
+            sample_listener(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn native_instance_exact_round_trip() {
+        let home = temp_dir("roundtrip");
+        let config = sample_config(&home);
+        let path = NativeInstanceConfig::native_path(&home);
+        config.write(&path).unwrap();
+        let loaded = NativeInstanceConfig::load(&path).unwrap();
+        assert_eq!(config, loaded);
+        let bytes = fs::read(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["schema"], "artisan-instance-v2");
+        assert_eq!(value["version"], 2);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn native_rejects_unknown_and_duplicate_fields() {
+        let home = temp_dir("unknown");
+        let path = home.join("instance-v2.json");
+        fs::write(
+            &path,
+            br#"{"schema":"artisan-instance-v2","version":2,"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":1,"requests_per_connection":1},"extra":"field"}"#,
+        )
+        .unwrap();
+        assert!(NativeInstanceConfig::load(&path).is_err());
+        fs::write(
+            &path,
+            br#"{"schema":"artisan-instance-v2","version":2,"version":2,"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":1,"requests_per_connection":1}}"#,
+        )
+        .unwrap();
+        assert!(NativeInstanceConfig::load(&path).is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn native_rejects_version_and_relative_paths() {
+        let home = temp_dir("version");
+        let path = home.join("instance-v2.json");
+        fs::write(
+            &path,
+            br#"{"schema":"artisan-instance-v2","version":1,"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":1,"requests_per_connection":1}}"#,
+        )
+        .unwrap();
+        assert!(NativeInstanceConfig::load(&path).is_err());
+        let listener = sample_listener();
+        assert!(
+            NativeInstanceConfig::new(
+                PathBuf::from("relative/path"),
+                PathBuf::from("/tmp/b"),
+                PathBuf::from("/tmp/c"),
+                PathBuf::from("/tmp/d"),
+                listener
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn native_rejects_zero_capacity() {
+        let home = temp_dir("zero");
+        let path = home.join("instance-v2.json");
+        fs::write(
+            &path,
+            br#"{"schema":"artisan-instance-v2","version":2,"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":0,"requests_per_connection":1}}"#,
+        )
+        .unwrap();
+        assert!(NativeInstanceConfig::load(&path).is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn native_listener_values_unchanged() {
+        let listener = NativeListenerConfig::new(
+            111,
+            222,
+            333,
+            444,
+            NonZeroU32::new(5).unwrap(),
+            NonZeroU32::new(6).unwrap(),
+        );
+        assert_eq!(listener.admission_timeout_ms(), 111);
+        assert_eq!(listener.handshake_timeout_ms(), 222);
+        assert_eq!(listener.request_timeout_ms(), 333);
+        assert_eq!(listener.drain_timeout_ms(), 444);
+        assert_eq!(listener.admission_capacity().get(), 5);
+        assert_eq!(listener.requests_per_connection().get(), 6);
+    }
+
+    #[test]
+    fn native_no_default_and_private_fields() {
+        let home = temp_dir("private");
+        let config = sample_config(&home);
+        let debug = format!("{config:?}");
+        assert!(debug.contains("database_path"));
+        let path = NativeInstanceConfig::native_path(&home);
+        config.write(&path).unwrap();
+        let mtime_before = fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let loaded = NativeInstanceConfig::load(&path).unwrap();
+        loaded.write(&path).unwrap();
+        let mtime_after = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(mtime_after >= mtime_before);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn native_redacted_debug() {
+        let err = NativeInstanceError::InvalidManifest("secret".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn native_unix_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_dir("native-modes");
+        let config = sample_config(&home);
+        let path = NativeInstanceConfig::native_path(&home);
+        config.write(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        fs::remove_dir_all(home).unwrap();
+    }
 }
 
 #[cfg(test)]
