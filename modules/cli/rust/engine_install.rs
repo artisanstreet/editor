@@ -888,8 +888,6 @@ fn validate_header(header: &[u8; 512]) -> Result<(), NativeOpenCode2InstallError
         &header[116..124],
         &header[124..136],
         &header[136..148],
-        &header[329..337],
-        &header[337..345],
     ] {
         parse_octal(field)?;
     }
