@@ -569,8 +569,7 @@ mod tests {
     use super::{
         Command, ForgeLaunchSpec, SHUTDOWN_POLL_INTERVAL, SHUTDOWN_PROBE_TIMEOUT, SHUTDOWN_TIMEOUT,
         configure_environment, ensure_idle_for_shutdown, is_forbidden_environment_key,
-        live_state_selected_until, live_state_until, native_argv, registered_states,
-        should_stop_instance,
+        live_state_selected_until, native_argv, registered_states, should_stop_instance,
     };
 
     use crate::{
