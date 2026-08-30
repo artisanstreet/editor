@@ -20,8 +20,8 @@ use artisan_database::{
 };
 use artisan_domain::{
     Command, ConversationQuery, ConversationQueryBounds, ConversationRequest,
-    ConversationSubscribe, DirectoryId, DisplayName, ListAttachedProjects, ListDirectories,
-    ListProjectThreads, MessageBody, MessageId, ProjectId, Query, QueryTurnCount,
+    ConversationSubscribe, ConversationUnsubscribe, DirectoryId, DisplayName, ListAttachedProjects,
+    ListDirectories, ListProjectThreads, MessageBody, MessageId, ProjectId, Query, QueryTurnCount,
     ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_protocol::{
@@ -735,24 +735,10 @@ async fn changed_create_title_fails_idempotency_conflict() {
 }
 
 #[tokio::test]
-async fn conversation_requests_fail_until_projection_exists() {
+async fn conversation_subscriptions_remain_unbacked_without_a_registrar() {
     let (_temporary, storage) = opened_storage("conversation").await;
     let handler = RequestHandler::new(storage.repository().clone());
 
-    let query_failure = failure_of(
-        handler
-            .respond(
-                &request("frame-query"),
-                &ClientRequest::Conversation(ConversationRequest::Query(ConversationQuery {
-                    thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
-                    bounds: ConversationQueryBounds::Window {
-                        maximum_turn_count: QueryTurnCount::new(1)
-                            .expect("bounded count should be valid"),
-                    },
-                })),
-            )
-            .await,
-    );
     let subscribe_failure = failure_of(
         handler
             .respond(
@@ -763,13 +749,113 @@ async fn conversation_requests_fail_until_projection_exists() {
             )
             .await,
     );
+    let unsubscribe_failure = failure_of(
+        handler
+            .respond(
+                &request("frame-unsubscribe"),
+                &ClientRequest::Conversation(ConversationRequest::Unsubscribe(
+                    ConversationUnsubscribe {
+                        thread_id: ThreadId::parse("thread-1").expect("valid id"),
+                    },
+                )),
+            )
+            .await,
+    );
 
     storage.close().await.expect("storage should close");
 
-    for failure in [query_failure, subscribe_failure] {
-        assert_eq!(failure.code, ErrorCode::Internal);
-        assert!(!failure.retryable);
-    }
+    assert_eq!(subscribe_failure.code, ErrorCode::Internal);
+    assert!(!subscribe_failure.retryable);
+    assert_eq!(
+        subscribe_failure.request_id,
+        Some(request("frame-subscribe"))
+    );
+    assert!(
+        subscribe_failure.detail.as_str().contains("subscription"),
+        "subscription failure should name the missing subscription capability"
+    );
+    assert_eq!(unsubscribe_failure.code, ErrorCode::Internal);
+    assert!(!unsubscribe_failure.retryable);
+    assert_eq!(
+        unsubscribe_failure.request_id,
+        Some(request("frame-unsubscribe"))
+    );
+    assert!(
+        unsubscribe_failure.detail.as_str().contains("subscription"),
+        "unsubscription failure should name the missing subscription capability"
+    );
+}
+
+#[tokio::test]
+async fn window_conversation_query_answers_from_durable_snapshot() {
+    let (_temporary, storage) = opened_storage("conversation-snapshot").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "request-project-1",
+            "directory-project-1",
+            "project-1",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
+        .await
+        .expect("seed create should persist");
+    let handler = RequestHandler::new(repository.clone());
+
+    let response = handler
+        .respond(
+            &request("frame-conversation-query"),
+            &ClientRequest::Conversation(ConversationRequest::Query(ConversationQuery {
+                thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
+                bounds: ConversationQueryBounds::Window {
+                    maximum_turn_count: QueryTurnCount::new(4)
+                        .expect("bounded count should be valid"),
+                },
+            })),
+        )
+        .await
+        .expect("known thread should answer with a conversation snapshot");
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(response.request_id, request("frame-conversation-query"));
+    let ResponsePayload::ConversationSnapshot(snapshot) = response.payload else {
+        panic!("expected a conversation snapshot payload");
+    };
+    assert_eq!(snapshot.thread_id().as_str(), "thread-1");
+    assert_eq!(snapshot.cursor().get(), 0);
+    assert!(snapshot.turns().is_empty());
+    assert!(snapshot.items().is_empty());
+    assert_eq!(snapshot.updated_at(), UnixMillis::from_millis(200));
+}
+
+#[tokio::test]
+async fn unknown_thread_conversation_query_fails_thread_unknown() {
+    let (_temporary, storage) = opened_storage("conversation-unknown").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("frame-unknown-query"),
+                &ClientRequest::Conversation(ConversationRequest::Query(ConversationQuery {
+                    thread_id: ThreadId::parse("thread-missing").expect("valid thread id"),
+                    bounds: ConversationQueryBounds::Window {
+                        maximum_turn_count: QueryTurnCount::new(1)
+                            .expect("bounded count should be valid"),
+                    },
+                })),
+            )
+            .await,
+    );
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(failure.code, ErrorCode::ThreadUnknown);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("frame-unknown-query")));
 }
 
 #[tokio::test]
@@ -1079,12 +1165,25 @@ async fn reads_unsupported_requests_and_bad_correlation_never_consult_the_origin
         )
         .await
         .expect("reads answer without the admission origin");
-    let conversation = failure_of(
+    let conversation_success = handler
+        .respond(
+            &request("frame-conversation"),
+            &ClientRequest::Conversation(ConversationRequest::Query(ConversationQuery {
+                thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
+                bounds: ConversationQueryBounds::Window {
+                    maximum_turn_count: QueryTurnCount::new(1)
+                        .expect("bounded count should be valid"),
+                },
+            })),
+        )
+        .await
+        .expect("successful conversation query should not consult the origin");
+    let conversation_failure = failure_of(
         handler
             .respond(
-                &request("frame-conversation"),
+                &request("frame-unknown-conversation"),
                 &ClientRequest::Conversation(ConversationRequest::Query(ConversationQuery {
-                    thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
+                    thread_id: ThreadId::parse("thread-missing").expect("valid thread id"),
                     bounds: ConversationQueryBounds::Window {
                         maximum_turn_count: QueryTurnCount::new(1)
                             .expect("bounded count should be valid"),
@@ -1105,10 +1204,83 @@ async fn reads_unsupported_requests_and_bad_correlation_never_consult_the_origin
     storage.close().await.expect("storage should close");
 
     assert!(matches!(listing.payload, ResponsePayload::ThreadListing(_)));
-    assert_eq!(conversation.code, ErrorCode::Internal);
+    assert!(
+        matches!(
+            conversation_success.payload,
+            ResponsePayload::ConversationSnapshot(_)
+        ),
+        "known-thread query should answer with a snapshot without consulting origin"
+    );
+    assert_eq!(conversation_failure.code, ErrorCode::ThreadUnknown);
+    assert!(!conversation_failure.retryable);
+    assert_eq!(
+        conversation_failure.request_id,
+        Some(request("frame-unknown-conversation"))
+    );
     assert_eq!(correlation.code, ErrorCode::InvalidInput);
     assert!(!correlation.retryable);
     assert_eq!(correlation.request_id, Some(request("frame-other")));
+    assert_eq!(origin.identity_calls(), 0);
+    assert_eq!(origin.instant_calls(), 0);
+}
+
+#[tokio::test]
+async fn conversation_queries_never_consult_the_origin() {
+    let (_temporary, storage) = opened_storage("conversation-no-origin").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "request-project-1",
+            "directory-project-1",
+            "project-1",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input("request-thread-1", "project-1", "thread-1"))
+        .await
+        .expect("seed create should persist");
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), Vec::new());
+    let handler = scripted_handler(&storage, &origin);
+
+    let success = handler
+        .respond(
+            &request("frame-success"),
+            &ClientRequest::Conversation(ConversationRequest::Query(ConversationQuery {
+                thread_id: ThreadId::parse("thread-1").expect("valid thread id"),
+                bounds: ConversationQueryBounds::Window {
+                    maximum_turn_count: QueryTurnCount::new(2)
+                        .expect("bounded count should be valid"),
+                },
+            })),
+        )
+        .await
+        .expect("successful query should answer without origin");
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("frame-failure"),
+                &ClientRequest::Conversation(ConversationRequest::Query(ConversationQuery {
+                    thread_id: ThreadId::parse("thread-unknown").expect("valid thread id"),
+                    bounds: ConversationQueryBounds::Window {
+                        maximum_turn_count: QueryTurnCount::new(2)
+                            .expect("bounded count should be valid"),
+                    },
+                })),
+            )
+            .await,
+    );
+
+    storage.close().await.expect("storage should close");
+
+    assert!(matches!(
+        success.payload,
+        ResponsePayload::ConversationSnapshot(_)
+    ));
+    assert_eq!(success.request_id, request("frame-success"));
+    assert_eq!(failure.code, ErrorCode::ThreadUnknown);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("frame-failure")));
     assert_eq!(origin.identity_calls(), 0);
     assert_eq!(origin.instant_calls(), 0);
 }
