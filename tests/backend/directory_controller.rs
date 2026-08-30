@@ -36,8 +36,7 @@ use artisan_database::SqliteConfig;
 use artisan_domain::ROOT_PATH_MAX_BYTES;
 use artisan_domain::{AttachProject, Command, DirectoryId, ReceiptDisposition, RequestId};
 use artisan_protocol::{
-    ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome, ErrorCode,
-    ResponsePayload,
+    ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome, ErrorCode, ResponsePayload,
 };
 use artisan_transport::CancelHandle;
 use runfiles::{Runfiles, rlocation};
@@ -279,78 +278,142 @@ fn request_handler_composes_picker_attach_replay_and_cancellation() {
             .await
             .expect("composition storage should open and migrate")
     });
-    let mut handler = RequestHandler::with_directory_picker(
-        storage.repository().clone(),
-        started_fixture_controller(&runtime, "pick_success"),
-        SUCCESS_BUDGET,
-    );
+    let handler = composition_handler(&runtime, &storage, "pick_success");
 
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(async {
-            let pick_request_id = RequestId::parse("frame-composition-pick")
-                .expect("pick frame id should be valid");
-            let (picked, receipt) = handler
-                .respond_with_receipt(&pick_request_id, &ClientRequest::PickDirectory)
-                .await
-                .into_parts();
-            assert!(receipt.is_no_work());
-            let picked = picked.expect("the fixture pick should succeed");
-            let directory_id = match picked.payload {
-                ResponsePayload::DirectoryPicked(ProtocolDirectoryPickOutcome::Selected(id)) => id,
-                _other => panic!("expected an opaque selected directory id"),
-            };
-            assert!(!directory_id.as_str().contains('/'));
-            assert!(!directory_id.as_str().contains('\\'));
-
-            let attach_request_id =
-                RequestId::parse("request-composition-attach").expect("attach id should be valid");
-            let attach = ClientRequest::Command(Command::AttachProject(AttachProject {
-                request_id: attach_request_id.clone(),
-                directory_id: directory_id.clone(),
-            }));
-            let (attached, receipt) = handler
-                .respond_with_receipt(&attach_request_id, &attach)
-                .await
-                .into_parts();
-            assert!(receipt.is_no_work());
-            let attached = attached.expect("first attach should succeed");
-            let (project, disposition) = match attached.payload {
-                ResponsePayload::AttachedProject {
-                    project,
-                    disposition,
-                } => (project, disposition),
-                _other => panic!("expected an attached project"),
-            };
-            assert_eq!(disposition, ReceiptDisposition::Accepted);
-            assert!(PathBuf::from(project.root_path.as_str()).is_absolute());
-
-            let (replayed, receipt) = handler
-                .respond_with_receipt(&attach_request_id, &attach)
-                .await
-                .into_parts();
-            assert!(receipt.is_no_work());
-            let replayed = replayed.expect("the same attach should replay");
-            let ResponsePayload::AttachedProject { disposition, .. } = replayed.payload else {
-                panic!("expected an attached-project replay");
-            };
-            assert_eq!(disposition, ReceiptDisposition::Duplicate);
-
-            let other_request_id =
-                RequestId::parse("request-composition-other").expect("other id should be valid");
-            let other_attach = ClientRequest::Command(Command::AttachProject(AttachProject {
-                request_id: other_request_id.clone(),
-                directory_id,
-            }));
-            let (unknown, receipt) = handler
-                .respond_with_receipt(&other_request_id, &other_attach)
-                .await
-                .into_parts();
-            assert!(receipt.is_no_work());
-            let unknown = unknown.expect_err("a consumed id must be unknown to another request");
-            assert_eq!(unknown.code, ErrorCode::DirectoryUnknown);
-            assert!(!unknown.retryable);
-        });
+        assert_successful_project_intake(&runtime, &handler);
     }));
+    let storage = finish_composition_handler(&runtime, handler, storage, caught);
+
+    let cancelled_handler = composition_handler(&runtime, &storage, "cancelled");
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_cancelled_project_intake(&runtime, &cancelled_handler);
+    }));
+    let storage = finish_composition_handler(&runtime, cancelled_handler, storage, caught);
+    runtime
+        .block_on(storage.close())
+        .expect("composition storage should close");
+}
+
+fn composition_handler(
+    runtime: &tokio::runtime::Runtime,
+    storage: &ForgeStorage,
+    scenario: &'static str,
+) -> RequestHandler {
+    RequestHandler::with_directory_picker(
+        storage.repository().clone(),
+        started_fixture_controller(runtime, scenario),
+        SUCCESS_BUDGET,
+    )
+}
+
+fn assert_successful_project_intake(runtime: &tokio::runtime::Runtime, handler: &RequestHandler) {
+    runtime.block_on(async {
+        let pick_request_id =
+            RequestId::parse("frame-composition-pick").expect("pick frame id should be valid");
+        let (picked, receipt) = handler
+            .respond_with_receipt(&pick_request_id, &ClientRequest::PickDirectory)
+            .await
+            .into_parts();
+        assert!(receipt.is_no_work());
+        let picked = picked.expect("the fixture pick should succeed");
+        let directory_id = match picked.payload {
+            ResponsePayload::DirectoryPicked(ProtocolDirectoryPickOutcome::Selected(id)) => id,
+            _other => panic!("expected an opaque selected directory id"),
+        };
+        assert!(!directory_id.as_str().contains('/'));
+        assert!(!directory_id.as_str().contains('\\'));
+
+        let attach_request_id =
+            RequestId::parse("request-composition-attach").expect("attach id should be valid");
+        let attach = ClientRequest::Command(Command::AttachProject(AttachProject {
+            request_id: attach_request_id.clone(),
+            directory_id: directory_id.clone(),
+        }));
+        let (attached, receipt) = handler
+            .respond_with_receipt(&attach_request_id, &attach)
+            .await
+            .into_parts();
+        assert!(receipt.is_no_work());
+        let attached = attached.expect("first attach should succeed");
+        let (project, disposition) = match attached.payload {
+            ResponsePayload::AttachedProject {
+                project,
+                disposition,
+            } => (project, disposition),
+            _other => panic!("expected an attached project"),
+        };
+        assert_eq!(disposition, ReceiptDisposition::Accepted);
+        assert!(PathBuf::from(project.root_path.as_str()).is_absolute());
+
+        let (replayed, receipt) = handler
+            .respond_with_receipt(&attach_request_id, &attach)
+            .await
+            .into_parts();
+        assert!(receipt.is_no_work());
+        let replayed = replayed.expect("the same attach should replay");
+        let ResponsePayload::AttachedProject { disposition, .. } = replayed.payload else {
+            panic!("expected an attached-project replay");
+        };
+        assert_eq!(disposition, ReceiptDisposition::Duplicate);
+
+        let other_request_id =
+            RequestId::parse("request-composition-other").expect("other id should be valid");
+        let other_attach = ClientRequest::Command(Command::AttachProject(AttachProject {
+            request_id: other_request_id.clone(),
+            directory_id,
+        }));
+        let (unknown, receipt) = handler
+            .respond_with_receipt(&other_request_id, &other_attach)
+            .await
+            .into_parts();
+        assert!(receipt.is_no_work());
+        let unknown = unknown.expect_err("a consumed id must be unknown to another request");
+        assert_eq!(unknown.code, ErrorCode::DirectoryUnknown);
+        assert!(!unknown.retryable);
+    });
+}
+
+fn assert_cancelled_project_intake(runtime: &tokio::runtime::Runtime, handler: &RequestHandler) {
+    runtime.block_on(async {
+        let pick_request_id =
+            RequestId::parse("frame-composition-cancel").expect("cancel frame id should be valid");
+        let (cancelled, receipt) = handler
+            .respond_with_receipt(&pick_request_id, &ClientRequest::PickDirectory)
+            .await
+            .into_parts();
+        assert!(receipt.is_no_work());
+        assert_eq!(
+            cancelled
+                .expect("cancelled picker should return a protocol response")
+                .payload,
+            ResponsePayload::DirectoryPicked(ProtocolDirectoryPickOutcome::Cancelled)
+        );
+
+        let attach_request_id =
+            RequestId::parse("request-composition-cancelled").expect("attach id should be valid");
+        let attach = ClientRequest::Command(Command::AttachProject(AttachProject {
+            request_id: attach_request_id.clone(),
+            directory_id: DirectoryId::parse("cancelled-directory")
+                .expect("directory id should be valid"),
+        }));
+        let (unknown, receipt) = handler
+            .respond_with_receipt(&attach_request_id, &attach)
+            .await
+            .into_parts();
+        assert!(receipt.is_no_work());
+        let unknown = unknown.expect_err("a cancelled pick must register nothing");
+        assert_eq!(unknown.code, ErrorCode::DirectoryUnknown);
+        assert!(!unknown.retryable);
+    });
+}
+
+fn finish_composition_handler(
+    runtime: &tokio::runtime::Runtime,
+    mut handler: RequestHandler,
+    storage: ForgeStorage,
+    caught: std::thread::Result<()>,
+) -> ForgeStorage {
     let report = runtime.block_on(handler.shutdown_directory_controller());
     drop(handler);
     if let Err(payload) = caught {
@@ -360,58 +423,7 @@ fn request_handler_composes_picker_attach_replay_and_cancellation() {
         std::panic::resume_unwind(payload);
     }
     assert_eq!(report, Some(ShutdownReport::Joined));
-
-    let mut cancelled_handler = RequestHandler::with_directory_picker(
-        storage.repository().clone(),
-        started_fixture_controller(&runtime, "cancelled"),
-        SUCCESS_BUDGET,
-    );
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(async {
-            let pick_request_id = RequestId::parse("frame-composition-cancel")
-                .expect("cancel frame id should be valid");
-            let (cancelled, receipt) = cancelled_handler
-                .respond_with_receipt(&pick_request_id, &ClientRequest::PickDirectory)
-                .await
-                .into_parts();
-            assert!(receipt.is_no_work());
-            assert_eq!(
-                cancelled
-                    .expect("cancelled picker should return a protocol response")
-                    .payload,
-                ResponsePayload::DirectoryPicked(ProtocolDirectoryPickOutcome::Cancelled)
-            );
-
-            let attach_request_id =
-                RequestId::parse("request-composition-cancelled")
-                    .expect("attach id should be valid");
-            let attach = ClientRequest::Command(Command::AttachProject(AttachProject {
-                request_id: attach_request_id.clone(),
-                directory_id: DirectoryId::parse("cancelled-directory")
-                    .expect("directory id should be valid"),
-            }));
-            let (unknown, receipt) = cancelled_handler
-                .respond_with_receipt(&attach_request_id, &attach)
-                .await
-                .into_parts();
-            assert!(receipt.is_no_work());
-            let unknown = unknown.expect_err("a cancelled pick must register nothing");
-            assert_eq!(unknown.code, ErrorCode::DirectoryUnknown);
-            assert!(!unknown.retryable);
-        });
-    }));
-    let report = runtime.block_on(cancelled_handler.shutdown_directory_controller());
-    drop(cancelled_handler);
-    if let Err(payload) = caught {
-        runtime
-            .block_on(storage.close())
-            .expect("composition storage should close after a panic");
-        std::panic::resume_unwind(payload);
-    }
-    assert_eq!(report, Some(ShutdownReport::Joined));
-    runtime
-        .block_on(storage.close())
-        .expect("composition storage should close");
+    storage
 }
 
 #[test]
