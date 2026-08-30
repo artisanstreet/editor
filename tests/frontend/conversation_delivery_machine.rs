@@ -182,7 +182,7 @@ fn request_generation(effect: &ConversationDeliveryEffect) -> Option<u64> {
     }
 }
 
-fn request_after(effect: &ConversationDeliveryEffect) -> Option<Option<ConversationCursor>> {
+fn request_after(effect: &ConversationDeliveryEffect) -> Option<ConversationCursor> {
     match effect {
         ConversationDeliveryEffect::RequestSnapshot { after, .. } => Some(*after),
         _ => None,
@@ -292,10 +292,7 @@ fn gap_enters_recovering_and_retains_state() {
     assert!(is_report(&effects[0]));
     assert!(is_request(&effects[1]));
     assert_eq!(request_generation(&effects[1]), Some(2));
-    assert_eq!(
-        request_after(&effects[1]),
-        Some(Some(ConversationCursor::new(4)))
-    );
+    assert_eq!(request_after(&effects[1]), Some(ConversationCursor::new(4)));
 }
 
 // 5. more batches in recovering neither mutate visible state nor storm requests
@@ -368,10 +365,7 @@ fn explicit_retry_increments_generation_and_preserves_recovery_snapshot() {
     assert_eq!(effects.len(), 1);
     assert!(is_request(&effects[0]));
     assert_eq!(request_generation(&effects[0]), Some(before_generation + 1));
-    assert_eq!(
-        request_after(&effects[0]),
-        Some(Some(ConversationCursor::new(4)))
-    );
+    assert_eq!(request_after(&effects[0]), Some(ConversationCursor::new(4)));
 }
 
 // 7. valid recovery snapshot returns ready
@@ -522,7 +516,7 @@ fn generation_exhaustion_is_typed_and_never_wraps() {
     assert!(effects.iter().any(is_report));
     let req = effects
         .iter()
-        .find(|effect| is_request(*effect))
+        .find(|effect| matches!(effect, ConversationDeliveryEffect::RequestSnapshot { .. }))
         .expect("request at MAX");
     assert_eq!(request_generation(req), Some(u64::MAX));
     assert_eq!(controller.generation(), u64::MAX);
