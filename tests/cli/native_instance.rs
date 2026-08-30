@@ -72,14 +72,16 @@ fn native_rejects_unknown_and_version() {
 #[test]
 fn native_rejects_relative_and_zero() {
     let home = temp_dir("relative");
-    assert!(NativeInstanceConfig::new(
-        PathBuf::from("relative"),
-        PathBuf::from("/tmp/b"),
-        PathBuf::from("/tmp/c"),
-        PathBuf::from("/tmp/d"),
-        sample_listener()
-    )
-    .is_err());
+    assert!(
+        NativeInstanceConfig::new(
+            PathBuf::from("relative"),
+            PathBuf::from("/tmp/b"),
+            PathBuf::from("/tmp/c"),
+            PathBuf::from("/tmp/d"),
+            sample_listener()
+        )
+        .is_err()
+    );
     let path = home.join("instance-v2.json");
     fs::write(
         &path,
