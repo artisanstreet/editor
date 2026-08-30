@@ -1,6 +1,6 @@
 use std::{
     env,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -104,17 +104,16 @@ fn discover_root_from(
     home: Option<&Path>,
     xdg_data_home: Option<&Path>,
 ) -> Result<PathBuf> {
-    let explicit = [install_root, artisan_home];
-    for root in explicit.into_iter().flatten() {
-        require_absolute_root(root)?;
-    }
-    if let (Some(install_root), Some(artisan_home)) = (install_root, artisan_home)
+    let install_root = install_root.map(normalize_absolute_root).transpose()?;
+    let artisan_home = artisan_home.map(normalize_absolute_root).transpose()?;
+    if let (Some(install_root), Some(artisan_home)) =
+        (install_root.as_deref(), artisan_home.as_deref())
         && !same_path(install_root, artisan_home)
     {
         return Err(CliError::Installation(ROOT_CONFLICT.into()));
     }
     if let Some(root) = install_root.or(artisan_home) {
-        return select_root(root.to_path_buf(), RootSource::Explicit);
+        return select_root_with_source(root, RootSource::Explicit);
     }
 
     if let Some(current_executable) = current_executable
@@ -125,6 +124,8 @@ fn discover_root_from(
 
     let (default_root, legacy_root) =
         platform_roots(platform, local_app_data, home, xdg_data_home)?;
+    let default_root = normalize_absolute_root(&default_root)?;
+    let legacy_root = normalize_absolute_root(&legacy_root)?;
     if !default_root.exists() && legacy_root_is_nonempty(&legacy_root)? {
         return Err(CliError::Installation(format!(
             "legacy Artisan root detected at {}; no migration was performed; select an explicit native root",
@@ -135,11 +136,11 @@ fn discover_root_from(
 }
 
 fn select_root(root: PathBuf, source: RootSource) -> Result<PathBuf> {
-    require_absolute_root(&root)?;
     select_root_with_source(root, source)
 }
 
 fn select_root_with_source(root: PathBuf, source: RootSource) -> Result<PathBuf> {
+    let root = normalize_absolute_root(&root)?;
     if matches!(
         source,
         RootSource::Explicit | RootSource::InstalledExecutable
@@ -150,13 +151,9 @@ fn select_root_with_source(root: PathBuf, source: RootSource) -> Result<PathBuf>
     Ok(root)
 }
 
-fn require_absolute_root(root: &Path) -> Result<()> {
-    if root.is_absolute() {
-        return Ok(());
-    }
-    Err(CliError::Installation(
-        "installation root must be an absolute path".into(),
-    ))
+fn normalize_absolute_root(root: &Path) -> Result<PathBuf> {
+    lexical_normalize_absolute(root)
+        .ok_or_else(|| CliError::Installation("installation root must be an absolute path".into()))
 }
 
 fn platform_roots(
@@ -200,7 +197,7 @@ fn platform_root() -> Result<PathBuf> {
         home.as_deref(),
         xdg_data_home.as_deref(),
     )
-    .map(|(root, _)| root)
+    .and_then(|(root, _)| normalize_absolute_root(&root))
 }
 
 fn legacy_root_is_nonempty(legacy_root: &Path) -> Result<bool> {
@@ -223,8 +220,11 @@ fn legacy_root_is_nonempty(legacy_root: &Path) -> Result<bool> {
 }
 
 fn is_legacy_root(root: &Path) -> bool {
+    let Some(root) = lexical_normalize_absolute(root) else {
+        return false;
+    };
     matches!(
-        comparable_components(root).last(),
+        comparable_components(&root).last(),
         Some(ComparableComponent::Normal(name))
             if name.eq_ignore_ascii_case("Artisan")
     )
@@ -241,9 +241,8 @@ fn installed_executable_root(
     current_executable: &Path,
     platform: NativePlatform,
 ) -> Option<PathBuf> {
-    if !current_executable.is_absolute()
-        || !component_matches(current_executable.file_name(), platform.ae_name())
-    {
+    let current_executable = lexical_normalize_absolute(current_executable)?;
+    if !component_matches(current_executable.file_name(), platform.ae_name()) {
         return None;
     }
     let bin = current_executable.parent()?;
@@ -258,12 +257,9 @@ fn installed_executable_root(
         if !safe_version_component(version) {
             return None;
         }
-        return versions
-            .parent()
-            .filter(|root| root.is_absolute())
-            .map(Path::to_path_buf);
+        return versions.parent().and_then(lexical_normalize_absolute);
     }
-    candidate.is_absolute().then(|| candidate.to_path_buf())
+    lexical_normalize_absolute(candidate)
 }
 
 fn component_matches(value: Option<&OsStr>, expected: &str) -> bool {
@@ -289,6 +285,40 @@ fn safe_version_component(value: &OsStr) -> bool {
 
 fn same_path(left: &Path, right: &Path) -> bool {
     comparable_components(left) == comparable_components(right)
+}
+
+fn lexical_normalize_absolute(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                normalized = PathBuf::from(prefix.as_os_str());
+            }
+            Component::RootDir => {
+                if normalized.as_os_str().is_empty() {
+                    normalized.push(component.as_os_str());
+                } else {
+                    let mut value: OsString = normalized.into_os_string();
+                    value.push(component.as_os_str());
+                    normalized = PathBuf::from(value);
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                }
+            }
+            Component::Normal(normal) => normalized.push(normal),
+        }
+    }
+    normalized.is_absolute().then_some(normalized)
 }
 
 /// Debug builds are development tools. They must never read or mutate the real
@@ -447,9 +477,10 @@ mod tests {
         } else {
             "/Users/Ada/Artisan Street"
         });
+        let equivalent = root.join("child").join("..");
         assert_eq!(
             discover_root_from(
-                Some(&root),
+                Some(&equivalent),
                 Some(&root.join(".")),
                 None,
                 NativePlatform::current(),
@@ -497,6 +528,15 @@ mod tests {
         let stable = root.join("bin").join(NativePlatform::current().ae_name());
         assert_eq!(
             installed_executable_root(&stable, NativePlatform::current()),
+            Some(root.clone())
+        );
+        let stable_equivalent = root
+            .join("child")
+            .join("..")
+            .join("bin")
+            .join(NativePlatform::current().ae_name());
+        assert_eq!(
+            installed_executable_root(&stable_equivalent, NativePlatform::current()),
             Some(root.clone())
         );
         let versioned = root
@@ -605,7 +645,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert!(same_path(&selected, &root));
+            assert_eq!(selected, root);
         }
     }
 

@@ -1,6 +1,6 @@
 use std::{
     env,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -46,7 +46,7 @@ impl Platform {
             home.as_deref(),
             xdg_data_home.as_deref(),
         )
-        .map(|(root, _)| root)
+        .and_then(|(root, _)| normalize_absolute_root(&root))
     }
 }
 
@@ -78,11 +78,15 @@ fn resolve_install_root_from(
     home: Option<&Path>,
     xdg_data_home: Option<&Path>,
 ) -> Result<PathBuf> {
-    let explicit = [command_line, install_root_env, artisan_home_env];
+    let command_line = command_line.map(normalize_absolute_root).transpose()?;
+    let install_root_env = install_root_env.map(normalize_absolute_root).transpose()?;
+    let artisan_home_env = artisan_home_env.map(normalize_absolute_root).transpose()?;
+    let explicit = [
+        command_line.as_deref(),
+        install_root_env.as_deref(),
+        artisan_home_env.as_deref(),
+    ];
     let explicit: Vec<&Path> = explicit.into_iter().flatten().collect();
-    for root in &explicit {
-        require_absolute_root(root)?;
-    }
     for (index, left) in explicit.iter().enumerate() {
         for right in explicit.iter().skip(index + 1) {
             if !same_path(left, right) {
@@ -91,10 +95,12 @@ fn resolve_install_root_from(
         }
     }
     if let Some(root) = command_line.or(install_root_env).or(artisan_home_env) {
-        return select_explicit_root(root.to_path_buf());
+        return select_explicit_root(root);
     }
 
     let (default_root, legacy_root) = default_roots_for(os, local_app_data, home, xdg_data_home)?;
+    let default_root = normalize_absolute_root(&default_root)?;
+    let legacy_root = normalize_absolute_root(&legacy_root)?;
     if !default_root.exists() && legacy_root_is_nonempty(&legacy_root)? {
         return Err(InstallerError::InvalidInstallation(format!(
             "legacy Artisan root detected at {}; no migration was performed; select an explicit native root",
@@ -105,20 +111,17 @@ fn resolve_install_root_from(
 }
 
 fn select_explicit_root(root: PathBuf) -> Result<PathBuf> {
-    require_absolute_root(&root)?;
+    let root = normalize_absolute_root(&root)?;
     if is_legacy_root(&root) {
         require_native_manifest(&root)?;
     }
     Ok(root)
 }
 
-fn require_absolute_root(root: &Path) -> Result<()> {
-    if root.is_absolute() {
-        return Ok(());
-    }
-    Err(InstallerError::InvalidInstallation(
-        "installation root must be an absolute path".into(),
-    ))
+fn normalize_absolute_root(root: &Path) -> Result<PathBuf> {
+    lexical_normalize_absolute(root).ok_or_else(|| {
+        InstallerError::InvalidInstallation("installation root must be an absolute path".into())
+    })
 }
 
 fn default_roots_for(
@@ -175,14 +178,20 @@ fn legacy_root_is_nonempty(legacy_root: &Path) -> Result<bool> {
 }
 
 fn is_legacy_root(root: &Path) -> bool {
+    let Some(root) = lexical_normalize_absolute(root) else {
+        return false;
+    };
     matches!(
-        comparable_components(root).last(),
+        comparable_components(&root).last(),
         Some(ComparableComponent::Normal(name))
             if name.eq_ignore_ascii_case("Artisan")
     )
 }
 
 fn require_native_manifest(root: &Path) -> Result<()> {
+    let Some(root) = lexical_normalize_absolute(root) else {
+        return Err(invalid_root());
+    };
     let path = root.join("installation.json");
     let bytes = fs::read(&path).map_err(|_| invalid_root())?;
     let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid_root())?;
@@ -192,7 +201,10 @@ fn require_native_manifest(root: &Path) -> Result<()> {
     else {
         return Err(invalid_root());
     };
-    if !same_path(Path::new(install_root), root) {
+    let Some(install_root) = lexical_normalize_absolute(Path::new(install_root)) else {
+        return Err(invalid_root());
+    };
+    if !same_path(&install_root, &root) {
         return Err(invalid_root());
     }
     if document
@@ -226,10 +238,12 @@ fn require_native_manifest(root: &Path) -> Result<()> {
         ));
     };
     let stable_name = if cfg!(windows) { "ae.exe" } else { "ae" };
-    if !same_path(
-        Path::new(permanent_ae_path),
-        &root.join("bin").join(stable_name),
-    ) {
+    let Some(permanent_ae_path) = lexical_normalize_absolute(Path::new(permanent_ae_path)) else {
+        return Err(InstallerError::InvalidInstallation(
+            "permanent ae path is invalid".into(),
+        ));
+    };
+    if !same_path(&permanent_ae_path, &root.join("bin").join(stable_name)) {
         return Err(InstallerError::InvalidInstallation(
             "permanent ae path is invalid".into(),
         ));
@@ -256,6 +270,40 @@ fn invalid_root() -> InstallerError {
 
 fn same_path(left: &Path, right: &Path) -> bool {
     comparable_components(left) == comparable_components(right)
+}
+
+fn lexical_normalize_absolute(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                normalized = PathBuf::from(prefix.as_os_str());
+            }
+            Component::RootDir => {
+                if normalized.as_os_str().is_empty() {
+                    normalized.push(component.as_os_str());
+                } else {
+                    let mut value: OsString = normalized.into_os_string();
+                    value.push(component.as_os_str());
+                    normalized = PathBuf::from(value);
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                }
+            }
+            Component::Normal(normal) => normalized.push(normal),
+        }
+    }
+    normalized.is_absolute().then_some(normalized)
 }
 
 #[cfg(debug_assertions)]
@@ -403,9 +451,10 @@ mod tests {
     fn explicit_roots_are_absolute_and_conflicting_sources_fail_closed() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("Artisan Street");
+        let equivalent = root.join("child").join("..");
         assert_eq!(
             resolve_install_root_from(
-                Some(&root),
+                Some(&equivalent),
                 Some(&root.join(".")),
                 Some(&root),
                 "linux",
@@ -551,7 +600,7 @@ mod tests {
             assert_eq!(
                 resolve_install_root_from(Some(spelling), None, None, "linux", None, None, None,)
                     .unwrap(),
-                spelling.clone()
+                root.clone()
             );
         }
         assert_eq!(

@@ -1,4 +1,7 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::Deserialize;
 
@@ -25,24 +28,24 @@ impl InstallationManifest {
     }
 
     pub fn load_for_root(path: &Path, selected_root: &Path) -> Result<Self> {
-        if !selected_root.is_absolute() {
-            return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
-        }
+        let selected_root = lexical_normalize_absolute(selected_root)
+            .ok_or_else(|| CliError::Installation(ROOT_OWNERSHIP.to_owned()))?;
         let expected_path = selected_root.join("installation.json");
-        if !same_path(path, &expected_path) {
+        let requested_path = lexical_normalize_absolute(path)
+            .ok_or_else(|| CliError::Installation(ROOT_OWNERSHIP.to_owned()))?;
+        if !same_path(&requested_path, &expected_path) {
             return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
         }
-        if !path.is_file() {
+        if !expected_path.is_file() {
             return Err(CliError::Installation(format!(
                 "no installation manifest at {}; this Artisan home has no installation",
-                path.display()
+                expected_path.display()
             )));
         }
-        let mut value: Self = read_json(path)?;
-        if !value.install_root.is_absolute() {
-            return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
-        }
-        if !same_path(&value.install_root, selected_root) {
+        let mut value: Self = read_json(&expected_path)?;
+        let manifest_root = lexical_normalize_absolute(&value.install_root)
+            .ok_or_else(|| CliError::Installation(ROOT_OWNERSHIP.to_owned()))?;
+        if !same_path(&manifest_root, &selected_root) {
             return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
         }
         if !value.active_version.as_deref().is_some_and(is_safe_version) {
@@ -51,7 +54,8 @@ impl InstallationManifest {
         if !value
             .permanent_ae_path
             .as_deref()
-            .is_some_and(|path| is_owned_permanent_ae_path(selected_root, path))
+            .and_then(lexical_normalize_absolute)
+            .is_some_and(|path| is_owned_permanent_ae_path(&selected_root, &path))
         {
             return Err(CliError::Installation(
                 "permanent ae path is invalid".into(),
@@ -65,7 +69,9 @@ impl InstallationManifest {
         // The selected root is the authority for all later version and
         // process resolution. Keep an equivalent manifest spelling from
         // becoming a second root authority.
-        value.install_root = selected_root.to_path_buf();
+        value.install_root = selected_root.clone();
+        let stable_name = if cfg!(windows) { "ae.exe" } else { "ae" };
+        value.permanent_ae_path = Some(selected_root.join("bin").join(stable_name));
         Ok(value)
     }
 
@@ -130,6 +136,40 @@ fn same_path(left: &Path, right: &Path) -> bool {
     comparable_components(left) == comparable_components(right)
 }
 
+fn lexical_normalize_absolute(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                normalized = PathBuf::from(prefix.as_os_str());
+            }
+            Component::RootDir => {
+                if normalized.as_os_str().is_empty() {
+                    normalized.push(component.as_os_str());
+                } else {
+                    let mut value: OsString = normalized.into_os_string();
+                    value.push(component.as_os_str());
+                    normalized = PathBuf::from(value);
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                }
+            }
+            Component::Normal(normal) => normalized.push(normal),
+        }
+    }
+    normalized.is_absolute().then_some(normalized)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ComparableComponent {
     Prefix(String),
@@ -175,7 +215,7 @@ fn comparable_text(value: &std::ffi::OsStr) -> String {
 mod tests {
     use std::{
         fs,
-        path::{Path, PathBuf},
+        path::{Component, Path, PathBuf},
     };
 
     use serde_json::json;
@@ -231,19 +271,27 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("Artisan Street");
         fs::create_dir_all(root.join("child")).unwrap();
-        let path = write_manifest(
+        write_manifest(
             &root,
             &root.join(".").join("nested").join(".."),
             Some("1.2.3"),
             Some(&native_permanent_path(&root)),
         );
         let selected = root.join("child").join("..");
-        let manifest = InstallationManifest::load_for_root(&path, &selected).unwrap();
-        assert!(same_path(&manifest.install_root, &root));
-        assert_eq!(manifest.finalization_state.as_deref(), Some("pending"));
+        let manifest_path = selected.join("installation.json");
+        let manifest = InstallationManifest::load_for_root(&manifest_path, &selected).unwrap();
+        assert_eq!(manifest.install_root, root);
         assert_eq!(
-            manifest.version_root(),
-            manifest.install_root.join("versions/1.2.3")
+            manifest.permanent_ae_path,
+            Some(native_permanent_path(&root))
+        );
+        assert_eq!(manifest.finalization_state.as_deref(), Some("pending"));
+        assert_eq!(manifest.version_root(), root.join("versions/1.2.3"));
+        assert!(
+            manifest
+                .version_root()
+                .components()
+                .all(|component| !matches!(component, Component::CurDir | Component::ParentDir))
         );
     }
 
