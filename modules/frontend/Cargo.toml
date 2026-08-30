@@ -139,6 +139,10 @@ name = "conversation_steering"
 path = "../../tests/frontend/conversation_steering.rs"
 
 [[test]]
+name = "conversation_steering_machine"
+path = "../../tests/frontend/conversation_steering_machine.rs"
+
+[[test]]
 name = "conversation_turn_footer_policy"
 path = "../../tests/frontend/conversation_turn_footer_policy.rs"
 
