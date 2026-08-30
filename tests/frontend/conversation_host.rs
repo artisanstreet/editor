@@ -37,7 +37,7 @@ use conversation_surface::{
 };
 use conversation_turn_machine::TurnEvent;
 use conversation_view_machine::{DisclosureState, ViewportEffect};
-use gpui::{AppContext as _, Modifiers, TestAppContext, px, size};
+use gpui::{Modifiers, TestAppContext, px, size};
 
 const THREAD: &str = "thread_host";
 const TURN_A: &str = "turn_a";
@@ -858,6 +858,7 @@ fn streaming_narration_is_projected_by_the_controller_scene(cx: &mut TestAppCont
             ordered_block_kinds(host.surface().read(app).scene()),
             vec![
                 conversation_surface::RenderedBlockKind::UserMessage,
+                conversation_surface::RenderedBlockKind::TurnStatus,
                 conversation_surface::RenderedBlockKind::TurnFooter,
             ]
         );
