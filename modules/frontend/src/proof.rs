@@ -20,7 +20,7 @@ use gpui::{
     MouseButton, MouseDownEvent, Subscription, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _},
-    px, rgb, size,
+    px, relative, rgb, size,
 };
 
 // Feasibility-only quit action exercising the `actions!` macro registry, plus
@@ -285,7 +285,8 @@ impl Render for ProofSurface {
             .text_xl()
             .child(
                 div()
-                    .flex_1()
+                    .w(relative(0.5))
+                    .flex_shrink_0()
                     .h_full()
                     .flex()
                     .flex_col()
@@ -310,7 +311,8 @@ impl Render for ProofSurface {
             )
             .child(
                 div()
-                    .flex_1()
+                    .w(relative(0.5))
+                    .flex_shrink_0()
                     .h_full()
                     .flex()
                     .flex_col()
