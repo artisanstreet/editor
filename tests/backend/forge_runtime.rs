@@ -612,6 +612,7 @@ fn readiness_is_exact_and_shutdown_removes_only_this_receipt() {
         "cancellation should be a clean shutdown: {result:?}"
     );
     assert!(!ready_path.exists(), "this run's receipt should be removed");
+    assert_no_readiness_temporary(&directory);
 
     let custody = ForgeProcessCustody::acquire(directory.path("forge.custody"))
         .expect("custody should be reacquirable after clean shutdown");
@@ -789,6 +790,11 @@ fn service_primary_survives_readiness_cleanup_failure_with_typed_cleanup() {
             .any(|failure| matches!(failure, ForgeRuntimeError::ReadinessCleanup(_)))
     );
     assert_eq!(
+        fs::read(&ready_path).expect("replacement readiness target should survive cleanup"),
+        b"replacement readiness target"
+    );
+    assert_no_readiness_temporary(&directory);
+    assert_eq!(
         composite.primary().exit_code(),
         forge_runtime::EXIT_CODE_SERVICE
     );
@@ -912,6 +918,25 @@ fn readiness_endpoint(value: &serde_json::Value) -> SocketAddr {
         .expect("readiness endpoint should be text")
         .parse()
         .expect("readiness endpoint should be a socket address")
+}
+
+fn assert_no_readiness_temporary(directory: &TemporaryDirectory) {
+    let prefix = format!(".artisan-forge-ready-{}-", process::id());
+    let leftovers = fs::read_dir(&directory.path)
+        .expect("Forge test directory should remain readable")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "Forge readiness temporary files should be removed: {leftovers:?}"
+    );
 }
 
 fn join_within<T>(handle: JoinHandle<T>, timeout: Duration) -> T {

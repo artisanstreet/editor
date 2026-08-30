@@ -13,7 +13,7 @@ use std::{
     ffi::{OsStr, OsString},
     fmt,
     fs::{self, File, Metadata, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
     path::{Path, PathBuf},
@@ -34,7 +34,9 @@ use zeroize::Zeroize;
 use crate::{
     ForgeApp, ForgeConfig, ForgeListener, ForgeProcessCustody, ForgeProcessCustodyError,
     ForgeShutdownError, ForgeStartupError, ListenerError, ListenerLimits, RequestHandler,
-    SystemCommandOrigin, listener::ServeUntilCancelError,
+    SystemCommandOrigin,
+    file_identity_policy::{FileIdentity, read_file_identity, same_file_identity},
+    listener::ServeUntilCancelError,
 };
 
 /// Stable process exit code for invalid configuration or credential material.
@@ -1194,10 +1196,10 @@ impl ReadinessReceipt {
         })?;
         let mut file = file.expect("temporary file exists whenever its path exists");
         if let Err(source) = file.write_all(body.as_bytes()) {
-            drop(file);
             let temporary_path = temporary.clone();
-            return Err(with_temporary_cleanup(
+            return Err(with_open_temporary_cleanup(
                 temporary,
+                file,
                 ReadinessError::WriteTemporary {
                     path: temporary_path,
                     source,
@@ -1205,23 +1207,23 @@ impl ReadinessReceipt {
             ));
         }
         if let Err(source) = file.flush().and_then(|()| file.sync_all()) {
-            drop(file);
             let temporary_path = temporary.clone();
-            return Err(with_temporary_cleanup(
+            return Err(with_open_temporary_cleanup(
                 temporary,
+                file,
                 ReadinessError::WriteTemporary {
                     path: temporary_path,
                     source,
                 },
             ));
         }
-        let temporary_identity = match file.metadata() {
-            Ok(metadata) => FileIdentity::from_metadata(&metadata),
+        let temporary_identity = match read_file_identity(&file) {
+            Ok(identity) => identity,
             Err(source) => {
-                drop(file);
                 let temporary_path = temporary.clone();
-                return Err(with_temporary_cleanup(
+                return Err(with_open_temporary_cleanup(
                     temporary,
+                    file,
                     ReadinessError::WriteTemporary {
                         path: temporary_path,
                         source,
@@ -1242,135 +1244,294 @@ impl ReadinessReceipt {
                     source,
                 }
             };
-            return Err(with_temporary_cleanup(temporary, error));
-        }
-        let target_metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(with_temporary_cleanup(
-                    temporary,
-                    ReadinessError::TargetReplaced {
-                        path: path.to_path_buf(),
-                    },
-                ));
-            }
-            Ok(metadata) if is_reparse_point(&metadata) || !metadata.is_file() => {
-                return Err(with_temporary_cleanup(
-                    temporary,
-                    ReadinessError::TargetReplaced {
-                        path: path.to_path_buf(),
-                    },
-                ));
-            }
-            Ok(metadata) => metadata,
-            Err(source) => {
-                return Err(with_temporary_cleanup(
-                    temporary,
-                    ReadinessError::Install {
-                        path: path.to_path_buf(),
-                        source,
-                    },
-                ));
-            }
-        };
-        let identity = FileIdentity::from_metadata(&target_metadata);
-        if identity != temporary_identity {
-            return Err(with_temporary_cleanup(
+            return Err(with_temporary_identity_cleanup(
                 temporary,
-                ReadinessError::TargetReplaced {
-                    path: path.to_path_buf(),
-                },
+                temporary_identity,
+                error,
             ));
         }
-        Ok(Self {
+        // The hard link is now installed. Construct the cleanup owner before
+        // opening or inspecting the target so every later failure has a
+        // recorded identity-bound owner to clean up.
+        let receipt = Self {
             path: path.to_path_buf(),
-            identity,
+            identity: temporary_identity,
             contents: body.into_bytes(),
             temporary,
-        })
+        };
+        match receipt.validate_published_target() {
+            Ok(()) => Ok(receipt),
+            Err(primary) => Err(receipt.cleanup_after_error(primary)),
+        }
     }
 
     fn remove(self) -> Result<(), ReadinessError> {
-        let mut failure = None;
-        match fs::symlink_metadata(&self.path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                failure = Some(ReadinessError::TargetReplaced {
-                    path: self.path.clone(),
-                });
-            }
-            Ok(metadata) if is_reparse_point(&metadata) => {
-                failure = Some(ReadinessError::TargetReplaced {
-                    path: self.path.clone(),
-                });
-            }
-            Ok(_) => match fs::metadata(&self.path) {
-                Ok(metadata) if FileIdentity::from_metadata(&metadata) == self.identity => {
-                    match fs::read(&self.path) {
-                        Ok(contents) if contents.as_slice() == self.contents.as_slice() => {
-                            if let Err(source) = fs::remove_file(&self.path) {
-                                failure = Some(ReadinessError::Remove {
-                                    path: self.path.clone(),
-                                    source,
-                                });
-                            }
-                        }
-                        Ok(_) => {
-                            failure = Some(ReadinessError::TargetReplaced {
-                                path: self.path.clone(),
-                            });
-                        }
-                        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-                        Err(source) => {
-                            failure = Some(ReadinessError::Remove {
-                                path: self.path.clone(),
-                                source,
-                            });
-                        }
-                    }
-                }
-                Ok(_) => {
-                    failure = Some(ReadinessError::TargetReplaced {
-                        path: self.path.clone(),
-                    });
-                }
-                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    failure = Some(ReadinessError::Remove {
-                        path: self.path.clone(),
-                        source,
-                    });
-                }
-            },
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => {
-                failure = Some(ReadinessError::Remove {
+        // Both owners are attempted independently. A target replacement must
+        // never prevent removal of this run's private temporary hard link.
+        let target_failure = remove_owned_target(&self.path, self.identity, &self.contents).err();
+        let temporary_failure = remove_owned_temporary(&self.temporary, self.identity).err();
+
+        match (target_failure, temporary_failure) {
+            (None, None) => Ok(()),
+            (Some(failure), None) | (None, Some(failure)) => Err(failure),
+            (Some(primary), Some(cleanup)) => Err(ReadinessError::Cleanup {
+                primary: Box::new(primary),
+                cleanup: Box::new(cleanup),
+            }),
+        }
+    }
+
+    fn validate_published_target(&self) -> Result<(), ReadinessError> {
+        let Some(mut target) = open_readiness_target(&self.path)? else {
+            return Err(ReadinessError::TargetReplaced {
+                path: self.path.clone(),
+            });
+        };
+        let target_identity =
+            read_file_identity(&target).map_err(|source| ReadinessError::InspectTarget {
+                path: self.path.clone(),
+                source,
+            })?;
+        if !same_file_identity(target_identity, self.identity)
+            || !readiness_contents_match(&mut target, &self.contents).map_err(|source| {
+                ReadinessError::InspectTarget {
                     path: self.path.clone(),
                     source,
-                });
-            }
-        }
-        if let Err(source) = remove_private_temporary(&self.temporary) {
-            let cleanup = ReadinessError::TemporaryCleanup {
-                path: self.temporary,
-                source,
-            };
-            failure = Some(match failure {
-                Some(primary) => ReadinessError::Cleanup {
-                    primary: Box::new(primary),
-                    cleanup: Box::new(cleanup),
-                },
-                None => cleanup,
+                }
+            })?
+        {
+            return Err(ReadinessError::TargetReplaced {
+                path: self.path.clone(),
             });
         }
-        failure.map_or(Ok(()), Err)
+        Ok(())
+    }
+
+    fn cleanup_after_error(self, primary: ReadinessError) -> ReadinessError {
+        match self.remove() {
+            Ok(()) => primary,
+            Err(cleanup) => ReadinessError::Cleanup {
+                primary: Box::new(primary),
+                cleanup: Box::new(cleanup),
+            },
+        }
     }
 }
 
-fn with_temporary_cleanup(path: PathBuf, primary: ReadinessError) -> ReadinessError {
-    match remove_private_temporary(&path) {
+/// Opens an existing readiness entry only after checking its complete parent
+/// chain and final path shape. The path is checked again after opening so the
+/// returned handle is paired with the exact entry that was inspected.
+fn open_readiness_target(path: &Path) -> Result<Option<File>, ReadinessError> {
+    let parent = path.parent().ok_or_else(|| ReadinessError::ParentMissing {
+        path: path.to_path_buf(),
+    })?;
+    validate_readiness_parent_chain(parent)?;
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ReadinessError::InspectTarget {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if readiness_target_is_replaced(&metadata) {
+        return Err(ReadinessError::TargetReplaced {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let file = match open_readiness_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ReadinessError::InspectTarget {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let handle_metadata = file
+        .metadata()
+        .map_err(|source| ReadinessError::InspectTarget {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if readiness_target_is_replaced(&handle_metadata) {
+        return Err(ReadinessError::TargetReplaced {
+            path: path.to_path_buf(),
+        });
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if readiness_target_is_replaced(&metadata) => {
+            Err(ReadinessError::TargetReplaced {
+                path: path.to_path_buf(),
+            })
+        }
+        Ok(_) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ReadinessError::InspectTarget {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn remove_owned_target(
+    path: &Path,
+    expected_identity: FileIdentity,
+    expected_contents: &[u8],
+) -> Result<(), ReadinessError> {
+    let Some(mut target) = open_readiness_target(path)? else {
+        return Ok(());
+    };
+    let target_identity =
+        read_file_identity(&target).map_err(|source| ReadinessError::InspectTarget {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !same_file_identity(target_identity, expected_identity)
+        || !readiness_contents_match(&mut target, expected_contents).map_err(|source| {
+            ReadinessError::InspectTarget {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?
+    {
+        return Err(ReadinessError::TargetReplaced {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let Some(mut final_target) = open_readiness_target(path)? else {
+        return Ok(());
+    };
+    let final_identity =
+        read_file_identity(&final_target).map_err(|source| ReadinessError::InspectTarget {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !same_file_identity(final_identity, expected_identity)
+        || !readiness_contents_match(&mut final_target, expected_contents).map_err(|source| {
+            ReadinessError::InspectTarget {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?
+    {
+        return Err(ReadinessError::TargetReplaced {
+            path: path.to_path_buf(),
+        });
+    }
+    drop(final_target);
+    drop(target);
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ReadinessError::Remove {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn remove_owned_temporary(
+    path: &Path,
+    expected_identity: FileIdentity,
+) -> Result<(), ReadinessError> {
+    let Some(file) = open_readiness_target(path)? else {
+        return Ok(());
+    };
+    let identity =
+        read_file_identity(&file).map_err(|source| ReadinessError::TemporaryCleanup {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !same_file_identity(identity, expected_identity) {
+        return Err(ReadinessError::TargetReplaced {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let Some(final_file) = open_readiness_target(path)? else {
+        return Ok(());
+    };
+    let final_identity =
+        read_file_identity(&final_file).map_err(|source| ReadinessError::TemporaryCleanup {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !same_file_identity(final_identity, expected_identity) {
+        return Err(ReadinessError::TargetReplaced {
+            path: path.to_path_buf(),
+        });
+    }
+    drop(final_file);
+    drop(file);
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ReadinessError::TemporaryCleanup {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn open_readiness_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_reparse_open(&mut options);
+    options.open(path)
+}
+
+fn readiness_contents_match(file: &mut File, expected: &[u8]) -> io::Result<bool> {
+    let expected_length = u64::try_from(expected.len()).unwrap_or(u64::MAX);
+    let limit = expected_length.saturating_add(1);
+    let mut contents = Vec::with_capacity(expected.len().saturating_add(1));
+    let mut limited = (&mut *file).take(limit);
+    limited.read_to_end(&mut contents)?;
+    Ok(contents == expected)
+}
+
+fn readiness_target_is_replaced(metadata: &Metadata) -> bool {
+    metadata.file_type().is_symlink() || is_reparse_point(metadata) || !metadata.is_file()
+}
+
+fn with_open_temporary_cleanup(
+    path: PathBuf,
+    file: File,
+    primary: ReadinessError,
+) -> ReadinessError {
+    let identity = match read_file_identity(&file) {
+        Ok(identity) => identity,
+        Err(source) => {
+            drop(file);
+            return ReadinessError::Cleanup {
+                primary: Box::new(primary),
+                cleanup: Box::new(ReadinessError::TemporaryCleanup { path, source }),
+            };
+        }
+    };
+    drop(file);
+    with_temporary_identity_cleanup(path, identity, primary)
+}
+
+fn with_temporary_identity_cleanup(
+    path: PathBuf,
+    identity: FileIdentity,
+    primary: ReadinessError,
+) -> ReadinessError {
+    match remove_owned_temporary(&path, identity) {
         Ok(()) => primary,
-        Err(source) => ReadinessError::Cleanup {
+        Err(cleanup) => ReadinessError::Cleanup {
             primary: Box::new(primary),
-            cleanup: Box::new(ReadinessError::TemporaryCleanup { path, source }),
+            cleanup: Box::new(cleanup),
         },
     }
 }
@@ -1457,14 +1618,6 @@ fn create_private_temporary(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-fn remove_private_temporary(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn temporary_path(parent: &Path) -> PathBuf {
@@ -1473,49 +1626,6 @@ fn temporary_path(parent: &Path) -> PathBuf {
         ".artisan-forge-ready-{}-{sequence}.tmp",
         std::process::id()
     ))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileIdentity {
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(windows)]
-    volume: Option<u32>,
-    #[cfg(windows)]
-    index: Option<u64>,
-    #[cfg(not(any(unix, windows)))]
-    length: u64,
-}
-
-impl FileIdentity {
-    #[cfg(unix)]
-    fn from_metadata(metadata: &Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
-
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        }
-    }
-
-    #[cfg(windows)]
-    fn from_metadata(metadata: &Metadata) -> Self {
-        use std::os::windows::fs::MetadataExt;
-
-        Self {
-            volume: metadata.volume_serial_number(),
-            index: metadata.file_index(),
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn from_metadata(metadata: &Metadata) -> Self {
-        Self {
-            length: metadata.len(),
-        }
-    }
 }
 
 fn is_required_loopback(address: SocketAddr) -> bool {
@@ -1614,6 +1724,9 @@ fn required<T>(value: Option<T>, option: &'static str) -> Result<T, ForgeConfigE
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 #[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+#[cfg(windows)]
 fn is_reparse_point(metadata: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
 
@@ -1624,3 +1737,13 @@ fn is_reparse_point(metadata: &Metadata) -> bool {
 const fn is_reparse_point(_: &Metadata) -> bool {
     false
 }
+
+#[cfg(windows)]
+fn configure_no_reparse_open(options: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(windows))]
+const fn configure_no_reparse_open(_: &mut OpenOptions) {}
