@@ -96,7 +96,29 @@ fn status_copy_is_exhaustive_and_suppression_has_no_row() {
 
 #[test]
 fn ordered_block_projection_preserves_scene_order() {
-    let items = vec![
+    let scene = scene(ordered_scene_items(), TurnNarration::Quiet);
+
+    assert_eq!(
+        ordered_block_kinds(&scene),
+        vec![
+            RenderedBlockKind::UserMessage,
+            RenderedBlockKind::WorkGroup,
+            RenderedBlockKind::AssistantMessage,
+            RenderedBlockKind::Plan,
+            RenderedBlockKind::Approval,
+            RenderedBlockKind::Question,
+            RenderedBlockKind::Error,
+            RenderedBlockKind::UsageInterruption,
+            RenderedBlockKind::ModelTransition,
+            RenderedBlockKind::NativeFact,
+            RenderedBlockKind::TurnStatus,
+            RenderedBlockKind::TurnFooter,
+        ]
+    );
+}
+
+fn ordered_scene_items() -> Vec<SceneItem> {
+    vec![
         item(
             "user",
             "turn_a",
@@ -191,25 +213,6 @@ fn ordered_block_projection_preserves_scene_order() {
             None,
         ),
     ];
-    let scene = scene(items, TurnNarration::Quiet);
-
-    assert_eq!(
-        ordered_block_kinds(&scene),
-        vec![
-            RenderedBlockKind::UserMessage,
-            RenderedBlockKind::WorkGroup,
-            RenderedBlockKind::AssistantMessage,
-            RenderedBlockKind::Plan,
-            RenderedBlockKind::Approval,
-            RenderedBlockKind::Question,
-            RenderedBlockKind::Error,
-            RenderedBlockKind::UsageInterruption,
-            RenderedBlockKind::ModelTransition,
-            RenderedBlockKind::NativeFact,
-            RenderedBlockKind::TurnStatus,
-            RenderedBlockKind::TurnFooter,
-        ]
-    );
 }
 
 #[test]
