@@ -14,7 +14,6 @@ use artisan_frontend::conversation_projection::ProjectionStatus;
 
 const THREAD: &str = "thread_delivery_machine";
 const TURN_A: &str = "turn_delivery_a";
-const TURN_B: &str = "turn_delivery_b";
 const ITEM_USER: &str = "item_delivery_user";
 const ITEM_ASSIST: &str = "item_delivery_assist";
 
@@ -532,11 +531,9 @@ fn generation_exhaustion_is_typed_and_never_wraps() {
     let err = controller.retry().expect_err("retry at MAX should exhaust");
     assert_eq!(err, ConversationDeliveryError::GenerationExhausted);
     let effects = controller.drain_effects();
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, ConversationDeliveryEffect::GenerationExhausted))
-    );
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, ConversationDeliveryEffect::GenerationExhausted)));
     // Generation never wrapped
     assert_eq!(controller.generation(), u64::MAX);
 
@@ -667,8 +664,11 @@ fn drain_does_not_alter_phase_or_projection() {
 #[test]
 fn undrained_exhaustion_not_rereported_on_later_inert_events() {
     let mut controller =
-        ConversationDeliveryController::with_initial_generation(thread_id(), u64::MAX - 1);
-    let _ = controller.drain_effects(); // MAX-1 consumed
+        ConversationDeliveryController::with_initial_generation(thread_id(), u64::MAX - 2);
+    // Construction consumed one generation: MAX-1.
+    let init_effects = controller.drain_effects();
+    assert_eq!(init_effects.len(), 1);
+    assert_eq!(request_generation(&init_effects[0]), Some(u64::MAX - 1));
     controller
         .on_snapshot(baseline_snapshot())
         .expect("baseline");
@@ -683,12 +683,10 @@ fn undrained_exhaustion_not_rereported_on_later_inert_events() {
     let err = controller.retry().expect_err("retry exhausts");
     assert_eq!(err, ConversationDeliveryError::GenerationExhausted);
     assert_eq!(controller.pending_effect_count(), 1);
-    assert!(
-        controller
-            .pending_effects()
-            .iter()
-            .any(|e| matches!(e, ConversationDeliveryEffect::GenerationExhausted))
-    );
+    assert!(controller
+        .pending_effects()
+        .iter()
+        .any(|e| matches!(e, ConversationDeliveryEffect::GenerationExhausted)));
 
     // An unrelated inert foreign frame must not rediscover the pending
     // exhaustion as a newly generated error.
@@ -699,11 +697,9 @@ fn undrained_exhaustion_not_rereported_on_later_inert_events() {
     );
     // Foreign frame added its own report, so pending now has 2 effects
     assert_eq!(controller.pending_effect_count(), 2);
-    assert!(
-        controller.pending_effects()[1..]
-            .iter()
-            .all(|e| matches!(e, ConversationDeliveryEffect::ReportRefusal { .. }))
-    );
+    assert!(controller.pending_effects()[1..]
+        .iter()
+        .all(|e| matches!(e, ConversationDeliveryEffect::ReportRefusal { .. })));
 
     // Closing after exhaustion must remain deterministic and not re-error
     // even though exhaustion is still pending.
@@ -717,10 +713,8 @@ fn undrained_exhaustion_not_rereported_on_later_inert_events() {
 
     // Only after draining does the pending count clear; no hidden re-error.
     let drained = controller.drain_effects();
-    assert!(
-        drained
-            .iter()
-            .any(|e| matches!(e, ConversationDeliveryEffect::GenerationExhausted))
-    );
+    assert!(drained
+        .iter()
+        .any(|e| matches!(e, ConversationDeliveryEffect::GenerationExhausted)));
     assert_eq!(controller.pending_effect_count(), 0);
 }
