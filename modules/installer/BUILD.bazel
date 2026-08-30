@@ -1,0 +1,90 @@
+load(
+    "@rules_rust//rust:defs.bzl",
+    "rust_binary",
+    "rust_clippy",
+    "rust_test",
+    "rustfmt_test",
+)
+
+exports_files(["Cargo.toml"])
+
+rust_binary(
+    name = "installer",
+    srcs = [
+        "rust/archive.rs",
+        "rust/background_process.rs",
+        "rust/error.rs",
+        "rust/install.rs",
+        "rust/integrations.rs",
+        "rust/main.rs",
+        "rust/manifest.rs",
+        "rust/payload.rs",
+        "rust/platform.rs",
+        "rust/processes.rs",
+        "rust/shortcuts.rs",
+    ],
+    crate_name = "artisan_installer",
+    deps = [
+        "@crates//:base64",
+        "@crates//:chrono",
+        "@crates//:clap",
+        "@crates//:ed25519-dalek",
+        "@crates//:hex",
+        "@crates//:reqwest",
+        "@crates//:semver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2-0.10.9",
+        "@crates//:tar",
+        "@crates//:thiserror",
+        "@crates//:tokio",
+        "@crates//:url",
+        "@crates//:zip",
+        "@crates//:zstd",
+    ] + select({
+        "@platforms//os:windows": ["@crates//:winreg"],
+        "//conditions:default": [],
+    }),
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    rustc_env = {
+        "CARGO_PKG_DESCRIPTION": "Standalone cross-platform installer and manager for Artisan Editor",
+        "CARGO_PKG_NAME": "ae-installer",
+        "CARGO_PKG_VERSION": "0.0.0",
+    },
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "installer_unit_test",
+    crate = ":installer",
+    deps = ["@crates//:tempfile"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_clippy(
+    name = "clippy",
+    testonly = True,
+    deps = [
+        ":installer",
+        ":installer_unit_test",
+    ],
+)
+
+rustfmt_test(
+    name = "format_test",
+    size = "small",
+    targets = [
+        ":installer",
+        ":installer_unit_test",
+    ],
+    transitive = True,
+)
+
+test_suite(
+    name = "tests",
+    tests = [":installer_unit_test"],
+)
