@@ -14,12 +14,12 @@
 //!   visible.
 //! - `Closed` — terminal; later delivery is ignored.
 //!
-//! Effects are appended to a private ordered outbox and drained explicitly.
-//! Entry to `AwaitingSnapshot` requests the initial baseline. Entry to
-//! `Recovering` requests exactly one fresh snapshot. Repeated invalid batches
-//! while recovering do not storm requests. Explicit retry increments exactly
-//! one generation. Generation overflow is a typed error/terminal effect and
-//! never wraps.
+//! Effects are appended to an explicit external controller context and drained
+//! via safe ownership. Entry to `AwaitingSnapshot` requests the initial
+//! baseline. Entry to `Recovering` requests exactly one fresh snapshot.
+//! Repeated invalid batches while recovering do not storm requests. Explicit
+//! retry increments exactly one generation. Generation overflow is a typed
+//! error/terminal effect and never wraps.
 
 use crate::conversation_projection::{
     ConversationProjection, ProjectionError, ProjectionStatus, SnapshotDisposition,
@@ -63,7 +63,7 @@ pub enum ConversationDeliveryEvent {
 
 /// Typed effect vocabulary.
 ///
-/// Effects are appended to a private ordered outbox and drained explicitly.
+/// Effects are appended to an external ordered outbox and drained explicitly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConversationDeliveryEffect {
     /// Request an authoritative snapshot.
@@ -127,14 +127,20 @@ pub struct ConversationDeliveryView {
     pub pending_effects: usize,
 }
 
+/// External effect outbox owned by the controller and passed as Statig context.
+///
+/// Keeping effects outside Statig shared storage allows the controller to drain
+/// them without `unsafe` `inner_mut`/`state_mut` access.
+type DeliveryContext = Vec<ConversationDeliveryEffect>;
+
 /// Internal delivery storage that the Statig machine owns.
 ///
 /// Fields are shared storage; state-local storage is not required for this
 /// machine. All projection mutation stays here and is never duplicated.
+/// Effects are emitted into the external [`DeliveryContext`].
 struct Delivery {
     thread_id: ThreadId,
     projection: ConversationProjection,
-    outbox: Vec<ConversationDeliveryEffect>,
     generation: u64,
 }
 
@@ -144,7 +150,6 @@ impl Delivery {
         Self {
             thread_id,
             projection,
-            outbox: Vec::new(),
             generation: 0,
         }
     }
@@ -154,7 +159,6 @@ impl Delivery {
         Self {
             thread_id,
             projection,
-            outbox: Vec::new(),
             generation,
         }
     }
@@ -168,20 +172,18 @@ impl Delivery {
         Ok(next)
     }
 
-    fn emit_snapshot_request(&mut self) {
+    fn emit_snapshot_request(&mut self, context: &mut DeliveryContext) {
         match self.next_generation() {
             Ok(generation) => {
                 let after = self.projection.snapshot().map(|snapshot| snapshot.cursor());
-                self.outbox
-                    .push(ConversationDeliveryEffect::RequestSnapshot {
-                        thread_id: self.thread_id.clone(),
-                        generation,
-                        after,
-                    });
+                context.push(ConversationDeliveryEffect::RequestSnapshot {
+                    thread_id: self.thread_id.clone(),
+                    generation,
+                    after,
+                });
             }
             Err(_) => {
-                self.outbox
-                    .push(ConversationDeliveryEffect::GenerationExhausted);
+                context.push(ConversationDeliveryEffect::GenerationExhausted);
             }
         }
     }
@@ -203,45 +205,47 @@ impl Delivery {
 )]
 impl Delivery {
     #[statig::state(superstate = "delivery", entry_action = "enter_awaiting_snapshot")]
-    fn awaiting_snapshot(&mut self, event: &ConversationDeliveryEvent) -> Outcome<State> {
+    fn awaiting_snapshot(
+        &mut self,
+        context: &mut DeliveryContext,
+        event: &ConversationDeliveryEvent,
+    ) -> Outcome<State> {
         match event {
             ConversationDeliveryEvent::Closed => Super,
             ConversationDeliveryEvent::SnapshotReceived(snapshot) => {
                 if snapshot.thread_id() != &self.thread_id {
-                    self.outbox.push(ConversationDeliveryEffect::ReportRefusal {
+                    context.push(ConversationDeliveryEffect::ReportRefusal {
                         error: ProjectionError::ThreadMismatch,
                     });
                     return Handled;
                 }
                 match self.projection.install_snapshot(snapshot) {
                     Ok(_) => {
-                        self.outbox.push(ConversationDeliveryEffect::Invalidate);
+                        context.push(ConversationDeliveryEffect::Invalidate);
                         Transition(State::ready())
                     }
                     Err(error) => {
-                        self.outbox
-                            .push(ConversationDeliveryEffect::ReportRefusal { error });
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
                         Handled
                     }
                 }
             }
             ConversationDeliveryEvent::BatchReceived(batch) => {
                 if batch.thread_id() != &self.thread_id {
-                    self.outbox.push(ConversationDeliveryEffect::ReportRefusal {
+                    context.push(ConversationDeliveryEffect::ReportRefusal {
                         error: ProjectionError::ThreadMismatch,
                     });
                     return Handled;
                 }
                 match self.projection.apply_batch(batch) {
                     Ok(_) => {
-                        self.outbox.push(ConversationDeliveryEffect::Invalidate);
+                        context.push(ConversationDeliveryEffect::Invalidate);
                         Transition(State::ready())
                     }
                     Err(error) => {
                         let needs_recovery =
                             self.projection.status() == ProjectionStatus::ResnapshotRequired;
-                        self.outbox
-                            .push(ConversationDeliveryEffect::ReportRefusal { error });
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
                         if needs_recovery {
                             Transition(State::recovering())
                         } else {
@@ -251,19 +255,23 @@ impl Delivery {
                 }
             }
             ConversationDeliveryEvent::RetryRequested => {
-                self.emit_snapshot_request();
+                self.emit_snapshot_request(context);
                 Handled
             }
         }
     }
 
     #[statig::state(superstate = "delivery")]
-    fn ready(&mut self, event: &ConversationDeliveryEvent) -> Outcome<State> {
+    fn ready(
+        &mut self,
+        context: &mut DeliveryContext,
+        event: &ConversationDeliveryEvent,
+    ) -> Outcome<State> {
         match event {
             ConversationDeliveryEvent::Closed => Super,
             ConversationDeliveryEvent::SnapshotReceived(snapshot) => {
                 if snapshot.thread_id() != &self.thread_id {
-                    self.outbox.push(ConversationDeliveryEffect::ReportRefusal {
+                    context.push(ConversationDeliveryEffect::ReportRefusal {
                         error: ProjectionError::ThreadMismatch,
                     });
                     return Handled;
@@ -271,7 +279,7 @@ impl Delivery {
                 match self.projection.install_snapshot(snapshot) {
                     Ok(disposition) => {
                         if disposition == SnapshotDisposition::Applied {
-                            self.outbox.push(ConversationDeliveryEffect::Invalidate);
+                            context.push(ConversationDeliveryEffect::Invalidate);
                         } else {
                             // Unchanged equal-cursor identical snapshot clears recovery and
                             // remains visible; no invalidation is required because rows are
@@ -281,29 +289,27 @@ impl Delivery {
                         Handled
                     }
                     Err(error) => {
-                        self.outbox
-                            .push(ConversationDeliveryEffect::ReportRefusal { error });
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
                         Handled
                     }
                 }
             }
             ConversationDeliveryEvent::BatchReceived(batch) => {
                 if batch.thread_id() != &self.thread_id {
-                    self.outbox.push(ConversationDeliveryEffect::ReportRefusal {
+                    context.push(ConversationDeliveryEffect::ReportRefusal {
                         error: ProjectionError::ThreadMismatch,
                     });
                     return Handled;
                 }
                 match self.projection.apply_batch(batch) {
                     Ok(_) => {
-                        self.outbox.push(ConversationDeliveryEffect::Invalidate);
+                        context.push(ConversationDeliveryEffect::Invalidate);
                         Handled
                     }
                     Err(error) => {
                         let is_recovery =
                             self.projection.status() == ProjectionStatus::ResnapshotRequired;
-                        self.outbox
-                            .push(ConversationDeliveryEffect::ReportRefusal { error });
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
                         if is_recovery {
                             Transition(State::recovering())
                         } else {
@@ -317,31 +323,34 @@ impl Delivery {
     }
 
     #[statig::state(superstate = "delivery", entry_action = "enter_recovering")]
-    fn recovering(&mut self, event: &ConversationDeliveryEvent) -> Outcome<State> {
+    fn recovering(
+        &mut self,
+        context: &mut DeliveryContext,
+        event: &ConversationDeliveryEvent,
+    ) -> Outcome<State> {
         match event {
             ConversationDeliveryEvent::Closed => Super,
             ConversationDeliveryEvent::SnapshotReceived(snapshot) => {
                 if snapshot.thread_id() != &self.thread_id {
-                    self.outbox.push(ConversationDeliveryEffect::ReportRefusal {
+                    context.push(ConversationDeliveryEffect::ReportRefusal {
                         error: ProjectionError::ThreadMismatch,
                     });
                     return Handled;
                 }
                 match self.projection.install_snapshot(snapshot) {
                     Ok(_) => {
-                        self.outbox.push(ConversationDeliveryEffect::Invalidate);
+                        context.push(ConversationDeliveryEffect::Invalidate);
                         Transition(State::ready())
                     }
                     Err(error) => {
-                        self.outbox
-                            .push(ConversationDeliveryEffect::ReportRefusal { error });
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
                         Handled
                     }
                 }
             }
             ConversationDeliveryEvent::BatchReceived(batch) => {
                 if batch.thread_id() != &self.thread_id {
-                    self.outbox.push(ConversationDeliveryEffect::ReportRefusal {
+                    context.push(ConversationDeliveryEffect::ReportRefusal {
                         error: ProjectionError::ThreadMismatch,
                     });
                     return Handled;
@@ -354,21 +363,24 @@ impl Delivery {
                         Handled
                     }
                     Err(error) => {
-                        self.outbox
-                            .push(ConversationDeliveryEffect::ReportRefusal { error });
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
                         Handled
                     }
                 }
             }
             ConversationDeliveryEvent::RetryRequested => {
-                self.emit_snapshot_request();
+                self.emit_snapshot_request(context);
                 Handled
             }
         }
     }
 
     #[statig::superstate]
-    fn delivery(&mut self, event: &ConversationDeliveryEvent) -> Outcome<State> {
+    fn delivery(
+        &mut self,
+        _context: &mut DeliveryContext,
+        event: &ConversationDeliveryEvent,
+    ) -> Outcome<State> {
         match event {
             ConversationDeliveryEvent::Closed => Transition(State::closed()),
             _ => Super,
@@ -376,23 +388,27 @@ impl Delivery {
     }
 
     #[statig::state(entry_action = "enter_closed")]
-    fn closed(&mut self, _event: &ConversationDeliveryEvent) -> Outcome<State> {
+    fn closed(
+        &mut self,
+        _context: &mut DeliveryContext,
+        _event: &ConversationDeliveryEvent,
+    ) -> Outcome<State> {
         Handled
     }
 
     #[statig::action]
-    fn enter_awaiting_snapshot(&mut self) {
-        self.emit_snapshot_request();
+    fn enter_awaiting_snapshot(&mut self, context: &mut DeliveryContext) {
+        self.emit_snapshot_request(context);
     }
 
     #[statig::action]
-    fn enter_recovering(&mut self) {
-        self.emit_snapshot_request();
+    fn enter_recovering(&mut self, context: &mut DeliveryContext) {
+        self.emit_snapshot_request(context);
     }
 
     #[statig::action]
-    fn enter_closed(&mut self) {
-        self.outbox.push(ConversationDeliveryEffect::OwnerClosed {
+    fn enter_closed(&mut self, context: &mut DeliveryContext) {
+        context.push(ConversationDeliveryEffect::OwnerClosed {
             thread_id: self.thread_id.clone(),
         });
     }
@@ -402,8 +418,10 @@ impl Delivery {
 ///
 /// All async work remains outside the machine. Callers dispatch typed events
 /// and inspect a read-only view; they never mutate projection state directly.
+/// Effects live in controller-owned context and are drained without `unsafe`.
 pub struct ConversationDeliveryController {
     machine: StateMachine<Delivery>,
+    outbox: DeliveryContext,
 }
 
 impl ConversationDeliveryController {
@@ -413,8 +431,9 @@ impl ConversationDeliveryController {
     pub fn new(thread_id: ThreadId) -> Self {
         let delivery = Delivery::new(thread_id);
         let mut machine = delivery.state_machine();
-        machine.init();
-        Self { machine }
+        let mut outbox = Vec::new();
+        machine.init_with_context(&mut outbox);
+        Self { machine, outbox }
     }
 
     /// Test-only constructor that starts the generation counter at `generation`.
@@ -426,24 +445,27 @@ impl ConversationDeliveryController {
     pub fn with_initial_generation(thread_id: ThreadId, generation: u64) -> Self {
         let delivery = Delivery::with_generation(thread_id, generation);
         let mut machine = delivery.state_machine();
+        let mut outbox = Vec::new();
         // Initial entry still runs; it will exhaust immediately if already at
         // `u64::MAX`. That is intentional for exhaustion tests.
-        machine.init();
-        Self { machine }
+        machine.init_with_context(&mut outbox);
+        Self { machine, outbox }
     }
 
     /// Dispatches one typed event.
     ///
     /// Closing is idempotent and later events cannot reopen the owner. If a
-    /// generation allocation fails, the corresponding
+    /// generation allocation fails during this dispatch, the corresponding
     /// [`ConversationDeliveryEffect::GenerationExhausted`] is queued and this
-    /// returns [`ConversationDeliveryError::GenerationExhausted`].
+    /// returns [`ConversationDeliveryError::GenerationExhausted`]. An already
+    /// pending exhaustion effect from a prior dispatch does not cause a new
+    /// error on an unrelated later dispatch.
     ///
     /// # Errors
     ///
     /// Returns [`ConversationDeliveryError::GenerationExhausted`] when the
     /// finite generation space is exhausted and a new request id cannot be
-    /// allocated.
+    /// allocated during this dispatch.
     pub fn dispatch(
         &mut self,
         event: ConversationDeliveryEvent,
@@ -452,40 +474,28 @@ impl ConversationDeliveryController {
             Delivery::current_phase(self.machine.state()),
             DeliveryPhase::Closed
         );
-        if is_closed {
-            if matches!(event, ConversationDeliveryEvent::Closed) {
-                // Idempotent: handling Closed while already closed stays closed
-                // without emitting a second OwnerClosed.
-                return Ok(());
-            }
-            self.machine.handle(&event);
-            // During Closed, outbox must remain free of render invalidations or
-            // new snapshot requests; only idempotent close is allowed. The
-            // state machine's closed handler is Handled for all events, so
-            // nothing new should have been added. Drain any accidental push.
-            let had_generation_exhausted =
-                self.machine.inner().outbox.iter().any(|effect| {
-                    matches!(effect, ConversationDeliveryEffect::GenerationExhausted)
-                });
-            if had_generation_exhausted {
-                return Err(ConversationDeliveryError::GenerationExhausted);
-            }
+        if is_closed && matches!(event, ConversationDeliveryEvent::Closed) {
+            // Idempotent: handling Closed while already closed stays closed
+            // without emitting a second OwnerClosed.
             return Ok(());
         }
 
-        self.machine.handle(&event);
+        let before_len = self.outbox.len();
+        self.machine.handle_with_context(&event, &mut self.outbox);
 
-        if self
-            .machine
-            .inner()
-            .outbox
+        // Per-dispatch exhaustion: only effects produced by this dispatch count.
+        let exhausted_this_dispatch = self.outbox[before_len..]
             .iter()
-            .any(|effect| matches!(effect, ConversationDeliveryEffect::GenerationExhausted))
-        {
-            // Keep the terminal effect in the outbox for the adapter to observe,
-            // but also surface the typed error.
+            .any(|effect| matches!(effect, ConversationDeliveryEffect::GenerationExhausted));
+
+        if exhausted_this_dispatch {
             return Err(ConversationDeliveryError::GenerationExhausted);
         }
+
+        // If we closed during this dispatch, outbox now contains OwnerClosed.
+        // No extra handling needed; later dispatches remain inert via the
+        // closed state's Handled response.
+
         Ok(())
     }
 
@@ -515,19 +525,19 @@ impl ConversationDeliveryController {
     /// Drains the ordered outbox.
     #[must_use]
     pub fn drain_effects(&mut self) -> Vec<ConversationDeliveryEffect> {
-        std::mem::take(&mut self.machine.inner_mut().outbox)
+        std::mem::take(&mut self.outbox)
     }
 
     /// Peeks at pending effects without draining.
     #[must_use]
     pub fn pending_effects(&self) -> &[ConversationDeliveryEffect] {
-        &self.machine.inner().outbox
+        &self.outbox
     }
 
     /// Returns the private outbox length without exposing mutable state.
     #[must_use]
     pub fn pending_effect_count(&self) -> usize {
-        self.machine.inner().outbox.len()
+        self.outbox.len()
     }
 
     /// Read-only view reporting phase, fixed thread, projection status,
@@ -545,7 +555,7 @@ impl ConversationDeliveryController {
                 .snapshot()
                 .map(|snapshot| snapshot.cursor()),
             has_snapshot: inner.projection.snapshot().is_some(),
-            pending_effects: inner.outbox.len(),
+            pending_effects: self.outbox.len(),
         }
     }
 

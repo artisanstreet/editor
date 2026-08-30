@@ -637,3 +637,90 @@ fn view_reports_pending_count_without_mutable_exposure() {
     assert_eq!(controller.view().pending_effects, 0);
     assert_eq!(controller.pending_effect_count(), 0);
 }
+
+#[test]
+fn drain_does_not_alter_phase_or_projection() {
+    let mut controller = ConversationDeliveryController::new(thread_id());
+    let phase_before = controller.phase();
+    let projection_before = controller.projection_status();
+    let snapshot_before = controller.snapshot().cloned();
+    let pending_before = controller.pending_effect_count();
+    assert_eq!(pending_before, 1);
+
+    let drained = controller.drain_effects();
+    assert_eq!(drained.len(), 1);
+
+    // Draining is a safe ownership move of the external context; it must not
+    // mutate Statig shared storage.
+    assert_eq!(controller.phase(), phase_before);
+    assert_eq!(controller.projection_status(), projection_before);
+    assert_eq!(controller.snapshot().cloned(), snapshot_before);
+    assert_eq!(controller.pending_effect_count(), 0);
+    assert_eq!(controller.view().pending_effects, 0);
+
+    // Second drain is also inert
+    let drained_again = controller.drain_effects();
+    assert!(drained_again.is_empty());
+    assert_eq!(controller.phase(), phase_before);
+}
+
+#[test]
+fn undrained_exhaustion_not_rereported_on_later_inert_events() {
+    let mut controller =
+        ConversationDeliveryController::with_initial_generation(thread_id(), u64::MAX - 1);
+    let _ = controller.drain_effects(); // MAX-1 consumed
+    controller
+        .on_snapshot(baseline_snapshot())
+        .expect("baseline");
+    let _ = controller.drain_effects();
+    controller
+        .on_batch(batch(6, 7, vec![append_patch(7, ITEM_USER, 1, "gap")]))
+        .expect("gap allocates MAX");
+    let _ = controller.drain_effects();
+    assert_eq!(controller.generation(), u64::MAX);
+
+    // Exhaust on retry — do not drain the resulting GenerationExhausted yet
+    let err = controller.retry().expect_err("retry exhausts");
+    assert_eq!(err, ConversationDeliveryError::GenerationExhausted);
+    assert_eq!(controller.pending_effect_count(), 1);
+    assert!(
+        controller
+            .pending_effects()
+            .iter()
+            .any(|e| matches!(e, ConversationDeliveryEffect::GenerationExhausted))
+    );
+
+    // An unrelated inert foreign frame must not rediscover the pending
+    // exhaustion as a newly generated error.
+    let result = controller.on_snapshot(foreign_snapshot());
+    assert!(
+        result.is_ok(),
+        "undrained earlier exhaustion must not cause later inert dispatch to error"
+    );
+    // Foreign frame added its own report, so pending now has 2 effects
+    assert_eq!(controller.pending_effect_count(), 2);
+    assert!(
+        controller.pending_effects()[1..]
+            .iter()
+            .all(|e| matches!(e, ConversationDeliveryEffect::ReportRefusal { .. }))
+    );
+
+    // Closing after exhaustion must remain deterministic and not re-error
+    // even though exhaustion is still pending.
+    let close_result = controller.close();
+    assert!(
+        close_result.is_ok(),
+        "close after undrained exhaustion must not rediscover error"
+    );
+    assert_eq!(controller.phase(), DeliveryPhase::Closed);
+    assert!(controller.is_closed());
+
+    // Only after draining does the pending count clear; no hidden re-error.
+    let drained = controller.drain_effects();
+    assert!(
+        drained
+            .iter()
+            .any(|e| matches!(e, ConversationDeliveryEffect::GenerationExhausted))
+    );
+    assert_eq!(controller.pending_effect_count(), 0);
+}
