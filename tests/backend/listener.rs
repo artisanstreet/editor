@@ -1563,7 +1563,7 @@ impl UntilCancelBroker {
         self.cancel.cancel();
     }
 
-    async fn await_result(&mut self) -> Result<(), ServeUntilCancelError> {
+    async fn await_result(&mut self) -> Result<(), Box<ServeUntilCancelError>> {
         let receiver = self
             .result_rx
             .as_mut()
@@ -1572,6 +1572,7 @@ impl UntilCancelBroker {
             .await
             .expect("until-cancel settles under watchdog")
             .expect("broker sent result")
+            .map_err(Box::new)
     }
 
     fn bounded_complete(&mut self, context: &str) -> Result<(), String> {
