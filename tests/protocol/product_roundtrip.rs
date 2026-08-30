@@ -3,11 +3,12 @@
 //! Exercises every message family of `schema/artisan.capnp` through its
 //! Bazel-generated bindings (`artisan_protocol::artisan_capnp`): hello and
 //! welcome negotiation across both credential kinds with reconnect rotation,
-//! every request and response arm with optional-parent, place, entry, and
-//! attached-project listings, all three events with their per-session
-//! cursors, both receipt dispositions, correlated and uncorrelated protocol
-//! errors, and deterministic framing. Wire shape only; owned domain
-//! conversions arrive in a later packet.
+//! negotiated lifecycle feature bits and status/stop control, every request
+//! and response arm with optional-parent, place, entry, and attached-project
+//! listings, all three events with their per-session cursors, both receipt
+//! dispositions, correlated and uncorrelated protocol errors, and
+//! deterministic framing. Wire shape only; owned domain conversions arrive
+//! in a later packet.
 //!
 //! Identifier vocabulary matches the schema header: opaque text ids of at
 //! most 128 UTF-8 bytes, nonblank, without Unicode whitespace or control
@@ -15,8 +16,9 @@
 
 use artisan_domain::PROJECT_LISTING_MAX_PROJECTS;
 use artisan_protocol::artisan_capnp::{
-    DirectoryEntryKind, ErrorCode, PlaceKind, QueuedState, ReceiptDisposition, directory_listing,
-    directory_pick_outcome, envelope, event, hello, list_attached_projects_request,
+    DirectoryEntryKind, ErrorCode, LifecycleState, LifecycleStopDisposition, PlaceKind,
+    QueuedState, ReceiptDisposition, directory_listing, directory_pick_outcome, envelope, event,
+    hello, lifecycle_request, lifecycle_response, list_attached_projects_request,
     list_directories_request, project, project_list, protocol_error, request, response,
     thread_summary,
 };
@@ -223,6 +225,7 @@ fn negotiates_hello_to_welcome_with_rotating_credentials() -> capnp::Result<()> 
                 let hello = hello?;
                 let offered: Vec<u32> = hello.get_supported_versions()?.iter().collect();
                 assert_eq!(offered, vec![PROTOCOL_VERSION]);
+                assert!(!hello.get_supports_lifecycle_control());
                 match hello.get_credential().which()? {
                     hello::credential::Which::Initial(received) => {
                         assert!(!reconnect, "reconnect input decoded as initial credential");
@@ -263,10 +266,192 @@ fn negotiates_hello_to_welcome_with_rotating_credentials() -> capnp::Result<()> 
                 welcome.get_reconnect_capability()?,
                 &ROTATED_RECONNECT_CAPABILITY[..]
             );
+            assert!(!welcome.get_lifecycle_control_supported());
         }
         _ => panic!("expected welcome body"),
     }
 
+    Ok(())
+}
+
+#[test]
+fn round_trips_negotiated_lifecycle_wire_vocabulary() -> capnp::Result<()> {
+    // Request @10: status is an empty nested struct, while stop carries only
+    // the peer-controlled requireIdle option. The enclosing message id is
+    // the complete request correlation; no nested request id is present.
+    for (stop, require_idle) in [(false, false), (true, false), (true, true)] {
+        let encoded = {
+            let mut message = frame();
+            let mut request = init_envelope(&mut message, CLIENT_REQUEST_ID)
+                .init_body()
+                .init_request();
+            let mut lifecycle = request.init_lifecycle_control();
+            if stop {
+                lifecycle.init_stop().set_require_idle(require_idle);
+            } else {
+                lifecycle.init_status();
+            }
+            encode(&message)
+        };
+
+        let decoded = decode(&encoded)?;
+        let envelope: envelope::Reader = decoded.get_root()?;
+        assert_envelope_header(envelope, CLIENT_REQUEST_ID)?;
+        match envelope.get_body().which()? {
+            envelope::body::Which::Request(request) => match request?.which()? {
+                request::Which::LifecycleControl(lifecycle) => match lifecycle?.which()? {
+                    lifecycle_request::Which::Status(status) => {
+                        assert!(!stop, "stop request decoded as status");
+                        status?;
+                    }
+                    lifecycle_request::Which::Stop(stop_request) => {
+                        assert!(stop, "status request decoded as stop");
+                        assert_eq!(stop_request?.get_require_idle(), require_idle);
+                    }
+                    _ => panic!("unexpected lifecycle request arm"),
+                },
+                _ => panic!("expected lifecycleControl request"),
+            },
+            _ => panic!("expected request body"),
+        }
+    }
+
+    // Response @11: status exercises every lifecycle state and stop exercises
+    // every disposition/state combination. Response correlation stays on the
+    // existing outer requestId field.
+    for (index, (state, count)) in [
+        (LifecycleState::Ready, 0_u32),
+        (LifecycleState::Busy, 1_u32),
+        (LifecycleState::Draining, 9_u32),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response_id = format!("server-lifecycle-status-{index}");
+        let encoded = {
+            let mut message = frame();
+            let mut response = init_envelope(&mut message, &response_id)
+                .init_body()
+                .init_response();
+            response.set_request_id(CLIENT_REQUEST_ID);
+            let mut status = response.init_lifecycle_control().init_status();
+            status.set_state(state);
+            status.set_active_work_count(count);
+            encode(&message)
+        };
+        let decoded = decode(&encoded)?;
+        let envelope: envelope::Reader = decoded.get_root()?;
+        assert_server_envelope(envelope, &response_id)?;
+        match envelope.get_body().which()? {
+            envelope::body::Which::Response(response) => {
+                let response = response?;
+                assert_eq!(response.get_request_id()?, CLIENT_REQUEST_ID);
+                match response.which()? {
+                    response::Which::LifecycleControl(lifecycle) => match lifecycle?.which()? {
+                        lifecycle_response::Which::Status(status) => {
+                            let status = status?;
+                            assert_eq!(status.get_state()?, state);
+                            assert_eq!(status.get_active_work_count(), count);
+                        }
+                        _ => panic!("expected lifecycle status response"),
+                    },
+                    _ => panic!("expected lifecycleControl response"),
+                }
+            }
+            _ => panic!("expected response body"),
+        }
+    }
+
+    for state in [
+        LifecycleState::Ready,
+        LifecycleState::Busy,
+        LifecycleState::Draining,
+    ] {
+        for disposition in [
+            LifecycleStopDisposition::Accepted,
+            LifecycleStopDisposition::Duplicate,
+            LifecycleStopDisposition::AlreadyStopping,
+        ] {
+            let encoded = {
+                let mut message = frame();
+                let mut response = init_envelope(&mut message, "server-lifecycle-stop")
+                    .init_body()
+                    .init_response();
+                response.set_request_id(CLIENT_REQUEST_ID);
+                let mut receipt = response.init_lifecycle_control().init_stop();
+                receipt.set_disposition(disposition);
+                receipt.set_state(state);
+                encode(&message)
+            };
+            let decoded = decode(&encoded)?;
+            let envelope: envelope::Reader = decoded.get_root()?;
+            assert_server_envelope(envelope, "server-lifecycle-stop")?;
+            match envelope.get_body().which()? {
+                envelope::body::Which::Response(response) => match response?.which()? {
+                    response::Which::LifecycleControl(lifecycle) => match lifecycle?.which()? {
+                        lifecycle_response::Which::Stop(receipt) => {
+                            let receipt = receipt?;
+                            assert_eq!(receipt.get_disposition()?, disposition);
+                            assert_eq!(receipt.get_state()?, state);
+                        }
+                        _ => panic!("expected lifecycle stop response"),
+                    },
+                    _ => panic!("expected lifecycleControl response"),
+                },
+                _ => panic!("expected response body"),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn lifecycle_feature_fields_roundtrip_true_at_raw_boundary() -> capnp::Result<()> {
+    let hello = {
+        let mut message = frame();
+        let mut hello = init_envelope(&mut message, CLIENT_REQUEST_ID)
+            .init_body()
+            .init_hello();
+        hello
+            .reborrow()
+            .init_supported_versions(1)
+            .set(0, PROTOCOL_VERSION);
+        hello
+            .reborrow()
+            .init_credential()
+            .set_initial(&HELLO_CAPABILITY);
+        hello.set_supports_lifecycle_control(true);
+        encode(&message)
+    };
+    let decoded = decode(&hello)?;
+    let root: envelope::Reader = decoded.get_root()?;
+    match root.get_body().which()? {
+        envelope::body::Which::Hello(hello) => {
+            assert!(hello?.get_supports_lifecycle_control());
+        }
+        _ => panic!("expected hello body"),
+    }
+
+    let welcome = {
+        let mut message = frame();
+        let mut welcome = init_envelope(&mut message, WELCOME_FRAME_ID)
+            .init_body()
+            .init_welcome();
+        welcome.set_negotiated_version(PROTOCOL_VERSION);
+        welcome.set_connection_id(CONNECTION_ID);
+        welcome.set_reconnect_capability(&ROTATED_RECONNECT_CAPABILITY);
+        welcome.set_lifecycle_control_supported(true);
+        encode(&message)
+    };
+    let decoded = decode(&welcome)?;
+    let root: envelope::Reader = decoded.get_root()?;
+    match root.get_body().which()? {
+        envelope::body::Which::Welcome(welcome) => {
+            assert!(welcome?.get_lifecycle_control_supported());
+        }
+        _ => panic!("expected welcome body"),
+    }
     Ok(())
 }
 
@@ -1179,7 +1364,8 @@ fn correlates_errors_to_the_triggering_request_id() -> capnp::Result<()> {
 fn appends_idempotency_conflict_at_the_next_unused_ordinal() -> capnp::Result<()> {
     // Append-only evolution guard on the raw generated surface: every
     // committed enumerator keeps its frozen ordinal and the conflict
-    // classification owns exactly the next unused slot, @6.
+    // classification owns exactly the next unused slot, @6; lifecycle error
+    // classifications append at @7 and @8.
     assert_eq!(ErrorCode::UnsupportedVersion as u16, 0);
     assert_eq!(ErrorCode::InvalidInput as u16, 1);
     assert_eq!(ErrorCode::DirectoryUnknown as u16, 2);
@@ -1187,6 +1373,8 @@ fn appends_idempotency_conflict_at_the_next_unused_ordinal() -> capnp::Result<()
     assert_eq!(ErrorCode::ThreadUnknown as u16, 4);
     assert_eq!(ErrorCode::Internal as u16, 5);
     assert_eq!(ErrorCode::IdempotencyConflict as u16, 6);
+    assert_eq!(ErrorCode::UnsupportedFeature as u16, 7);
+    assert_eq!(ErrorCode::LifecycleBusy as u16, 8);
 
     // One correlated, non-retryable conflict report survives verbatim: Forge
     // rejected a stable request identity previously accepted for a different
@@ -1228,6 +1416,39 @@ fn appends_idempotency_conflict_at_the_next_unused_ordinal() -> capnp::Result<()
         _ => panic!("expected protocolError body"),
     }
 
+    Ok(())
+}
+
+#[test]
+fn round_trips_lifecycle_error_codes() -> capnp::Result<()> {
+    for code in [ErrorCode::UnsupportedFeature, ErrorCode::LifecycleBusy] {
+        let encoded = {
+            let mut message = frame();
+            let mut error = init_envelope(&mut message, "server-lifecycle-error")
+                .init_body()
+                .init_protocol_error();
+            error.set_code(code);
+            error.set_message("lifecycle error");
+            error.set_retryable(false);
+            error.set_uncorrelated(());
+            encode(&message)
+        };
+        let decoded = decode(&encoded)?;
+        let root: envelope::Reader = decoded.get_root()?;
+        match root.get_body().which()? {
+            envelope::body::Which::ProtocolError(error) => {
+                let error = error?;
+                assert_eq!(error.get_code()?, code);
+                assert_eq!(error.get_message()?, "lifecycle error");
+                assert!(!error.get_retryable());
+                assert!(matches!(
+                    error.which()?,
+                    protocol_error::Which::Uncorrelated(())
+                ));
+            }
+            _ => panic!("expected protocolError body"),
+        }
+    }
     Ok(())
 }
 

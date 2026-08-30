@@ -12,15 +12,20 @@ use artisan_domain::{
     ReceiptDisposition, RequestId, RootPath, THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId,
     ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle, UnixMillis,
 };
-use artisan_protocol::artisan_capnp::{ErrorCode as WireErrorCode, envelope};
+use artisan_protocol::artisan_capnp::{
+    ErrorCode as WireErrorCode, LifecycleState as WireLifecycleState,
+    LifecycleStopDisposition as WireLifecycleStopDisposition, envelope,
+};
 use artisan_protocol::{
     CAPNP_NESTING_LIMIT, CAPNP_TRAVERSAL_LIMIT_WORDS, ClientRequest, ConnectionId,
     DirectoryPickOutcome, DispatchFailure, ErrorCode, ErrorDetail, EventCursor,
-    FirstMessageReceipt, FrameId, Hello, HelloCredential, LocalCapability, LocalCapabilityError,
-    ProtocolDecodeError, ProtocolEncodeError, ProtocolFailure, ProtocolValueError, ProtocolVersion,
-    RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ReconnectCapabilityError, ResponsePayload,
-    ServerEvent, ServerResponse, VersionOffer, VersionOfferError, Welcome, WireEnvelope,
-    WireEnvelopeBody, decode_envelope, encode_envelope,
+    FirstMessageReceipt, FrameId, Hello, HelloCredential, LifecycleRequest, LifecycleResponse,
+    LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
+    LocalCapability, LocalCapabilityError, ProtocolDecodeError, ProtocolEncodeError,
+    ProtocolFailure, ProtocolValueError, ProtocolVersion, RECONNECT_CAPABILITY_BYTES,
+    ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse,
+    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody, decode_envelope,
+    encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -244,6 +249,7 @@ fn handshake_frames_roundtrip_without_secret_formatting() -> Result<(), Box<dyn 
         WireEnvelopeBody::Hello(Hello {
             supported_versions: VersionOffer::new(vec![1])?,
             credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+            supports_lifecycle_control: false,
         }),
     );
     assert_roundtrip(&initial_hello)?;
@@ -255,6 +261,7 @@ fn handshake_frames_roundtrip_without_secret_formatting() -> Result<(), Box<dyn 
             credential: HelloCredential::Reconnect(ReconnectCapability::from_bytes(
                 RECONNECT_HELLO_CAPABILITY,
             )),
+            supports_lifecycle_control: false,
         }),
     );
     assert_roundtrip(&reconnect_hello)?;
@@ -265,9 +272,135 @@ fn handshake_frames_roundtrip_without_secret_formatting() -> Result<(), Box<dyn 
             negotiated_version: ProtocolVersion::V1,
             connection_id: ConnectionId::parse("connection-1")?,
             reconnect_capability: ReconnectCapability::from_bytes(ROTATED_RECONNECT_CAPABILITY),
+            lifecycle_control_supported: false,
         }),
     );
     assert_roundtrip(&welcome)
+}
+
+#[test]
+fn negotiated_lifecycle_owned_values_roundtrip() -> Result<(), Box<dyn Error>> {
+    let hello = envelope(
+        "client-lifecycle-hello",
+        WireEnvelopeBody::Hello(Hello {
+            supported_versions: VersionOffer::new(vec![1])?,
+            credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+            supports_lifecycle_control: true,
+        }),
+    );
+    let decoded_hello = decode_envelope(&encode_envelope(&hello)?)?;
+    let WireEnvelopeBody::Hello(decoded_hello) = decoded_hello.body else {
+        panic!("expected hello body");
+    };
+    assert!(decoded_hello.supports_lifecycle_control);
+
+    let welcome = envelope(
+        "server-lifecycle-welcome",
+        WireEnvelopeBody::Welcome(Welcome {
+            negotiated_version: ProtocolVersion::V1,
+            connection_id: ConnectionId::parse("connection-lifecycle")?,
+            reconnect_capability: ReconnectCapability::from_bytes(ROTATED_RECONNECT_CAPABILITY),
+            lifecycle_control_supported: true,
+        }),
+    );
+    let decoded_welcome = decode_envelope(&encode_envelope(&welcome)?)?;
+    let WireEnvelopeBody::Welcome(decoded_welcome) = decoded_welcome.body else {
+        panic!("expected welcome body");
+    };
+    assert!(decoded_welcome.lifecycle_control_supported);
+
+    for (frame, request) in [
+        ("client-lifecycle-status", LifecycleRequest::Status),
+        (
+            "client-lifecycle-stop-false",
+            LifecycleRequest::Stop {
+                require_idle: false,
+            },
+        ),
+        (
+            "client-lifecycle-stop-true",
+            LifecycleRequest::Stop { require_idle: true },
+        ),
+    ] {
+        let value = envelope(
+            frame,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(request)),
+        );
+        let decoded = decode_envelope(&encode_envelope(&value)?)?;
+        assert_eq!(decoded.frame_id.as_str(), frame);
+        assert!(
+            decoded == value,
+            "lifecycle request must survive field-for-field"
+        );
+    }
+
+    for (index, (state, count)) in [
+        (LifecycleState::Ready, 0),
+        (LifecycleState::Busy, 1),
+        (LifecycleState::Draining, 7),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response_id = request_id(&format!("client-lifecycle-status-{index}"));
+        let response = envelope(
+            &format!("server-lifecycle-status-{index}"),
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id: response_id,
+                payload: ResponsePayload::Lifecycle(LifecycleResponse::Status(
+                    LifecycleStatus::new(state, count)?,
+                )),
+            }),
+        );
+        assert_roundtrip(&response)?;
+    }
+
+    for (index, disposition) in [
+        LifecycleStopDisposition::Accepted,
+        LifecycleStopDisposition::Duplicate,
+        LifecycleStopDisposition::AlreadyStopping,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = envelope(
+            &format!("server-lifecycle-stop-{index}"),
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id: request_id(&format!("client-lifecycle-stop-{index}")),
+                payload: ResponsePayload::Lifecycle(LifecycleResponse::Stop(
+                    LifecycleStopReceipt {
+                        disposition,
+                        state: LifecycleState::Draining,
+                    },
+                )),
+            }),
+        );
+        assert_roundtrip(&response)?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn lifecycle_status_validation_is_checked_and_typed() {
+    assert!(LifecycleStatus::new(LifecycleState::Ready, 0).is_ok());
+    assert!(LifecycleStatus::new(LifecycleState::Busy, 1).is_ok());
+    assert!(LifecycleStatus::new(LifecycleState::Draining, 0).is_ok());
+    assert!(LifecycleStatus::new(LifecycleState::Draining, u32::MAX).is_ok());
+    assert_eq!(
+        LifecycleStatus::new(LifecycleState::Ready, 1),
+        Err(ProtocolValueError::InvalidLifecycleStatus {
+            state: LifecycleState::Ready,
+            active_work_count: 1,
+        })
+    );
+    assert_eq!(
+        LifecycleStatus::new(LifecycleState::Busy, 0),
+        Err(ProtocolValueError::InvalidLifecycleStatus {
+            state: LifecycleState::Busy,
+            active_work_count: 0,
+        })
+    );
 }
 
 #[test]
@@ -728,6 +861,7 @@ fn failures_without_a_settled_request_stay_uncorrelated() -> Result<(), Box<dyn 
         WireEnvelopeBody::Hello(Hello {
             supported_versions: VersionOffer::new(vec![1])?,
             credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+            supports_lifecycle_control: false,
         }),
     );
     assert!(
@@ -767,6 +901,313 @@ fn failures_without_a_settled_request_stay_uncorrelated() -> Result<(), Box<dyn 
 
 fn raw_envelope() -> Builder<HeapAllocator> {
     Builder::new(HeapAllocator::new())
+}
+
+fn raw_lifecycle_request(stop: bool, require_idle: bool) -> Vec<u8> {
+    let mut message = raw_envelope();
+    let mut root = message.init_root::<envelope::Builder>();
+    root.set_protocol_version(1);
+    root.set_message_id("lifecycle-request-frame");
+    let mut request = root.reborrow().init_body().init_request();
+    let mut lifecycle = request.init_lifecycle_control();
+    if stop {
+        lifecycle.init_stop().set_require_idle(require_idle);
+    } else {
+        lifecycle.init_status();
+    }
+    serialize::write_message_to_words(&message)
+}
+
+fn raw_lifecycle_status(state: WireLifecycleState, active_work_count: u32) -> Vec<u8> {
+    let mut message = raw_envelope();
+    let mut root = message.init_root::<envelope::Builder>();
+    root.set_protocol_version(1);
+    root.set_message_id("lifecycle-response-frame");
+    let mut response = root.reborrow().init_body().init_response();
+    response.set_request_id("lifecycle-request-id");
+    let mut lifecycle = response.init_lifecycle_control();
+    let mut status = lifecycle.init_status();
+    status.set_state(state);
+    status.set_active_work_count(active_work_count);
+    serialize::write_message_to_words(&message)
+}
+
+fn raw_lifecycle_stop(
+    disposition: WireLifecycleStopDisposition,
+    state: WireLifecycleState,
+) -> Vec<u8> {
+    let mut message = raw_envelope();
+    let mut root = message.init_root::<envelope::Builder>();
+    root.set_protocol_version(1);
+    root.set_message_id("lifecycle-response-frame");
+    let mut response = root.reborrow().init_body().init_response();
+    response.set_request_id("lifecycle-request-id");
+    let mut lifecycle = response.init_lifecycle_control();
+    let mut receipt = lifecycle.init_stop();
+    receipt.set_disposition(disposition);
+    receipt.set_state(state);
+    serialize::write_message_to_words(&message)
+}
+
+fn raw_lifecycle_response(stop: bool) -> Vec<u8> {
+    if stop {
+        raw_lifecycle_stop(
+            WireLifecycleStopDisposition::Accepted,
+            WireLifecycleState::Ready,
+        )
+    } else {
+        raw_lifecycle_status(WireLifecycleState::Ready, 0)
+    }
+}
+
+fn assert_unknown_discriminant(mut malformed: Vec<u8>, comparison: &[u8]) {
+    let compared_length = malformed.len().min(comparison.len());
+    for index in 0..compared_length {
+        if malformed[index] == comparison[index] {
+            continue;
+        }
+        let original = malformed[index];
+        malformed[index] = u8::MAX;
+        if matches!(
+            decode_envelope(&malformed),
+            Err(ProtocolDecodeError::UnknownDiscriminant { value: 255 })
+        ) {
+            return;
+        }
+        malformed[index] = original;
+    }
+    panic!("no changed byte produced an unknown discriminant");
+}
+
+#[test]
+fn raw_lifecycle_request_arms_preserve_frame_correlation() -> Result<(), Box<dyn Error>> {
+    for (stop, require_idle, expected) in [
+        (false, false, LifecycleRequest::Status),
+        (
+            true,
+            false,
+            LifecycleRequest::Stop {
+                require_idle: false,
+            },
+        ),
+        (true, true, LifecycleRequest::Stop { require_idle: true }),
+    ] {
+        let decoded = decode_envelope(&raw_lifecycle_request(stop, require_idle))?;
+        assert_eq!(decoded.frame_id.as_str(), "lifecycle-request-frame");
+        assert!(
+            decoded.body == WireEnvelopeBody::Request(ClientRequest::Lifecycle(expected)),
+            "lifecycle request must decode field-for-field"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn raw_lifecycle_response_arms_preserve_outer_correlation() -> Result<(), Box<dyn Error>> {
+    for (index, (state, count)) in [
+        (WireLifecycleState::Ready, 0),
+        (WireLifecycleState::Busy, 1),
+        (WireLifecycleState::Draining, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let decoded = decode_envelope(&raw_lifecycle_status(state, count))?;
+        assert_eq!(decoded.frame_id.as_str(), "lifecycle-response-frame");
+        let WireEnvelopeBody::Response(response) = decoded.body else {
+            panic!("expected lifecycle status response");
+        };
+        assert_eq!(response.request_id, request_id("lifecycle-request-id"));
+        assert_eq!(
+            response.payload,
+            ResponsePayload::Lifecycle(LifecycleResponse::Status(LifecycleStatus::new(
+                [
+                    LifecycleState::Ready,
+                    LifecycleState::Busy,
+                    LifecycleState::Draining
+                ][index],
+                count,
+            )?,))
+        );
+    }
+
+    for (state, expected_state) in [
+        (WireLifecycleState::Ready, LifecycleState::Ready),
+        (WireLifecycleState::Busy, LifecycleState::Busy),
+        (WireLifecycleState::Draining, LifecycleState::Draining),
+    ] {
+        for (disposition, expected_disposition) in [
+            (
+                WireLifecycleStopDisposition::Accepted,
+                LifecycleStopDisposition::Accepted,
+            ),
+            (
+                WireLifecycleStopDisposition::Duplicate,
+                LifecycleStopDisposition::Duplicate,
+            ),
+            (
+                WireLifecycleStopDisposition::AlreadyStopping,
+                LifecycleStopDisposition::AlreadyStopping,
+            ),
+        ] {
+            let decoded = decode_envelope(&raw_lifecycle_stop(disposition, state))?;
+            let WireEnvelopeBody::Response(response) = decoded.body else {
+                panic!("expected lifecycle stop response");
+            };
+            assert_eq!(response.request_id, request_id("lifecycle-request-id"));
+            assert_eq!(
+                response.payload,
+                ResponsePayload::Lifecycle(LifecycleResponse::Stop(LifecycleStopReceipt {
+                    disposition: expected_disposition,
+                    state: expected_state,
+                }))
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn lifecycle_feature_fields_roundtrip_true_and_default_false() -> Result<(), Box<dyn Error>> {
+    let true_hello = envelope(
+        "lifecycle-feature-hello",
+        WireEnvelopeBody::Hello(Hello {
+            supported_versions: VersionOffer::new(vec![1])?,
+            credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+            supports_lifecycle_control: true,
+        }),
+    );
+    let WireEnvelopeBody::Hello(decoded_hello) =
+        decode_envelope(&encode_envelope(&true_hello)?)?.body
+    else {
+        panic!("expected hello body");
+    };
+    assert!(decoded_hello.supports_lifecycle_control);
+
+    let true_welcome = envelope(
+        "lifecycle-feature-welcome",
+        WireEnvelopeBody::Welcome(Welcome {
+            negotiated_version: ProtocolVersion::V1,
+            connection_id: ConnectionId::parse("connection-feature")?,
+            reconnect_capability: ReconnectCapability::from_bytes(ROTATED_RECONNECT_CAPABILITY),
+            lifecycle_control_supported: true,
+        }),
+    );
+    let WireEnvelopeBody::Welcome(decoded_welcome) =
+        decode_envelope(&encode_envelope(&true_welcome)?)?.body
+    else {
+        panic!("expected welcome body");
+    };
+    assert!(decoded_welcome.lifecycle_control_supported);
+
+    let WireEnvelopeBody::Hello(old_hello) = decode_envelope(&raw_hello_credential(false))?.body
+    else {
+        panic!("expected old hello fixture");
+    };
+    assert!(!old_hello.supports_lifecycle_control);
+
+    let old_welcome = {
+        let mut message = raw_envelope();
+        let mut root = message.init_root::<envelope::Builder>();
+        root.set_protocol_version(1);
+        root.set_message_id("old-welcome-frame");
+        let mut welcome = root.reborrow().init_body().init_welcome();
+        welcome.set_negotiated_version(1);
+        welcome.set_connection_id("connection-old");
+        welcome.set_reconnect_capability(&ROTATED_RECONNECT_CAPABILITY);
+        serialize::write_message_to_words(&message)
+    };
+    let WireEnvelopeBody::Welcome(old_welcome) = decode_envelope(&old_welcome)?.body else {
+        panic!("expected old welcome fixture");
+    };
+    assert!(!old_welcome.lifecycle_control_supported);
+    Ok(())
+}
+
+#[test]
+fn lifecycle_error_codes_roundtrip_at_appended_ordinals() -> Result<(), Box<dyn Error>> {
+    assert_eq!(WireErrorCode::UnsupportedFeature as u16, 7);
+    assert_eq!(WireErrorCode::LifecycleBusy as u16, 8);
+    assert_roundtrip(&envelope(
+        "server-unsupported-feature",
+        WireEnvelopeBody::ProtocolError(ProtocolFailure {
+            code: ErrorCode::UnsupportedFeature,
+            detail: ErrorDetail::parse("lifecycle control was not negotiated")?,
+            retryable: false,
+            request_id: None,
+        }),
+    ))?;
+    assert_roundtrip(&envelope(
+        "server-lifecycle-busy",
+        WireEnvelopeBody::ProtocolError(ProtocolFailure {
+            code: ErrorCode::LifecycleBusy,
+            detail: ErrorDetail::parse("lifecycle work is still active")?,
+            retryable: true,
+            request_id: Some(request_id("lifecycle-request-id")),
+        }),
+    ))?;
+    Ok(())
+}
+
+#[test]
+fn invalid_lifecycle_statuses_are_rejected_at_owned_boundaries() {
+    for (state, count) in [
+        (WireLifecycleState::Ready, 1),
+        (WireLifecycleState::Busy, 0),
+    ] {
+        assert!(matches!(
+            decode_envelope(&raw_lifecycle_status(state, count)),
+            Err(ProtocolDecodeError::ProtocolValue {
+                source: ProtocolValueError::InvalidLifecycleStatus {
+                    state: _,
+                    active_work_count: _
+                }
+            })
+        ));
+    }
+
+    let invalid = envelope(
+        "server-invalid-lifecycle-status",
+        WireEnvelopeBody::Response(ServerResponse {
+            request_id: request_id("lifecycle-request-id"),
+            payload: ResponsePayload::Lifecycle(LifecycleResponse::Status(LifecycleStatus {
+                state: LifecycleState::Ready,
+                active_work_count: 1,
+            })),
+        }),
+    );
+    assert!(matches!(
+        encode_envelope(&invalid),
+        Err(ProtocolEncodeError::Value(
+            ProtocolValueError::InvalidLifecycleStatus {
+                state: LifecycleState::Ready,
+                active_work_count: 1
+            }
+        ))
+    ));
+}
+
+#[test]
+fn unknown_lifecycle_discriminants_remain_typed_failures() {
+    assert_unknown_discriminant(
+        raw_lifecycle_request(false, false),
+        &raw_lifecycle_request(true, false),
+    );
+    assert_unknown_discriminant(raw_lifecycle_response(false), &raw_lifecycle_response(true));
+    assert_unknown_discriminant(
+        raw_lifecycle_status(WireLifecycleState::Ready, 0),
+        &raw_lifecycle_status(WireLifecycleState::Busy, 1),
+    );
+    assert_unknown_discriminant(
+        raw_lifecycle_stop(
+            WireLifecycleStopDisposition::Accepted,
+            WireLifecycleState::Ready,
+        ),
+        &raw_lifecycle_stop(
+            WireLifecycleStopDisposition::Duplicate,
+            WireLifecycleState::Ready,
+        ),
+    );
 }
 
 #[test]
@@ -1151,6 +1592,7 @@ fn decoder_accepts_exactly_one_message_without_trailing_bytes() {
             connection_id: ConnectionId::parse("connection-1")
                 .expect("fixture connection id is valid"),
             reconnect_capability: ReconnectCapability::from_bytes(ROTATED_RECONNECT_CAPABILITY),
+            lifecycle_control_supported: false,
         }),
     ))
     .expect("fixture envelope encodes");

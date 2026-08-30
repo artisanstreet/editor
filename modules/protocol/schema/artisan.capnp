@@ -154,6 +154,8 @@ enum ErrorCode {
   # the six-code contract was committed; fresh ordinal, existing ordinals
   # frozen.
   idempotencyConflict @6;
+  unsupportedFeature @7;
+  lifecycleBusy @8;
 }
 
 # One Forge-visible directory in a listing.
@@ -313,6 +315,12 @@ struct Hello {
     # enforcement lands in Phase 3.
     reconnect @2 :Data;
   }
+
+  # Optional feature offer. An absent field decodes as false, so peers that
+  # predate lifecycle control remain compatible. A client must not send the
+  # Request.lifecycleControl arm unless the Welcome negotiated support; the
+  # transport and backend enforce that authorization in later packets.
+  supportsLifecycleControl @3 :Bool;
 }
 
 # Server answer: the single negotiated application protocol version plus the
@@ -331,6 +339,69 @@ struct Welcome {
   # the Data wire type alone does not. Appended at a fresh ordinal so existing
   # readers see empty bytes and reject them at the owned boundary.
   reconnectCapability @2 :Data;
+
+  # Optional feature acceptance. An absent field decodes as false, so peers
+  # that predate lifecycle control remain compatible. Only a true negotiated
+  # value authorizes a client to send Request.lifecycleControl; enforcement is
+  # outside this wire-only packet.
+  lifecycleControlSupported @3 :Bool;
+}
+
+# ---------------------------------------------------------------------------
+# Negotiated Forge lifecycle control
+# ---------------------------------------------------------------------------
+
+# Empty status request. Lifecycle control is available only after the hello /
+# welcome feature negotiation above; no request id is nested here because the
+# enclosing Envelope.messageId supplies the request correlation.
+struct LifecycleStatusRequest {}
+
+# Request to stop lifecycle work. `requireIdle` is the only peer-controlled
+# option; transport and backend policy remain outside this wire-only packet.
+struct LifecycleStopRequest {
+  requireIdle @0 :Bool;
+}
+
+# Native lifecycle control request selected by Request.lifecycleControl.
+struct LifecycleRequest {
+  union {
+    status @0 :LifecycleStatusRequest;
+    stop @1 :LifecycleStopRequest;
+  }
+}
+
+# Coarse Forge lifecycle state reported by status and stop receipts.
+enum LifecycleState {
+  ready @0;
+  busy @1;
+  draining @2;
+}
+
+# Current lifecycle state and bounded active-work count.
+struct LifecycleStatus {
+  state @0 :LifecycleState;
+  activeWorkCount @1 :UInt32;
+}
+
+# Result of a lifecycle stop request.
+enum LifecycleStopDisposition {
+  accepted @0;
+  duplicate @1;
+  alreadyStopping @2;
+}
+
+# Lifecycle stop result. The state is reported independently of disposition.
+struct LifecycleStopReceipt {
+  disposition @0 :LifecycleStopDisposition;
+  state @1 :LifecycleState;
+}
+
+# Native lifecycle control response selected by Response.lifecycleControl.
+struct LifecycleResponse {
+  union {
+    status @0 :LifecycleStatus;
+    stop @1 :LifecycleStopReceipt;
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -388,9 +459,9 @@ struct QueueFirstMessageRequest {
 struct ListAttachedProjectsRequest {}
 
 # The request arms of the native protocol: the six of the first workflow,
-# the three conversation read/subscription requests appended below them, and
-# the explicit host-interaction pickDirectory request appended last as the
-# tenth arm.
+# the three conversation read/subscription requests appended below them, the
+# explicit host-interaction pickDirectory request, and lifecycle control
+# appended last as the eleventh arm.
 struct Request {
   union {
     listDirectories @0 :ListDirectoriesRequest;
@@ -419,6 +490,12 @@ struct Request {
     # Appended after the conversation requests; fresh ordinal, existing
     # ordinals frozen.
     pickDirectory @9 :Void;
+
+  # Negotiated native lifecycle status/stop control. A client must not send
+  # this arm unless the preceding Welcome negotiated support; old peers
+  # remain compatible with messages that omit this fresh arm. Authorization
+  # is enforced by transport/backend packets, not by this wire-only leaf.
+    lifecycleControl @10 :LifecycleRequest;
   }
 }
 
@@ -458,6 +535,10 @@ struct Response {
     # outside this slice. Appended after the conversation responses; fresh
     # ordinal, existing ordinals frozen.
     directoryPicked @10 :DirectoryPickOutcome;
+
+    # Negotiated native lifecycle status/stop result. Appended at a fresh
+    # ordinal; existing response arms remain frozen.
+    lifecycleControl @11 :LifecycleResponse;
   }
 }
 
