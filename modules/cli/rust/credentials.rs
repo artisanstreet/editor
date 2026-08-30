@@ -1198,10 +1198,10 @@ fn is_icacls_success_summary(line: &str) -> bool {
     let Some(processed) = processed.strip_suffix(" files") else {
         return false;
     };
+    let failed = failed.strip_suffix('.').unwrap_or(failed);
     let Some(failed) = failed.strip_suffix(" files") else {
         return false;
     };
-    let failed = failed.strip_suffix('.').unwrap_or(failed);
     let (Ok(processed), Ok(failed)) = (processed.parse::<u64>(), failed.parse::<u64>()) else {
         return false;
     };
