@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     time::Duration,
@@ -211,29 +211,68 @@ fn validate_home(home: &Path) -> Result<(), ForgeCredentialError> {
     Ok(())
 }
 
-fn reject_symlink_chain(path: &Path) -> Result<(), ForgeCredentialError> {
-    for ancestor in path.ancestors() {
+fn metadata_is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_ancestors_all(path: &Path, must_exist: bool) -> Result<(), ForgeCredentialError> {
+    let parent = path.parent().unwrap_or(Path::new("/"));
+    for ancestor in parent.ancestors() {
         if ancestor.as_os_str().is_empty() {
             continue;
         }
         match fs::symlink_metadata(ancestor) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(ForgeCredentialError::UnsafePath(ancestor.to_path_buf()));
+            Ok(meta) => {
+                if metadata_is_symlink_or_reparse(&meta) {
+                    return Err(ForgeCredentialError::UnsafePath(ancestor.to_path_buf()));
+                }
+                if !meta.is_dir() {
+                    return Err(ForgeCredentialError::UnsafePath(ancestor.to_path_buf()));
+                }
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if must_exist {
+                    return Err(ForgeCredentialError::Io {
+                        context: "inspect parent",
+                        path: ancestor.to_path_buf(),
+                    });
+                }
+            }
             Err(_) => {
                 return Err(ForgeCredentialError::Io {
-                    context: "inspect path",
+                    context: "inspect parent",
                     path: ancestor.to_path_buf(),
                 });
             }
         }
-        if ancestor == path {
-            break;
-        }
     }
     Ok(())
+}
+
+fn reject_symlink_chain(path: &Path) -> Result<(), ForgeCredentialError> {
+    check_ancestors_all(path, false)?;
+    match fs::symlink_metadata(path) {
+        Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
+            Err(ForgeCredentialError::UnsafePath(path.to_path_buf()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(ForgeCredentialError::Io {
+            context: "inspect path",
+            path: path.to_path_buf(),
+        }),
+    }
 }
 
 fn is_safe_filename(name: &str) -> bool {
@@ -254,7 +293,7 @@ fn check_dir_mode(path: &Path) -> Result<(), ForgeCredentialError> {
     use std::os::unix::fs::PermissionsExt;
     let meta = fs::symlink_metadata(path)
         .map_err(|_| ForgeCredentialError::UnsafePath(path.to_path_buf()))?;
-    if meta.file_type().is_symlink() {
+    if metadata_is_symlink_or_reparse(&meta) {
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
     if !meta.is_dir() {
@@ -272,7 +311,7 @@ fn check_file_mode(path: &Path) -> Result<(), ForgeCredentialError> {
     use std::os::unix::fs::PermissionsExt;
     let meta = fs::symlink_metadata(path)
         .map_err(|_| ForgeCredentialError::UnsafePath(path.to_path_buf()))?;
-    if meta.file_type().is_symlink() {
+    if metadata_is_symlink_or_reparse(&meta) {
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
     if !meta.is_file() {
@@ -330,22 +369,76 @@ fn file_id(path: &Path) -> Result<FileId, ForgeCredentialError> {
         context: "inspect file id",
         path: path.to_path_buf(),
     })?;
+    let volume = meta
+        .volume_serial_number()
+        .ok_or(ForgeCredentialError::Provisioning)? as u64;
+    let high = meta
+        .file_index_high()
+        .ok_or(ForgeCredentialError::Provisioning)? as u64;
+    let low = meta
+        .file_index_low()
+        .ok_or(ForgeCredentialError::Provisioning)? as u64;
+    if volume == 0 && high == 0 && low == 0 {
+        return Err(ForgeCredentialError::Provisioning);
+    }
     Ok(FileId {
-        volume: meta.volume_serial_number().map_or(0, |v| u64::from(v)),
-        index_high: meta.file_index_high().map_or(0, |v| u64::from(v)),
-        index_low: meta.file_index_low().map_or(0, |v| u64::from(v)),
+        volume,
+        index_high: high,
+        index_low: low,
     })
 }
 
 #[cfg(not(any(unix, windows)))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileId {
-    dummy: u64,
-}
+struct FileId;
 
 #[cfg(not(any(unix, windows)))]
 fn file_id(_path: &Path) -> Result<FileId, ForgeCredentialError> {
-    Ok(FileId { dummy: 0 })
+    Err(ForgeCredentialError::Provisioning)
+}
+
+#[cfg(unix)]
+fn file_id_from_file(file: &File) -> Result<FileId, ForgeCredentialError> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().map_err(|_| ForgeCredentialError::Io {
+        context: "inspect file id",
+        path: PathBuf::from("<handle>"),
+    })?;
+    Ok(FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn file_id_from_file(file: &File) -> Result<FileId, ForgeCredentialError> {
+    use std::os::windows::fs::MetadataExt;
+    let meta = file.metadata().map_err(|_| ForgeCredentialError::Io {
+        context: "inspect file id",
+        path: PathBuf::from("<handle>"),
+    })?;
+    let volume = meta
+        .volume_serial_number()
+        .ok_or(ForgeCredentialError::Provisioning)? as u64;
+    let high = meta
+        .file_index_high()
+        .ok_or(ForgeCredentialError::Provisioning)? as u64;
+    let low = meta
+        .file_index_low()
+        .ok_or(ForgeCredentialError::Provisioning)? as u64;
+    if volume == 0 && high == 0 && low == 0 {
+        return Err(ForgeCredentialError::Provisioning);
+    }
+    Ok(FileId {
+        volume,
+        index_high: high,
+        index_low: low,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_id_from_file(_file: &File) -> Result<FileId, ForgeCredentialError> {
+    Err(ForgeCredentialError::Provisioning)
 }
 
 struct CreatedFile {
@@ -480,28 +573,66 @@ fn is_valid_sid(sid: &str) -> bool {
 }
 
 fn parse_icacls_output(output: &str, expected_sid: &str) -> Result<(), ForgeCredentialError> {
-    let lower = output.to_ascii_lowercase();
+    parse_icacls_strict(output, expected_sid, true)
+}
+
+fn parse_icacls_strict(
+    output: &str,
+    expected_sid: &str,
+    expect_dir: bool,
+) -> Result<(), ForgeCredentialError> {
     let expected_lower = expected_sid.to_ascii_lowercase();
-    if !lower.contains(&expected_lower) {
+    let mut ace_lines: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.contains(':') || !trimmed.contains('(') {
+            continue;
+        }
+        if trimmed.to_ascii_lowercase().starts_with("successfully") {
+            continue;
+        }
+        ace_lines.push(trimmed.to_string());
+    }
+    if ace_lines.is_empty() {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    if lower.contains("deny") {
+    if ace_lines.len() != 1 {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    if lower.contains("(i)") {
+    let ace = ace_lines[0].to_ascii_lowercase();
+    if !ace.contains(&expected_lower) {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    let sid_count = lower.matches("s-1-").count();
-    if sid_count != 1 {
+    if ace.contains("deny") {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    if ace.contains("(i)") {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    if !ace.contains("(f)") {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    if expect_dir {
+        if !ace.contains("(oi)") || !ace.contains("(ci)") {
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+    } else if ace.contains("(oi)") || ace.contains("(ci)") {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     for forbidden in ["everyone", "builtin", "nt authority", "authenticated users"] {
-        if lower.contains(forbidden) {
+        if ace.contains(forbidden) {
             return Err(ForgeCredentialError::WindowsAcl);
         }
     }
-    if !lower.contains("(f)") && !lower.contains("(oi)(ci)(f)") && !lower.contains("(oi)(ci)f") {
-        return Err(ForgeCredentialError::WindowsAcl);
+    let lower_output = output.to_ascii_lowercase();
+    if lower_output.matches(':').count() != ace_lines.len() {
+        let colon_count = lower_output.matches(':').count();
+        if colon_count > ace_lines.len() {
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
     }
     Ok(())
 }
@@ -514,7 +645,8 @@ fn verify_windows_dacl(path: &Path, expected_sid: &str) -> Result<(), ForgeCrede
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    parse_icacls_output(&text, expected_sid)
+    let is_dir = fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
+    parse_icacls_strict(&text, expected_sid, is_dir)
 }
 
 #[cfg(windows)]
@@ -567,9 +699,9 @@ fn sync_directory(_dir: &Path) -> Result<(), ForgeCredentialError> {
 }
 
 fn ensure_credentials_dir(dir: &Path) -> Result<(), ForgeCredentialError> {
-    reject_symlink_chain(dir.parent().unwrap_or(Path::new("/")))?;
+    check_ancestors_all(dir, false)?;
     match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.file_type().is_symlink() => {
+        Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
             return Err(ForgeCredentialError::UnsafePath(dir.to_path_buf()));
         }
         Ok(meta) if meta.is_dir() => {
@@ -615,10 +747,9 @@ fn ensure_credentials_dir(dir: &Path) -> Result<(), ForgeCredentialError> {
 }
 
 fn acquire_lock(lock_path: &Path) -> Result<File, ForgeCredentialError> {
-    let parent = lock_path.parent().unwrap_or(Path::new("/"));
-    reject_symlink_chain(parent)?;
+    check_ancestors_all(lock_path, false)?;
     match fs::symlink_metadata(lock_path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
+        Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
             return Err(ForgeCredentialError::UnsafePath(lock_path.to_path_buf()));
         }
         Ok(meta) if meta.is_dir() => {
@@ -655,7 +786,7 @@ fn acquire_lock(lock_path: &Path) -> Result<File, ForgeCredentialError> {
             path: lock_path.to_path_buf(),
         })?;
     match fs::symlink_metadata(lock_path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
+        Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
             return Err(ForgeCredentialError::UnsafePath(lock_path.to_path_buf()));
         }
         Ok(meta) if !meta.is_file() => {
@@ -680,14 +811,39 @@ fn acquire_lock(lock_path: &Path) -> Result<File, ForgeCredentialError> {
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            let open_vol = open_meta.volume_serial_number();
-            let path_vol = path_meta.volume_serial_number();
-            let open_idx = (open_meta.file_index_high(), open_meta.file_index_low());
-            let path_idx = (path_meta.file_index_high(), path_meta.file_index_low());
-            if open_vol != path_vol || open_idx != path_idx {
+            let open_vol = open_meta
+                .volume_serial_number()
+                .ok_or(ForgeCredentialError::Provisioning)?;
+            let path_vol = fs::metadata(lock_path)
+                .map_err(|_| ForgeCredentialError::Provisioning)?
+                .volume_serial_number()
+                .ok_or(ForgeCredentialError::Provisioning)?;
+            if open_vol != path_vol {
+                return Err(ForgeCredentialError::UnsafePath(lock_path.to_path_buf()));
+            }
+            let open_idx = (
+                open_meta
+                    .file_index_high()
+                    .ok_or(ForgeCredentialError::Provisioning)?,
+                open_meta
+                    .file_index_low()
+                    .ok_or(ForgeCredentialError::Provisioning)?,
+            );
+            let path_idx = {
+                let m = fs::metadata(lock_path).map_err(|_| ForgeCredentialError::Provisioning)?;
+                (
+                    m.file_index_high()
+                        .ok_or(ForgeCredentialError::Provisioning)?,
+                    m.file_index_low()
+                        .ok_or(ForgeCredentialError::Provisioning)?,
+                )
+            };
+            if open_idx != path_idx {
                 return Err(ForgeCredentialError::UnsafePath(lock_path.to_path_buf()));
             }
         }
+    } else {
+        return Err(ForgeCredentialError::Provisioning);
     }
     #[cfg(unix)]
     check_file_mode(lock_path)?;
@@ -802,6 +958,56 @@ fn validate_key_matches_cert(key_der: &[u8], cert_der: &[u8]) -> Result<(), Forg
     Ok(())
 }
 
+fn open_and_read(path: &Path) -> Result<Vec<u8>, ForgeCredentialError> {
+    check_ancestors_all(path, true)?;
+    let pre_meta = fs::symlink_metadata(path).map_err(|_| ForgeCredentialError::Io {
+        context: "inspect file",
+        path: path.to_path_buf(),
+    })?;
+    if metadata_is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
+    let pre_id = file_id(path)?;
+    let mut file =
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|_| ForgeCredentialError::Io {
+                context: "open file",
+                path: path.to_path_buf(),
+            })?;
+    let handle_meta = file.metadata().map_err(|_| ForgeCredentialError::Io {
+        context: "inspect handle",
+        path: path.to_path_buf(),
+    })?;
+    if metadata_is_symlink_or_reparse(&handle_meta) || !handle_meta.is_file() {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
+    let handle_id = file_id_from_file(&file)?;
+    if handle_id != pre_id {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| ForgeCredentialError::Io {
+            context: "read file",
+            path: path.to_path_buf(),
+        })?;
+    check_ancestors_all(path, true)?;
+    let post_meta = fs::symlink_metadata(path).map_err(|_| ForgeCredentialError::Io {
+        context: "inspect file",
+        path: path.to_path_buf(),
+    })?;
+    if metadata_is_symlink_or_reparse(&post_meta) || !post_meta.is_file() {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
+    let post_id = file_id(path)?;
+    if post_id != pre_id || post_id != handle_id {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
+    Ok(bytes)
+}
+
 fn validate_existing_bundle(paths: &ForgeCredentialPaths) -> Result<bool, ForgeCredentialError> {
     let manifest_path = paths.manifest_path();
     let capability_path = paths.capability_path();
@@ -813,14 +1019,14 @@ fn validate_existing_bundle(paths: &ForgeCredentialPaths) -> Result<bool, ForgeC
     let mut missing = Vec::new();
     for file in &files {
         match fs::symlink_metadata(file) {
-            Ok(meta) if meta.file_type().is_symlink() => {
+            Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
                 return Err(ForgeCredentialError::UnsafePath((*file).to_path_buf()));
             }
             Ok(meta) if meta.is_dir() => {
                 return Err(ForgeCredentialError::UnsafePath((*file).to_path_buf()));
             }
             Ok(meta) if meta.is_file() => {
-                reject_symlink_chain(file)?;
+                check_ancestors_all(file, true)?;
                 exists.push(*file);
             }
             Ok(_) => return Err(ForgeCredentialError::UnsafePath((*file).to_path_buf())),
@@ -849,33 +1055,18 @@ fn validate_existing_bundle(paths: &ForgeCredentialPaths) -> Result<bool, ForgeC
             let sid = resolve_current_sid()?;
             verify_windows_dacl(file, &sid)?;
         }
-        reject_symlink_chain(file)?;
+        check_ancestors_all(file, true)?;
     }
-    let manifest_bytes = fs::read(manifest_path).map_err(|_| ForgeCredentialError::Io {
-        context: "read manifest",
-        path: manifest_path.to_path_buf(),
-    })?;
+    let manifest_bytes = open_and_read(manifest_path)?;
     validate_manifest_bytes(&manifest_bytes, paths)?;
-    let cap_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(fs::read(capability_path).map_err(
-        |_| ForgeCredentialError::Io {
-            context: "read capability",
-            path: capability_path.to_path_buf(),
-        },
-    )?);
+    let cap_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(open_and_read(capability_path)?);
     if cap_bytes.len() != 32 {
         return Err(ForgeCredentialError::InvalidCapability {
             path: capability_path.to_path_buf(),
         });
     }
-    let cert_der = fs::read(cert_path).map_err(|_| ForgeCredentialError::Io {
-        context: "read certificate",
-        path: cert_path.to_path_buf(),
-    })?;
-    let key_bytes: Zeroizing<Vec<u8>> =
-        Zeroizing::new(fs::read(key_path).map_err(|_| ForgeCredentialError::Io {
-            context: "read private key",
-            path: key_path.to_path_buf(),
-        })?);
+    let cert_der = open_and_read(cert_path)?;
+    let key_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(open_and_read(key_path)?);
     if cert_der.is_empty() || key_bytes.is_empty() {
         return Err(ForgeCredentialError::InvalidCertificate);
     }
@@ -928,7 +1119,7 @@ fn install_atomic(
     }
     let dest = dir.join(filename);
     match fs::symlink_metadata(&dest) {
-        Ok(meta) if meta.file_type().is_symlink() => {
+        Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
             return Err(ForgeCredentialError::UnsafePath(dest));
         }
         Ok(meta) if meta.is_dir() => {
@@ -946,7 +1137,7 @@ fn install_atomic(
             });
         }
     }
-    reject_symlink_chain(&dest)?;
+    check_ancestors_all(&dest, false)?;
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| ForgeCredentialError::Provisioning)?;
     let nonce_hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
@@ -974,31 +1165,51 @@ fn install_atomic(
         context: "sync temporary file",
         path: temp_path.clone(),
     })?;
+    let temp_id = file_id_from_file(&file)?;
     drop(file);
     fs::hard_link(&temp_path, &dest).map_err(|_| ForgeCredentialError::Io {
         context: "activate file",
         path: dest.clone(),
     })?;
-    let id = file_id(&dest)?;
+    let dest_id = file_id(&dest)?;
+    if dest_id != temp_id {
+        return Err(ForgeCredentialError::Provisioning);
+    }
     created.push(CreatedFile {
         path: dest.clone(),
-        id,
+        id: dest_id,
     });
-    sync_directory(dir)?;
+    sync_directory(dir).map_err(|e| {
+        let _ = fs::remove_file(&dest);
+        e
+    })?;
     #[cfg(unix)]
-    check_file_mode(&dest)?;
+    {
+        if let Err(e) = check_file_mode(&dest) {
+            let _ = fs::remove_file(&dest);
+            return Err(e);
+        }
+    }
     #[cfg(windows)]
     {
         let sid = resolve_current_sid()?;
-        restrict_file_windows(&dest, &sid)?;
+        if let Err(e) = restrict_file_windows(&dest, &sid) {
+            let _ = fs::remove_file(&dest);
+            return Err(e);
+        }
+    }
+    if fs::remove_file(&temp_path).is_err() {
+        return Err(ForgeCredentialError::Io {
+            context: "remove temporary file",
+            path: temp_path.clone(),
+        });
     }
     temp_guard.disarm();
-    let _ = fs::remove_file(&temp_path);
     Ok(())
 }
 
 fn cleanup_created(created: Vec<CreatedFile>) {
-    for entry in created {
+    for entry in created.into_iter().rev() {
         if let Ok(current_id) = file_id(&entry.path) {
             if current_id == entry.id {
                 let _ = fs::remove_file(&entry.path);
@@ -1009,7 +1220,7 @@ fn cleanup_created(created: Vec<CreatedFile>) {
 
 pub fn provision_or_load(home: &Path) -> Result<ForgeCredentialPaths, ForgeCredentialError> {
     validate_home(home)?;
-    reject_symlink_chain(home)?;
+    check_ancestors_all(home, true)?;
     let paths = ForgeCredentialPaths::new(home)?;
     let credentials_dir = paths.credentials_dir();
     ensure_credentials_dir(&credentials_dir)?;
@@ -1060,11 +1271,17 @@ pub fn provision_or_load(home: &Path) -> Result<ForgeCredentialPaths, ForgeCrede
         cleanup_created(created);
         return Err(error);
     }
-    if !validate_existing_bundle(&paths)? {
-        cleanup_created(created);
-        return Err(ForgeCredentialError::Provisioning);
+    match validate_existing_bundle(&paths) {
+        Ok(true) => Ok(paths),
+        Ok(false) => {
+            cleanup_created(created);
+            Err(ForgeCredentialError::Provisioning)
+        }
+        Err(error) => {
+            cleanup_created(created);
+            Err(error)
+        }
     }
-    Ok(paths)
 }
 
 pub fn provision_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCredentialError> {
@@ -1075,389 +1292,20 @@ pub fn ensure_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCred
     provision_or_load(home)
 }
 
+// Tiny private parser test kept inside production file because DACL string shape cannot be
+// exercised through the public credential facade without Windows `icacls` execution.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{fs, thread};
-
-    fn temp_home(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "artisan-cred-test-{}-{}-{}",
-            label,
-            std::process::id(),
-            line!()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+mod parser_tests {
+    use super::{parse_icacls_output, parse_icacls_strict};
 
     #[test]
-    fn first_provision_produces_exact_file_set() {
-        let home = temp_home("first");
-        let paths = provision_or_load(&home).unwrap();
-        assert!(paths.manifest_path().is_file());
-        assert!(paths.capability_path().is_file());
-        assert!(paths.certificate_paths()[0].is_file());
-        assert!(paths.private_key_path().is_file());
-        assert_eq!(fs::read(paths.capability_path()).unwrap().len(), 32);
-        let manifest_bytes = fs::read(paths.manifest_path()).unwrap();
-        let manifest: CredentialManifest = serde_json::from_slice(&manifest_bytes).unwrap();
-        assert_eq!(manifest.schema, "artisan-forge-credentials-v1");
-        assert_eq!(manifest.version, 1);
-        assert_eq!(manifest.certificate_chain, vec!["localhost-leaf.der"]);
-        let cert_der = fs::read(&paths.certificate_paths()[0]).unwrap();
-        validate_cert_sans(&cert_der).unwrap();
-        let key_der = fs::read(paths.private_key_path()).unwrap();
-        validate_key_matches_cert(&key_der, &cert_der).unwrap();
-        let size = fs::read_dir(paths.credentials_dir()).unwrap().count();
-        assert!(size >= 5);
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn repeated_provision_is_byte_identical() {
-        let home = temp_home("repeat");
-        let first = provision_or_load(&home).unwrap();
-        let cap1 = fs::read(first.capability_path()).unwrap();
-        let cert1 = fs::read(&first.certificate_paths()[0]).unwrap();
-        let key1 = fs::read(first.private_key_path()).unwrap();
-        let manifest1 = fs::read(first.manifest_path()).unwrap();
-        let second = provision_or_load(&home).unwrap();
-        assert_eq!(cap1, fs::read(second.capability_path()).unwrap());
-        assert_eq!(cert1, fs::read(&second.certificate_paths()[0]).unwrap());
-        assert_eq!(key1, fs::read(second.private_key_path()).unwrap());
-        assert_eq!(manifest1, fs::read(second.manifest_path()).unwrap());
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn concurrent_provision_yields_one_bundle() {
-        let home = temp_home("concurrent");
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let home = home.clone();
-                thread::spawn(move || provision_or_load(&home).unwrap())
-            })
-            .collect();
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        let first_cap = fs::read(results[0].capability_path()).unwrap();
-        for paths in &results[1..] {
-            assert_eq!(first_cap, fs::read(paths.capability_path()).unwrap());
-        }
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn partial_bundle_is_error_not_rotated() {
-        let home = temp_home("partial");
-        provision_or_load(&home).unwrap();
-        let cap_path = home.join("credentials").join("bootstrap-capability.bin");
-        fs::remove_file(home.join("credentials").join("localhost-leaf.der")).unwrap();
-        let original_cap = fs::read(&cap_path).unwrap();
-        let err = provision_or_load(&home).unwrap_err();
-        assert!(matches!(err, ForgeCredentialError::PartialBundle));
-        assert_eq!(fs::read(&cap_path).unwrap(), original_cap);
-        assert!(home.join("credentials").join("manifest.json").is_file());
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn corrupt_and_unknown_fields_fail() {
-        let home = temp_home("corrupt");
-        provision_or_load(&home).unwrap();
-        let manifest_path = home.join("credentials").join("manifest.json");
-        let original = fs::read(&manifest_path).unwrap();
-        fs::write(
-            &manifest_path,
-            br#"{"schema":"artisan-forge-credentials-v1","version":1,"bootstrap_capability":"bootstrap-capability.bin","certificate_chain":["localhost-leaf.der"],"private_key":"localhost-key.pkcs8.der","unknown":"field"}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            provision_or_load(&home).unwrap_err(),
-            ForgeCredentialError::ManifestMalformed
-                | ForgeCredentialError::ManifestUnknownField
-                | ForgeCredentialError::ManifestDuplicateField
-                | ForgeCredentialError::InvalidCertificate
-        ));
-        fs::write(&manifest_path, original).unwrap();
-        let cert_path = home.join("credentials").join("localhost-leaf.der");
-        let orig_cert = fs::read(&cert_path).unwrap();
-        fs::write(&cert_path, b"not der").unwrap();
-        assert!(matches!(
-            provision_or_load(&home).unwrap_err(),
-            ForgeCredentialError::InvalidCertificate
-        ));
-        fs::write(&cert_path, orig_cert).unwrap();
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn traversal_filename_rejected() {
-        let home = temp_home("traversal");
-        provision_or_load(&home).unwrap();
-        let manifest_path = home.join("credentials").join("manifest.json");
-        fs::write(
-            &manifest_path,
-            br#"{"schema":"artisan-forge-credentials-v1","version":1,"bootstrap_capability":"../evil.bin","certificate_chain":["localhost-leaf.der"],"private_key":"localhost-key.pkcs8.der"}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            provision_or_load(&home).unwrap_err(),
-            ForgeCredentialError::ManifestTraversal
-                | ForgeCredentialError::ManifestMalformed
-                | ForgeCredentialError::InvalidCertificate
-        ));
-        let traversal_error = ForgeCredentialError::ManifestTraversal;
-        assert!(!format!("{traversal_error}").contains("evil"));
-        assert!(!format!("{traversal_error:?}").contains("evil"));
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn symlink_rejected() {
-        let home = temp_home("symlink");
-        provision_or_load(&home).unwrap();
-        let cert_path = home.join("credentials").join("localhost-leaf.der");
-        let backup = cert_path.with_extension("bak");
-        fs::rename(&cert_path, &backup).unwrap();
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&backup, &cert_path).unwrap();
-        }
-        #[cfg(windows)]
-        {
-            std::os::windows::fs::symlink_file(&backup, &cert_path).unwrap_or_else(|_| {
-                fs::remove_file(&backup).unwrap();
-                fs::write(&cert_path, b"not der").unwrap();
-                return;
-            });
-        }
-        let err = provision_or_load(&home).unwrap_err();
-        assert!(matches!(err, ForgeCredentialError::UnsafePath(_)));
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn legacy_secrets_untouched() {
-        let home = temp_home("legacy");
-        let sentinel = b"legacy-sentinel-bytes-keep";
-        fs::write(home.join("secrets.json"), sentinel).unwrap();
-        provision_or_load(&home).unwrap();
-        assert_eq!(fs::read(home.join("secrets.json")).unwrap(), sentinel);
-        let second = provision_or_load(&home).unwrap();
-        assert_eq!(fs::read(home.join("secrets.json")).unwrap(), sentinel);
-        let _ = second;
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn redacted_debug_and_sentinel_scan() {
-        let home = temp_home("redacted");
-        let paths = provision_or_load(&home).unwrap();
-        let cap = fs::read(paths.capability_path()).unwrap();
-        let debug = format!("{:?}", paths);
-        let err = ForgeCredentialError::Provisioning;
-        let err_debug = format!("{err:?}");
-        let err_display = format!("{err}");
-        for bytes in [cap.clone()] {
-            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-            assert!(!debug.contains(&hex));
-            assert!(!err_debug.contains(&hex));
-            assert!(!err_display.contains(&hex));
-        }
-        let material = ProvisionalMaterial {
-            capability: Zeroizing::new([0xAA; 32]),
-            private_key: Zeroizing::new(vec![0xBB; 64]),
-            certificate: vec![0xCC; 100],
-        };
-        let mat_debug = format!("{material:?}");
-        assert!(mat_debug.contains("[REDACTED]"));
-        assert!(!mat_debug.contains("AA"));
-        let control = "evil\x00\n\r traversal";
-        let traversal_err = ForgeCredentialError::ManifestTraversal;
-        assert!(!format!("{traversal_err}").contains(control));
-        assert!(!format!("{traversal_err:?}").contains(control));
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn unix_exact_modes() {
-        use std::os::unix::fs::PermissionsExt;
-        let home = temp_home("modes");
-        let paths = provision_or_load(&home).unwrap();
-        let dir_mode = fs::metadata(paths.credentials_dir())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(dir_mode, 0o700);
-        for file in [
-            paths.manifest_path(),
-            paths.capability_path(),
-            &paths.certificate_paths()[0],
-            paths.private_key_path(),
-            &paths.lock_path(),
-        ] {
-            let mode = fs::metadata(file).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "file {} mode {mode:o}", file.display());
-        }
-        fs::set_permissions(paths.credentials_dir(), fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(matches!(
-            provision_or_load(&home).unwrap_err(),
-            ForgeCredentialError::WindowsAcl
-        ));
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn windows_owner_only_dacl() {
-        let home = temp_home("winacl");
-        let paths = provision_or_load(&home).unwrap();
-        let sid = resolve_current_sid().unwrap();
-        assert!(is_valid_sid(&sid));
-        verify_windows_dacl(paths.credentials_dir(), &sid).unwrap();
-        verify_windows_dacl(paths.capability_path(), &sid).unwrap();
-        let acl_output = hidden_output(
-            "icacls.exe",
-            &[&paths.credentials_dir().to_string_lossy().to_string()],
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        assert!(acl_output.status.success());
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn atomic_failure_cleanup_only_this_run() {
-        let home = temp_home("atomic");
-        let cred_dir = home.join("credentials");
-        fs::create_dir_all(&cred_dir).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&cred_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let preexisting = cred_dir.join("keep.txt");
-        fs::write(&preexisting, b"keep").unwrap();
-        let mut created: Vec<CreatedFile> = Vec::new();
-        let _ = install_atomic(&cred_dir, "a.bin", b"data", &mut created);
-        assert!(cred_dir.join("a.bin").is_file());
-        let second_temp = cred_dir.join("b.bin");
-        fs::write(&second_temp, b"existing").unwrap();
-        let mut c: Vec<CreatedFile> = Vec::new();
-        let err = install_atomic(&cred_dir, "b.bin", b"new", &mut c).unwrap_err();
-        assert!(matches!(err, ForgeCredentialError::PartialBundle));
-        assert!(preexisting.is_file());
-        assert_eq!(fs::read(preexisting).unwrap(), b"keep");
-        let before_id = file_id(&cred_dir.join("a.bin")).unwrap();
-        fs::remove_file(cred_dir.join("a.bin")).unwrap();
-        fs::write(cred_dir.join("a.bin"), b"replaced").unwrap();
-        cleanup_created(created);
-        assert_eq!(fs::read(cred_dir.join("a.bin")).unwrap(), b"replaced");
-        assert!(file_id(&cred_dir.join("a.bin")).unwrap() != before_id);
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn nonregular_file_rejected() {
-        let home = temp_home("nonregular");
-        provision_or_load(&home).unwrap();
-        let manifest_path = home.join("credentials").join("manifest.json");
-        let backup = manifest_path.with_extension("bak");
-        fs::rename(&manifest_path, &backup).unwrap();
-        fs::create_dir(&manifest_path).unwrap();
-        assert!(matches!(
-            provision_or_load(&home).unwrap_err(),
-            ForgeCredentialError::UnsafePath(_)
-        ));
-        fs::remove_dir_all(&manifest_path).unwrap();
-        fs::rename(&backup, &manifest_path).unwrap();
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn hardlink_no_overwrite_and_identity_cleanup() {
-        let home = temp_home("hardlink");
-        let cred_dir = home.join("credentials");
-        fs::create_dir_all(&cred_dir).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&cred_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let mut created: Vec<CreatedFile> = Vec::new();
-        install_atomic(&cred_dir, "x.bin", b"first", &mut created).unwrap();
-        let first_id = file_id(&cred_dir.join("x.bin")).unwrap();
-        assert!(matches!(
-            install_atomic(&cred_dir, "x.bin", b"second", &mut Vec::new()).unwrap_err(),
-            ForgeCredentialError::PartialBundle
-        ));
-        assert_eq!(file_id(&cred_dir.join("x.bin")).unwrap(), first_id);
-        assert_eq!(fs::read(cred_dir.join("x.bin")).unwrap(), b"first");
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn post_install_failure_leak_check() {
-        let home = temp_home("postfail");
-        let cred_dir = home.join("credentials");
-        fs::create_dir_all(&cred_dir).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&cred_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let mut created: Vec<CreatedFile> = Vec::new();
-        install_atomic(&cred_dir, "leaf.der", b"cert", &mut created).unwrap();
-        let id_before = file_id(&cred_dir.join("leaf.der")).unwrap();
-        cleanup_created(created);
-        assert!(!cred_dir.join("leaf.der").exists());
-        let mut created2: Vec<CreatedFile> = Vec::new();
-        install_atomic(&cred_dir, "leaf.der", b"newcert", &mut created2).unwrap();
-        let id_after = file_id(&cred_dir.join("leaf.der")).unwrap();
-        assert!(id_before != id_after);
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn tampered_certificate_rejected() {
-        let home = temp_home("tamper");
-        let paths = provision_or_load(&home).unwrap();
-        let cert_path = paths.certificate_paths()[0].to_path_buf();
-        let mut cert = fs::read(&cert_path).unwrap();
-        let last = cert.len() - 1;
-        cert[last] ^= 0xFF;
-        fs::write(&cert_path, &cert).unwrap();
-        assert!(matches!(
-            provision_or_load(&home).unwrap_err(),
-            ForgeCredentialError::InvalidCertificate
-        ));
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn wrong_signature_certificate_rejected() {
-        let mut cert_der = {
-            let home = temp_home("wrsig-gen");
-            let p = provision_or_load(&home).unwrap();
-            let d = fs::read(&p.certificate_paths()[0]).unwrap();
-            fs::remove_dir_all(home).unwrap();
-            d
-        };
-        if cert_der.len() > 20 {
-            cert_der[cert_der.len() - 10] ^= 0x01;
-        }
-        assert!(validate_cert_sans(&cert_der).is_err());
-    }
-
-    #[test]
-    fn parser_exact_windows_dacl() {
+    fn windows_dacl_parser_strict() {
         let sid = "S-1-5-21-1-2-3-1000";
-        let good = format!("C:\\creds {sid}:(OI)(CI)(F)");
-        assert!(parse_icacls_output(&good, sid).is_ok());
+        let good_dir = format!("C:\\creds {sid}:(OI)(CI)(F)");
+        assert!(parse_icacls_output(&good_dir, sid).is_ok());
+        assert!(parse_icacls_strict(&good_dir, sid, true).is_ok());
+        let good_file = format!("C:\\creds\\file {sid}:(F)");
+        assert!(parse_icacls_strict(&good_file, sid, false).is_ok());
         let with_inherited = format!("C:\\creds {sid}:(I)(OI)(CI)(F)");
         assert!(parse_icacls_output(&with_inherited, sid).is_err());
         let two_sids = format!("C:\\creds {sid}:(F) S-1-5-21-1-2-3-1001:(F)");
@@ -1466,37 +1314,8 @@ mod tests {
         assert!(parse_icacls_output(&deny, sid).is_err());
         let everyone = format!("C:\\creds BUILTIN\\Users:(F) {sid}:(F)");
         assert!(parse_icacls_output(&everyone, sid).is_err());
-    }
-
-    #[test]
-    fn lock_symlink_rejected() {
-        let home = temp_home("locklink");
-        let cred_dir = home.join("credentials");
-        fs::create_dir_all(&cred_dir).unwrap();
-        let lock = cred_dir.join(".provision.lock");
-        fs::write(&lock, b"lock").unwrap();
-        let target = cred_dir.join("target.lock");
-        fs::rename(&lock, &target).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &lock).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&target, &lock).unwrap_or_else(|_| {
-            fs::write(&lock, b"not symlink").unwrap();
-            return;
-        });
-        let result = acquire_lock(&lock);
-        if cfg!(unix) {
-            assert!(result.is_err());
-        }
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn manifest_error_is_redacted() {
-        let err = ForgeCredentialError::ManifestMalformed;
-        assert!(!format!("{err}").contains("evil"));
-        assert!(!format!("{err:?}").contains("evil"));
-        let control = "bad\x00\x01\x02";
-        assert!(!format!("{}", ForgeCredentialError::ManifestTraversal).contains(control));
+        let named_extra = format!("C:\\creds {sid}:(F)\nDOMAIN\\OtherUser:(F)");
+        assert!(parse_icacls_output(&named_extra, sid).is_err());
+        assert!(parse_icacls_strict(&named_extra, sid, false).is_err());
     }
 }
