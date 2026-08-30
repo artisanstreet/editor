@@ -15,6 +15,7 @@ artisan-domain = { path = "../domain" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
+statig.workspace = true
 url.workspace = true
 
 [[test]]

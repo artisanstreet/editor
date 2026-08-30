@@ -146,6 +146,7 @@ rust_library(
         "//modules/transport:transport",
         "//modules/ui:ui",
         "@crates//:gpui",
+        "@crates//:statig",
         "@crates//:url",
     ],
     edition = "2024",
