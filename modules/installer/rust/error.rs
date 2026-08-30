@@ -52,7 +52,7 @@ pub enum InstallerError {
     #[error("permanent ae executable is missing at {0}")]
     MissingCli(PathBuf),
     #[error(
-        "installer lifecycle binary is missing at {0}; release archives must contain bin/ae-installer (bin/ae-installer.exe on Windows)"
+        "installer lifecycle binary is missing at {0}; release archives must contain bin/installer (bin/installer.exe on Windows)"
     )]
     MissingInstaller(PathBuf),
     #[error("installation state is invalid: {0}")]
