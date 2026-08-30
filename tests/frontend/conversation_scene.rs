@@ -630,10 +630,10 @@ fn reasoning_only_work_renders_thought_for_ordinary_renders_worked_for_never_bot
     }
 
     // ordinary work (activity + reasoning mixed)
-    let turns2 = vec![scene_turn("turn_b", 1, ConversationLifecycle::Completed)];
+    let turns2 = vec![scene_turn("turn_b", 2, ConversationLifecycle::Completed)];
     let items2 = vec![
-        reasoning_item("r1", "turn_b", 1, "r1"),
-        activity_item("a1", "turn_b", 2, "tool"),
+        reasoning_item("r1", "turn_b", 3, "r1"),
+        activity_item("a1", "turn_b", 4, "tool"),
     ];
     let narrations2 = vec![narration(
         "turn_b",
@@ -865,15 +865,17 @@ fn work_group_overflow_is_typed_error() {
 
 #[test]
 fn changed_files_overflow_is_typed_error() {
-    use conversation_scene::ConversationScene;
-
-    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
     let files: Vec<SceneFileChange> = (0..(SCENE_MAX_CHANGED_FILES_PER_CARD + 1))
         .map(|i| SceneFileChange::new(format!("file_{i}.txt"), FileChangeStatus::Modified).unwrap())
         .collect();
-    let items = vec![change_set_item("cs", "turn_a", 1, files)];
-    let err =
-        ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("files overflow");
+    let err = SceneItem::new(
+        scene_id("cs"),
+        turn_id("turn_a"),
+        1,
+        SceneItemKind::ChangeSet { files },
+        None,
+    )
+    .expect_err("files overflow");
     assert!(matches!(err, SceneBuildError::TooManyChangedFiles { .. }));
 }
 
