@@ -32,7 +32,8 @@ use artisan_domain::{
 };
 use artisan_protocol::{
     APPLICATION_PROTOCOL_VERSION, ClientRequest, FrameId, Hello, HelloCredential, LocalCapability,
-    ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope, WireEnvelopeBody,
+    ProtocolVersion, ReconnectCapability, ResponsePayload, VersionOffer, WireEnvelope,
+    WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, DeadlineError, EnvelopeReceiveError, FrameError, HandshakeError,
@@ -2000,6 +2001,110 @@ async fn until_cancel_error_hides_secrets_in_debug_display() {
     let rendered = format!("{error}{error:?}");
     assert!(!rendered.contains("b7b7"));
     assert!(!rendered.contains("5c5c"));
+    let (done, handle) = (broker.done, broker.handle.take().unwrap());
+    let _ = done.recv_timeout(WATCHDOG);
+    let deadline = Instant::now() + WATCHDOG;
+    while !handle.is_finished() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().expect("join");
+}
+
+#[tokio::test]
+async fn until_cancel_family_mismatch_is_retryable_then_valid_succeeds() {
+    // FamilyMismatch (present Reconnect while Initial expected) is retryable per
+    // the fenced contract and must not terminate the loop.
+    let limits = default_limits(Duration::from_secs(2));
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-family", limits, capacity(4), capacity(4)).await;
+    let client_ep = client_endpoint(&pki);
+    let addr = broker.addr();
+
+    let mismatch = HelloCredential::Reconnect(ReconnectCapability::from_bytes([0x11; 32]));
+    let rejected = try_admit(&client_ep, addr, mismatch).await;
+    assert!(rejected.is_err(), "family mismatch must not get Welcome");
+
+    // Same endpoint must still serve a valid Initial credential.
+    let client = admit(&client_ep, addr, initial_credential()).await;
+    assert_eq!(client.welcome.frame_id.as_str(), "forge-meta-3");
+    exchange_response(
+        &client,
+        &list_projects_request("frame-after-family"),
+        "forge-meta-4",
+        UnixMillis::from_millis(1002),
+    )
+    .await;
+    broker.cancel();
+    let outcome = broker.await_result().await;
+    assert!(outcome.is_ok(), "family mismatch must be retryable");
+    expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
+    assert_connect_fails(&client_ep, addr).await;
+    let (done, handle) = (broker.done, broker.handle.take().unwrap());
+    let _ = done.recv_timeout(WATCHDOG);
+    let deadline = Instant::now() + WATCHDOG;
+    while !handle.is_finished() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().expect("join");
+}
+
+#[tokio::test]
+async fn until_cancel_handshake_timeout_is_terminal_service_failure() {
+    // Handshake timeout is terminal: authority may have already been touched,
+    // so the loop must drain and report service failure, not retry.
+    let limits = ListenerLimits {
+        admission: Duration::from_secs(2),
+        handshake: Duration::from_millis(120),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    };
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-hs-timeout", limits, capacity(4), capacity(4)).await;
+    let client_ep = client_endpoint(&pki);
+    let addr = broker.addr();
+
+    // Connect but delay opening the control stream past the handshake deadline.
+    let connecting = client_ep
+        .connect(addr, LOOPBACK_SERVER_NAME)
+        .expect("connect");
+    let connection = tokio::time::timeout(WATCHDOG, connecting)
+        .await
+        .expect("connect watchdog")
+        .expect("established");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Attempt to open after the server has timed out; the server's
+    // deadline decision is already terminal.
+    let _ = connection.open_bi().await;
+
+    let outcome = broker.await_result().await;
+    assert!(outcome.is_err(), "handshake timeout must be terminal");
+    let error = outcome.unwrap_err();
+    assert!(
+        error.is_service_failure(),
+        "timeout must be service failure, not drain-only"
+    );
+    assert!(error.drain_error().is_none(), "drain should succeed");
+    assert!(
+        error.as_listener_error().is_some(),
+        "primary must be listener authentication timeout"
+    );
+    if let Some(ListenerError::Authentication { source }) = error.as_listener_error() {
+        assert!(matches!(
+            source,
+            DeadlineError::Timeout {
+                operation: OperationKind::Handshake,
+                ..
+            }
+        ));
+    } else {
+        panic!("expected authentication timeout");
+    }
+    let rendered = format!("{error}{error:?}");
+    assert!(!rendered.contains("b7b7"));
+
+    assert_connect_fails(&client_ep, addr).await;
     let (done, handle) = (broker.done, broker.handle.take().unwrap());
     let _ = done.recv_timeout(WATCHDOG);
     let deadline = Instant::now() + WATCHDOG;
