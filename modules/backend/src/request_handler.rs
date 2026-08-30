@@ -41,8 +41,8 @@ use artisan_database::{
 };
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
-    ConversationUnsubscribe, CreateThread, DirectoryId, MessageId, PatchBatch, Query,
-    ProjectId, QueueFirstMessage, RequestId, RootPath, ThreadId, UnixMillis,
+    ConversationUnsubscribe, CreateThread, DirectoryId, MessageId, PatchBatch, ProjectId, Query,
+    QueueFirstMessage, RequestId, RootPath, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome, ErrorCode, ErrorDetail,
@@ -61,8 +61,7 @@ use crate::conversation_subscription_registry::{
     SubscriptionLease, SubscriptionView,
 };
 use crate::directory_controller::{
-    AdmissionError, DirectoryController, DirectoryPickOutcome, HelperOperationError,
-    ShutdownReport,
+    AdmissionError, DirectoryController, DirectoryPickOutcome, HelperOperationError, ShutdownReport,
 };
 use crate::directory_selection::{DirectorySelectionAdmissionError, SelectedDirectoryAuthority};
 
@@ -520,17 +519,17 @@ impl RequestHandler {
         &self,
         request_id: &RequestId,
     ) -> Result<ServerResponse, ProtocolFailure> {
-        let Some(picker) = self.directory_picker.as_ref() else {
+        let Some(directory_picker) = self.directory_picker.as_ref() else {
             return Err(unbacked_failure(request_id, "native directory picking"));
         };
 
-        let picked = picker
+        let pick_result = directory_picker
             .controller
-            .pick_directory(picker.budget)
+            .pick_directory(directory_picker.budget)
             .map_err(|error| directory_admission_failure(error, request_id))?
             .await
-            .map_err(|error| helper_operation_failure(error, request_id))?;
-        let root_path = match picked {
+            .map_err(|error| helper_operation_failure(&error, request_id))?;
+        let root_path = match pick_result {
             DirectoryPickOutcome::Selected { canonical_path } => RootPath::parse(canonical_path)
                 .map_err(|_| {
                     typed_failure(
@@ -546,7 +545,7 @@ impl RequestHandler {
                     ResponsePayload::DirectoryPicked(ProtocolDirectoryPickOutcome::Cancelled),
                 ));
             }
-            other => return Err(picker_outcome_failure(other, request_id)),
+            other => return Err(picker_outcome_failure(&other, request_id)),
         };
 
         let identity = self
@@ -555,7 +554,7 @@ impl RequestHandler {
             .map_err(|error| origin_entropy_failure(&error, request_id))?;
         let directory_id = DirectoryId::parse(identity)
             .map_err(|_| forged_identity_failure("directory", request_id))?;
-        let mut authority = picker.authority.lock().await;
+        let mut authority = directory_picker.authority.lock().await;
         let issued = authority
             .register(directory_id, root_path, Instant::now())
             .map_err(|error| directory_selection_failure(error, request_id))?;
@@ -992,10 +991,7 @@ fn unknown_directory_failure(request_id: &RequestId, directory: &DirectoryId) ->
 }
 
 /// Maps controller queue admission without exposing any operation payload.
-fn directory_admission_failure(
-    error: AdmissionError,
-    request_id: &RequestId,
-) -> ProtocolFailure {
+fn directory_admission_failure(error: AdmissionError, request_id: &RequestId) -> ProtocolFailure {
     let (detail, retryable) = match error {
         AdmissionError::Unavailable => ("native directory picker is unavailable", false),
         AdmissionError::Busy => ("native directory picker is busy", true),
@@ -1008,7 +1004,7 @@ fn directory_admission_failure(
 
 /// Maps one controller operation failure to the stable protocol vocabulary.
 fn helper_operation_failure(
-    error: HelperOperationError,
+    error: &HelperOperationError,
     request_id: &RequestId,
 ) -> ProtocolFailure {
     let (detail, retryable) = match error {
@@ -1016,10 +1012,9 @@ fn helper_operation_failure(
             "native directory picker was cancelled or abandoned by its controller",
             true,
         ),
-        HelperOperationError::Deadline => (
-            "native directory picker exceeded its request budget",
-            true,
-        ),
+        HelperOperationError::Deadline => {
+            ("native directory picker exceeded its request budget", true)
+        }
         HelperOperationError::Shutdown => (
             "native directory picker shut down during the request",
             false,
@@ -1029,20 +1024,14 @@ fn helper_operation_failure(
             "native directory picker generation capacity is exhausted",
             false,
         ),
-        HelperOperationError::SpawnFailed => (
-            "native directory picker helper could not start",
-            true,
-        ),
-        HelperOperationError::InvalidRequest => (
-            "native directory picker request was invalid",
-            false,
-        ),
-        HelperOperationError::WriteFailed => {
-            ("native directory picker request pipe failed", true)
+        HelperOperationError::SpawnFailed => {
+            ("native directory picker helper could not start", true)
         }
-        HelperOperationError::ReadFailed => {
-            ("native directory picker response pipe failed", true)
+        HelperOperationError::InvalidRequest => {
+            ("native directory picker request was invalid", false)
         }
+        HelperOperationError::WriteFailed => ("native directory picker request pipe failed", true),
+        HelperOperationError::ReadFailed => ("native directory picker response pipe failed", true),
         HelperOperationError::MalformedFrame => (
             "native directory picker returned a malformed response",
             false,
@@ -1051,28 +1040,22 @@ fn helper_operation_failure(
             "native directory picker returned a truncated response",
             false,
         ),
-        HelperOperationError::TrailingOutput => (
-            "native directory picker returned trailing output",
-            false,
-        ),
-        HelperOperationError::StaleGeneration => (
-            "native directory picker returned a stale response",
-            false,
-        ),
-        HelperOperationError::OversizedOutput => (
-            "native directory picker response exceeded its bound",
-            false,
-        ),
+        HelperOperationError::TrailingOutput => {
+            ("native directory picker returned trailing output", false)
+        }
+        HelperOperationError::StaleGeneration => {
+            ("native directory picker returned a stale response", false)
+        }
+        HelperOperationError::OversizedOutput => {
+            ("native directory picker response exceeded its bound", false)
+        }
         HelperOperationError::StderrCapExceeded => (
             "native directory picker diagnostic output exceeded its bound",
             false,
         ),
         HelperOperationError::ExitFailure => ("native directory picker helper failed", true),
-        HelperOperationError::UnresolvedReapDuring { .. } => (
-            "native directory picker helper cleanup could not confirm reaping",
-            false,
-        ),
-        HelperOperationError::ReapUnresolved => (
+        HelperOperationError::UnresolvedReapDuring { .. }
+        | HelperOperationError::ReapUnresolved => (
             "native directory picker helper cleanup could not confirm reaping",
             false,
         ),
@@ -1083,7 +1066,7 @@ fn helper_operation_failure(
 /// Maps a successful helper outcome that cannot be represented by the wire
 /// picker outcome.
 fn picker_outcome_failure(
-    outcome: DirectoryPickOutcome,
+    outcome: &DirectoryPickOutcome,
     request_id: &RequestId,
 ) -> ProtocolFailure {
     let (code, detail, retryable) = match outcome {
@@ -1124,26 +1107,22 @@ fn directory_selection_failure(
             "native directory selection identity was already issued",
             false,
         ),
-        DirectorySelectionAdmissionError::LiveCapacityFull => (
-            "native directory selection capacity is full",
-            true,
-        ),
+        DirectorySelectionAdmissionError::LiveCapacityFull => {
+            ("native directory selection capacity is full", true)
+        }
         DirectorySelectionAdmissionError::LifetimeExhausted => (
             "native directory selection lifetime capacity is exhausted",
             false,
         ),
-        DirectorySelectionAdmissionError::DeadlineOverflow => (
-            "native directory selection deadline is invalid",
-            false,
-        ),
-        DirectorySelectionAdmissionError::DisplayName(_) => (
-            "native directory selection display name is invalid",
-            false,
-        ),
-        DirectorySelectionAdmissionError::UnnamedRootForm => (
-            "native directory selection root is unnamed",
-            false,
-        ),
+        DirectorySelectionAdmissionError::DeadlineOverflow => {
+            ("native directory selection deadline is invalid", false)
+        }
+        DirectorySelectionAdmissionError::DisplayName(_) => {
+            ("native directory selection display name is invalid", false)
+        }
+        DirectorySelectionAdmissionError::UnnamedRootForm => {
+            ("native directory selection root is unnamed", false)
+        }
     };
     typed_failure(ErrorCode::Internal, detail, retryable, request_id)
 }

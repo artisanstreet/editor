@@ -844,20 +844,17 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         }
     };
 
-    let forge_executable = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(_) => {
-            let handler = RequestHandler::with_subscriptions(app.repository().clone());
-            return finish(
-                app,
-                handler,
-                custody,
-                None,
-                None,
-                Some(ForgeRuntimeError::DirectoryControllerExecutable),
-            )
-            .await;
-        }
+    let Ok(forge_executable) = std::env::current_exe() else {
+        let handler = RequestHandler::with_subscriptions(app.repository().clone());
+        return finish(
+            app,
+            handler,
+            custody,
+            None,
+            None,
+            Some(ForgeRuntimeError::DirectoryControllerExecutable),
+        )
+        .await;
     };
     let directory_controller = match DirectoryController::start(
         DirectoryControllerConfig::new(forge_executable),
