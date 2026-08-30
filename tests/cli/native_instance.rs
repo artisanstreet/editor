@@ -1,5 +1,9 @@
 use artisan_editor_cli::instance::{NativeInstanceConfig, NativeListenerConfig};
-use std::{fs, num::NonZeroU32, path::PathBuf};
+use std::{
+    fs,
+    num::NonZeroU32,
+    path::{Path, PathBuf},
+};
 
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -24,7 +28,7 @@ fn sample_listener() -> NativeListenerConfig {
     )
 }
 
-fn sample_config(home: &PathBuf) -> NativeInstanceConfig {
+fn sample_config(home: &Path) -> NativeInstanceConfig {
     NativeInstanceConfig::new(
         home.join("data").join("artisan.sqlite"),
         home.join("custody").join("lock"),
