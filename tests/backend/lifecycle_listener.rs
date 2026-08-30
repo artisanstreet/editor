@@ -188,7 +188,7 @@ fn spawn_listener_broker(server: ServerConfig, gate: Arc<TestActivityGate>) -> L
                 Box::new(TestOrigin::new()),
                 listener_limits(),
                 std::num::NonZeroU32::new(3).expect("admission capacity"),
-                std::num::NonZeroU32::new(1).expect("request capacity"),
+                std::num::NonZeroU32::new(2).expect("request capacity"),
                 lifecycle,
             )
             .expect("configured listener binds");
@@ -409,9 +409,9 @@ async fn one_listener_controller_serializes_first_committed_stop_across_connecti
         LifecycleStopDisposition::Duplicate
     );
     assert_eq!(duplicate_receipt.state, LifecycleState::Draining);
+    let reconnect = take_reconnect(duplicate);
     assert!(broker.served().await);
     assert!(!duplicate_cancel.is_cancelled());
-    let reconnect = take_reconnect(duplicate);
 
     let already_stopping_cancel = Arc::new(CancelHandle::new());
     broker.serve(Arc::clone(&already_stopping_cancel));
@@ -432,12 +432,12 @@ async fn one_listener_controller_serializes_first_committed_stop_across_connecti
         LifecycleStopDisposition::AlreadyStopping
     );
     assert_eq!(already_stopping_receipt.state, LifecycleState::Draining);
+    let _reconnect = take_reconnect(already_stopping);
     assert!(broker.served().await);
     assert!(!already_stopping_cancel.is_cancelled());
     assert_eq!(gate.committed(), 1);
     assert_eq!(gate.rolled_back(), 0);
     assert_eq!(gate.begin_stop_calls(), 1);
-    let _reconnect = take_reconnect(already_stopping);
 
     broker.shutdown();
     artisan_transport::shutdown(
