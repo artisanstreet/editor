@@ -832,6 +832,7 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
         context: "activate instance file",
         path: path.to_path_buf(),
     })?;
+    guard.disarm();
     // Prove destination is the temp file
     let dest_id = native_file_id(path)?;
     if dest_id != temp_id {
@@ -871,13 +872,6 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
                 path: directory.to_path_buf(),
             })?;
     }
-    if fs::remove_file(&temporary).is_err() {
-        return Err(NativeInstanceError::Io {
-            context: "remove temporary file",
-            path: temporary.clone(),
-        });
-    }
-    guard.disarm();
     Ok(())
 }
 
