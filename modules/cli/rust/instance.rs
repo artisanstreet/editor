@@ -1059,14 +1059,11 @@ pub(crate) fn replace_native_file(
     check_ancestors_all(path, true)?;
     verify_native_destination(path, pre_existing_id)?;
     verify_native_temporary(temporary.path(), temporary_id)?;
-    let persisted = match temporary.persist(path) {
-        Ok(file) => file,
-        Err(_) => {
-            return Err(NativeInstanceError::Io {
-                context: "activate native file",
-                path: path.to_path_buf(),
-            });
-        }
+    let Ok(persisted) = temporary.persist(path) else {
+        return Err(NativeInstanceError::Io {
+            context: "activate native file",
+            path: path.to_path_buf(),
+        });
     };
     drop(persisted);
 

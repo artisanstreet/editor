@@ -550,7 +550,8 @@ impl NativeOpenCode2Authority {
     ) -> Result<NativeAtomicReplaceOutcome, NativeOpenCode2StateError> {
         let state_path = state_path_for_root(toolchain_root, self.install_spec.engine_id())?;
         let bytes = self.encode_install_state(state)?;
-        instance::replace_native_file(&state_path, &bytes).map_err(map_atomic_replace_error)
+        instance::replace_native_file(&state_path, &bytes)
+            .map_err(|error| map_atomic_replace_error(&error))
     }
 }
 
@@ -773,7 +774,7 @@ fn map_state_read_error(error: &NativeInstanceError) -> NativeOpenCode2StateErro
     }
 }
 
-fn map_atomic_replace_error(error: NativeInstanceError) -> NativeOpenCode2StateError {
+fn map_atomic_replace_error(error: &NativeInstanceError) -> NativeOpenCode2StateError {
     match error {
         NativeInstanceError::UnsafePath(_) => NativeOpenCode2StateError::UnsafePath,
         NativeInstanceError::NotFound
