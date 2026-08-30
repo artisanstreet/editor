@@ -25,6 +25,9 @@ impl InstallationManifest {
     }
 
     pub fn load_for_root(path: &Path, selected_root: &Path) -> Result<Self> {
+        if !selected_root.is_absolute() {
+            return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
+        }
         let expected_path = selected_root.join("installation.json");
         if !same_path(path, &expected_path) {
             return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
@@ -36,6 +39,9 @@ impl InstallationManifest {
             )));
         }
         let mut value: Self = read_json(path)?;
+        if !value.install_root.is_absolute() {
+            return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
+        }
         if !same_path(&value.install_root, selected_root) {
             return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
         }
@@ -211,21 +217,50 @@ mod tests {
     }
 
     #[test]
+    fn load_rejects_a_relative_manifest_path_before_filesystem_lookup() {
+        let error =
+            InstallationManifest::load(Path::new("relative/installation.json")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Artisan is not installed correctly: installation manifest does not own the requested root"
+        );
+    }
+
+    #[test]
     fn load_binds_the_manifest_and_preserves_pending_finalization() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("Artisan Street");
+        fs::create_dir_all(root.join("child")).unwrap();
         let path = write_manifest(
             &root,
             &root.join(".").join("nested").join(".."),
             Some("1.2.3"),
             Some(&native_permanent_path(&root)),
         );
-        let manifest = InstallationManifest::load_for_root(&path, &root).unwrap();
-        assert_eq!(manifest.install_root, root);
+        let selected = root.join("child").join("..");
+        let manifest = InstallationManifest::load_for_root(&path, &selected).unwrap();
+        assert!(same_path(&manifest.install_root, &root));
         assert_eq!(manifest.finalization_state.as_deref(), Some("pending"));
         assert_eq!(
             manifest.version_root(),
             manifest.install_root.join("versions/1.2.3")
+        );
+    }
+
+    #[test]
+    fn load_rejects_a_relative_manifest_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Artisan Street");
+        let path = write_manifest(
+            &root,
+            Path::new("Artisan Street"),
+            Some("1.2.3"),
+            Some(&native_permanent_path(&root)),
+        );
+        let error = InstallationManifest::load_for_root(&path, &root).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Artisan is not installed correctly: installation manifest does not own the requested root"
         );
     }
 
