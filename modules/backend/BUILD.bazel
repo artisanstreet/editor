@@ -20,6 +20,7 @@ rust_library(
         "src/app.rs",
         "src/builtin_tool_capabilities_policy.rs",
         "src/connection.rs",
+        "src/conversation_delivery_writer.rs",
         "src/conversation_subscription_preparation.rs",
         "src/conversation_subscription_registry.rs",
         "src/credential_authority.rs",
