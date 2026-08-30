@@ -45,6 +45,7 @@ rust_library(
         "@crates//:sha2-0.10.9",
         "@crates//:tempfile",
         "@crates//:thiserror",
+        "@crates//:tokio",
         "@crates//:winapi-util",
         "@crates//:x509-parser",
         "@crates//:zeroize",
