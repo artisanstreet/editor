@@ -686,10 +686,6 @@ mod viewport_statig {
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::detached())
                 }
-                ViewportEvent::AnchorRemoved { .. } => {
-                    context.none();
-                    Handled
-                }
                 ViewportEvent::LayoutSettled | ViewportEvent::AnchorRemoved { .. } => {
                     context.none();
                     Handled
