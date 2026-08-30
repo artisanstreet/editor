@@ -19,6 +19,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use artisan_backend::listener::ServeUntilCancelError;
 use artisan_backend::{
     AuthenticationStageError, CommandOrigin, CommandOriginClockError, CommandOriginEntropyError,
     ForgeApp, ForgeConfig, ForgeListener, ForgeShutdownError, ListenerError, ListenerLimits,
@@ -31,7 +32,8 @@ use artisan_domain::{
 };
 use artisan_protocol::{
     APPLICATION_PROTOCOL_VERSION, ClientRequest, FrameId, Hello, HelloCredential, LocalCapability,
-    ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope, WireEnvelopeBody,
+    ProtocolVersion, ReconnectCapability, ResponsePayload, VersionOffer, WireEnvelope,
+    WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, DeadlineError, EnvelopeReceiveError, FrameError, HandshakeError,
@@ -1537,4 +1539,544 @@ async fn pending_owning_serve_future_drop_abandons_admission() {
     ));
     assert_connect_fails(&client_ep, broker.addr()).await;
     broker.shutdown_app().await;
+}
+
+// ---------------------------------------------------------------------------
+// Long-lived production loop: serve_until_cancel
+// ---------------------------------------------------------------------------
+
+struct UntilCancelBroker {
+    addr: SocketAddr,
+    cancel: Arc<CancelHandle>,
+    result_rx: Option<tokio::sync::oneshot::Receiver<Result<(), ServeUntilCancelError>>>,
+    done: std::sync::mpsc::Receiver<()>,
+    handle: Option<JoinHandle<()>>,
+    _temporary: TemporaryDatabase,
+}
+
+impl UntilCancelBroker {
+    fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    async fn await_result(&mut self) -> Result<(), Box<ServeUntilCancelError>> {
+        let receiver = self
+            .result_rx
+            .as_mut()
+            .expect("result receiver held until completion");
+        tokio::time::timeout(WATCHDOG, receiver)
+            .await
+            .expect("until-cancel settles under watchdog")
+            .expect("broker sent result")
+            .map_err(Box::new)
+    }
+
+    fn bounded_complete(&mut self, context: &str) -> Result<(), String> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        drop(self.result_rx.take());
+        let signalled = match self.done.recv_timeout(WATCHDOG) {
+            Ok(()) => true,
+            Err(RecvTimeoutError::Disconnected) => false,
+            Err(RecvTimeoutError::Timeout) => {
+                drop(handle);
+                return Err(format!("{context}: until-cancel broker timeout"));
+            }
+        };
+        let finish_deadline = Instant::now() + WATCHDOG;
+        while !handle.is_finished() {
+            if Instant::now() >= finish_deadline {
+                drop(handle);
+                return Err(format!(
+                    "{context}: broker did not finish within {WATCHDOG:?} after its completion window; detaching it without joining"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        match handle.join() {
+            Ok(()) if signalled => Ok(()),
+            Ok(()) => Err(format!(
+                "{context}: broker thread exited without its completion signal"
+            )),
+            Err(_) => Err(format!("{context}: broker panicked")),
+        }
+    }
+
+    fn complete(mut self, context: &str) -> Result<(), String> {
+        self.bounded_complete(context)
+    }
+}
+
+impl Drop for UntilCancelBroker {
+    fn drop(&mut self) {
+        if let Err(failure) = self.bounded_complete("dropped until-cancel test side") {
+            eprintln!("broker cleanup failure on dropped until-cancel test side: {failure}");
+        }
+    }
+}
+
+async fn start_until_cancel_broker(
+    label: &str,
+    limits: ListenerLimits,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+) -> (UntilCancelBroker, TestPki) {
+    let temporary = TemporaryDatabase::new(label);
+    let pki = test_pki();
+    let config = test_server_config(&pki);
+    let database_path = temporary.path().to_path_buf();
+    let cancel = Arc::new(CancelHandle::new());
+    let cancel_for_thread = cancel.clone();
+    let (addr_tx, addr_rx) = tokio::sync::oneshot::channel::<SocketAddr>();
+    let (result_tx, result_rx) =
+        tokio::sync::oneshot::channel::<Result<(), ServeUntilCancelError>>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("until-cancel broker runtime");
+        runtime.block_on(async move {
+            let app = ForgeApp::start(ForgeConfig::new(
+                SqliteConfig::file(&database_path).sqlx_logging(false),
+            ))
+            .await
+            .expect("app starts");
+            let handler = artisan_backend::RequestHandler::new(app.repository().clone());
+            let listener = ForgeListener::bind(
+                config,
+                LocalCapability::from_bytes(INITIAL_CAPABILITY),
+                SequencedOrigin::boxed(),
+                limits,
+                admission_capacity,
+                requests_per_connection,
+            )
+            .expect("listener binds");
+            let bound = listener.local_addr().expect("addr observable");
+            let _ = addr_tx.send(bound);
+            let outcome = listener
+                .serve_until_cancel(&handler, cancel_for_thread.as_ref())
+                .await;
+            let _ = result_tx.send(outcome);
+            drop(handler);
+            let _ = app.shutdown().await;
+        });
+        drop(runtime);
+        let _ = done_tx.send(());
+    });
+
+    let addr = tokio::time::timeout(WATCHDOG, addr_rx)
+        .await
+        .expect("addr under watchdog")
+        .expect("broker bound");
+    let broker = UntilCancelBroker {
+        addr,
+        cancel,
+        result_rx: Some(result_rx),
+        done: done_rx,
+        handle: Some(handle),
+        _temporary: temporary,
+    };
+    (broker, pki)
+}
+
+#[tokio::test]
+async fn until_cancel_idle_timeout_leaves_same_listener_alive() {
+    let limits = ListenerLimits {
+        admission: Duration::from_millis(180),
+        handshake: Duration::from_secs(2),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    };
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-idle-alive", limits, capacity(4), capacity(4)).await;
+    let client_ep = client_endpoint(&pki);
+    let start_addr = broker.addr();
+
+    // Let several idle timeouts fire without a peer; the loop must continue.
+    tokio::time::sleep(Duration::from_millis(650)).await;
+
+    // Same endpoint must still be reachable and serve a valid client.
+    let client = admit(&client_ep, start_addr, initial_credential()).await;
+    exchange_response(
+        &client,
+        &list_projects_request("frame-until-idle"),
+        "forge-meta-2",
+        UnixMillis::from_millis(1001),
+    )
+    .await;
+    // Cancel and prove drain success via result Ok and orphan check.
+    broker.cancel();
+    let outcome = broker.await_result().await;
+    assert!(outcome.is_ok(), "cancel with drain must succeed");
+    // Broker thread will have drained; endpoint must be closed.
+    assert_connect_fails(&client_ep, start_addr).await;
+    expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
+    broker
+        .complete("until-idle-alive")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_idle_timeouts_do_not_consume_capacity() {
+    let limits = ListenerLimits {
+        admission: Duration::from_millis(150),
+        handshake: Duration::from_secs(2),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    };
+    // Capacity 1: if timeouts consumed capacity, no peer could ever succeed.
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-idle-capacity", limits, capacity(1), capacity(1)).await;
+    let client_ep = client_endpoint(&pki);
+    tokio::time::sleep(Duration::from_millis(520)).await;
+    let client = admit(&client_ep, broker.addr(), initial_credential()).await;
+    let unread = write_unread_budget_request(&client, &list_projects_request("frame-cap")).await;
+    // After one successful admission the capacity is exhausted; the loop will
+    // become terminal and drain. Cancel to avoid hanging if not terminal.
+    broker.cancel();
+    let outcome = broker.await_result().await;
+    // Outcome may be Ok (cancel before exhaustion check) or service failure;
+    // the key proof is that the first client succeeded, so timeouts did not
+    // consume capacity.
+    assert!(
+        outcome.is_ok() || outcome.unwrap_err().is_service_failure(),
+        "after one admission the loop either cancelled or hit exhaustion"
+    );
+    drop(unread);
+    assert_connect_fails(&client_ep, broker.addr()).await;
+    broker
+        .complete("until-idle-capacity")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_rejected_client_does_not_terminate() {
+    let limits = default_limits(Duration::from_secs(2));
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-rejected", limits, capacity(4), capacity(4)).await;
+    let client_ep = client_endpoint(&pki);
+    let addr = broker.addr();
+
+    let rejected = try_admit(&client_ep, addr, wrong_value_credential()).await;
+    assert!(rejected.is_err(), "wrong credential must not get Welcome");
+
+    // The same endpoint must still serve a valid client after the rejection.
+    // First attempt consumed two identities (0,1) before failing, so the next
+    // valid Welcome uses 2/3 and its first request uses 4/1002.
+    let client = admit(&client_ep, addr, initial_credential()).await;
+    assert_eq!(client.welcome.frame_id.as_str(), "forge-meta-3");
+    assert_eq!(client.welcome.sent_at, UnixMillis::from_millis(1001));
+    exchange_response(
+        &client,
+        &list_projects_request("frame-after-reject"),
+        "forge-meta-4",
+        UnixMillis::from_millis(1002),
+    )
+    .await;
+    broker.cancel();
+    let outcome = broker.await_result().await;
+    assert!(outcome.is_ok(), "loop must survive auth rejection");
+    expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
+    assert_connect_fails(&client_ep, addr).await;
+    broker
+        .complete("until-rejected")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_cancellation_before_admission_drains() {
+    let limits = ListenerLimits {
+        admission: Duration::from_secs(30),
+        handshake: Duration::from_secs(2),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    };
+    let cancel = Arc::new(CancelHandle::new());
+    cancel.cancel();
+    // Build listener directly in a dedicated thread so cancellation is already
+    // set before the loop checks it.
+    let temporary = TemporaryDatabase::new("until-cancel-before");
+    let pki = test_pki();
+    let config = test_server_config(&pki);
+    let database_path = temporary.path().to_path_buf();
+    let cancel_clone = cancel.clone();
+    let (addr_tx, addr_rx) = tokio::sync::oneshot::channel::<SocketAddr>();
+    let (result_tx, result_rx) =
+        tokio::sync::oneshot::channel::<Result<(), ServeUntilCancelError>>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let app = ForgeApp::start(ForgeConfig::new(
+                SqliteConfig::file(&database_path).sqlx_logging(false),
+            ))
+            .await
+            .expect("app");
+            let handler = artisan_backend::RequestHandler::new(app.repository().clone());
+            let listener = ForgeListener::bind(
+                config,
+                LocalCapability::from_bytes(INITIAL_CAPABILITY),
+                SequencedOrigin::boxed(),
+                limits,
+                capacity(4),
+                capacity(4),
+            )
+            .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let _ = addr_tx.send(addr);
+            let outcome = listener
+                .serve_until_cancel(&handler, cancel_clone.as_ref())
+                .await;
+            let _ = result_tx.send(outcome);
+            drop(handler);
+            let _ = app.shutdown().await;
+        });
+        drop(runtime);
+        let _ = done_tx.send(());
+    });
+    let addr = tokio::time::timeout(WATCHDOG, addr_rx)
+        .await
+        .expect("addr")
+        .expect("sent");
+    let outcome = tokio::time::timeout(WATCHDOG, result_rx)
+        .await
+        .expect("result timeout")
+        .expect("sent");
+    assert!(outcome.is_ok(), "pre-cancelled loop must drain Ok");
+    let client_ep = client_endpoint(&pki);
+    assert_connect_fails(&client_ep, addr).await;
+    assert!(done_rx.recv_timeout(WATCHDOG).is_ok());
+    let deadline = Instant::now() + WATCHDOG;
+    while !handle.is_finished() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().expect("join");
+}
+
+#[tokio::test]
+async fn until_cancel_cancellation_while_waiting_drains() {
+    let limits = ListenerLimits {
+        admission: Duration::from_secs(30),
+        handshake: Duration::from_secs(2),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    };
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-cancel-waiting", limits, capacity(4), capacity(4)).await;
+    let client_ep = client_endpoint(&pki);
+    let addr = broker.addr();
+    // Give the loop a moment to enter the admission wait.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    broker.cancel();
+    let outcome = broker.await_result().await;
+    assert!(outcome.is_ok(), "cancel while waiting must drain Ok");
+    assert_connect_fails(&client_ep, addr).await;
+    broker
+        .complete("until-cancel-waiting")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_request_failure_is_terminal_with_primary() {
+    let limits = default_limits(Duration::from_secs(2));
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-request-terminal", limits, capacity(4), capacity(8)).await;
+    let client_ep = client_endpoint(&pki);
+    let addr = broker.addr();
+    let client = admit(&client_ep, addr, initial_credential()).await;
+    // Cause a non-cancellation request failure: peer closes, server's next
+    // accept fails with Peer.
+    client
+        .connection
+        .close(VarInt::from_u32(0x02), b"peer done");
+    let outcome = broker.await_result().await;
+    assert!(outcome.is_err(), "request failure must be terminal");
+    let error = outcome.unwrap_err();
+    assert!(
+        error.is_service_failure(),
+        "must be classified as service failure"
+    );
+    assert!(error.drain_error().is_none(), "drain should succeed");
+    assert!(
+        error.as_request_error().is_some(),
+        "primary must preserve request error"
+    );
+    let rendered = format!("{error}{error:?}");
+    assert!(!rendered.contains("b7b7"), "must not leak bootstrap");
+    assert_connect_fails(&client_ep, addr).await;
+    broker
+        .complete("until-request-terminal")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
+async fn serve_one_retains_consuming_error_contract() {
+    // Prove serve_one still drops on auth failure and idle timeout.
+    let (mut broker, _temporary, pki) = start_broker(
+        "serve-one-contract",
+        None,
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        SequencedOrigin::boxed(),
+        default_limits(Duration::from_millis(250)),
+        capacity(4),
+        capacity(4),
+    )
+    .await;
+    let client_ep = client_endpoint(&pki);
+    // Idle timeout path: serve_one must be terminal.
+    broker.begin_serve();
+    let outcome = broker.await_served().await;
+    assert!(matches!(
+        outcome,
+        Err(ListenerError::Admission {
+            source: DeadlineError::Timeout {
+                operation: OperationKind::Connect,
+                ..
+            },
+        })
+    ));
+    assert_connect_fails(&client_ep, broker.addr()).await;
+    // Need fresh broker for auth failure because previous listener dropped.
+    drop(broker);
+    let (mut broker2, _tmp2, pki2) = start_broker(
+        "serve-one-auth",
+        None,
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        SequencedOrigin::boxed(),
+        default_limits(Duration::from_secs(2)),
+        capacity(4),
+        capacity(4),
+    )
+    .await;
+    let client_ep2 = client_endpoint(&pki2);
+    broker2.begin_serve();
+    let rejected = try_admit(&client_ep2, broker2.addr(), wrong_value_credential()).await;
+    assert!(rejected.is_err());
+    let err = broker2.await_served().await.expect_err("must be terminal");
+    assert!(matches!(err, ListenerError::Authentication { .. }));
+    let rendered = format!("{err}{err:?}");
+    assert!(!rendered.contains("b7b7"));
+    assert!(!rendered.contains("5c5c"));
+    assert_connect_fails(&client_ep2, broker2.addr()).await;
+    broker2.shutdown_app().await;
+}
+
+#[tokio::test]
+async fn until_cancel_error_hides_secrets_in_debug_display() {
+    let limits = default_limits(Duration::from_secs(2));
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-secret", limits, capacity(4), capacity(8)).await;
+    let client_ep = client_endpoint(&pki);
+    let client = admit(&client_ep, broker.addr(), initial_credential()).await;
+    client
+        .connection
+        .close(VarInt::from_u32(0x02), b"peer done");
+    let error = broker.await_result().await.expect_err("terminal");
+    let rendered = format!("{error}{error:?}");
+    assert!(!rendered.contains("b7b7"));
+    assert!(!rendered.contains("5c5c"));
+    broker.complete("until-secret").expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_family_mismatch_is_retryable_then_valid_succeeds() {
+    // FamilyMismatch (present Reconnect while Initial expected) is retryable per
+    // the fenced contract and must not terminate the loop.
+    let limits = default_limits(Duration::from_secs(2));
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-family", limits, capacity(4), capacity(4)).await;
+    let client_ep = client_endpoint(&pki);
+    let addr = broker.addr();
+
+    let mismatch = HelloCredential::Reconnect(ReconnectCapability::from_bytes([0x11; 32]));
+    let rejected = try_admit(&client_ep, addr, mismatch).await;
+    assert!(rejected.is_err(), "family mismatch must not get Welcome");
+
+    // Same endpoint must still serve a valid Initial credential.
+    let client = admit(&client_ep, addr, initial_credential()).await;
+    assert_eq!(client.welcome.frame_id.as_str(), "forge-meta-3");
+    exchange_response(
+        &client,
+        &list_projects_request("frame-after-family"),
+        "forge-meta-4",
+        UnixMillis::from_millis(1002),
+    )
+    .await;
+    broker.cancel();
+    let outcome = broker.await_result().await;
+    assert!(outcome.is_ok(), "family mismatch must be retryable");
+    expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
+    assert_connect_fails(&client_ep, addr).await;
+    broker.complete("until-family").expect("bounded completion");
+}
+
+#[tokio::test]
+async fn until_cancel_handshake_timeout_is_terminal_service_failure() {
+    // Handshake timeout is terminal: authority may have already been touched,
+    // so the loop must drain and report service failure, not retry.
+    let limits = ListenerLimits {
+        admission: Duration::from_secs(2),
+        handshake: Duration::from_millis(120),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    };
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-hs-timeout", limits, capacity(4), capacity(4)).await;
+    let client_ep = client_endpoint(&pki);
+    let addr = broker.addr();
+
+    // Connect but delay opening the control stream past the handshake deadline.
+    let connecting = client_ep
+        .connect(addr, LOOPBACK_SERVER_NAME)
+        .expect("connect");
+    let connection = tokio::time::timeout(WATCHDOG, connecting)
+        .await
+        .expect("connect watchdog")
+        .expect("established");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Attempt to open after the server has timed out; the server's
+    // deadline decision is already terminal.
+    let _ = connection.open_bi().await;
+
+    let outcome = broker.await_result().await;
+    assert!(outcome.is_err(), "handshake timeout must be terminal");
+    let error = outcome.unwrap_err();
+    assert!(
+        error.is_service_failure(),
+        "timeout must be service failure, not drain-only"
+    );
+    assert!(error.drain_error().is_none(), "drain should succeed");
+    assert!(
+        error.as_listener_error().is_some(),
+        "primary must be listener authentication timeout"
+    );
+    if let Some(ListenerError::Authentication { source }) = error.as_listener_error() {
+        assert!(matches!(
+            source,
+            DeadlineError::Timeout {
+                operation: OperationKind::Handshake,
+                ..
+            }
+        ));
+    } else {
+        panic!("expected authentication timeout");
+    }
+    let rendered = format!("{error}{error:?}");
+    assert!(!rendered.contains("b7b7"));
+
+    assert_connect_fails(&client_ep, addr).await;
+    broker
+        .complete("until-hs-timeout")
+        .expect("bounded completion");
 }
