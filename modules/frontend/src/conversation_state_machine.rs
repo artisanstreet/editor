@@ -871,6 +871,9 @@ impl ConversationStateController {
 
     /// Registers one turn controller.
     pub fn register_turn(&mut self, turn_id: TurnId) -> Result<(), ConversationStateError> {
+        if self.delivery.is_closed() {
+            return Err(ConversationStateError::OwnerClosed);
+        }
         if self.turns.contains_key(&turn_id) {
             return Err(ConversationStateError::DuplicateTurn { turn_id });
         }
@@ -904,6 +907,9 @@ impl ConversationStateController {
         started_at_ms: i64,
         label_kind: SteeringLabelKind,
     ) -> Result<(), ConversationStateError> {
+        if self.delivery.is_closed() {
+            return Err(ConversationStateError::OwnerClosed);
+        }
         let key = SteeringKey {
             command_id: command_id.clone(),
             generation,
@@ -983,6 +989,9 @@ impl ConversationStateController {
         scene_id: SceneId,
         initially_working: bool,
     ) -> Result<(), ConversationStateError> {
+        if self.delivery.is_closed() {
+            return Err(ConversationStateError::OwnerClosed);
+        }
         if self.disclosures.contains_key(&scene_id) {
             return Err(ConversationStateError::DuplicateDisclosure { scene_id });
         }

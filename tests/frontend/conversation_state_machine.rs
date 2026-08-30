@@ -768,11 +768,27 @@ fn duplicate_unknown_capacity_closed_and_refused_events_are_atomic() {
     closed.close().expect("owner closes");
     let _ = closed.drain_effects();
     let closed_view = closed.view();
+    let closed_effects = closed.pending_effects().to_vec();
     assert!(matches!(
         closed.register_turn(turn_id(TURN_A)),
         Err(ConversationStateError::OwnerClosed)
     ));
+    assert!(matches!(
+        closed.register_steering(
+            steering_request("closed_command"),
+            1,
+            steering_source("closed_command"),
+            0,
+            SteeringLabelKind::Steering,
+        ),
+        Err(ConversationStateError::OwnerClosed)
+    ));
+    assert!(matches!(
+        closed.register_disclosure(scene_id("closed_disclosure"), false),
+        Err(ConversationStateError::OwnerClosed)
+    ));
     assert_eq!(closed.view(), closed_view);
+    assert_eq!(closed.pending_effects(), closed_effects.as_slice());
 
     let mut capacity = ConversationStateController::new(thread_id());
     let _ = capacity.drain_effects();
