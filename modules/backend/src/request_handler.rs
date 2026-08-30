@@ -25,33 +25,168 @@
 //! Bounded [`artisan_domain::ConversationQuery`] reads are answered directly
 //! from the durable projection reader
 //! [`Repository::read_conversation_snapshot`]; subscription start and stop
-//! remain unbacked in this build pending a per-connection registrar and
-//! answer with a typed non-retryable `Internal` failure that names the missing
-//! subscription capability rather than claiming registration.
+//! stay unbacked through [`RequestHandler::respond`] while the opt-in
+//! [`RequestHandler::respond_with_receipt`] path owns one connection-local
+//! registrar. That path prepares subscriptions as `Pending` and leaves their
+//! activation to its caller after the response has been written.
+
+use std::sync::Arc;
 
 use artisan_database::{CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError};
 use artisan_domain::{
-    Command, ConversationRequest, CreateThread, DirectoryId, MessageId, Query, QueueFirstMessage,
+    Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
+    ConversationUnsubscribe, CreateThread, DirectoryId, MessageId, Query, QueueFirstMessage,
     RequestId, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, ErrorCode, ErrorDetail, FirstMessageReceipt, ProtocolFailure, ResponsePayload,
     ServerResponse,
 };
+use tokio::sync::Mutex;
 
 use crate::command_admission::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, SystemCommandOrigin,
+};
+use crate::conversation_subscription_preparation::{
+    PrepareSubscriptionError, prepare_conversation_subscription, stop_conversation_subscription,
+};
+use crate::conversation_subscription_registry::{
+    ActivateError, ConversationSubscriptionRegistry, RegisterError, SubscriptionLease,
+    SubscriptionView,
 };
 
 /// Detail used when a diagnostic text would exceed the protocol-owned
 /// error-detail ceiling. Short by construction, so parsing it cannot fail.
 const BOUNDED_DETAIL_FALLBACK: &str = "failure detail exceeded the protocol error-detail bound";
 
+/// Stable detail returned when a resume cursor no longer has a durable tail.
+const RESNAPSHOT_REQUIRED_DETAIL: &str = "a fresh conversation resnapshot is required";
+
+/// Stable detail returned when a connection-local subscription generation is
+/// exhausted.
+const SUBSCRIPTION_GENERATION_EXHAUSTED_DETAIL: &str =
+    "conversation subscription registration capacity is exhausted";
+
+/// Private, non-zero-sized allocation identity for one handler-owned
+/// subscription registrar.
+type SubscriptionRegistrarIdentity = u8;
+
+/// One private activation capability carried by a local request receipt.
+#[derive(Debug)]
+struct SubscriptionActivation {
+    registrar: Arc<SubscriptionRegistrarIdentity>,
+    lease: SubscriptionLease,
+}
+
+/// The wire result and local post-write work for one handled request.
+///
+/// The response result is exactly the value a connection adapter can map to a
+/// wire response or correlated protocol error. The receipt remains local and
+/// is never part of that wire value.
+#[must_use]
+#[derive(Debug)]
+pub struct RequestHandlerResponse {
+    response: Result<ServerResponse, ProtocolFailure>,
+    receipt: RequestHandlerReceipt,
+}
+
+impl RequestHandlerResponse {
+    /// Consumes the handled request into its wire result and local receipt.
+    pub fn into_parts(
+        self,
+    ) -> (
+        Result<ServerResponse, ProtocolFailure>,
+        RequestHandlerReceipt,
+    ) {
+        (self.response, self.receipt)
+    }
+
+    fn without_receipt(response: Result<ServerResponse, ProtocolFailure>) -> Self {
+        Self {
+            response,
+            receipt: RequestHandlerReceipt::none(),
+        }
+    }
+
+    fn with_receipt(
+        response: Result<ServerResponse, ProtocolFailure>,
+        receipt: RequestHandlerReceipt,
+    ) -> Self {
+        Self { response, receipt }
+    }
+}
+
+/// Local post-write work produced by a subscription-enabled request.
+///
+/// A receipt is single-owner and deliberately does not implement [`Clone`].
+/// Its private lease and per-handler registrar identity prevent callers from
+/// fabricating an activation receipt or using one with a different handler.
+/// The identity is checked by allocation identity before registry activation.
+/// `None` means that no post-write work exists; `Some` contains exactly one
+/// prepared lease and its registrar capability.
+#[must_use]
+#[derive(Debug)]
+pub struct RequestHandlerReceipt {
+    activation: Option<SubscriptionActivation>,
+}
+
+impl RequestHandlerReceipt {
+    /// Returns whether this receipt carries no post-write activation work.
+    #[must_use]
+    pub const fn is_no_work(&self) -> bool {
+        self.activation.is_none()
+    }
+
+    fn none() -> Self {
+        Self { activation: None }
+    }
+
+    fn activate(registrar: Arc<SubscriptionRegistrarIdentity>, lease: SubscriptionLease) -> Self {
+        Self {
+            activation: Some(SubscriptionActivation { registrar, lease }),
+        }
+    }
+}
+
+/// The activated subscription handed to a future delivery owner.
+///
+/// The lease is the exact lease that was prepared for the successful request,
+/// and the cursor is the exact cursor stored by activation. This value is
+/// local state only; it does not claim that any wire response was delivered.
+#[must_use]
+#[derive(Debug, Eq, PartialEq)]
+pub struct ActivatedConversationSubscription {
+    lease: SubscriptionLease,
+    cursor: ConversationCursor,
+}
+
+impl ActivatedConversationSubscription {
+    /// Returns the exact lease activated in the handler registry.
+    #[must_use]
+    pub fn lease(&self) -> &SubscriptionLease {
+        &self.lease
+    }
+
+    /// Returns the exact cursor declared by the prepared subscription.
+    #[must_use]
+    pub const fn cursor(&self) -> ConversationCursor {
+        self.cursor
+    }
+
+    /// Consumes the activated value into its lease and cursor.
+    #[must_use]
+    pub fn into_parts(self) -> (SubscriptionLease, ConversationCursor) {
+        (self.lease, self.cursor)
+    }
+}
+
 /// Answers decoded client requests from Forge-owned repository state.
 #[derive(Debug)]
 pub struct RequestHandler {
     repository: Repository,
     origin: AdmissionOrigin,
+    subscriptions: Option<Mutex<ConversationSubscriptionRegistry>>,
+    subscription_identity: Option<Arc<SubscriptionRegistrarIdentity>>,
 }
 
 /// Handler-owned admission source: the real system boundary by default, or
@@ -95,6 +230,8 @@ impl RequestHandler {
         Self {
             repository,
             origin: AdmissionOrigin::system(),
+            subscriptions: None,
+            subscription_identity: None,
         }
     }
 
@@ -111,6 +248,25 @@ impl RequestHandler {
         Self {
             repository,
             origin: AdmissionOrigin::Injected(origin),
+            subscriptions: None,
+            subscription_identity: None,
+        }
+    }
+
+    /// Creates a handler with the normal system admission origin and one
+    /// connection-local conversation subscription registry.
+    ///
+    /// The registry is owned exclusively by this handler behind an async
+    /// mutex. It is neither shared nor cloneable, and ordinary [`Self::respond`]
+    /// calls continue to use the unbacked subscription behavior.
+    #[must_use]
+    pub fn with_subscriptions(repository: Repository) -> Self {
+        let subscription_identity = Arc::new(0_u8);
+        Self {
+            repository,
+            origin: AdmissionOrigin::system(),
+            subscriptions: Some(Mutex::new(ConversationSubscriptionRegistry::new())),
+            subscription_identity: Some(subscription_identity),
         }
     }
 
@@ -153,6 +309,145 @@ impl RequestHandler {
                 Err(unbacked_failure(request_id, "native directory picking"))
             }
         }
+    }
+
+    /// Resolves one correlated request and returns its local post-write work.
+    ///
+    /// Queries, commands, directory picking, and every protocol failure use
+    /// the exact [`Self::respond`] behavior and carry no post-write work.
+    /// Subscription-enabled Subscribe requests perform one durable
+    /// preparation and leave the registry `Pending`; activation is never done
+    /// in this method. Unsubscribe mutates the same registry immediately and
+    /// returns only its protocol acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// The returned wire result contains the same correlated
+    /// [`ProtocolFailure`] classifications as [`Self::respond`], plus the
+    /// bounded resnapshot-required and generation-exhaustion failures for
+    /// subscription preparation. All failures carry a no-work receipt.
+    pub async fn respond_with_receipt(
+        &self,
+        request_id: &RequestId,
+        request: &ClientRequest,
+    ) -> RequestHandlerResponse {
+        match request {
+            ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe))
+                if self.subscriptions.is_some() =>
+            {
+                self.subscribe_with_receipt(request_id, request, subscribe)
+                    .await
+            }
+            ClientRequest::Conversation(ConversationRequest::Unsubscribe(unsubscribe))
+                if self.subscriptions.is_some() =>
+            {
+                self.unsubscribe_with_receipt(request_id, request, unsubscribe)
+                    .await
+            }
+            _ => RequestHandlerResponse::without_receipt(self.respond(request_id, request).await),
+        }
+    }
+
+    /// Activates a real subscription receipt after the caller proves its
+    /// response write and send-side finish.
+    ///
+    /// A no-work receipt returns `Ok(None)` without locking the registry. A
+    /// receipt from another handler is rejected by private allocation identity
+    /// before this handler's registry is locked or activated. A receipt from
+    /// this handler locks its one registry and attempts exactly one typed
+    /// activation; the caller owns the wire-order proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivateError::StaleLease`] when the receipt's lease no
+    /// longer identifies the current entry, or
+    /// [`ActivateError::AlreadyActive`] when the current entry was already
+    /// activated. Neither error is converted into success.
+    pub async fn activate_after_response(
+        &self,
+        receipt: RequestHandlerReceipt,
+    ) -> Result<Option<ActivatedConversationSubscription>, ActivateError> {
+        let Some(activation) = receipt.activation else {
+            return Ok(None);
+        };
+        let Some(subscription_identity) = self.subscription_identity.as_ref() else {
+            return Err(ActivateError::StaleLease);
+        };
+        if !Arc::ptr_eq(subscription_identity, &activation.registrar) {
+            return Err(ActivateError::StaleLease);
+        }
+        let Some(subscriptions) = self.subscriptions.as_ref() else {
+            return Err(ActivateError::StaleLease);
+        };
+        let mut registry = subscriptions.lock().await;
+        let cursor = registry.activate(&activation.lease)?;
+        Ok(Some(ActivatedConversationSubscription {
+            lease: activation.lease,
+            cursor,
+        }))
+    }
+
+    /// Returns an owned read-only view of one handler-local subscription.
+    ///
+    /// A handler created without [`Self::with_subscriptions`] always returns
+    /// `None`; the registry itself is never exposed.
+    pub async fn subscription_view(&self, thread_id: &ThreadId) -> Option<SubscriptionView> {
+        let subscriptions = self.subscriptions.as_ref()?;
+        subscriptions.lock().await.view(thread_id)
+    }
+
+    async fn subscribe_with_receipt(
+        &self,
+        request_id: &RequestId,
+        request: &ClientRequest,
+        subscribe: &ConversationSubscribe,
+    ) -> RequestHandlerResponse {
+        let Some(subscriptions) = self.subscriptions.as_ref() else {
+            return RequestHandlerResponse::without_receipt(
+                self.respond(request_id, request).await,
+            );
+        };
+        let Some(subscription_identity) = self.subscription_identity.as_ref() else {
+            return RequestHandlerResponse::without_receipt(
+                self.respond(request_id, request).await,
+            );
+        };
+        let mut registry = subscriptions.lock().await;
+        match prepare_conversation_subscription(&self.repository, &mut registry, subscribe).await {
+            Ok(prepared) => {
+                let (started, lease) = prepared.into_parts();
+                RequestHandlerResponse::with_receipt(
+                    Ok(outcome(
+                        request_id,
+                        ResponsePayload::ConversationSubscriptionStarted(started),
+                    )),
+                    RequestHandlerReceipt::activate(subscription_identity.clone(), lease),
+                )
+            }
+            Err(error) => {
+                RequestHandlerResponse::without_receipt(Err(preparation_failure(error, request_id)))
+            }
+        }
+    }
+
+    async fn unsubscribe_with_receipt(
+        &self,
+        request_id: &RequestId,
+        request: &ClientRequest,
+        unsubscribe: &ConversationUnsubscribe,
+    ) -> RequestHandlerResponse {
+        let Some(subscriptions) = self.subscriptions.as_ref() else {
+            return RequestHandlerResponse::without_receipt(
+                self.respond(request_id, request).await,
+            );
+        };
+        let mut registry = subscriptions.lock().await;
+        let (stopped, _outcome) =
+            stop_conversation_subscription(&mut registry, unsubscribe).into_parts();
+        RequestHandlerResponse::without_receipt(Ok(outcome(
+            request_id,
+            ResponsePayload::ConversationSubscriptionStopped(stopped),
+        )))
     }
 
     /// Answers pure reads from repository listings.
@@ -433,6 +728,26 @@ fn repository_failure(error: &RepositoryError, request_id: &RequestId) -> Protoc
         Failure::Database { .. } => (ErrorCode::Internal, true),
     };
     typed_failure(code, error.to_string(), retryable, request_id)
+}
+
+/// Maps a subscription-preparation failure without exposing its durable
+/// cursor or client request values.
+fn preparation_failure(error: PrepareSubscriptionError, request_id: &RequestId) -> ProtocolFailure {
+    match error {
+        PrepareSubscriptionError::Repository(error) => repository_failure(&error, request_id),
+        PrepareSubscriptionError::ResnapshotRequired { .. } => typed_failure(
+            ErrorCode::InvalidInput,
+            RESNAPSHOT_REQUIRED_DETAIL,
+            false,
+            request_id,
+        ),
+        PrepareSubscriptionError::Register(RegisterError::GenerationExhausted) => typed_failure(
+            ErrorCode::Internal,
+            SUBSCRIPTION_GENERATION_EXHAUSTED_DETAIL,
+            false,
+            request_id,
+        ),
+    }
 }
 
 /// Builds the typed failure for an operation without a backing capability.
