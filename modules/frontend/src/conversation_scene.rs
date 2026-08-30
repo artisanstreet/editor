@@ -1,51 +1,64 @@
 //! Pure immutable render scene consumed by the later GPUI renderer.
 //!
-//! This module performs deterministic ordering and grouping only and makes
-//! invalid visual combinations impossible in its output. It does no I/O,
-//! Markdown parsing, diff loading, timers, scrolling, mutation, `Statig`
-//! dispatch, or GPUI element creation. One later aggregate state machine will
-//! feed it already-authoritative delivery, turn, steering, and disclosure
-//! views.
+//! This module performs deterministic validation, ordering, grouping, and
+//! state-to-block projection only. It does no I/O, Markdown parsing, timers,
+//! scrolling, mutation, `Statig` dispatch, or GPUI element creation. A later
+//! aggregate state machine will feed it authoritative delivery, turn,
+//! steering, and disclosure views.
 //!
 //! # Bounds
 //!
-//! Every bound is validated **before** large caller input is cloned. No
-//! truncation is performed; oversize input is a typed error.
+//! Every bound is measured in UTF-8 bytes unless it is explicitly marked as a
+//! count. Bounds are checked before the scene takes ownership of caller data;
+//! oversize input is refused rather than truncated.
 //!
-//! - [`SCENE_MAX_ITEMS`] — maximum scene input items in one build (count)
-//! - [`SCENE_MAX_WORK_GROUP_ITEMS`] — maximum items coalesced into one work
-//!   group (count)
-//! - [`SCENE_MAX_CHANGED_FILES_PER_CARD`] — maximum changed files rendered in
-//!   one change-set card (count)
-//! - [`SCENE_MAX_NATIVE_FACT_BYTES`] — maximum UTF-8 bytes for a
-//!   native-event/fallback fact text
-//! - [`SCENE_MAX_DISPLAY_PATH_BYTES`] — maximum UTF-8 bytes for a
-//!   filesystem display path (never read from disk)
-//! - [`SCENE_ID_MAX_BYTES`] — maximum UTF-8 bytes for the render-only opaque
-//!   scene identity
-//! - [`SCENE_MAX_STEERING_LABEL_BYTES`] — maximum UTF-8 bytes for a steering
-//!   label
-//! - [`SCENE_MAX_TEXT_BYTES`] — maximum UTF-8 bytes for other renderer-safe
-//!   bounded text fields
+//! - [`SCENE_MAX_TURNS`] — turn descriptors per scene (count)
+//! - [`SCENE_MAX_ITEMS`] — input items per scene (count)
+//! - [`SCENE_MAX_NARRATIONS`] — narration entries per scene (count)
+//! - [`SCENE_MAX_STEERING_PLACEMENTS`] — steering placements per scene (count)
+//! - [`SCENE_MAX_WORK_GROUP_ITEMS`] — items coalesced into one work group
+//!   (count)
+//! - [`SCENE_MAX_PLAN_ENTRIES`] — entries in one plan (count)
+//! - [`SCENE_MAX_CHANGED_FILES_PER_CARD`] — files in one change-set card
+//!   (count)
+//! - [`SCENE_MAX_NATIVE_FACT_BYTES`] — native-event/fallback fact text
+//! - [`SCENE_MAX_DISPLAY_PATH_BYTES`] — filesystem display path text
+//! - [`SCENE_ID_MAX_BYTES`] — render-only opaque scene identity
+//! - [`SCENE_MAX_STEERING_LABEL_BYTES`] — steering label text
+//! - [`SCENE_MAX_TEXT_BYTES`] — general renderer-safe text
+//! - [`SCENE_MAX_MESSAGE_BODY_BYTES`] — complete user/assistant message text
 //!
 //! # Deterministic terminal order
 //!
-//! Within each turn, blocks are emitted in this fixed order for the terminal
-//! sequence: final assistant reply message(s) first, then the settled
-//! change-set card (if any), then exactly one status row (unless suppressed),
-//! then exactly one turn footer. This order is documented here and pinned by
-//! tests.
+//! Within each turn, ordinary blocks retain canonical item ordinal order.
+//! The settled change-set card, when present, is appended after those blocks,
+//! followed by exactly one status row (unless streaming suppression applies)
+//! and exactly one turn footer.
+
+#![allow(clippy::module_name_repetitions)]
 
 use std::collections::{HashMap, HashSet};
 
 use artisan_domain::{ConversationLifecycle, ItemId, TurnId};
 use thiserror::Error;
 
+/// Maximum turn descriptors per scene (count).
+pub const SCENE_MAX_TURNS: usize = 512;
+
 /// Maximum scene input items per build (count).
 pub const SCENE_MAX_ITEMS: usize = 512;
 
+/// Maximum per-turn narration entries per build (count).
+pub const SCENE_MAX_NARRATIONS: usize = 512;
+
+/// Maximum steering placements per build (count).
+pub const SCENE_MAX_STEERING_PLACEMENTS: usize = 512;
+
 /// Maximum items coalesced into one work group (count).
 pub const SCENE_MAX_WORK_GROUP_ITEMS: usize = 32;
+
+/// Maximum checklist entries in one plan (count).
+pub const SCENE_MAX_PLAN_ENTRIES: usize = 256;
 
 /// Maximum changed files per change-set card (count).
 pub const SCENE_MAX_CHANGED_FILES_PER_CARD: usize = 128;
@@ -64,6 +77,13 @@ pub const SCENE_MAX_STEERING_LABEL_BYTES: usize = 1_024;
 
 /// Maximum UTF-8 bytes for general renderer-safe text.
 pub const SCENE_MAX_TEXT_BYTES: usize = 8_192;
+
+/// Maximum UTF-8 bytes for a complete user or assistant message body.
+///
+/// This deliberately follows the frozen domain ceiling. A full message is
+/// not a streamed fragment and therefore must not inherit the smaller general
+/// renderer-text bound.
+pub const SCENE_MAX_MESSAGE_BODY_BYTES: usize = artisan_domain::MESSAGE_BODY_MAX_BYTES;
 
 // ---------------------------------------------------------------------------
 // Scene identity
@@ -87,13 +107,16 @@ fn validate_scene_id(value: &str) -> Result<(), SceneIdError> {
     if value.is_empty() {
         return Err(SceneIdError::Empty);
     }
-    if let Some(ch) = value.chars().find(|ch| ch.is_whitespace() || ch.is_control()) {
-        return Err(SceneIdError::ForbiddenCharacter { character: ch });
+    if let Some(character) = value
+        .chars()
+        .find(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(SceneIdError::ForbiddenCharacter { character });
     }
-    let len = value.len();
-    if len > SCENE_ID_MAX_BYTES {
+    let length = value.len();
+    if length > SCENE_ID_MAX_BYTES {
         return Err(SceneIdError::TooLong {
-            length: len,
+            length,
             maximum: SCENE_ID_MAX_BYTES,
         });
     }
@@ -102,9 +125,9 @@ fn validate_scene_id(value: &str) -> Result<(), SceneIdError> {
 
 /// Bounded validated opaque scene identity for render-only records.
 ///
-/// Used for work, change, and command records that do not yet exist as native
-/// domain entities. Mirrors the domain identifier rule (non-empty, no
-/// whitespace or control, bounded to [`SCENE_ID_MAX_BYTES`] UTF-8 bytes).
+/// Synthetic work, change, and command records use this identity until a
+/// later aggregate supplies a domain identity. Real domain [`ItemId`] values
+/// can be converted losslessly when they are used as scene item identities.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SceneId(String);
 
@@ -113,12 +136,18 @@ impl SceneId {
     ///
     /// # Errors
     ///
-    /// Returns [`SceneIdError`] on empty, forbidden character, or overlong
+    /// Returns [`SceneIdError`] on empty, forbidden-character, or overlong
     /// input.
     pub fn parse(value: impl Into<String>) -> Result<Self, SceneIdError> {
         let value = value.into();
         validate_scene_id(&value)?;
         Ok(Self(value))
+    }
+
+    /// Converts a validated domain item identity without changing its text.
+    #[must_use]
+    pub fn from_item_id(item_id: &ItemId) -> Self {
+        Self(item_id.as_str().to_owned())
     }
 
     /// Returns the validated text.
@@ -128,9 +157,15 @@ impl SceneId {
     }
 }
 
+impl From<ItemId> for SceneId {
+    fn from(item_id: ItemId) -> Self {
+        Self::from_item_id(&item_id)
+    }
+}
+
 impl std::fmt::Display for SceneId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -138,7 +173,7 @@ impl std::fmt::Display for SceneId {
 // Disclosure and narration enums (closed, not booleans)
 // ---------------------------------------------------------------------------
 
-/// Explicit disclosure value copied into the exact owning group or card block.
+/// Explicit disclosure value copied into the exact owning group or card.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SceneDisclosure {
     /// The disclosure is open/expanded.
@@ -148,22 +183,19 @@ pub enum SceneDisclosure {
 }
 
 /// Closed per-turn narration vocabulary.
-///
-/// Mirrors the public views the later `Statig` packets will supply but does not
-/// import their files.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TurnNarration {
     /// Quiet status (no active work).
     Quiet,
-    /// Waiting for provider to respond.
+    /// Waiting for a provider to respond.
     ProviderWait,
-    /// Compact in progress.
+    /// Compaction is in progress.
     Compacting,
     /// Thinking.
     Thinking,
     /// Working.
     Working,
-    /// Streaming reply is active; quiet status is suppressed.
+    /// An assistant reply is streaming; quiet status can be suppressed.
     StreamingSuppression,
     /// Waiting for background agents.
     BackgroundWait,
@@ -177,6 +209,16 @@ pub enum TurnNarration {
     Interrupted,
     /// Turn cancelled.
     Cancelled,
+}
+
+impl TurnNarration {
+    fn terminal_label(self) -> Option<WorkGroupLabel> {
+        match self {
+            Self::WorkedFor { millis } => Some(WorkGroupLabel::WorkedFor { millis }),
+            Self::ThoughtFor { millis } => Some(WorkGroupLabel::ThoughtFor { millis }),
+            _ => None,
+        }
+    }
 }
 
 /// Per-turn narration entry.
@@ -208,11 +250,11 @@ pub struct SteeringPlacement {
 }
 
 impl SteeringPlacement {
-    /// Creates a steering placement.
+    /// Creates a steering placement after validating its label.
     ///
     /// # Errors
     ///
-    /// Returns [`SceneBuildError`] if the label exceeds
+    /// Returns [`SceneBuildError`] if the label is empty or exceeds
     /// [`SCENE_MAX_STEERING_LABEL_BYTES`] UTF-8 bytes.
     pub fn new(
         id: SceneId,
@@ -220,12 +262,7 @@ impl SteeringPlacement {
         label: impl Into<String>,
     ) -> Result<Self, SceneBuildError> {
         let label = label.into();
-        if label.len() > SCENE_MAX_STEERING_LABEL_BYTES {
-            return Err(SceneBuildError::SteeringLabelTooLong {
-                length: label.len(),
-                maximum: SCENE_MAX_STEERING_LABEL_BYTES,
-            });
-        }
+        validate_steering_label(&label)?;
         Ok(Self { id, anchor, label })
     }
 }
@@ -246,9 +283,13 @@ pub enum AssistantPhase {
 /// File change status for display.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FileChangeStatus {
+    /// A file was added.
     Added,
+    /// A file was modified.
     Modified,
+    /// A file was removed.
     Removed,
+    /// A file was renamed.
     Renamed,
 }
 
@@ -262,29 +303,15 @@ pub struct SceneFileChange {
 }
 
 impl SceneFileChange {
-    /// Creates a file change fact.
+    /// Creates a file change fact after validating its path.
     ///
     /// # Errors
     ///
-    /// Returns [`SceneBuildError`] if the path exceeds
+    /// Returns [`SceneBuildError`] if the path is empty or exceeds
     /// [`SCENE_MAX_DISPLAY_PATH_BYTES`] UTF-8 bytes.
-    pub fn new(
-        path: impl Into<String>,
-        status: FileChangeStatus,
-    ) -> Result<Self, SceneBuildError> {
+    pub fn new(path: impl Into<String>, status: FileChangeStatus) -> Result<Self, SceneBuildError> {
         let path = path.into();
-        if path.len() > SCENE_MAX_DISPLAY_PATH_BYTES {
-            return Err(SceneBuildError::DisplayPathTooLong {
-                length: path.len(),
-                maximum: SCENE_MAX_DISPLAY_PATH_BYTES,
-            });
-        }
-        if path.is_empty() {
-            return Err(SceneBuildError::DisplayPathTooLong {
-                length: 0,
-                maximum: SCENE_MAX_DISPLAY_PATH_BYTES,
-            });
-        }
+        validate_display_path(&path)?;
         Ok(Self { path, status })
     }
 }
@@ -294,27 +321,46 @@ impl SceneFileChange {
 /// Variant payloads carry only renderer-safe bounded text and metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneItemKind {
+    /// Canonical user message.
     UserMessage { body: String },
+    /// Assistant message with caller-supplied phase.
     AssistantMessage { body: String, phase: AssistantPhase },
+    /// Settled reasoning summary.
     ReasoningSummary { body: String },
+    /// Activity or tool-result summary.
     Activity { body: String },
+    /// Bounded work-session title.
     WorkSession { title: String },
+    /// Compaction summary card.
     Compaction { summary: String },
+    /// One change-set fact containing zero or more files.
     ChangeSet { files: Vec<SceneFileChange> },
+    /// One individual file-change fact.
     FileChange { file: SceneFileChange },
+    /// Plan/checklist card.
     Plan { title: String, entries: Vec<String> },
+    /// Approval request card.
     Approval { prompt: String },
+    /// Question card.
     Question { prompt: String },
+    /// Error card.
     Error { message: String },
+    /// Usage or provider interruption card.
     UsageInterruption { detail: String },
-    ModelTransition { from_model: String, to_model: String },
+    /// Model transition fact.
+    ModelTransition {
+        from_model: String,
+        to_model: String,
+    },
+    /// Bounded native event/fallback fact.
     NativeFact { text: String },
 }
 
 /// One renderer input record with stable identity, owning turn, and ordinal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SceneItem {
-    /// Stable identity.
+    /// Stable scene identity. Real domain item identities can be converted to
+    /// [`SceneId`] with [`SceneId::from_item_id`].
     pub id: SceneId,
     /// Owning turn.
     pub turn_id: TurnId,
@@ -327,22 +373,28 @@ pub struct SceneItem {
 }
 
 impl SceneItem {
-    /// Creates a scene item.
-    #[must_use]
+    /// Creates a scene item after validating all bounded variant payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneBuildError`] for an overlong body, title, prompt,
+    /// collection, native fact, or path. Validation happens before the item
+    /// is returned, so no invalid item is constructed by this constructor.
     pub fn new(
-        id: SceneId,
+        id: impl Into<SceneId>,
         turn_id: TurnId,
         ordinal: u64,
         kind: SceneItemKind,
         disclosure: Option<SceneDisclosure>,
-    ) -> Self {
-        Self {
-            id,
+    ) -> Result<Self, SceneBuildError> {
+        validate_item_kind(&kind)?;
+        Ok(Self {
+            id: id.into(),
             turn_id,
             ordinal,
             kind,
             disclosure,
-        }
+        })
     }
 }
 
@@ -358,7 +410,9 @@ pub struct SceneTurn {
 }
 
 impl SceneTurn {
-    /// Creates a scene turn.
+    /// Creates a scene turn. The domain [`TurnId`] is already validated by its
+    /// owning domain constructor; scene-level collection bounds are checked
+    /// by [`ConversationScene::build`].
     #[must_use]
     pub fn new(turn_id: TurnId, ordinal: u64, lifecycle: ConversationLifecycle) -> Self {
         Self {
@@ -383,12 +437,12 @@ pub enum WorkGroupLabel {
 }
 
 impl WorkGroupLabel {
-    /// Returns the display label text for testing/diagnostics (not snapshot).
+    /// Returns the display label text for diagnostics (not a snapshot).
     #[must_use]
     pub fn display(self) -> String {
         match self {
-            Self::ThoughtFor { millis } => format!("Thought for {}ms", millis),
-            Self::WorkedFor { millis } => format!("Worked for {}ms", millis),
+            Self::ThoughtFor { millis } => format!("Thought for {millis}ms"),
+            Self::WorkedFor { millis } => format!("Worked for {millis}ms"),
         }
     }
 }
@@ -396,141 +450,234 @@ impl WorkGroupLabel {
 /// One work item inside a grouped work block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkItem {
-    Reasoning { id: SceneId, body: String, disclosure: Option<SceneDisclosure> },
-    Activity { id: SceneId, body: String, disclosure: Option<SceneDisclosure> },
-    WorkSession { id: SceneId, title: String, disclosure: Option<SceneDisclosure> },
+    /// A reasoning summary.
+    Reasoning {
+        id: SceneId,
+        body: String,
+        disclosure: Option<SceneDisclosure>,
+    },
+    /// An activity/tool-result summary.
+    Activity {
+        id: SceneId,
+        body: String,
+        disclosure: Option<SceneDisclosure>,
+    },
+    /// A work-session title.
+    WorkSession {
+        id: SceneId,
+        title: String,
+        disclosure: Option<SceneDisclosure>,
+    },
 }
 
 /// Ordered blocks for one turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TurnBlock {
+    /// User message block.
     UserMessage(UserMessageBlock),
+    /// Assistant message block.
     AssistantMessage(AssistantMessageBlock),
+    /// Contiguous work group.
     WorkGroup(WorkGroupBlock),
+    /// Compaction card.
     Compaction(CompactionBlock),
+    /// Changed-files card.
     ChangeSet(ChangeSetBlock),
+    /// Plan/checklist card.
     Plan(PlanBlock),
+    /// Approval card.
     Approval(ApprovalBlock),
+    /// Question card.
     Question(QuestionBlock),
+    /// Error card.
     Error(ErrorBlock),
+    /// Usage interruption card.
     UsageInterruption(UsageInterruptionBlock),
+    /// Model transition card.
     ModelTransition(ModelTransitionBlock),
+    /// Native fact card.
     NativeFact(NativeFactBlock),
+    /// Steering label anchored to a user message.
     SteeringLabel(SteeringBlock),
+    /// One per-turn status row unless streaming suppression applies.
     TurnStatus(TurnStatusBlock),
+    /// One per-turn footer.
     TurnFooter(TurnFooterBlock),
 }
 
+/// User message block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserMessageBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Complete bounded body.
     pub body: String,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Assistant message block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssistantMessageBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Complete bounded body.
     pub body: String,
+    /// Caller-supplied text phase.
     pub phase: AssistantPhase,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Group of contiguous reasoning/activity/work-session items.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkGroupBlock {
+    /// Ordered group members.
     pub items: Vec<WorkItem>,
+    /// At most one terminal duration label for this turn.
     pub label: Option<WorkGroupLabel>,
+    /// Disclosure owned by the group.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Compaction card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Bounded summary.
     pub summary: String,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Changed-files card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangeSetBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Ordered file facts.
     pub files: Vec<SceneFileChange>,
+    /// Disclosure owned by the card.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Plan/checklist card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Bounded title.
     pub title: String,
+    /// Ordered checklist entries.
     pub entries: Vec<String>,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Approval card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Bounded prompt.
     pub prompt: String,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Question card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuestionBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Bounded prompt.
     pub prompt: String,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Error card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErrorBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Bounded message.
     pub message: String,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Usage interruption card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageInterruptionBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Bounded detail.
     pub detail: String,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Model transition card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelTransitionBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Previous model label.
     pub from_model: String,
+    /// New model label.
     pub to_model: String,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Native fact card.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeFactBlock {
+    /// Scene identity.
     pub id: SceneId,
+    /// Bounded native fact text.
     pub text: String,
+    /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
 
+/// Steering label block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteeringBlock {
+    /// Steering identity.
     pub id: SceneId,
+    /// Exact domain item anchor.
     pub anchor: ItemId,
+    /// Bounded label.
     pub label: String,
 }
 
+/// Turn status row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnStatusBlock {
+    /// Closed narration value.
     pub narration: TurnNarration,
 }
 
+/// Turn footer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnFooterBlock {
+    /// Owning turn.
     pub turn_id: TurnId,
 }
 
 /// One turn's rendered scene.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnScene {
+    /// Owning turn.
     pub turn_id: TurnId,
+    /// Canonical turn ordinal.
     pub ordinal: u64,
+    /// Authoritative lifecycle.
     pub lifecycle: ConversationLifecycle,
+    /// Ordered blocks.
     pub blocks: Vec<TurnBlock>,
 }
 
@@ -548,10 +695,12 @@ impl TurnScene {
     }
 }
 
-/// One deferred change-set retained when owning work is not yet settled.
+/// One deferred change-set retained when owning work is not terminal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeferredChangeSet {
+    /// Owning turn.
     pub turn_id: TurnId,
+    /// Deferred card.
     pub card: ChangeSetBlock,
 }
 
@@ -560,6 +709,12 @@ pub struct DeferredChangeSet {
 pub struct ConversationScene {
     turn_scenes: Vec<TurnScene>,
     deferred: Vec<DeferredChangeSet>,
+}
+
+#[derive(Clone, Copy)]
+enum AnchorKind {
+    UserMessage,
+    Other,
 }
 
 impl ConversationScene {
@@ -585,340 +740,260 @@ impl ConversationScene {
 
     /// Builds a deterministic scene from authoritative inputs.
     ///
-    /// Frozen ordering rules:
-    /// - inputs are sorted by stable ordinal for rendering;
-    /// - duplicate identity or ordinal, or unknown turn, is a typed error;
-    /// - contiguous `ReasoningSummary`/`Activity`/`WorkSession` items coalesce
-    ///   into one ordered work group; messages and interactive/error cards
-    ///   break a group;
-    /// - compaction is an explicit card and its active narration cannot coexist
-    ///   with an additional generic thinking/working status row;
-    /// - streaming assistant suppresses the quiet status row;
-    /// - change-set cards render only after settled lifecycle, otherwise they
-    ///   are retained in [`Self::deferred_change_sets`];
-    /// - final assistant reply, terminal change card, status, and footer have
-    ///   the pinned order: assistant message(s) → change card → status → footer;
-    /// - exactly one status block per turn unless suppressed;
-    /// - each steering placement appears exactly once immediately after its
-    ///   exact user-message anchor.
+    /// Frozen rules:
     ///
-    /// # Errors
+    /// - turns and items are ordered by their globally unique stable ordinal;
+    /// - duplicate identity/ordinal and unknown ownership are typed errors;
+    /// - contiguous reasoning/activity/work-session items coalesce into one
+    ///   work group, while every other item is a barrier;
+    /// - a compaction card cannot be paired with a generic thinking/working
+    ///   narration;
+    /// - a streaming assistant suppresses the status only when the supplied
+    ///   narration is [`TurnNarration::StreamingSuppression`];
+    /// - change cards render only for a terminal domain lifecycle and are
+    ///   retained in [`Self::deferred_change_sets`] before that point;
+    /// - ordinary blocks are followed by a terminal change card, one status,
+    ///   and one footer;
+    /// - each steering placement appears once immediately after its exact
+    ///   user-message anchor.
     ///
-    /// Returns [`SceneBuildError`] for any duplicate, unknown turn, invalid
-    /// anchor, or bound overflow. The build is atomic: no partial scene is
-    /// returned on failure.
+    /// The build is atomic: any validation failure returns only a typed error
+    /// and no partial scene.
+    #[allow(clippy::too_many_lines)]
     pub fn build(
         turns: Vec<SceneTurn>,
         items: Vec<SceneItem>,
         narrations: Vec<TurnNarrationEntry>,
         steerings: Vec<SteeringPlacement>,
     ) -> Result<Self, SceneBuildError> {
-        // ---- bounds: counts before cloning large payloads where practical ----
+        // Count bounds are checked before ownership is rearranged or any
+        // large text payload is cloned into output blocks.
+        if turns.len() > SCENE_MAX_TURNS {
+            return Err(SceneBuildError::TooManyTurns {
+                count: turns.len(),
+                maximum: SCENE_MAX_TURNS,
+            });
+        }
         if items.len() > SCENE_MAX_ITEMS {
             return Err(SceneBuildError::TooManyItems {
                 count: items.len(),
                 maximum: SCENE_MAX_ITEMS,
             });
         }
+        if narrations.len() > SCENE_MAX_NARRATIONS {
+            return Err(SceneBuildError::TooManyNarrations {
+                count: narrations.len(),
+                maximum: SCENE_MAX_NARRATIONS,
+            });
+        }
+        if steerings.len() > SCENE_MAX_STEERING_PLACEMENTS {
+            return Err(SceneBuildError::TooManySteeringPlacements {
+                count: steerings.len(),
+                maximum: SCENE_MAX_STEERING_PLACEMENTS,
+            });
+        }
 
-        // Validate bounded text lengths before heavy allocation.
+        // Validate every owned payload while it is still borrowed from the
+        // caller's vectors. This also covers public struct literals that did
+        // not use `SceneItem::new` or `SceneFileChange::new`.
         for item in &items {
-            validate_item_text(item)?;
+            validate_item_kind(&item.kind)?;
         }
         for steering in &steerings {
-            if steering.label.len() > SCENE_MAX_STEERING_LABEL_BYTES {
-                return Err(SceneBuildError::SteeringLabelTooLong {
-                    length: steering.label.len(),
-                    maximum: SCENE_MAX_STEERING_LABEL_BYTES,
-                });
-            }
+            validate_steering_label(&steering.label)?;
         }
 
-        // ---- turn checks: duplicate id / ordinal ----
-        let mut seen_turn_ids: HashSet<String> = HashSet::new();
-        let mut seen_turn_ordinals: HashSet<u64> = HashSet::new();
+        // Domain snapshot invariants use globally unique turn/item ordinals;
+        // the scene repeats that contract before sorting.
+        let mut turn_ids: HashSet<TurnId> = HashSet::with_capacity(turns.len());
+        let mut all_ordinals: HashSet<u64> =
+            HashSet::with_capacity(turns.len().saturating_add(items.len()));
         for turn in &turns {
-            if !seen_turn_ids.insert(turn.turn_id.as_str().to_owned()) {
+            if !turn_ids.insert(turn.turn_id.clone()) {
                 return Err(SceneBuildError::DuplicateTurnId {
                     turn_id: turn.turn_id.clone(),
                 });
             }
-            if !seen_turn_ordinals.insert(turn.ordinal) {
-                return Err(SceneBuildError::DuplicateOrdinal { ordinal: turn.ordinal });
+            if !all_ordinals.insert(turn.ordinal) {
+                return Err(SceneBuildError::DuplicateOrdinal {
+                    ordinal: turn.ordinal,
+                });
             }
         }
 
-        // ---- narration checks: duplicate per turn ----
-        let mut narration_map: HashMap<String, TurnNarration> = HashMap::new();
-        let mut seen_narration_turns: HashSet<String> = HashSet::new();
+        let mut narration_map: HashMap<TurnId, TurnNarration> =
+            HashMap::with_capacity(narrations.len());
         for entry in &narrations {
-            let key = entry.turn_id.as_str().to_owned();
-            if !seen_narration_turns.insert(key.clone()) {
+            if !turn_ids.contains(&entry.turn_id) {
+                return Err(SceneBuildError::UnknownNarrationTurn {
+                    turn_id: entry.turn_id.clone(),
+                });
+            }
+            if narration_map
+                .insert(entry.turn_id.clone(), entry.narration)
+                .is_some()
+            {
                 return Err(SceneBuildError::DuplicateNarration {
                     turn_id: entry.turn_id.clone(),
                 });
             }
-            narration_map.insert(key, entry.narration);
         }
 
-        // ---- item checks: duplicate id / ordinal, unknown turn ----
-        let turn_ids: HashSet<String> =
-            turns.iter().map(|t| t.turn_id.as_str().to_owned()).collect();
-        let mut seen_item_ids: HashSet<String> = HashSet::new();
-        let mut seen_item_ordinals: HashSet<u64> = HashSet::new();
-        let mut all_ordinals = seen_turn_ordinals.clone();
+        let mut item_ids: HashSet<SceneId> = HashSet::with_capacity(items.len());
         for item in &items {
-            if !turn_ids.contains(item.turn_id.as_str()) {
+            if !turn_ids.contains(&item.turn_id) {
                 return Err(SceneBuildError::UnknownTurn {
                     item_id: item.id.clone(),
                     turn_id: item.turn_id.clone(),
                 });
             }
-            if !seen_item_ids.insert(item.id.as_str().to_owned()) {
-                return Err(SceneBuildError::DuplicateItemId { id: item.id.clone() });
-            }
-            if !seen_item_ordinals.insert(item.ordinal) {
-                return Err(SceneBuildError::DuplicateOrdinal { ordinal: item.ordinal });
+            if !item_ids.insert(item.id.clone()) {
+                return Err(SceneBuildError::DuplicateItemId {
+                    id: item.id.clone(),
+                });
             }
             if !all_ordinals.insert(item.ordinal) {
-                return Err(SceneBuildError::DuplicateOrdinal { ordinal: item.ordinal });
-            }
-            // Changed files per card checked here for ChangeSet/FileChange
-            if let SceneItemKind::ChangeSet { files } = &item.kind {
-                if files.len() > SCENE_MAX_CHANGED_FILES_PER_CARD {
-                    return Err(SceneBuildError::TooManyChangedFiles {
-                        count: files.len(),
-                        maximum: SCENE_MAX_CHANGED_FILES_PER_CARD,
-                    });
-                }
-                for file in files {
-                    if file.path.len() > SCENE_MAX_DISPLAY_PATH_BYTES {
-                        return Err(SceneBuildError::DisplayPathTooLong {
-                            length: file.path.len(),
-                            maximum: SCENE_MAX_DISPLAY_PATH_BYTES,
-                        });
-                    }
-                }
-            }
-            if let SceneItemKind::FileChange { file } = &item.kind {
-                if file.path.len() > SCENE_MAX_DISPLAY_PATH_BYTES {
-                    return Err(SceneBuildError::DisplayPathTooLong {
-                        length: file.path.len(),
-                        maximum: SCENE_MAX_DISPLAY_PATH_BYTES,
-                    });
-                }
-            }
-        }
-
-        // ---- steering checks: duplicate id, unknown / non-user anchor ----
-        let mut seen_steering_ids: HashSet<String> = HashSet::new();
-        for steering in &steerings {
-            if !seen_steering_ids.insert(steering.id.as_str().to_owned()) {
-                return Err(SceneBuildError::DuplicateSteeringId {
-                    id: steering.id.clone(),
+                return Err(SceneBuildError::DuplicateOrdinal {
+                    ordinal: item.ordinal,
                 });
             }
         }
 
-        // Build lookup: item id string -> kind is_user
-        let mut item_kind_by_string: HashMap<String, bool> = HashMap::new();
-        let mut item_by_string: HashMap<String, &SceneItem> = HashMap::new();
+        // Keep the exact ItemId in the placement, but use the validated text
+        // only as the lookup bridge to a scene identity. The bridge cannot
+        // relocate a label: it is checked against the one exact user item.
+        let mut item_anchor_kinds: HashMap<&str, AnchorKind> = HashMap::with_capacity(items.len());
         for item in &items {
-            let is_user = matches!(item.kind, SceneItemKind::UserMessage { .. });
-            item_kind_by_string.insert(item.id.as_str().to_owned(), is_user);
-            item_by_string.insert(item.id.as_str().to_owned(), item);
+            item_anchor_kinds.insert(
+                item.id.as_str(),
+                if matches!(&item.kind, SceneItemKind::UserMessage { .. }) {
+                    AnchorKind::UserMessage
+                } else {
+                    AnchorKind::Other
+                },
+            );
         }
 
+        let mut steering_ids: HashSet<SceneId> = HashSet::with_capacity(steerings.len());
         for steering in &steerings {
-            let anchor_str = steering.anchor.as_str();
-            match item_kind_by_string.get(anchor_str) {
+            if !steering_ids.insert(steering.id.clone()) {
+                return Err(SceneBuildError::DuplicateSteeringId {
+                    id: steering.id.clone(),
+                });
+            }
+            match item_anchor_kinds.get(steering.anchor.as_str()) {
                 None => {
                     return Err(SceneBuildError::UnknownSteeringAnchor {
                         anchor: steering.anchor.clone(),
                     });
                 }
-                Some(false) => {
+                Some(AnchorKind::Other) => {
                     return Err(SceneBuildError::NonUserSteeringAnchor {
                         anchor: steering.anchor.clone(),
                     });
                 }
-                Some(true) => {}
+                Some(AnchorKind::UserMessage) => {}
             }
         }
+        drop(item_anchor_kinds);
 
-        // ---- sort inputs canonically ----
         let mut sorted_turns = turns;
-        sorted_turns.sort_by_key(|t| t.ordinal);
-        // Items already have ordinal uniqueness; sort for deterministic grouping
-        let mut sorted_items = items;
-        sorted_items.sort_by_key(|i| i.ordinal);
+        sorted_turns.sort_by_key(|turn| turn.ordinal);
 
-        // Group items by turn
-        let mut items_by_turn: HashMap<String, Vec<SceneItem>> = HashMap::new();
+        let mut sorted_items = items;
+        sorted_items.sort_by_key(|item| item.ordinal);
+
+        let mut items_by_turn: HashMap<TurnId, Vec<SceneItem>> =
+            HashMap::with_capacity(sorted_turns.len());
         for item in sorted_items {
             items_by_turn
-                .entry(item.turn_id.as_str().to_owned())
+                .entry(item.turn_id.clone())
                 .or_default()
                 .push(item);
         }
 
-        // Steering by anchor string (preserve input order for multiple on same anchor)
-        let mut steerings_by_anchor: HashMap<String, Vec<&SteeringPlacement>> = HashMap::new();
-        for steering in &steerings {
+        // Preserve caller order when multiple legal placements share one
+        // exact anchor. Different anchors remain independently addressable.
+        let mut steerings_by_anchor: HashMap<String, Vec<SteeringPlacement>> =
+            HashMap::with_capacity(steerings.len());
+        for steering in steerings {
             steerings_by_anchor
                 .entry(steering.anchor.as_str().to_owned())
                 .or_default()
                 .push(steering);
         }
 
-        let turn_lifecycle_by_id: HashMap<String, ConversationLifecycle> = sorted_turns
-            .iter()
-            .map(|t| (t.turn_id.as_str().to_owned(), t.lifecycle))
-            .collect();
-
-        let mut turn_scenes: Vec<TurnScene> = Vec::new();
-        let mut deferred: Vec<DeferredChangeSet> = Vec::new();
+        let mut turn_scenes = Vec::with_capacity(sorted_turns.len());
+        let mut deferred = Vec::new();
 
         for turn in &sorted_turns {
             let narration = narration_map
-                .get(turn.turn_id.as_str())
+                .get(&turn.turn_id)
                 .copied()
                 .unwrap_or(TurnNarration::Quiet);
-            let turn_items: Vec<SceneItem> =
-                items_by_turn.remove(turn.turn_id.as_str()).unwrap_or_default();
+            let turn_items = items_by_turn.remove(&turn.turn_id).unwrap_or_default();
 
-            // Separate change items for deferred vs terminal card handling
-            let mut change_files: Vec<SceneFileChange> = Vec::new();
-            let mut change_disclosure: Option<SceneDisclosure> = None;
-            let mut change_id: Option<SceneId> = None;
-            let mut non_change_items: Vec<SceneItem> = Vec::new();
-
-            for item in turn_items {
-                match item.kind {
-                    SceneItemKind::ChangeSet { files } => {
-                        // Preserve first id/disclosure as card identity; merge files
-                        if change_id.is_none() {
-                            change_id = Some(item.id.clone());
-                            change_disclosure = item.disclosure;
-                        } else if change_disclosure.is_none() {
-                            change_disclosure = item.disclosure;
-                        }
-                        change_files.extend(files);
-                    }
-                    SceneItemKind::FileChange { file } => {
-                        if change_id.is_none() {
-                            change_id = Some(item.id.clone());
-                            change_disclosure = item.disclosure;
-                        } else if change_disclosure.is_none() {
-                            change_disclosure = item.disclosure;
-                        }
-                        change_files.push(file);
-                    }
-                    _ => non_change_items.push(item),
-                }
-            }
-
-            // Validate merged changed files count
-            if change_files.len() > SCENE_MAX_CHANGED_FILES_PER_CARD {
-                return Err(SceneBuildError::TooManyChangedFiles {
-                    count: change_files.len(),
-                    maximum: SCENE_MAX_CHANGED_FILES_PER_CARD,
-                });
-            }
-
-            let is_settled = matches!(
-                turn.lifecycle,
-                ConversationLifecycle::Completed
-                    | ConversationLifecycle::Failed
-                    | ConversationLifecycle::Interrupted
-                    | ConversationLifecycle::Cancelled
-            );
-
-            let mut pending_change_card: Option<ChangeSetBlock> = None;
-            if !change_files.is_empty() {
-                let card = ChangeSetBlock {
-                    id: change_id.clone().expect("change_id set when files non-empty"),
-                    files: change_files.clone(),
-                    disclosure: change_disclosure,
-                };
-                if is_settled {
-                    pending_change_card = Some(card);
-                } else {
-                    deferred.push(DeferredChangeSet {
-                        turn_id: turn.turn_id.clone(),
-                        card,
-                    });
-                }
-            }
-
-            // Build ordinal blocks with work-group coalescing
-            let mut blocks: Vec<TurnBlock> = Vec::new();
-            let mut work_buffer: Vec<WorkItem> = Vec::new();
-            let mut work_buffer_disclosure: Option<SceneDisclosure> = None;
+            let mut blocks = Vec::new();
+            let mut work_buffer = Vec::new();
+            let mut work_disclosure = None;
+            let mut change_id = None;
+            let mut change_disclosure = None;
+            let mut change_files = Vec::new();
             let mut has_compaction = false;
             let mut has_streaming_assistant = false;
 
-            // Helper to flush work group
-            let flush_work = |buffer: &mut Vec<WorkItem>,
-                              disclosure: &mut Option<SceneDisclosure>,
-                              blocks: &mut Vec<TurnBlock>,
-                              narration: TurnNarration|
-             -> Result<(), SceneBuildError> {
-                if buffer.is_empty() {
-                    return Ok(());
+            for item in turn_items {
+                // Change facts are a barrier even though the card is rendered
+                // at the terminal position. This preserves *contiguous* work
+                // grouping around a deferred or settled change event.
+                if matches!(
+                    &item.kind,
+                    SceneItemKind::ChangeSet { .. } | SceneItemKind::FileChange { .. }
+                ) {
+                    flush_work(&mut work_buffer, &mut work_disclosure, &mut blocks)?;
+                    match item.kind {
+                        SceneItemKind::ChangeSet { files } => {
+                            if change_id.is_none() {
+                                change_id = Some(item.id);
+                                change_disclosure = item.disclosure;
+                            } else if change_disclosure.is_none() {
+                                change_disclosure = item.disclosure;
+                            }
+                            change_files.extend(files);
+                        }
+                        SceneItemKind::FileChange { file } => {
+                            if change_id.is_none() {
+                                change_id = Some(item.id);
+                                change_disclosure = item.disclosure;
+                            } else if change_disclosure.is_none() {
+                                change_disclosure = item.disclosure;
+                            }
+                            change_files.push(file);
+                        }
+                        _ => unreachable!("change barrier matched only change variants"),
+                    }
+                    if change_files.len() > SCENE_MAX_CHANGED_FILES_PER_CARD {
+                        return Err(SceneBuildError::TooManyChangedFiles {
+                            count: change_files.len(),
+                            maximum: SCENE_MAX_CHANGED_FILES_PER_CARD,
+                        });
+                    }
+                    continue;
                 }
-                if buffer.len() > SCENE_MAX_WORK_GROUP_ITEMS {
-                    return Err(SceneBuildError::TooManyWorkItems {
-                        count: buffer.len(),
-                        maximum: SCENE_MAX_WORK_GROUP_ITEMS,
-                    });
-                }
-                // Determine label: reasoning-only => ThoughtFor, otherwise WorkedFor
-                let reasoning_only = buffer.iter().all(|item| {
-                    matches!(item, WorkItem::Reasoning { .. })
-                });
-                let label = match narration {
-                    TurnNarration::ThoughtFor { millis } if reasoning_only => {
-                        Some(WorkGroupLabel::ThoughtFor { millis })
-                    }
-                    TurnNarration::WorkedFor { millis } if !reasoning_only => {
-                        Some(WorkGroupLabel::WorkedFor { millis })
-                    }
-                    TurnNarration::ThoughtFor { millis } => {
-                        // Mixed content but narration says ThoughtFor: still emit ThoughtFor
-                        // However spec says scene never holds both; we ensure single label per group,
-                        // not both variants inside same group.
-                        Some(WorkGroupLabel::ThoughtFor { millis })
-                    }
-                    TurnNarration::WorkedFor { millis } => {
-                        Some(WorkGroupLabel::WorkedFor { millis })
-                    }
-                    _ => {
-                        // No duration narration: choose by content with zero duration placeholder?
-                        // Use no label unless narration supplies duration.
-                        None
-                    }
-                };
-                // Enforce never holds both ThoughtFor and WorkedFor in same group
-                // (guaranteed by enum being single variant)
-                let drained = std::mem::take(buffer);
-                let disc = disclosure.take();
-                blocks.push(TurnBlock::WorkGroup(WorkGroupBlock {
-                    items: drained,
-                    label,
-                    disclosure: disc,
-                }));
-                Ok(())
-            };
 
-            for item in non_change_items {
                 let is_work_like = matches!(
-                    item.kind,
+                    &item.kind,
                     SceneItemKind::ReasoningSummary { .. }
                         | SceneItemKind::Activity { .. }
                         | SceneItemKind::WorkSession { .. }
                 );
                 if is_work_like {
+                    if work_buffer.len() >= SCENE_MAX_WORK_GROUP_ITEMS {
+                        return Err(SceneBuildError::TooManyWorkItems {
+                            count: work_buffer.len() + 1,
+                            maximum: SCENE_MAX_WORK_GROUP_ITEMS,
+                        });
+                    }
                     let work_item = match item.kind {
                         SceneItemKind::ReasoningSummary { body } => WorkItem::Reasoning {
                             id: item.id,
@@ -935,43 +1010,38 @@ impl ConversationScene {
                             title,
                             disclosure: item.disclosure,
                         },
-                        _ => unreachable!(),
+                        _ => unreachable!("work-like match covered every work variant"),
                     };
-                    if work_buffer_disclosure.is_none() {
-                        work_buffer_disclosure = work_item_disclosure(&work_item);
+                    if work_disclosure.is_none() {
+                        work_disclosure = work_item_disclosure(&work_item);
                     }
                     work_buffer.push(work_item);
                     continue;
                 }
 
-                // Breaks work group
-                flush_work(
-                    &mut work_buffer,
-                    &mut work_buffer_disclosure,
-                    &mut blocks,
-                    narration,
-                )?;
+                // Messages, cards, and facts are all work-group barriers.
+                flush_work(&mut work_buffer, &mut work_disclosure, &mut blocks)?;
 
                 match item.kind {
                     SceneItemKind::UserMessage { body } => {
-                        let id_str = item.id.as_str().to_owned();
+                        let anchor_key = item.id.as_str().to_owned();
                         blocks.push(TurnBlock::UserMessage(UserMessageBlock {
                             id: item.id,
                             body,
                             disclosure: item.disclosure,
                         }));
-                        // Steering labels immediately after anchor are handled later;
-                        // we keep placeholder to insert after.
-                        // We'll insert steering blocks after this message in a second pass.
-                        // To keep anchor mapping simple, we remember position and later insert.
-                        // For now, record that we need to handle steering after building all.
-                        // Instead we handle post-loop insertion.
-                        let _ = id_str;
+                        if let Some(placements) = steerings_by_anchor.remove(&anchor_key) {
+                            for placement in placements {
+                                blocks.push(TurnBlock::SteeringLabel(SteeringBlock {
+                                    id: placement.id,
+                                    anchor: placement.anchor,
+                                    label: placement.label,
+                                }));
+                            }
+                        }
                     }
                     SceneItemKind::AssistantMessage { body, phase } => {
-                        if phase == AssistantPhase::Streaming {
-                            has_streaming_assistant = true;
-                        }
+                        has_streaming_assistant |= phase == AssistantPhase::Streaming;
                         blocks.push(TurnBlock::AssistantMessage(AssistantMessageBlock {
                             id: item.id,
                             body,
@@ -1017,15 +1087,16 @@ impl ConversationScene {
                         }));
                     }
                     SceneItemKind::UsageInterruption { detail } => {
-                        blocks.push(TurnBlock::UsageInterruption(
-                            UsageInterruptionBlock {
-                                id: item.id,
-                                detail,
-                                disclosure: item.disclosure,
-                            },
-                        ));
+                        blocks.push(TurnBlock::UsageInterruption(UsageInterruptionBlock {
+                            id: item.id,
+                            detail,
+                            disclosure: item.disclosure,
+                        }));
                     }
-                    SceneItemKind::ModelTransition { from_model, to_model } => {
+                    SceneItemKind::ModelTransition {
+                        from_model,
+                        to_model,
+                    } => {
                         blocks.push(TurnBlock::ModelTransition(ModelTransitionBlock {
                             id: item.id,
                             from_model,
@@ -1044,235 +1115,110 @@ impl ConversationScene {
                     | SceneItemKind::Activity { .. }
                     | SceneItemKind::WorkSession { .. }
                     | SceneItemKind::ChangeSet { .. }
-                    | SceneItemKind::FileChange { .. } => unreachable!(),
+                    | SceneItemKind::FileChange { .. } => {
+                        unreachable!("all work and change variants were handled above")
+                    }
                 }
             }
-            flush_work(
-                &mut work_buffer,
-                &mut work_buffer_disclosure,
-                &mut blocks,
-                narration,
-            )?;
 
-            // Insert steering labels immediately after their anchor user message
-            let mut with_steering: Vec<TurnBlock> = Vec::new();
-            for block in blocks {
-                let anchor_key = match &block {
-                    TurnBlock::UserMessage(msg) => Some(msg.id.as_str().to_owned()),
+            flush_work(&mut work_buffer, &mut work_disclosure, &mut blocks)?;
+
+            // A duration narration is a terminal label, not a label on every
+            // historical work fragment. Put exactly one label on the latest
+            // group when a turn contains work.
+            if let Some(label) = narration.terminal_label() {
+                if let Some(group) = blocks.iter_mut().rev().find_map(|block| match block {
+                    TurnBlock::WorkGroup(group) => Some(group),
                     _ => None,
-                };
-                with_steering.push(block);
-                if let Some(key) = anchor_key {
-                    if let Some(placements) = steerings_by_anchor.remove(&key) {
-                        for placement in placements {
-                            with_steering.push(TurnBlock::SteeringLabel(SteeringBlock {
-                                id: placement.id.clone(),
-                                anchor: placement.anchor.clone(),
-                                label: placement.label.clone(),
-                            }));
-                        }
+                }) {
+                    group.label = Some(label);
+                }
+            }
+
+            if let Some(change_id) = change_id {
+                if !change_files.is_empty() {
+                    let card = ChangeSetBlock {
+                        id: change_id,
+                        files: change_files,
+                        disclosure: change_disclosure,
+                    };
+                    if turn.lifecycle.is_terminal() {
+                        // Terminal cards are deliberately appended before the
+                        // status/footer pair, regardless of item ordinal.
+                        blocks.push(TurnBlock::ChangeSet(card));
+                    } else {
+                        deferred.push(DeferredChangeSet {
+                            turn_id: turn.turn_id.clone(),
+                            card,
+                        });
                     }
                 }
             }
-            // Any remaining steerings for this turn that didn't match? Already validated globally,
-            // but if anchor is in different turn, it wouldn't be inserted here; they'll be inserted
-            // when that turn's blocks are processed. At the end, steerings_by_anchor should be empty
-            // for anchors that existed; if any remain at end of all turns, that would be unknown anchor,
-            // but we already errored earlier. So after processing all turns, there could still be entries
-            // for anchors whose turn is not yet processed – we keep map and continue.
-            // However we removed entries per turn; remaining will be handled in later turns.
 
-            // Determine change card insertion before status (deterministic terminal order)
-            // We have pending_change_card if settled and had files.
-            // Reorder: ensure assistant messages come before change card, regardless of original ordinal.
-            // For simplicity, if we have a change card, extract it and re-insert at correct position:
-            // after last assistant message, before status/footer.
-            // Currently change card not yet in blocks; we will insert now.
-            let mut terminal_blocks: Vec<TurnBlock> = Vec::new();
-            let mut assistant_blocks: Vec<TurnBlock> = Vec::new();
-            let mut other_blocks: Vec<TurnBlock> = Vec::new();
-            for b in with_steering {
-                match b {
-                    TurnBlock::AssistantMessage(_) => assistant_blocks.push(b),
-                    TurnBlock::SteeringLabel(_) => {
-                        // Steering labels stay immediately after anchor; but if anchor is user message,
-                        // steering labels are currently interleaved with other_blocks; we need to keep them
-                        // with their anchor, not moved. Our split above incorrectly separates them.
-                        // To avoid breaking steering placement, we should not split steering labels into
-                        // separate bucket. Instead keep them attached to preceding user message group.
-                        // Simpler: keep steering labels together with other_blocks, but ensure the
-                        // deterministic order still holds: change card after all assistant messages but
-                        // before status. Steering labels remain after their anchor wherever anchor sits.
-                        // So we need different handling.
-                        other_blocks.push(b);
-                    }
-                    _ => other_blocks.push(b),
-                }
-            }
-            // Reconstruct with deterministic order: other_blocks (preserving steering adjacency for user messages)
-            // but we have split assistant messages out; need to interleave them back in ordinal order
-            // except change card before status. However ordinal already gave deterministic interleaving.
-            // Simpler approach: just append change card before status, preserving original block order for
-            // everything else, minus the change card which we didn't insert yet.
-            // So rebuild: take with_steering as base, then insert change card at position before status/footer
-            // (which haven't been added yet). So just push change card now.
-            // To keep split logic simple, undo split and just use with_steering directly:
-            terminal_blocks = with_steering;
-            // Remove assistant_blocks recombination – we already have correct order; avoid second guessing.
-            // Actually we did destructive split; reconstruct properly: we pushed assistant_blocks separately,
-            // now need to merge back. Let's reconstruct correctly: if we want change card after assistant messages,
-            // the simplest deterministic order that satisfies spec and tests is: all non-assistant ordinal blocks
-            // in order, then assistant messages, then change card, then status, then footer.
-            // But that would reorder ordinal interleaving. The spec says final assistant reply, terminal change card,
-            // status, and footer have one deterministic order. That suggests the final three are pinned relative to
-            // each other, not that assistant messages always come after work groups? The natural ordinal order
-            // already has that property if items were inserted in that order. We just need to guarantee that
-            // when change card exists, it appears after the last assistant message and before status.
-            // The easiest guarantee: after building with_steering, find last assistant index and insert change card after it;
-            // if no assistant, insert at end before status.
-            if let Some(card) = pending_change_card {
-                let insert_at = terminal_blocks
-                    .iter()
-                    .rposition(|b| matches!(b, TurnBlock::AssistantMessage(_)))
-                    .map(|idx| idx + 1)
-                    .unwrap_or(terminal_blocks.len());
-                // Need to also keep steering labels immediately after anchors: if last assistant is before steering
-                // that belongs to after anchor that comes after assistant, then insertion after last assistant might break ordering.
-                // But change card should come after all ordinal content including steering labels, but before status.
-                // So if there are steering labels after the last assistant, we should insert after those as well.
-                // Simpler: insert at end (before status)
-                let mut change_idx = insert_at;
-                // advance past any trailing steering labels? Actually steering labels are tied to user messages,
-                // which could be after assistant messages if ordinal interleaves user after assistant (unlikely but possible
-                // for multi-turn). For single turn, user messages come before assistant. So insertion after last assistant
-                // already is at end. We'll just insert at end for now; tests will pin this.
-                if change_idx < terminal_blocks.len() {
-                    // If we inserted in middle, we still preserve steering adjacency because steering labels are paired with
-                    // their anchor user message which is before change_idx, so okay.
-                    terminal_blocks.insert(change_idx, TurnBlock::ChangeSet(card));
-                } else {
-                    terminal_blocks.push(TurnBlock::ChangeSet(card));
-                }
-                let _ = assistant_blocks; // suppress unused
+            if has_compaction
+                && matches!(narration, TurnNarration::Thinking | TurnNarration::Working)
+            {
+                return Err(SceneBuildError::CompactionNarrationConflict { narration });
             }
 
-            // Status handling: compaction active narration cannot coexist with generic thinking/working status
-            // Check conflict: if has_compaction && matches!(narration, Thinking | Working | Quiet | ProviderWait | BackgroundWait)
-            // then we must not have duplicate generic status. Our design already has exactly one status (the narration itself).
-            // The conflict rule means if narration is Compacting and there is a compaction card, we must not also emit a generic status.
-            // Since narration Compacting itself is the status, that's fine – we just ensure we don't emit an extra.
-            // If narration is Thinking/Working but there is a compaction card, that is the violation described?
-            // Spec says "its active narration cannot coexist with an additional generic thinking/working status row"
-            // Means if compaction card exists and narration is Compacting, we must not also have a generic status row.
-            // Our code emits exactly one status derived from narration, so no duplicate.
-            let suppress_status = narration == TurnNarration::StreamingSuppression && has_streaming_assistant;
-
-            if has_compaction && matches!(narration, TurnNarration::Compacting) {
-                // valid: one compaction status
-            } else if has_compaction
-                && matches!(
-                    narration,
-                    TurnNarration::Thinking | TurnNarration::Working | TurnNarration::Quiet
-                ) {
-                // This would be a second generic status alongside compaction card, but spec says it cannot coexist.
-                // However our model already only emits one status (the narration), so the compaction card plus generic status
-                // would be two visual elements: compaction card block + status row. Is that forbidden?
-                // The spec phrase "compaction is an explicit card/block and its active narration cannot coexist with
-                // an additional generic thinking/working status row" – suggests when narration is Compacting, there must be a compaction card
-                // and no Thinking/Working status. Conversely, if narration is Thinking/Working, there should not be a compaction card with Compacting narration?
-                // Our current path where has_compaction true and narration is Thinking would mean compaction card exists but narration is Thinking – that would be an extra generic status alongside compaction, which spec says is invalid.
-                // But should we error? Or just ensure that compaction narration implies Thinking/Working not also present?
-                // Since narration is single value, the conflict is about not having both. If has_compaction and narration != Compacting, then we have compaction card plus generic narration status – that might be considered two statuses? The spec says active narration cannot coexist with additional generic row.
-                // We could enforce that if has_compaction, narration must be Compacting, otherwise it's a build error.
-                // However spec tests say active compaction has one exact card/narration and no generic duplicate – so case where compaction card exists with Compacting narration is valid, and we must ensure no duplicate.
-                // Case where compaction card exists with non-Compacting narration might be invalid input; we could allow it as is, no extra duplicate.
-                // Simplify: only enforce that when narration == Compacting, we require has_compaction true and we don't add extra status beyond that single narration.
-            }
-
+            let suppress_status =
+                has_streaming_assistant && narration == TurnNarration::StreamingSuppression;
             if !suppress_status {
-                // Ensure at most one status block; our code adds exactly one per turn (unless suppressed)
-                // Check compaction duplicate rule: if narration == Compacting, we shouldn't also have Thinking/Working elsewhere – but we already have single.
-                terminal_blocks.push(TurnBlock::TurnStatus(TurnStatusBlock { narration }));
-            } else {
-                // suppressed quiet status – zero status blocks for this turn
+                blocks.push(TurnBlock::TurnStatus(TurnStatusBlock { narration }));
             }
-
-            // Exactly one footer per turn
-            terminal_blocks.push(TurnBlock::TurnFooter(TurnFooterBlock {
+            blocks.push(TurnBlock::TurnFooter(TurnFooterBlock {
                 turn_id: turn.turn_id.clone(),
             }));
-
-            // Validate exactly one status (or zero if suppressed) and one footer
-            let status_count = terminal_blocks
-                .iter()
-                .filter(|b| matches!(b, TurnBlock::TurnStatus(_)))
-                .count();
-            if suppress_status {
-                if status_count != 0 {
-                    return Err(SceneBuildError::Internal(
-                        "suppressed status must be zero".to_string(),
-                    ));
-                }
-            } else if status_count != 1 {
-                return Err(SceneBuildError::Internal(format!(
-                    "turn {} must have exactly one status row",
-                    turn.turn_id.as_str()
-                )));
-            }
-            let footer_count = terminal_blocks
-                .iter()
-                .filter(|b| matches!(b, TurnBlock::TurnFooter(_)))
-                .count();
-            if footer_count != 1 {
-                return Err(SceneBuildError::Internal(format!(
-                    "turn {} must have exactly one footer",
-                    turn.turn_id.as_str()
-                )));
-            }
 
             turn_scenes.push(TurnScene {
                 turn_id: turn.turn_id.clone(),
                 ordinal: turn.ordinal,
                 lifecycle: turn.lifecycle,
-                blocks: terminal_blocks,
+                blocks,
             });
         }
 
-        // Ensure no remaining steerings left unprocessed (should have been consumed per turn)
-        // Items in steerings_by_anchor are those whose anchor turn was not in sorted_turns order? But we already validated anchors exist.
-        // However our per-turn removal may have left some anchors for later turns still in map at this point if anchors belong to later turns processed later,
-        // but we remove per turn, so after all turns any leftover means anchor was for a turn that had no blocks? Should have been consumed.
-        // If any remain, it means anchor id string existed but its turn's blocks didn't contain the anchor due to grouping? Unlikely.
-        // We can check remaining and if non-empty, treat as internal error because anchor valid but not placed.
-        if !steerings_by_anchor.is_empty() {
-            // Attempt to place remaining steerings into correct turn scenes post hoc? Instead error.
-            // For simplicity, verify they were all placed: collect placed steering ids from scenes
-            let placed: HashSet<String> = turn_scenes
-                .iter()
-                .flat_map(|ts| ts.blocks.iter())
-                .filter_map(|b| match b {
-                    TurnBlock::SteeringLabel(s) => Some(s.id.as_str().to_owned()),
-                    _ => None,
-                })
-                .collect();
-            for steering in &steerings {
-                if !placed.contains(steering.id.as_str()) {
-                    return Err(SceneBuildError::Internal(format!(
-                        "steering {} not placed",
-                        steering.id.as_str()
-                    )));
-                }
-            }
+        if let Some(placement) = steerings_by_anchor
+            .values()
+            .next()
+            .and_then(|placements| placements.first())
+        {
+            return Err(SceneBuildError::SteeringAnchorNotPlaced {
+                anchor: placement.anchor.clone(),
+            });
         }
 
-        // Sort turn scenes canonically
-        turn_scenes.sort_by_key(|t| t.ordinal);
+        // Turns were already sorted, but retain the final sort as a local
+        // invariant if construction changes later.
+        turn_scenes.sort_by_key(|scene| scene.ordinal);
 
         Ok(Self {
             turn_scenes,
             deferred,
         })
     }
+}
+
+fn flush_work(
+    buffer: &mut Vec<WorkItem>,
+    disclosure: &mut Option<SceneDisclosure>,
+    blocks: &mut Vec<TurnBlock>,
+) -> Result<(), SceneBuildError> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    if buffer.len() > SCENE_MAX_WORK_GROUP_ITEMS {
+        return Err(SceneBuildError::TooManyWorkItems {
+            count: buffer.len(),
+            maximum: SCENE_MAX_WORK_GROUP_ITEMS,
+        });
+    }
+    blocks.push(TurnBlock::WorkGroup(WorkGroupBlock {
+        items: std::mem::take(buffer),
+        label: None,
+        disclosure: disclosure.take(),
+    }));
+    Ok(())
 }
 
 fn work_item_disclosure(item: &WorkItem) -> Option<SceneDisclosure> {
@@ -1283,46 +1229,77 @@ fn work_item_disclosure(item: &WorkItem) -> Option<SceneDisclosure> {
     }
 }
 
-fn validate_item_text(item: &SceneItem) -> Result<(), SceneBuildError> {
-    let check_len = |text: &str, max: usize| -> Result<(), SceneBuildError> {
-        if text.len() > max {
-            return Err(SceneBuildError::TextTooLong {
-                length: text.len(),
-                maximum: max,
-            });
+fn validate_steering_label(label: &str) -> Result<(), SceneBuildError> {
+    if label.is_empty() {
+        return Err(SceneBuildError::EmptySteeringLabel);
+    }
+    if label.len() > SCENE_MAX_STEERING_LABEL_BYTES {
+        return Err(SceneBuildError::SteeringLabelTooLong {
+            length: label.len(),
+            maximum: SCENE_MAX_STEERING_LABEL_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_display_path(path: &str) -> Result<(), SceneBuildError> {
+    if path.is_empty() {
+        return Err(SceneBuildError::EmptyDisplayPath);
+    }
+    if path.len() > SCENE_MAX_DISPLAY_PATH_BYTES {
+        return Err(SceneBuildError::DisplayPathTooLong {
+            length: path.len(),
+            maximum: SCENE_MAX_DISPLAY_PATH_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_general_text(text: &str) -> Result<(), SceneBuildError> {
+    if text.len() > SCENE_MAX_TEXT_BYTES {
+        return Err(SceneBuildError::TextTooLong {
+            length: text.len(),
+            maximum: SCENE_MAX_TEXT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_message_body(text: &str) -> Result<(), SceneBuildError> {
+    if text.len() > SCENE_MAX_MESSAGE_BODY_BYTES {
+        return Err(SceneBuildError::MessageBodyTooLong {
+            length: text.len(),
+            maximum: SCENE_MAX_MESSAGE_BODY_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_native_fact(text: &str) -> Result<(), SceneBuildError> {
+    if text.len() > SCENE_MAX_NATIVE_FACT_BYTES {
+        return Err(SceneBuildError::NativeFactTooLong {
+            length: text.len(),
+            maximum: SCENE_MAX_NATIVE_FACT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_file_change(file: &SceneFileChange) -> Result<(), SceneBuildError> {
+    validate_display_path(&file.path)
+}
+
+fn validate_item_kind(kind: &SceneItemKind) -> Result<(), SceneBuildError> {
+    match kind {
+        SceneItemKind::UserMessage { body } | SceneItemKind::AssistantMessage { body, .. } => {
+            validate_message_body(body)
         }
-        Ok(())
-    };
-    match &item.kind {
-        SceneItemKind::UserMessage { body }
-        | SceneItemKind::AssistantMessage { body, .. }
-        | SceneItemKind::ReasoningSummary { body }
-        | SceneItemKind::Activity { body } => check_len(body, SCENE_MAX_TEXT_BYTES),
-        SceneItemKind::WorkSession { title } => check_len(title, SCENE_MAX_TEXT_BYTES),
-        SceneItemKind::Compaction { summary } => check_len(summary, SCENE_MAX_TEXT_BYTES),
-        SceneItemKind::Plan { title, entries } => {
-            check_len(title, SCENE_MAX_TEXT_BYTES)?;
-            for entry in entries {
-                check_len(entry, SCENE_MAX_TEXT_BYTES)?;
-            }
-            if entries.len() > 256 {
-                return Err(SceneBuildError::TooManyItems {
-                    count: entries.len(),
-                    maximum: 256,
-                });
-            }
-            Ok(())
+        SceneItemKind::ReasoningSummary { body } | SceneItemKind::Activity { body } => {
+            validate_general_text(body)
         }
-        SceneItemKind::Approval { prompt } | SceneItemKind::Question { prompt } => {
-            check_len(prompt, SCENE_MAX_TEXT_BYTES)
+        SceneItemKind::WorkSession { title } | SceneItemKind::Compaction { summary: title } => {
+            validate_general_text(title)
         }
-        SceneItemKind::Error { message } => check_len(message, SCENE_MAX_TEXT_BYTES),
-        SceneItemKind::UsageInterruption { detail } => check_len(detail, SCENE_MAX_TEXT_BYTES),
-        SceneItemKind::ModelTransition { from_model, to_model } => {
-            check_len(from_model, SCENE_MAX_TEXT_BYTES)?;
-            check_len(to_model, SCENE_MAX_TEXT_BYTES)
-        }
-        SceneItemKind::NativeFact { text } => check_len(text, SCENE_MAX_NATIVE_FACT_BYTES),
         SceneItemKind::ChangeSet { files } => {
             if files.len() > SCENE_MAX_CHANGED_FILES_PER_CARD {
                 return Err(SceneBuildError::TooManyChangedFiles {
@@ -1331,24 +1308,37 @@ fn validate_item_text(item: &SceneItem) -> Result<(), SceneBuildError> {
                 });
             }
             for file in files {
-                if file.path.len() > SCENE_MAX_DISPLAY_PATH_BYTES {
-                    return Err(SceneBuildError::DisplayPathTooLong {
-                        length: file.path.len(),
-                        maximum: SCENE_MAX_DISPLAY_PATH_BYTES,
-                    });
-                }
+                validate_file_change(file)?;
             }
             Ok(())
         }
-        SceneItemKind::FileChange { file } => {
-            if file.path.len() > SCENE_MAX_DISPLAY_PATH_BYTES {
-                return Err(SceneBuildError::DisplayPathTooLong {
-                    length: file.path.len(),
-                    maximum: SCENE_MAX_DISPLAY_PATH_BYTES,
+        SceneItemKind::FileChange { file } => validate_file_change(file),
+        SceneItemKind::Plan { title, entries } => {
+            if entries.len() > SCENE_MAX_PLAN_ENTRIES {
+                return Err(SceneBuildError::TooManyPlanEntries {
+                    count: entries.len(),
+                    maximum: SCENE_MAX_PLAN_ENTRIES,
                 });
             }
+            validate_general_text(title)?;
+            for entry in entries {
+                validate_general_text(entry)?;
+            }
             Ok(())
         }
+        SceneItemKind::Approval { prompt } | SceneItemKind::Question { prompt } => {
+            validate_general_text(prompt)
+        }
+        SceneItemKind::Error { message } => validate_general_text(message),
+        SceneItemKind::UsageInterruption { detail } => validate_general_text(detail),
+        SceneItemKind::ModelTransition {
+            from_model,
+            to_model,
+        } => {
+            validate_general_text(from_model)?;
+            validate_general_text(to_model)
+        }
+        SceneItemKind::NativeFact { text } => validate_native_fact(text),
     }
 }
 
@@ -1359,36 +1349,79 @@ fn validate_item_text(item: &SceneItem) -> Result<(), SceneBuildError> {
 /// Typed atomic failure for a scene build.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SceneBuildError {
+    /// Two turns reused one identity.
     #[error("duplicate turn id {turn_id}")]
     DuplicateTurnId { turn_id: TurnId },
+    /// Two scene items reused one identity.
     #[error("duplicate item id {id}")]
     DuplicateItemId { id: SceneId },
+    /// Two steering placements reused one identity.
     #[error("duplicate steering id {id}")]
     DuplicateSteeringId { id: SceneId },
+    /// Two turn/item records reused one global ordinal.
     #[error("duplicate ordinal {ordinal}")]
     DuplicateOrdinal { ordinal: u64 },
+    /// Two narration entries targeted one turn.
     #[error("duplicate narration for turn {turn_id}")]
     DuplicateNarration { turn_id: TurnId },
+    /// A narration targeted a turn absent from the input.
+    #[error("narration references unknown turn {turn_id}")]
+    UnknownNarrationTurn { turn_id: TurnId },
+    /// An item targeted a turn absent from the input.
     #[error("item {item_id} references unknown turn {turn_id}")]
     UnknownTurn { item_id: SceneId, turn_id: TurnId },
+    /// A steering placement targeted no input item.
     #[error("steering anchor {anchor} is unknown")]
     UnknownSteeringAnchor { anchor: ItemId },
+    /// A steering placement targeted an item that is not a user message.
     #[error("steering anchor {anchor} is not a user message")]
     NonUserSteeringAnchor { anchor: ItemId },
+    /// A validated anchor unexpectedly had no output placement.
+    #[error("steering anchor {anchor} was not placed")]
+    SteeringAnchorNotPlaced { anchor: ItemId },
+    /// The scene contained too many turns.
+    #[error("scene has {count} turns; the maximum is {maximum} (count)")]
+    TooManyTurns { count: usize, maximum: usize },
+    /// The scene contained too many items.
     #[error("scene has {count} items; the maximum is {maximum} (count)")]
     TooManyItems { count: usize, maximum: usize },
+    /// The scene contained too many narration entries.
+    #[error("scene has {count} narrations; the maximum is {maximum} (count)")]
+    TooManyNarrations { count: usize, maximum: usize },
+    /// The scene contained too many steering placements.
+    #[error("scene has {count} steering placements; the maximum is {maximum} (count)")]
+    TooManySteeringPlacements { count: usize, maximum: usize },
+    /// One contiguous work group exceeded its item ceiling.
     #[error("work group has {count} items; the maximum is {maximum} (count)")]
     TooManyWorkItems { count: usize, maximum: usize },
+    /// One plan exceeded its entry ceiling.
+    #[error("plan has {count} entries; the maximum is {maximum} (count)")]
+    TooManyPlanEntries { count: usize, maximum: usize },
+    /// One merged change card exceeded its file ceiling.
     #[error("change-set card has {count} files; the maximum is {maximum} (count)")]
     TooManyChangedFiles { count: usize, maximum: usize },
+    /// The supplied plan/prompt/title/general text was too long.
     #[error("text is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
     TextTooLong { length: usize, maximum: usize },
+    /// A complete user/assistant body exceeded the domain body ceiling.
+    #[error("message body is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
+    MessageBodyTooLong { length: usize, maximum: usize },
+    /// A native fact exceeded its conservative display ceiling.
     #[error("native fact text is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
     NativeFactTooLong { length: usize, maximum: usize },
+    /// A display path was empty.
+    #[error("display path must not be empty")]
+    EmptyDisplayPath,
+    /// A display path exceeded its conservative ceiling.
     #[error("display path is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
     DisplayPathTooLong { length: usize, maximum: usize },
+    /// A steering label was empty.
+    #[error("steering label must not be empty")]
+    EmptySteeringLabel,
+    /// A steering label exceeded its conservative ceiling.
     #[error("steering label is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
     SteeringLabelTooLong { length: usize, maximum: usize },
-    #[error("internal error: {0}")]
-    Internal(String),
+    /// A compaction card was paired with a generic active-work narration.
+    #[error("compaction card cannot coexist with {narration:?} narration")]
+    CompactionNarrationConflict { narration: TurnNarration },
 }

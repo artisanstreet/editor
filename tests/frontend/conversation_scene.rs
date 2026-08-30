@@ -5,12 +5,15 @@
 #[path = "../../modules/frontend/src/conversation_scene.rs"]
 mod conversation_scene;
 
-use artisan_domain::{ConversationLifecycle, ItemId, TurnId};
+use artisan_domain::{ConversationLifecycle, ItemId, MESSAGE_BODY_MAX_BYTES, MessageBody, TurnId};
 use conversation_scene::{
-    AssistantPhase, FileChangeStatus, SceneBuildError, SceneDisclosure, SceneFileChange, SceneId,
-    SceneItem, SceneItemKind, SceneTurn, SteeringPlacement, TurnBlock, TurnNarration,
-    TurnNarrationEntry, WorkItem, SCENE_MAX_CHANGED_FILES_PER_CARD, SCENE_MAX_DISPLAY_PATH_BYTES,
-    SCENE_MAX_ITEMS, SCENE_MAX_NATIVE_FACT_BYTES, SCENE_MAX_WORK_GROUP_ITEMS, WorkGroupLabel,
+    AssistantPhase, FileChangeStatus, SCENE_MAX_CHANGED_FILES_PER_CARD,
+    SCENE_MAX_DISPLAY_PATH_BYTES, SCENE_MAX_ITEMS, SCENE_MAX_MESSAGE_BODY_BYTES,
+    SCENE_MAX_NARRATIONS, SCENE_MAX_NATIVE_FACT_BYTES, SCENE_MAX_PLAN_ENTRIES,
+    SCENE_MAX_STEERING_PLACEMENTS, SCENE_MAX_TURNS, SCENE_MAX_WORK_GROUP_ITEMS, SceneBuildError,
+    SceneDisclosure, SceneFileChange, SceneId, SceneItem, SceneItemKind, SceneTurn,
+    SteeringPlacement, TurnBlock, TurnNarration, TurnNarrationEntry, WorkGroupBlock,
+    WorkGroupLabel, WorkItem,
 };
 
 fn scene_id(value: &str) -> SceneId {
@@ -31,7 +34,7 @@ fn scene_turn(id: &str, ordinal: u64, lifecycle: ConversationLifecycle) -> Scene
 
 fn user_item(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneItem {
     SceneItem::new(
-        scene_id(id),
+        item_id(id),
         turn_id(turn),
         ordinal,
         SceneItemKind::UserMessage {
@@ -39,6 +42,7 @@ fn user_item(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneItem {
         },
         None,
     )
+    .expect("user item valid")
 }
 
 fn assistant_item(
@@ -49,7 +53,7 @@ fn assistant_item(
     phase: AssistantPhase,
 ) -> SceneItem {
     SceneItem::new(
-        scene_id(id),
+        item_id(id),
         turn_id(turn),
         ordinal,
         SceneItemKind::AssistantMessage {
@@ -58,6 +62,7 @@ fn assistant_item(
         },
         None,
     )
+    .expect("assistant item valid")
 }
 
 fn reasoning_item(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneItem {
@@ -70,6 +75,7 @@ fn reasoning_item(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneItem {
         },
         None,
     )
+    .expect("reasoning item valid")
 }
 
 fn activity_item(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneItem {
@@ -82,6 +88,7 @@ fn activity_item(id: &str, turn: &str, ordinal: u64, body: &str) -> SceneItem {
         },
         None,
     )
+    .expect("activity item valid")
 }
 
 fn work_session_item(id: &str, turn: &str, ordinal: u64, title: &str) -> SceneItem {
@@ -94,6 +101,7 @@ fn work_session_item(id: &str, turn: &str, ordinal: u64, title: &str) -> SceneIt
         },
         None,
     )
+    .expect("work session item valid")
 }
 
 fn compaction_item(id: &str, turn: &str, ordinal: u64, summary: &str) -> SceneItem {
@@ -106,14 +114,10 @@ fn compaction_item(id: &str, turn: &str, ordinal: u64, summary: &str) -> SceneIt
         },
         None,
     )
+    .expect("compaction item valid")
 }
 
-fn change_set_item(
-    id: &str,
-    turn: &str,
-    ordinal: u64,
-    files: Vec<SceneFileChange>,
-) -> SceneItem {
+fn change_set_item(id: &str, turn: &str, ordinal: u64, files: Vec<SceneFileChange>) -> SceneItem {
     SceneItem::new(
         scene_id(id),
         turn_id(turn),
@@ -121,6 +125,7 @@ fn change_set_item(
         SceneItemKind::ChangeSet { files },
         None,
     )
+    .expect("change-set item valid")
 }
 
 fn file_change_item(id: &str, turn: &str, ordinal: u64, path: &str) -> SceneItem {
@@ -133,6 +138,7 @@ fn file_change_item(id: &str, turn: &str, ordinal: u64, path: &str) -> SceneItem
         },
         None,
     )
+    .expect("file-change item valid")
 }
 
 fn plan_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
@@ -146,6 +152,7 @@ fn plan_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
         },
         None,
     )
+    .expect("plan item valid")
 }
 
 fn approval_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
@@ -158,6 +165,7 @@ fn approval_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
         },
         None,
     )
+    .expect("approval item valid")
 }
 
 fn question_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
@@ -170,6 +178,7 @@ fn question_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
         },
         None,
     )
+    .expect("question item valid")
 }
 
 fn error_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
@@ -182,6 +191,7 @@ fn error_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
         },
         None,
     )
+    .expect("error item valid")
 }
 
 fn native_fact_item(id: &str, turn: &str, ordinal: u64, text: &str) -> SceneItem {
@@ -189,9 +199,12 @@ fn native_fact_item(id: &str, turn: &str, ordinal: u64, text: &str) -> SceneItem
         scene_id(id),
         turn_id(turn),
         ordinal,
-        SceneItemKind::NativeFact { text: text.to_owned() },
+        SceneItemKind::NativeFact {
+            text: text.to_owned(),
+        },
         None,
     )
+    .expect("native fact item valid")
 }
 
 fn narration(turn: &str, narration: TurnNarration) -> TurnNarrationEntry {
@@ -199,15 +212,14 @@ fn narration(turn: &str, narration: TurnNarration) -> TurnNarrationEntry {
 }
 
 fn steering(id: &str, anchor: &str, label: &str) -> SteeringPlacement {
-    SteeringPlacement::new(scene_id(id), item_id(anchor), label.to_owned())
-        .expect("steering valid")
+    SteeringPlacement::new(scene_id(id), item_id(anchor), label.to_owned()).expect("steering valid")
 }
 
 // ---- 1. empty and message-only scenes preserve canonical turn/item order ----
 
 #[test]
 fn empty_conversation_is_representable_without_dummy_messages() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let scene = ConversationScene::build(Vec::new(), Vec::new(), Vec::new(), Vec::new())
         .expect("empty scene builds");
@@ -217,20 +229,25 @@ fn empty_conversation_is_representable_without_dummy_messages() {
 
 #[test]
 fn partially_loaded_turn_without_items_still_has_status_and_footer() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
-    let scene = ConversationScene::build(turns, Vec::new(), vec![narration("turn_a", TurnNarration::Quiet)], Vec::new())
-        .expect("partial turn builds");
+    let scene = ConversationScene::build(
+        turns,
+        Vec::new(),
+        vec![narration("turn_a", TurnNarration::Quiet)],
+        Vec::new(),
+    )
+    .expect("partial turn builds");
     let ts = &scene.turn_scenes()[0];
     assert_eq!(ts.blocks.len(), 2);
-    assert!(matches!(ts.blocks[0], TurnBlock::TurnStatus(_)));
-    assert!(matches!(ts.blocks[1], TurnBlock::TurnFooter(_)));
+    assert!(matches!(&ts.blocks[0], TurnBlock::TurnStatus(_)));
+    assert!(matches!(&ts.blocks[1], TurnBlock::TurnFooter(_)));
 }
 
 #[test]
 fn message_only_scenes_preserve_canonical_turn_and_item_order() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![
         scene_turn("turn_b", 1, ConversationLifecycle::Pending),
@@ -246,15 +263,52 @@ fn message_only_scenes_preserve_canonical_turn_and_item_order() {
     assert_eq!(scene.turn_scenes()[1].turn_id.as_str(), "turn_b");
     let blocks = &scene.turn_scenes()[0].blocks;
     // first block is user message, second is assistant message
-    assert!(matches!(blocks[0], TurnBlock::UserMessage(_)));
-    assert!(matches!(blocks[1], TurnBlock::AssistantMessage(_)));
+    assert!(matches!(&blocks[0], TurnBlock::UserMessage(_)));
+    assert!(matches!(&blocks[1], TurnBlock::AssistantMessage(_)));
+}
+
+#[test]
+fn message_bodies_use_the_domain_ceiling_without_truncation() {
+    use conversation_scene::ConversationScene;
+
+    assert_eq!(SCENE_MAX_MESSAGE_BODY_BYTES, MESSAGE_BODY_MAX_BYTES);
+    let max_body = "x".repeat(MESSAGE_BODY_MAX_BYTES);
+    assert!(MessageBody::parse(max_body.clone()).is_ok());
+
+    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
+    let items = vec![
+        user_item("user_a", "turn_a", 1, &max_body),
+        assistant_item("assistant_a", "turn_a", 2, &max_body, AssistantPhase::Final),
+    ];
+    let scene = ConversationScene::build(turns, items, Vec::new(), Vec::new())
+        .expect("maximum domain-sized messages build");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(matches!(
+        &blocks[0],
+        TurnBlock::UserMessage(message) if message.body.len() == MESSAGE_BODY_MAX_BYTES
+    ));
+    assert!(matches!(
+        &blocks[1],
+        TurnBlock::AssistantMessage(message) if message.body.len() == MESSAGE_BODY_MAX_BYTES
+    ));
+
+    let too_long = "x".repeat(MESSAGE_BODY_MAX_BYTES + 1);
+    let err = SceneItem::new(
+        item_id("too_long"),
+        turn_id("turn_a"),
+        3,
+        SceneItemKind::UserMessage { body: too_long },
+        None,
+    )
+    .expect_err("message body above the domain ceiling is refused");
+    assert!(matches!(err, SceneBuildError::MessageBodyTooLong { .. }));
 }
 
 // ---- 2. thinking/reasoning/activity/work items group without swallowing final reply ----
 
 #[test]
 fn reasoning_activity_work_session_coalesce_into_one_group_before_final_reply() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
     let items = vec![
@@ -266,21 +320,23 @@ fn reasoning_activity_work_session_coalesce_into_one_group_before_final_reply() 
     let scene = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
     // Expect: WorkGroup, AssistantMessage, TurnStatus, TurnFooter
-    assert!(matches!(blocks[0], TurnBlock::WorkGroup(_)));
+    assert!(matches!(&blocks[0], TurnBlock::WorkGroup(_)));
     if let TurnBlock::WorkGroup(group) = &blocks[0] {
         assert_eq!(group.items.len(), 3);
-        assert!(matches!(group.items[0], WorkItem::Reasoning { .. }));
-        assert!(matches!(group.items[1], WorkItem::Activity { .. }));
-        assert!(matches!(group.items[2], WorkItem::WorkSession { .. }));
+        assert!(matches!(&group.items[0], WorkItem::Reasoning { .. }));
+        assert!(matches!(&group.items[1], WorkItem::Activity { .. }));
+        assert!(matches!(&group.items[2], WorkItem::WorkSession { .. }));
     }
-    assert!(matches!(blocks[1], TurnBlock::AssistantMessage(_)));
+    assert!(matches!(&blocks[1], TurnBlock::AssistantMessage(_)));
     // final reply not swallowed
-    assert!(matches!(blocks[1], TurnBlock::AssistantMessage(ref b) if b.phase == AssistantPhase::Final));
+    assert!(
+        matches!(&blocks[1], TurnBlock::AssistantMessage(b) if b.phase == AssistantPhase::Final)
+    );
 }
 
 #[test]
 fn messages_break_work_groups() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
     let items = vec![
@@ -288,19 +344,39 @@ fn messages_break_work_groups() {
         user_item("u1", "turn_a", 2, "user breaks"),
         reasoning_item("r2", "turn_a", 3, "r2"),
     ];
-    let scene = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
+    let scene = ConversationScene::build(
+        turns,
+        items,
+        vec![narration("turn_a", TurnNarration::WorkedFor { millis: 9 })],
+        Vec::new(),
+    )
+    .expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
     // WorkGroup, UserMessage, WorkGroup, Status, Footer
-    assert!(matches!(blocks[0], TurnBlock::WorkGroup(_)));
-    assert!(matches!(blocks[1], TurnBlock::UserMessage(_)));
-    assert!(matches!(blocks[2], TurnBlock::WorkGroup(_)));
+    assert!(matches!(&blocks[0], TurnBlock::WorkGroup(_)));
+    assert!(matches!(&blocks[1], TurnBlock::UserMessage(_)));
+    assert!(matches!(&blocks[2], TurnBlock::WorkGroup(_)));
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|block| matches!(block, TurnBlock::WorkGroup(group) if group.label.is_some()))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        &blocks[2],
+        TurnBlock::WorkGroup(WorkGroupBlock {
+            label: Some(WorkGroupLabel::WorkedFor { millis: 9 }),
+            ..
+        })
+    ));
 }
 
 // ---- 3. active compaction has one exact card/narration and no generic duplicate ----
 
 #[test]
 fn active_compaction_has_one_card_and_compacting_narration_no_duplicate() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
     let items = vec![compaction_item("c1", "turn_a", 1, "compacting...")];
@@ -323,11 +399,32 @@ fn active_compaction_has_one_card_and_compacting_narration_no_duplicate() {
     ));
 }
 
+#[test]
+fn compaction_cannot_be_paired_with_generic_thinking_or_working_status() {
+    use conversation_scene::ConversationScene;
+
+    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
+    let items = vec![compaction_item("compact", "turn_a", 1, "summary")];
+    let err = ConversationScene::build(
+        turns,
+        items,
+        vec![narration("turn_a", TurnNarration::Thinking)],
+        Vec::new(),
+    )
+    .expect_err("generic active narration conflicts with compaction");
+    assert!(matches!(
+        err,
+        SceneBuildError::CompactionNarrationConflict {
+            narration: TurnNarration::Thinking
+        }
+    ));
+}
+
 // ---- 4. streaming reply suppresses only quiet status row ----
 
 #[test]
 fn streaming_reply_suppresses_quiet_status_row_only() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Streaming)];
     let items = vec![
@@ -339,7 +436,11 @@ fn streaming_reply_suppresses_quiet_status_row_only() {
     let blocks = &scene.turn_scenes()[0].blocks;
     // Still has work group and assistant message, but no status row
     assert!(blocks.iter().any(|b| matches!(b, TurnBlock::WorkGroup(_))));
-    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::AssistantMessage(_))));
+    assert!(
+        blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::AssistantMessage(_)))
+    );
     assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
     // footer still present
     assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnFooter(_))));
@@ -347,7 +448,7 @@ fn streaming_reply_suppresses_quiet_status_row_only() {
 
 #[test]
 fn streaming_reply_does_not_remove_message_or_work_group_when_not_suppressing() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Streaming)];
     let items = vec![
@@ -359,7 +460,11 @@ fn streaming_reply_does_not_remove_message_or_work_group_when_not_suppressing() 
     let scene = ConversationScene::build(turns, items, narrations, Vec::new()).expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
     assert!(blocks.iter().any(|b| matches!(b, TurnBlock::WorkGroup(_))));
-    assert!(blocks.iter().any(|b| matches!(b, TurnBlock::AssistantMessage(_))));
+    assert!(
+        blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::AssistantMessage(_)))
+    );
     assert!(blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
 }
 
@@ -367,7 +472,7 @@ fn streaming_reply_does_not_remove_message_or_work_group_when_not_suppressing() 
 
 #[test]
 fn change_cards_defer_while_active_and_appear_in_pinned_order_when_settled() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     // Active turn: change card deferred
     let turns_active = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
@@ -377,18 +482,18 @@ fn change_cards_defer_while_active_and_appear_in_pinned_order_when_settled() {
             "cs1",
             "turn_a",
             2,
-            vec![
-                SceneFileChange::new("a.txt", FileChangeStatus::Modified).unwrap(),
-            ],
+            vec![SceneFileChange::new("a.txt", FileChangeStatus::Modified).unwrap()],
         ),
     ];
-    let scene_active =
-        ConversationScene::build(turns_active, items_active, Vec::new(), Vec::new()).expect("builds");
+    let scene_active = ConversationScene::build(turns_active, items_active, Vec::new(), Vec::new())
+        .expect("builds");
     assert_eq!(scene_active.deferred_change_sets().len(), 1);
-    assert!(!scene_active.turn_scenes()[0]
-        .blocks
-        .iter()
-        .any(|b| matches!(b, TurnBlock::ChangeSet(_))));
+    assert!(
+        !scene_active.turn_scenes()[0]
+            .blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::ChangeSet(_)))
+    );
 
     // Settled turn: change card appears in terminal order assistant -> change -> status -> footer
     let turns_settled = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
@@ -398,12 +503,13 @@ fn change_cards_defer_while_active_and_appear_in_pinned_order_when_settled() {
             "cs1",
             "turn_a",
             2,
-            vec![
-                SceneFileChange::new("a.txt", FileChangeStatus::Modified).unwrap(),
-            ],
+            vec![SceneFileChange::new("a.txt", FileChangeStatus::Modified).unwrap()],
         ),
     ];
-    let narrations = vec![narration("turn_a", TurnNarration::WorkedFor { millis: 100 })];
+    let narrations = vec![narration(
+        "turn_a",
+        TurnNarration::WorkedFor { millis: 100 },
+    )];
     let scene_settled =
         ConversationScene::build(turns_settled, items_settled, narrations, Vec::new())
             .expect("builds");
@@ -430,11 +536,77 @@ fn change_cards_defer_while_active_and_appear_in_pinned_order_when_settled() {
     assert!(idx_status < idx_footer);
 }
 
+#[test]
+fn changed_files_break_work_groups_and_interrupted_turns_still_defer_them() {
+    use conversation_scene::ConversationScene;
+
+    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
+    let items = vec![
+        reasoning_item("before", "turn_a", 1, "before"),
+        file_change_item("file", "turn_a", 2, "changed.rs"),
+        reasoning_item("after", "turn_a", 3, "after"),
+    ];
+    let scene = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(matches!(&blocks[0], TurnBlock::WorkGroup(_)));
+    assert!(matches!(&blocks[1], TurnBlock::WorkGroup(_)));
+    assert_eq!(scene.deferred_change_sets().len(), 1);
+    assert!(
+        !blocks
+            .iter()
+            .any(|block| matches!(block, TurnBlock::ChangeSet(_)))
+    );
+
+    let interrupted = ConversationScene::build(
+        vec![scene_turn("turn_i", 0, ConversationLifecycle::Interrupted)],
+        vec![file_change_item("file", "turn_i", 1, "changed.rs")],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("interrupted scene builds");
+    assert_eq!(interrupted.deferred_change_sets().len(), 1);
+    assert!(
+        !interrupted.turn_scenes()[0]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, TurnBlock::ChangeSet(_)))
+    );
+}
+
+#[test]
+fn terminal_change_card_follows_interactive_cards_before_status_and_footer() {
+    use conversation_scene::ConversationScene;
+
+    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
+    let items = vec![
+        assistant_item("reply", "turn_a", 1, "done", AssistantPhase::Final),
+        approval_item("approval", "turn_a", 2),
+        file_change_item("file", "turn_a", 3, "changed.rs"),
+    ];
+    let scene = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    let kinds: Vec<&str> = blocks
+        .iter()
+        .map(|block| match block {
+            TurnBlock::AssistantMessage(_) => "assistant",
+            TurnBlock::Approval(_) => "approval",
+            TurnBlock::ChangeSet(_) => "change",
+            TurnBlock::TurnStatus(_) => "status",
+            TurnBlock::TurnFooter(_) => "footer",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["assistant", "approval", "change", "status", "footer"]
+    );
+}
+
 // ---- 6. completed reasoning-only work renders Thought for, ordinary work renders Worked for, never both ----
 
 #[test]
 fn reasoning_only_work_renders_thought_for_ordinary_renders_worked_for_never_both() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     // reasoning-only
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
@@ -442,7 +614,10 @@ fn reasoning_only_work_renders_thought_for_ordinary_renders_worked_for_never_bot
         reasoning_item("r1", "turn_a", 1, "r1"),
         reasoning_item("r2", "turn_a", 2, "r2"),
     ];
-    let narrations = vec![narration("turn_a", TurnNarration::ThoughtFor { millis: 123 })];
+    let narrations = vec![narration(
+        "turn_a",
+        TurnNarration::ThoughtFor { millis: 123 },
+    )];
     let scene = ConversationScene::build(turns, items, narrations, Vec::new()).expect("builds");
     let block = scene.turn_scenes()[0]
         .blocks
@@ -450,8 +625,10 @@ fn reasoning_only_work_renders_thought_for_ordinary_renders_worked_for_never_bot
         .find(|b| matches!(b, TurnBlock::WorkGroup(_)))
         .expect("work group");
     if let TurnBlock::WorkGroup(g) = block {
-        assert!(matches!(g.label, Some(l) if matches!(l, artisan_frontend::conversation_scene::WorkGroupLabel::ThoughtFor { millis: 123 })));
-        assert!(!matches!(g.label, Some(artisan_frontend::conversation_scene::WorkGroupLabel::WorkedFor { .. })));
+        assert!(
+            matches!(g.label, Some(l) if matches!(l, WorkGroupLabel::ThoughtFor { millis: 123 }))
+        );
+        assert!(!matches!(g.label, Some(WorkGroupLabel::WorkedFor { .. })));
     }
 
     // ordinary work (activity + reasoning mixed)
@@ -460,7 +637,10 @@ fn reasoning_only_work_renders_thought_for_ordinary_renders_worked_for_never_bot
         reasoning_item("r1", "turn_b", 1, "r1"),
         activity_item("a1", "turn_b", 2, "tool"),
     ];
-    let narrations2 = vec![narration("turn_b", TurnNarration::WorkedFor { millis: 456 })];
+    let narrations2 = vec![narration(
+        "turn_b",
+        TurnNarration::WorkedFor { millis: 456 },
+    )];
     let scene2 = ConversationScene::build(turns2, items2, narrations2, Vec::new()).expect("builds");
     let block2 = scene2.turn_scenes()[0]
         .blocks
@@ -468,7 +648,9 @@ fn reasoning_only_work_renders_thought_for_ordinary_renders_worked_for_never_bot
         .find(|b| matches!(b, TurnBlock::WorkGroup(_)))
         .expect("work group");
     if let TurnBlock::WorkGroup(g) = block2 {
-        assert!(matches!(g.label, Some(l) if matches!(l, artisan_frontend::conversation_scene::WorkGroupLabel::WorkedFor { millis: 456 })));
+        assert!(
+            matches!(g.label, Some(l) if matches!(l, WorkGroupLabel::WorkedFor { millis: 456 }))
+        );
     }
 
     // never both in same group – enforced by enum single variant
@@ -479,7 +661,7 @@ fn reasoning_only_work_renders_thought_for_ordinary_renders_worked_for_never_bot
 
 #[test]
 fn two_steering_labels_remain_immediately_after_exact_anchors() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let items = vec![
@@ -517,18 +699,19 @@ fn two_steering_labels_remain_immediately_after_exact_anchors() {
 
 #[test]
 fn unknown_steering_anchor_is_refused() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let items = vec![user_item("user_a", "turn_a", 1, "hello")];
     let steerings = vec![steering("steer_x", "missing_id", "label")];
-    let err = ConversationScene::build(turns, items, Vec::new(), steerings).expect_err("must refuse");
+    let err =
+        ConversationScene::build(turns, items, Vec::new(), steerings).expect_err("must refuse");
     assert!(matches!(err, SceneBuildError::UnknownSteeringAnchor { .. }));
 }
 
 #[test]
 fn non_user_steering_anchor_is_refused() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let items = vec![assistant_item(
@@ -540,7 +723,8 @@ fn non_user_steering_anchor_is_refused() {
     )];
     // Anchor is assistant, not user
     let steerings = vec![steering("steer_x", "assist_a", "label")];
-    let err = ConversationScene::build(turns, items, Vec::new(), steerings).expect_err("must refuse");
+    let err =
+        ConversationScene::build(turns, items, Vec::new(), steerings).expect_err("must refuse");
     assert!(matches!(err, SceneBuildError::NonUserSteeringAnchor { .. }));
 }
 
@@ -548,15 +732,19 @@ fn non_user_steering_anchor_is_refused() {
 
 #[test]
 fn disclosure_is_attached_to_correct_group_and_card() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
     let mut r = reasoning_item("r1", "turn_a", 1, "thought");
     r.disclosure = Some(SceneDisclosure::Open);
     let mut plan = plan_item("plan1", "turn_a", 2);
     plan.disclosure = Some(SceneDisclosure::Closed);
-    let narrations = vec![narration("turn_a", TurnNarration::ThoughtFor { millis: 10 })];
-    let scene = ConversationScene::build(turns, vec![r, plan], narrations, Vec::new()).expect("builds");
+    let narrations = vec![narration(
+        "turn_a",
+        TurnNarration::ThoughtFor { millis: 10 },
+    )];
+    let scene =
+        ConversationScene::build(turns, vec![r, plan], narrations, Vec::new()).expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
     let work = blocks
         .iter()
@@ -565,7 +753,14 @@ fn disclosure_is_attached_to_correct_group_and_card() {
     if let TurnBlock::WorkGroup(g) = work {
         // group disclosure is from first work item or group-level
         // our implementation copies work item disclosure into items; group disclosure taken from first
-        assert_eq!(g.items[0], WorkItem::Reasoning { id: scene_id("r1"), body: "thought".to_owned(), disclosure: Some(SceneDisclosure::Open) });
+        assert_eq!(
+            g.items[0],
+            WorkItem::Reasoning {
+                id: scene_id("r1"),
+                body: "thought".to_owned(),
+                disclosure: Some(SceneDisclosure::Open)
+            }
+        );
     }
     let plan_block = blocks
         .iter()
@@ -580,55 +775,74 @@ fn disclosure_is_attached_to_correct_group_and_card() {
 
 #[test]
 fn duplicate_turn_id_is_typed_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![
         scene_turn("turn_a", 0, ConversationLifecycle::Pending),
         scene_turn("turn_a", 1, ConversationLifecycle::Pending),
     ];
-    let err = ConversationScene::build(turns, Vec::new(), Vec::new(), Vec::new()).expect_err("duplicate turn id");
+    let err = ConversationScene::build(turns, Vec::new(), Vec::new(), Vec::new())
+        .expect_err("duplicate turn id");
     assert!(matches!(err, SceneBuildError::DuplicateTurnId { .. }));
 }
 
 #[test]
 fn duplicate_item_id_is_typed_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let items = vec![
         user_item("dup", "turn_a", 1, "a"),
         user_item("dup", "turn_a", 2, "b"),
     ];
-    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("duplicate item id");
+    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new())
+        .expect_err("duplicate item id");
     assert!(matches!(err, SceneBuildError::DuplicateItemId { .. }));
 }
 
 #[test]
+fn duplicate_steering_id_is_typed_error() {
+    use conversation_scene::ConversationScene;
+
+    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
+    let items = vec![user_item("user_a", "turn_a", 1, "hello")];
+    let steerings = vec![
+        steering("duplicate", "user_a", "one"),
+        steering("duplicate", "user_a", "two"),
+    ];
+    let err = ConversationScene::build(turns, items, Vec::new(), steerings)
+        .expect_err("duplicate steering id");
+    assert!(matches!(err, SceneBuildError::DuplicateSteeringId { .. }));
+}
+
+#[test]
 fn duplicate_ordinal_is_typed_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let items = vec![
         user_item("a", "turn_a", 1, "a"),
         user_item("b", "turn_a", 1, "b"),
     ];
-    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("duplicate ordinal");
+    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new())
+        .expect_err("duplicate ordinal");
     assert!(matches!(err, SceneBuildError::DuplicateOrdinal { .. }));
 }
 
 #[test]
 fn unknown_turn_is_typed_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let items = vec![user_item("u1", "turn_missing", 1, "hi")];
-    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("unknown turn");
+    let err =
+        ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("unknown turn");
     assert!(matches!(err, SceneBuildError::UnknownTurn { .. }));
 }
 
 #[test]
 fn scene_items_overflow_is_typed_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let items: Vec<SceneItem> = (0..(SCENE_MAX_ITEMS + 1))
@@ -640,54 +854,182 @@ fn scene_items_overflow_is_typed_error() {
 
 #[test]
 fn work_group_overflow_is_typed_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
     let items: Vec<SceneItem> = (0..(SCENE_MAX_WORK_GROUP_ITEMS + 1))
         .map(|i| reasoning_item(&format!("r{i}"), "turn_a", i as u64 + 1, "r"))
         .collect();
-    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("work overflow");
+    let err =
+        ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("work overflow");
     assert!(matches!(err, SceneBuildError::TooManyWorkItems { .. }));
 }
 
 #[test]
 fn changed_files_overflow_is_typed_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
     let files: Vec<SceneFileChange> = (0..(SCENE_MAX_CHANGED_FILES_PER_CARD + 1))
         .map(|i| SceneFileChange::new(format!("file_{i}.txt"), FileChangeStatus::Modified).unwrap())
         .collect();
     let items = vec![change_set_item("cs", "turn_a", 1, files)];
-    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("files overflow");
+    let err =
+        ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("files overflow");
     assert!(matches!(err, SceneBuildError::TooManyChangedFiles { .. }));
 }
 
 #[test]
 fn native_fact_text_overflow_is_typed_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
-
-    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let long = "x".repeat(SCENE_MAX_NATIVE_FACT_BYTES + 1);
-    let items = vec![native_fact_item("n1", "turn_a", 1, &long)];
-    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("native fact overflow");
-    assert!(matches!(err, SceneBuildError::TextTooLong { .. } | SceneBuildError::NativeFactTooLong { .. }));
+    let err = SceneItem::new(
+        scene_id("n1"),
+        turn_id("turn_a"),
+        1,
+        SceneItemKind::NativeFact { text: long },
+        None,
+    )
+    .expect_err("native fact overflow");
+    assert!(matches!(err, SceneBuildError::NativeFactTooLong { .. }));
 }
 
 #[test]
 fn display_path_overflow_is_typed_error() {
     let long_path = "a".repeat(SCENE_MAX_DISPLAY_PATH_BYTES + 1);
-    let err = SceneFileChange::new(long_path, FileChangeStatus::Modified).expect_err("path overflow");
+    let err =
+        SceneFileChange::new(long_path, FileChangeStatus::Modified).expect_err("path overflow");
     assert!(matches!(err, SceneBuildError::DisplayPathTooLong { .. }));
 }
 
 #[test]
+fn public_payload_constructors_refuse_each_bounded_collection_and_label() {
+    let too_many_entries = (0..(SCENE_MAX_PLAN_ENTRIES + 1))
+        .map(|index| index.to_string())
+        .collect();
+    let err = SceneItem::new(
+        scene_id("plan"),
+        turn_id("turn_a"),
+        1,
+        SceneItemKind::Plan {
+            title: "plan".to_owned(),
+            entries: too_many_entries,
+        },
+        None,
+    )
+    .expect_err("plan entry bound");
+    assert!(matches!(err, SceneBuildError::TooManyPlanEntries { .. }));
+
+    let too_long_title = "x".repeat(conversation_scene::SCENE_MAX_TEXT_BYTES + 1);
+    let err = SceneItem::new(
+        scene_id("work"),
+        turn_id("turn_a"),
+        1,
+        SceneItemKind::WorkSession {
+            title: too_long_title,
+        },
+        None,
+    )
+    .expect_err("general text bound");
+    assert!(matches!(err, SceneBuildError::TextTooLong { .. }));
+
+    let err = SteeringPlacement::new(
+        scene_id("steer"),
+        item_id("user"),
+        "x".repeat(conversation_scene::SCENE_MAX_STEERING_LABEL_BYTES + 1),
+    )
+    .expect_err("steering label bound");
+    assert!(matches!(err, SceneBuildError::SteeringLabelTooLong { .. }));
+
+    let err =
+        SceneFileChange::new("", FileChangeStatus::Modified).expect_err("empty display path bound");
+    assert!(matches!(err, SceneBuildError::EmptyDisplayPath));
+}
+
+#[test]
+fn build_rejects_unknown_and_duplicate_narrations_atomically() {
+    use conversation_scene::ConversationScene;
+
+    let unknown = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)],
+        Vec::new(),
+        vec![narration("turn_missing", TurnNarration::Quiet)],
+        Vec::new(),
+    )
+    .expect_err("unknown narration turn");
+    assert!(matches!(
+        unknown,
+        SceneBuildError::UnknownNarrationTurn { .. }
+    ));
+
+    let duplicate = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)],
+        Vec::new(),
+        vec![
+            narration("turn_a", TurnNarration::Quiet),
+            narration("turn_a", TurnNarration::Working),
+        ],
+        Vec::new(),
+    )
+    .expect_err("duplicate narration turn");
+    assert!(matches!(
+        duplicate,
+        SceneBuildError::DuplicateNarration { .. }
+    ));
+}
+
+#[test]
+fn scene_rejects_collection_bounds_before_processing_payloads() {
+    use conversation_scene::ConversationScene;
+
+    let too_many_turns = (0..(SCENE_MAX_TURNS + 1))
+        .map(|index| {
+            scene_turn(
+                &format!("turn_{index}"),
+                index as u64,
+                ConversationLifecycle::Pending,
+            )
+        })
+        .collect();
+    let err = ConversationScene::build(too_many_turns, Vec::new(), Vec::new(), Vec::new())
+        .expect_err("turn bound");
+    assert!(matches!(err, SceneBuildError::TooManyTurns { .. }));
+
+    let too_many_narrations = (0..(SCENE_MAX_NARRATIONS + 1))
+        .map(|_| narration("turn_a", TurnNarration::Quiet))
+        .collect();
+    let err = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)],
+        Vec::new(),
+        too_many_narrations,
+        Vec::new(),
+    )
+    .expect_err("narration bound");
+    assert!(matches!(err, SceneBuildError::TooManyNarrations { .. }));
+
+    let too_many_steerings = (0..(SCENE_MAX_STEERING_PLACEMENTS + 1))
+        .map(|index| steering(&format!("steer_{index}"), "user_a", "label"))
+        .collect();
+    let err = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)],
+        vec![user_item("user_a", "turn_a", 1, "hello")],
+        Vec::new(),
+        too_many_steerings,
+    )
+    .expect_err("steering bound");
+    assert!(matches!(
+        err,
+        SceneBuildError::TooManySteeringPlacements { .. }
+    ));
+}
+
+#[test]
 fn duplicate_ordinal_across_turn_and_item_is_error() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
     let items = vec![user_item("u1", "turn_a", 0, "hi")];
-    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("cross ordinal duplicate");
+    let err = ConversationScene::build(turns, items, Vec::new(), Vec::new())
+        .expect_err("cross ordinal duplicate");
     assert!(matches!(err, SceneBuildError::DuplicateOrdinal { .. }));
 }
 
@@ -695,7 +1037,7 @@ fn duplicate_ordinal_across_turn_and_item_is_error() {
 
 #[test]
 fn interrupted_failed_cancelled_and_interactive_error_cards_remain_ordered_distinct() {
-    use artisan_frontend::conversation_scene::ConversationScene;
+    use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Failed)];
     let items = vec![
@@ -710,7 +1052,8 @@ fn interrupted_failed_cancelled_and_interactive_error_cards_remain_ordered_disti
                 detail: "interrupted".to_owned(),
             },
             None,
-        ),
+        )
+        .expect("interruption item valid"),
         SceneItem::new(
             scene_id("m1"),
             turn_id("turn_a"),
@@ -720,7 +1063,8 @@ fn interrupted_failed_cancelled_and_interactive_error_cards_remain_ordered_disti
                 to_model: "m2".to_owned(),
             },
             None,
-        ),
+        )
+        .expect("model transition item valid"),
         native_fact_item("n1", "turn_a", 6, "fact"),
     ];
     let narrations = vec![narration("turn_a", TurnNarration::Failed)];
