@@ -41,6 +41,7 @@ rust_library(
         "src/conversation_steering_machine.rs",
         "src/conversation_turn_footer_policy.rs",
         "src/conversation_turn_navigator.rs",
+        "src/conversation_view_machine.rs",
         "src/dev_instance_policy.rs",
         "src/dropdown_highlight_settle.rs",
         "src/editor_diagnostic_mapping.rs",

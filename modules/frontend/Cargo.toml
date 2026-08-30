@@ -151,6 +151,10 @@ name = "conversation_turn_navigator"
 path = "../../tests/frontend/conversation_turn_navigator.rs"
 
 [[test]]
+name = "conversation_view_machine"
+path = "../../tests/frontend/conversation_view_machine.rs"
+
+[[test]]
 name = "dev_instance_policy"
 path = "../../tests/frontend/dev_instance_policy.rs"
 
