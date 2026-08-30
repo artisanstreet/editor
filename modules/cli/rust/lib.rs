@@ -2,6 +2,7 @@
 
 pub mod commands;
 pub mod credentials;
+pub(crate) mod engine_catalog;
 pub mod error;
 pub mod http;
 pub mod instance;

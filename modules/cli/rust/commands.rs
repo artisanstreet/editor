@@ -13,6 +13,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::{
     CliError, Result,
     credentials::{self, ForgeCredentialPaths},
+    engine_catalog::{
+        CERTIFIED_BINARY, CERTIFIED_ENGINE_ID, CERTIFIED_EXECUTABLE_SHA256_HEX,
+        NativeOpenCode2Authority, OpenCode2Inspection,
+    },
     error::io,
     http::{self, PairResponse},
     instance::{self, NativeInstanceConfig, NativeListenerConfig},
@@ -129,10 +133,24 @@ pub enum Commands {
         #[arg(long)]
         remove_data: bool,
     },
+    /// Inspect the managed native engine catalog.
+    Engine {
+        #[command(subcommand)]
+        command: EngineCommand,
+    },
     /// Inspect or change privacy-preserving observability preferences.
     Telemetry {
         #[command(subcommand)]
         command: TelemetryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EngineCommand {
+    /// List installed native engines and their verified generation metadata.
+    List {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -244,6 +262,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Autostart { disable } => autostart(disable),
         Commands::Update => delegate_installer(&layout, "update", false),
+        Commands::Engine { command } => engine_command(&layout, command),
         Commands::Telemetry { command } => telemetry_command(&layout, command),
     }
 }
@@ -290,6 +309,103 @@ fn telemetry_command(layout: &Layout, command: TelemetryCommand) -> Result<()> {
 
 fn require_installation(layout: &Layout) -> Result<InstallationManifest> {
     InstallationManifest::load(&layout.manifest)
+}
+
+fn engine_command(layout: &Layout, command: EngineCommand) -> Result<()> {
+    require_installation(layout)?;
+    let instance = load_native_instance(layout).map_err(|error| match error {
+        CliError::MissingInstance => CliError::MissingInstance,
+        _ => CliError::OpenCode2Authority {
+            reason: "instance_invalid",
+        },
+    })?;
+    match command {
+        EngineCommand::List { json } => list_engines(&instance, json),
+    }
+}
+
+fn list_engines(instance: &NativeInstanceConfig, json: bool) -> Result<()> {
+    let inspection = NativeOpenCode2Authority::new().inspect(instance);
+    match inspection {
+        Ok(OpenCode2Inspection::UnsupportedPlatform) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": "artisan-engine-list-v1",
+                        "engines": [{
+                            "engine_id": CERTIFIED_ENGINE_ID,
+                            "status": "unsupported_platform",
+                        }],
+                    })
+                );
+            } else {
+                println!("OpenCode2: unsupported platform");
+            }
+            Ok(())
+        }
+        Ok(OpenCode2Inspection::NotInstalled) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": "artisan-engine-list-v1",
+                        "engines": [{
+                            "engine_id": CERTIFIED_ENGINE_ID,
+                            "status": "not_installed",
+                        }],
+                    })
+                );
+            } else {
+                println!("OpenCode2: not installed");
+            }
+            Ok(())
+        }
+        Ok(OpenCode2Inspection::Ready(generation)) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": "artisan-engine-list-v1",
+                        "engines": [{
+                            "engine_id": CERTIFIED_ENGINE_ID,
+                            "status": "ready",
+                            "generation": generation.generation_id(),
+                            "version": generation.version(),
+                            "upstream_commit": generation.upstream_commit(),
+                            "binary": CERTIFIED_BINARY,
+                            "size_bytes": generation.executable_size_bytes(),
+                            "sha256": CERTIFIED_EXECUTABLE_SHA256_HEX,
+                        }],
+                    })
+                );
+            } else {
+                println!(
+                    "OpenCode2: ready ({}, generation {})",
+                    generation.version(),
+                    generation.generation_id()
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let reason = error.cli_reason();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "schema": "artisan-engine-list-v1",
+                        "engines": [{
+                            "engine_id": CERTIFIED_ENGINE_ID,
+                            "status": "invalid",
+                            "reason": reason,
+                        }],
+                    })
+                );
+            }
+            Err(CliError::OpenCode2Authority { reason })
+        }
+    }
 }
 
 #[derive(Debug)]

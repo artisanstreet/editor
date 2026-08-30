@@ -127,6 +127,8 @@ pub enum CliError {
     ForgeTerminated { termination: ForgeTermination },
     #[error("native Forge lifecycle control is unavailable until L1")]
     UnsupportedLifecycleControl,
+    #[error("OpenCode2 authority check failed ({reason})")]
+    OpenCode2Authority { reason: &'static str },
     #[error("Forge control request failed: {0}")]
     Control(String),
     #[error("unsupported operation: {0}")]
