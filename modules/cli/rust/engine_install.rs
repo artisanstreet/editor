@@ -1341,10 +1341,9 @@ mod tests {
 
     #[test]
     fn archive_reader_rejects_bad_checksum_truncation_and_missing_terminal_block() {
-        let mut archive = tar_gzip(&[("package/bin/opencode2.exe", b"a".as_slice(), b'0')]);
-        let position = archive.len() / 2;
-        archive[position] ^= 1;
-        let mut decoder = GzDecoder::new(Cursor::new(archive));
+        let mut decoded = tar_bytes(&[("package/bin/opencode2.exe", b"a".as_slice(), b'0')]);
+        decoded[0] ^= 1;
+        let mut decoder = GzDecoder::new(Cursor::new(gzip(&decoded)));
         let target_directory = tempfile::tempdir().unwrap();
         let target_path = target_directory.path().join("target");
         assert!(parse_tar(&mut decoder, "package/bin/opencode2.exe", &target_path, 1).is_err());
