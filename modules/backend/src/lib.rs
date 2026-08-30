@@ -1,6 +1,6 @@
 //! Forge application assembly boundary.
 
-use std::{process::ExitCode, sync::Arc};
+use std::{future::Future, process::ExitCode, sync::Arc};
 
 use artisan_transport::CancelHandle;
 
@@ -75,7 +75,7 @@ pub use directory_selection::{
 };
 pub use forge_runtime::{
     CredentialMaterialError, ForgeCleanupError, ForgeConfigError, ForgeLaunchConfig,
-    ForgeRuntimeError, ForgeServiceError, ReadinessError,
+    ForgePrimaryCleanupError, ForgeRuntimeError, ForgeServiceError, ReadinessError,
 };
 pub use listener::{
     AdmissionCause, ForgeListener, ListenerError, ListenerLimits, MetadataError,
@@ -144,9 +144,84 @@ async fn run_with_signal(
                     cancel.cancel();
                     cancellation_seen = true;
                 }
-                Err(error) => return Err(ForgeRuntimeError::Signal(error)),
+                Err(error) => {
+                    return finish_after_signal_failure(cancel.as_ref(), process.as_mut(), error)
+                        .await;
+                }
             },
             result = &mut process => return result,
         }
+    }
+}
+
+async fn finish_after_signal_failure<F>(
+    cancel: &CancelHandle,
+    process: F,
+    signal_error: std::io::Error,
+) -> Result<(), ForgeRuntimeError>
+where
+    F: Future<Output = Result<(), ForgeRuntimeError>>,
+{
+    // Signal registration/observation failed, but the already-owned process
+    // future must still run its full cancellation and cleanup path before the
+    // signal remains the primary exit-73 failure.
+    cancel.cancel();
+    match process.await {
+        Ok(()) => Err(ForgeRuntimeError::Signal(signal_error)),
+        Err(cleanup) => Err(ForgeRuntimeError::with_cleanup(
+            ForgeRuntimeError::Signal(signal_error),
+            vec![cleanup],
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    use super::*;
+
+    #[test]
+    fn signal_failure_awaits_process_and_retains_signal_as_primary() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("signal test runtime should build");
+        let cancel = Arc::new(CancelHandle::new());
+        let observed = Arc::new(AtomicBool::new(false));
+        let process_cancel = Arc::clone(&cancel);
+        let process_observed = Arc::clone(&observed);
+        let process = async move {
+            assert!(process_cancel.is_cancelled());
+            process_observed.store(true, Ordering::Relaxed);
+            Err(ForgeRuntimeError::ReadinessCleanup(
+                forge_runtime::ReadinessError::TargetReplaced {
+                    path: PathBuf::from("/absolute/ready.json"),
+                },
+            ))
+        };
+
+        let result = runtime.block_on(finish_after_signal_failure(
+            cancel.as_ref(),
+            process,
+            std::io::Error::other("signal registration failed"),
+        ));
+        let error = result.expect_err("signal failure should be returned");
+        assert!(observed.load(Ordering::Relaxed));
+        assert_eq!(error.exit_code(), forge_runtime::EXIT_CODE_SHUTDOWN);
+        let composite = error
+            .as_primary_with_cleanup()
+            .expect("signal must remain primary over process cleanup");
+        assert!(matches!(composite.primary(), ForgeRuntimeError::Signal(_)));
+        assert!(matches!(
+            composite.cleanup_failures(),
+            [ForgeRuntimeError::ReadinessCleanup(_)]
+        ));
     }
 }

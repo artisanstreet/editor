@@ -24,8 +24,16 @@ use artisan_backend::{
     forge_runtime::{self, ForgeConfigError, ForgeLaunchConfig, ForgeRuntimeError},
 };
 use artisan_database::SqliteConfig;
-use artisan_protocol::LOCAL_CAPABILITY_BYTES;
-use artisan_transport::{CancelHandle, PinnedIdentity};
+use artisan_domain::UnixMillis;
+use artisan_protocol::{
+    APPLICATION_PROTOCOL_VERSION, FrameId, Hello, HelloCredential, LOCAL_CAPABILITY_BYTES,
+    LocalCapability, ProtocolVersion, VersionOffer, WireEnvelope, WireEnvelopeBody,
+};
+use artisan_transport::{
+    CancelHandle, LOOPBACK_SERVER_NAME, PinnedIdentity, bind_loopback_client, client_config,
+    client_handshake,
+};
+use quinn::{Connection, Endpoint, VarInt};
 use rustls_pki_types::CertificateDer;
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,6 +43,8 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const STARTUP_WAIT: Duration = Duration::from_secs(5);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const FUTURE_WAIT: Duration = Duration::from_secs(10);
+
+const TEST_CAPABILITY: [u8; LOCAL_CAPABILITY_BYTES] = [0x5a; LOCAL_CAPABILITY_BYTES];
 
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -128,6 +138,60 @@ fn config(
         cancel,
     )
     .expect("test launch configuration should be explicit and valid")
+}
+
+fn client_endpoint(credentials: &Credentials) -> Endpoint {
+    let identity = PinnedIdentity::from_certificate(&credentials.certificate);
+    let client = client_config(credentials.certificate.clone(), identity)
+        .expect("test client configuration should be valid");
+    artisan_transport::bind_loopback_client(client).expect("test client should bind")
+}
+
+fn hello_envelope() -> WireEnvelope {
+    WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse("forge-test-hello").expect("test frame id should be valid"),
+        sent_at: UnixMillis::from_millis(1),
+        body: WireEnvelopeBody::Hello(Hello {
+            supported_versions: VersionOffer::new(vec![APPLICATION_PROTOCOL_VERSION])
+                .expect("test version offer should be valid"),
+            credential: HelloCredential::Initial(LocalCapability::from_bytes(TEST_CAPABILITY)),
+        }),
+    }
+}
+
+async fn authenticate_client(client: &Endpoint, address: SocketAddr) -> Connection {
+    let connecting = client
+        .connect(address, LOOPBACK_SERVER_NAME)
+        .expect("test client should begin connecting");
+    let connection = tokio::time::timeout(FUTURE_WAIT, connecting)
+        .await
+        .expect("test client connection should settle")
+        .expect("test client connection should establish");
+    let (mut send, mut receive) = connection
+        .open_bi()
+        .await
+        .expect("test control stream should open");
+    tokio::time::timeout(
+        FUTURE_WAIT,
+        client_handshake(&mut send, &mut receive, hello_envelope()),
+    )
+    .await
+    .expect("test handshake should settle")
+    .expect("test handshake should succeed");
+    drop(send);
+    drop(receive);
+    connection
+}
+
+async fn connect_without_auth(client: &Endpoint, address: SocketAddr) -> Connection {
+    let connecting = client
+        .connect(address, LOOPBACK_SERVER_NAME)
+        .expect("test client should begin connecting");
+    tokio::time::timeout(FUTURE_WAIT, connecting)
+        .await
+        .expect("test transport connection should settle")
+        .expect("test transport connection should establish")
 }
 
 fn append_path(arguments: &mut Vec<OsString>, option: &str, path: PathBuf) {
@@ -506,19 +570,7 @@ fn readiness_is_exact_and_shutdown_removes_only_this_receipt() {
         Arc::clone(&cancel),
     )));
     let ready_path = directory.path("forge.ready");
-    let (bytes, value) = match wait_for_readiness(&ready_path) {
-        Ok(readiness) => readiness,
-        Err(error) => {
-            cancel.cancel();
-            let worker_result = join_within(
-                worker
-                    .take()
-                    .expect("readiness worker should still be owned"),
-                SHUTDOWN_WAIT,
-            );
-            panic!("{error}; worker result: {worker_result:?}");
-        }
-    };
+    let (bytes, value) = wait_for_readiness_or_stop(&ready_path, &cancel, &mut worker);
 
     assert_eq!(value["schema"].as_str(), Some(forge_runtime::READY_SCHEMA));
     let endpoint: SocketAddr = value["endpoint"]
@@ -586,6 +638,163 @@ fn readiness_is_exact_and_shutdown_removes_only_this_receipt() {
 }
 
 #[test]
+fn accepted_service_failure_maps_to_72_and_keeps_listener_error() {
+    let directory = TemporaryDirectory::new("service-failure");
+    let credentials = credentials(&directory);
+    let cancel = Arc::new(CancelHandle::new());
+    let mut worker = Some(spawn_runtime(config(
+        &directory,
+        &credentials,
+        Arc::clone(&cancel),
+    )));
+    let (_, value) =
+        wait_for_readiness_or_stop(&directory.path("forge.ready"), &cancel, &mut worker);
+    let address = readiness_endpoint(&value);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime should build");
+    let client = {
+        let _entered = runtime.enter();
+        client_endpoint(&credentials)
+    };
+    let connection = runtime.block_on(authenticate_client(&client, address));
+    connection.close(VarInt::from_u32(2), b"test service failure");
+    let _ = runtime.block_on(tokio::time::timeout(FUTURE_WAIT, connection.closed()));
+
+    let error = join_within(
+        worker
+            .take()
+            .expect("service-failure worker should still be owned"),
+        SHUTDOWN_WAIT,
+    )
+    .expect_err("the accepted listener failure should end the process");
+    assert_eq!(error.exit_code(), forge_runtime::EXIT_CODE_SERVICE);
+    match &error {
+        ForgeRuntimeError::Service(listener_error) => {
+            assert!(listener_error.is_service_failure());
+            assert!(listener_error.service_cause().is_some());
+            assert!(listener_error.as_request_error().is_some());
+            assert!(listener_error.drain_error().is_none());
+        }
+        other => panic!("expected the complete accepted service error, got {other:?}"),
+    }
+}
+
+#[test]
+fn accepted_drain_only_failure_maps_to_73() {
+    let directory = TemporaryDirectory::new("drain-failure");
+    let credentials = credentials(&directory);
+    let cancel = Arc::new(CancelHandle::new());
+    let drain_limits = ListenerLimits {
+        drain: Duration::ZERO,
+        ..limits()
+    };
+    let launch = ForgeLaunchConfig::new(
+        directory.path("forge.sqlite3"),
+        directory.path("forge.custody"),
+        vec![credentials.certificate_path.clone()],
+        credentials.private_key_path.clone(),
+        credentials.capability_path.clone(),
+        directory.path("forge.ready"),
+        drain_limits,
+        NonZeroU32::new(1).expect("one admission is nonzero"),
+        NonZeroU32::new(1).expect("one request is nonzero"),
+        Arc::clone(&cancel),
+    )
+    .expect("zero drain is explicit configuration");
+    let mut worker = Some(spawn_runtime(launch));
+    let (_, value) =
+        wait_for_readiness_or_stop(&directory.path("forge.ready"), &cancel, &mut worker);
+    let address = readiness_endpoint(&value);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime should build");
+    let client = {
+        let _entered = runtime.enter();
+        client_endpoint(&credentials)
+    };
+    let connection = runtime.block_on(connect_without_auth(&client, address));
+    cancel.cancel();
+    let _ = runtime.block_on(tokio::time::timeout(FUTURE_WAIT, connection.closed()));
+
+    let error = join_within(
+        worker
+            .take()
+            .expect("drain-failure worker should still be owned"),
+        SHUTDOWN_WAIT,
+    )
+    .expect_err("the zero-limit listener drain should fail");
+    assert_eq!(error.exit_code(), forge_runtime::EXIT_CODE_SHUTDOWN);
+    match &error {
+        ForgeRuntimeError::ListenerDrain(listener_error) => {
+            assert!(!listener_error.is_service_failure());
+            assert!(listener_error.is_drain_failure());
+            assert!(listener_error.drain_error().is_some());
+            assert!(listener_error.service_cause().is_none());
+        }
+        other => panic!("expected the accepted drain-only error, got {other:?}"),
+    }
+}
+
+#[test]
+fn service_primary_survives_readiness_cleanup_failure_with_typed_cleanup() {
+    let directory = TemporaryDirectory::new("service-primary-cleanup");
+    let credentials = credentials(&directory);
+    let cancel = Arc::new(CancelHandle::new());
+    let mut worker = Some(spawn_runtime(config(
+        &directory,
+        &credentials,
+        Arc::clone(&cancel),
+    )));
+    let ready_path = directory.path("forge.ready");
+    let (_, value) = wait_for_readiness_or_stop(&ready_path, &cancel, &mut worker);
+    let address = readiness_endpoint(&value);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime should build");
+    let client = {
+        let _entered = runtime.enter();
+        client_endpoint(&credentials)
+    };
+    let connection = runtime.block_on(authenticate_client(&client, address));
+
+    fs::remove_file(&ready_path).expect("the owned readiness receipt should be removable");
+    fs::write(&ready_path, b"replacement readiness target")
+        .expect("the replacement readiness target should be written");
+    connection.close(VarInt::from_u32(2), b"test primary failure");
+    let _ = runtime.block_on(tokio::time::timeout(FUTURE_WAIT, connection.closed()));
+
+    let error = join_within(
+        worker
+            .take()
+            .expect("primary-cleanup worker should still be owned"),
+        SHUTDOWN_WAIT,
+    )
+    .expect_err("service failure should remain observable");
+    assert_eq!(error.exit_code(), forge_runtime::EXIT_CODE_SERVICE);
+    let composite = error
+        .as_primary_with_cleanup()
+        .expect("cleanup must be correlated with the service primary");
+    assert!(matches!(
+        composite.primary(),
+        ForgeRuntimeError::Service(listener_error) if listener_error.is_service_failure()
+    ));
+    assert!(
+        composite
+            .cleanup_failures()
+            .iter()
+            .any(|failure| matches!(failure, ForgeRuntimeError::ReadinessCleanup(_)))
+    );
+    assert_eq!(
+        composite.primary().exit_code(),
+        forge_runtime::EXIT_CODE_SERVICE
+    );
+}
+
+#[test]
 fn second_forge_cannot_start_until_first_releases_custody() {
     let directory = TemporaryDirectory::new("second-forge");
     let credentials = credentials(&directory);
@@ -595,19 +804,8 @@ fn second_forge_cannot_start_until_first_releases_custody() {
         &credentials,
         Arc::clone(&first_cancel),
     )));
-    let _ready = match wait_for_readiness(&directory.path("forge.ready")) {
-        Ok(readiness) => readiness,
-        Err(error) => {
-            first_cancel.cancel();
-            let worker_result = join_within(
-                first
-                    .take()
-                    .expect("first Forge worker should still be owned"),
-                SHUTDOWN_WAIT,
-            );
-            panic!("{error}; worker result: {worker_result:?}");
-        }
-    };
+    let _ready =
+        wait_for_readiness_or_stop(&directory.path("forge.ready"), &first_cancel, &mut first);
 
     let second_error = run_config(config(
         &directory,
@@ -686,6 +884,34 @@ fn wait_for_readiness(path: &Path) -> Result<(Vec<u8>, serde_json::Value), &'sta
         }
         thread::yield_now();
     }
+}
+
+fn wait_for_readiness_or_stop(
+    path: &Path,
+    cancel: &CancelHandle,
+    worker: &mut Option<JoinHandle<Result<(), ForgeRuntimeError>>>,
+) -> (Vec<u8>, serde_json::Value) {
+    match wait_for_readiness(path) {
+        Ok(readiness) => readiness,
+        Err(error) => {
+            cancel.cancel();
+            let worker_result = join_within(
+                worker
+                    .take()
+                    .expect("readiness worker should still be owned"),
+                SHUTDOWN_WAIT,
+            );
+            panic!("{error}; worker result: {worker_result:?}");
+        }
+    }
+}
+
+fn readiness_endpoint(value: &serde_json::Value) -> SocketAddr {
+    value["endpoint"]
+        .as_str()
+        .expect("readiness endpoint should be text")
+        .parse()
+        .expect("readiness endpoint should be a socket address")
 }
 
 fn join_within<T>(handle: JoinHandle<T>, timeout: Duration) -> T {

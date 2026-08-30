@@ -26,9 +26,7 @@ use std::{
 
 use artisan_database::SqliteConfig;
 use artisan_protocol::{LocalCapability, LocalCapabilityError};
-use artisan_transport::{
-    CancelHandle, DeadlineError, PinnedIdentity, TransportError, server_config,
-};
+use artisan_transport::{CancelHandle, PinnedIdentity, TransportError, server_config};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -36,7 +34,7 @@ use zeroize::Zeroize;
 use crate::{
     ForgeApp, ForgeConfig, ForgeListener, ForgeProcessCustody, ForgeProcessCustodyError,
     ForgeShutdownError, ForgeStartupError, ListenerError, ListenerLimits, RequestHandler,
-    RequestTermination, SystemCommandOrigin, connection::RequestStageError,
+    SystemCommandOrigin, listener::ServeUntilCancelError,
 };
 
 /// Stable process exit code for invalid configuration or credential material.
@@ -454,17 +452,12 @@ pub enum CredentialMaterialError {
     EmptyCertificateChain,
 }
 
-/// Typed service-loop failure after startup.
-#[derive(Debug, Error)]
-pub enum ForgeServiceError {
-    /// The listener's consuming service boundary failed.
-    #[error("Forge listener service failed")]
-    Listener(#[source] ListenerError),
-
-    /// A request-stage failure ended a reusable authenticated connection.
-    #[error("Forge request service failed")]
-    Request(#[source] DeadlineError<RequestStageError>),
-}
+/// The accepted listener's complete consuming-loop failure.
+///
+/// This alias deliberately keeps [`ServeUntilCancelError`] as the stored
+/// value. Its private representation retains the service cause and any
+/// secondary drain error without introducing a second classification surface.
+pub type ForgeServiceError = ServeUntilCancelError;
 
 /// Aggregated failures observed while stopping a partially or fully started
 /// Forge process.
@@ -499,6 +492,63 @@ impl std::error::Error for ForgeCleanupError {
         self.failures
             .first()
             .map(|failure| failure as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// A primary process failure together with typed failures found while
+/// cleaning up its owners.
+///
+/// The private fields keep the primary/cleanup relationship correlated. The
+/// primary remains the process outcome, while every cleanup failure remains
+/// available through typed accessors for diagnostics and tests.
+#[derive(Debug)]
+pub struct ForgePrimaryCleanupError {
+    primary: Box<ForgeRuntimeError>,
+    cleanup: ForgeCleanupError,
+}
+
+impl ForgePrimaryCleanupError {
+    fn new(primary: ForgeRuntimeError, failures: Vec<ForgeRuntimeError>) -> Self {
+        Self {
+            primary: Box::new(primary),
+            cleanup: ForgeCleanupError { failures },
+        }
+    }
+
+    /// Returns the failure that determined the process exit code.
+    #[must_use]
+    pub fn primary(&self) -> &ForgeRuntimeError {
+        &self.primary
+    }
+
+    /// Returns the aggregate of typed cleanup failures.
+    #[must_use]
+    pub fn cleanup(&self) -> &ForgeCleanupError {
+        &self.cleanup
+    }
+
+    /// Returns every typed cleanup failure without exposing a parallel status
+    /// flag or a duplicated exit-code value.
+    #[must_use]
+    pub fn cleanup_failures(&self) -> &[ForgeRuntimeError] {
+        self.cleanup.failures()
+    }
+}
+
+impl fmt::Display for ForgePrimaryCleanupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Forge primary failure ({}) retained with {} cleanup failure(s)",
+            self.primary,
+            self.cleanup.failures.len()
+        )
+    }
+}
+
+impl std::error::Error for ForgePrimaryCleanupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.primary.as_ref())
     }
 }
 
@@ -542,6 +592,11 @@ pub enum ForgeRuntimeError {
     #[error("Forge service failed")]
     Service(#[source] ForgeServiceError),
 
+    /// The accepted listener loop ended with a cancellation-only drain
+    /// failure. The complete accepted error remains available to callers.
+    #[error("Forge listener drain failed")]
+    ListenerDrain(#[source] ForgeServiceError),
+
     /// A runtime could not be constructed.
     #[error("Forge runtime construction failed")]
     Runtime(#[source] io::Error),
@@ -565,12 +620,25 @@ pub enum ForgeRuntimeError {
     /// More than one failure was observed while stopping Forge.
     #[error("Forge shutdown encountered multiple failures")]
     Shutdown(#[source] ForgeCleanupError),
+
+    /// A primary failure remained primary while cleanup failures were also
+    /// retained for typed inspection.
+    #[error("Forge primary failure retained with cleanup failures")]
+    PrimaryWithCleanup(#[source] ForgePrimaryCleanupError),
 }
 
 impl ForgeRuntimeError {
+    pub(crate) fn with_cleanup(primary: Self, cleanup_failures: Vec<Self>) -> Self {
+        if cleanup_failures.is_empty() {
+            primary
+        } else {
+            Self::PrimaryWithCleanup(ForgePrimaryCleanupError::new(primary, cleanup_failures))
+        }
+    }
+
     /// Returns the stable process exit code for this typed failure.
     #[must_use]
-    pub const fn exit_code(&self) -> u8 {
+    pub fn exit_code(&self) -> u8 {
         match self {
             Self::Configuration(_) | Self::Credentials(_) => EXIT_CODE_CONFIGURATION,
             Self::Custody(_) => EXIT_CODE_CUSTODY,
@@ -583,9 +651,39 @@ impl ForgeRuntimeError {
             Self::Runtime(_)
             | Self::Signal(_)
             | Self::ListenerShutdown(_)
+            | Self::ListenerDrain(_)
             | Self::ApplicationShutdown(_)
             | Self::ReadinessCleanup(_)
             | Self::Shutdown(_) => EXIT_CODE_SHUTDOWN,
+            Self::PrimaryWithCleanup(composite) => composite.primary().exit_code(),
+        }
+    }
+
+    /// Returns the primary failure when cleanup was also unsuccessful.
+    #[must_use]
+    pub fn primary_failure(&self) -> Option<&ForgeRuntimeError> {
+        match self {
+            Self::PrimaryWithCleanup(composite) => Some(composite.primary()),
+            _ => None,
+        }
+    }
+
+    /// Returns all typed cleanup failures retained by this outcome.
+    #[must_use]
+    pub fn cleanup_failures(&self) -> &[ForgeRuntimeError] {
+        match self {
+            Self::PrimaryWithCleanup(composite) => composite.cleanup_failures(),
+            Self::Shutdown(cleanup) => cleanup.failures(),
+            _ => &[],
+        }
+    }
+
+    /// Returns the correlated primary/cleanup composite, when present.
+    #[must_use]
+    pub fn as_primary_with_cleanup(&self) -> Option<&ForgePrimaryCleanupError> {
+        match self {
+            Self::PrimaryWithCleanup(composite) => Some(composite),
+            _ => None,
         }
     }
 }
@@ -819,80 +917,22 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         }
     };
 
-    let service = serve_until_cancel(listener, &handler, config.cancel_handle()).await;
-    let (listener, primary) = match service {
-        ServiceEnd::Cancelled { listener } => (listener, None),
-        ServiceEnd::Failure { listener, error } => (listener, Some(error)),
-        ServiceEnd::ConsumedOnCancellation => (None, None),
+    let primary = match listener
+        .serve_until_cancel(&handler, config.cancel_handle())
+        .await
+    {
+        Ok(()) => None,
+        Err(error) if error.is_service_failure() => Some(ForgeRuntimeError::Service(error)),
+        Err(error) if error.is_drain_failure() => Some(ForgeRuntimeError::ListenerDrain(error)),
+        // The accepted error has exactly the two classifications above. If
+        // that contract ever grows, preserve the complete typed value and
+        // keep the conservative shutdown exit rather than flattening it.
+        Err(error) => Some(ForgeRuntimeError::ListenerDrain(error)),
     };
 
-    finish(app, handler, custody, listener, Some(receipt), primary).await
-}
-
-/// A result of the linear listener loop. The enum keeps lifecycle state
-/// correlated instead of exposing public boolean combinations.
-enum ServiceEnd {
-    /// Cancellation was observed with reusable listener custody and the
-    /// caller must finish the awaited drain.
-    Cancelled { listener: Option<ForgeListener> },
-    /// A typed non-cancellation service failure ended the loop.
-    Failure {
-        listener: Option<ForgeListener>,
-        error: ForgeRuntimeError,
-    },
-    /// A consuming listener operation returned cancellation after it had
-    /// synchronously closed and dropped its endpoint.
-    ConsumedOnCancellation,
-}
-
-/// Serves one listener connection at a time until cancellation or failure.
-async fn serve_until_cancel(
-    mut listener: ForgeListener,
-    handler: &RequestHandler,
-    cancel: &CancelHandle,
-) -> ServiceEnd {
-    loop {
-        if cancel.is_cancelled() {
-            return match listener.drain().await {
-                Ok(()) => ServiceEnd::Cancelled { listener: None },
-                Err(error) => ServiceEnd::Failure {
-                    listener: None,
-                    error: ForgeRuntimeError::Shutdown(ForgeCleanupError {
-                        failures: vec![ForgeRuntimeError::ListenerShutdown(error)],
-                    }),
-                },
-            };
-        }
-
-        match listener.serve_one(handler, cancel).await {
-            Ok((next, report)) => {
-                listener = next;
-                match report.termination {
-                    RequestTermination::BudgetReached => {}
-                    RequestTermination::Failed { source } if deadline_was_cancelled(&source) => {
-                        return ServiceEnd::Cancelled {
-                            listener: Some(listener),
-                        };
-                    }
-                    RequestTermination::Failed { source } => {
-                        return ServiceEnd::Failure {
-                            listener: Some(listener),
-                            error: ForgeRuntimeError::Service(ForgeServiceError::Request(source)),
-                        };
-                    }
-                }
-            }
-            Err(error) if listener_error_was_cancelled(&error) => {
-                return ServiceEnd::ConsumedOnCancellation;
-            }
-            Err(error) => {
-                return ServiceEnd::Failure {
-                    listener: None,
-                    error: ForgeRuntimeError::Service(ForgeServiceError::Listener(error)),
-                };
-            }
-        }
-    }
+    // `serve_until_cancel` consumes the listener on every path. No listener
+    // owner or endpoint custody remains to pass into the cleanup tail.
+    finish(app, handler, custody, None, Some(receipt), primary).await
 }
 
 /// Finishes every owner in the required order and preserves every failure.
@@ -904,34 +944,38 @@ async fn finish(
     receipt: Option<ReadinessReceipt>,
     primary: Option<ForgeRuntimeError>,
 ) -> Result<(), ForgeRuntimeError> {
-    let mut failures = Vec::new();
-    if let Some(primary) = primary {
-        failures.push(primary);
-    }
+    let mut cleanup_failures = Vec::new();
     if let Some(listener) = listener {
         if let Err(error) = listener.drain().await {
-            failures.push(ForgeRuntimeError::ListenerShutdown(error));
+            cleanup_failures.push(ForgeRuntimeError::ListenerShutdown(error));
         }
     }
     if let Some(receipt) = receipt {
         if let Err(error) = receipt.remove() {
-            failures.push(ForgeRuntimeError::ReadinessCleanup(error));
+            cleanup_failures.push(ForgeRuntimeError::ReadinessCleanup(error));
         }
     }
     drop(handler);
     if let Err(error) = app.shutdown().await {
-        failures.push(ForgeRuntimeError::ApplicationShutdown(error));
+        cleanup_failures.push(ForgeRuntimeError::ApplicationShutdown(error));
     }
     // Custody is deliberately the last owning resource released. Its Drop
     // closes the exact lock carrier; no explicit unlock or unlink occurs.
     drop(custody);
 
-    match failures.len() {
+    if let Some(primary) = primary {
+        return Err(ForgeRuntimeError::with_cleanup(primary, cleanup_failures));
+    }
+
+    match cleanup_failures.len() {
         0 => Ok(()),
-        1 => Err(failures
-            .pop()
+        1 => Err(cleanup_failures
+            .into_iter()
+            .next()
             .expect("one cleanup failure exists when length is one")),
-        _ => Err(ForgeRuntimeError::Shutdown(ForgeCleanupError { failures })),
+        _ => Err(ForgeRuntimeError::Shutdown(ForgeCleanupError {
+            failures: cleanup_failures,
+        })),
     }
 }
 
@@ -1476,21 +1520,6 @@ impl FileIdentity {
 
 fn is_required_loopback(address: SocketAddr) -> bool {
     address.port() != 0 && address.ip() == IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-}
-
-fn deadline_was_cancelled<E>(error: &DeadlineError<E>) -> bool {
-    matches!(error, DeadlineError::Cancelled { .. })
-}
-
-fn listener_error_was_cancelled(error: &ListenerError) -> bool {
-    match error {
-        ListenerError::Admission { source } => deadline_was_cancelled(source),
-        ListenerError::Authentication { source } => deadline_was_cancelled(source),
-        ListenerError::UnrepresentableLimits
-        | ListenerError::Bind(_)
-        | ListenerError::AdmissionCapacityExhausted
-        | ListenerError::Metadata { .. } => false,
-    }
 }
 
 fn explicit_path(option: &'static str, path: PathBuf) -> Result<PathBuf, ForgeConfigError> {
