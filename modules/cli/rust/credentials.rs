@@ -11,6 +11,16 @@ use rcgen::PublicKeyData;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+const MAX_MANIFEST_BYTES: usize = 4_096;
+const MAX_MANIFEST_READ_BYTES: usize = MAX_MANIFEST_BYTES + 1;
+const MAX_CAPABILITY_BYTES: usize = 32;
+const MAX_CAPABILITY_READ_BYTES: usize = MAX_CAPABILITY_BYTES + 1;
+const MAX_CERTIFICATE_BYTES: usize = 65_536;
+const MAX_CERTIFICATE_READ_BYTES: usize = MAX_CERTIFICATE_BYTES + 1;
+const MAX_PRIVATE_KEY_BYTES: usize = 65_536;
+const MAX_PRIVATE_KEY_READ_BYTES: usize = MAX_PRIVATE_KEY_BYTES + 1;
+const SAFE_READ_CHUNK_BYTES: usize = 4_096;
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum ForgeCredentialError {
     InvalidHome(PathBuf),
@@ -170,6 +180,27 @@ impl ForgeCredentialPaths {
 
     pub fn lock_path(&self) -> PathBuf {
         self.credentials_dir().join(".provision.lock")
+    }
+}
+
+pub struct NativeClientCredentials {
+    paths: ForgeCredentialPaths,
+    certificate: rustls_pki_types::CertificateDer<'static>,
+    capability: artisan_protocol::LocalCapability,
+}
+
+impl NativeClientCredentials {
+    pub fn paths(&self) -> &ForgeCredentialPaths {
+        &self.paths
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        rustls_pki_types::CertificateDer<'static>,
+        artisan_protocol::LocalCapability,
+    ) {
+        (self.certificate, self.capability)
     }
 }
 
@@ -1678,6 +1709,32 @@ fn acquire_lock(lock_path: &Path) -> Result<File, ForgeCredentialError> {
     Ok(file)
 }
 
+fn validate_private_file(path: &Path) -> Result<(), ForgeCredentialError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ForgeCredentialError::UnsafePath(path.to_path_buf()))?;
+    if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
+    #[cfg(unix)]
+    check_file_mode(path)?;
+    #[cfg(windows)]
+    {
+        acl_diagnostic!(acl_diagnostic::stage("BundleAclVerification"));
+        let identity = resolve_current_identity()?;
+        verify_windows_dacl(path, &identity.sid)?;
+    }
+    Ok(())
+}
+
+fn validate_private_material(
+    paths: &ForgeCredentialPaths,
+    path: &Path,
+) -> Result<(), ForgeCredentialError> {
+    let credentials_dir = paths.credentials_dir();
+    validate_private_directory(&credentials_dir)?;
+    validate_private_file(path)
+}
+
 fn validate_manifest_bytes(
     bytes: &[u8],
     _paths: &ForgeCredentialPaths,
@@ -1708,6 +1765,40 @@ fn validate_manifest_bytes(
         }
     }
     Ok(manifest)
+}
+
+fn classify_manifest_length(length: usize) -> Result<(), ForgeCredentialError> {
+    if length <= MAX_MANIFEST_BYTES {
+        Ok(())
+    } else {
+        Err(ForgeCredentialError::ManifestMalformed)
+    }
+}
+
+fn classify_capability_length(length: usize, path: &Path) -> Result<(), ForgeCredentialError> {
+    if length == MAX_CAPABILITY_BYTES {
+        Ok(())
+    } else {
+        Err(ForgeCredentialError::InvalidCapability {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+fn classify_certificate_length(length: usize) -> Result<(), ForgeCredentialError> {
+    if (1..=MAX_CERTIFICATE_BYTES).contains(&length) {
+        Ok(())
+    } else {
+        Err(ForgeCredentialError::InvalidCertificate)
+    }
+}
+
+fn classify_private_key_length(length: usize) -> Result<(), ForgeCredentialError> {
+    if (1..=MAX_PRIVATE_KEY_BYTES).contains(&length) {
+        Ok(())
+    } else {
+        Err(ForgeCredentialError::InvalidCertificate)
+    }
 }
 
 fn validate_cert_sans(cert_der: &[u8]) -> Result<(), ForgeCredentialError> {
@@ -1771,7 +1862,19 @@ fn validate_key_matches_cert(key_der: &[u8], cert_der: &[u8]) -> Result<(), Forg
     Ok(())
 }
 
-fn open_and_read(path: &Path) -> Result<Vec<u8>, ForgeCredentialError> {
+fn file_identities_match<T: PartialEq>(pre: &T, opened: &T, post: &T) -> bool {
+    pre == opened && opened == post
+}
+
+fn open_and_read_bounded(
+    path: &Path,
+    read_limit: usize,
+    oversized: ForgeCredentialError,
+) -> Result<Zeroizing<Vec<u8>>, ForgeCredentialError> {
+    if read_limit == 0 {
+        return Err(oversized);
+    }
+    let read_limit_u64 = u64::try_from(read_limit).map_err(|_| oversized.clone())?;
     check_ancestors_all(path, true)?;
     let pre_meta = fs::symlink_metadata(path).map_err(|_| ForgeCredentialError::Io {
         context: "inspect file",
@@ -1800,12 +1903,26 @@ fn open_and_read(path: &Path) -> Result<Vec<u8>, ForgeCredentialError> {
     if handle_id != pre_id {
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|_| ForgeCredentialError::Io {
-            context: "read file",
-            path: path.to_path_buf(),
-        })?;
+    if handle_meta.len() >= read_limit_u64 {
+        return Err(oversized);
+    }
+
+    let mut bytes = Zeroizing::new(Vec::with_capacity(read_limit));
+    let mut chunk = Zeroizing::new([0_u8; SAFE_READ_CHUNK_BYTES]);
+    while bytes.len() < read_limit {
+        let chunk_len = (read_limit - bytes.len()).min(SAFE_READ_CHUNK_BYTES);
+        let read = file
+            .read(&mut chunk[..chunk_len])
+            .map_err(|_| ForgeCredentialError::Io {
+                context: "read file",
+                path: path.to_path_buf(),
+            })?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+
     check_ancestors_all(path, true)?;
     let post_meta = fs::symlink_metadata(path).map_err(|_| ForgeCredentialError::Io {
         context: "inspect file",
@@ -1815,9 +1932,24 @@ fn open_and_read(path: &Path) -> Result<Vec<u8>, ForgeCredentialError> {
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
     let post_id = file_id(path)?;
-    if post_id != pre_id || post_id != handle_id {
+    if !file_identities_match(&pre_id, &handle_id, &post_id) {
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
+    if post_meta.len() >= read_limit_u64 {
+        return Err(oversized);
+    }
+    Ok(bytes)
+}
+
+fn read_private_material(
+    paths: &ForgeCredentialPaths,
+    path: &Path,
+    read_limit: usize,
+    oversized: ForgeCredentialError,
+) -> Result<Zeroizing<Vec<u8>>, ForgeCredentialError> {
+    validate_private_material(paths, path)?;
+    let bytes = open_and_read_bounded(path, read_limit, oversized)?;
+    validate_private_material(paths, path)?;
     Ok(bytes)
 }
 
@@ -1871,19 +2003,37 @@ fn validate_existing_bundle(paths: &ForgeCredentialPaths) -> Result<bool, ForgeC
         }
         check_ancestors_all(file, true)?;
     }
-    let manifest_bytes = open_and_read(manifest_path)?;
+    let manifest_bytes = read_private_material(
+        paths,
+        manifest_path,
+        MAX_MANIFEST_READ_BYTES,
+        ForgeCredentialError::ManifestMalformed,
+    )?;
+    classify_manifest_length(manifest_bytes.len())?;
     validate_manifest_bytes(&manifest_bytes, paths)?;
-    let cap_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(open_and_read(capability_path)?);
-    if cap_bytes.len() != 32 {
-        return Err(ForgeCredentialError::InvalidCapability {
+    let cap_bytes = read_private_material(
+        paths,
+        capability_path,
+        MAX_CAPABILITY_READ_BYTES,
+        ForgeCredentialError::InvalidCapability {
             path: capability_path.to_path_buf(),
-        });
-    }
-    let cert_der = open_and_read(cert_path)?;
-    let key_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(open_and_read(key_path)?);
-    if cert_der.is_empty() || key_bytes.is_empty() {
-        return Err(ForgeCredentialError::InvalidCertificate);
-    }
+        },
+    )?;
+    classify_capability_length(cap_bytes.len(), capability_path)?;
+    let cert_der = read_private_material(
+        paths,
+        cert_path,
+        MAX_CERTIFICATE_READ_BYTES,
+        ForgeCredentialError::InvalidCertificate,
+    )?;
+    classify_certificate_length(cert_der.len())?;
+    let key_bytes = read_private_material(
+        paths,
+        key_path,
+        MAX_PRIVATE_KEY_READ_BYTES,
+        ForgeCredentialError::InvalidCertificate,
+    )?;
+    classify_private_key_length(key_bytes.len())?;
     validate_cert_sans(&cert_der)?;
     validate_key_matches_cert(&key_bytes, &cert_der)?;
     let _ = rustls::crypto::ring::default_provider();
@@ -1891,8 +2041,8 @@ fn validate_existing_bundle(paths: &ForgeCredentialPaths) -> Result<bool, ForgeC
 }
 
 fn generate_material() -> Result<ProvisionalMaterial, ForgeCredentialError> {
-    let mut cap = [0_u8; 32];
-    getrandom::fill(&mut cap).map_err(|_| ForgeCredentialError::Provisioning)?;
+    let mut cap = Zeroizing::new([0_u8; MAX_CAPABILITY_BYTES]);
+    getrandom::fill(&mut *cap).map_err(|_| ForgeCredentialError::Provisioning)?;
     let key_pair = rcgen::KeyPair::generate().map_err(|_| ForgeCredentialError::Provisioning)?;
     let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
         .map_err(|_| ForgeCredentialError::Provisioning)?;
@@ -1916,7 +2066,7 @@ fn generate_material() -> Result<ProvisionalMaterial, ForgeCredentialError> {
     validate_cert_sans(&cert_der)?;
     validate_key_matches_cert(&key_der, &cert_der)?;
     Ok(ProvisionalMaterial {
-        capability: Zeroizing::new(cap),
+        capability: cap,
         private_key: Zeroizing::new(key_der),
         certificate: cert_der,
     })
@@ -2110,6 +2260,49 @@ pub fn provision_or_load(home: &Path) -> Result<ForgeCredentialPaths, ForgeCrede
     }
 }
 
+fn local_capability_from_bytes(
+    bytes: Zeroizing<Vec<u8>>,
+    path: &Path,
+) -> Result<artisan_protocol::LocalCapability, ForgeCredentialError> {
+    classify_capability_length(bytes.len(), path)?;
+    let mut exact = Zeroizing::new([0_u8; MAX_CAPABILITY_BYTES]);
+    exact[..].copy_from_slice(bytes.as_slice());
+    Ok(artisan_protocol::LocalCapability::from_bytes(*exact))
+}
+
+pub fn load_client_credentials(
+    home: &Path,
+) -> Result<NativeClientCredentials, ForgeCredentialError> {
+    let paths = provision_or_load(home)?;
+    let certificate_path = &paths.certificate_paths()[0];
+    let certificate_bytes = read_private_material(
+        &paths,
+        certificate_path,
+        MAX_CERTIFICATE_READ_BYTES,
+        ForgeCredentialError::InvalidCertificate,
+    )?;
+    classify_certificate_length(certificate_bytes.len())?;
+    validate_cert_sans(&certificate_bytes)?;
+    let certificate = rustls_pki_types::CertificateDer::from(certificate_bytes.as_slice().to_vec());
+
+    let capability_path = paths.capability_path();
+    let capability_bytes = read_private_material(
+        &paths,
+        capability_path,
+        MAX_CAPABILITY_READ_BYTES,
+        ForgeCredentialError::InvalidCapability {
+            path: capability_path.to_path_buf(),
+        },
+    )?;
+    let capability = local_capability_from_bytes(capability_bytes, capability_path)?;
+
+    Ok(NativeClientCredentials {
+        paths,
+        certificate,
+        capability,
+    })
+}
+
 pub fn provision_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCredentialError> {
     provision_or_load(home)
 }
@@ -2273,6 +2466,223 @@ mod parser_tests {
         };
         let exact = format!("{path} {sid}:(OI)(CI)(F)");
         assert!(plan_icacls_removals(&exact, &malformed_identity, path).is_err());
+    }
+}
+
+#[cfg(test)]
+mod client_credentials_tests {
+    use super::*;
+
+    #[test]
+    fn load_returns_exact_leaf_capability_and_paths() {
+        let home = tempfile::tempdir().expect("temporary credential home");
+        let expected_paths = provision_or_load(home.path()).expect("provision credentials");
+        let expected_certificate =
+            fs::read(expected_paths.certificate_paths()[0].as_path()).expect("read certificate");
+        let capability_bytes = Zeroizing::new(
+            fs::read(expected_paths.capability_path()).expect("read capability fixture"),
+        );
+        let mut expected_capability_bytes = Zeroizing::new([0_u8; MAX_CAPABILITY_BYTES]);
+        expected_capability_bytes[..].copy_from_slice(capability_bytes.as_slice());
+        let expected_capability =
+            artisan_protocol::LocalCapability::from_bytes(*expected_capability_bytes);
+
+        let loaded = load_client_credentials(home.path()).expect("load credentials");
+        assert_eq!(loaded.paths(), &expected_paths);
+        let (certificate, capability) = loaded.into_parts();
+        assert_eq!(certificate.as_ref(), expected_certificate.as_slice());
+        assert!(capability.constant_time_eq(&expected_capability));
+    }
+
+    #[test]
+    fn capability_length_is_exact_with_zeroizing_material() {
+        let path = Path::new("capability.bin");
+        for (length, valid) in [(31, false), (32, true), (33, false)] {
+            let material = Zeroizing::new(vec![0xa5_u8; length]);
+            let result = local_capability_from_bytes(material, path);
+            if valid {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(ForgeCredentialError::InvalidCapability { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn certificate_length_classifier_is_bounded_without_parsing_fixture_bytes() {
+        assert!(matches!(
+            classify_certificate_length(0),
+            Err(ForgeCredentialError::InvalidCertificate)
+        ));
+        assert!(classify_certificate_length(MAX_CERTIFICATE_BYTES).is_ok());
+        assert!(matches!(
+            classify_certificate_length(MAX_CERTIFICATE_BYTES + 1),
+            Err(ForgeCredentialError::InvalidCertificate)
+        ));
+    }
+
+    #[test]
+    fn bundle_validation_enforces_manifest_and_private_key_bounds() {
+        let manifest_home = tempfile::tempdir().expect("temporary manifest home");
+        let manifest_paths =
+            provision_or_load(manifest_home.path()).expect("provision manifest fixture");
+        fs::write(
+            manifest_paths.manifest_path(),
+            vec![b'm'; MAX_MANIFEST_BYTES + 1],
+        )
+        .expect("write oversized manifest fixture");
+        assert!(matches!(
+            validate_existing_bundle(&manifest_paths),
+            Err(ForgeCredentialError::ManifestMalformed)
+        ));
+
+        let key_home = tempfile::tempdir().expect("temporary key home");
+        let key_paths = provision_or_load(key_home.path()).expect("provision key fixture");
+        fs::write(
+            key_paths.private_key_path(),
+            vec![b'k'; MAX_PRIVATE_KEY_BYTES + 1],
+        )
+        .expect("write oversized private key fixture");
+        assert!(matches!(
+            validate_existing_bundle(&key_paths),
+            Err(ForgeCredentialError::InvalidCertificate)
+        ));
+    }
+
+    #[test]
+    fn file_identity_decision_rejects_any_pre_open_post_mismatch() {
+        assert!(file_identities_match(&7_u8, &7_u8, &7_u8));
+        assert!(!file_identities_match(&6_u8, &7_u8, &6_u8));
+        assert!(!file_identities_match(&7_u8, &6_u8, &7_u8));
+        assert!(!file_identities_match(&7_u8, &7_u8, &6_u8));
+    }
+
+    #[test]
+    fn bounded_reader_rejects_directories() {
+        let root = tempfile::tempdir().expect("temporary reader home");
+        let directory = root.path().join("directory");
+        fs::create_dir(&directory).expect("create directory fixture");
+        assert!(matches!(
+            open_and_read_bounded(
+                &directory,
+                MAX_CERTIFICATE_READ_BYTES,
+                ForgeCredentialError::InvalidCertificate,
+            ),
+            Err(ForgeCredentialError::UnsafePath(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_reader_rejects_symlink_targets_and_unsafe_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temporary reader home");
+        let real_file = root.path().join("real-file");
+        fs::write(&real_file, b"safe").expect("write real file");
+        let symlink_file = root.path().join("symlink-file");
+        symlink(&real_file, &symlink_file).expect("create symlink fixture");
+        assert!(matches!(
+            open_and_read_bounded(
+                &symlink_file,
+                MAX_CERTIFICATE_READ_BYTES,
+                ForgeCredentialError::InvalidCertificate,
+            ),
+            Err(ForgeCredentialError::UnsafePath(_))
+        ));
+
+        let real_directory = root.path().join("real-directory");
+        fs::create_dir(&real_directory).expect("create real directory");
+        let nested_file = real_directory.join("nested-file");
+        fs::write(&nested_file, b"safe").expect("write nested file");
+        let symlink_directory = root.path().join("symlink-directory");
+        symlink(&real_directory, &symlink_directory).expect("create ancestor symlink");
+        let substituted_path = symlink_directory.join("nested-file");
+        assert!(matches!(
+            open_and_read_bounded(
+                &substituted_path,
+                MAX_CERTIFICATE_READ_BYTES,
+                ForgeCredentialError::InvalidCertificate,
+            ),
+            Err(ForgeCredentialError::UnsafePath(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_private_modes_fail_closed_without_repair() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary mode home");
+        let credentials = root.path().join("credentials");
+        fs::create_dir(&credentials).expect("create credentials directory");
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o755))
+            .expect("set unsafe directory mode");
+        assert!(matches!(
+            validate_private_directory(&credentials),
+            Err(ForgeCredentialError::WindowsAcl)
+        ));
+        assert_eq!(
+            fs::symlink_metadata(&credentials)
+                .expect("inspect directory mode")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o700))
+            .expect("restore directory mode");
+        let file = credentials.join("material");
+        fs::write(&file, b"material").expect("write material");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644))
+            .expect("set unsafe file mode");
+        assert!(matches!(
+            check_file_mode(&file),
+            Err(ForgeCredentialError::WindowsAcl)
+        ));
+        assert_eq!(
+            fs::symlink_metadata(&file)
+                .expect("inspect file mode")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn credential_material_errors_redact_all_injected_canaries() {
+        const CAPABILITY_CANARY: &[u8] = b"bootstrap-capability-bytes-canary";
+        const CERTIFICATE_CANARY: &[u8] = b"certificate-bytes-canary";
+        const KEY_CANARY: &[u8] = b"private-key-bytes-canary";
+        let capability_error = match local_capability_from_bytes(
+            Zeroizing::new(CAPABILITY_CANARY.to_vec()),
+            Path::new("capability.bin"),
+        ) {
+            Ok(_) => panic!("canary capability must fail length validation"),
+            Err(error) => error,
+        };
+        let certificate_error =
+            validate_cert_sans(CERTIFICATE_CANARY).expect_err("canary certificate must fail");
+        let key_error = validate_key_matches_cert(KEY_CANARY, CERTIFICATE_CANARY)
+            .expect_err("canary key must fail parsing");
+
+        for error in [capability_error, certificate_error, key_error] {
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            for canary in [
+                "bootstrap-capability-bytes-canary",
+                "certificate-bytes-canary",
+                "private-key-bytes-canary",
+            ] {
+                assert!(!display.contains(canary));
+                assert!(!debug.contains(canary));
+            }
+        }
     }
 }
 
