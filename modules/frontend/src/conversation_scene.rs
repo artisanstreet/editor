@@ -759,6 +759,11 @@ impl ConversationScene {
     ///
     /// The build is atomic: any validation failure returns only a typed error
     /// and no partial scene.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneBuildError`] when collection bounds, payload bounds,
+    /// identities, ordinals, ownership, or steering placement rules fail.
     #[allow(clippy::too_many_lines)]
     pub fn build(
         turns: Vec<SceneTurn>,
@@ -823,7 +828,7 @@ impl ConversationScene {
 
         let mut narration_map: HashMap<TurnId, TurnNarration> =
             HashMap::with_capacity(narrations.len());
-        for entry in &narrations {
+        for entry in narrations {
             if !turn_ids.contains(&entry.turn_id) {
                 return Err(SceneBuildError::UnknownNarrationTurn {
                     turn_id: entry.turn_id.clone(),
@@ -1126,32 +1131,32 @@ impl ConversationScene {
             // A duration narration is a terminal label, not a label on every
             // historical work fragment. Put exactly one label on the latest
             // group when a turn contains work.
-            if let Some(label) = narration.terminal_label() {
-                if let Some(group) = blocks.iter_mut().rev().find_map(|block| match block {
+            if let Some(label) = narration.terminal_label()
+                && let Some(group) = blocks.iter_mut().rev().find_map(|block| match block {
                     TurnBlock::WorkGroup(group) => Some(group),
                     _ => None,
-                }) {
-                    group.label = Some(label);
-                }
+                })
+            {
+                group.label = Some(label);
             }
 
-            if let Some(change_id) = change_id {
-                if !change_files.is_empty() {
-                    let card = ChangeSetBlock {
-                        id: change_id,
-                        files: change_files,
-                        disclosure: change_disclosure,
-                    };
-                    if turn.lifecycle.is_terminal() {
-                        // Terminal cards are deliberately appended before the
-                        // status/footer pair, regardless of item ordinal.
-                        blocks.push(TurnBlock::ChangeSet(card));
-                    } else {
-                        deferred.push(DeferredChangeSet {
-                            turn_id: turn.turn_id.clone(),
-                            card,
-                        });
-                    }
+            if let Some(change_id) = change_id
+                && !change_files.is_empty()
+            {
+                let card = ChangeSetBlock {
+                    id: change_id,
+                    files: change_files,
+                    disclosure: change_disclosure,
+                };
+                if turn.lifecycle.is_terminal() {
+                    // Terminal cards are deliberately appended before the
+                    // status/footer pair, regardless of item ordinal.
+                    blocks.push(TurnBlock::ChangeSet(card));
+                } else {
+                    deferred.push(DeferredChangeSet {
+                        turn_id: turn.turn_id.clone(),
+                        card,
+                    });
                 }
             }
 
