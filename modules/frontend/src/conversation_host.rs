@@ -368,7 +368,8 @@ impl ConversationHost {
             Err(ConversationHostError::EffectOutboxFull { .. }) => {
                 SurfaceRouteDecision::Backpressured
             }
-            Err(ConversationHostError::SceneProjection(_)) => SurfaceRouteDecision::Accepted,
+            Err(ConversationHostError::SceneProjection(_))
+            | Err(ConversationHostError::InvalidThreadId(_)) => SurfaceRouteDecision::Accepted,
         }
     }
 
