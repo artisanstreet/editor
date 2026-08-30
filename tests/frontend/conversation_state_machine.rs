@@ -689,7 +689,7 @@ fn viewport_scroll_completion_is_fenced_by_generation() {
 }
 
 #[test]
-fn duplicate_unknown_capacity_closed_and_refused_events_are_atomic() {
+fn duplicate_unknown_and_refused_events_are_atomic() {
     let mut controller = ConversationStateController::new(thread_id());
     let _ = controller.drain_effects();
     controller
@@ -762,7 +762,10 @@ fn duplicate_unknown_capacity_closed_and_refused_events_are_atomic() {
         controller.pending_effects(),
         before_refused_effects.as_slice()
     );
+}
 
+#[test]
+fn closed_owner_registration_is_atomic() {
     let mut closed = ConversationStateController::new(thread_id());
     let _ = closed.drain_effects();
     closed.close().expect("owner closes");
@@ -789,7 +792,10 @@ fn duplicate_unknown_capacity_closed_and_refused_events_are_atomic() {
     ));
     assert_eq!(closed.view(), closed_view);
     assert_eq!(closed.pending_effects(), closed_effects.as_slice());
+}
 
+#[test]
+fn pending_effect_capacity_is_atomic() {
     let mut capacity = ConversationStateController::new(thread_id());
     let _ = capacity.drain_effects();
     let mut capacity_error = None;
