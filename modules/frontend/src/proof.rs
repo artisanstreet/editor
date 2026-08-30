@@ -174,7 +174,7 @@ impl ProofSurface {
             Vec::with_capacity(PROOF_MAX_CONVERSATION_EFFECTS),
         );
         if let Some(host) = self.conversation_host.clone() {
-            self.pump_conversation_boundary(host, cx);
+            self.pump_conversation_boundary(&host, cx);
         }
         effects
     }
@@ -236,17 +236,17 @@ impl ProofSurface {
     /// Performs one explicit proof-to-application backpressure handoff.
     fn pump_conversation_boundary(
         &mut self,
-        host: Entity<conversation_host::ConversationHost>,
+        host: &Entity<conversation_host::ConversationHost>,
         cx: &mut Context<Self>,
     ) {
-        self.collect_conversation_effects(&host, cx);
+        self.collect_conversation_effects(host, cx);
         if host.read(cx).total_pending_effect_count() == 0 {
             host.update(
                 cx,
                 conversation_host::ConversationHost::process_pending_actions,
             );
         }
-        self.collect_conversation_effects(&host, cx);
+        self.collect_conversation_effects(host, cx);
     }
 }
 
