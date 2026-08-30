@@ -397,6 +397,17 @@ rust_test(
 )
 
 rust_test(
+    name = "process_custody_test",
+    srcs = ["process_custody.rs"],
+    crate_name = "process_custody_test",
+    deps = ["//modules/backend:backend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "product_telemetry_capture_policy_test",
     srcs = ["product_telemetry_capture_policy.rs"],
     crate_name = "product_telemetry_capture_policy_test",

@@ -17,6 +17,7 @@ artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 base64.workspace = true
 bytes.workspace = true
+fs2.workspace = true
 getrandom.workspace = true
 http.workspace = true
 http-body-util.workspace = true
@@ -128,6 +129,10 @@ path = "../../tests/backend/listener.rs"
 [[test]]
 name = "preview_service_policy"
 path = "../../tests/backend/preview_service_policy.rs"
+
+[[test]]
+name = "process_custody"
+path = "../../tests/backend/process_custody.rs"
 
 [[test]]
 name = "request_handler"

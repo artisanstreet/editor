@@ -30,6 +30,7 @@ pub mod host_suspend_detection_policy;
 pub mod listener;
 pub mod orchestration_intake_policy;
 pub mod preview_service_policy;
+pub mod process_custody;
 pub mod product_telemetry_capture_policy;
 pub mod request_handler;
 pub mod sqlite_write_retry_policy;
@@ -43,6 +44,8 @@ pub mod thread_metadata_refiner_policy;
 pub mod thread_resource_quiescence_policy;
 pub mod usage_interruption_model_policy;
 pub mod wake_lock_policy;
+
+pub use process_custody::{ForgeProcessCustody, ForgeProcessCustodyError};
 
 pub use app::{ForgeApp, ForgeConfig, ForgeShutdownError, ForgeStartupError};
 pub use command_admission::{

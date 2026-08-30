@@ -27,6 +27,7 @@ base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 bytes = { version = "=1.12.1", default-features = false }
 capnp = "=0.27.0"
 capnpc = "=0.27.0"
+fs2 = "=0.4.3"
 getrandom = { version = "=0.4.3", default-features = false }
 gpui = { version = "=0.2.2", features = ["inspector", "test-support"] }
 http = { version = "=1.5.0", default-features = false, features = ["std"] }
