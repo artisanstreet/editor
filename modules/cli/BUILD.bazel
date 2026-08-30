@@ -16,6 +16,7 @@ rust_library(
         "rust/credentials.rs",
         "rust/engine_catalog.rs",
         "rust/engine_install.rs",
+        "rust/engine_profiles.rs",
         "rust/error.rs",
         "rust/http.rs",
         "rust/instance.rs",

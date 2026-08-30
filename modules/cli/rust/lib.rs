@@ -4,6 +4,7 @@ pub mod commands;
 pub mod credentials;
 pub(crate) mod engine_catalog;
 pub(crate) mod engine_install;
+pub(crate) mod engine_profiles;
 pub mod error;
 pub mod http;
 pub mod instance;
