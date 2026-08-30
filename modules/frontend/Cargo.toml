@@ -16,6 +16,7 @@ artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
 statig.workspace = true
+thiserror.workspace = true
 url.workspace = true
 
 [[test]]
@@ -125,6 +126,10 @@ path = "../../tests/frontend/conversation_projection.rs"
 [[test]]
 name = "conversation_relative_age"
 path = "../../tests/frontend/conversation_relative_age.rs"
+
+[[test]]
+name = "conversation_scene"
+path = "../../tests/frontend/conversation_scene.rs"
 
 [[test]]
 name = "conversation_scroll_position"
