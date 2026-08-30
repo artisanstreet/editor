@@ -399,7 +399,7 @@ fn explicit_paths_are_the_only_configuration_and_secret_diagnostics_stay_clean()
     assert_eq!(config.custody_path(), directory.path("forge.custody"));
     assert_eq!(
         config.certificate_der_paths(),
-        &[credentials.certificate_path.clone()]
+        std::slice::from_ref(&credentials.certificate_path)
     );
     assert_eq!(
         config.private_key_der_path(),
@@ -895,12 +895,11 @@ fn spawn_runtime(config: ForgeLaunchConfig) -> JoinHandle<Result<(), ForgeRuntim
 fn wait_for_readiness(path: &Path) -> Result<(Vec<u8>, serde_json::Value), &'static str> {
     let deadline = Instant::now() + STARTUP_WAIT;
     loop {
-        if let Ok(bytes) = fs::read(path) {
-            if bytes.ends_with(b"\n") {
-                if let Ok(value) = serde_json::from_slice(&bytes) {
-                    return Ok((bytes, value));
-                }
-            }
+        if let Ok(bytes) = fs::read(path)
+            && bytes.ends_with(b"\n")
+            && let Ok(value) = serde_json::from_slice(&bytes)
+        {
+            return Ok((bytes, value));
         }
         if Instant::now() >= deadline {
             return Err("readiness should appear within the bounded startup wait");
