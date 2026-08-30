@@ -1,35 +1,59 @@
-load("@rules_rust//rust:defs.bzl", "rust_test")
-load(":portable_archive.bzl", "portable_archive")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load(":portable_archive.bzl", "versioned_payload_archive")
 
-# Layout-only portable runtime metadata for the Phase 9 packaging proof.
-#
-# Exports the machine-readable layout contract. The only consumer is the
-# focused validator under //tests/packaging, which embeds the file as
-# compile_data and fails closed on schema drift. Producer rules (archive
-# assembly) are deferred decisions and intentionally absent here.
+# The v2 layout is the only packaging contract consumed by this leaf. The
+# archive itself is rooted at the per-version payload, so it intentionally
+# does not contain the layout's outer `Artisan Street/versions/<version>/`
+# directories.
 exports_files(
-    [
-        "portable_layout.txt",
-        "versioned_layout.txt",
+    ["versioned_layout.txt"],
+    visibility = ["//tests/packaging:__pkg__"],
+)
+
+rust_binary(
+    name = "payload_manifest_generator",
+    srcs = ["rust/payload_manifest.rs"],
+    crate_name = "payload_manifest_generator",
+    deps = [
+        "@crates//:serde_json",
+        "@crates//:sha2-0.10.9",
     ],
-    visibility = ["//tests/packaging:__pkg__"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    visibility = ["//visibility:public"],
 )
 
-portable_archive(
-    name = "portable_archive",
+versioned_payload_archive(
+    name = "versioned_payload_archive",
+    ae = "//modules/cli:ae",
     editor = "//modules/frontend:editor",
     forge = "//modules/backend:forge",
-    layout = ":portable_layout.txt",
-    output_name = "artisan-editor-portable.zip",
+    installer = "//modules/installer:installer",
+    layout = ":versioned_layout.txt",
+    resources = {},
+    licenses = {},
+    executable_suffix = select({
+        "@platforms//os:windows": ".exe",
+        "//conditions:default": "",
+    }),
+    output_name = "artisan-editor-versioned-payload.zip",
     visibility = ["//tests/packaging:__pkg__"],
 )
 
-portable_archive(
-    name = "portable_archive_reproducibility_fixture",
+versioned_payload_archive(
+    name = "versioned_payload_archive_reproducibility_fixture",
     testonly = True,
+    ae = "//modules/cli:ae",
     editor = "//modules/frontend:editor",
     forge = "//modules/backend:forge",
-    layout = ":portable_layout.txt",
-    output_name = "artisan-editor-portable-reproducibility.zip",
+    installer = "//modules/installer:installer",
+    layout = ":versioned_layout.txt",
+    resources = {},
+    licenses = {},
+    executable_suffix = select({
+        "@platforms//os:windows": ".exe",
+        "//conditions:default": "",
+    }),
+    output_name = "artisan-editor-versioned-payload-reproducibility.zip",
     visibility = ["//tests/packaging:__pkg__"],
 )
