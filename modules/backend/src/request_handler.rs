@@ -246,15 +246,19 @@ impl ActivatedConversationSubscription {
     }
 }
 
+struct DirectoryPicker {
+    controller: DirectoryController,
+    authority: Mutex<SelectedDirectoryAuthority>,
+    budget: Duration,
+}
+
 /// Answers decoded client requests from Forge-owned repository state.
 pub struct RequestHandler {
     repository: Repository,
     origin: AdmissionOrigin,
     subscriptions: Option<ConversationSubscriptionRegistrar>,
     subscription_identity: Option<Arc<SubscriptionRegistrarIdentity>>,
-    directory_controller: Option<DirectoryController>,
-    directory_authority: Option<Mutex<SelectedDirectoryAuthority>>,
-    directory_picker_budget: Option<Duration>,
+    directory_picker: Option<DirectoryPicker>,
 }
 
 impl fmt::Debug for RequestHandler {
@@ -306,9 +310,7 @@ impl RequestHandler {
             origin: AdmissionOrigin::system(),
             subscriptions: None,
             subscription_identity: None,
-            directory_controller: None,
-            directory_authority: None,
-            directory_picker_budget: None,
+            directory_picker: None,
         }
     }
 
@@ -327,9 +329,7 @@ impl RequestHandler {
             origin: AdmissionOrigin::Injected(origin),
             subscriptions: None,
             subscription_identity: None,
-            directory_controller: None,
-            directory_authority: None,
-            directory_picker_budget: None,
+            directory_picker: None,
         }
     }
 
@@ -349,9 +349,7 @@ impl RequestHandler {
             origin: AdmissionOrigin::system(),
             subscriptions: Some(registrar),
             subscription_identity: Some(subscription_identity),
-            directory_controller: None,
-            directory_authority: None,
-            directory_picker_budget: None,
+            directory_picker: None,
         }
     }
 
@@ -375,9 +373,11 @@ impl RequestHandler {
         pick_budget: Duration,
     ) -> Self {
         let mut handler = Self::with_subscriptions(repository);
-        handler.directory_controller = Some(directory_controller);
-        handler.directory_authority = Some(Mutex::new(SelectedDirectoryAuthority::new()));
-        handler.directory_picker_budget = Some(pick_budget);
+        handler.directory_picker = Some(DirectoryPicker {
+            controller: directory_controller,
+            authority: Mutex::new(SelectedDirectoryAuthority::new()),
+            budget: pick_budget,
+        });
         handler
     }
 
@@ -425,8 +425,8 @@ impl RequestHandler {
     /// Stops the handler-owned directory controller and reports its observed
     /// shutdown result. Legacy handlers have no controller to stop.
     pub(crate) async fn shutdown_directory_controller(&mut self) -> Option<ShutdownReport> {
-        let controller = self.directory_controller.as_mut()?;
-        Some(controller.shutdown().await)
+        let picker = self.directory_picker.as_mut()?;
+        Some(picker.controller.shutdown().await)
     }
 
     /// Resolves one correlated request and returns its local post-write work.
@@ -520,16 +520,13 @@ impl RequestHandler {
         &self,
         request_id: &RequestId,
     ) -> Result<ServerResponse, ProtocolFailure> {
-        let (Some(controller), Some(authority), Some(budget)) = (
-            self.directory_controller.as_ref(),
-            self.directory_authority.as_ref(),
-            self.directory_picker_budget,
-        ) else {
+        let Some(picker) = self.directory_picker.as_ref() else {
             return Err(unbacked_failure(request_id, "native directory picking"));
         };
 
-        let picked = controller
-            .pick_directory(budget)
+        let picked = picker
+            .controller
+            .pick_directory(picker.budget)
             .map_err(|error| directory_admission_failure(error, request_id))?
             .await
             .map_err(|error| helper_operation_failure(error, request_id))?;
@@ -558,7 +555,7 @@ impl RequestHandler {
             .map_err(|error| origin_entropy_failure(&error, request_id))?;
         let directory_id = DirectoryId::parse(identity)
             .map_err(|_| forged_identity_failure("directory", request_id))?;
-        let mut authority = authority.lock().await;
+        let mut authority = picker.authority.lock().await;
         let issued = authority
             .register(directory_id, root_path, Instant::now())
             .map_err(|error| directory_selection_failure(error, request_id))?;
@@ -1156,15 +1153,15 @@ fn directory_selection_failure(
 /// Entropy unavailability is an environmental fault, not a client mistake:
 /// nothing was persisted, no receipt was recorded, and the identical retry
 /// may succeed once the platform provider recovers, so the failure stays
-/// internal and retryable. The detail is static and never carries command
-/// payloads.
+/// internal and retryable. The detail carries only the bounded typed cause —
+/// never command payloads.
 fn origin_entropy_failure(
-    _error: &CommandOriginEntropyError,
+    error: &CommandOriginEntropyError,
     request_id: &RequestId,
 ) -> ProtocolFailure {
     typed_failure(
         ErrorCode::Internal,
-        "fresh command could not acquire durable identity entropy",
+        format!("fresh command could not acquire durable identity entropy: {error}"),
         true,
         request_id,
     )
@@ -1176,13 +1173,10 @@ fn origin_entropy_failure(
 /// environmental and left nothing behind: conversion refuses to truncate or
 /// clamp, so the failure stays internal, payload-free, correlated, and
 /// retryable on the same terms as the entropy fault.
-fn origin_clock_failure(
-    _error: CommandOriginClockError,
-    request_id: &RequestId,
-) -> ProtocolFailure {
+fn origin_clock_failure(error: CommandOriginClockError, request_id: &RequestId) -> ProtocolFailure {
     typed_failure(
         ErrorCode::Internal,
-        "fresh command could not acquire an acceptance instant",
+        format!("fresh command could not acquire an acceptance instant: {error}"),
         true,
         request_id,
     )
