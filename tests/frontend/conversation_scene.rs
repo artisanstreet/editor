@@ -3,6 +3,7 @@
 //! Structural enum assertions only: no string snapshots of debug output.
 
 use artisan_domain::{ConversationLifecycle, ItemId, MESSAGE_BODY_MAX_BYTES, MessageBody, TurnId};
+use artisan_frontend::conversation_scene;
 use artisan_frontend::conversation_scene::{
     AssistantPhase, FileChangeStatus, SCENE_MAX_CHANGED_FILES_PER_CARD,
     SCENE_MAX_DISPLAY_PATH_BYTES, SCENE_MAX_ITEMS, SCENE_MAX_MESSAGE_BODY_BYTES,
