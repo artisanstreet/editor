@@ -68,6 +68,14 @@ pub enum ProtocolValueError {
     /// A nested receipt carried a different request id than its response.
     #[error("response request id and nested receipt request id must match")]
     ResponseCorrelationMismatch,
+    /// A lifecycle status carried an impossible state and active-work count.
+    #[error("lifecycle status {state:?} cannot report active work count {active_work_count}")]
+    InvalidLifecycleStatus {
+        /// Reported lifecycle state.
+        state: LifecycleState,
+        /// Reported active-work count.
+        active_work_count: u32,
+    },
 }
 
 /// Negotiated application protocol version.
@@ -481,6 +489,8 @@ pub struct Hello {
     pub supported_versions: VersionOffer,
     /// Owned single-use credential proving this session's right to connect.
     pub credential: HelloCredential,
+    /// Whether this client offers native lifecycle control support.
+    pub supports_lifecycle_control: bool,
 }
 
 /// Successful application protocol negotiation.
@@ -492,6 +502,126 @@ pub struct Welcome {
     pub connection_id: ConnectionId,
     /// Rotated single-use reconnect credential for resuming a later session.
     pub reconnect_capability: ReconnectCapability,
+    /// Whether this connection negotiated native lifecycle control support.
+    pub lifecycle_control_supported: bool,
+}
+
+/// Native Forge lifecycle state reported by status and stop receipts.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LifecycleState {
+    /// No lifecycle work is currently active.
+    Ready,
+    /// One or more lifecycle operations are active.
+    Busy,
+    /// Shutdown is draining in-flight lifecycle work.
+    Draining,
+}
+
+/// Native lifecycle status with a state/count consistency invariant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleStatus {
+    /// Coarse lifecycle state.
+    pub state: LifecycleState,
+    /// Number of active units of lifecycle work.
+    pub active_work_count: u32,
+}
+
+impl LifecycleStatus {
+    /// Creates a lifecycle status after checking its state/count invariant.
+    ///
+    /// `Ready` requires a zero count, `Busy` requires a positive count, and
+    /// `Draining` permits any in-flight count while cancellation completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::InvalidLifecycleStatus`] for an
+    /// inconsistent state/count pair.
+    pub const fn new(
+        state: LifecycleState,
+        active_work_count: u32,
+    ) -> Result<Self, ProtocolValueError> {
+        let status = Self {
+            state,
+            active_work_count,
+        };
+        match status.validate() {
+            Ok(()) => Ok(status),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Validates a status assembled at the public field boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolValueError::InvalidLifecycleStatus`] for an
+    /// inconsistent state/count pair.
+    pub const fn validate(&self) -> Result<(), ProtocolValueError> {
+        match self.state {
+            LifecycleState::Ready => {
+                if self.active_work_count == 0 {
+                    Ok(())
+                } else {
+                    Err(ProtocolValueError::InvalidLifecycleStatus {
+                        state: self.state,
+                        active_work_count: self.active_work_count,
+                    })
+                }
+            }
+            LifecycleState::Busy => {
+                if self.active_work_count == 0 {
+                    Err(ProtocolValueError::InvalidLifecycleStatus {
+                        state: self.state,
+                        active_work_count: self.active_work_count,
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            LifecycleState::Draining => Ok(()),
+        }
+    }
+}
+
+/// Result classification for a native lifecycle stop request.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LifecycleStopDisposition {
+    /// The stop transition was newly accepted.
+    Accepted,
+    /// The same stop request was already accepted.
+    Duplicate,
+    /// A stop transition is already in progress.
+    AlreadyStopping,
+}
+
+/// Native lifecycle stop receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LifecycleStopReceipt {
+    /// Whether this stop request was accepted, replayed, or already stopping.
+    pub disposition: LifecycleStopDisposition,
+    /// Lifecycle state observed with the disposition.
+    pub state: LifecycleState,
+}
+
+/// Native lifecycle control request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LifecycleRequest {
+    /// Read the current lifecycle status.
+    Status,
+    /// Ask Forge to stop, optionally requiring an idle lifecycle first.
+    Stop {
+        /// Whether the stop may be accepted only after the lifecycle is idle.
+        require_idle: bool,
+    },
+}
+
+/// Native lifecycle control response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LifecycleResponse {
+    /// Current lifecycle status.
+    Status(LifecycleStatus),
+    /// Result of a stop request.
+    Stop(LifecycleStopReceipt),
 }
 
 /// First-workflow request payload after frame correlation is separated out.
@@ -513,6 +643,8 @@ pub enum ClientRequest {
     /// implements neither duplicate-request suppression nor cancellation
     /// propagation.
     PickDirectory,
+    /// Negotiated native lifecycle status or stop control.
+    Lifecycle(LifecycleRequest),
 }
 
 /// Receipt returned when a first message is durably queued.
@@ -598,6 +730,8 @@ pub enum ResponsePayload {
     ConversationSubscriptionStopped(ConversationSubscriptionStopped),
     /// Outcome of one explicit native directory-picker interaction.
     DirectoryPicked(DirectoryPickOutcome),
+    /// Negotiated native lifecycle status or stop result.
+    Lifecycle(LifecycleResponse),
 }
 
 /// Successful response correlated to a client request frame.
@@ -638,6 +772,10 @@ pub enum ErrorCode {
     /// outcome stands, and repeating the conflicting request is never
     /// retryable.
     IdempotencyConflict,
+    /// The peer requested lifecycle control without a negotiated capability.
+    UnsupportedFeature,
+    /// Lifecycle control cannot be accepted while lifecycle work is busy.
+    LifecycleBusy,
 }
 
 /// Typed application-protocol rejection or failure.

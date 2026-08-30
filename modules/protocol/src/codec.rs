@@ -26,15 +26,17 @@ use thiserror::Error;
 use crate::artisan_capnp::{
     self, conversation_item, conversation_patch, conversation_query_request,
     conversation_subscribe_request, conversation_subscription_started, directory_listing,
-    directory_pick_outcome, envelope, event, list_directories_request, protocol_error, query_range,
-    request, response,
+    directory_pick_outcome, envelope, event, lifecycle_request, lifecycle_response,
+    list_directories_request, protocol_error, query_range, request, response,
 };
 use crate::types::{
     ClientRequest, ConnectionId, ConversationSubscriptionStarted, ConversationSubscriptionStopped,
     DirectoryPickOutcome, ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello,
-    HelloCredential, LocalCapability, LocalCapabilityError, ProtocolFailure, ProtocolValueError,
-    ProtocolVersion, ReconnectCapability, ReconnectCapabilityError, ResponsePayload, ServerEvent,
-    ServerResponse, VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    HelloCredential, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
+    LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
+    ProtocolFailure, ProtocolValueError, ProtocolVersion, ReconnectCapability,
+    ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse, VersionOffer,
+    VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 
 /// Maximum Cap'n Proto graph traversal for one already-framed application
@@ -438,21 +440,25 @@ fn encode_body(
             match &value.credential {
                 HelloCredential::Initial(capability) => {
                     hello
+                        .reborrow()
                         .init_credential()
                         .set_initial(capability.expose_for_wire());
                 }
                 HelloCredential::Reconnect(capability) => {
                     hello
+                        .reborrow()
                         .init_credential()
                         .set_reconnect(capability.expose_for_wire());
                 }
             }
+            hello.set_supports_lifecycle_control(value.supports_lifecycle_control);
         }
         WireEnvelopeBody::Welcome(value) => {
             let mut welcome = root.reborrow().init_body().init_welcome();
             welcome.set_negotiated_version(value.negotiated_version.get());
             welcome.set_connection_id(value.connection_id.as_str());
             welcome.set_reconnect_capability(value.reconnect_capability.expose_for_wire());
+            welcome.set_lifecycle_control_supported(value.lifecycle_control_supported);
         }
         WireEnvelopeBody::Request(value) => {
             encode_request(root.reborrow().init_body().init_request(), value);
@@ -554,6 +560,16 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
         ClientRequest::PickDirectory => {
             builder.reborrow().set_pick_directory(());
         }
+        ClientRequest::Lifecycle(LifecycleRequest::Status) => {
+            builder.reborrow().init_lifecycle_control().init_status();
+        }
+        ClientRequest::Lifecycle(LifecycleRequest::Stop { require_idle }) => {
+            builder
+                .reborrow()
+                .init_lifecycle_control()
+                .init_stop()
+                .set_require_idle(*require_idle);
+        }
     }
 }
 
@@ -651,6 +667,29 @@ fn encode_response(
         }
         ResponsePayload::DirectoryPicked(outcome) => {
             encode_directory_picked(builder.reborrow().init_directory_picked(), outcome);
+        }
+        ResponsePayload::Lifecycle(value) => {
+            encode_lifecycle_response(builder.reborrow().init_lifecycle_control(), value)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_lifecycle_response(
+    mut builder: artisan_capnp::lifecycle_response::Builder<'_>,
+    value: &LifecycleResponse,
+) -> Result<(), ProtocolEncodeError> {
+    match value {
+        LifecycleResponse::Status(status) => {
+            status.validate()?;
+            let mut encoded = builder.reborrow().init_status();
+            encoded.set_state(encode_lifecycle_state(status.state));
+            encoded.set_active_work_count(status.active_work_count);
+        }
+        LifecycleResponse::Stop(receipt) => {
+            let mut encoded = builder.reborrow().init_stop();
+            encoded.set_disposition(encode_lifecycle_stop_disposition(receipt.disposition));
+            encoded.set_state(encode_lifecycle_state(receipt.state));
         }
     }
     Ok(())
@@ -966,6 +1005,26 @@ const fn encode_directory_kind(value: DirectoryKind) -> artisan_capnp::Directory
     }
 }
 
+const fn encode_lifecycle_state(value: LifecycleState) -> artisan_capnp::LifecycleState {
+    match value {
+        LifecycleState::Ready => artisan_capnp::LifecycleState::Ready,
+        LifecycleState::Busy => artisan_capnp::LifecycleState::Busy,
+        LifecycleState::Draining => artisan_capnp::LifecycleState::Draining,
+    }
+}
+
+const fn encode_lifecycle_stop_disposition(
+    value: LifecycleStopDisposition,
+) -> artisan_capnp::LifecycleStopDisposition {
+    match value {
+        LifecycleStopDisposition::Accepted => artisan_capnp::LifecycleStopDisposition::Accepted,
+        LifecycleStopDisposition::Duplicate => artisan_capnp::LifecycleStopDisposition::Duplicate,
+        LifecycleStopDisposition::AlreadyStopping => {
+            artisan_capnp::LifecycleStopDisposition::AlreadyStopping
+        }
+    }
+}
+
 const fn encode_error_code(value: ErrorCode) -> artisan_capnp::ErrorCode {
     match value {
         ErrorCode::UnsupportedVersion => artisan_capnp::ErrorCode::UnsupportedVersion,
@@ -975,6 +1034,8 @@ const fn encode_error_code(value: ErrorCode) -> artisan_capnp::ErrorCode {
         ErrorCode::ThreadUnknown => artisan_capnp::ErrorCode::ThreadUnknown,
         ErrorCode::Internal => artisan_capnp::ErrorCode::Internal,
         ErrorCode::IdempotencyConflict => artisan_capnp::ErrorCode::IdempotencyConflict,
+        ErrorCode::UnsupportedFeature => artisan_capnp::ErrorCode::UnsupportedFeature,
+        ErrorCode::LifecycleBusy => artisan_capnp::ErrorCode::LifecycleBusy,
     }
 }
 
@@ -1025,6 +1086,7 @@ fn decode_hello(value: artisan_capnp::hello::Reader<'_>) -> Result<Hello, Protoc
     Ok(Hello {
         supported_versions,
         credential,
+        supports_lifecycle_control: value.get_supports_lifecycle_control(),
     })
 }
 
@@ -1040,6 +1102,7 @@ fn decode_welcome(
         reconnect_capability: ReconnectCapability::try_from_slice(
             value.get_reconnect_capability()?,
         )?,
+        lifecycle_control_supported: value.get_lifecycle_control_supported(),
     })
 }
 
@@ -1133,7 +1196,23 @@ fn decode_request(
             decode_conversation_unsubscribe_request(unsubscribe?)
         }
         request::Which::PickDirectory(()) => Ok(ClientRequest::PickDirectory),
+        request::Which::LifecycleControl(lifecycle) => decode_lifecycle_request(lifecycle?),
     }
+}
+
+fn decode_lifecycle_request(
+    value: artisan_capnp::lifecycle_request::Reader<'_>,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let request = match value.which()? {
+        lifecycle_request::Which::Status(status) => {
+            status?;
+            LifecycleRequest::Status
+        }
+        lifecycle_request::Which::Stop(stop) => LifecycleRequest::Stop {
+            require_idle: stop?.get_require_idle(),
+        },
+    };
+    Ok(ClientRequest::Lifecycle(request))
 }
 
 fn decode_queue_first_message(
@@ -1313,11 +1392,35 @@ fn decode_response(
             )
         }
         response::Which::DirectoryPicked(picked) => decode_directory_picked(picked?)?,
+        response::Which::LifecycleControl(lifecycle) => {
+            ResponsePayload::Lifecycle(decode_lifecycle_response(lifecycle?)?)
+        }
     };
     Ok(ServerResponse {
         request_id,
         payload,
     })
+}
+
+fn decode_lifecycle_response(
+    value: artisan_capnp::lifecycle_response::Reader<'_>,
+) -> Result<LifecycleResponse, ProtocolDecodeError> {
+    match value.which()? {
+        lifecycle_response::Which::Status(status) => {
+            let status = status?;
+            Ok(LifecycleResponse::Status(LifecycleStatus::new(
+                decode_lifecycle_state(status.get_state()?),
+                status.get_active_work_count(),
+            )?))
+        }
+        lifecycle_response::Which::Stop(receipt) => {
+            let receipt = receipt?;
+            Ok(LifecycleResponse::Stop(LifecycleStopReceipt {
+                disposition: decode_lifecycle_stop_disposition(receipt.get_disposition()?),
+                state: decode_lifecycle_state(receipt.get_state()?),
+            }))
+        }
+    }
 }
 
 fn decode_queued_receipt(
@@ -1872,6 +1975,26 @@ const fn decode_directory_kind(value: artisan_capnp::DirectoryEntryKind) -> Dire
     }
 }
 
+const fn decode_lifecycle_state(value: artisan_capnp::LifecycleState) -> LifecycleState {
+    match value {
+        artisan_capnp::LifecycleState::Ready => LifecycleState::Ready,
+        artisan_capnp::LifecycleState::Busy => LifecycleState::Busy,
+        artisan_capnp::LifecycleState::Draining => LifecycleState::Draining,
+    }
+}
+
+const fn decode_lifecycle_stop_disposition(
+    value: artisan_capnp::LifecycleStopDisposition,
+) -> LifecycleStopDisposition {
+    match value {
+        artisan_capnp::LifecycleStopDisposition::Accepted => LifecycleStopDisposition::Accepted,
+        artisan_capnp::LifecycleStopDisposition::Duplicate => LifecycleStopDisposition::Duplicate,
+        artisan_capnp::LifecycleStopDisposition::AlreadyStopping => {
+            LifecycleStopDisposition::AlreadyStopping
+        }
+    }
+}
+
 const fn decode_error_code(value: artisan_capnp::ErrorCode) -> ErrorCode {
     match value {
         artisan_capnp::ErrorCode::UnsupportedVersion => ErrorCode::UnsupportedVersion,
@@ -1881,5 +2004,7 @@ const fn decode_error_code(value: artisan_capnp::ErrorCode) -> ErrorCode {
         artisan_capnp::ErrorCode::ThreadUnknown => ErrorCode::ThreadUnknown,
         artisan_capnp::ErrorCode::Internal => ErrorCode::Internal,
         artisan_capnp::ErrorCode::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+        artisan_capnp::ErrorCode::UnsupportedFeature => ErrorCode::UnsupportedFeature,
+        artisan_capnp::ErrorCode::LifecycleBusy => ErrorCode::LifecycleBusy,
     }
 }
