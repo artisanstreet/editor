@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -15,7 +15,7 @@ use crate::{
     credentials::{self, ForgeCredentialPaths},
     error::io,
     http::{self, PairResponse},
-    instance::{self, NativeInstanceConfig, NativeListenerConfig, State},
+    instance::{self, NativeInstanceConfig, NativeListenerConfig},
     manifest::InstallationManifest,
     paths::Layout,
     payload, process,
@@ -27,8 +27,6 @@ const MAX_FOLLOW_BYTES: u64 = 64 * 1024;
 // A cold installed Forge can take more than 20 seconds to initialize its SEA
 // runtime and durable state; leave enough time for the first editor handoff.
 const FORGE_READY_TIMEOUT: Duration = Duration::from_secs(30);
-const FORGE_READY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
-const FORGE_READY_INTERVAL: Duration = Duration::from_millis(100);
 const FORGE_START_LAUNCH_URL: &str = "artisan://forge/start";
 const AUTOSTART_TASK_NAME: &str = "Artisan Forge";
 
@@ -224,17 +222,8 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Commands::Start { foreground } => start(&layout, foreground).map(|_| ()),
-        Commands::Stop {
-            instance_id,
-            pid,
-            if_idle,
-        } => match pid {
-            Some(pid) => stop_pid(&layout, pid, if_idle),
-            None => stop(&layout, instance_id.as_deref()),
-        },
-        Commands::Restart { foreground } => {
-            let _ = stop(&layout, None);
-            start(&layout, foreground).map(|_| ())
+        Commands::Stop { .. } | Commands::Restart { .. } | Commands::Uninstall { .. } => {
+            unsupported_lifecycle_control()
         }
         Commands::Status { json } => status(&layout, json),
         Commands::Logs { lines, follow } => logs(&layout, lines, follow),
@@ -256,14 +245,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Autostart { disable } => autostart(disable),
         Commands::Update => delegate_installer(&layout, "update", false),
         Commands::Telemetry { command } => telemetry_command(&layout, command),
-        Commands::Uninstall { remove_data } => {
-            match stop(&layout, None) {
-                Ok(()) | Err(CliError::NotRunning | CliError::MissingInstance) => {}
-                Err(error) => return Err(error),
-            }
-            disable_autostart_if_supported()?;
-            delegate_installer(&layout, "uninstall", remove_data)
-        }
     }
 }
 
@@ -379,21 +360,11 @@ fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
     let manifest = require_installation(layout)?;
     telemetry::load_or_create(layout)?;
     let spec = native_launch_spec(layout, &manifest)?;
-    process::start(&spec, foreground)
+    process::start_until(&spec, foreground, Instant::now() + FORGE_READY_TIMEOUT)
 }
 
-fn stop(layout: &Layout, instance_id: Option<&str>) -> Result<()> {
-    let (paths, _, secrets) = instance::load(layout)?;
-    process::stop_with_instance_id(&paths, &secrets, instance_id)
-}
-
-fn stop_pid(layout: &Layout, pid: u32, if_idle: bool) -> Result<()> {
-    let (paths, _, secrets) = instance::load(layout)?;
-    if if_idle {
-        process::stop_with_pid_if_idle(&paths, &secrets, pid)
-    } else {
-        process::stop_with_pid(&paths, &secrets, pid)
-    }
+fn unsupported_lifecycle_control() -> Result<()> {
+    Err(CliError::UnsupportedLifecycleControl)
 }
 
 fn autostart(disable: bool) -> Result<()> {
@@ -567,13 +538,6 @@ fn create_autostart_task(_: &str) -> Result<()> {
     ))
 }
 
-fn disable_autostart_if_supported() -> Result<()> {
-    #[cfg(target_os = "windows")]
-    return disable_autostart();
-    #[cfg(not(target_os = "windows"))]
-    Ok(())
-}
-
 #[cfg(target_os = "windows")]
 fn disable_autostart() -> Result<()> {
     let query_status = hidden_schtasks(
@@ -663,23 +627,43 @@ fn hidden_schtasks(
 }
 
 fn status(layout: &Layout, json: bool) -> Result<()> {
-    let (paths, _, secrets) = instance::load(layout)?;
-    let running = process::live_state_until(
-        &paths,
-        &secrets,
-        None,
-        std::time::Instant::now() + Duration::from_secs(2),
-    )?
-    .is_some();
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "state": if running { "running" } else { "stopped" },
-            })
-        );
-    } else {
-        println!("{}", if running { "running" } else { "stopped" });
+    let manifest = require_installation(layout)?;
+    let config = load_native_instance(layout)?;
+    match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
+        process::ForgeReadinessStatus::Ready(readiness) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "certificate_sha256": readiness.certificate_sha256(),
+                        "endpoint": readiness.endpoint(),
+                        "pid": readiness.pid(),
+                        "readiness": "ready",
+                        "schema": readiness.schema(),
+                    })
+                );
+            } else {
+                println!(
+                    "ready (pid {} at {})",
+                    readiness.pid(),
+                    readiness.endpoint()
+                );
+            }
+        }
+        process::ForgeReadinessStatus::Missing => {
+            if json {
+                println!(r#"{"readiness":"missing"}"#);
+            } else {
+                println!("missing");
+            }
+        }
+        process::ForgeReadinessStatus::Invalid => {
+            if json {
+                println!(r#"{"readiness":"invalid"}"#);
+            } else {
+                println!("invalid");
+            }
+        }
     }
     Ok(())
 }
@@ -831,71 +815,46 @@ fn handle_protocol(layout: &Layout, url: &str) -> Result<()> {
 
 #[derive(Clone, Debug)]
 struct ReadyState {
-    state: State,
-    owned_instance_id: Option<String>,
+    readiness: process::ForgeReadiness,
 }
 
 fn ready_state(layout: &Layout) -> Result<ReadyState> {
     let deadline = std::time::Instant::now() + FORGE_READY_TIMEOUT;
-    // An already-healthy Forge needs no launch, so opening against one works
-    // even in a home whose installation manifest is unavailable.
-    if !layout.manifest.is_file() {
-        let (paths, _, secrets) = instance::load(layout)?;
-        if let Some(candidate) =
-            process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
-        {
-            return Ok(ReadyState {
-                state: candidate,
-                owned_instance_id: None,
-            });
+    start_until(layout, false, deadline)?;
+    let manifest = require_installation(layout)?;
+    let config = load_native_instance(layout)?;
+    match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
+        process::ForgeReadinessStatus::Ready(readiness) => Ok(ReadyState { readiness }),
+        process::ForgeReadinessStatus::Missing | process::ForgeReadinessStatus::Invalid => {
+            Err(CliError::ForgeReadinessTimeout)
         }
     }
-    let start_result = start_until(layout, false, deadline)?;
-    let (paths, _, secrets) = instance::load(layout)?;
-    while std::time::Instant::now() < deadline {
-        if let Some(candidate) =
-            process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
-        {
-            return Ok(ReadyState {
-                owned_instance_id: owned_instance_id(start_result, &candidate),
-                state: candidate,
-            });
-        }
-        sleep_until(deadline, FORGE_READY_INTERVAL);
-    }
-    Err(CliError::Control("Forge did not become ready".into()))
 }
 
 fn start_until(
     layout: &Layout,
     foreground: bool,
-    health_deadline: std::time::Instant,
+    readiness_deadline: std::time::Instant,
 ) -> Result<process::StartResult> {
     let manifest = require_installation(layout)?;
     let spec = native_launch_spec(layout, &manifest)?;
-    process::start_until(&spec, foreground, health_deadline)
+    process::start_until(&spec, foreground, readiness_deadline)
 }
 
-fn probe_deadline(deadline: std::time::Instant) -> std::time::Instant {
-    deadline.min(std::time::Instant::now() + FORGE_READY_PROBE_TIMEOUT)
+fn forge_http_endpoint(readiness: &process::ForgeReadiness) -> String {
+    format!("http://{}", readiness.endpoint())
 }
 
-fn sleep_until(deadline: std::time::Instant, interval: Duration) {
-    if let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
-        thread::sleep(interval.min(remaining));
-    }
-}
-
-fn mint_pair_code(layout: &Layout, state: &State) -> Result<String> {
+fn mint_pair_code(layout: &Layout, readiness: &process::ForgeReadiness) -> Result<String> {
     let (paths, _, secrets) = instance::load(layout)?;
     let body = http::request(
-        &state.endpoint,
+        &forge_http_endpoint(readiness),
         "/api/pair/request",
         &secrets.auth_token,
         "POST",
     )?;
     let pair: PairResponse = serde_json::from_slice(&body).map_err(|source| CliError::Json {
-        path: paths.state,
+        path: paths.config,
         source,
     })?;
     Ok(pair.code)
@@ -940,18 +899,13 @@ fn open_ready(
     match flow {
         OpenFlow::Editor => launch_editor(layout),
         OpenFlow::Browser => {
-            let code = mint_pair_code(layout, &ready.state)?;
-            let origin = resolve_browser_origin(origin, &ready.state.endpoint)?;
+            let code = mint_pair_code(layout, &ready.readiness)?;
+            let endpoint = forge_http_endpoint(&ready.readiness);
+            let origin = resolve_browser_origin(origin, &endpoint)?;
             launch_url(&format!("{origin}/#pair={code}"))
         }
         OpenFlow::Handoff => {
-            let code = match mint_pair_code(layout, &ready.state) {
-                Ok(code) => code,
-                Err(error) => {
-                    cleanup_failed_handoff(layout, ready);
-                    return Err(error);
-                }
-            };
+            let code = mint_pair_code(layout, &ready.readiness)?;
             // The capability is one-time and short-lived; stdout reaches only
             // the trusted local process that invoked this hidden mode.
             println!("{}", handoff_json(ready, &code));
@@ -960,39 +914,12 @@ fn open_ready(
     }
 }
 
-fn cleanup_failed_handoff(layout: &Layout, ready: &ReadyState) {
-    if let Some(instance_id) = handoff_cleanup_instance_id(ready) {
-        // Preserve the pairing error: cleanup is best-effort and exact, never
-        // an ordinary shutdown that could affect a replacement Forge.
-        let _ = stop(layout, Some(instance_id));
-    }
-}
-
-fn handoff_cleanup_instance_id(ready: &ReadyState) -> Option<&str> {
-    ready.owned_instance_id.as_deref()
-}
-
-fn owned_instance_id(start_result: process::StartResult, state: &State) -> Option<String> {
-    match start_result {
-        process::StartResult::Spawned { pid } if pid == state.pid => {
-            Some(state.instance_id.clone())
-        }
-        process::StartResult::AlreadyRunning
-        | process::StartResult::Spawned { .. }
-        | process::StartResult::ForegroundExited => None,
-    }
-}
-
 fn handoff_json(ready: &ReadyState, pair_code: &str) -> serde_json::Value {
-    let mut handoff = serde_json::json!({
-        "endpoint": ready.state.endpoint,
+    serde_json::json!({
+        "endpoint": forge_http_endpoint(&ready.readiness),
         "pair_code": pair_code,
         "version": 1,
-    });
-    if let Some(owned_instance_id) = &ready.owned_instance_id {
-        handoff["owned_instance_id"] = serde_json::Value::String(owned_instance_id.clone());
-    }
-    handoff
+    })
 }
 
 /// The installed editor renders the bundled frontend itself and performs its
@@ -1265,39 +1192,30 @@ mod tests {
     }
 
     #[test]
-    fn handoff_ownership_is_emitted_only_for_the_spawned_ready_pid() {
-        let state = State {
-            endpoint: "http://127.0.0.1:4317".into(),
-            instance_id: "forge-owned".into(),
-            pid: 42,
-        };
+    fn native_lifecycle_controls_are_explicitly_unsupported_before_l1() {
+        assert!(matches!(
+            unsupported_lifecycle_control(),
+            Err(CliError::UnsupportedLifecycleControl)
+        ));
         assert_eq!(
-            owned_instance_id(process::StartResult::Spawned { pid: 42 }, &state),
-            Some("forge-owned".into())
+            CliError::UnsupportedLifecycleControl.to_string(),
+            "native Forge lifecycle control is unavailable until L1"
         );
-        assert_eq!(
-            owned_instance_id(process::StartResult::Spawned { pid: 7 }, &state),
-            None
-        );
-        let owned = ReadyState {
-            state: state.clone(),
-            owned_instance_id: Some("forge-owned".into()),
-        };
-        assert_eq!(
-            handoff_json(&owned, "pair")["owned_instance_id"],
-            "forge-owned"
-        );
-        let existing = ReadyState {
-            state,
-            owned_instance_id: None,
-        };
-        assert!(
-            handoff_json(&existing, "pair")
-                .get("owned_instance_id")
-                .is_none()
-        );
-        assert_eq!(handoff_cleanup_instance_id(&owned), Some("forge-owned"));
-        assert_eq!(handoff_cleanup_instance_id(&existing), None);
+    }
+
+    #[test]
+    fn handoff_uses_only_validated_non_secret_readiness_data() {
+        let readiness = process::ForgeReadiness::new(
+            "artisan-forge-ready-v1",
+            "127.0.0.1:4317",
+            "a".repeat(64),
+            42,
+        )
+        .unwrap();
+        let handoff = handoff_json(&ReadyState { readiness }, "pair");
+        assert_eq!(handoff["endpoint"], "http://127.0.0.1:4317");
+        assert_eq!(handoff["pair_code"], "pair");
+        assert!(handoff.get("owned_instance_id").is_none());
     }
 
     #[test]
@@ -1384,8 +1302,6 @@ mod tests {
     #[test]
     fn handoff_wait_budget_covers_the_renderer_cold_start_window() {
         assert_eq!(FORGE_READY_TIMEOUT, Duration::from_secs(30));
-        assert!(FORGE_READY_PROBE_TIMEOUT < FORGE_READY_TIMEOUT);
-        assert!(FORGE_READY_INTERVAL < FORGE_READY_TIMEOUT);
     }
 
     fn explicit_setup_args() -> Vec<String> {
