@@ -1527,7 +1527,7 @@ fn with_temporary_identity_cleanup(
     identity: FileIdentity,
     primary: ReadinessError,
 ) -> ReadinessError {
-    match remove_owned_temporary(&path, identity) {
+    match remove_owned_temporary(path, identity) {
         Ok(()) => primary,
         Err(cleanup) => ReadinessError::Cleanup {
             primary: Box::new(primary),
