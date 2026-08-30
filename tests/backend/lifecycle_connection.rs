@@ -298,7 +298,7 @@ async fn next_server_connection(loopback: &mut Loopback) -> Connection {
     tokio::time::timeout(TEST_DEADLINE, loopback.server_connections.recv())
         .await
         .expect("server connection arrives")
-        .expect("server remains accepting");
+        .expect("server remains accepting")
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +580,7 @@ async fn configured_negotiation_requires_both_hello_offer_and_installed_gate() {
     let (temporary, app) = opened_app("negotiation").await;
     let mut loopback = spawn_loopback();
     let gate = TestActivityGate::new(0);
-    let lifecycle = LifecycleController::with_activity_gate(Arc::clone(&gate));
+    let lifecycle = LifecycleController::with_activity_gate(gate.clone());
     let mut authority = bootstrap_authority();
     let handler = RequestHandler::new(app.repository().clone());
     let cancel = CancelHandle::new();
@@ -634,7 +634,7 @@ async fn configured_status_crosses_connection_as_correlated_lifecycle_response()
     let (temporary, app) = opened_app("status").await;
     let mut loopback = spawn_loopback();
     let gate = TestActivityGate::new(0);
-    let lifecycle = LifecycleController::with_activity_gate(Arc::clone(&gate));
+    let lifecycle = LifecycleController::with_activity_gate(gate.clone());
     let mut authority = bootstrap_authority();
     let handler = RequestHandler::new(app.repository().clone());
     let cancel = CancelHandle::new();
@@ -674,7 +674,7 @@ async fn configured_stop(require_idle: bool, label: &str) {
     let (temporary, app) = opened_app(label).await;
     let mut loopback = spawn_loopback();
     let gate = TestActivityGate::new(0);
-    let lifecycle = LifecycleController::with_activity_gate(Arc::clone(&gate));
+    let lifecycle = LifecycleController::with_activity_gate(gate.clone());
     let mut authority = bootstrap_authority();
     let handler = RequestHandler::new(app.repository().clone());
     let cancel = CancelHandle::new();
@@ -733,7 +733,7 @@ async fn response_failure_rolls_back_pending_stop_without_cancellation() {
     let (temporary, app) = opened_app("response-failure").await;
     let mut loopback = spawn_loopback();
     let gate = TestActivityGate::new(0);
-    let lifecycle = LifecycleController::with_activity_gate(Arc::clone(&gate));
+    let lifecycle = LifecycleController::with_activity_gate(gate.clone());
     let mut authority = bootstrap_authority();
     let handler = RequestHandler::new(app.repository().clone());
     let cancel = CancelHandle::new();
@@ -822,7 +822,7 @@ async fn reconnect_negotiates_fresh_witness_instead_of_reusing_old_offer() {
     let (temporary, app) = opened_app("reconnect-witness").await;
     let mut loopback = spawn_loopback();
     let gate = TestActivityGate::new(0);
-    let lifecycle = LifecycleController::with_activity_gate(Arc::clone(&gate));
+    let lifecycle = LifecycleController::with_activity_gate(gate.clone());
     let mut authority = bootstrap_authority();
     let handler = RequestHandler::new(app.repository().clone());
     let cancel = CancelHandle::new();

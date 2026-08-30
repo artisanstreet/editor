@@ -519,7 +519,9 @@ async fn drive_request(
     // finished send side, even when activation later fails or is cancelled.
     streams.mark_send_finished();
     match receipt {
-        PostResponseReceipt::Handler(receipt) => handler.activate_after_response(receipt).await?,
+        PostResponseReceipt::Handler(receipt) => {
+            let _activation = handler.activate_after_response(receipt).await?;
+        }
         PostResponseReceipt::Lifecycle(receipt) => receipt.commit_after_response(cancel),
     }
     Ok(())

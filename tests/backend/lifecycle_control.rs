@@ -106,7 +106,7 @@ fn request_id(value: &str) -> RequestId {
 
 fn controller(active_work_count: u32) -> (LifecycleController, Arc<TestGate>) {
     let gate = TestGate::new(active_work_count);
-    let controller = LifecycleController::with_activity_gate(Arc::clone(&gate));
+    let controller = LifecycleController::with_activity_gate(gate.clone());
     (controller, gate)
 }
 
