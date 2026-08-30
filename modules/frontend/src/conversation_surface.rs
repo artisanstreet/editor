@@ -21,7 +21,7 @@ use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, FontWeight, IntoElement, Render, ScrollHandle,
+    AnyElement, Context, Div, Entity, FocusHandle, FontWeight, IntoElement, Render, ScrollHandle,
     SharedString, Window, div,
     prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
 };
@@ -867,7 +867,7 @@ impl ConversationSurface {
             .min_w_0()
             .text_size(theme.typography.label_text)
             .text_color(theme.colors.muted_foreground.to_paint())
-            .whitespace_pre_wrap()
+            .whitespace_normal()
             .child(block.label.clone());
         label = label.debug_selector(move || selector.clone());
         label.into_any_element()
@@ -991,7 +991,7 @@ fn body_text(text: &str, theme: ArtisanTheme) -> Div {
         .min_w_0()
         .text_size(theme.typography.editor_text_desktop)
         .line_height(theme.spacing.steps(6.0))
-        .whitespace_pre_wrap()
+        .whitespace_normal()
         .child(text.to_owned())
 }
 
