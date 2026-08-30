@@ -30,6 +30,26 @@
 //! receipt, awaited endpoint idle, database shutdown, or hard real-time
 //! cleanup; those require the awaited boundaries below.
 //!
+//! # Long-lived production loop
+//!
+//! [`ForgeListener::serve_until_cancel`] owns one listener for its entire
+//! lifetime and serves sequential connections until cancellation or a terminal
+//! failure. It reuses the same private borrowed attempt as [`Self::serve_one`]
+//! without rebinding, cloning the endpoint, detaching a task, or adding a
+//! second runtime. Cancellation is checked before each admission: on
+//! cancellation the owned endpoint is closed and awaited via [`Self::drain`].
+//! An idle [`OperationKind::Connect`] timeout is nonterminal and continues
+//! with the same endpoint without consuming admission capacity. A
+//! connection-local authentication failure after the accepted guard closes the
+//! peer is nonterminal. All other pre-ready exhaustion, metadata, and
+//! non-timeout admission failures, plus non-cancellation request-stage
+//! failures, are terminal service failures. A terminal primary remains
+//! classified as a service failure even when the best-effort drain also
+//! fails; both typed causes are preserved.
+//!
+//! [`Drop`] remains the synchronous local-close proof; [`Self::drain`] is the
+//! awaited idle proof.
+//!
 //! # Metadata provenance
 //!
 //! No new identity trait, encoder, or clock exists here. Server metadata is
@@ -246,6 +266,144 @@ pub struct ServiceReport {
     pub termination: RequestTermination,
 }
 
+/// Typed cause for a terminal service failure inside the production loop.
+#[derive(Debug, Error)]
+pub enum ServiceCause {
+    /// A listener-stage failure that is terminal for the production loop.
+    #[error(transparent)]
+    Listener(#[from] ListenerError),
+
+    /// A non-cancellation request-stage failure that is terminal.
+    #[error(transparent)]
+    Request(#[from] DeadlineError<RequestStageError>),
+}
+
+/// Terminal error for the long-lived production loop
+/// [`ForgeListener::serve_until_cancel`].
+///
+/// The type hides its fields and correlated booleans; callers distinguish
+/// outcomes through the typed methods:
+///
+/// * `is_service_failure()` — primary non-cancellation service failure
+///   (future exit 72), optionally carrying a drain failure without replacing
+///   the primary classification;
+/// * `is_drain_failure()` — cleanup-only listener drain failure after
+///   cancellation (future exit 73).
+///
+/// No raw capability, credential, request payload, or frame bytes appear in
+/// `Debug` or `Display`.
+#[derive(Debug)]
+pub struct ServeUntilCancelError {
+    kind: Kind,
+}
+
+#[derive(Debug)]
+enum Kind {
+    Service {
+        cause: ServiceCause,
+        drain: Option<TransportError>,
+    },
+    Drain {
+        drain: TransportError,
+    },
+}
+
+impl ServeUntilCancelError {
+    fn service(cause: ServiceCause, drain: Option<TransportError>) -> Self {
+        Self {
+            kind: Kind::Service { cause, drain },
+        }
+    }
+
+    fn drain(drain: TransportError) -> Self {
+        Self {
+            kind: Kind::Drain { drain },
+        }
+    }
+
+    /// Returns `true` when this is a primary non-cancellation service failure.
+    #[must_use]
+    pub fn is_service_failure(&self) -> bool {
+        matches!(self.kind, Kind::Service { .. })
+    }
+
+    /// Returns `true` when this is a cleanup-only drain failure after cancellation.
+    #[must_use]
+    pub fn is_drain_failure(&self) -> bool {
+        matches!(self.kind, Kind::Drain { .. })
+    }
+
+    /// Returns the primary service cause when this is a service failure.
+    #[must_use]
+    pub fn service_cause(&self) -> Option<&ServiceCause> {
+        match &self.kind {
+            Kind::Service { cause, .. } => Some(cause),
+            Kind::Drain { .. } => None,
+        }
+    }
+
+    /// Returns the drain failure when present.
+    ///
+    /// For a service failure this is the optional best-effort drain error
+    /// preserved alongside the primary; for a drain-only failure it is the
+    /// primary drain error.
+    #[must_use]
+    pub fn drain_error(&self) -> Option<&TransportError> {
+        match &self.kind {
+            Kind::Service { drain, .. } => drain.as_ref(),
+            Kind::Drain { drain } => Some(drain),
+        }
+    }
+
+    /// Convenience: the listener-stage service error, if any.
+    #[must_use]
+    pub fn as_listener_error(&self) -> Option<&ListenerError> {
+        match self.service_cause() {
+            Some(ServiceCause::Listener(error)) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Convenience: the request-stage service error, if any.
+    #[must_use]
+    pub fn as_request_error(&self) -> Option<&DeadlineError<RequestStageError>> {
+        match self.service_cause() {
+            Some(ServiceCause::Request(error)) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ServeUntilCancelError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            Kind::Service { cause, drain } => {
+                if drain.is_some() {
+                    write!(
+                        formatter,
+                        "forge listener service failure ({cause}) with additional drain failure"
+                    )
+                } else {
+                    write!(formatter, "forge listener service failure: {cause}")
+                }
+            }
+            Kind::Drain { drain } => write!(
+                formatter,
+                "forge listener drain failure after cancellation: {drain}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ServeUntilCancelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            Kind::Service { cause, .. } => Some(cause),
+            Kind::Drain { drain } => Some(drain),
+        }
+    }
+}
+
 /// One owning loopback Forge listener over the accepted seams.
 ///
 /// The value implements neither `Clone` nor `Debug`. Dropping it closes the
@@ -323,12 +481,12 @@ impl ForgeListener {
     /// paired with its [`ServiceReport`]; every pre-ready failure is
     /// terminal and drops the listener instead.
     ///
-    /// Phases: reserve one admission from remaining capacity (typed
-    /// exhaustion before touching the endpoint); one deadline-bounded
-    /// accept-and-TLS operation; guard the accepted connection before any
-    /// fallible metadata call; transfer it into the existing authentication
-    /// seam; then drive sequential consuming dispatches up to the configured
-    /// per-connection capacity with freshly acquired stamps.
+    /// Phases: one admission from remaining capacity (typed exhaustion before
+    /// touching the endpoint); one deadline-bounded accept-and-TLS operation;
+    /// guard the accepted connection before any fallible metadata call;
+    /// transfer it into the existing authentication seam; then drive
+    /// sequential consuming dispatches up to the configured per-connection
+    /// capacity with freshly acquired stamps.
     ///
     /// Work cancellation is only observed through the supplied handle and is
     /// never triggered or reset here.
@@ -344,47 +502,165 @@ impl ForgeListener {
         handler: &RequestHandler,
         cancel: &CancelHandle,
     ) -> Result<(Self, ServiceReport), ListenerError> {
-        // The listener stays one owning local throughout (it implements
-        // Drop, so its fields are never moved out); phases work through
-        // disjoint field borrows of this single value.
         let mut listener = self;
+        let report = listener.serve_attempt(handler, cancel).await?;
+        Ok((listener, report))
+    }
 
-        // Reserve exactly once, with checked arithmetic, before touching
-        // the endpoint.
-        let Some(reserved) = listener.admission_remaining.checked_sub(1) else {
+    /// Long-lived production loop owning one listener for its whole lifetime.
+    ///
+    /// Sequentially serves connections until cancellation or a terminal
+    /// failure. The same private borrowed attempt as [`Self::serve_one`] is
+    /// reused without rebinding, cloning the endpoint, detaching a task, or
+    /// adding a second runtime. Cancellation is checked before each admission;
+    /// on cancellation the owned endpoint is closed and drained. An idle
+    /// [`OperationKind::Connect`] timeout with no peer is nonterminal and
+    /// continues with the same endpoint without consuming admission capacity.
+    /// A connection-local authentication failure after the accepted guard
+    /// closes the peer is nonterminal. Admission-capacity exhaustion, local
+    /// metadata/origin failure, non-timeout admission transport failure, and
+    /// non-cancellation request-stage failure are terminal service failures;
+    /// a terminal primary remains a service failure even when the best-effort
+    /// drain also fails. Cancellation with a drain failure is the
+    /// cleanup-only error.
+    ///
+    /// Preserves lifetime admission counting and per-connection request
+    /// capacity exactly; idle timeouts neither consume nor refund an
+    /// admission — only a proven accepted admission consumes capacity via
+    /// checked arithmetic. Sequential dispatch, capability rotation,
+    /// accepted-connection guards, endpoint close code/reason, and the
+    /// honest synchronous-`Drop` versus awaited-`drain` documentation are
+    /// preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServeUntilCancelError`] on terminal service or cleanup-only
+    /// drain failure; `Ok(())` means cancellation with successful drain.
+    pub async fn serve_until_cancel(
+        self,
+        handler: &RequestHandler,
+        cancel: &CancelHandle,
+    ) -> Result<(), ServeUntilCancelError> {
+        let mut listener = self;
+        loop {
+            if cancel.is_cancelled() {
+                return match listener.drain().await {
+                    Ok(()) => Ok(()),
+                    Err(drain) => Err(ServeUntilCancelError::drain(drain)),
+                };
+            }
+
+            match listener.serve_attempt(handler, cancel).await {
+                Ok(report) => match report.termination {
+                    RequestTermination::BudgetReached => continue,
+                    RequestTermination::Failed { source } => {
+                        if matches!(source, DeadlineError::Cancelled { .. }) {
+                            return match listener.drain().await {
+                                Ok(()) => Ok(()),
+                                Err(drain) => Err(ServeUntilCancelError::drain(drain)),
+                            };
+                        }
+                        let cause = ServiceCause::Request(source);
+                        return match listener.drain().await {
+                            Ok(()) => Err(ServeUntilCancelError::service(cause, None)),
+                            Err(drain) => Err(ServeUntilCancelError::service(cause, Some(drain))),
+                        };
+                    }
+                },
+                Err(error) => {
+                    let is_cancelled = match &error {
+                        ListenerError::Admission { source } => {
+                            matches!(source, DeadlineError::Cancelled { .. })
+                        }
+                        ListenerError::Authentication { source } => {
+                            matches!(source, DeadlineError::Cancelled { .. })
+                        }
+                        _ => false,
+                    };
+                    if is_cancelled {
+                        return match listener.drain().await {
+                            Ok(()) => Ok(()),
+                            Err(drain) => Err(ServeUntilCancelError::drain(drain)),
+                        };
+                    }
+
+                    let is_idle_timeout = match &error {
+                        ListenerError::Admission { source } => matches!(
+                            source,
+                            DeadlineError::Timeout {
+                                operation: OperationKind::Connect,
+                                ..
+                            }
+                        ),
+                        _ => false,
+                    };
+                    if is_idle_timeout {
+                        continue;
+                    }
+
+                    if matches!(&error, ListenerError::Authentication { .. }) {
+                        continue;
+                    }
+
+                    let cause = ServiceCause::Listener(error);
+                    return match listener.drain().await {
+                        Ok(()) => Err(ServeUntilCancelError::service(cause, None)),
+                        Err(drain) => Err(ServeUntilCancelError::service(cause, Some(drain))),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Single-admission borrowed attempt reused by both `serve_one` and
+    /// `serve_until_cancel`.
+    ///
+    /// Checks capacity without consuming it before touching the endpoint;
+    /// only a proven accepted connection consumes capacity via checked
+    /// arithmetic. One deadline-bounded accept-and-TLS operation, guard
+    /// before metadata, authentication seam, and sequential dispatches up to
+    /// the per-connection capacity follow. Idle timeouts therefore neither
+    /// consume nor refund admission capacity.
+    async fn serve_attempt(
+        &mut self,
+        handler: &RequestHandler,
+        cancel: &CancelHandle,
+    ) -> Result<ServiceReport, ListenerError> {
+        if self.admission_remaining == 0 {
             return Err(ListenerError::AdmissionCapacityExhausted);
-        };
-        listener.admission_remaining = reserved;
+        }
 
-        // One bounded decision covers waiting for a peer and completing
-        // its QUIC/TLS handshake; there is no unbounded gap between them.
         let guarded = match run_with_deadline(
             OperationKind::Connect,
-            listener.limits.admission,
+            self.limits.admission,
             cancel,
-            establish(&listener.endpoint),
+            establish(&self.endpoint),
         )
         .await
         {
-            Ok(connection) => AcceptedGuard::armed(connection),
+            Ok(connection) => {
+                let Some(remaining) = self.admission_remaining.checked_sub(1) else {
+                    let guard = AcceptedGuard::armed(connection);
+                    drop(guard);
+                    return Err(ListenerError::AdmissionCapacityExhausted);
+                };
+                self.admission_remaining = remaining;
+                AcceptedGuard::armed(connection)
+            }
             Err(source) => return Err(ListenerError::Admission { source }),
         };
 
-        // Guard first, fallible metadata second: a metadata failure drops
-        // the guard and closes the actual peer connection synchronously.
-        let metadata = welcome_metadata(listener.origin.as_ref())
+        let metadata = welcome_metadata(self.origin.as_ref())
             .map_err(|source| ListenerError::Metadata { source })?;
 
-        // Transfer into the accepted seam, whose own synchronous guard
-        // takes over eager closure for the whole authentication stage.
         let connection = guarded.release();
         let connection_limits = ConnectionLimits {
-            handshake: listener.limits.handshake,
-            next_request: listener.limits.next_request,
+            handshake: self.limits.handshake,
+            next_request: self.limits.next_request,
         };
         let mut connection = match ForgeConnection::authenticate(
             connection,
-            &mut listener.authority,
+            &mut self.authority,
             handler,
             metadata,
             connection_limits,
@@ -396,16 +672,14 @@ impl ForgeListener {
             Err(source) => return Err(ListenerError::Authentication { source }),
         };
 
-        // Sequential consuming dispatches up to the explicit capacity.
-        let capacity = listener.requests_per_connection.get();
+        let capacity = self.requests_per_connection.get();
         let mut completed_requests: u32 = 0;
         let termination = loop {
             if completed_requests >= capacity {
-                // Budget reached: explicitly close the ready owner here.
                 drop(connection);
                 break RequestTermination::BudgetReached;
             }
-            let stamp = frame_stamp(listener.origin.as_ref())
+            let stamp = frame_stamp(self.origin.as_ref())
                 .map_err(|source| ListenerError::Metadata { source })?;
             match connection.respond_next(stamp).await {
                 Ok(returned) => {
@@ -416,16 +690,10 @@ impl ForgeListener {
             }
         };
 
-        // A failed consuming call already consumed and closed its
-        // connection; the budget path dropped the ready owner above.
-        // Either way the lease is released before custody returns.
-        Ok((
-            listener,
-            ServiceReport {
-                completed_requests,
-                termination,
-            },
-        ))
+        Ok(ServiceReport {
+            completed_requests,
+            termination,
+        })
     }
 
     /// Consuming teardown: closes every connection and waits until the owned
