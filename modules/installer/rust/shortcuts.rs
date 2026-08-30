@@ -64,17 +64,18 @@ impl ShortcutTarget {
 /// Resolves the launchers this installation owns: the desktop shortcut and the
 /// Start Menu entry, both invoking `ae open`.
 ///
-/// The icon is taken from the active release's editor executable. That path
-/// changes with every update, which is exactly why the shortcuts must be
-/// rewritten on activation instead of created once at first install — a
-/// shortcut left pointing at a removed version keeps a cached icon until
-/// Windows re-reads it, then falls back to a blank document.
+/// The icon is taken from the active release's native Editor executable at
+/// `release/bin/editor.exe`. That path changes with every update, which is
+/// exactly why the shortcuts must be rewritten on activation instead of
+/// created once at first install — a shortcut left pointing at a removed
+/// version keeps a cached icon until Windows re-reads it, then falls back to a
+/// blank document.
 pub fn targets(platform: &Platform, stable_ae: &Path, release: &Path) -> Vec<ShortcutTarget> {
     if platform.os != "windows" {
         return Vec::new();
     }
 
-    let icon = release.join("editor").join("Artisan Editor.exe");
+    let icon = release.join("bin").join("editor.exe");
     [desktop_directory(), start_menu_directory()]
         .into_iter()
         .flatten()
@@ -299,7 +300,7 @@ mod tests {
             link: PathBuf::from(r"C:\Users\test\Desktop\Artisan Editor.lnk"),
             executable: PathBuf::from(r"C:\Artisan\bin\ae.exe"),
             arguments: "open".to_owned(),
-            icon: PathBuf::from(r"C:\Artisan\versions\0.2.14\editor\Artisan Editor.exe"),
+            icon: PathBuf::from(r"C:\Artisan\versions\0.2.14\bin\editor.exe"),
             app_user_model_id: APP_USER_MODEL_ID.to_owned(),
             toast_activator_clsid: TOAST_ACTIVATOR_CLSID.to_owned(),
         }
@@ -311,8 +312,19 @@ mod tests {
     fn the_fingerprint_follows_the_versioned_icon() {
         let current = target();
         let mut stale = target();
-        stale.icon = PathBuf::from(r"C:\Artisan\versions\0.2.11\editor\Artisan Editor.exe");
+        stale.icon = PathBuf::from(r"C:\Artisan\versions\0.2.11\bin\editor.exe");
         assert_ne!(current.fingerprint(), stale.fingerprint());
+    }
+
+    #[test]
+    fn shortcut_launches_stable_ae_open_with_the_native_editor_icon() {
+        let target = target();
+        assert_eq!(target.executable, PathBuf::from(r"C:\Artisan\bin\ae.exe"));
+        assert_eq!(target.arguments, "open");
+        assert_eq!(
+            target.icon,
+            PathBuf::from(r"C:\Artisan\versions\0.2.14\bin\editor.exe")
+        );
     }
 
     #[test]
