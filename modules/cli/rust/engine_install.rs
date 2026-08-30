@@ -368,15 +368,16 @@ impl InstallLock {
 }
 
 fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallError> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if is_reparse_or_symlink(&metadata) || !metadata.is_file() {
-            return Err(NativeOpenCode2InstallError::LockUnavailable);
-        }
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (is_reparse_or_symlink(&metadata) || !metadata.is_file())
+    {
+        return Err(NativeOpenCode2InstallError::LockUnavailable);
     }
     let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(path)
         .map_err(|_| NativeOpenCode2InstallError::LockUnavailable)?;
     let metadata = file
@@ -435,7 +436,7 @@ fn file_identity(file: &File) -> Result<FileIdentity, NativeOpenCode2InstallErro
         if volume == 0 && index == 0 {
             return Err(NativeOpenCode2InstallError::LockUnavailable);
         }
-        return Ok(FileIdentity { volume, index });
+        Ok(FileIdentity { volume, index })
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -775,8 +776,7 @@ fn ensure_gzip_end<R: BufRead>(mut gzip: GzDecoder<R>) -> Result<(), NativeOpenC
     let mut byte = [0_u8; 1];
     match gzip.read(&mut byte) {
         Ok(0) => {}
-        Ok(_) => return Err(NativeOpenCode2InstallError::ArchiveInvalid),
-        Err(_) => return Err(NativeOpenCode2InstallError::ArchiveInvalid),
+        Ok(_) | Err(_) => return Err(NativeOpenCode2InstallError::ArchiveInvalid),
     }
     let mut buffered = gzip.into_inner();
     if !buffered
@@ -845,7 +845,7 @@ fn parse_tar<R: Read>(
             copy_exact(reader, &mut output, size)?;
             output
                 .flush()
-                .and_then(|_| output.sync_all())
+                .and_then(|()| output.sync_all())
                 .map_err(|_| NativeOpenCode2InstallError::ArchiveTargetInvalid)?;
             target_found = true;
         } else {
@@ -1010,9 +1010,7 @@ impl ArchiveNames {
 }
 
 fn fold_name(name: &str) -> String {
-    name.chars()
-        .flat_map(|character| character.to_lowercase())
-        .collect()
+    name.chars().flat_map(char::to_lowercase).collect()
 }
 
 fn copy_exact<R: Read, W: Write>(
@@ -1022,7 +1020,8 @@ fn copy_exact<R: Read, W: Write>(
 ) -> Result<(), NativeOpenCode2InstallError> {
     let mut buffer = vec![0_u8; 64 * 1024];
     while remaining > 0 {
-        let length = remaining.min(buffer.len() as u64) as usize;
+        let length = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| NativeOpenCode2InstallError::ArchiveInvalid)?;
         let read = reader
             .read(&mut buffer[..length])
             .map_err(|_| NativeOpenCode2InstallError::ArchiveInvalid)?;
@@ -1043,7 +1042,8 @@ fn discard_exact<R: Read>(
 ) -> Result<(), NativeOpenCode2InstallError> {
     let mut buffer = vec![0_u8; 64 * 1024];
     while remaining > 0 {
-        let length = remaining.min(buffer.len() as u64) as usize;
+        let length = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| NativeOpenCode2InstallError::ArchiveInvalid)?;
         let read = reader
             .read(&mut buffer[..length])
             .map_err(|_| NativeOpenCode2InstallError::ArchiveInvalid)?;
@@ -1060,7 +1060,8 @@ fn discard_padding<R: Read>(reader: &mut R, size: u64) -> Result<(), NativeOpenC
     let mut buffer = [0_u8; 512];
     let mut remaining = padding;
     while remaining > 0 {
-        let length = remaining as usize;
+        let length =
+            usize::try_from(remaining).map_err(|_| NativeOpenCode2InstallError::ArchiveInvalid)?;
         reader
             .read_exact(&mut buffer[..length])
             .map_err(|_| NativeOpenCode2InstallError::ArchiveInvalid)?;
@@ -1077,10 +1078,10 @@ fn verify_executable(
     spec: &NativeOpenCode2InstallSpec,
 ) -> Result<NativeFileId, NativeOpenCode2InstallError> {
     instance::verify_native_file(path, spec.executable_size_bytes(), spec.executable_sha256())
-        .map_err(map_executable_error)
+        .map_err(|error| map_executable_error(&error))
 }
 
-fn map_executable_error(error: NativeInstanceError) -> NativeOpenCode2InstallError {
+fn map_executable_error(error: &NativeInstanceError) -> NativeOpenCode2InstallError {
     match error {
         NativeInstanceError::NotFound
         | NativeInstanceError::TooLarge
@@ -1398,11 +1399,11 @@ mod tests {
     #[test]
     fn executable_size_and_hash_mismatches_map_to_one_path_free_error() {
         assert_eq!(
-            map_executable_error(NativeInstanceError::FileSizeMismatch),
+            map_executable_error(&NativeInstanceError::FileSizeMismatch),
             NativeOpenCode2InstallError::ExecutableInvalid
         );
         assert_eq!(
-            map_executable_error(NativeInstanceError::FileHashMismatch),
+            map_executable_error(&NativeInstanceError::FileHashMismatch),
             NativeOpenCode2InstallError::ExecutableInvalid
         );
     }

@@ -150,7 +150,7 @@ pub enum EngineCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Install the certified native OpenCode2 engine.
+    /// Install the certified native `OpenCode2` engine.
     Install,
 }
 
