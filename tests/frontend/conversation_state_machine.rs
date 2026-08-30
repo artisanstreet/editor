@@ -453,7 +453,7 @@ fn simultaneous_steering_views_keep_their_own_anchors_generations_and_effects() 
             command_id,
             generation: 1,
             effect: SteeringEffect::WatchAcknowledgement { anchor, .. },
-        } if command.as_str() == "cmd_a" && anchor.as_str() == USER_A
+        } if command_id.as_str() == "cmd_a" && anchor.as_str() == USER_A
     )));
     assert!(effects.iter().any(|effect| matches!(
         effect,
@@ -461,7 +461,7 @@ fn simultaneous_steering_views_keep_their_own_anchors_generations_and_effects() 
             command_id,
             generation: 7,
             effect: SteeringEffect::WatchAcknowledgement { anchor, .. },
-        } if command.as_str() == "cmd_b" && anchor.as_str() == USER_B
+        } if command_id.as_str() == "cmd_b" && anchor.as_str() == USER_B
     )));
 
     let view = controller.view();
