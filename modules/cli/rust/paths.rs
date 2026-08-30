@@ -21,6 +21,10 @@ impl Layout {
             root,
         })
     }
+
+    pub fn native_instance_path(&self) -> PathBuf {
+        crate::instance::NativeInstanceConfig::native_path(&self.root)
+    }
 }
 
 fn platform_root() -> Result<PathBuf> {
@@ -93,6 +97,19 @@ mod tests {
             root: root.clone(),
         };
         assert!(layout.manifest.starts_with(&root));
+    }
+
+    #[test]
+    fn layout_resolves_the_native_instance_through_the_v2_contract() {
+        let root = PathBuf::from("Artisan Street");
+        let layout = Layout {
+            manifest: root.join("installation.json"),
+            root: root.clone(),
+        };
+        assert_eq!(
+            layout.native_instance_path(),
+            crate::instance::NativeInstanceConfig::native_path(&root)
+        );
     }
 
     #[cfg(debug_assertions)]

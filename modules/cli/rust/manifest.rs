@@ -16,11 +16,7 @@ impl InstallationManifest {
     pub fn load(path: &Path) -> Result<Self> {
         if !path.is_file() {
             return Err(CliError::Installation(format!(
-                "no installation manifest at {}; this Artisan home has no installation. \
-                 The repo development Forge runs without one (`pnpm run dev:forge`, then \
-                 `pnpm run dev:open` or `dev:pair`); to exercise the installed flow in \
-                 development, create the sandboxed installation with \
-                 `pnpm run dev:ae-installer -- install`",
+                "no installation manifest at {}; this Artisan home has no installation",
                 path.display()
             )));
         }
@@ -43,35 +39,35 @@ impl InstallationManifest {
     }
 
     pub fn forge_executable(&self) -> PathBuf {
-        let directory = self.version_root().join("forge");
+        let directory = self.version_root().join("bin");
         #[cfg(target_os = "windows")]
-        return directory.join("Artisan Forge.exe");
+        return directory.join("forge.exe");
         #[cfg(not(target_os = "windows"))]
-        directory.join("artisan-forge")
-    }
-
-    pub fn broker_executable(&self) -> PathBuf {
-        let directory = self.version_root().join("forge");
-        #[cfg(target_os = "windows")]
-        return directory.join("Artisan Broker.exe");
-        #[cfg(not(target_os = "windows"))]
-        directory.join("artisan-broker")
+        directory.join("forge")
     }
 
     pub fn editor_executable(&self) -> PathBuf {
-        let directory = self.version_root().join("editor");
+        let directory = self.version_root().join("bin");
         #[cfg(target_os = "windows")]
-        return directory.join("Artisan Editor.exe");
+        return directory.join("editor.exe");
         #[cfg(not(target_os = "windows"))]
-        directory.join("artisan-editor")
+        directory.join("editor")
     }
 
     pub fn installer_executable(&self) -> PathBuf {
         let directory = self.version_root().join("bin");
         #[cfg(target_os = "windows")]
-        return directory.join("ae-installer.exe");
+        return directory.join("installer.exe");
         #[cfg(not(target_os = "windows"))]
-        directory.join("ae-installer")
+        directory.join("installer")
+    }
+
+    pub fn ae_executable(&self) -> PathBuf {
+        let directory = self.version_root().join("bin");
+        #[cfg(target_os = "windows")]
+        return directory.join("ae.exe");
+        #[cfg(not(target_os = "windows"))]
+        directory.join("ae")
     }
 }
 
@@ -80,28 +76,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_home_without_an_installation_names_the_gap_and_both_development_paths() {
+    fn a_home_without_an_installation_names_the_missing_installation() {
         let missing = std::env::temp_dir()
             .join(format!("artisan-cli-manifest-test-{}", std::process::id()))
             .join("installation.json");
         let error = InstallationManifest::load(&missing).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("no installation manifest"), "{message}");
-        assert!(message.contains("pnpm run dev:forge"), "{message}");
-        assert!(message.contains("dev:ae-installer -- install"), "{message}");
     }
 
     #[test]
-    fn broker_lives_beside_the_versioned_forge() {
+    fn all_binaries_resolve_to_the_versioned_bin_directory() {
         let manifest = InstallationManifest {
             activation_state: "active".into(),
             active_version: Some("1.2.3".into()),
-            install_root: PathBuf::from("artisan"),
+            install_root: if cfg!(windows) {
+                PathBuf::from(r"C:\Users\Ada\Artisan Street")
+            } else {
+                PathBuf::from("/opt/Artisan Street")
+            },
             permanent_ae_path: None,
         };
+
+        let bin = manifest.version_root().join("bin");
+        #[cfg(windows)]
+        let expected = [
+            bin.join("ae.exe"),
+            bin.join("installer.exe"),
+            bin.join("editor.exe"),
+            bin.join("forge.exe"),
+        ];
+        #[cfg(not(windows))]
+        let expected = [
+            bin.join("ae"),
+            bin.join("installer"),
+            bin.join("editor"),
+            bin.join("forge"),
+        ];
+
         assert_eq!(
-            manifest.broker_executable().parent(),
-            manifest.forge_executable().parent()
+            [
+                manifest.ae_executable(),
+                manifest.installer_executable(),
+                manifest.editor_executable(),
+                manifest.forge_executable(),
+            ],
+            expected
         );
+        assert!(manifest.forge_executable().starts_with(&bin));
     }
 }
