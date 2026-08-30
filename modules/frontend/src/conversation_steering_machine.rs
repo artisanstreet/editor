@@ -750,11 +750,7 @@ impl SteeringInner {
     }
 
     #[state(superstate = "settled")]
-    fn acknowledged(
-        &mut self,
-        event: &SteeringEvent,
-        _context: &mut VecDeque<SteeringEffect>,
-    ) -> Outcome<State> {
+    fn acknowledged(&mut self, event: &SteeringEvent) -> Outcome<State> {
         match event {
             SteeringEvent::EngineAcknowledged { at_ms, .. } => {
                 self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
@@ -775,11 +771,7 @@ impl SteeringInner {
     }
 
     #[state(superstate = "settled")]
-    fn failed(
-        &mut self,
-        event: &SteeringEvent,
-        _context: &mut VecDeque<SteeringEffect>,
-    ) -> Outcome<State> {
+    fn failed(&mut self, event: &SteeringEvent) -> Outcome<State> {
         match event {
             SteeringEvent::DispatchFailed { at_ms, .. } => {
                 self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
@@ -798,11 +790,7 @@ impl SteeringInner {
     }
 
     #[state(superstate = "settled")]
-    fn cancelled(
-        &mut self,
-        event: &SteeringEvent,
-        _context: &mut VecDeque<SteeringEffect>,
-    ) -> Outcome<State> {
+    fn cancelled(&mut self, event: &SteeringEvent) -> Outcome<State> {
         match event {
             SteeringEvent::Cancelled { at_ms, .. } => {
                 self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
@@ -821,20 +809,12 @@ impl SteeringInner {
     }
 
     #[superstate]
-    fn active_submission(
-        &mut self,
-        _event: &SteeringEvent,
-        _context: &mut VecDeque<SteeringEffect>,
-    ) -> Outcome<State> {
+    fn active_submission(&mut self) -> Outcome<State> {
         Handled
     }
 
     #[superstate]
-    fn settled(
-        &mut self,
-        _event: &SteeringEvent,
-        _context: &mut VecDeque<SteeringEffect>,
-    ) -> Outcome<State> {
+    fn settled(&mut self) -> Outcome<State> {
         Handled
     }
 }
