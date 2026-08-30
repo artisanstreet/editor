@@ -27,6 +27,21 @@ rust_test(
     visibility = ["//:__pkg__"],
 )
 
+# Closed v2 naming and path-safety contract for the approved versioned
+# installation layout. This is a pure source-only proof: binary convergence,
+# payload assembly, signing, installation, and launch behavior remain later
+# packaging packets.
+rust_test(
+    name = "versioned_layout_test",
+    srcs = ["versioned_layout.rs"],
+    compile_data = ["//packaging/portable:versioned_layout.txt"],
+    crate_name = "versioned_layout_test",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
 # Deterministic archive proof: validates the stored ZIP produced by
 # //packaging/portable:portable_archive contains exactly the two Bazel-built
 # binaries under contract-derived names with deterministic metadata.
@@ -64,6 +79,7 @@ rust_clippy(
     deps = [
         ":portable_archive_test",
         ":portable_layout_test",
+        ":versioned_layout_test",
     ],
 )
 
@@ -73,6 +89,7 @@ rustfmt_test(
     targets = [
         ":portable_archive_test",
         ":portable_layout_test",
+        ":versioned_layout_test",
     ],
     transitive = True,
 )
@@ -82,5 +99,6 @@ test_suite(
     tests = [
         ":portable_archive_test",
         ":portable_layout_test",
+        ":versioned_layout_test",
     ],
 )
