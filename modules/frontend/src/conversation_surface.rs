@@ -248,8 +248,7 @@ fn work_group_selector_id(turn_id: &TurnId, block: &WorkGroupBlock) -> String {
         .items
         .first()
         .map(work_item_id)
-        .map(|id| id.as_str().to_owned())
-        .unwrap_or_else(|| turn_id.as_str().to_owned())
+        .map_or_else(|| turn_id.as_str().to_owned(), |id| id.as_str().to_owned())
 }
 
 fn work_item_id(item: &WorkItem) -> &SceneId {
@@ -340,6 +339,21 @@ pub struct ConversationSurface {
     transcript_focus: FocusHandle,
     disclosure_focus: FocusHandle,
     actions: Vec<ConversationSurfaceAction>,
+}
+
+struct TextBlockRender<'a> {
+    id: &'a SceneId,
+    disclosure: Option<SceneDisclosure>,
+    selector: String,
+    title: &'static str,
+    body: &'a str,
+}
+
+struct ControlledCardOptions {
+    id: SceneId,
+    disclosure: Option<SceneDisclosure>,
+    selector: String,
+    style: CardStyle,
 }
 
 impl ConversationSurface {
@@ -450,8 +464,8 @@ impl ConversationSurface {
     fn render_turn(
         &self,
         turn: &TurnScene,
-        entity: Entity<Self>,
-        theme: ArtisanTheme,
+        entity: &Entity<Self>,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         let selector = turn_selector(&turn.turn_id);
         let mut turn_element = div()
@@ -475,7 +489,7 @@ impl ConversationSurface {
         turn_id: &TurnId,
         block: &TurnBlock,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> Option<AnyElement> {
         let selector = block_selector(turn_id, block);
         match block {
@@ -511,9 +525,9 @@ impl ConversationSurface {
             TurnBlock::NativeFact(block) => {
                 Some(self.render_native_fact(block, selector, entity, theme))
             }
-            TurnBlock::SteeringLabel(block) => Some(self.render_steering(block, selector, theme)),
-            TurnBlock::TurnStatus(block) => self.render_status(block, selector, theme),
-            TurnBlock::TurnFooter(block) => Some(self.render_footer(block, selector, theme)),
+            TurnBlock::SteeringLabel(block) => Some(Self::render_steering(block, selector, theme)),
+            TurnBlock::TurnStatus(block) => Self::render_status(block, selector, theme),
+            TurnBlock::TurnFooter(block) => Some(Self::render_footer(block, selector, theme)),
         }
     }
 
@@ -522,14 +536,16 @@ impl ConversationSurface {
         block: &UserMessageBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         self.render_text_block(
-            &block.id,
-            block.disclosure,
-            selector,
-            "User message",
-            &block.body,
+            TextBlockRender {
+                id: &block.id,
+                disclosure: block.disclosure,
+                selector,
+                title: "User message",
+                body: &block.body,
+            },
             entity,
             theme,
         )
@@ -540,14 +556,16 @@ impl ConversationSurface {
         block: &crate::conversation_scene::AssistantMessageBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         self.render_text_block(
-            &block.id,
-            block.disclosure,
-            selector,
-            "Assistant message",
-            &block.body,
+            TextBlockRender {
+                id: &block.id,
+                disclosure: block.disclosure,
+                selector,
+                title: "Assistant message",
+                body: &block.body,
+            },
             entity,
             theme,
         )
@@ -555,22 +573,27 @@ impl ConversationSurface {
 
     fn render_text_block(
         &self,
-        id: &SceneId,
-        disclosure: Option<SceneDisclosure>,
-        selector: String,
-        title: &'static str,
-        body: &str,
+        params: TextBlockRender<'_>,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
-        let style = CardStyle::resolve(theme);
-        self.render_controlled_card(
-            id.clone(),
+        let TextBlockRender {
+            id,
             disclosure,
             selector,
+            title,
+            body,
+        } = params;
+        let style = CardStyle::resolve(*theme);
+        self.render_controlled_card(
+            ControlledCardOptions {
+                id: id.clone(),
+                disclosure,
+                selector,
+                style,
+            },
             compact_card_content(style).child(card_heading(title, theme)),
             compact_card_content(style).child(body_text(body, theme)),
-            style,
             entity,
         )
     }
@@ -581,9 +604,9 @@ impl ConversationSurface {
         block: &WorkGroupBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
-        let style = CardStyle::resolve(theme);
+        let style = CardStyle::resolve(*theme);
         let group_id = block
             .items
             .first()
@@ -595,8 +618,7 @@ impl ConversationSurface {
             });
         let title = block
             .label
-            .map(format_work_group_label)
-            .unwrap_or_else(|| "Work".to_owned());
+            .map_or_else(|| "Work".to_owned(), format_work_group_label);
 
         let mut items = div()
             .w_full()
@@ -604,26 +626,23 @@ impl ConversationSurface {
             .flex_col()
             .gap(theme.spacing.steps(3.0));
         for item in &block.items {
-            items = items.child(self.render_work_item(item, &selector, theme));
+            items = items.child(Self::render_work_item(item, &selector, theme));
         }
 
         self.render_controlled_card(
-            group_id,
-            block.disclosure,
-            selector,
+            ControlledCardOptions {
+                id: group_id,
+                disclosure: block.disclosure,
+                selector,
+                style,
+            },
             compact_card_content(style).child(card_heading(title, theme)),
             compact_card_content(style).child(items),
-            style,
             entity,
         )
     }
 
-    fn render_work_item(
-        &self,
-        item: &WorkItem,
-        group_selector: &str,
-        theme: ArtisanTheme,
-    ) -> AnyElement {
+    fn render_work_item(item: &WorkItem, group_selector: &str, theme: &ArtisanTheme) -> AnyElement {
         let (id, title, text) = match item {
             WorkItem::Reasoning { id, body, .. } => (id, "Reasoning", body.as_str()),
             WorkItem::Activity { id, body, .. } => (id, "Activity", body.as_str()),
@@ -648,14 +667,16 @@ impl ConversationSurface {
         block: &CompactionBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         self.render_text_block(
-            &block.id,
-            block.disclosure,
-            selector,
-            "Compaction",
-            &block.summary,
+            TextBlockRender {
+                id: &block.id,
+                disclosure: block.disclosure,
+                selector,
+                title: "Compaction",
+                body: &block.summary,
+            },
             entity,
             theme,
         )
@@ -666,9 +687,9 @@ impl ConversationSurface {
         block: &ChangeSetBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
-        let style = CardStyle::resolve(theme);
+        let style = CardStyle::resolve(*theme);
         let header = card_heading(format!("Changed files ({})", block.files.len()), theme);
         let mut rows = div()
             .w_full()
@@ -685,12 +706,14 @@ impl ConversationSurface {
             }
         }
         self.render_controlled_card(
-            block.id.clone(),
-            block.disclosure,
-            selector,
+            ControlledCardOptions {
+                id: block.id.clone(),
+                disclosure: block.disclosure,
+                selector,
+                style,
+            },
             compact_card_content(style).child(header),
             compact_card_content(style).child(rows),
-            style,
             entity,
         )
     }
@@ -700,9 +723,9 @@ impl ConversationSurface {
         block: &PlanBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
-        let style = CardStyle::resolve(theme);
+        let style = CardStyle::resolve(*theme);
         let mut entries = div()
             .w_full()
             .flex()
@@ -728,12 +751,14 @@ impl ConversationSurface {
             .child(body_text(&block.title, theme))
             .child(entries);
         self.render_controlled_card(
-            block.id.clone(),
-            block.disclosure,
-            selector,
+            ControlledCardOptions {
+                id: block.id.clone(),
+                disclosure: block.disclosure,
+                selector,
+                style,
+            },
             compact_card_content(style).child(card_heading("Plan", theme)),
             compact_card_content(style).child(content),
-            style,
             entity,
         )
     }
@@ -743,14 +768,16 @@ impl ConversationSurface {
         block: &crate::conversation_scene::ApprovalBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         self.render_text_block(
-            &block.id,
-            block.disclosure,
-            selector,
-            "Approval requested",
-            &block.prompt,
+            TextBlockRender {
+                id: &block.id,
+                disclosure: block.disclosure,
+                selector,
+                title: "Approval requested",
+                body: &block.prompt,
+            },
             entity,
             theme,
         )
@@ -761,14 +788,16 @@ impl ConversationSurface {
         block: &QuestionBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         self.render_text_block(
-            &block.id,
-            block.disclosure,
-            selector,
-            "Question",
-            &block.prompt,
+            TextBlockRender {
+                id: &block.id,
+                disclosure: block.disclosure,
+                selector,
+                title: "Question",
+                body: &block.prompt,
+            },
             entity,
             theme,
         )
@@ -779,19 +808,22 @@ impl ConversationSurface {
         block: &ErrorBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
-        let alert = Alert::from_theme(theme, AlertVariant::Destructive)
+        let style = CardStyle::resolve(*theme);
+        let alert = Alert::from_theme(*theme, AlertVariant::Destructive)
             .title("Error")
             .description(block.message.clone())
             .debug_selector(format!("{selector}-alert"));
         self.render_controlled_card(
-            block.id.clone(),
-            block.disclosure,
-            selector,
-            compact_card_content(CardStyle::resolve(theme)).child(card_heading("Error", theme)),
+            ControlledCardOptions {
+                id: block.id.clone(),
+                disclosure: block.disclosure,
+                selector,
+                style,
+            },
+            compact_card_content(style).child(card_heading("Error", theme)),
             alert,
-            CardStyle::resolve(theme),
             entity,
         )
     }
@@ -801,20 +833,22 @@ impl ConversationSurface {
         block: &UsageInterruptionBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
-        let alert = Alert::from_theme(theme, AlertVariant::Default)
+        let style = CardStyle::resolve(*theme);
+        let alert = Alert::from_theme(*theme, AlertVariant::Default)
             .title("Usage interruption")
             .description(block.detail.clone())
             .debug_selector(format!("{selector}-alert"));
         self.render_controlled_card(
-            block.id.clone(),
-            block.disclosure,
-            selector,
-            compact_card_content(CardStyle::resolve(theme))
-                .child(card_heading("Usage interruption", theme)),
+            ControlledCardOptions {
+                id: block.id.clone(),
+                disclosure: block.disclosure,
+                selector,
+                style,
+            },
+            compact_card_content(style).child(card_heading("Usage interruption", theme)),
             alert,
-            CardStyle::resolve(theme),
             entity,
         )
     }
@@ -824,15 +858,17 @@ impl ConversationSurface {
         block: &ModelTransitionBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         let text = format!("{} → {}", block.from_model, block.to_model);
         self.render_text_block(
-            &block.id,
-            block.disclosure,
-            selector,
-            "Model transition",
-            &text,
+            TextBlockRender {
+                id: &block.id,
+                disclosure: block.disclosure,
+                selector,
+                title: "Model transition",
+                body: &text,
+            },
             entity,
             theme,
         )
@@ -843,24 +879,25 @@ impl ConversationSurface {
         block: &NativeFactBlock,
         selector: String,
         entity: Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         self.render_text_block(
-            &block.id,
-            block.disclosure,
-            selector,
-            "Native fact",
-            &block.text,
+            TextBlockRender {
+                id: &block.id,
+                disclosure: block.disclosure,
+                selector,
+                title: "Native fact",
+                body: &block.text,
+            },
             entity,
             theme,
         )
     }
 
     fn render_steering(
-        &self,
         block: &SteeringBlock,
         selector: String,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         let mut label = div()
             .w_full()
@@ -874,10 +911,9 @@ impl ConversationSurface {
     }
 
     fn render_status(
-        &self,
         block: &crate::conversation_scene::TurnStatusBlock,
         selector: String,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> Option<AnyElement> {
         let copy = turn_status_copy(block.narration)?;
         let mut status = div()
@@ -891,10 +927,9 @@ impl ConversationSurface {
     }
 
     fn render_footer(
-        &self,
         _block: &TurnFooterBlock,
         selector: String,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> AnyElement {
         let mut footer = div()
             .w_full()
@@ -907,14 +942,17 @@ impl ConversationSurface {
 
     fn render_controlled_card(
         &self,
-        id: SceneId,
-        disclosure: Option<SceneDisclosure>,
-        selector: String,
+        options: ControlledCardOptions,
         trigger: impl IntoElement,
         content: impl IntoElement,
-        style: CardStyle,
         entity: Entity<Self>,
     ) -> AnyElement {
+        let ControlledCardOptions {
+            id,
+            disclosure,
+            selector,
+            style,
+        } = options;
         let disabled = disclosure.is_none();
         let open = !matches!(disclosure, Some(SceneDisclosure::Closed));
         let disclosure_selector = format!("{selector}-disclosure");
@@ -936,7 +974,7 @@ impl ConversationSurface {
                     id: action_id.clone(),
                     requested_open,
                 };
-                let _ = entity.update(app, |surface, cx| {
+                entity.update(app, |surface, cx| {
                     if surface.enqueue_action(action) {
                         cx.notify();
                     }
@@ -960,7 +998,7 @@ impl Render for ConversationSurface {
             .flex_col()
             .gap(theme.spacing.steps(4.0));
         for turn in self.scene.turn_scenes() {
-            transcript = transcript.child(self.render_turn(turn, entity.clone(), theme));
+            transcript = transcript.child(self.render_turn(turn, &entity, &theme));
         }
 
         // Deferred change cards intentionally have no transcript position in
@@ -976,7 +1014,7 @@ impl Render for ConversationSurface {
     }
 }
 
-fn card_heading(title: impl Into<SharedString>, theme: ArtisanTheme) -> Div {
+fn card_heading(title: impl Into<SharedString>, theme: &ArtisanTheme) -> Div {
     div()
         .w_full()
         .min_w_0()
@@ -985,7 +1023,7 @@ fn card_heading(title: impl Into<SharedString>, theme: ArtisanTheme) -> Div {
         .child(title.into())
 }
 
-fn body_text(text: &str, theme: ArtisanTheme) -> Div {
+fn body_text(text: &str, theme: &ArtisanTheme) -> Div {
     div()
         .w_full()
         .min_w_0()
@@ -999,7 +1037,7 @@ fn changed_file_row(
     card_id: &SceneId,
     index: usize,
     file: &SceneFileChange,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
 ) -> AnyElement {
     let selector = changed_file_selector(card_id, index);
     let mut row = div()
@@ -1012,14 +1050,14 @@ fn changed_file_row(
     row = row.debug_selector(move || selector.clone());
     row = row
         .child(outline_badge(
-            BadgeStyle::resolve(theme),
+            BadgeStyle::resolve(*theme),
             file_change_status_label(file.status),
         ))
         .child(body_text(&file.path, theme));
     row.into_any_element()
 }
 
-fn status_color(theme: ArtisanTheme, narration: TurnNarration) -> gpui::Hsla {
+fn status_color(theme: &ArtisanTheme, narration: TurnNarration) -> gpui::Hsla {
     match narration {
         TurnNarration::Failed | TurnNarration::Interrupted | TurnNarration::Cancelled => {
             theme.colors.destructive.to_paint()
