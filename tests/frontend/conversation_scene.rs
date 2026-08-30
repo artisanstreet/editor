@@ -843,7 +843,7 @@ fn scene_items_overflow_is_typed_error() {
     use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Pending)];
-    let items: Vec<SceneItem> = (0..(SCENE_MAX_ITEMS + 1))
+    let items: Vec<SceneItem> = (0..=SCENE_MAX_ITEMS)
         .map(|i| user_item(&format!("id_{i}"), "turn_a", i as u64 + 1, "hi"))
         .collect();
     let err = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect_err("overflow");
@@ -855,7 +855,7 @@ fn work_group_overflow_is_typed_error() {
     use conversation_scene::ConversationScene;
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
-    let items: Vec<SceneItem> = (0..(SCENE_MAX_WORK_GROUP_ITEMS + 1))
+    let items: Vec<SceneItem> = (0..=SCENE_MAX_WORK_GROUP_ITEMS)
         .map(|i| reasoning_item(&format!("r{i}"), "turn_a", i as u64 + 1, "r"))
         .collect();
     let err =
@@ -865,7 +865,7 @@ fn work_group_overflow_is_typed_error() {
 
 #[test]
 fn changed_files_overflow_is_typed_error() {
-    let files: Vec<SceneFileChange> = (0..(SCENE_MAX_CHANGED_FILES_PER_CARD + 1))
+    let files: Vec<SceneFileChange> = (0..=SCENE_MAX_CHANGED_FILES_PER_CARD)
         .map(|i| SceneFileChange::new(format!("file_{i}.txt"), FileChangeStatus::Modified).unwrap())
         .collect();
     let err = SceneItem::new(
@@ -903,7 +903,7 @@ fn display_path_overflow_is_typed_error() {
 
 #[test]
 fn public_payload_constructors_refuse_each_bounded_collection_and_label() {
-    let too_many_entries = (0..(SCENE_MAX_PLAN_ENTRIES + 1))
+    let too_many_entries = (0..=SCENE_MAX_PLAN_ENTRIES)
         .map(|index| index.to_string())
         .collect();
     let err = SceneItem::new(
@@ -981,7 +981,7 @@ fn build_rejects_unknown_and_duplicate_narrations_atomically() {
 fn scene_rejects_collection_bounds_before_processing_payloads() {
     use conversation_scene::ConversationScene;
 
-    let too_many_turns = (0..(SCENE_MAX_TURNS + 1))
+    let too_many_turns = (0..=SCENE_MAX_TURNS)
         .map(|index| {
             scene_turn(
                 &format!("turn_{index}"),
@@ -994,7 +994,7 @@ fn scene_rejects_collection_bounds_before_processing_payloads() {
         .expect_err("turn bound");
     assert!(matches!(err, SceneBuildError::TooManyTurns { .. }));
 
-    let too_many_narrations = (0..(SCENE_MAX_NARRATIONS + 1))
+    let too_many_narrations = (0..=SCENE_MAX_NARRATIONS)
         .map(|_| narration("turn_a", TurnNarration::Quiet))
         .collect();
     let err = ConversationScene::build(
@@ -1006,7 +1006,7 @@ fn scene_rejects_collection_bounds_before_processing_payloads() {
     .expect_err("narration bound");
     assert!(matches!(err, SceneBuildError::TooManyNarrations { .. }));
 
-    let too_many_steerings = (0..(SCENE_MAX_STEERING_PLACEMENTS + 1))
+    let too_many_steerings = (0..=SCENE_MAX_STEERING_PLACEMENTS)
         .map(|index| steering(&format!("steer_{index}"), "user_a", "label"))
         .collect();
     let err = ConversationScene::build(
