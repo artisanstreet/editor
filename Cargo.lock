@@ -454,6 +454,7 @@ dependencies = [
 name = "artisan-editor-cli"
 version = "0.0.0"
 dependencies = [
+ "artisan-domain",
  "base64",
  "clap",
  "flate2",
