@@ -1,5 +1,5 @@
 {
-  "checksum": "6002b25725eea824340f0ff13642f2197e885be37df9a6aaecfdcbf66217e2ef",
+  "checksum": "39734baf34ac39af964a5213db62c4ecac1e135dd518105939cd33d7c1471620",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2233,6 +2233,10 @@
               "target": "quinn"
             },
             {
+              "id": "rustls-pki-types 1.15.1",
+              "target": "rustls_pki_types"
+            },
+            {
               "id": "sea-orm 2.0.2",
               "target": "sea_orm"
             },
@@ -2271,10 +2275,6 @@
             {
               "id": "rcgen 0.14.9",
               "target": "rcgen"
-            },
-            {
-              "id": "rustls-pki-types 1.15.1",
-              "target": "rustls_pki_types"
             }
           ],
           "selects": {}
@@ -45781,6 +45781,7 @@
             "process",
             "rt",
             "rt-multi-thread",
+            "signal",
             "signal-hook-registry",
             "socket2",
             "sync",
