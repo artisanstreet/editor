@@ -18,7 +18,12 @@ fn request_generation(effects: &[ViewportEffect]) -> ViewportGeneration {
         .find_map(|effect| match effect {
             ViewportEffect::RequestBottomScroll { generation }
             | ViewportEffect::RequestAnchorRestore { generation, .. } => Some(*generation),
-            _ => None,
+            ViewportEffect::None
+            | ViewportEffect::ShowJumpToLatest
+            | ViewportEffect::HideJumpToLatest
+            | ViewportEffect::InvalidateRender
+            | ViewportEffect::CompletionRejected { .. }
+            | ViewportEffect::GenerationExhausted => None,
         })
         .expect("scroll request must include a generation")
 }
@@ -196,7 +201,13 @@ fn exact_item_anchor_offset_restoration_survives_extent_changes() {
                 offset,
                 generation,
             } => Some((anchor_id.clone(), *offset, *generation)),
-            _ => None,
+            ViewportEffect::None
+            | ViewportEffect::RequestBottomScroll { .. }
+            | ViewportEffect::ShowJumpToLatest
+            | ViewportEffect::HideJumpToLatest
+            | ViewportEffect::InvalidateRender
+            | ViewportEffect::CompletionRejected { .. }
+            | ViewportEffect::GenerationExhausted => None,
         })
         .expect("anchored extent must emit anchor restore");
     assert_eq!(restored_anchor, anchor);
@@ -276,6 +287,19 @@ fn jump_to_bottom_uses_generation_fenced_scrolling_settling_following() {
     assert!(effects3
         .iter()
         .any(|effect| matches!(effect, ViewportEffect::HideJumpToLatest)));
+}
+
+#[test]
+fn layout_settled_while_scrolling_does_not_finish_the_active_generation() {
+    let mut vp = ViewportController::new();
+    let generation = request_generation(&vp.handle(ViewportEvent::JumpToBottomRequested));
+
+    let effects = vp.handle(ViewportEvent::LayoutSettled);
+    assert_eq!(effects, vec![ViewportEffect::None]);
+    assert_eq!(vp.state(), ViewportState::Scrolling { generation });
+
+    vp.handle(ViewportEvent::ScrollCompleted { generation });
+    assert_eq!(vp.state(), ViewportState::Settling { generation });
 }
 
 #[test]

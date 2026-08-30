@@ -828,6 +828,10 @@ mod viewport_statig {
                     });
                     Handled
                 }
+                ViewportEvent::LayoutSettled => {
+                    context.none();
+                    Handled
+                }
                 ViewportEvent::OwnerClosed => {
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::closed())
