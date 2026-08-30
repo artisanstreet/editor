@@ -684,7 +684,7 @@ mod acl_diagnostic {
             || flags.matches("(ci)").count() > 1
             || flags
                 .chars()
-                .any(|c| c.is_ascii_alphabetic() && !matches!(c, 'f' | 'o' | 'i'))
+                .any(|c| c.is_ascii_alphabetic() && !matches!(c, 'f' | 'o' | 'i' | 'c'))
         {
             return "InvalidFlags";
         }
