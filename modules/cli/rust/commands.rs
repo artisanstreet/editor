@@ -54,13 +54,13 @@ pub enum Commands {
         custody_path: PathBuf,
         #[arg(long, required = true, value_name = "PATH")]
         readiness_path: PathBuf,
-        #[arg(long, required = true)]
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
         admission_timeout_ms: u64,
-        #[arg(long, required = true)]
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
         handshake_timeout_ms: u64,
-        #[arg(long, required = true)]
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
         request_timeout_ms: u64,
-        #[arg(long, required = true)]
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
         drain_timeout_ms: u64,
         #[arg(long, required = true, value_parser = parse_nonzero_u32)]
         admission_capacity: NonZeroU32,
@@ -324,6 +324,16 @@ fn parse_nonzero_u32(value: &str) -> std::result::Result<NonZeroU32, String> {
         .parse::<u32>()
         .map_err(|_| "must be a positive 32-bit integer".to_owned())?;
     NonZeroU32::new(value).ok_or_else(|| "must be greater than zero".to_owned())
+}
+
+fn parse_positive_u64(value: &str) -> std::result::Result<u64, String> {
+    let value = value
+        .parse::<u64>()
+        .map_err(|_| "must be a positive 64-bit integer".to_owned())?;
+    if value == 0 {
+        return Err("must be greater than zero".to_owned());
+    }
+    Ok(value)
 }
 
 fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {
@@ -1443,7 +1453,16 @@ mod tests {
         ));
 
         assert!(Cli::try_parse_from(["ae", "setup"]).is_err());
-        for (index, invalid) in [(17, "0"), (19, "0"), (17, "not-a-number"), (9, "-1")] {
+        for index in [9, 11, 13, 15, 17, 19] {
+            let mut arguments = explicit_setup_args();
+            arguments[index] = "0".to_owned();
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "zero argument {index}"
+            );
+        }
+        assert_eq!(parse_positive_u64(&u64::MAX.to_string()), Ok(u64::MAX));
+        for (index, invalid) in [(17, "not-a-number"), (9, "-1")] {
             let mut arguments = explicit_setup_args();
             arguments[index] = invalid.to_owned();
             assert!(Cli::try_parse_from(arguments).is_err(), "argument {index}");

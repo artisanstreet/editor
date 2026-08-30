@@ -25,8 +25,8 @@ const INSTANCE_REGISTRY_CARD_LIMIT: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForgeLaunchSpec {
-    pub executable: PathBuf,
-    pub argv: Vec<OsString>,
+    executable: PathBuf,
+    argv: Vec<OsString>,
 }
 
 impl ForgeLaunchSpec {
@@ -131,8 +131,8 @@ fn append_number(argv: &mut Vec<OsString>, option: &str, value: u64) {
 }
 
 fn forge_command(spec: &ForgeLaunchSpec) -> Command {
-    let mut command = Command::new(&spec.executable);
-    command.args(&spec.argv);
+    let mut command = Command::new(spec.executable());
+    command.args(spec.argv());
     configure_native_environment(&mut command);
     command
 }
@@ -170,12 +170,12 @@ fn starts_with_ascii_case_insensitive(value: &OsStr, prefix: &[u8]) -> bool {
 }
 
 fn ensure_forge_executable(spec: &ForgeLaunchSpec) -> Result<()> {
-    if spec.executable.is_file() {
+    if spec.executable().is_file() {
         return Ok(());
     }
     Err(CliError::Installation(format!(
         "Forge binary is missing at {}",
-        spec.executable.display()
+        spec.executable().display()
     )))
 }
 
