@@ -236,6 +236,7 @@ rust_test(
         "//modules/database:database",
         "//modules/protocol:protocol",
         "//modules/transport:transport",
+        "@crates//:quinn",
         "@crates//:rcgen",
         "@crates//:rustls-pki-types",
         "@crates//:serde_json",
