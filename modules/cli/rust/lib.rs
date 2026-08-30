@@ -1,6 +1,7 @@
 #![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
 
 pub mod commands;
+pub mod credentials;
 pub mod error;
 pub mod http;
 pub mod instance;

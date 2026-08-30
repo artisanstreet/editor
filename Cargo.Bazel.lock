@@ -1,5 +1,5 @@
 {
-  "checksum": "39734baf34ac39af964a5213db62c4ecac1e135dd518105939cd33d7c1471620",
+  "checksum": "6e11b965264a3ba33298be06ddda3a8545c5b83c902ec60488106042bcff40e4",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2477,6 +2477,18 @@
               "target": "getrandom"
             },
             {
+              "id": "rcgen 0.14.9",
+              "target": "rcgen"
+            },
+            {
+              "id": "rustls 0.23.43",
+              "target": "rustls"
+            },
+            {
+              "id": "rustls-pki-types 1.15.1",
+              "target": "rustls_pki_types"
+            },
+            {
               "id": "serde 1.0.229",
               "target": "serde"
             },
@@ -2491,6 +2503,18 @@
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
+            },
+            {
+              "id": "winapi-util 0.1.11",
+              "target": "winapi_util"
+            },
+            {
+              "id": "x509-parser 0.18.1",
+              "target": "x509_parser"
+            },
+            {
+              "id": "zeroize 1.9.0",
+              "target": "zeroize"
             }
           ],
           "selects": {}
@@ -3313,6 +3337,15 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "datetime",
+            "default",
+            "std",
+            "time"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -3330,6 +3363,10 @@
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
+            },
+            {
+              "id": "time 0.3.55",
+              "target": "time"
             }
           ],
           "selects": {}
@@ -11870,6 +11907,14 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "alloc",
+            "default",
+            "std"
+          ],
+          "selects": {}
+        },
         "edition": "2018",
         "version": "2.11.1"
       },
@@ -12038,6 +12083,15 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "bigint",
+            "default",
+            "num-bigint",
+            "std"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -12047,6 +12101,10 @@
             {
               "id": "nom 7.1.3",
               "target": "nom"
+            },
+            {
+              "id": "num-bigint 0.4.8",
+              "target": "num_bigint"
             },
             {
               "id": "num-traits 0.2.19",
@@ -12957,6 +13015,13 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "default",
+            "std"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -27360,6 +27425,7 @@
         "crate_features": {
           "common": [
             "alloc",
+            "default",
             "std"
           ],
           "selects": {}
@@ -27663,6 +27729,7 @@
         ],
         "crate_features": {
           "common": [
+            "default",
             "std"
           ],
           "selects": {}
@@ -29446,6 +29513,22 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "crypto",
+            "default",
+            "kdf",
+            "nist_algs",
+            "pkcs1",
+            "pkcs12",
+            "pkcs7",
+            "pkcs9",
+            "registry",
+            "x509",
+            "x962"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -55651,6 +55734,13 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "ring",
+            "verify"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {
@@ -55676,6 +55766,10 @@
             {
               "id": "oid-registry 0.8.1",
               "target": "oid_registry"
+            },
+            {
+              "id": "ring 0.17.14",
+              "target": "ring"
             },
             {
               "id": "rusticata-macros 4.1.0",
@@ -59834,6 +59928,7 @@
     "native-dialog 0.9.7",
     "pulldown-cmark 0.13.4",
     "quinn 0.11.11",
+    "rcgen 0.14.9",
     "reqwest 0.12.28",
     "rustls 0.23.43",
     "rustls-pki-types 1.15.1",
@@ -59855,12 +59950,12 @@
     "url 2.5.8",
     "winapi-util 0.1.11",
     "winreg 0.55.0",
+    "x509-parser 0.18.1",
     "zeroize 1.9.0",
     "zip 4.6.1",
     "zstd 0.13.3"
   ],
   "direct_dev_deps": [
-    "rcgen 0.14.9",
     "roxmltree 0.20.0",
     "toml 1.1.4+spec-1.1.0"
   ],
