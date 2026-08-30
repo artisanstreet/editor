@@ -1055,18 +1055,10 @@ pub(crate) fn replace_native_file(
             path: directory.to_path_buf(),
         })?;
     let temporary_id = native_file_id_from_file(temporary.as_file())?;
-    if native_file_id_from_file(temporary.as_file())? != temporary_id {
-        return Err(NativeInstanceError::UnsafePath(
-            temporary.path().to_path_buf(),
-        ));
-    }
+    verify_native_temporary(temporary.path(), temporary_id)?;
     check_ancestors_all(path, true)?;
     verify_native_destination(path, pre_existing_id)?;
-    if native_file_id_from_file(temporary.as_file())? != temporary_id {
-        return Err(NativeInstanceError::UnsafePath(
-            temporary.path().to_path_buf(),
-        ));
-    }
+    verify_native_temporary(temporary.path(), temporary_id)?;
     let persisted = match temporary.persist(path) {
         Ok(file) => file,
         Err(_) => {
@@ -1091,6 +1083,15 @@ pub(crate) fn replace_native_file(
         Ok(NativeAtomicReplaceOutcome::Committed)
     } else {
         Ok(NativeAtomicReplaceOutcome::CommittedButUnverified)
+    }
+}
+
+fn verify_native_temporary(path: &Path, expected_id: NativeFileId) -> NativeResult<()> {
+    let actual_id = inspect_native_destination(path)?.ok_or(NativeInstanceError::NotFound)?;
+    if actual_id == expected_id {
+        Ok(())
+    } else {
+        Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
     }
 }
 
@@ -1140,6 +1141,30 @@ mod tests {
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn native_file_replacement_rejects_temporary_path_substitution_while_handle_is_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".artisan-native-")
+            .tempfile_in(directory.path())
+            .unwrap();
+        temporary.as_file_mut().write_all(b"staged bytes").unwrap();
+        temporary.as_file().sync_all().unwrap();
+        let handle_id = native_file_id_from_file(temporary.as_file()).unwrap();
+        let substituted_path = temporary.path().to_path_buf();
+        let original_path = directory.path().join("original.tmp");
+
+        fs::rename(&substituted_path, &original_path).unwrap();
+        fs::write(&substituted_path, b"substituted bytes").unwrap();
+
+        assert!(verify_native_temporary(&substituted_path, handle_id).is_err());
+        assert_eq!(fs::read(&original_path).unwrap(), b"staged bytes");
+        assert_eq!(fs::read(&substituted_path).unwrap(), b"substituted bytes");
+        fs::remove_file(original_path).unwrap();
+        fs::remove_file(substituted_path).unwrap();
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn native_file_replacement_rejects_unsafe_destination_without_changing_target() {
@@ -1157,6 +1182,30 @@ mod tests {
         assert!(replace_native_file(&destination, b"attacker bytes").is_err());
         assert_eq!(fs::read(&target).unwrap(), b"untouched");
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_file_replacement_preserves_destination_when_delete_sharing_is_denied() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("state.json");
+        let original = b"original state";
+        fs::write(&destination, original).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&destination)
+            .unwrap();
+
+        assert!(replace_native_file(&destination, b"replacement state").is_err());
+        assert_eq!(fs::read(&destination).unwrap(), original);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        drop(holder);
     }
 
     #[test]

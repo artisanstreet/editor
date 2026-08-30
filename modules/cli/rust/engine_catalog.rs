@@ -6,7 +6,6 @@ use std::{
 use serde::{
     Deserialize,
     de::{self, Deserializer, MapAccess, Visitor},
-    ser::{SerializeStruct, Serializer},
     Serialize,
 };
 #[cfg(test)]
@@ -128,14 +127,15 @@ const MAX_VERSION_BYTES: usize = 128;
 const STATE_FIELDS: &[&str] = &["active", "format_version", "previous"];
 const GENERATION_FIELDS: &[&str] = &["binary", "directory", "sha256", "version"];
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct ManagedToolchainStateV1 {
     active: ManagedGenerationV1,
     format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     previous: Option<ManagedGenerationV1>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct ManagedGenerationV1 {
     binary: String,
     directory: String,
@@ -271,38 +271,6 @@ impl<'de> Deserialize<'de> for ManagedToolchainStateV1 {
         }
 
         deserializer.deserialize_map(StateVisitor)
-    }
-}
-
-impl Serialize for ManagedGenerationV1 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut object = serializer.serialize_struct("ManagedGenerationV1", 4)?;
-        object.serialize_field("binary", &self.binary)?;
-        object.serialize_field("directory", &self.directory)?;
-        object.serialize_field("sha256", &self.sha256)?;
-        object.serialize_field("version", &self.version)?;
-        object.end()
-    }
-}
-
-impl Serialize for ManagedToolchainStateV1 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut object = serializer.serialize_struct(
-            "ManagedToolchainStateV1",
-            if self.previous.is_some() { 3 } else { 2 },
-        )?;
-        object.serialize_field("active", &self.active)?;
-        object.serialize_field("format_version", &self.format_version)?;
-        if let Some(previous) = self.previous.as_ref() {
-            object.serialize_field("previous", previous)?;
-        }
-        object.end()
     }
 }
 
