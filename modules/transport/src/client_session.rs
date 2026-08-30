@@ -8,9 +8,9 @@
 //! inside that Welcome belongs to the trusted calling coordinator from
 //! that moment on — never to the session, any [`Debug`] output, or any
 //! cloned state. The session retains only the negotiated non-secret
-//! metadata its requests need (protocol revision and connection
-//! identity), exposes no raw Quinn getters, spawns no background reader,
-//! task, channel, queue, or runtime, and carries one accepted
+//! metadata its requests need (protocol revision, connection identity, and
+//! the accepted lifecycle feature bit), exposes no raw Quinn getters, spawns
+//! no background reader, task, channel, queue, or runtime, and carries one accepted
 //! [`ClientRequestLifecycle`] through every successful request of the
 //! connection's whole life.
 //!
@@ -72,7 +72,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use artisan_domain::IdentifierError;
-use artisan_protocol::{ConnectionId, ProtocolVersion, WireEnvelope, WireEnvelopeBody};
+use artisan_protocol::{
+    ClientRequest, ConnectionId, ProtocolVersion, WireEnvelope, WireEnvelopeBody,
+};
 use quinn::{Connection, Endpoint, RecvStream};
 use rustls_pki_types::CertificateDer;
 use thiserror::Error;
@@ -352,6 +354,10 @@ pub enum ClientRequestError {
         /// Revision negotiated during the session's handshake.
         negotiated_version: u32,
     },
+    /// Native lifecycle control was not negotiated for this session,
+    /// diagnosed before any request identity or network admission.
+    #[error("native lifecycle control was not negotiated")]
+    UnsupportedFeature,
     /// The request's frame identity could not seed its correlation
     /// identity. Unreachable for decoded envelopes, kept typed rather
     /// than panicked.
@@ -395,6 +401,8 @@ pub struct ClientSession {
     negotiated_version: ProtocolVersion,
     /// Negotiated non-secret connection diagnostic identity.
     connection_id: ConnectionId,
+    /// Whether native lifecycle control was accepted during this handshake.
+    lifecycle_control_supported: bool,
     /// Whether the one server-delivery receiver has already been acquired.
     delivery_taken: bool,
 }
@@ -483,6 +491,7 @@ impl ClientSession {
         let (endpoint, connection) = link.disband();
         let negotiated_version = welcome.protocol_version;
         let connection_id = welcome.welcome.connection_id.clone();
+        let lifecycle_control_supported = welcome.welcome.lifecycle_control_supported;
         Ok((
             Self {
                 endpoint,
@@ -491,6 +500,7 @@ impl ClientSession {
                 limits,
                 negotiated_version,
                 connection_id,
+                lifecycle_control_supported,
                 delivery_taken: false,
             },
             welcome,
@@ -501,6 +511,13 @@ impl ClientSession {
     #[must_use]
     pub const fn protocol_version(&self) -> ProtocolVersion {
         self.negotiated_version
+    }
+
+    /// Returns whether native lifecycle control was negotiated for this
+    /// session.
+    #[must_use]
+    pub const fn lifecycle_control_supported(&self) -> bool {
+        self.lifecycle_control_supported
     }
 
     /// Returns the server-assigned connection diagnostic identity.
@@ -573,7 +590,8 @@ impl ClientSession {
     /// # Errors
     ///
     /// Returns [`ClientRequestError::NotARequest`] and
-    /// [`ClientRequestError::VersionMismatch`] before any network
+    /// [`ClientRequestError::VersionMismatch`] and
+    /// [`ClientRequestError::UnsupportedFeature`] before any network
     /// attempt, [`ClientRequestError::Correlation`] for an unusable
     /// frame identity, [`ClientRequestError::Admission`] when the
     /// registry rejects the identity, [`ClientRequestError::Exchange`]
@@ -592,8 +610,8 @@ impl ClientSession {
         cancel: &CancelHandle,
     ) -> Result<(Self, ResolvedRequest), ClientRequestError> {
         // Pre-I/O validation, in order: family, negotiated version,
-        // correlation seeding, admission. Nothing touches the network
-        // before all four pass.
+        // negotiated lifecycle feature, correlation seeding, admission.
+        // Nothing touches the network before all five pass.
         if !matches!(&envelope.body, WireEnvelopeBody::Request(_)) {
             let received = message_kind(&envelope.body);
             return Err(ClientRequestError::NotARequest { received });
@@ -603,6 +621,13 @@ impl ClientSession {
                 envelope_version: envelope.protocol_version.get(),
                 negotiated_version: self.negotiated_version.get(),
             });
+        }
+        if matches!(
+            &envelope.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(_))
+        ) && !self.lifecycle_control_supported
+        {
+            return Err(ClientRequestError::UnsupportedFeature);
         }
         let request_id = envelope
             .frame_id

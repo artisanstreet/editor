@@ -132,6 +132,7 @@ fn early_hello() -> Result<WireEnvelope, Box<dyn Error>> {
         body: WireEnvelopeBody::Hello(Hello {
             supported_versions: VersionOffer::new(vec![1])?,
             credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+            supports_lifecycle_control: false,
         }),
     })
 }
@@ -145,6 +146,7 @@ fn early_welcome() -> Result<WireEnvelope, Box<dyn Error>> {
             negotiated_version: ProtocolVersion::V1,
             connection_id: ConnectionId::parse("connection-dispatch")?,
             reconnect_capability: ReconnectCapability::from_bytes(ROTATED_CAPABILITY),
+            lifecycle_control_supported: false,
         }),
     })
 }
