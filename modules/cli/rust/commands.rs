@@ -13,10 +13,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::{
     CliError, Result,
     credentials::{self, ForgeCredentialPaths},
-    engine_catalog::{
-        CERTIFIED_BINARY, CERTIFIED_ENGINE_ID, CERTIFIED_EXECUTABLE_SHA256_HEX,
-        NativeOpenCode2Authority, OpenCode2Inspection,
-    },
+    engine_catalog::{NativeOpenCode2Authority, OpenCode2Inspection},
     error::io,
     http::{self, PairResponse},
     instance::{self, NativeInstanceConfig, NativeListenerConfig},
@@ -325,7 +322,9 @@ fn engine_command(layout: &Layout, command: &EngineCommand) -> Result<()> {
 }
 
 fn list_engines(instance: &NativeInstanceConfig, json: bool) -> Result<()> {
-    let inspection = NativeOpenCode2Authority::new().inspect(instance);
+    let authority = NativeOpenCode2Authority::new();
+    let spec = NativeOpenCode2Authority::certified_install_spec();
+    let inspection = authority.inspect(instance);
     match inspection {
         Ok(OpenCode2Inspection::UnsupportedPlatform) => {
             if json {
@@ -334,7 +333,7 @@ fn list_engines(instance: &NativeInstanceConfig, json: bool) -> Result<()> {
                     serde_json::json!({
                         "schema": "artisan-engine-list-v1",
                         "engines": [{
-                            "engine_id": CERTIFIED_ENGINE_ID,
+                            "engine_id": spec.engine_id(),
                             "status": "unsupported_platform",
                         }],
                     })
@@ -351,7 +350,7 @@ fn list_engines(instance: &NativeInstanceConfig, json: bool) -> Result<()> {
                     serde_json::json!({
                         "schema": "artisan-engine-list-v1",
                         "engines": [{
-                            "engine_id": CERTIFIED_ENGINE_ID,
+                            "engine_id": spec.engine_id(),
                             "status": "not_installed",
                         }],
                     })
@@ -368,21 +367,21 @@ fn list_engines(instance: &NativeInstanceConfig, json: bool) -> Result<()> {
                     serde_json::json!({
                         "schema": "artisan-engine-list-v1",
                         "engines": [{
-                            "engine_id": CERTIFIED_ENGINE_ID,
+                            "engine_id": spec.engine_id(),
                             "status": "ready",
                             "generation": generation.generation_id(),
-                            "version": generation.version(),
-                            "upstream_commit": generation.upstream_commit(),
-                            "binary": CERTIFIED_BINARY,
-                            "size_bytes": generation.executable_size_bytes(),
-                            "sha256": CERTIFIED_EXECUTABLE_SHA256_HEX,
+                            "version": spec.version(),
+                            "upstream_commit": spec.upstream_commit(),
+                            "binary": spec.binary(),
+                            "size_bytes": spec.executable_size_bytes(),
+                            "sha256": spec.executable_sha256_hex(),
                         }],
                     })
                 );
             } else {
                 println!(
                     "OpenCode2: ready ({}, generation {})",
-                    generation.version(),
+                    spec.version(),
                     generation.generation_id()
                 );
             }
@@ -396,7 +395,7 @@ fn list_engines(instance: &NativeInstanceConfig, json: bool) -> Result<()> {
                     serde_json::json!({
                         "schema": "artisan-engine-list-v1",
                         "engines": [{
-                            "engine_id": CERTIFIED_ENGINE_ID,
+                            "engine_id": spec.engine_id(),
                             "status": "invalid",
                             "reason": reason,
                         }],

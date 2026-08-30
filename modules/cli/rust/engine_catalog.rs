@@ -4,33 +4,119 @@ use std::{
 };
 
 use serde::{
-    Deserialize,
+    Deserialize, Serialize,
     de::{self, Deserializer, MapAccess, Visitor},
 };
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 
-use crate::instance::{self, NativeFileId, NativeInstanceConfig, NativeInstanceError};
+use crate::instance::{
+    self, NativeAtomicReplaceOutcome, NativeFileId, NativeInstanceConfig, NativeInstanceError,
+};
 
-pub(crate) const CERTIFIED_ENGINE_ID: &str = "opencode2";
-pub(crate) const CERTIFIED_VERSION: &str = "0.0.0-beta-17778";
-pub(crate) const CERTIFIED_UPSTREAM_COMMIT: &str = "0d2684b67308380fc47540fe55deb55306a08e3f";
-pub(crate) const CERTIFIED_PLATFORM: &str = "win32";
-pub(crate) const CERTIFIED_ARCHITECTURE: &str = "x64";
-pub(crate) const CERTIFIED_ARTIFACT_KIND: &str = "npm-tarball";
-pub(crate) const CERTIFIED_ARCHIVE_MEMBER: &str = "package/bin/opencode2.exe";
-pub(crate) const CERTIFIED_BINARY: &str = "opencode2.exe";
-pub(crate) const CERTIFIED_NPM_INTEGRITY_SHA512: &str =
+const CERTIFIED_ENGINE_ID: &str = "opencode2";
+const CERTIFIED_VERSION: &str = "0.0.0-beta-17778";
+const CERTIFIED_UPSTREAM_COMMIT: &str = "0d2684b67308380fc47540fe55deb55306a08e3f";
+const CERTIFIED_PLATFORM: &str = "win32";
+const CERTIFIED_ARCHITECTURE: &str = "x64";
+const CERTIFIED_ARTIFACT_KIND: &str = "npm-tarball";
+const CERTIFIED_ARCHIVE_MEMBER: &str = "package/bin/opencode2.exe";
+const CERTIFIED_BINARY: &str = "opencode2.exe";
+const CERTIFIED_NPM_INTEGRITY_SHA512: &str =
     "Z0oMvTBUhxmz1IYuQSMOZTpI2HoWjeIjdxJ39SoGrhDwvJZK7OI0rgIMYtDGavOucOQT8oxrazUiO4j+2hVMpw==";
-pub(crate) const CERTIFIED_DOWNLOAD_BOUND_BYTES: u64 = 268_435_456;
-pub(crate) const CERTIFIED_EXECUTABLE_SIZE_BYTES: u64 = 144_313_344;
-pub(crate) const CERTIFIED_EXECUTABLE_SHA256_HEX: &str =
+const CERTIFIED_DOWNLOAD_BOUND_BYTES: u64 = 268_435_456;
+const CERTIFIED_EXECUTABLE_SIZE_BYTES: u64 = 144_313_344;
+const CERTIFIED_EXECUTABLE_SHA256_HEX: &str =
     "452794a764e1033e629c4cd40bde6433c10c6bd32433fb3be279bf03969a6edf";
-pub(crate) const CERTIFIED_EXECUTABLE_SHA256: [u8; 32] = [
+const CERTIFIED_EXECUTABLE_SHA256: [u8; 32] = [
     0x45, 0x27, 0x94, 0xa7, 0x64, 0xe1, 0x03, 0x3e, 0x62, 0x9c, 0x4c, 0xd4, 0x0b, 0xde, 0x64, 0x33,
     0xc1, 0x0c, 0x6b, 0xd3, 0x24, 0x33, 0xfb, 0x3b, 0xe2, 0x79, 0xbf, 0x03, 0x96, 0x9a, 0x6e, 0xdf,
 ];
-pub(crate) const CERTIFIED_NPM_URL: &str = "https://registry.npmjs.org/@opencode-ai/cli-windows-x64/-/cli-windows-x64-0.0.0-beta-17778.tgz";
+const CERTIFIED_NPM_URL: &str = "https://registry.npmjs.org/@opencode-ai/cli-windows-x64/-/cli-windows-x64-0.0.0-beta-17778.tgz";
+
+pub(crate) struct NativeOpenCode2InstallSpec {
+    engine_id: &'static str,
+    version: &'static str,
+    upstream_commit: &'static str,
+    platform: &'static str,
+    architecture: &'static str,
+    artifact_kind: &'static str,
+    archive_member: &'static str,
+    binary: &'static str,
+    npm_integrity_sha512: &'static str,
+    npm_url: &'static str,
+    download_bound_bytes: u64,
+    executable_size_bytes: u64,
+    executable_sha256: [u8; 32],
+    executable_sha256_hex: &'static str,
+}
+
+impl NativeOpenCode2InstallSpec {
+    pub(crate) const fn engine_id(&self) -> &'static str {
+        self.engine_id
+    }
+
+    pub(crate) const fn version(&self) -> &'static str {
+        self.version
+    }
+
+    pub(crate) const fn upstream_commit(&self) -> &'static str {
+        self.upstream_commit
+    }
+
+    pub(crate) const fn platform(&self) -> &'static str {
+        self.platform
+    }
+
+    pub(crate) const fn architecture(&self) -> &'static str {
+        self.architecture
+    }
+
+    pub(crate) const fn artifact_kind(&self) -> &'static str {
+        self.artifact_kind
+    }
+
+    pub(crate) const fn archive_member(&self) -> &'static str {
+        self.archive_member
+    }
+
+    pub(crate) const fn binary(&self) -> &'static str {
+        self.binary
+    }
+
+    pub(crate) const fn npm_integrity_sha512(&self) -> &'static str {
+        self.npm_integrity_sha512
+    }
+
+    pub(crate) const fn npm_url(&self) -> &'static str {
+        self.npm_url
+    }
+
+    pub(crate) const fn download_bound_bytes(&self) -> u64 {
+        self.download_bound_bytes
+    }
+
+    pub(crate) const fn executable_size_bytes(&self) -> u64 {
+        self.executable_size_bytes
+    }
+
+    pub(crate) const fn executable_sha256(&self) -> &[u8; 32] {
+        &self.executable_sha256
+    }
+
+    pub(crate) const fn executable_sha256_hex(&self) -> &'static str {
+        self.executable_sha256_hex
+    }
+
+    fn generation(&self, directory: &str) -> ManagedGenerationV1 {
+        ManagedGenerationV1 {
+            binary: self.binary.to_owned(),
+            directory: directory.to_owned(),
+            sha256: self.executable_sha256_hex.to_owned(),
+            version: self.version.to_owned(),
+        }
+    }
+}
 
 const MAX_STATE_BYTES: usize = 16 * 1024;
 const MAX_GENERATION_ID_BYTES: usize = 128;
@@ -40,14 +126,15 @@ const MAX_VERSION_BYTES: usize = 128;
 const STATE_FIELDS: &[&str] = &["active", "format_version", "previous"];
 const GENERATION_FIELDS: &[&str] = &["binary", "directory", "sha256", "version"];
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct ManagedToolchainStateV1 {
     active: ManagedGenerationV1,
     format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     previous: Option<ManagedGenerationV1>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct ManagedGenerationV1 {
     binary: String,
     directory: String,
@@ -243,6 +330,40 @@ impl fmt::Display for NativeOpenCode2Error {
 
 impl std::error::Error for NativeOpenCode2Error {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeOpenCode2StateError {
+    InvalidRoot,
+    TooLarge,
+    Malformed,
+    UnsupportedVersion,
+    ActiveGenerationUntrusted,
+    UnsafePath,
+    Io,
+    Encode,
+    AtomicPublishFailed,
+}
+
+impl fmt::Display for NativeOpenCode2StateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::InvalidRoot => "OpenCode2 install state root is invalid",
+            Self::TooLarge => "OpenCode2 install state exceeds its bound",
+            Self::Malformed => "OpenCode2 install state is malformed",
+            Self::UnsupportedVersion => "OpenCode2 install state version is unsupported",
+            Self::ActiveGenerationUntrusted => {
+                "OpenCode2 install state has an untrusted active generation"
+            }
+            Self::UnsafePath => "OpenCode2 install state path is unsafe",
+            Self::Io => "OpenCode2 install state I/O failed",
+            Self::Encode => "OpenCode2 install state encoding failed",
+            Self::AtomicPublishFailed => "OpenCode2 install state publication failed",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for NativeOpenCode2StateError {}
+
 #[derive(Debug)]
 pub(crate) enum OpenCode2Inspection {
     UnsupportedPlatform,
@@ -296,24 +417,32 @@ impl ResolvedOpenCode2Generation {
 }
 
 pub(crate) struct NativeOpenCode2Authority {
-    certified_executable_size_bytes: u64,
-    certified_executable_sha256: [u8; 32],
+    install_spec: NativeOpenCode2InstallSpec,
 }
 
 impl NativeOpenCode2Authority {
     pub(crate) const fn new() -> Self {
-        let _ = (
-            CERTIFIED_PLATFORM,
-            CERTIFIED_ARCHITECTURE,
-            CERTIFIED_ARTIFACT_KIND,
-            CERTIFIED_ARCHIVE_MEMBER,
-            CERTIFIED_NPM_INTEGRITY_SHA512,
-            CERTIFIED_DOWNLOAD_BOUND_BYTES,
-            CERTIFIED_NPM_URL,
-        );
         Self {
-            certified_executable_size_bytes: CERTIFIED_EXECUTABLE_SIZE_BYTES,
-            certified_executable_sha256: CERTIFIED_EXECUTABLE_SHA256,
+            install_spec: Self::certified_install_spec(),
+        }
+    }
+
+    pub(crate) const fn certified_install_spec() -> NativeOpenCode2InstallSpec {
+        NativeOpenCode2InstallSpec {
+            engine_id: CERTIFIED_ENGINE_ID,
+            version: CERTIFIED_VERSION,
+            upstream_commit: CERTIFIED_UPSTREAM_COMMIT,
+            platform: CERTIFIED_PLATFORM,
+            architecture: CERTIFIED_ARCHITECTURE,
+            artifact_kind: CERTIFIED_ARTIFACT_KIND,
+            archive_member: CERTIFIED_ARCHIVE_MEMBER,
+            binary: CERTIFIED_BINARY,
+            npm_integrity_sha512: CERTIFIED_NPM_INTEGRITY_SHA512,
+            npm_url: CERTIFIED_NPM_URL,
+            download_bound_bytes: CERTIFIED_DOWNLOAD_BOUND_BYTES,
+            executable_size_bytes: CERTIFIED_EXECUTABLE_SIZE_BYTES,
+            executable_sha256: CERTIFIED_EXECUTABLE_SHA256,
+            executable_sha256_hex: CERTIFIED_EXECUTABLE_SHA256_HEX,
         }
     }
 
@@ -338,45 +467,111 @@ impl NativeOpenCode2Authority {
         if !is_supported_platform() {
             return Err(NativeOpenCode2Error::UnsupportedPlatform);
         }
-        let paths = managed_paths(instance)?;
-        let state = read_managed_state(&paths)?;
-        validate_generation(&state.active, true)?;
-        if let Some(previous) = state.previous.as_ref() {
-            validate_generation(previous, false)?;
-        }
+        let paths = managed_paths(instance, self.install_spec.engine_id())?;
+        let state = self
+            .read_install_state(&paths.engine_root)
+            .map_err(map_state_seam_error)?
+            .ok_or(NativeOpenCode2Error::StateMissing)?;
+        let active = &state.inner.active;
 
         let executable = paths
             .versions_root
-            .join(&state.active.directory)
-            .join(&state.active.binary);
+            .join(&active.directory)
+            .join(&active.binary);
         let verified_file_id = instance::verify_native_file(
             &executable,
-            self.certified_executable_size_bytes,
-            &self.certified_executable_sha256,
+            self.install_spec.executable_size_bytes(),
+            self.install_spec.executable_sha256(),
         )
         .map_err(|error| map_executable_error(&error))?;
         Ok(ResolvedOpenCode2Generation {
             executable,
-            generation_id: state.active.directory,
-            version: CERTIFIED_VERSION,
-            upstream_commit: CERTIFIED_UPSTREAM_COMMIT,
-            executable_size_bytes: self.certified_executable_size_bytes,
-            executable_sha256: self.certified_executable_sha256,
+            generation_id: active.directory.clone(),
+            version: self.install_spec.version(),
+            upstream_commit: self.install_spec.upstream_commit(),
+            executable_size_bytes: self.install_spec.executable_size_bytes(),
+            executable_sha256: *self.install_spec.executable_sha256(),
             verified_file_id,
         })
+    }
+
+    pub(crate) fn new_install_state(
+        &self,
+        generation_id: &str,
+        previous: Option<&NativeOpenCode2State>,
+    ) -> Result<NativeOpenCode2State, NativeOpenCode2StateError> {
+        if let Some(previous) = previous {
+            validate_install_state(&previous.inner, &self.install_spec)?;
+        }
+        let state = NativeOpenCode2State {
+            inner: ManagedToolchainStateV1 {
+                active: self.install_spec.generation(generation_id),
+                format_version: 1,
+                previous: previous.map(|state| state.inner.active.clone()),
+            },
+        };
+        validate_install_state(&state.inner, &self.install_spec)?;
+        Ok(state)
+    }
+
+    pub(crate) fn read_install_state(
+        &self,
+        toolchain_root: &Path,
+    ) -> Result<Option<NativeOpenCode2State>, NativeOpenCode2StateError> {
+        let state_path = state_path_for_root(toolchain_root, self.install_spec.engine_id())?;
+        let bytes = match instance::read_bounded_native_file(&state_path, MAX_STATE_BYTES) {
+            Ok(bytes) => bytes,
+            Err(NativeInstanceError::NotFound) => return Ok(None),
+            Err(error) => return Err(map_state_read_error(&error)),
+        };
+        let inner = decode_state(&bytes).map_err(map_state_decoder_error)?;
+        validate_install_state(&inner, &self.install_spec)?;
+        Ok(Some(NativeOpenCode2State { inner }))
+    }
+
+    pub(crate) fn encode_install_state(
+        &self,
+        state: &NativeOpenCode2State,
+    ) -> Result<Vec<u8>, NativeOpenCode2StateError> {
+        validate_install_state(&state.inner, &self.install_spec)?;
+        let bytes =
+            serde_json::to_vec(&state.inner).map_err(|_| NativeOpenCode2StateError::Encode)?;
+        if bytes.len() > MAX_STATE_BYTES {
+            return Err(NativeOpenCode2StateError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn write_install_state(
+        &self,
+        toolchain_root: &Path,
+        state: &NativeOpenCode2State,
+    ) -> Result<NativeAtomicReplaceOutcome, NativeOpenCode2StateError> {
+        let state_path = state_path_for_root(toolchain_root, self.install_spec.engine_id())?;
+        let bytes = self.encode_install_state(state)?;
+        instance::replace_native_file(&state_path, &bytes)
+            .map_err(|error| map_atomic_replace_error(&error))
     }
 }
 
 struct ManagedPaths {
+    engine_root: PathBuf,
     state_path: PathBuf,
     versions_root: PathBuf,
+}
+
+pub(crate) struct NativeOpenCode2State {
+    inner: ManagedToolchainStateV1,
 }
 
 fn is_supported_platform() -> bool {
     cfg!(all(target_os = "windows", target_arch = "x86_64"))
 }
 
-fn managed_paths(instance: &NativeInstanceConfig) -> Result<ManagedPaths, NativeOpenCode2Error> {
+fn managed_paths(
+    instance: &NativeInstanceConfig,
+    engine_id: &str,
+) -> Result<ManagedPaths, NativeOpenCode2Error> {
     let database_path = instance.database_path();
     if !database_path.is_absolute()
         || database_path
@@ -389,21 +584,28 @@ fn managed_paths(instance: &NativeInstanceConfig) -> Result<ManagedPaths, Native
         .parent()
         .ok_or(NativeOpenCode2Error::UnsafePath)?;
     let toolchain_root = database_parent.join("toolchain");
-    let engine_root = toolchain_root.join(CERTIFIED_ENGINE_ID);
+    let engine_root = toolchain_root.join(engine_id);
     Ok(ManagedPaths {
+        engine_root: engine_root.clone(),
         state_path: engine_root.join("state.json"),
         versions_root: engine_root.join("versions"),
     })
 }
 
-fn read_managed_state(
-    paths: &ManagedPaths,
-) -> Result<ManagedToolchainStateV1, NativeOpenCode2Error> {
-    let bytes = instance::read_bounded_native_file(&paths.state_path, MAX_STATE_BYTES)
-        .map_err(|error| map_state_error(&error))?;
-    let state = decode_state(&bytes)?;
-    validate_state_version(&state)?;
-    Ok(state)
+fn state_path_for_root(
+    toolchain_root: &Path,
+    engine_id: &str,
+) -> Result<PathBuf, NativeOpenCode2StateError> {
+    let expected_suffix = Path::new("toolchain").join(engine_id);
+    if !toolchain_root.is_absolute()
+        || toolchain_root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        || !toolchain_root.ends_with(expected_suffix)
+    {
+        return Err(NativeOpenCode2StateError::InvalidRoot);
+    }
+    Ok(toolchain_root.join("state.json"))
 }
 
 fn decode_state(bytes: &[u8]) -> Result<ManagedToolchainStateV1, NativeOpenCode2Error> {
@@ -419,6 +621,18 @@ fn decode_state(bytes: &[u8]) -> Result<ManagedToolchainStateV1, NativeOpenCode2
     Ok(state)
 }
 
+fn validate_install_state(
+    state: &ManagedToolchainStateV1,
+    spec: &NativeOpenCode2InstallSpec,
+) -> Result<(), NativeOpenCode2StateError> {
+    validate_state_version(state).map_err(map_state_validation_error)?;
+    validate_generation(&state.active, true, spec).map_err(map_state_validation_error)?;
+    if let Some(previous) = state.previous.as_ref() {
+        validate_generation(previous, false, spec).map_err(map_state_validation_error)?;
+    }
+    Ok(())
+}
+
 fn validate_state_version(state: &ManagedToolchainStateV1) -> Result<(), NativeOpenCode2Error> {
     if state.format_version != 1 {
         return Err(NativeOpenCode2Error::StateUnsupportedVersion);
@@ -429,6 +643,7 @@ fn validate_state_version(state: &ManagedToolchainStateV1) -> Result<(), NativeO
 fn validate_generation(
     generation: &ManagedGenerationV1,
     active: bool,
+    spec: &NativeOpenCode2InstallSpec,
 ) -> Result<(), NativeOpenCode2Error> {
     if !is_safe_basename(&generation.directory, MAX_GENERATION_ID_BYTES)
         || !is_safe_relative_path(&generation.binary, MAX_BINARY_PATH_BYTES)
@@ -439,13 +654,42 @@ fn validate_generation(
         return Err(NativeOpenCode2Error::ActiveGenerationUntrusted);
     }
     if active
-        && (generation.binary != CERTIFIED_BINARY
-            || generation.version != CERTIFIED_VERSION
-            || generation.sha256 != CERTIFIED_EXECUTABLE_SHA256_HEX)
+        && (generation.binary != spec.binary()
+            || generation.version != spec.version()
+            || generation.sha256 != spec.executable_sha256_hex())
     {
         return Err(NativeOpenCode2Error::ActiveGenerationUntrusted);
     }
     Ok(())
+}
+
+fn map_state_validation_error(error: NativeOpenCode2Error) -> NativeOpenCode2StateError {
+    match error {
+        NativeOpenCode2Error::StateUnsupportedVersion => {
+            NativeOpenCode2StateError::UnsupportedVersion
+        }
+        NativeOpenCode2Error::UnsafePath => NativeOpenCode2StateError::UnsafePath,
+        NativeOpenCode2Error::ActiveGenerationUntrusted => {
+            NativeOpenCode2StateError::ActiveGenerationUntrusted
+        }
+        NativeOpenCode2Error::StateTooLarge => NativeOpenCode2StateError::TooLarge,
+        NativeOpenCode2Error::StateMalformed
+        | NativeOpenCode2Error::UnsupportedPlatform
+        | NativeOpenCode2Error::StateMissing
+        | NativeOpenCode2Error::ExecutableUnavailable
+        | NativeOpenCode2Error::ExecutableChanged
+        | NativeOpenCode2Error::ExecutableSizeMismatch
+        | NativeOpenCode2Error::ExecutableHashMismatch
+        | NativeOpenCode2Error::Io => NativeOpenCode2StateError::Malformed,
+    }
+}
+
+fn map_state_decoder_error(error: NativeOpenCode2Error) -> NativeOpenCode2StateError {
+    match error {
+        NativeOpenCode2Error::StateTooLarge => NativeOpenCode2StateError::TooLarge,
+        NativeOpenCode2Error::StateMalformed => NativeOpenCode2StateError::Malformed,
+        error => map_state_validation_error(error),
+    }
 }
 
 fn is_safe_basename(value: &str, maximum_bytes: usize) -> bool {
@@ -515,17 +759,50 @@ fn is_safe_version(value: &str) -> bool {
     })
 }
 
-fn map_state_error(error: &NativeInstanceError) -> NativeOpenCode2Error {
+fn map_state_read_error(error: &NativeInstanceError) -> NativeOpenCode2StateError {
     match error {
-        NativeInstanceError::NotFound => NativeOpenCode2Error::StateMissing,
-        NativeInstanceError::TooLarge => NativeOpenCode2Error::StateTooLarge,
-        NativeInstanceError::UnsafePath(_) => NativeOpenCode2Error::UnsafePath,
-        NativeInstanceError::InvalidManifest => NativeOpenCode2Error::StateMalformed,
+        NativeInstanceError::TooLarge => NativeOpenCode2StateError::TooLarge,
+        NativeInstanceError::UnsafePath(_) => NativeOpenCode2StateError::UnsafePath,
+        NativeInstanceError::InvalidManifest => NativeOpenCode2StateError::Malformed,
         NativeInstanceError::FileChanged
         | NativeInstanceError::FileSizeMismatch
         | NativeInstanceError::FileHashMismatch
         | NativeInstanceError::InvalidPath(_)
-        | NativeInstanceError::Io { .. } => NativeOpenCode2Error::Io,
+        | NativeInstanceError::Io { .. }
+        | NativeInstanceError::NotFound => NativeOpenCode2StateError::Io,
+    }
+}
+
+fn map_atomic_replace_error(error: &NativeInstanceError) -> NativeOpenCode2StateError {
+    match error {
+        NativeInstanceError::UnsafePath(_) => NativeOpenCode2StateError::UnsafePath,
+        NativeInstanceError::NotFound
+        | NativeInstanceError::TooLarge
+        | NativeInstanceError::FileChanged
+        | NativeInstanceError::FileSizeMismatch
+        | NativeInstanceError::FileHashMismatch
+        | NativeInstanceError::InvalidPath(_)
+        | NativeInstanceError::Io { .. }
+        | NativeInstanceError::InvalidManifest => NativeOpenCode2StateError::AtomicPublishFailed,
+    }
+}
+
+fn map_state_seam_error(error: NativeOpenCode2StateError) -> NativeOpenCode2Error {
+    match error {
+        NativeOpenCode2StateError::InvalidRoot | NativeOpenCode2StateError::UnsafePath => {
+            NativeOpenCode2Error::UnsafePath
+        }
+        NativeOpenCode2StateError::TooLarge => NativeOpenCode2Error::StateTooLarge,
+        NativeOpenCode2StateError::Malformed => NativeOpenCode2Error::StateMalformed,
+        NativeOpenCode2StateError::UnsupportedVersion => {
+            NativeOpenCode2Error::StateUnsupportedVersion
+        }
+        NativeOpenCode2StateError::ActiveGenerationUntrusted => {
+            NativeOpenCode2Error::ActiveGenerationUntrusted
+        }
+        NativeOpenCode2StateError::Io
+        | NativeOpenCode2StateError::Encode
+        | NativeOpenCode2StateError::AtomicPublishFailed => NativeOpenCode2Error::Io,
     }
 }
 
@@ -550,35 +827,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn certified_metadata_is_immutable() {
-        assert_eq!(CERTIFIED_ENGINE_ID, "opencode2");
-        assert_eq!(CERTIFIED_VERSION, "0.0.0-beta-17778");
+    fn certified_install_spec_exposes_only_the_accepted_identity() {
+        let authority = NativeOpenCode2Authority::new();
+        let spec = NativeOpenCode2Authority::certified_install_spec();
+        assert_eq!(authority.install_spec.engine_id(), spec.engine_id());
+        assert_eq!(spec.engine_id(), "opencode2");
+        assert_eq!(spec.version(), "0.0.0-beta-17778");
         assert_eq!(
-            CERTIFIED_UPSTREAM_COMMIT,
+            spec.upstream_commit(),
             "0d2684b67308380fc47540fe55deb55306a08e3f"
         );
-        assert_eq!(CERTIFIED_PLATFORM, "win32");
-        assert_eq!(CERTIFIED_ARCHITECTURE, "x64");
-        assert_eq!(CERTIFIED_ARTIFACT_KIND, "npm-tarball");
-        assert_eq!(CERTIFIED_ARCHIVE_MEMBER, "package/bin/opencode2.exe");
-        assert_eq!(CERTIFIED_BINARY, "opencode2.exe");
-        assert_eq!(CERTIFIED_DOWNLOAD_BOUND_BYTES, 268_435_456);
-        assert_eq!(CERTIFIED_EXECUTABLE_SIZE_BYTES, 144_313_344);
+        assert_eq!(spec.platform(), "win32");
+        assert_eq!(spec.architecture(), "x64");
+        assert_eq!(spec.artifact_kind(), "npm-tarball");
+        assert_eq!(spec.archive_member(), "package/bin/opencode2.exe");
+        assert_eq!(spec.binary(), "opencode2.exe");
+        assert_eq!(spec.download_bound_bytes(), 268_435_456);
+        assert_eq!(spec.executable_size_bytes(), 144_313_344);
         assert_eq!(
-            CERTIFIED_EXECUTABLE_SHA256_HEX,
+            spec.executable_sha256_hex(),
             "452794a764e1033e629c4cd40bde6433c10c6bd32433fb3be279bf03969a6edf"
         );
         assert_eq!(
-            CERTIFIED_NPM_INTEGRITY_SHA512,
+            spec.npm_integrity_sha512(),
             "Z0oMvTBUhxmz1IYuQSMOZTpI2HoWjeIjdxJ39SoGrhDwvJZK7OI0rgIMYtDGavOucOQT8oxrazUiO4j+2hVMpw=="
         );
         assert_eq!(
-            CERTIFIED_NPM_URL,
+            spec.npm_url(),
             "https://registry.npmjs.org/@opencode-ai/cli-windows-x64/-/cli-windows-x64-0.0.0-beta-17778.tgz"
         );
         assert_eq!(
-            CERTIFIED_EXECUTABLE_SHA256,
-            [
+            spec.executable_sha256(),
+            &[
                 0x45, 0x27, 0x94, 0xa7, 0x64, 0xe1, 0x03, 0x3e, 0x62, 0x9c, 0x4c, 0xd4, 0x0b, 0xde,
                 0x64, 0x33, 0xc1, 0x0c, 0x6b, 0xd3, 0x24, 0x33, 0xfb, 0x3b, 0xe2, 0x79, 0xbf, 0x03,
                 0x96, 0x9a, 0x6e, 0xdf,
@@ -600,8 +880,9 @@ mod tests {
             format!(r#"{{"active":{active},"format_version":1,"previous":{previous}}}"#);
         let state = decode_state(with_previous.as_bytes()).unwrap();
         assert_eq!(state.previous.as_ref().unwrap().directory, "generation-old");
-        validate_generation(&state.active, true).unwrap();
-        validate_generation(state.previous.as_ref().unwrap(), false).unwrap();
+        let spec = NativeOpenCode2Authority::certified_install_spec();
+        validate_generation(&state.active, true, &spec).unwrap();
+        validate_generation(state.previous.as_ref().unwrap(), false, &spec).unwrap();
     }
 
     #[test]
@@ -642,6 +923,110 @@ mod tests {
     }
 
     #[test]
+    fn install_state_constructor_retains_only_the_previous_active_generation() {
+        let authority = NativeOpenCode2Authority::new();
+        let first = authority.new_install_state("generation-a", None).unwrap();
+        let second = authority
+            .new_install_state("generation-b", Some(&first))
+            .unwrap();
+
+        assert_eq!(second.inner.active.directory, "generation-b");
+        assert_eq!(
+            second.inner.previous.as_ref().unwrap().directory,
+            "generation-a"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn install_state_round_trips_and_replaces_without_serializing_null_previous() {
+        let authority = NativeOpenCode2Authority::new();
+        let root = tempfile::tempdir().unwrap();
+        let engine_root = root.path().join("toolchain").join("opencode2");
+        std::fs::create_dir_all(&engine_root).unwrap();
+
+        let first = authority.new_install_state("generation-a", None).unwrap();
+        let first_bytes = authority.encode_install_state(&first).unwrap();
+        let first_text = String::from_utf8(first_bytes.clone()).unwrap();
+        assert!(!first_text.contains("previous"));
+        assert!(!first_text.contains("null"));
+        assert!(matches!(
+            authority.write_install_state(&engine_root, &first),
+            Ok(instance::NativeAtomicReplaceOutcome::Committed)
+        ));
+        assert_eq!(std::fs::read_dir(&engine_root).unwrap().count(), 1);
+
+        let first_read = authority.read_install_state(&engine_root).unwrap().unwrap();
+        assert_eq!(
+            authority.encode_install_state(&first_read).unwrap(),
+            first_bytes
+        );
+
+        let second = authority
+            .new_install_state("generation-b", Some(&first_read))
+            .unwrap();
+        let second_bytes = authority.encode_install_state(&second).unwrap();
+        let second_text = String::from_utf8(second_bytes.clone()).unwrap();
+        assert!(second_text.contains("\"previous\""));
+        assert!(!second_text.contains("\"previous\":null"));
+        assert!(matches!(
+            authority.write_install_state(&engine_root, &second),
+            Ok(instance::NativeAtomicReplaceOutcome::Committed)
+        ));
+        assert_eq!(std::fs::read_dir(&engine_root).unwrap().count(), 1);
+
+        let second_read = authority.read_install_state(&engine_root).unwrap().unwrap();
+        assert_eq!(second_read.inner.active.directory, "generation-b");
+        assert_eq!(
+            second_read.inner.previous.as_ref().unwrap().directory,
+            "generation-a"
+        );
+        assert_eq!(
+            authority.encode_install_state(&second_read).unwrap(),
+            second_bytes
+        );
+    }
+
+    #[test]
+    fn install_state_validation_is_opaque_and_path_free() {
+        let authority = NativeOpenCode2Authority::new();
+        assert!(matches!(
+            authority.read_install_state(Path::new("toolchain/opencode2")),
+            Err(NativeOpenCode2StateError::InvalidRoot)
+        ));
+
+        let unsupported = NativeOpenCode2State {
+            inner: ManagedToolchainStateV1 {
+                active: certified_generation("generation-a"),
+                format_version: 2,
+                previous: None,
+            },
+        };
+        assert_eq!(
+            authority.encode_install_state(&unsupported),
+            Err(NativeOpenCode2StateError::UnsupportedVersion)
+        );
+
+        let malformed = NativeOpenCode2State {
+            inner: ManagedToolchainStateV1 {
+                active: ManagedGenerationV1 {
+                    binary: "opencode2.exe".into(),
+                    directory: "generation-a".into(),
+                    sha256: "not-a-digest".into(),
+                    version: "0.0.0-beta-17778".into(),
+                },
+                format_version: 1,
+                previous: None,
+            },
+        };
+        assert_eq!(
+            authority.encode_install_state(&malformed),
+            Err(NativeOpenCode2StateError::ActiveGenerationUntrusted)
+        );
+        assert!(!format!("{}", NativeOpenCode2StateError::UnsafePath).contains("toolchain"));
+    }
+
+    #[test]
     fn unsafe_generation_binary_version_and_digest_values_fail_closed() {
         assert!(!is_safe_basename("../generation", MAX_GENERATION_ID_BYTES));
         assert!(!is_safe_relative_path(
@@ -661,25 +1046,41 @@ mod tests {
         let mut active = certified_generation("generation-a");
         active.binary = "nested/opencode2.exe".into();
         assert_eq!(
-            validate_generation(&active, true),
+            validate_generation(
+                &active,
+                true,
+                &NativeOpenCode2Authority::certified_install_spec(),
+            ),
             Err(NativeOpenCode2Error::ActiveGenerationUntrusted)
         );
         active = certified_generation("generation-a");
         active.directory = "../generation-a".into();
         assert_eq!(
-            validate_generation(&active, true),
+            validate_generation(
+                &active,
+                true,
+                &NativeOpenCode2Authority::certified_install_spec(),
+            ),
             Err(NativeOpenCode2Error::UnsafePath)
         );
         active = certified_generation("generation-a");
         active.version = "1.2.3".into();
         assert_eq!(
-            validate_generation(&active, true),
+            validate_generation(
+                &active,
+                true,
+                &NativeOpenCode2Authority::certified_install_spec(),
+            ),
             Err(NativeOpenCode2Error::ActiveGenerationUntrusted)
         );
         active = certified_generation("generation-a");
         active.sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into();
         assert_eq!(
-            validate_generation(&active, true),
+            validate_generation(
+                &active,
+                true,
+                &NativeOpenCode2Authority::certified_install_spec(),
+            ),
             Err(NativeOpenCode2Error::ActiveGenerationUntrusted)
         );
     }
@@ -688,7 +1089,7 @@ mod tests {
     fn exact_database_parent_toolchain_root_is_used() {
         let root = std::env::temp_dir().join("authority-root");
         let instance = sample_instance(&root);
-        let paths = managed_paths(&instance).unwrap();
+        let paths = managed_paths(&instance, CERTIFIED_ENGINE_ID).unwrap();
         assert_eq!(
             paths.state_path,
             root.join("data")
@@ -712,7 +1113,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            managed_paths(&traversal),
+            managed_paths(&traversal, CERTIFIED_ENGINE_ID),
             Err(NativeOpenCode2Error::UnsafePath)
         ));
     }
@@ -730,10 +1131,16 @@ mod tests {
             "previous-generation"
         );
         let root = tempfile::tempdir().unwrap();
+        let instance = sample_instance(root.path());
+        let paths = managed_paths(&instance, CERTIFIED_ENGINE_ID).unwrap();
+        assert!(matches!(
+            NativeOpenCode2Authority::new().read_install_state(&paths.engine_root),
+            Ok(None)
+        ));
         assert!(
             !is_supported_platform()
                 || NativeOpenCode2Authority::new()
-                    .resolve_active(&sample_instance(root.path()))
+                    .resolve_active(&instance)
                     .is_err()
         );
     }
@@ -742,7 +1149,7 @@ mod tests {
     fn active_generation_is_the_only_generation_path_candidate() {
         let root = tempfile::tempdir().unwrap();
         let instance = sample_instance(root.path());
-        let paths = managed_paths(&instance).unwrap();
+        let paths = managed_paths(&instance, CERTIFIED_ENGINE_ID).unwrap();
         let state = ManagedToolchainStateV1 {
             active: certified_generation("active-generation"),
             format_version: 1,
@@ -809,8 +1216,12 @@ mod tests {
         symlink(&real_state, state_directory.join("state.json")).unwrap();
         let instance = sample_instance(root.path());
         assert!(matches!(
-            read_managed_state(&managed_paths(&instance).unwrap()),
-            Err(NativeOpenCode2Error::UnsafePath)
+            NativeOpenCode2Authority::new().read_install_state(
+                &managed_paths(&instance, CERTIFIED_ENGINE_ID)
+                    .unwrap()
+                    .engine_root,
+            ),
+            Err(NativeOpenCode2StateError::UnsafePath)
         ));
 
         let executable = root.path().join("executable.exe");
@@ -834,12 +1245,12 @@ mod tests {
         std::fs::create_dir_all(real_data.join("toolchain").join("opencode2")).unwrap();
         symlink(&real_data, root.path().join("data")).unwrap();
         let instance = sample_instance(root.path());
-        let paths = managed_paths(&instance).unwrap();
+        let paths = managed_paths(&instance, CERTIFIED_ENGINE_ID).unwrap();
         let state = br#"{"active":{"binary":"opencode2.exe","directory":"generation-a","sha256":"452794a764e1033e629c4cd40bde6433c10c6bd32433fb3be279bf03969a6edf","version":"0.0.0-beta-17778"},"format_version":1}"#;
         std::fs::write(&paths.state_path, state).unwrap();
         assert!(matches!(
-            read_managed_state(&paths),
-            Err(NativeOpenCode2Error::UnsafePath)
+            NativeOpenCode2Authority::new().read_install_state(&paths.engine_root),
+            Err(NativeOpenCode2StateError::UnsafePath)
         ));
     }
 
@@ -847,7 +1258,7 @@ mod tests {
     fn bounded_state_reader_never_returns_bytes_above_its_limit() {
         let root = tempfile::tempdir().unwrap();
         let instance = sample_instance(root.path());
-        let paths = managed_paths(&instance).unwrap();
+        let paths = managed_paths(&instance, CERTIFIED_ENGINE_ID).unwrap();
         std::fs::create_dir_all(paths.state_path.parent().unwrap()).unwrap();
         std::fs::write(&paths.state_path, vec![b'x'; MAX_STATE_BYTES + 1]).unwrap();
         assert_eq!(
@@ -925,12 +1336,14 @@ mod tests {
     fn state_bytes_remain_unchanged_after_bounded_read() {
         let root = tempfile::tempdir().unwrap();
         let instance = sample_instance(root.path());
-        let paths = managed_paths(&instance).unwrap();
+        let paths = managed_paths(&instance, CERTIFIED_ENGINE_ID).unwrap();
         std::fs::create_dir_all(paths.state_path.parent().unwrap()).unwrap();
         let bytes = br#"{"active":{"binary":"opencode2.exe","directory":"generation-a","sha256":"452794a764e1033e629c4cd40bde6433c10c6bd32433fb3be279bf03969a6edf","version":"0.0.0-beta-17778"},"format_version":1}"#;
         std::fs::write(&paths.state_path, bytes).unwrap();
         let before = std::fs::read(&paths.state_path).unwrap();
-        let _ = read_managed_state(&paths).unwrap();
+        let _ = NativeOpenCode2Authority::new()
+            .read_install_state(&paths.engine_root)
+            .unwrap();
         let after = std::fs::read(&paths.state_path).unwrap();
         assert_eq!(before, after);
     }
@@ -947,20 +1360,15 @@ mod tests {
             .join("state.json");
         std::fs::create_dir_all(other_state.parent().unwrap()).unwrap();
         std::fs::write(&other_state, b"not OpenCode2 state").unwrap();
-        let paths = managed_paths(&instance).unwrap();
+        let paths = managed_paths(&instance, CERTIFIED_ENGINE_ID).unwrap();
         assert!(matches!(
-            read_managed_state(&paths),
-            Err(NativeOpenCode2Error::StateMissing)
+            NativeOpenCode2Authority::new().read_install_state(&paths.engine_root),
+            Ok(None)
         ));
     }
 
     fn certified_generation(directory: &str) -> ManagedGenerationV1 {
-        ManagedGenerationV1 {
-            binary: CERTIFIED_BINARY.into(),
-            directory: directory.into(),
-            sha256: CERTIFIED_EXECUTABLE_SHA256_HEX.into(),
-            version: CERTIFIED_VERSION.into(),
-        }
+        NativeOpenCode2Authority::certified_install_spec().generation(directory)
     }
 
     fn sample_instance(root: &Path) -> NativeInstanceConfig {

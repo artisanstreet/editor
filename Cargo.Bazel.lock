@@ -1,5 +1,5 @@
 {
-  "checksum": "6e11b965264a3ba33298be06ddda3a8545c5b83c902ec60488106042bcff40e4",
+  "checksum": "3ff18d30cc4154e30575d936659668318ca6e220fb09af560f2463fc28493cf1",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2501,6 +2501,10 @@
               "target": "sha2"
             },
             {
+              "id": "tempfile 3.27.0",
+              "target": "tempfile"
+            },
+            {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
@@ -2515,15 +2519,6 @@
             {
               "id": "zeroize 1.9.0",
               "target": "zeroize"
-            }
-          ],
-          "selects": {}
-        },
-        "deps_dev": {
-          "common": [
-            {
-              "id": "tempfile 3.27.0",
-              "target": "tempfile"
             }
           ],
           "selects": {}

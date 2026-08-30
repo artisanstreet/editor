@@ -334,6 +334,12 @@ impl std::error::Error for NativeInstanceError {}
 
 type NativeResult<T> = std::result::Result<T, NativeInstanceError>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeAtomicReplaceOutcome {
+    Committed,
+    CommittedButUnverified,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeInstanceFile {
@@ -908,38 +914,6 @@ pub fn write_native_config(path: &Path, config: &NativeInstanceConfig) -> Native
     config.write(path)
 }
 
-struct NativeScopedTemp {
-    path: PathBuf,
-    armed: bool,
-}
-
-impl NativeScopedTemp {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for NativeScopedTemp {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn encode_nonce_hex(nonce: &[u8; 16]) -> String {
-    let mut encoded = String::with_capacity(32);
-    for &byte in nonce {
-        encoded.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('?'));
-        encoded.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('?'));
-    }
-    encoded
-}
-
 fn inspect_native_destination(path: &Path) -> NativeResult<Option<NativeFileId>> {
     check_ancestors_all(path, false)?;
     match fs::symlink_metadata(path) {
@@ -954,46 +928,6 @@ fn inspect_native_destination(path: &Path) -> NativeResult<Option<NativeFileId>>
             path: path.to_path_buf(),
         }),
     }
-}
-
-fn prepare_native_temp(
-    directory: &Path,
-    path: &Path,
-    bytes: &[u8],
-) -> NativeResult<(PathBuf, NativeScopedTemp, NativeFileId)> {
-    let mut nonce = [0_u8; 16];
-    getrandom::fill(&mut nonce).map_err(|_| NativeInstanceError::InvalidManifest)?;
-    let nonce_hex = encode_nonce_hex(&nonce);
-    let base_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("instance");
-    let temporary = directory.join(format!(".{base_name}.{nonce_hex}.tmp"));
-    let guard = NativeScopedTemp::new(temporary.clone());
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&temporary)
-        .map_err(|_| NativeInstanceError::Io {
-            context: "create temporary instance file",
-            path: temporary.clone(),
-        })?;
-    file.write_all(bytes).map_err(|_| NativeInstanceError::Io {
-        context: "write temporary instance file",
-        path: temporary.clone(),
-    })?;
-    file.sync_all().map_err(|_| NativeInstanceError::Io {
-        context: "sync temporary instance file",
-        path: temporary.clone(),
-    })?;
-    let temp_id = native_file_id_from_file(&file)?;
-    drop(file);
-    Ok((temporary, guard, temp_id))
 }
 
 fn verify_native_destination(
@@ -1071,25 +1005,91 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
     let directory = path
         .parent()
         .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
-    let pre_existing_id = inspect_native_destination(path)?;
     fs::create_dir_all(directory).map_err(|_| NativeInstanceError::Io {
         context: "create directory",
         path: directory.to_path_buf(),
     })?;
-    check_ancestors_all(path, false)?;
-    let (temporary, mut guard, temp_id) = prepare_native_temp(directory, path, bytes)?;
-    verify_native_destination(path, pre_existing_id)?;
-    fs::rename(&temporary, path).map_err(|_| NativeInstanceError::Io {
-        context: "activate instance file",
-        path: path.to_path_buf(),
-    })?;
-    guard.disarm();
-    let dest_id = native_file_id(path)?;
-    if dest_id != temp_id {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+    match replace_native_file(path, bytes)? {
+        NativeAtomicReplaceOutcome::Committed => Ok(()),
+        NativeAtomicReplaceOutcome::CommittedButUnverified => Err(NativeInstanceError::Io {
+            context: "verify activated instance file",
+            path: path.to_path_buf(),
+        }),
     }
+}
+
+pub(crate) fn replace_native_file(
+    path: &Path,
+    bytes: &[u8],
+) -> std::result::Result<NativeAtomicReplaceOutcome, NativeInstanceError> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
     check_ancestors_all(path, true)?;
-    sync_native_directory(directory)
+    let pre_existing_id = inspect_native_destination(path)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".artisan-native-")
+        .suffix(".tmp")
+        .tempfile_in(directory)
+        .map_err(|_| NativeInstanceError::Io {
+            context: "create temporary native file",
+            path: directory.to_path_buf(),
+        })?;
+    if temporary.path().parent() != Some(directory) {
+        return Err(NativeInstanceError::UnsafePath(
+            temporary.path().to_path_buf(),
+        ));
+    }
+    temporary
+        .as_file_mut()
+        .write_all(bytes)
+        .map_err(|_| NativeInstanceError::Io {
+            context: "write temporary native file",
+            path: directory.to_path_buf(),
+        })?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|_| NativeInstanceError::Io {
+            context: "sync temporary native file",
+            path: directory.to_path_buf(),
+        })?;
+    let temporary_id = native_file_id_from_file(temporary.as_file())?;
+    verify_native_temporary(temporary.path(), temporary_id)?;
+    check_ancestors_all(path, true)?;
+    verify_native_destination(path, pre_existing_id)?;
+    verify_native_temporary(temporary.path(), temporary_id)?;
+    let Ok(persisted) = temporary.persist(path) else {
+        return Err(NativeInstanceError::Io {
+            context: "activate native file",
+            path: path.to_path_buf(),
+        });
+    };
+    drop(persisted);
+
+    let verified = (|| {
+        check_ancestors_all(path, true)?;
+        let destination_id =
+            inspect_native_destination(path)?.ok_or(NativeInstanceError::NotFound)?;
+        if destination_id != temporary_id {
+            return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+        }
+        sync_native_directory(directory)
+    })();
+    if verified.is_ok() {
+        Ok(NativeAtomicReplaceOutcome::Committed)
+    } else {
+        Ok(NativeAtomicReplaceOutcome::CommittedButUnverified)
+    }
+}
+
+fn verify_native_temporary(path: &Path, expected_id: NativeFileId) -> NativeResult<()> {
+    let actual_id = inspect_native_destination(path)?.ok_or(NativeInstanceError::NotFound)?;
+    if actual_id == expected_id {
+        Ok(())
+    } else {
+        Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
+    }
 }
 
 #[cfg(test)]
@@ -1117,6 +1117,117 @@ mod tests {
         )
         .expect("legacy instance config");
         assert!(!config.serve_frontend);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_file_replacement_is_same_directory_atomic_and_identity_fenced() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("state.json");
+        let original = b"original state";
+        let replacement = b"replacement state";
+        fs::write(&destination, original).unwrap();
+        let original_id = native_file_id(&destination).unwrap();
+
+        assert!(matches!(
+            replace_native_file(&destination, replacement),
+            Ok(NativeAtomicReplaceOutcome::Committed)
+        ));
+        assert_eq!(fs::read(&destination).unwrap(), replacement);
+        assert_ne!(native_file_id(&destination).unwrap(), original_id);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_file_replacement_rejects_temporary_path_substitution_while_handle_is_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".artisan-native-")
+            .tempfile_in(directory.path())
+            .unwrap();
+        temporary.as_file_mut().write_all(b"staged bytes").unwrap();
+        temporary.as_file().sync_all().unwrap();
+        let handle_id = native_file_id_from_file(temporary.as_file()).unwrap();
+        let substituted_path = temporary.path().to_path_buf();
+        let original_path = directory.path().join("original.tmp");
+
+        fs::rename(&substituted_path, &original_path).unwrap();
+        fs::write(&substituted_path, b"substituted bytes").unwrap();
+
+        assert!(verify_native_temporary(&substituted_path, handle_id).is_err());
+        assert_eq!(fs::read(&original_path).unwrap(), b"staged bytes");
+        assert_eq!(fs::read(&substituted_path).unwrap(), b"substituted bytes");
+        fs::remove_file(original_path).unwrap();
+        fs::remove_file(substituted_path).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_file_replacement_rejects_unsafe_destination_without_changing_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.json");
+        let destination = directory.path().join("state.json");
+        fs::write(&target, b"untouched").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &destination).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(&target, &destination).is_err() {
+            return;
+        }
+
+        assert!(replace_native_file(&destination, b"attacker bytes").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"untouched");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_file_replacement_preserves_destination_when_delete_sharing_is_denied() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("state.json");
+        let original = b"original state";
+        fs::write(&destination, original).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&destination)
+            .unwrap();
+
+        assert!(replace_native_file(&destination, b"replacement state").is_err());
+        assert_eq!(fs::read(&destination).unwrap(), original);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        drop(holder);
+    }
+
+    #[test]
+    fn native_file_replacement_requires_an_existing_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("missing");
+        let destination = parent.join("state.json");
+
+        assert!(replace_native_file(&destination, b"state").is_err());
+        assert!(!parent.exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_file_destination_identity_fence_rejects_a_replaced_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("state.json");
+        fs::write(&destination, b"original").unwrap();
+        let original_id = native_file_id(&destination).unwrap();
+        let backup = directory.path().join("state.old");
+        fs::rename(&destination, &backup).unwrap();
+        fs::write(&destination, b"replacement").unwrap();
+
+        assert!(verify_native_destination(&destination, Some(original_id)).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
     }
 
     #[test]
