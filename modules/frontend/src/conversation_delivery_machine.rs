@@ -25,8 +25,8 @@ use crate::conversation_projection::{
     ConversationProjection, ProjectionError, ProjectionStatus, SnapshotDisposition,
 };
 use artisan_domain::{ConversationCursor, ConversationSnapshot, PatchBatch, ThreadId};
-use statig::Outcome::{Handled, Super, Transition};
 use statig::prelude::*;
+use statig::Outcome::{Handled, Super, Transition};
 
 // Re-export for tests that want to match on projection types without
 // reaching into the projection module separately.
@@ -204,7 +204,7 @@ impl Delivery {
     superstate(derive(Debug))
 )]
 impl Delivery {
-    #[statig::state(superstate = "delivery", entry_action = "enter_awaiting_snapshot")]
+    #[state(superstate = "delivery", entry_action = "enter_awaiting_snapshot")]
     fn awaiting_snapshot(
         &mut self,
         context: &mut DeliveryContext,
@@ -261,7 +261,7 @@ impl Delivery {
         }
     }
 
-    #[statig::state(superstate = "delivery")]
+    #[state(superstate = "delivery")]
     fn ready(
         &mut self,
         context: &mut DeliveryContext,
@@ -322,7 +322,7 @@ impl Delivery {
         }
     }
 
-    #[statig::state(superstate = "delivery", entry_action = "enter_recovering")]
+    #[state(superstate = "delivery", entry_action = "enter_recovering")]
     fn recovering(
         &mut self,
         context: &mut DeliveryContext,
@@ -375,7 +375,7 @@ impl Delivery {
         }
     }
 
-    #[statig::superstate]
+    #[superstate]
     fn delivery(
         &mut self,
         _context: &mut DeliveryContext,
@@ -387,7 +387,7 @@ impl Delivery {
         }
     }
 
-    #[statig::state(entry_action = "enter_closed")]
+    #[state(entry_action = "enter_closed")]
     fn closed(
         &mut self,
         _context: &mut DeliveryContext,
@@ -396,17 +396,17 @@ impl Delivery {
         Handled
     }
 
-    #[statig::action]
+    #[action]
     fn enter_awaiting_snapshot(&mut self, context: &mut DeliveryContext) {
         self.emit_snapshot_request(context);
     }
 
-    #[statig::action]
+    #[action]
     fn enter_recovering(&mut self, context: &mut DeliveryContext) {
         self.emit_snapshot_request(context);
     }
 
-    #[statig::action]
+    #[action]
     fn enter_closed(&mut self, context: &mut DeliveryContext) {
         context.push(ConversationDeliveryEffect::OwnerClosed {
             thread_id: self.thread_id.clone(),
