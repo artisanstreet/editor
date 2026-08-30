@@ -440,11 +440,13 @@ fn encode_body(
             match &value.credential {
                 HelloCredential::Initial(capability) => {
                     hello
+                        .reborrow()
                         .init_credential()
                         .set_initial(capability.expose_for_wire());
                 }
                 HelloCredential::Reconnect(capability) => {
                     hello
+                        .reborrow()
                         .init_credential()
                         .set_reconnect(capability.expose_for_wire());
                 }
