@@ -580,10 +580,6 @@ fn is_valid_sid(sid: &str) -> bool {
     true
 }
 
-fn parse_icacls_output(output: &str, expected_sid: &str) -> Result<(), ForgeCredentialError> {
-    parse_icacls_output_with_path(output, expected_sid, "")
-}
-
 fn parse_icacls_output_with_path(
     output: &str,
     expected_sid: &str,
@@ -594,14 +590,6 @@ fn parse_icacls_output_with_path(
         account: String::new(),
     };
     parse_icacls_strict_with_identity(output, &identity, true, queried_path)
-}
-
-fn parse_icacls_strict(
-    output: &str,
-    expected_sid: &str,
-    expect_dir: bool,
-) -> Result<(), ForgeCredentialError> {
-    parse_icacls_strict_with_path(output, expected_sid, expect_dir, "")
 }
 
 fn parse_icacls_strict_with_path(
@@ -1437,8 +1425,8 @@ pub fn ensure_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCred
 #[cfg(test)]
 mod parser_tests {
     use super::{
-        CurrentIdentity, parse_icacls_output, parse_icacls_output_with_path, parse_icacls_strict,
-        parse_icacls_strict_with_identity, parse_icacls_strict_with_path,
+        CurrentIdentity, parse_icacls_output_with_path, parse_icacls_strict_with_identity,
+        parse_icacls_strict_with_path,
     };
 
     #[test]
@@ -1449,30 +1437,38 @@ mod parser_tests {
             sid: sid.to_string(),
             account: account.to_string(),
         };
-        let good_dir_sid = format!("C:\\creds {sid}:(OI)(CI)(F)");
-        assert!(parse_icacls_output(&good_dir_sid, sid).is_ok());
-        assert!(parse_icacls_strict(&good_dir_sid, sid, true).is_ok());
-        let good_dir_account = format!("C:\\creds {account}:(OI)(CI)(F)");
-        assert!(parse_icacls_strict_with_identity(&good_dir_account, &identity, true, "").is_ok());
-        let good_file = format!("C:\\creds\\file {sid}:(F)");
-        assert!(parse_icacls_strict(&good_file, sid, false).is_ok());
-        let sid_prefix = format!("C:\\creds {sid}00:(F)");
-        assert!(parse_icacls_strict(&sid_prefix, sid, false).is_err());
-        let with_inherited = format!("C:\\creds {sid}:(I)(OI)(CI)(F)");
-        assert!(parse_icacls_output(&with_inherited, sid).is_err());
-        let two_sids = format!("C:\\creds {sid}:(F)\nS-1-5-21-1-2-3-1001:(F)");
-        assert!(parse_icacls_output(&two_sids, sid).is_err());
-        let deny = format!("C:\\creds {sid}:(DENY)(F)");
-        assert!(parse_icacls_output(&deny, sid).is_err());
-        let everyone = format!("C:\\creds BUILTIN\\Users:(F) {sid}:(F)");
-        assert!(parse_icacls_output(&everyone, sid).is_err());
-        let named_extra = format!("C:\\creds {sid}:(F)\nDOMAIN\\OtherUser:(F)");
-        assert!(parse_icacls_output(&named_extra, sid).is_err());
-        assert!(parse_icacls_strict(&named_extra, sid, false).is_err());
-        let extra_flags = format!("C:\\creds {sid}:(OI)(CI)(F)(M)");
-        assert!(parse_icacls_strict(&extra_flags, sid, true).is_err());
-        let broad = format!("C:\\creds {sid}:(OI)(CI)(M)");
-        assert!(parse_icacls_strict(&broad, sid, true).is_err());
+        let dir_path = "C:\\creds";
+        let file_path = "C:\\creds\\file";
+        let good_dir_sid = format!("{dir_path} {sid}:(OI)(CI)(F)");
+        assert!(parse_icacls_output_with_path(&good_dir_sid, sid, dir_path).is_ok());
+        assert!(parse_icacls_strict_with_path(&good_dir_sid, sid, true, dir_path).is_ok());
+        let good_dir_account = format!("{dir_path} {account}:(OI)(CI)(F)");
+        assert!(
+            parse_icacls_strict_with_identity(&good_dir_account, &identity, true, dir_path).is_ok()
+        );
+        // A drive-letter path must be stripped only when the complete queried path matches.
+        let drive_file = format!("{file_path} {sid}:(F)");
+        assert!(parse_icacls_strict_with_path(&drive_file, sid, false, file_path).is_ok());
+        assert!(
+            parse_icacls_strict_with_path(&drive_file, sid, false, "C:\\creds\\other").is_err()
+        );
+        let sid_prefix = format!("{file_path} {sid}00:(F)");
+        assert!(parse_icacls_strict_with_path(&sid_prefix, sid, false, file_path).is_err());
+        let with_inherited = format!("{dir_path} {sid}:(I)(OI)(CI)(F)");
+        assert!(parse_icacls_output_with_path(&with_inherited, sid, dir_path).is_err());
+        let two_sids = format!("{dir_path} {sid}:(F)\nS-1-5-21-1-2-3-1001:(F)");
+        assert!(parse_icacls_output_with_path(&two_sids, sid, dir_path).is_err());
+        let deny = format!("{dir_path} {sid}:(DENY)(F)");
+        assert!(parse_icacls_output_with_path(&deny, sid, dir_path).is_err());
+        let everyone = format!("{dir_path} BUILTIN\\Users:(F) {sid}:(F)");
+        assert!(parse_icacls_output_with_path(&everyone, sid, dir_path).is_err());
+        let named_extra = format!("{dir_path} {sid}:(F)\nDOMAIN\\OtherUser:(F)");
+        assert!(parse_icacls_output_with_path(&named_extra, sid, dir_path).is_err());
+        assert!(parse_icacls_strict_with_path(&named_extra, sid, false, dir_path).is_err());
+        let extra_flags = format!("{dir_path} {sid}:(OI)(CI)(F)(M)");
+        assert!(parse_icacls_strict_with_path(&extra_flags, sid, true, dir_path).is_err());
+        let broad = format!("{dir_path} {sid}:(OI)(CI)(M)");
+        assert!(parse_icacls_strict_with_path(&broad, sid, true, dir_path).is_err());
         // Exact queried path containing spaces
         let spaced_path = "C:\\My Documents\\Artisan creds";
         let spaced_good = format!("{spaced_path} {sid}:(OI)(CI)(F)");
@@ -1485,12 +1481,12 @@ mod parser_tests {
             parse_icacls_strict_with_path(&spaced_wrong_prefix, sid, true, spaced_path).is_err()
         );
         // Duplicate tokens
-        let dup_f_file = format!("C:\\creds {sid}:(F)(F)");
-        assert!(parse_icacls_strict(&dup_f_file, sid, false).is_err());
-        let dup_oi_dir = format!("C:\\creds {sid}:(OI)(OI)(CI)(F)");
-        assert!(parse_icacls_strict(&dup_oi_dir, sid, true).is_err());
+        let dup_f_file = format!("{file_path} {sid}:(F)(F)");
+        assert!(parse_icacls_strict_with_path(&dup_f_file, sid, false, file_path).is_err());
+        let dup_oi_dir = format!("{dir_path} {sid}:(OI)(OI)(CI)(F)");
+        assert!(parse_icacls_strict_with_path(&dup_oi_dir, sid, true, dir_path).is_err());
         // Trailing junk
-        let trailing = format!("C:\\creds {sid}:(F) extra");
-        assert!(parse_icacls_strict(&trailing, sid, false).is_err());
+        let trailing = format!("{file_path} {sid}:(F) extra");
+        assert!(parse_icacls_strict_with_path(&trailing, sid, false, file_path).is_err());
     }
 }
