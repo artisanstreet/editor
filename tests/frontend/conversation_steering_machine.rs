@@ -62,7 +62,7 @@ fn happy_path_view_and_effect_sequence() {
 
     // DispatchStarted -> Dispatching
     machine
-        .handle_event(SteeringEvent::DispatchStarted {
+        .handle_event(&SteeringEvent::DispatchStarted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 1001,
@@ -99,7 +99,7 @@ fn happy_path_view_and_effect_sequence() {
 
     // DispatchAccepted -> AwaitingProjection (lip retained per invariant)
     machine
-        .handle_event(SteeringEvent::DispatchAccepted {
+        .handle_event(&SteeringEvent::DispatchAccepted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 1002,
@@ -120,7 +120,7 @@ fn happy_path_view_and_effect_sequence() {
     // DurableItemAnchored -> AwaitingAcknowledgement with exact anchor
     let anchor = item("item-aaaa");
     machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 1,
             item_id: anchor.clone(),
@@ -143,7 +143,7 @@ fn happy_path_view_and_effect_sequence() {
 
     // EngineAcknowledged -> Acknowledged (settled, hidden, releases lip)
     machine
-        .handle_event(SteeringEvent::EngineAcknowledged {
+        .handle_event(&SteeringEvent::EngineAcknowledged {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 1004,
@@ -185,13 +185,13 @@ fn two_concurrent_controllers_retain_different_anchors() {
     let mut b = new_controller("cmd-b", 7, "src-b", 2000);
 
     for (m, cmd) in [(&mut a, "cmd-a"), (&mut b, "cmd-b")] {
-        m.handle_event(SteeringEvent::DispatchStarted {
+        m.handle_event(&SteeringEvent::DispatchStarted {
             command_id: request(cmd),
             generation: if cmd == "cmd-a" { 1 } else { 7 },
             at_ms: 2001,
         })
         .unwrap();
-        m.handle_event(SteeringEvent::DispatchAccepted {
+        m.handle_event(&SteeringEvent::DispatchAccepted {
             command_id: request(cmd),
             generation: if cmd == "cmd-a" { 1 } else { 7 },
             at_ms: 2002,
@@ -201,14 +201,14 @@ fn two_concurrent_controllers_retain_different_anchors() {
 
     let anchor_a = item("item-anchor-a");
     let anchor_b = item("item-anchor-b");
-    a.handle_event(SteeringEvent::DurableItemAnchored {
+    a.handle_event(&SteeringEvent::DurableItemAnchored {
         command_id: request("cmd-a"),
         generation: 1,
         item_id: anchor_a.clone(),
         at_ms: 2003,
     })
     .unwrap();
-    b.handle_event(SteeringEvent::DurableItemAnchored {
+    b.handle_event(&SteeringEvent::DurableItemAnchored {
         command_id: request("cmd-b"),
         generation: 7,
         item_id: anchor_b.clone(),
@@ -233,7 +233,7 @@ fn two_concurrent_controllers_retain_different_anchors() {
     ));
 
     // Settling one does not affect the other.
-    a.handle_event(SteeringEvent::EngineAcknowledged {
+    a.handle_event(&SteeringEvent::EngineAcknowledged {
         command_id: request("cmd-a"),
         generation: 1,
         at_ms: 2004,
@@ -251,14 +251,14 @@ fn two_concurrent_controllers_retain_different_anchors() {
 fn later_unrelated_item_cannot_relocate_anchor() {
     let mut machine = new_controller("cmd-1", 1, "src-1", 3000);
     machine
-        .handle_event(SteeringEvent::DispatchStarted {
+        .handle_event(&SteeringEvent::DispatchStarted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 3001,
         })
         .unwrap();
     machine
-        .handle_event(SteeringEvent::DispatchAccepted {
+        .handle_event(&SteeringEvent::DispatchAccepted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 3002,
@@ -266,7 +266,7 @@ fn later_unrelated_item_cannot_relocate_anchor() {
         .unwrap();
     let first = item("item-first");
     machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 1,
             item_id: first.clone(),
@@ -276,7 +276,7 @@ fn later_unrelated_item_cannot_relocate_anchor() {
     // Attempt to anchor a different item — must be rejected.
     let second = item("item-second");
     let err = machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 1,
             item_id: second.clone(),
@@ -296,14 +296,14 @@ fn later_unrelated_item_cannot_relocate_anchor() {
 
     // Even after acknowledgement, the anchor must not move.
     machine
-        .handle_event(SteeringEvent::EngineAcknowledged {
+        .handle_event(&SteeringEvent::EngineAcknowledged {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 3005,
         })
         .unwrap();
     // Settled — anchoring a new item is refused, not relocated.
-    let after_settled = machine.handle_event(SteeringEvent::DurableItemAnchored {
+    let after_settled = machine.handle_event(&SteeringEvent::DurableItemAnchored {
         command_id: request("cmd-1"),
         generation: 1,
         item_id: second.clone(),
@@ -321,14 +321,14 @@ fn later_unrelated_item_cannot_relocate_anchor() {
 fn stale_completions_are_atomic_refusals() {
     let mut machine = new_controller("cmd-1", 5, "src-1", 4000);
     machine
-        .handle_event(SteeringEvent::DispatchStarted {
+        .handle_event(&SteeringEvent::DispatchStarted {
             command_id: request("cmd-1"),
             generation: 5,
             at_ms: 4001,
         })
         .unwrap();
     machine
-        .handle_event(SteeringEvent::DispatchAccepted {
+        .handle_event(&SteeringEvent::DispatchAccepted {
             command_id: request("cmd-1"),
             generation: 5,
             at_ms: 4002,
@@ -341,7 +341,7 @@ fn stale_completions_are_atomic_refusals() {
 
     // Stale generation.
     let err = machine
-        .handle_event(SteeringEvent::EngineAcknowledged {
+        .handle_event(&SteeringEvent::EngineAcknowledged {
             command_id: request("cmd-1"),
             generation: 4,
             at_ms: 4003,
@@ -356,7 +356,7 @@ fn stale_completions_are_atomic_refusals() {
 
     // Stale command id.
     let err2 = machine
-        .handle_event(SteeringEvent::EngineAcknowledged {
+        .handle_event(&SteeringEvent::EngineAcknowledged {
             command_id: request("cmd-999"),
             generation: 5,
             at_ms: 4003,
@@ -371,7 +371,7 @@ fn stale_completions_are_atomic_refusals() {
 
     // Stale anchor event.
     let err3 = machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 99,
             item_id: item("item-x"),
@@ -394,14 +394,14 @@ fn stale_completions_are_atomic_refusals() {
 fn duplicate_equal_anchor_is_idempotent_conflicting_rejected() {
     let mut machine = new_controller("cmd-1", 1, "src-1", 5000);
     machine
-        .handle_event(SteeringEvent::DispatchStarted {
+        .handle_event(&SteeringEvent::DispatchStarted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 5001,
         })
         .unwrap();
     machine
-        .handle_event(SteeringEvent::DispatchAccepted {
+        .handle_event(&SteeringEvent::DispatchAccepted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 5002,
@@ -409,7 +409,7 @@ fn duplicate_equal_anchor_is_idempotent_conflicting_rejected() {
         .unwrap();
     let anchor = item("item-anchor");
     machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 1,
             item_id: anchor.clone(),
@@ -421,7 +421,7 @@ fn duplicate_equal_anchor_is_idempotent_conflicting_rejected() {
     // Duplicate equal anchor with newer timestamp — idempotent, no conflict,
     // advances last_observed but does not change placement or duplicate effects.
     machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 1,
             item_id: anchor.clone(),
@@ -444,7 +444,7 @@ fn duplicate_equal_anchor_is_idempotent_conflicting_rejected() {
     // Conflicting anchor is rejected.
     let other = item("item-other");
     let err = machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 1,
             item_id: other,
@@ -458,7 +458,7 @@ fn duplicate_equal_anchor_is_idempotent_conflicting_rejected() {
 
     // Duplicate acknowledgement is idempotent when settled.
     machine
-        .handle_event(SteeringEvent::EngineAcknowledged {
+        .handle_event(&SteeringEvent::EngineAcknowledged {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 5006,
@@ -466,7 +466,7 @@ fn duplicate_equal_anchor_is_idempotent_conflicting_rejected() {
         .unwrap();
     let settled_view = machine.view();
     machine
-        .handle_event(SteeringEvent::EngineAcknowledged {
+        .handle_event(&SteeringEvent::EngineAcknowledged {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 5007,
@@ -484,7 +484,7 @@ fn failure_and_cancellation_release_only_owning_generation() {
     let mut a = new_controller("cmd-a", 10, "src-a", 6000);
     let mut b = new_controller("cmd-b", 20, "src-b", 6000);
     for (m, cmd, generation) in [(&mut a, "cmd-a", 10), (&mut b, "cmd-b", 20)] {
-        m.handle_event(SteeringEvent::DispatchStarted {
+        m.handle_event(&SteeringEvent::DispatchStarted {
             command_id: request(cmd),
             generation,
             at_ms: 6001,
@@ -496,7 +496,7 @@ fn failure_and_cancellation_release_only_owning_generation() {
     let _ = b.drain_effects();
 
     // Fail A with closed redacted kind
-    a.handle_event(SteeringEvent::DispatchFailed {
+    a.handle_event(&SteeringEvent::DispatchFailed {
         command_id: request("cmd-a"),
         generation: 10,
         at_ms: 6002,
@@ -527,7 +527,7 @@ fn failure_and_cancellation_release_only_owning_generation() {
     assert!(b.pending_effects().is_empty());
 
     // Cancel B
-    b.handle_event(SteeringEvent::Cancelled {
+    b.handle_event(&SteeringEvent::Cancelled {
         command_id: request("cmd-b"),
         generation: 20,
         at_ms: 6003,
@@ -544,27 +544,27 @@ fn failure_and_cancellation_release_only_owning_generation() {
 
     // Failure after anchoring must keep anchor and use redacted kind.
     let mut c = new_controller("cmd-c", 30, "src-c", 7000);
-    c.handle_event(SteeringEvent::DispatchStarted {
+    c.handle_event(&SteeringEvent::DispatchStarted {
         command_id: request("cmd-c"),
         generation: 30,
         at_ms: 7001,
     })
     .unwrap();
-    c.handle_event(SteeringEvent::DispatchAccepted {
+    c.handle_event(&SteeringEvent::DispatchAccepted {
         command_id: request("cmd-c"),
         generation: 30,
         at_ms: 7002,
     })
     .unwrap();
     let anchor = item("item-c");
-    c.handle_event(SteeringEvent::DurableItemAnchored {
+    c.handle_event(&SteeringEvent::DurableItemAnchored {
         command_id: request("cmd-c"),
         generation: 30,
         item_id: anchor.clone(),
         at_ms: 7003,
     })
     .unwrap();
-    c.handle_event(SteeringEvent::DispatchFailed {
+    c.handle_event(&SteeringEvent::DispatchFailed {
         command_id: request("cmd-c"),
         generation: 30,
         at_ms: 7004,
@@ -589,14 +589,14 @@ fn failure_and_cancellation_release_only_owning_generation() {
 fn acknowledgement_before_projection_settles_without_fabricating_anchor() {
     let mut machine = new_controller("cmd-1", 1, "src-1", 8000);
     machine
-        .handle_event(SteeringEvent::DispatchStarted {
+        .handle_event(&SteeringEvent::DispatchStarted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 8001,
         })
         .unwrap();
     machine
-        .handle_event(SteeringEvent::DispatchAccepted {
+        .handle_event(&SteeringEvent::DispatchAccepted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 8002,
@@ -604,7 +604,7 @@ fn acknowledgement_before_projection_settles_without_fabricating_anchor() {
         .unwrap();
     // Ack arrives before any anchor.
     machine
-        .handle_event(SteeringEvent::EngineAcknowledged {
+        .handle_event(&SteeringEvent::EngineAcknowledged {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 8003,
@@ -621,7 +621,7 @@ fn acknowledgement_before_projection_settles_without_fabricating_anchor() {
     ));
     // Later anchor attempt must be refused (settled, cannot fabricate).
     let anchor = item("item-late");
-    let err = machine.handle_event(SteeringEvent::DurableItemAnchored {
+    let err = machine.handle_event(&SteeringEvent::DurableItemAnchored {
         command_id: request("cmd-1"),
         generation: 1,
         item_id: anchor,
@@ -639,14 +639,14 @@ fn acknowledgement_before_projection_settles_without_fabricating_anchor() {
 fn timestamp_regression_refused_atomically() {
     let mut machine = new_controller("cmd-1", 1, "src-1", 9000);
     machine
-        .handle_event(SteeringEvent::DispatchStarted {
+        .handle_event(&SteeringEvent::DispatchStarted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 9001,
         })
         .unwrap();
     machine
-        .handle_event(SteeringEvent::DispatchAccepted {
+        .handle_event(&SteeringEvent::DispatchAccepted {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 9005,
@@ -658,7 +658,7 @@ fn timestamp_regression_refused_atomically() {
 
     // Regression: at_ms 9003 < last_observed 9005
     let err = machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 1,
             item_id: item("item-x"),
@@ -674,7 +674,7 @@ fn timestamp_regression_refused_atomically() {
 
     // Also for acknowledgement with regression.
     let err2 = machine
-        .handle_event(SteeringEvent::EngineAcknowledged {
+        .handle_event(&SteeringEvent::EngineAcknowledged {
             command_id: request("cmd-1"),
             generation: 1,
             at_ms: 9004,
@@ -688,7 +688,7 @@ fn timestamp_regression_refused_atomically() {
 
     // Valid forward timestamp still succeeds.
     machine
-        .handle_event(SteeringEvent::DurableItemAnchored {
+        .handle_event(&SteeringEvent::DurableItemAnchored {
             command_id: request("cmd-1"),
             generation: 1,
             item_id: item("item-y"),
@@ -746,7 +746,7 @@ fn construction_rejects_invalid_id_generation_and_source_ref() {
 fn view_reflects_pending_effect_count_and_identity() {
     let mut m = new_controller("cmd-xyz", 42, "src-xyz", 12345);
     assert_eq!(m.view().pending_effect_count, 0);
-    m.handle_event(SteeringEvent::DispatchStarted {
+    m.handle_event(&SteeringEvent::DispatchStarted {
         command_id: request("cmd-xyz"),
         generation: 42,
         at_ms: 12346,
@@ -770,7 +770,7 @@ fn statig_state_drives_phase_and_placement() {
     assert_eq!(m.phase(), SteeringPhase::PendingLip);
     assert_eq!(m.view().phase, SteeringPhase::PendingLip);
 
-    m.handle_event(SteeringEvent::DispatchStarted {
+    m.handle_event(&SteeringEvent::DispatchStarted {
         command_id: request("cmd-s"),
         generation: 1,
         at_ms: 101,
@@ -779,7 +779,7 @@ fn statig_state_drives_phase_and_placement() {
     assert_eq!(m.phase(), SteeringPhase::Dispatching);
     assert_eq!(m.view().phase, SteeringPhase::Dispatching);
 
-    m.handle_event(SteeringEvent::DispatchAccepted {
+    m.handle_event(&SteeringEvent::DispatchAccepted {
         command_id: request("cmd-s"),
         generation: 1,
         at_ms: 102,
@@ -788,7 +788,7 @@ fn statig_state_drives_phase_and_placement() {
     assert_eq!(m.phase(), SteeringPhase::AwaitingProjection);
 
     let anchor = item("item-s");
-    m.handle_event(SteeringEvent::DurableItemAnchored {
+    m.handle_event(&SteeringEvent::DurableItemAnchored {
         command_id: request("cmd-s"),
         generation: 1,
         item_id: anchor.clone(),
@@ -801,7 +801,7 @@ fn statig_state_drives_phase_and_placement() {
         SteeringPlacement::AnchoredAfter { anchor: ref a } if a == &anchor
     ));
 
-    m.handle_event(SteeringEvent::EngineAcknowledged {
+    m.handle_event(&SteeringEvent::EngineAcknowledged {
         command_id: request("cmd-s"),
         generation: 1,
         at_ms: 104,
@@ -812,7 +812,7 @@ fn statig_state_drives_phase_and_placement() {
     assert_eq!(m.view().placement, SteeringPlacement::SettledHidden);
 
     // Sealed settled: further dispatch is refused, proving Statig sealed superstate.
-    let err = m.handle_event(SteeringEvent::DispatchStarted {
+    let err = m.handle_event(&SteeringEvent::DispatchStarted {
         command_id: request("cmd-s"),
         generation: 1,
         at_ms: 105,
@@ -834,13 +834,13 @@ fn statig_state_drives_phase_and_placement() {
 fn settled_states_are_sealed_no_retry() {
     // Failed is sealed
     let mut m = new_controller("cmd-f", 1, "src-f", 200);
-    m.handle_event(SteeringEvent::DispatchStarted {
+    m.handle_event(&SteeringEvent::DispatchStarted {
         command_id: request("cmd-f"),
         generation: 1,
         at_ms: 201,
     })
     .unwrap();
-    m.handle_event(SteeringEvent::DispatchFailed {
+    m.handle_event(&SteeringEvent::DispatchFailed {
         command_id: request("cmd-f"),
         generation: 1,
         at_ms: 202,
@@ -849,7 +849,7 @@ fn settled_states_are_sealed_no_retry() {
     .unwrap();
     assert_eq!(m.phase(), SteeringPhase::Failed);
     // No retry transition — any further dispatch attempt is sealed.
-    let err = m.handle_event(SteeringEvent::DispatchStarted {
+    let err = m.handle_event(&SteeringEvent::DispatchStarted {
         command_id: request("cmd-f"),
         generation: 1,
         at_ms: 203,
@@ -861,7 +861,7 @@ fn settled_states_are_sealed_no_retry() {
         )
     ));
     // Duplicate DispatchFailed is idempotent
-    m.handle_event(SteeringEvent::DispatchFailed {
+    m.handle_event(&SteeringEvent::DispatchFailed {
         command_id: request("cmd-f"),
         generation: 1,
         at_ms: 204,
@@ -872,20 +872,20 @@ fn settled_states_are_sealed_no_retry() {
 
     // Cancelled is sealed
     let mut n = new_controller("cmd-c", 1, "src-c", 300);
-    n.handle_event(SteeringEvent::DispatchStarted {
+    n.handle_event(&SteeringEvent::DispatchStarted {
         command_id: request("cmd-c"),
         generation: 1,
         at_ms: 301,
     })
     .unwrap();
-    n.handle_event(SteeringEvent::Cancelled {
+    n.handle_event(&SteeringEvent::Cancelled {
         command_id: request("cmd-c"),
         generation: 1,
         at_ms: 302,
     })
     .unwrap();
     assert_eq!(n.phase(), SteeringPhase::Cancelled);
-    let err2 = n.handle_event(SteeringEvent::DispatchAccepted {
+    let err2 = n.handle_event(&SteeringEvent::DispatchAccepted {
         command_id: request("cmd-c"),
         generation: 1,
         at_ms: 303,
@@ -901,13 +901,13 @@ fn settled_states_are_sealed_no_retry() {
 #[test]
 fn failure_kind_is_closed_and_redacted() {
     let mut m = new_controller("cmd-k", 1, "src-k", 400);
-    m.handle_event(SteeringEvent::DispatchStarted {
+    m.handle_event(&SteeringEvent::DispatchStarted {
         command_id: request("cmd-k"),
         generation: 1,
         at_ms: 401,
     })
     .unwrap();
-    m.handle_event(SteeringEvent::DispatchFailed {
+    m.handle_event(&SteeringEvent::DispatchFailed {
         command_id: request("cmd-k"),
         generation: 1,
         at_ms: 402,

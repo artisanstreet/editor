@@ -809,12 +809,12 @@ impl SteeringInner {
     }
 
     #[superstate]
-    fn active_submission(&mut self) -> Outcome<State> {
+    fn active_submission() -> Outcome<State> {
         Handled
     }
 
     #[superstate]
-    fn settled(&mut self) -> Outcome<State> {
+    fn settled() -> Outcome<State> {
         Handled
     }
 }
@@ -981,7 +981,7 @@ impl ConversationSteeringMachine {
     ///
     /// Returns [`SteeringRejection`] on refusal. Idempotent duplicate
     /// anchor/completion returns `Ok(())` with no additional effects.
-    pub fn handle_event(&mut self, event: SteeringEvent) -> Result<(), SteeringRejection> {
+    pub fn handle_event(&mut self, event: &SteeringEvent) -> Result<(), SteeringRejection> {
         let inner = self.machine.inner();
         // Fencing: immutable identity must match exactly.
         if event.command_id() != &inner.command_id || event.generation() != inner.generation {
@@ -1003,25 +1003,24 @@ impl ConversationSteeringMachine {
         }
 
         // Anchor immutability: second different ItemId is a typed conflict.
-        if let SteeringEvent::DurableItemAnchored { item_id, .. } = &event {
-            if let Some(existing) = &inner.anchor {
-                if existing != item_id {
-                    return Err(SteeringRejection::AnchorConflict {
-                        existing: existing.clone(),
-                        attempted: item_id.clone(),
-                    });
-                }
-                // Duplicate equal anchor is allowed — handler will advance timestamp.
-            }
+        // Duplicate equal anchor is allowed — handler will advance timestamp.
+        if let SteeringEvent::DurableItemAnchored { item_id, .. } = event
+            && let Some(existing) = &inner.anchor
+            && existing != item_id
+        {
+            return Err(SteeringRejection::AnchorConflict {
+                existing: existing.clone(),
+                attempted: item_id.clone(),
+            });
         }
 
         // Sealed settled states: only exact duplicate completion is allowed.
         let phase = phase_from_state(self.machine.state());
         if phase.is_settled() {
-            let allowed = match (&phase, &event) {
-                (SteeringPhase::Acknowledged, SteeringEvent::EngineAcknowledged { .. }) => true,
-                (SteeringPhase::Failed, SteeringEvent::DispatchFailed { .. }) => true,
-                (SteeringPhase::Cancelled, SteeringEvent::Cancelled { .. }) => true,
+            let allowed = match (phase, event) {
+                (SteeringPhase::Acknowledged, SteeringEvent::EngineAcknowledged { .. })
+                | (SteeringPhase::Failed, SteeringEvent::DispatchFailed { .. })
+                | (SteeringPhase::Cancelled, SteeringEvent::Cancelled { .. }) => true,
                 (_, SteeringEvent::DurableItemAnchored { item_id, .. }) => {
                     // Duplicate equal anchor is idempotent even when settled.
                     inner.anchor.as_ref() == Some(item_id)
@@ -1030,7 +1029,7 @@ impl ConversationSteeringMachine {
             };
             if !allowed {
                 // For anchor conflict already handled above; otherwise already settled.
-                if let SteeringEvent::DurableItemAnchored { .. } = &event {
+                if let SteeringEvent::DurableItemAnchored { .. } = event {
                     // Equal case handled, different already returned AnchorConflict.
                     return Err(SteeringRejection::InvalidTransition {
                         from: phase,
@@ -1042,7 +1041,7 @@ impl ConversationSteeringMachine {
         }
 
         // Validate transition exists from current phase for this event.
-        if !is_valid_transition(phase, &event, inner.anchor.is_some()) {
+        if !is_valid_transition(phase, event, inner.anchor.is_some()) {
             // Duplicate equal anchor already allowed; this is truly invalid.
             return Err(SteeringRejection::InvalidTransition {
                 from: phase,
@@ -1051,7 +1050,7 @@ impl ConversationSteeringMachine {
         }
 
         // All accepted state changes occur inside real Statig handlers.
-        self.machine.handle_with_context(&event, &mut self.outbox);
+        self.machine.handle_with_context(event, &mut self.outbox);
         Ok(())
     }
 }
@@ -1069,28 +1068,40 @@ fn phase_from_state(state: &State) -> SteeringPhase {
 }
 
 fn is_valid_transition(phase: SteeringPhase, event: &SteeringEvent, has_anchor: bool) -> bool {
-    match (phase, event) {
-        (SteeringPhase::PendingLip, SteeringEvent::DispatchStarted { .. }) => true,
-        (SteeringPhase::Dispatching, SteeringEvent::DispatchAccepted { .. }) => true,
-        (SteeringPhase::Dispatching, SteeringEvent::DispatchFailed { .. }) => true,
-        (SteeringPhase::Dispatching, SteeringEvent::Cancelled { .. }) => true,
-        (SteeringPhase::AwaitingProjection, SteeringEvent::DurableItemAnchored { .. }) => true,
-        (SteeringPhase::AwaitingProjection, SteeringEvent::EngineAcknowledged { .. }) => true,
-        (SteeringPhase::AwaitingProjection, SteeringEvent::DispatchFailed { .. }) => true,
-        (SteeringPhase::AwaitingProjection, SteeringEvent::Cancelled { .. }) => true,
-        (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::EngineAcknowledged { .. }) => true,
-        (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::DispatchFailed { .. }) => true,
-        (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::Cancelled { .. }) => true,
-        (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::DurableItemAnchored { .. }) => {
-            has_anchor
+    let is_anchor_event = matches!(event, SteeringEvent::DurableItemAnchored { .. });
+    match phase {
+        SteeringPhase::PendingLip => matches!(event, SteeringEvent::DispatchStarted { .. }),
+        SteeringPhase::Dispatching => matches!(
+            event,
+            SteeringEvent::DispatchAccepted { .. }
+                | SteeringEvent::DispatchFailed { .. }
+                | SteeringEvent::Cancelled { .. }
+        ),
+        SteeringPhase::AwaitingProjection => matches!(
+            event,
+            SteeringEvent::DurableItemAnchored { .. }
+                | SteeringEvent::EngineAcknowledged { .. }
+                | SteeringEvent::DispatchFailed { .. }
+                | SteeringEvent::Cancelled { .. }
+        ),
+        SteeringPhase::AwaitingAcknowledgement => {
+            matches!(
+                event,
+                SteeringEvent::EngineAcknowledged { .. }
+                    | SteeringEvent::DispatchFailed { .. }
+                    | SteeringEvent::Cancelled { .. }
+            ) || is_anchor_event && has_anchor
         }
-        (SteeringPhase::Acknowledged, SteeringEvent::EngineAcknowledged { .. }) => true,
-        (SteeringPhase::Acknowledged, SteeringEvent::DurableItemAnchored { .. }) => has_anchor,
-        (SteeringPhase::Failed, SteeringEvent::DispatchFailed { .. }) => true,
-        (SteeringPhase::Failed, SteeringEvent::DurableItemAnchored { .. }) => has_anchor,
-        (SteeringPhase::Cancelled, SteeringEvent::Cancelled { .. }) => true,
-        (SteeringPhase::Cancelled, SteeringEvent::DurableItemAnchored { .. }) => has_anchor,
-        _ => false,
+        SteeringPhase::Acknowledged => {
+            matches!(event, SteeringEvent::EngineAcknowledged { .. })
+                || is_anchor_event && has_anchor
+        }
+        SteeringPhase::Failed => {
+            matches!(event, SteeringEvent::DispatchFailed { .. }) || is_anchor_event && has_anchor
+        }
+        SteeringPhase::Cancelled => {
+            matches!(event, SteeringEvent::Cancelled { .. }) || is_anchor_event && has_anchor
+        }
     }
 }
 
