@@ -833,14 +833,12 @@ impl TurnMachine {
     }
 
     #[superstate]
-    fn active_work(&mut self, event: &TurnEvent) -> Outcome<State> {
-        let _ = (self, event);
+    fn active_work() -> Outcome<State> {
         Handled
     }
 
     #[superstate]
-    fn settled(&mut self, event: &TurnEvent) -> Outcome<State> {
-        let _ = (self, event);
+    fn settled() -> Outcome<State> {
         Handled
     }
 }
