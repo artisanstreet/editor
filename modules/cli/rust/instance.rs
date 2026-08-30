@@ -263,7 +263,7 @@ fn sync_directory(path: &Path) -> Result<()> {
         .map_err(io("inspect Artisan home directory"))
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum NativeInstanceError {
     InvalidPath(PathBuf),
     Io {
@@ -315,6 +315,8 @@ impl std::fmt::Debug for NativeInstanceError {
 }
 
 impl std::error::Error for NativeInstanceError {}
+
+type NativeResult<T> = std::result::Result<T, NativeInstanceError>;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -417,7 +419,7 @@ fn metadata_is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
     false
 }
 
-fn check_ancestors_all(path: &Path, must_exist: bool) -> Result<(), NativeInstanceError> {
+fn check_ancestors_all(path: &Path, must_exist: bool) -> NativeResult<()> {
     let parent = path.parent().unwrap_or(Path::new("/"));
     for ancestor in parent.ancestors() {
         if ancestor.as_os_str().is_empty() {
@@ -466,7 +468,7 @@ struct NativeFileId {
 }
 
 #[cfg(unix)]
-fn native_file_id(path: &Path) -> Result<NativeFileId, NativeInstanceError> {
+fn native_file_id(path: &Path) -> NativeResult<NativeFileId> {
     let file = fs::File::open(path).map_err(|_| NativeInstanceError::Io {
         context: "inspect file id",
         path: path.to_path_buf(),
@@ -475,7 +477,7 @@ fn native_file_id(path: &Path) -> Result<NativeFileId, NativeInstanceError> {
 }
 
 #[cfg(windows)]
-fn native_file_id(path: &Path) -> Result<NativeFileId, NativeInstanceError> {
+fn native_file_id(path: &Path) -> NativeResult<NativeFileId> {
     let file = fs::File::open(path).map_err(|_| NativeInstanceError::Io {
         context: "inspect file id",
         path: path.to_path_buf(),
@@ -488,14 +490,14 @@ fn native_file_id(path: &Path) -> Result<NativeFileId, NativeInstanceError> {
 struct NativeFileId;
 
 #[cfg(not(any(unix, windows)))]
-fn native_file_id(_path: &Path) -> Result<NativeFileId, NativeInstanceError> {
+fn native_file_id(_path: &Path) -> NativeResult<NativeFileId> {
     Err(NativeInstanceError::Io {
         context: "inspect file id",
         path: PathBuf::from("<unsupported>"),
     })
 }
 
-fn native_file_id_from_file(file: &fs::File) -> Result<NativeFileId, NativeInstanceError> {
+fn native_file_id_from_file(file: &fs::File) -> NativeResult<NativeFileId> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -535,7 +537,7 @@ fn native_file_id_from_file(file: &fs::File) -> Result<NativeFileId, NativeInsta
     }
 }
 
-fn open_and_read_native(path: &Path) -> Result<Vec<u8>, NativeInstanceError> {
+fn open_and_read_native(path: &Path) -> NativeResult<Vec<u8>> {
     check_ancestors_all(path, true)?;
     let pre_meta = fs::symlink_metadata(path).map_err(|_| NativeInstanceError::Io {
         context: "inspect instance file",
@@ -592,7 +594,7 @@ impl NativeInstanceConfig {
         readiness_path: PathBuf,
         credentials_manifest: PathBuf,
         listener: NativeListenerConfig,
-    ) -> Result<Self, NativeInstanceError> {
+    ) -> NativeResult<Self> {
         for path in [
             &database_path,
             &custody_path,
@@ -636,7 +638,7 @@ impl NativeInstanceConfig {
         home.join("instance-v2.json")
     }
 
-    pub fn load(path: &Path) -> Result<Self, NativeInstanceError> {
+    pub fn load(path: &Path) -> NativeResult<Self> {
         let bytes = open_and_read_native(path)?;
         let file: NativeInstanceFile =
             serde_json::from_slice(&bytes).map_err(|_| NativeInstanceError::InvalidManifest)?;
@@ -662,7 +664,7 @@ impl NativeInstanceConfig {
         )
     }
 
-    pub fn write(&self, path: &Path) -> Result<(), NativeInstanceError> {
+    pub fn write(&self, path: &Path) -> NativeResult<()> {
         check_ancestors_all(path, false)?;
         match fs::symlink_metadata(path) {
             Ok(meta) if metadata_is_symlink_or_reparse(&meta) || meta.is_dir() => {
@@ -699,23 +701,20 @@ impl NativeInstanceConfig {
         write_native_atomic(path, &bytes)
     }
 
-    pub fn load_from_home(home: &Path) -> Result<Self, NativeInstanceError> {
+    pub fn load_from_home(home: &Path) -> NativeResult<Self> {
         Self::load(&Self::native_path(home))
     }
 
-    pub fn write_to_home(&self, home: &Path) -> Result<(), NativeInstanceError> {
+    pub fn write_to_home(&self, home: &Path) -> NativeResult<()> {
         self.write(&Self::native_path(home))
     }
 }
 
-pub fn load_native_config(path: &Path) -> Result<NativeInstanceConfig, NativeInstanceError> {
+pub fn load_native_config(path: &Path) -> NativeResult<NativeInstanceConfig> {
     NativeInstanceConfig::load(path)
 }
 
-pub fn write_native_config(
-    path: &Path,
-    config: &NativeInstanceConfig,
-) -> Result<(), NativeInstanceError> {
+pub fn write_native_config(path: &Path, config: &NativeInstanceConfig) -> NativeResult<()> {
     config.write(path)
 }
 
@@ -742,7 +741,7 @@ impl Drop for NativeScopedTemp {
     }
 }
 
-fn write_native_atomic(path: &Path, bytes: &[u8]) -> Result<(), NativeInstanceError> {
+fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
     let directory = path
         .parent()
         .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;

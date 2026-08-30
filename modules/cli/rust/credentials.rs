@@ -9,10 +9,11 @@ use std::{
 };
 
 use fs2::FileExt;
+use rcgen::PublicKeyData;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum ForgeCredentialError {
     InvalidHome(PathBuf),
     UnsafePath(PathBuf),
