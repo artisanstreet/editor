@@ -95,7 +95,7 @@ fn resolve_install_root_from(
         }
     }
     if let Some(root) = command_line.or(install_root_env).or(artisan_home_env) {
-        return select_explicit_root(root);
+        return select_explicit_root(&root);
     }
 
     let (default_root, legacy_root) = default_roots_for(os, local_app_data, home, xdg_data_home)?;
@@ -110,8 +110,8 @@ fn resolve_install_root_from(
     Ok(default_root)
 }
 
-fn select_explicit_root(root: PathBuf) -> Result<PathBuf> {
-    let root = normalize_absolute_root(&root)?;
+fn select_explicit_root(root: &Path) -> Result<PathBuf> {
+    let root = normalize_absolute_root(root)?;
     if is_legacy_root(&root) {
         require_native_manifest(&root)?;
     }
@@ -142,7 +142,7 @@ fn default_roots_for(
                 _ => home
                     .filter(|path| !path.as_os_str().is_empty())
                     .map(|path| path.join(".local").join("share"))
-                    .ok_or_else(|| user_data_unavailable())?,
+                    .ok_or_else(user_data_unavailable)?,
             };
             (Some(base), "artisan")
         }
