@@ -27,7 +27,7 @@ fn assert_single_narration(controller: &ConversationTurnController) {
 fn assert_public_leaf(
     event: Option<TurnEvent>,
     expected_state: StateKind,
-    expected_narration: TurnNarration,
+    expected_narration: &TurnNarration,
     expected_active: bool,
     expected_settled: bool,
     expected_sealed: bool,
@@ -38,7 +38,7 @@ fn assert_public_leaf(
     }
     let view = controller.view();
     assert_eq!(view.state, expected_state);
-    assert_eq!(view.narration, expected_narration);
+    assert_eq!(&view.narration, expected_narration);
     assert_eq!(view.state.is_active(), expected_active);
     assert_eq!(view.state.is_settled(), expected_settled);
     assert_eq!(view.state.is_sealed(), expected_sealed);
@@ -50,7 +50,7 @@ fn public_statig_view_exposes_pending_and_active_leaves() {
     assert_public_leaf(
         None,
         StateKind::Pending,
-        TurnNarration::Hidden,
+        &TurnNarration::Hidden,
         false,
         false,
         false,
@@ -58,7 +58,7 @@ fn public_statig_view_exposes_pending_and_active_leaves() {
     assert_public_leaf(
         Some(TurnEvent::WaitingForProvider { at: 1, revision: 1 }),
         StateKind::WaitingForProvider,
-        TurnNarration::WaitingForProvider,
+        &TurnNarration::WaitingForProvider,
         true,
         false,
         false,
@@ -66,7 +66,7 @@ fn public_statig_view_exposes_pending_and_active_leaves() {
     assert_public_leaf(
         Some(TurnEvent::Compacting { at: 1, revision: 1 }),
         StateKind::Compacting,
-        TurnNarration::Compacting,
+        &TurnNarration::Compacting,
         true,
         false,
         false,
@@ -74,7 +74,7 @@ fn public_statig_view_exposes_pending_and_active_leaves() {
     assert_public_leaf(
         Some(TurnEvent::Thinking { at: 1, revision: 1 }),
         StateKind::Thinking,
-        TurnNarration::Thinking,
+        &TurnNarration::Thinking,
         true,
         false,
         false,
@@ -82,7 +82,7 @@ fn public_statig_view_exposes_pending_and_active_leaves() {
     assert_public_leaf(
         Some(TurnEvent::Working { at: 1, revision: 1 }),
         StateKind::Working,
-        TurnNarration::Working,
+        &TurnNarration::Working,
         true,
         false,
         false,
@@ -90,7 +90,7 @@ fn public_statig_view_exposes_pending_and_active_leaves() {
     assert_public_leaf(
         Some(TurnEvent::StreamingReply { at: 1, revision: 1 }),
         StateKind::StreamingReply,
-        TurnNarration::StreamingReply,
+        &TurnNarration::StreamingReply,
         true,
         false,
         false,
@@ -98,7 +98,7 @@ fn public_statig_view_exposes_pending_and_active_leaves() {
     assert_public_leaf(
         Some(TurnEvent::WaitingForBackground { at: 1, revision: 1 }),
         StateKind::WaitingForBackground,
-        TurnNarration::WaitingForBackground,
+        &TurnNarration::WaitingForBackground,
         true,
         false,
         false,
@@ -110,7 +110,7 @@ fn public_statig_view_exposes_settled_leaves() {
     assert_public_leaf(
         Some(TurnEvent::Completed { at: 1, revision: 1 }),
         StateKind::Completed,
-        TurnNarration::ThoughtFor { elapsed_ms: 0 },
+        &TurnNarration::ThoughtFor { elapsed_ms: 0 },
         false,
         true,
         true,
@@ -122,7 +122,7 @@ fn public_statig_view_exposes_settled_leaves() {
             kind: Some(FailureKind::RateLimited),
         }),
         StateKind::Failed,
-        TurnNarration::Failed {
+        &TurnNarration::Failed {
             elapsed_ms: 0,
             kind: Some(FailureKind::RateLimited),
         },
@@ -133,7 +133,7 @@ fn public_statig_view_exposes_settled_leaves() {
     assert_public_leaf(
         Some(TurnEvent::Interrupted { at: 1, revision: 1 }),
         StateKind::Interrupted,
-        TurnNarration::Interrupted { elapsed_ms: 0 },
+        &TurnNarration::Interrupted { elapsed_ms: 0 },
         false,
         true,
         false,
@@ -141,7 +141,7 @@ fn public_statig_view_exposes_settled_leaves() {
     assert_public_leaf(
         Some(TurnEvent::Cancelled { at: 1, revision: 1 }),
         StateKind::Cancelled,
-        TurnNarration::Cancelled { elapsed_ms: 0 },
+        &TurnNarration::Cancelled { elapsed_ms: 0 },
         false,
         true,
         true,
