@@ -487,9 +487,9 @@ mod acl_diagnostic {
     pub(super) fn capture<T>(operation: impl FnOnce() -> T) -> (T, AclDiagnosticRecord) {
         ACTIVE.with(|active| *active.borrow_mut() = Some(AclDiagnosticRecord::new()));
         let result = operation();
-        let record = ACTIVE.with(|active| active.borrow_mut().take()).unwrap_or_else(
-            AclDiagnosticRecord::new,
-        );
+        let record = ACTIVE
+            .with(|active| active.borrow_mut().take())
+            .unwrap_or_else(AclDiagnosticRecord::new);
         (result, record)
     }
 
@@ -526,27 +526,43 @@ mod acl_diagnostic {
     }
 
     pub(super) fn stream_shape(bytes: &[u8]) -> &'static str {
-        if bytes.len() > MAX_STREAM_BYTES { "Oversized" }
-        else if bytes.is_empty() { "Empty" }
-        else if bytes.starts_with(&[0xef, 0xbb, 0xbf]) { "Bom" }
-        else if std::str::from_utf8(bytes).is_ok() { "Utf8" }
-        else { "InvalidUtf8" }
+        if bytes.len() > MAX_STREAM_BYTES {
+            "Oversized"
+        } else if bytes.is_empty() {
+            "Empty"
+        } else if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            "Bom"
+        } else if std::str::from_utf8(bytes).is_ok() {
+            "Utf8"
+        } else {
+            "InvalidUtf8"
+        }
     }
 
     fn identity_shape(fields: usize, sid: Option<&str>, account: Option<&str>) -> &'static str {
-        if fields != 2 { return "FieldCount"; }
-        let (Some(sid), Some(account)) = (sid, account) else { return "Missing"; };
+        if fields != 2 {
+            return "FieldCount";
+        }
+        let (Some(sid), Some(account)) = (sid, account) else {
+            return "Missing";
+        };
         if sid.len() > MAX_STREAM_BYTES || account.len() > MAX_STREAM_BYTES {
             return "Oversized";
         }
-        if sid.is_empty() || account.is_empty() { return "Empty"; }
+        if sid.is_empty() || account.is_empty() {
+            return "Empty";
+        }
         let valid_account = account.matches('\\').count() == 1
             && !account.starts_with('\\')
             && !account.ends_with('\\')
             && !account
                 .chars()
                 .any(|c| c.is_control() || matches!(c, '/' | ':' | '"' | ','));
-        if is_valid_sid(sid) && valid_account { "Valid" } else { "Malformed" }
+        if is_valid_sid(sid) && valid_account {
+            "Valid"
+        } else {
+            "Malformed"
+        }
     }
 
     pub(super) fn record_identity(
@@ -559,7 +575,11 @@ mod acl_diagnostic {
         for (kind, bytes) in [("stdout", stdout), ("stderr", stderr)] {
             event_at("IdentityResolution", kind, stream_shape(bytes));
         }
-        event_at("IdentityResolution", "identity", identity_shape(fields, sid, account));
+        event_at(
+            "IdentityResolution",
+            "identity",
+            identity_shape(fields, sid, account),
+        );
     }
 
     fn summary(output: &str) -> &'static str {
@@ -586,83 +606,135 @@ mod acl_diagnostic {
     }
 
     pub(super) fn record_acl(output: &str, count: usize) {
-        event("acl_count", match count {
-            0 => "Zero",
-            1 => "One",
-            2 => "Two",
-            _ => "Many",
-        });
+        event(
+            "acl_count",
+            match count {
+                0 => "Zero",
+                1 => "One",
+                2 => "Two",
+                _ => "Many",
+            },
+        );
         event("acl_summary", summary(output));
     }
 
     pub(super) fn probe(exe: &str, args: &[&str]) -> Option<&'static str> {
-        if exe.eq_ignore_ascii_case("whoami.exe") { Some("Whoami") }
-        else if exe.eq_ignore_ascii_case("icacls.exe") {
+        if exe.eq_ignore_ascii_case("whoami.exe") {
+            Some("Whoami")
+        } else if exe.eq_ignore_ascii_case("icacls.exe") {
             Some(if args.iter().any(|arg| *arg == "/grant:r") {
                 "IcaclsMutation"
-            } else { "IcaclsQuery" })
-        } else { None }
+            } else {
+                "IcaclsQuery"
+            })
+        } else {
+            None
+        }
     }
 
     pub(super) fn subprocess(probe: Option<&'static str>, outcome: &'static str) {
-        let Some(probe) = probe else { return; };
-        event_at(if probe == "Whoami" { "IdentityResolution" } else { current_stage() },
-            probe, outcome);
+        let Some(probe) = probe else {
+            return;
+        };
+        event_at(
+            if probe == "Whoami" {
+                "IdentityResolution"
+            } else {
+                current_stage()
+            },
+            probe,
+            outcome,
+        );
     }
 
-    pub(super) fn ace_reason(ace: &str, identity: &CurrentIdentity, expect_dir: bool) -> &'static str {
+    pub(super) fn ace_reason(
+        ace: &str,
+        identity: &CurrentIdentity,
+        expect_dir: bool,
+    ) -> &'static str {
         let ace = bounded(ace);
         let lower = ace.to_ascii_lowercase();
-        if lower.contains("deny") { return "Deny"; }
-        if lower.contains("(i)") { return "Inherited"; }
-        let Some(colon) = ace.find(':') else { return "MalformedAce"; };
+        if lower.contains("deny") {
+            return "Deny";
+        }
+        if lower.contains("(i)") {
+            return "Inherited";
+        }
+        let Some(colon) = ace.find(':') else {
+            return "MalformedAce";
+        };
         let principal = ace[..colon].trim();
         let sid = bounded(&identity.sid);
         let account = bounded(&identity.account);
-        let matches = (identity.sid.len() <= MAX_STREAM_BYTES && !sid.is_empty()
+        let matches = (identity.sid.len() <= MAX_STREAM_BYTES
+            && !sid.is_empty()
             && principal.eq_ignore_ascii_case(sid))
-            || (identity.account.len() <= MAX_STREAM_BYTES && !account.is_empty()
+            || (identity.account.len() <= MAX_STREAM_BYTES
+                && !account.is_empty()
                 && principal.eq_ignore_ascii_case(account));
-        if principal.is_empty() || !matches { return "IdentityMismatch"; }
+        if principal.is_empty() || !matches {
+            return "IdentityMismatch";
+        }
         let flags = &lower[colon + 1..];
-        if !flags.contains("(f)") { return "MissingFullControl"; }
+        if !flags.contains("(f)") {
+            return "MissingFullControl";
+        }
         if flags.matches("(f)").count() != 1
             || flags.matches("(oi)").count() > 1
             || flags.matches("(ci)").count() > 1
-            || flags.chars().any(|c| c.is_ascii_alphabetic() && !matches!(c, 'f' | 'o' | 'i'))
+            || flags
+                .chars()
+                .any(|c| c.is_ascii_alphabetic() && !matches!(c, 'f' | 'o' | 'i'))
         {
             return "InvalidFlags";
         }
-        if (expect_dir && (!flags.contains("(oi)") || !flags.contains("(ci)"))
-            || !expect_dir && (flags.contains("(oi)") || flags.contains("(ci)"))
+        if (expect_dir && (!flags.contains("(oi)") || !flags.contains("(ci)")))
+            || (!expect_dir && (flags.contains("(oi)") || flags.contains("(ci)")))
         {
             return "InheritanceMismatch";
         }
         if ["everyone", "builtin", "nt authority", "authenticated users"]
-            .iter().any(|forbidden| lower.contains(forbidden))
-        { "BroadPrincipal" } else { "Accepted" }
+            .iter()
+            .any(|forbidden| lower.contains(forbidden))
+        {
+            "BroadPrincipal"
+        } else {
+            "Accepted"
+        }
     }
 
     pub(super) fn write(path: &Path, record: &AclDiagnosticRecord) -> Option<()> {
-        if !path.is_absolute() { return None; }
+        if !path.is_absolute() {
+            return None;
+        }
         let bytes = serde_json::to_vec(record).ok()?;
-        if bytes.len() > MAX_ARTIFACT_BYTES { return None; }
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return None;
+        }
         let parent = path.parent()?;
         let file_name = path.file_name()?;
         let mut nonce = [0_u8; 16];
         getrandom::fill(&mut nonce).ok()?;
         let temporary_path = parent.join(format!(
-            ".{}.{}.tmp", file_name.to_string_lossy(), encode_nonce_hex(&nonce)
+            ".{}.{}.tmp",
+            file_name.to_string_lossy(),
+            encode_nonce_hex(&nonce)
         ));
         let result = (|| -> Option<()> {
-            let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary_path).ok()?;
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary_path)
+                .ok()?;
             file.write_all(&bytes).ok()?;
             file.sync_all().ok()?;
             drop(file);
             fs::rename(&temporary_path, path).ok()?;
             Some(())
         })();
-        if result.is_none() { let _ = fs::remove_file(&temporary_path); }
+        if result.is_none() {
+            let _ = fs::remove_file(&temporary_path);
+        }
         result
     }
 
@@ -680,7 +752,9 @@ mod acl_diagnostic {
 
 #[cfg(all(test, windows))]
 macro_rules! acl_diagnostic {
-    ($expression:expr) => { $expression };
+    ($expression:expr) => {
+        $expression
+    };
 }
 
 #[cfg(not(all(test, windows)))]
@@ -770,12 +844,24 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         Duration::from_secs(5),
     )?;
     if !output.status.success() {
-        acl_diagnostic!(acl_diagnostic::record_identity(&output.stdout, &output.stderr, 0, None, None));
+        acl_diagnostic!(acl_diagnostic::record_identity(
+            &output.stdout,
+            &output.stderr,
+            0,
+            None,
+            None
+        ));
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let text = String::from_utf8_lossy(&output.stdout).to_string();
     let line = text.lines().next().ok_or_else(|| {
-        acl_diagnostic!(acl_diagnostic::record_identity(&output.stdout, &output.stderr, 0, None, None));
+        acl_diagnostic!(acl_diagnostic::record_identity(
+            &output.stdout,
+            &output.stderr,
+            0,
+            None,
+            None
+        ));
         ForgeCredentialError::WindowsAcl
     })?;
     let mut parts: Vec<String> = Vec::new();
@@ -794,7 +880,13 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
     parts.push(current.trim().to_string());
     let field_count = parts.len();
     if parts.len() != 2 {
-        acl_diagnostic!(acl_diagnostic::record_identity(&output.stdout, &output.stderr, field_count, None, None));
+        acl_diagnostic!(acl_diagnostic::record_identity(
+            &output.stdout,
+            &output.stderr,
+            field_count,
+            None,
+            None
+        ));
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let account = parts[0].trim().trim_matches('"').trim().to_string();
@@ -987,7 +1079,10 @@ fn validate_icacls_ace(
     identity: &CurrentIdentity,
     expect_dir: bool,
 ) -> Result<(), ForgeCredentialError> {
-    acl_diagnostic!(acl_diagnostic::event("ace", acl_diagnostic::ace_reason(ace, identity, expect_dir)));
+    acl_diagnostic!(acl_diagnostic::event(
+        "ace",
+        acl_diagnostic::ace_reason(ace, identity, expect_dir)
+    ));
     let lower = ace.to_ascii_lowercase();
     if lower.contains("deny") {
         return Err(ForgeCredentialError::WindowsAcl);
@@ -1097,7 +1192,7 @@ fn restrict_directory_windows(dir: &Path) -> Result<(), ForgeCredentialError> {
 
 #[cfg(windows)]
 fn restrict_file_windows(path: &Path, sid: &str) -> Result<(), ForgeCredentialError> {
-    acl_diagnostic!(acl_diagnostic::stage("DirectoryAclMutation"));
+    acl_diagnostic!(acl_diagnostic::stage("BundleAclMutation"));
     let identity = resolve_current_identity()?;
     if !identity.sid.eq_ignore_ascii_case(sid) {
         return Err(ForgeCredentialError::WindowsAcl);
@@ -1797,12 +1892,21 @@ mod diagnostic_tests {
         assert!(bytes.len() <= 16 * 1024);
         let value: serde_json::Value = serde_json::from_slice(bytes).expect("diagnostic JSON");
         let object = value.as_object().expect("diagnostic object");
-        assert_eq!(object.get("schema_version").and_then(serde_json::Value::as_u64), Some(1));
-        let events = object.get("events").and_then(serde_json::Value::as_array)
+        assert_eq!(
+            object
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        let events = object
+            .get("events")
+            .and_then(serde_json::Value::as_array)
             .expect("diagnostic events");
         assert!(events.len() <= acl_diagnostic::MAX_EVENTS);
         assert_eq!(
-            object.get("event_count").and_then(serde_json::Value::as_u64),
+            object
+                .get("event_count")
+                .and_then(serde_json::Value::as_u64),
             Some(events.len() as u64)
         );
         let text = String::from_utf8_lossy(bytes);
@@ -1855,17 +1959,18 @@ mod diagnostic_tests {
         let record = captured.finish("Success");
         acl_diagnostic::assert_redacted(&record);
         let json = serde_json::to_string(&record).expect("structural diagnostic serialization");
-        assert!(["Completed", "identity", "acl_count", "ace", "Accepted"]
-            .iter()
-            .all(|value| json.contains(value)));
+        assert!(
+            ["Completed", "identity", "acl_count", "ace", "Accepted"]
+                .iter()
+                .all(|value| json.contains(value))
+        );
 
         for output in [
             format!("C:\\creds {}:(OI)(CI)(F)", sid),
             format!("C:\\creds {}:(DENY)(F)", sid),
             format!("C:\\creds {}:(F) extra", sid),
         ] {
-            let expected =
-                parse_icacls_strict_with_identity(&output, &identity, true, "C:\\creds");
+            let expected = parse_icacls_strict_with_identity(&output, &identity, true, "C:\\creds");
             let (actual, captured) = acl_diagnostic::capture(|| {
                 parse_icacls_strict_with_identity(&output, &identity, true, "C:\\creds")
             });
