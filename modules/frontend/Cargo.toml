@@ -107,6 +107,10 @@ name = "conversation_checklist"
 path = "../../tests/frontend/conversation_checklist.rs"
 
 [[test]]
+name = "conversation_delivery_machine"
+path = "../../tests/frontend/conversation_delivery_machine.rs"
+
+[[test]]
 name = "conversation_error_card_policy"
 path = "../../tests/frontend/conversation_error_card_policy.rs"
 
