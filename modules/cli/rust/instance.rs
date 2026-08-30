@@ -7,6 +7,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{CliError, Result, error::io, paths::Layout};
 
@@ -265,6 +266,11 @@ fn sync_directory(path: &Path) -> Result<()> {
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum NativeInstanceError {
+    NotFound,
+    TooLarge,
+    FileChanged,
+    FileSizeMismatch,
+    FileHashMismatch,
     InvalidPath(PathBuf),
     Io {
         context: &'static str,
@@ -277,6 +283,11 @@ pub enum NativeInstanceError {
 impl std::fmt::Display for NativeInstanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotFound => f.write_str("native file is not present"),
+            Self::TooLarge => f.write_str("native file exceeds its read bound"),
+            Self::FileChanged => f.write_str("native file changed while it was read"),
+            Self::FileSizeMismatch => f.write_str("native file size does not match"),
+            Self::FileHashMismatch => f.write_str("native file hash does not match"),
             Self::InvalidPath(path) => write!(f, "invalid absolute path: {}", path.display()),
             Self::Io { context, path } => {
                 write!(f, "{context} at {}: [REDACTED]", path.display())
@@ -296,6 +307,11 @@ impl std::fmt::Display for NativeInstanceError {
 impl std::fmt::Debug for NativeInstanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotFound => f.debug_tuple("NotFound").finish(),
+            Self::TooLarge => f.debug_tuple("TooLarge").finish(),
+            Self::FileChanged => f.debug_tuple("FileChanged").finish(),
+            Self::FileSizeMismatch => f.debug_tuple("FileSizeMismatch").finish(),
+            Self::FileHashMismatch => f.debug_tuple("FileHashMismatch").finish(),
             Self::InvalidPath(path) => f
                 .debug_tuple("InvalidPath")
                 .field(&path.display().to_string())
@@ -455,39 +471,51 @@ fn check_ancestors_all(path: &Path, must_exist: bool) -> NativeResult<()> {
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct NativeFileId {
+pub(crate) struct NativeFileId {
     dev: u64,
     ino: u64,
 }
 
 #[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct NativeFileId {
+pub(crate) struct NativeFileId {
     volume: u64,
     index: u64,
 }
 
 #[cfg(unix)]
 fn native_file_id(path: &Path) -> NativeResult<NativeFileId> {
-    let file = fs::File::open(path).map_err(|_| NativeInstanceError::Io {
-        context: "inspect file id",
-        path: path.to_path_buf(),
+    let file = fs::File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            NativeInstanceError::NotFound
+        } else {
+            NativeInstanceError::Io {
+                context: "inspect file id",
+                path: path.to_path_buf(),
+            }
+        }
     })?;
     native_file_id_from_file(&file)
 }
 
 #[cfg(windows)]
 fn native_file_id(path: &Path) -> NativeResult<NativeFileId> {
-    let file = fs::File::open(path).map_err(|_| NativeInstanceError::Io {
-        context: "inspect file id",
-        path: path.to_path_buf(),
+    let file = fs::File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            NativeInstanceError::NotFound
+        } else {
+            NativeInstanceError::Io {
+                context: "inspect file id",
+                path: path.to_path_buf(),
+            }
+        }
     })?;
     native_file_id_from_file(&file)
 }
 
 #[cfg(not(any(unix, windows)))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct NativeFileId;
+pub(crate) struct NativeFileId;
 
 #[cfg(not(any(unix, windows)))]
 fn native_file_id(_path: &Path) -> NativeResult<NativeFileId> {
@@ -538,14 +566,38 @@ fn native_file_id_from_file(file: &fs::File) -> NativeResult<NativeFileId> {
 }
 
 fn open_and_read_native(path: &Path) -> NativeResult<Vec<u8>> {
-    check_ancestors_all(path, true)?;
-    let pre_meta = fs::symlink_metadata(path).map_err(|_| NativeInstanceError::Io {
-        context: "inspect instance file",
-        path: path.to_path_buf(),
-    })?;
+    open_and_read_native_inner(path, None, false)
+}
+
+pub(crate) fn read_bounded_native_file(
+    path: &Path,
+    maximum_bytes: usize,
+) -> std::result::Result<Vec<u8>, NativeInstanceError> {
+    open_and_read_native_inner(path, Some(maximum_bytes), true)
+}
+
+fn open_and_read_native_inner(
+    path: &Path,
+    maximum_bytes: Option<usize>,
+    classify_missing: bool,
+) -> NativeResult<Vec<u8>> {
+    check_ancestors_all(path, false)?;
+    let pre_meta = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if classify_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(NativeInstanceError::NotFound);
+        }
+        Err(_) => {
+            return Err(NativeInstanceError::Io {
+                context: "inspect instance file",
+                path: path.to_path_buf(),
+            });
+        }
+    };
     if metadata_is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
         return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
     }
+    check_ancestors_all(path, true)?;
     let pre_id = native_file_id(path)?;
     let mut file =
         OpenOptions::new()
@@ -567,11 +619,25 @@ fn open_and_read_native(path: &Path) -> NativeResult<Vec<u8>> {
         return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|_| NativeInstanceError::Io {
-            context: "read instance file",
-            path: path.to_path_buf(),
-        })?;
+    match maximum_bytes {
+        Some(maximum_bytes) => {
+            let read_limit = maximum_bytes.saturating_add(1);
+            std::io::Read::by_ref(&mut file)
+                .take(u64::try_from(read_limit).unwrap_or(u64::MAX))
+                .read_to_end(&mut bytes)
+                .map_err(|_| NativeInstanceError::Io {
+                    context: "read instance file",
+                    path: path.to_path_buf(),
+                })?;
+        }
+        None => {
+            file.read_to_end(&mut bytes)
+                .map_err(|_| NativeInstanceError::Io {
+                    context: "read instance file",
+                    path: path.to_path_buf(),
+                })?;
+        }
+    }
     check_ancestors_all(path, true)?;
     let post_meta = fs::symlink_metadata(path).map_err(|_| NativeInstanceError::Io {
         context: "inspect instance file",
@@ -584,7 +650,131 @@ fn open_and_read_native(path: &Path) -> NativeResult<Vec<u8>> {
     if post_id != pre_id || post_id != handle_id {
         return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
     }
+    if maximum_bytes.is_some_and(|maximum| bytes.len() > maximum) {
+        return Err(NativeInstanceError::TooLarge);
+    }
     Ok(bytes)
+}
+
+pub(crate) fn verify_native_file(
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: &[u8; 32],
+) -> std::result::Result<NativeFileId, NativeInstanceError> {
+    check_ancestors_all(path, false)?;
+    let pre_meta = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(NativeInstanceError::NotFound);
+        }
+        Err(_) => {
+            return Err(NativeInstanceError::Io {
+                context: "inspect native executable",
+                path: path.to_path_buf(),
+            });
+        }
+    };
+    if metadata_is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
+        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+    }
+    if pre_meta.len() != expected_size {
+        return Err(NativeInstanceError::FileSizeMismatch);
+    }
+    check_ancestors_all(path, true)?;
+    let pre_id = native_file_id(path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|_| NativeInstanceError::FileChanged)?;
+    let handle_meta = file
+        .metadata()
+        .map_err(|_| NativeInstanceError::FileChanged)?;
+    if metadata_is_symlink_or_reparse(&handle_meta) || !handle_meta.is_file() {
+        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+    }
+    if handle_meta.len() != expected_size {
+        return Err(NativeInstanceError::FileSizeMismatch);
+    }
+    let handle_id = native_file_id_from_file(&file)?;
+    if handle_id != pre_id {
+        return Err(NativeInstanceError::FileChanged);
+    }
+
+    let stream_result = stream_and_verify(&mut file, expected_size, expected_sha256);
+
+    let post_handle_meta = file
+        .metadata()
+        .map_err(|_| NativeInstanceError::FileChanged)?;
+    if metadata_is_symlink_or_reparse(&post_handle_meta) || !post_handle_meta.is_file() {
+        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+    }
+    if post_handle_meta.len() != expected_size {
+        return Err(NativeInstanceError::FileSizeMismatch);
+    }
+    let post_handle_id = native_file_id_from_file(&file)?;
+    if post_handle_id != pre_id {
+        return Err(NativeInstanceError::FileChanged);
+    }
+
+    check_ancestors_all(path, true)?;
+    let post_meta = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            NativeInstanceError::FileChanged
+        } else {
+            NativeInstanceError::Io {
+                context: "inspect native executable",
+                path: path.to_path_buf(),
+            }
+        }
+    })?;
+    if metadata_is_symlink_or_reparse(&post_meta) || !post_meta.is_file() {
+        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+    }
+    if post_meta.len() != expected_size {
+        return Err(NativeInstanceError::FileSizeMismatch);
+    }
+    let post_id = native_file_id(path)?;
+    if post_id != pre_id {
+        return Err(NativeInstanceError::FileChanged);
+    }
+    stream_result?;
+    Ok(pre_id)
+}
+
+pub(crate) fn stream_and_verify<R: Read>(
+    reader: &mut R,
+    expected_size: u64,
+    expected_sha256: &[u8; 32],
+) -> NativeResult<()> {
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|_| NativeInstanceError::Io {
+                context: "read native executable",
+                path: PathBuf::from("<handle>"),
+            })?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .ok_or(NativeInstanceError::FileSizeMismatch)?;
+        if total > expected_size {
+            return Err(NativeInstanceError::FileSizeMismatch);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if total != expected_size {
+        return Err(NativeInstanceError::FileSizeMismatch);
+    }
+    let digest = hasher.finalize();
+    if digest[..] != expected_sha256[..] {
+        return Err(NativeInstanceError::FileHashMismatch);
+    }
+    Ok(())
 }
 
 impl NativeInstanceConfig {
