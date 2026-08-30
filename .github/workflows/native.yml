@@ -43,7 +43,7 @@ jobs:
 
       - name: Capture retained native credential ACL shape
         id: acl_diagnostic
-        if: steps.bazel_test.outcome == 'failure'
+        if: failure() && steps.bazel_test.outcome == 'failure'
         shell: pwsh
         env:
           ARTISAN_NATIVE_ACL_DIAGNOSTIC: "1"
