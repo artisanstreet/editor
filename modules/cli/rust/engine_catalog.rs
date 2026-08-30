@@ -7,6 +7,7 @@ use serde::{
     Deserialize,
     de::{self, Deserializer, MapAccess, Visitor},
 };
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 use crate::instance::{self, NativeFileId, NativeInstanceConfig, NativeInstanceError};
@@ -317,7 +318,7 @@ impl NativeOpenCode2Authority {
         if !is_supported_platform() {
             return Ok(OpenCode2Inspection::UnsupportedPlatform);
         }
-        match self.resolve_active(instance) {
+        match Self::resolve_active(instance) {
             Ok(generation) => Ok(OpenCode2Inspection::Ready(generation)),
             Err(NativeOpenCode2Error::StateMissing) => Ok(OpenCode2Inspection::NotInstalled),
             Err(error) => Err(error),
@@ -325,7 +326,6 @@ impl NativeOpenCode2Authority {
     }
 
     pub(crate) fn resolve_active(
-        &self,
         instance: &NativeInstanceConfig,
     ) -> Result<ResolvedOpenCode2Generation, NativeOpenCode2Error> {
         if !is_supported_platform() {
@@ -347,7 +347,7 @@ impl NativeOpenCode2Authority {
             CERTIFIED_EXECUTABLE_SIZE_BYTES,
             &CERTIFIED_EXECUTABLE_SHA256,
         )
-        .map_err(map_executable_error)?;
+        .map_err(|error| map_executable_error(&error))?;
         Ok(ResolvedOpenCode2Generation {
             executable,
             generation_id: state.active.directory,
@@ -393,7 +393,7 @@ fn read_managed_state(
     paths: &ManagedPaths,
 ) -> Result<ManagedToolchainStateV1, NativeOpenCode2Error> {
     let bytes = instance::read_bounded_native_file(&paths.state_path, MAX_STATE_BYTES)
-        .map_err(map_state_error)?;
+        .map_err(|error| map_state_error(&error))?;
     let state = decode_state(&bytes)?;
     validate_state_version(&state)?;
     Ok(state)
@@ -508,7 +508,7 @@ fn is_safe_version(value: &str) -> bool {
     })
 }
 
-fn map_state_error(error: NativeInstanceError) -> NativeOpenCode2Error {
+fn map_state_error(error: &NativeInstanceError) -> NativeOpenCode2Error {
     match error {
         NativeInstanceError::NotFound => NativeOpenCode2Error::StateMissing,
         NativeInstanceError::TooLarge => NativeOpenCode2Error::StateTooLarge,
@@ -522,7 +522,7 @@ fn map_state_error(error: NativeInstanceError) -> NativeOpenCode2Error {
     }
 }
 
-fn map_executable_error(error: NativeInstanceError) -> NativeOpenCode2Error {
+fn map_executable_error(error: &NativeInstanceError) -> NativeOpenCode2Error {
     match error {
         NativeInstanceError::NotFound => NativeOpenCode2Error::ExecutableUnavailable,
         NativeInstanceError::TooLarge | NativeInstanceError::FileSizeMismatch => {
@@ -725,9 +725,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert!(
             !is_supported_platform()
-                || NativeOpenCode2Authority::new()
-                    .resolve_active(&sample_instance(root.path()))
-                    .is_err()
+                || NativeOpenCode2Authority::resolve_active(&sample_instance(root.path())).is_err()
         );
     }
 

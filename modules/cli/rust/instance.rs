@@ -748,7 +748,7 @@ pub(crate) fn stream_and_verify<R: Read>(
 ) -> NativeResult<()> {
     let mut hasher = Sha256::new();
     let mut total = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = reader
             .read(&mut buffer)

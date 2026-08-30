@@ -262,7 +262,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Autostart { disable } => autostart(disable),
         Commands::Update => delegate_installer(&layout, "update", false),
-        Commands::Engine { command } => engine_command(&layout, command),
+        Commands::Engine { command } => engine_command(&layout, &command),
         Commands::Telemetry { command } => telemetry_command(&layout, command),
     }
 }
@@ -311,7 +311,7 @@ fn require_installation(layout: &Layout) -> Result<InstallationManifest> {
     InstallationManifest::load(&layout.manifest)
 }
 
-fn engine_command(layout: &Layout, command: EngineCommand) -> Result<()> {
+fn engine_command(layout: &Layout, command: &EngineCommand) -> Result<()> {
     require_installation(layout)?;
     let instance = load_native_instance(layout).map_err(|error| match error {
         CliError::MissingInstance => CliError::MissingInstance,
@@ -320,7 +320,7 @@ fn engine_command(layout: &Layout, command: EngineCommand) -> Result<()> {
         },
     })?;
     match command {
-        EngineCommand::List { json } => list_engines(&instance, json),
+        EngineCommand::List { json } => list_engines(&instance, *json),
     }
 }
 
