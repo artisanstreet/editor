@@ -480,6 +480,7 @@ mod acl_diagnostic {
         }
     }
 
+    #[derive(Clone, Copy)]
     pub(super) enum PlannerClassification {
         InvalidValidatedIdentity,
         InheritedAce,
@@ -506,6 +507,7 @@ mod acl_diagnostic {
         }
     }
 
+    #[derive(Clone, Copy)]
     pub(super) enum ParserClassification {
         MalformedSuccessSummary,
         MissingSeparator,
