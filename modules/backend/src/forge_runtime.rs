@@ -328,22 +328,22 @@ where
             BOOTSTRAP_OPTION => set_path(&mut bootstrap_capability, option, raw_value)?,
             READY_FILE_OPTION => set_path(&mut ready_file, option, raw_value)?,
             ADMISSION_TIMEOUT_OPTION => {
-                set_duration(&mut admission_timeout_ms, option, raw_value)?;
+                set_duration(&mut admission_timeout_ms, option, raw_value.as_os_str())?;
             }
             HANDSHAKE_TIMEOUT_OPTION => {
-                set_duration(&mut handshake_timeout_ms, option, raw_value)?;
+                set_duration(&mut handshake_timeout_ms, option, raw_value.as_os_str())?;
             }
             REQUEST_TIMEOUT_OPTION => {
-                set_duration(&mut request_timeout_ms, option, raw_value)?;
+                set_duration(&mut request_timeout_ms, option, raw_value.as_os_str())?;
             }
             DRAIN_TIMEOUT_OPTION => {
-                set_duration(&mut drain_timeout_ms, option, raw_value)?;
+                set_duration(&mut drain_timeout_ms, option, raw_value.as_os_str())?;
             }
             ADMISSION_CAPACITY_OPTION => {
-                set_capacity(&mut admission_capacity, option, raw_value)?;
+                set_capacity(&mut admission_capacity, option, raw_value.as_os_str())?;
             }
             REQUESTS_PER_CONNECTION_OPTION => {
-                set_capacity(&mut requests_per_connection, option, raw_value)?;
+                set_capacity(&mut requests_per_connection, option, raw_value.as_os_str())?;
             }
             _ => return Err(ForgeConfigError::UnknownOption),
         }
@@ -947,15 +947,15 @@ async fn finish(
     primary: Option<ForgeRuntimeError>,
 ) -> Result<(), ForgeRuntimeError> {
     let mut cleanup_failures = Vec::new();
-    if let Some(listener) = listener {
-        if let Err(error) = listener.drain().await {
-            cleanup_failures.push(ForgeRuntimeError::ListenerShutdown(error));
-        }
+    if let Some(listener) = listener
+        && let Err(error) = listener.drain().await
+    {
+        cleanup_failures.push(ForgeRuntimeError::ListenerShutdown(error));
     }
-    if let Some(receipt) = receipt {
-        if let Err(error) = receipt.remove() {
-            cleanup_failures.push(ForgeRuntimeError::ReadinessCleanup(error));
-        }
+    if let Some(receipt) = receipt
+        && let Err(error) = receipt.remove()
+    {
+        cleanup_failures.push(ForgeRuntimeError::ReadinessCleanup(error));
     }
     drop(handler);
     if let Err(error) = app.shutdown().await {
@@ -1245,7 +1245,7 @@ impl ReadinessReceipt {
                 }
             };
             return Err(with_temporary_identity_cleanup(
-                temporary,
+                &temporary,
                 temporary_identity,
                 error,
             ));
@@ -1519,11 +1519,11 @@ fn with_open_temporary_cleanup(
         }
     };
     drop(file);
-    with_temporary_identity_cleanup(path, identity, primary)
+    with_temporary_identity_cleanup(&path, identity, primary)
 }
 
 fn with_temporary_identity_cleanup(
-    path: PathBuf,
+    path: &Path,
     identity: FileIdentity,
     primary: ReadinessError,
 ) -> ReadinessError {
@@ -1681,24 +1681,24 @@ fn set_path(
 fn set_duration(
     slot: &mut Option<u64>,
     option: &'static str,
-    raw_value: OsString,
+    raw_value: &OsStr,
 ) -> Result<(), ForgeConfigError> {
     if slot.is_some() {
         return Err(ForgeConfigError::Duplicate { option });
     }
-    *slot = Some(parse_unsigned(raw_value.as_os_str(), option)?);
+    *slot = Some(parse_unsigned(raw_value, option)?);
     Ok(())
 }
 
 fn set_capacity(
     slot: &mut Option<NonZeroU32>,
     option: &'static str,
-    raw_value: OsString,
+    raw_value: &OsStr,
 ) -> Result<(), ForgeConfigError> {
     if slot.is_some() {
         return Err(ForgeConfigError::Duplicate { option });
     }
-    let value = parse_unsigned(raw_value.as_os_str(), option)?;
+    let value = parse_unsigned(raw_value, option)?;
     let value = u32::try_from(value).map_err(|_| ForgeConfigError::NumberOverflow { option })?;
     *slot = Some(NonZeroU32::new(value).ok_or(ForgeConfigError::ZeroCapacity { option })?);
     Ok(())
