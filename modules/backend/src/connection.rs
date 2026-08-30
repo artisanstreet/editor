@@ -639,3 +639,7 @@ impl Drop for AdmissionGuard {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/backend/lifecycle_connection.rs"]
+pub(crate) mod lifecycle_connection_tests;

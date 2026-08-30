@@ -78,6 +78,8 @@ rust_library(
         "//tests/backend:engine_owner_streaming.rs",
         "//tests/backend:listener_configuration.rs",
         "//tests/backend:lifecycle_control.rs",
+        "//tests/backend:lifecycle_connection.rs",
+        "//tests/backend:lifecycle_listener.rs",
     ],
     crate_name = "artisan_backend",
     deps = [

@@ -91,6 +91,10 @@ const LISTENER_CLOSE_REASON: &[u8] = b"forge listener released";
 #[path = "../../../tests/backend/listener_configuration.rs"]
 mod listener_configuration;
 
+#[cfg(test)]
+#[path = "../../../tests/backend/lifecycle_listener.rs"]
+pub(crate) mod lifecycle_listener_tests;
+
 /// Caller-supplied finite bounds for one listener. There is deliberately no
 /// `Default`: assembly selects every value.
 ///
