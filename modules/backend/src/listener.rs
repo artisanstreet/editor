@@ -294,7 +294,7 @@ pub enum ServiceCause {
 /// `Debug` or `Display`.
 #[derive(Debug)]
 pub struct ServeUntilCancelError {
-    kind: Kind,
+    kind: Box<Kind>,
 }
 
 #[derive(Debug)]
@@ -311,32 +311,32 @@ enum Kind {
 impl ServeUntilCancelError {
     fn service(cause: ServiceCause, drain: Option<TransportError>) -> Self {
         Self {
-            kind: Kind::Service { cause, drain },
+            kind: Box::new(Kind::Service { cause, drain }),
         }
     }
 
     fn drain(drain: TransportError) -> Self {
         Self {
-            kind: Kind::Drain { drain },
+            kind: Box::new(Kind::Drain { drain }),
         }
     }
 
     /// Returns `true` when this is a primary non-cancellation service failure.
     #[must_use]
     pub fn is_service_failure(&self) -> bool {
-        matches!(&self.kind, Kind::Service { .. })
+        matches!(&*self.kind, Kind::Service { .. })
     }
 
     /// Returns `true` when this is a cleanup-only drain failure after cancellation.
     #[must_use]
     pub fn is_drain_failure(&self) -> bool {
-        matches!(&self.kind, Kind::Drain { .. })
+        matches!(&*self.kind, Kind::Drain { .. })
     }
 
     /// Returns the primary service cause when this is a service failure.
     #[must_use]
     pub fn service_cause(&self) -> Option<&ServiceCause> {
-        match &self.kind {
+        match &*self.kind {
             Kind::Service { cause, .. } => Some(cause),
             Kind::Drain { .. } => None,
         }
@@ -349,7 +349,7 @@ impl ServeUntilCancelError {
     /// primary drain error.
     #[must_use]
     pub fn drain_error(&self) -> Option<&TransportError> {
-        match &self.kind {
+        match &*self.kind {
             Kind::Service { drain, .. } => drain.as_ref(),
             Kind::Drain { drain } => Some(drain),
         }
@@ -376,7 +376,7 @@ impl ServeUntilCancelError {
 
 impl std::fmt::Display for ServeUntilCancelError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
+        match &*self.kind {
             Kind::Service { cause, drain } => {
                 if drain.is_some() {
                     write!(
@@ -397,7 +397,7 @@ impl std::fmt::Display for ServeUntilCancelError {
 
 impl std::error::Error for ServeUntilCancelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.kind {
+        match &*self.kind {
             Kind::Service { cause, .. } => Some(cause),
             Kind::Drain { drain } => Some(drain),
         }
@@ -556,7 +556,7 @@ impl ForgeListener {
 
             match listener.serve_attempt(handler, cancel).await {
                 Ok(report) => match report.termination {
-                    RequestTermination::BudgetReached => continue,
+                    RequestTermination::BudgetReached => {}
                     RequestTermination::Failed { source } => {
                         if matches!(&source, DeadlineError::Cancelled { .. }) {
                             return match listener.drain().await {
@@ -602,10 +602,10 @@ impl ForgeListener {
                         continue;
                     }
 
-                    if let ListenerError::Authentication { source } = &error {
-                        if is_authentication_retryable(source) {
-                            continue;
-                        }
+                    if let ListenerError::Authentication { source } = &error
+                        && is_authentication_retryable(source)
+                    {
+                        continue;
                     }
 
                     let cause = ServiceCause::Listener(error);
