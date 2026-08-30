@@ -1,5 +1,5 @@
 {
-  "checksum": "08f2793a09ad5463dee04861ca7bff5cc99275a368cb53fd8f4863c975f56989",
+  "checksum": "6002b25725eea824340f0ff13642f2197e885be37df9a6aaecfdcbf66217e2ef",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2542,6 +2542,10 @@
             {
               "id": "gpui 0.2.2",
               "target": "gpui"
+            },
+            {
+              "id": "statig 0.4.1",
+              "target": "statig"
             },
             {
               "id": "url 2.5.8",
@@ -42394,6 +42398,120 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "statig 0.4.1": {
+      "name": "statig",
+      "version": "0.4.1",
+      "package_url": "https://github.com/mdeloof/statig",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/statig/0.4.1/download",
+          "sha256": "03c04b4a9f2d66294d63bdd8df834caad9f8e181997c3cf766b6b4f6d12d4fbc"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "statig",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "statig",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "default",
+            "macro",
+            "statig_macro"
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "proc_macro_deps": {
+          "common": [
+            {
+              "id": "statig_macro 0.4.0",
+              "target": "statig_macro"
+            }
+          ],
+          "selects": {}
+        },
+        "version": "0.4.1"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": null
+    },
+    "statig_macro 0.4.0": {
+      "name": "statig_macro",
+      "version": "0.4.0",
+      "package_url": "https://github.com/mdeloof/statig",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/statig_macro/0.4.0/download",
+          "sha256": "8090ca395ee30c4b38fee68cf4ddf0bcc5f01aa83364cd4c3ec737a1596dab4d"
+        }
+      },
+      "targets": [
+        {
+          "ProcMacro": {
+            "crate_name": "statig_macro",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "statig_macro",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "proc-macro-error2 2.0.1",
+              "target": "proc_macro_error2"
+            },
+            {
+              "id": "proc-macro2 1.0.107",
+              "target": "proc_macro2"
+            },
+            {
+              "id": "quote 1.0.47",
+              "target": "quote"
+            },
+            {
+              "id": "syn 2.0.119",
+              "target": "syn"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.4.0"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": null
+    },
     "strict-num 0.1.1": {
       "name": "strict-num",
       "version": "0.1.1",
@@ -59726,6 +59844,7 @@
     "sha2 0.10.9",
     "sha2 0.11.0",
     "sqlx-sqlite 0.9.0",
+    "statig 0.4.1",
     "subtle 2.6.1",
     "syntect 5.3.0",
     "tar 0.4.46",
