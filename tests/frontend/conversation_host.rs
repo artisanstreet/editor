@@ -174,6 +174,74 @@ fn dispatch_snapshot(host: &gpui::Entity<ConversationHost>, cx: &mut gpui::Visua
     });
 }
 
+fn dispatch_following_viewport_burst(
+    host: &gpui::Entity<ConversationHost>,
+    cx: &mut gpui::VisualTestContext,
+    count: usize,
+) {
+    cx.update(|_, app| {
+        host.update(app, |host, host_cx| {
+            for _ in 0..count {
+                host.dispatch(
+                    ConversationStateEvent::Viewport(
+                        conversation_view_machine::ViewportEvent::UserScrolled { at_bottom: true },
+                    ),
+                    host_cx,
+                )
+                .expect("bounded viewport burst is accepted");
+            }
+        });
+    });
+    cx.run_until_parked();
+}
+
+fn proof_host(
+    proof: &gpui::Entity<artisan_frontend::proof::ProofSurface>,
+    cx: &mut gpui::VisualTestContext,
+) -> gpui::Entity<ConversationHost> {
+    cx.update(|_, app| {
+        proof
+            .read(app)
+            .conversation_host()
+            .cloned()
+            .expect("proof mounts the genuine conversation host")
+    })
+}
+
+fn drain_proof_effects(
+    proof: &gpui::Entity<artisan_frontend::proof::ProofSurface>,
+    cx: &mut gpui::VisualTestContext,
+) -> Vec<ConversationHostEffect> {
+    cx.update(|_, app| {
+        proof.update(app, |proof, proof_cx| {
+            proof.drain_conversation_effects(proof_cx)
+        })
+    })
+}
+
+fn assert_proof_boundary_is_full_and_scroll_is_blocked(
+    proof: &gpui::Entity<artisan_frontend::proof::ProofSurface>,
+    host: &gpui::Entity<ConversationHost>,
+    cx: &mut gpui::VisualTestContext,
+    maximum: usize,
+) {
+    cx.update(|_, app| {
+        let proof = proof.read(app);
+        assert_eq!(proof.pending_conversation_effects().len(), maximum);
+        let host = host.read(app);
+        assert_eq!(
+            host.pending_effect_count(),
+            conversation_host::CONVERSATION_HOST_MAX_EFFECTS
+        );
+        assert!(matches!(
+            host.surface().read(app).pending_actions(),
+            [ConversationSurfaceAction::ScrollIntent {
+                target: ConversationSurfaceTarget::Scene(target)
+            }] if target.as_str() == "proof-pump"
+        ));
+    });
+}
+
 #[gpui::test]
 fn initial_scene_and_request_cross_the_host_boundary(cx: &mut TestAppContext) {
     let (host, cx) = add_host(cx);
@@ -832,6 +900,92 @@ fn proof_mounts_the_genuine_host_and_retains_the_initial_effect(cx: &mut TestApp
     cx.simulate_click(gpui::point(px(40.0), px(40.0)), Modifiers::none());
     cx.run_until_parked();
     cx.update(|_, app| assert_eq!(proof.read(app).clicks(), 1));
+}
+
+#[gpui::test]
+fn proof_drain_pumps_full_boundary_without_unrelated_activity(cx: &mut TestAppContext) {
+    let (proof, cx) = cx.add_window_view(artisan_frontend::proof::ProofSurface::new);
+    cx.run_until_parked();
+    let host = proof_host(&proof, cx);
+    let surface = cx.update(|_, app| host.read(app).surface().clone());
+    let maximum = artisan_frontend::proof::PROOF_MAX_CONVERSATION_EFFECTS;
+
+    dispatch_following_viewport_burst(&host, cx, maximum.saturating_sub(1));
+    cx.update(|_, app| {
+        assert_eq!(
+            proof.read(app).pending_conversation_effects().len(),
+            maximum
+        );
+    });
+
+    dispatch_following_viewport_burst(&host, cx, conversation_host::CONVERSATION_HOST_MAX_EFFECTS);
+    cx.update(|_, app| {
+        let host = host.read(app);
+        assert_eq!(
+            host.pending_effect_count(),
+            conversation_host::CONVERSATION_HOST_MAX_EFFECTS
+        );
+        assert_eq!(host.pending_controller_effect_count(), 0);
+    });
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            assert!(surface.request_scroll(
+                ConversationSurfaceTarget::Scene(scene_id("proof-pump")),
+                surface_cx,
+            ));
+        });
+    });
+    cx.run_until_parked();
+    assert_proof_boundary_is_full_and_scroll_is_blocked(&proof, &host, cx, maximum);
+
+    let first = drain_proof_effects(&proof, cx);
+    assert_eq!(first.len(), maximum);
+    assert!(matches!(
+        first.first(),
+        Some(ConversationHostEffect::Controller(
+            ConversationStateEffect::Delivery(ConversationDeliveryEffect::RequestSnapshot {
+                thread_id,
+                generation: 1,
+                after: None,
+            })
+        )) if thread_id.as_str() == "proof-conversation"
+    ));
+    assert!(first.iter().skip(1).all(|effect| matches!(
+        effect,
+        ConversationHostEffect::Controller(ConversationStateEffect::Viewport(
+            ViewportEffect::HideJumpToLatest
+        ))
+    )));
+    cx.update(|_, app| {
+        let host = host.read(app);
+        assert!(host.surface().read(app).pending_actions().is_empty());
+        assert!(matches!(
+            host.pending_effects(),
+            [ConversationHostEffect::ScrollIntent {
+                target: ConversationSurfaceTarget::Scene(target)
+            }] if target.as_str() == "proof-pump"
+        ));
+    });
+
+    let second = drain_proof_effects(&proof, cx);
+    assert_eq!(second.len(), maximum);
+    assert!(second.iter().all(|effect| matches!(
+        effect,
+        ConversationHostEffect::Controller(ConversationStateEffect::Viewport(
+            ViewportEffect::HideJumpToLatest
+        ))
+    )));
+    let third = drain_proof_effects(&proof, cx);
+    assert!(matches!(
+        third.as_slice(),
+        [ConversationHostEffect::ScrollIntent {
+            target: ConversationSurfaceTarget::Scene(target)
+        }] if target.as_str() == "proof-pump"
+    ));
+    cx.update(|_, app| {
+        assert!(proof.read(app).pending_conversation_effects().is_empty());
+    });
 }
 
 #[test]

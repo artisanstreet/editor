@@ -156,13 +156,27 @@ impl ProofSurface {
         &self.conversation_effects
     }
 
-    /// Drains application-bound conversation effects in FIFO order.
+    /// Drains application-bound conversation effects in FIFO order and pumps
+    /// the newly available bounded boundary once.
+    ///
+    /// The context is required because an application drain must explicitly
+    /// collect the older host/controller prefix and retry surface actions;
+    /// unrelated GPUI notifications are not used as a completion signal. The
+    /// pump has two collection passes and one action pass. Any remaining tail
+    /// stays observable in its owning host, controller, or surface queue.
     #[must_use]
-    pub fn drain_conversation_effects(&mut self) -> Vec<conversation_host::ConversationHostEffect> {
-        std::mem::replace(
+    pub fn drain_conversation_effects(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<conversation_host::ConversationHostEffect> {
+        let effects = std::mem::replace(
             &mut self.conversation_effects,
             Vec::with_capacity(PROOF_MAX_CONVERSATION_EFFECTS),
-        )
+        );
+        if let Some(host) = self.conversation_host.clone() {
+            self.pump_conversation_boundary(host, cx);
+        }
+        effects
     }
 
     /// The proof surface's own tracked focus handle (its startup focus).
@@ -189,16 +203,27 @@ impl ProofSurface {
         cx: &mut Context<Self>,
     ) {
         let mut changed = false;
-        loop {
-            let pending = host.read(cx).pending_effect_count();
+        // Host and controller queues are bounded by the same public maximum;
+        // this explicit bound keeps the controller-flush retry finite.
+        for _ in 0..=PROOF_MAX_CONVERSATION_EFFECTS {
+            let (pending, total_pending) = {
+                let host = host.read(cx);
+                (
+                    host.pending_effect_count(),
+                    host.total_pending_effect_count(),
+                )
+            };
             let available =
                 PROOF_MAX_CONVERSATION_EFFECTS.saturating_sub(self.conversation_effects.len());
-            if pending == 0 || pending > available {
+            if pending > available || total_pending == 0 {
                 break;
             }
             let effects = host.update(cx, |host, _| host.drain_effects());
             if effects.is_empty() {
-                break;
+                if pending > 0 {
+                    break;
+                }
+                continue;
             }
             self.conversation_effects.extend(effects);
             changed = true;
@@ -206,6 +231,19 @@ impl ProofSurface {
         if changed {
             cx.notify();
         }
+    }
+
+    /// Performs one explicit proof-to-application backpressure handoff.
+    fn pump_conversation_boundary(
+        &mut self,
+        host: Entity<conversation_host::ConversationHost>,
+        cx: &mut Context<Self>,
+    ) {
+        self.collect_conversation_effects(host.clone(), cx);
+        if host.read(cx).total_pending_effect_count() == 0 {
+            host.update(cx, |host, host_cx| host.process_pending_actions(host_cx));
+        }
+        self.collect_conversation_effects(host, cx);
     }
 }
 
