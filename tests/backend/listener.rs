@@ -1948,7 +1948,7 @@ async fn serve_one_retains_consuming_error_contract() {
     assert_connect_fails(&client_ep, broker.addr()).await;
     // Need fresh broker for auth failure because previous listener dropped.
     drop(broker);
-    let (mut broker2, _tmp2, _pki2) = start_broker(
+    let (mut broker2, _tmp2, pki2) = start_broker(
         "serve-one-auth",
         None,
         LocalCapability::from_bytes(INITIAL_CAPABILITY),
@@ -1958,7 +1958,7 @@ async fn serve_one_retains_consuming_error_contract() {
         capacity(4),
     )
     .await;
-    let client_ep2 = client_endpoint(&pki);
+    let client_ep2 = client_endpoint(&pki2);
     broker2.begin_serve();
     let rejected = try_admit(&client_ep2, broker2.addr(), wrong_value_credential()).await;
     assert!(rejected.is_err());
