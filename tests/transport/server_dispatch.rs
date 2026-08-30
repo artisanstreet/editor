@@ -685,3 +685,430 @@ async fn a_local_handler_failure_is_returned_typed_without_reply_bytes()
     drain(loopback).await;
     Ok(())
 }
+
+/// Non-Clone receipt whose drop is observable without sleeps.
+#[derive(Debug)]
+struct Receipt {
+    value: u32,
+    drops: Arc<AtomicUsize>,
+}
+
+impl Receipt {
+    fn new(value: u32, drops: Arc<AtomicUsize>) -> Self {
+        Self { value, drops }
+    }
+}
+
+impl Drop for Receipt {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn receipt_is_returned_only_after_successful_response_write_and_finish()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, mut client_recv) = client_connection.open_bi().await?;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let receipt_drops = Arc::clone(&drops);
+    let reply = correlated_response()?;
+
+    transport::send_envelope(&mut client_send, &list_directories_request()?).await?;
+    let (mut server_send, mut server_recv) =
+        tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+
+    let receipt =
+        tokio::time::timeout(
+            TEST_DEADLINE,
+            transport::server_dispatch::dispatch_server_request_with_receipt(
+                &mut server_send,
+                &mut server_recv,
+                move |_| async move {
+                    Ok::<_, HandlerRejected>((reply, Receipt::new(42, receipt_drops)))
+                },
+            ),
+        )
+        .await??;
+
+    assert_eq!(receipt.value, 42);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    let received =
+        tokio::time::timeout(TEST_DEADLINE, transport::receive_envelope(&mut client_recv))
+            .await??;
+    assert!(
+        received == correlated_response()?,
+        "peer must observe the correlated reply"
+    );
+    let end_of_stream =
+        tokio::time::timeout(TEST_DEADLINE, transport::receive_envelope(&mut client_recv)).await?;
+    match end_of_stream {
+        Err(transport::EnvelopeReceiveError::Frame(transport::FrameError::Truncated {
+            expected,
+            received,
+        })) => {
+            assert_eq!(expected, size_of::<u32>());
+            assert_eq!(received, 0);
+        }
+        Err(other) => panic!("expected clean end-of-stream, got {other:?}"),
+        Ok(envelope) => panic!(
+            "expected exactly one reply, got second envelope with frame id {}",
+            envelope.frame_id
+        ),
+    }
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(receipt);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    drop(server_send);
+    drop(server_recv);
+    client_send.finish()?;
+    drop(client_send);
+    drop(client_recv);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn protocol_failure_reply_like_a_receipt_is_returned_after_wire_success()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, mut client_recv) = client_connection.open_bi().await?;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let receipt_drops = Arc::clone(&drops);
+    let reply = correlated_failure()?;
+
+    transport::send_envelope(&mut client_send, &attach_project_request()?).await?;
+    let (mut server_send, mut server_recv) =
+        tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+
+    let receipt =
+        tokio::time::timeout(
+            TEST_DEADLINE,
+            transport::server_dispatch::dispatch_server_request_with_receipt(
+                &mut server_send,
+                &mut server_recv,
+                move |_| async move {
+                    Ok::<_, HandlerRejected>((reply, Receipt::new(7, receipt_drops)))
+                },
+            ),
+        )
+        .await??;
+
+    assert_eq!(receipt.value, 7);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    let received =
+        tokio::time::timeout(TEST_DEADLINE, transport::receive_envelope(&mut client_recv))
+            .await??;
+    assert!(
+        received == correlated_failure()?,
+        "protocol failure must cross the wire unchanged"
+    );
+    let end_of_stream =
+        tokio::time::timeout(TEST_DEADLINE, transport::receive_envelope(&mut client_recv)).await?;
+    match end_of_stream {
+        Err(transport::EnvelopeReceiveError::Frame(transport::FrameError::Truncated {
+            expected,
+            received,
+        })) => {
+            assert_eq!(expected, size_of::<u32>());
+            assert_eq!(received, 0);
+        }
+        Err(other) => panic!("expected clean end-of-stream, got {other:?}"),
+        Ok(envelope) => panic!(
+            "expected one failure reply, got second envelope with frame id {}",
+            envelope.frame_id
+        ),
+    }
+    drop(receipt);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    drop(server_send);
+    drop(server_recv);
+    client_send.finish()?;
+    drop(client_send);
+    drop(client_recv);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn differently_correlated_reply_drops_receipt_and_writes_no_bytes()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, mut client_recv) = client_connection.open_bi().await?;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let receipt_drops = Arc::clone(&drops);
+    transport::send_envelope(&mut client_send, &list_directories_request()?).await?;
+    let (mut server_send, mut server_recv) =
+        tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+
+    let result = tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::server_dispatch::dispatch_server_request_with_receipt(
+            &mut server_send,
+            &mut server_recv,
+            move |_| async move {
+                Ok::<_, HandlerRejected>((
+                    mismatched_response().expect("fixture"),
+                    Receipt::new(99, receipt_drops),
+                ))
+            },
+        ),
+    )
+    .await
+    .expect("dispatch settles within deadline");
+
+    assert!(
+        matches!(
+            result,
+            Err(ServerDispatchError::Reply(
+                ReplyValidationError::DifferentRequest
+            ))
+        ),
+        "expected Reply(DifferentRequest), got {result:?}"
+    );
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        1,
+        "receipt must be dropped on validation failure"
+    );
+
+    drop(server_send);
+    expect_no_reply_bytes(&mut client_recv).await;
+    drop(server_recv);
+    drop(client_send);
+    drop(client_recv);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn wrong_family_reply_drops_receipt_and_writes_no_bytes() -> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, mut client_recv) = client_connection.open_bi().await?;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let receipt_drops = Arc::clone(&drops);
+    transport::send_envelope(&mut client_send, &list_directories_request()?).await?;
+    let (mut server_send, mut server_recv) =
+        tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+
+    let result = tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::server_dispatch::dispatch_server_request_with_receipt(
+            &mut server_send,
+            &mut server_recv,
+            move |_| async move {
+                Ok::<_, HandlerRejected>((
+                    list_directories_request().expect("fixture"),
+                    Receipt::new(100, receipt_drops),
+                ))
+            },
+        ),
+    )
+    .await
+    .expect("dispatch settles within deadline");
+
+    assert!(
+        matches!(
+            result,
+            Err(ServerDispatchError::Reply(
+                ReplyValidationError::WrongFamily {
+                    received: HandshakeMessageKind::Request
+                }
+            ))
+        ),
+        "expected Reply(WrongFamily(Request)), got {result:?}"
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    drop(server_send);
+    expect_no_reply_bytes(&mut client_recv).await;
+    drop(server_recv);
+    drop(client_send);
+    drop(client_recv);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn uncorrelated_protocol_failure_drops_receipt() -> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, mut client_recv) = client_connection.open_bi().await?;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let receipt_drops = Arc::clone(&drops);
+    transport::send_envelope(&mut client_send, &list_directories_request()?).await?;
+    let (mut server_send, mut server_recv) =
+        tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+
+    let result = tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::server_dispatch::dispatch_server_request_with_receipt(
+            &mut server_send,
+            &mut server_recv,
+            move |_| async move {
+                Ok::<_, HandlerRejected>((
+                    uncorrelated_failure().expect("fixture"),
+                    Receipt::new(101, receipt_drops),
+                ))
+            },
+        ),
+    )
+    .await
+    .expect("dispatch settles within deadline");
+
+    assert!(
+        matches!(
+            result,
+            Err(ServerDispatchError::Reply(
+                ReplyValidationError::Uncorrelated
+            ))
+        ),
+        "expected Reply(Uncorrelated), got {result:?}"
+    );
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    drop(server_send);
+    expect_no_reply_bytes(&mut client_recv).await;
+    drop(server_recv);
+    drop(client_send);
+    drop(client_recv);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_handler_error_preserves_local_source_and_produces_no_receipt()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, mut client_recv) = client_connection.open_bi().await?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    transport::send_envelope(&mut client_send, &list_directories_request()?).await?;
+    let (mut server_send, mut server_recv) =
+        tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+
+    let result: Result<Receipt, ServerDispatchError<HandlerRejected>> = tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::server_dispatch::dispatch_server_request_with_receipt(
+            &mut server_send,
+            &mut server_recv,
+            move |_| async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Err(HandlerRejected)
+            },
+        ),
+    )
+    .await
+    .expect("dispatch settles within deadline");
+
+    let Err(error) = &result else {
+        panic!("local handler failure must fail dispatch");
+    };
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    match error {
+        ServerDispatchError::Local(failure) => {
+            assert_eq!(*failure, HandlerRejected);
+            assert_eq!(error.to_string(), "the request handler failed");
+        }
+        other => panic!("expected Local failure, got {other:?}"),
+    }
+
+    drop(server_send);
+    expect_no_reply_bytes(&mut client_recv).await;
+    drop(server_recv);
+    drop(client_send);
+    drop(client_recv);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_finished_send_side_causes_send_or_finish_failure_and_drops_receipt()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let client_connection = connect_client(&loopback).await;
+    let server_connection = server_connection(&mut loopback).await;
+    let (mut client_send, client_recv) = client_connection.open_bi().await?;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let receipt_drops = Arc::clone(&drops);
+    transport::send_envelope(&mut client_send, &list_directories_request()?).await?;
+    let (mut server_send, mut server_recv) =
+        tokio::time::timeout(TEST_DEADLINE, server_connection.accept_bi()).await??;
+
+    // Deterministically break the post-handler wire step without sleeps: the
+    // server send side is already finished before dispatch attempts to write
+    // and finish again.
+    server_send.finish()?;
+
+    let result = tokio::time::timeout(
+        TEST_DEADLINE,
+        transport::server_dispatch::dispatch_server_request_with_receipt(
+            &mut server_send,
+            &mut server_recv,
+            move |_| async move {
+                Ok::<_, HandlerRejected>((
+                    correlated_response().expect("fixture"),
+                    Receipt::new(55, receipt_drops),
+                ))
+            },
+        ),
+    )
+    .await
+    .expect("dispatch settles within deadline");
+
+    assert!(
+        matches!(
+            result,
+            Err(ServerDispatchError::Send(_) | ServerDispatchError::Finish(_))
+        ),
+        "expected Send or Finish failure after pre-finished stream, got {result:?}"
+    );
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        1,
+        "receipt must be dropped on wire failure"
+    );
+
+    drop(server_send);
+    drop(server_recv);
+    drop(client_send);
+    drop(client_recv);
+    drop(client_connection);
+    drop(server_connection);
+    drain(loopback).await;
+    Ok(())
+}
