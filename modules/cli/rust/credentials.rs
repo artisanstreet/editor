@@ -482,7 +482,6 @@ mod acl_diagnostic {
 
     pub(super) enum PlannerClassification {
         InvalidValidatedIdentity,
-        MissingAceSeparator,
         InheritedAce,
         CurrentIdentityMatch,
         DuplicateCurrentIdentity,
@@ -496,7 +495,6 @@ mod acl_diagnostic {
         const fn as_str(self) -> &'static str {
             match self {
                 Self::InvalidValidatedIdentity => "InvalidValidatedIdentity",
-                Self::MissingAceSeparator => "MissingAceSeparator",
                 Self::InheritedAce => "InheritedAce",
                 Self::CurrentIdentityMatch => "CurrentIdentityMatch",
                 Self::DuplicateCurrentIdentity => "DuplicateCurrentIdentity",
@@ -1227,9 +1225,6 @@ fn plan_icacls_removals(
     let mut current_identity_count = 0;
     for ace in ace_lines {
         let Some(colon) = ace.find(':') else {
-            acl_diagnostic!(acl_diagnostic::planner(
-                acl_diagnostic::PlannerClassification::MissingAceSeparator
-            ));
             return Err(ForgeCredentialError::WindowsAcl);
         };
         let principal = ace[..colon].trim();
@@ -2327,7 +2322,6 @@ mod diagnostic_tests {
     ) {
         let allowed = [
             "InvalidValidatedIdentity",
-            "MissingAceSeparator",
             "InheritedAce",
             "CurrentIdentityMatch",
             "DuplicateCurrentIdentity",
@@ -2414,9 +2408,6 @@ mod diagnostic_tests {
         };
         assert_planner_classification("InvalidValidatedIdentity", false, || {
             plan_icacls_removals("", &invalid_identity, path)
-        });
-        assert_planner_classification("MissingAceSeparator", false, || {
-            plan_icacls_removals(&format!("{path} non-ace output"), &identity, path)
         });
         assert_planner_classification("InheritedAce", false, || {
             plan_icacls_removals(&format!("{path} {sid}:(I)(OI)(CI)(F)"), &identity, path)
