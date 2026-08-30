@@ -314,7 +314,12 @@ pub fn forbid_default_install_root(root: &Path) -> Result<()> {
     let Ok(installed) = Platform::default_install_root() else {
         return Ok(());
     };
-    if !is_same_or_inside(root, &installed) {
+    forbid_installed_root(root, &installed)
+}
+
+#[cfg(debug_assertions)]
+fn forbid_installed_root(root: &Path, installed: &Path) -> Result<()> {
+    if !is_same_or_inside(root, installed) {
         return Ok(());
     }
     Err(InstallerError::DebugBuildGuard(format!(
@@ -375,10 +380,7 @@ fn comparable_text(value: &OsStr) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-    };
+    use std::{fs, path::Path};
 
     use serde_json::json;
 
@@ -619,19 +621,23 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn debug_builds_require_a_sandboxed_install_root() {
-        use super::forbid_default_install_root;
+        use super::forbid_installed_root;
 
-        let installed = Platform::default_install_root().expect("installed root");
-        assert!(matches!(
-            forbid_default_install_root(&installed),
-            Err(InstallerError::DebugBuildGuard(message))
-                if message.contains("ARTISAN_INSTALL_ROOT")
-        ));
-        assert!(forbid_default_install_root(&installed.join("versions")).is_err());
-        assert!(
-            forbid_default_install_root(&std::env::temp_dir().join("artisan-dev-install-root"))
-                .is_ok()
+        let directory = tempfile::tempdir().unwrap();
+        assert!(directory.path().is_absolute());
+        let installed = directory.path().join("Artisan Street");
+        let expected_message = format!(
+            "this debug installer build refuses to operate on the installed Artisan root at {}; \
+             pass --install-root (or set ARTISAN_INSTALL_ROOT) to a sandbox such as \
+             <repo>/.dist/dev/install-root, for example via `pnpm run dev:ae-installer`",
+            installed.display()
         );
+        assert!(matches!(
+            forbid_installed_root(&installed, &installed),
+            Err(InstallerError::DebugBuildGuard(message)) if message == expected_message
+        ));
+        assert!(forbid_installed_root(&installed.join("versions"), &installed).is_err());
+        assert!(forbid_installed_root(&directory.path().join("sandbox"), &installed).is_ok());
     }
 
     #[cfg(all(debug_assertions, windows))]
