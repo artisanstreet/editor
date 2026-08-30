@@ -279,52 +279,68 @@ impl Render for ProofSurface {
             .on_action(|_: &PreviousTabStop, window, _| window.focus_prev())
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_press))
             .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_3()
             .size_full()
             .bg(rgb(BACKGROUND))
             .text_color(rgb(FOREGROUND))
             .text_xl()
-            .child(format!("Artisan GPUI proof — clicks: {}", self.clicks))
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child("Feasibility-only presentation · quit with cmd-q / ctrl-q"),
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(format!("Artisan GPUI proof — clicks: {}", self.clicks))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child("Feasibility-only presentation · quit with cmd-q / ctrl-q"),
+                    )
+                    // The first real native workflow leaf: the project picker.
+                    .child(self.picker.clone())
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child(picker_summary(self.picker.read(cx).last_action())),
+                    ),
             )
-            // The first real native workflow leaf: the project picker.
-            .child(self.picker.clone())
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child(picker_summary(self.picker.read(cx).last_action())),
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child({
+                        let mut conversation_panel = div()
+                            .w_full()
+                            .h(px(CONVERSATION_HEIGHT))
+                            .rounded(px(8.0))
+                            .bg(rgb(BACKGROUND));
+                        if let Some(host) = self.conversation_host.clone() {
+                            conversation_panel = conversation_panel.child(host);
+                        } else {
+                            conversation_panel = conversation_panel
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_sm()
+                                .text_color(rgb(MUTED))
+                                .child("conversation host unavailable");
+                        }
+                        conversation_panel
+                    })
+                    .child(div().text_sm().text_color(rgb(MUTED)).child(format!(
+                        "conversation effects queued: {}",
+                        self.conversation_effects.len()
+                    ))),
             )
-            .child({
-                let mut conversation_panel = div()
-                    .w_full()
-                    .h(px(CONVERSATION_HEIGHT))
-                    .rounded(px(8.0))
-                    .bg(rgb(BACKGROUND));
-                if let Some(host) = self.conversation_host.clone() {
-                    conversation_panel = conversation_panel.child(host);
-                } else {
-                    conversation_panel = conversation_panel
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_sm()
-                        .text_color(rgb(MUTED))
-                        .child("conversation host unavailable");
-                }
-                conversation_panel
-            })
-            .child(div().text_sm().text_color(rgb(MUTED)).child(format!(
-                "conversation effects queued: {}",
-                self.conversation_effects.len()
-            )))
     }
 }
 
