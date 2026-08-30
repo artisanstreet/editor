@@ -394,8 +394,8 @@ fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallError> {
 }
 
 fn verify_regular_file(path: &Path) -> Result<(), NativeOpenCode2InstallError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| NativeOpenCode2InstallError::LockUnavailable)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| NativeOpenCode2InstallError::LockUnavailable)?;
     if is_reparse_or_symlink(&metadata) || !metadata.is_file() {
         return Err(NativeOpenCode2InstallError::LockIdentityChanged);
     }
@@ -470,8 +470,7 @@ fn cleanup_staging(
         verify_directory(&candidate)?;
         lock.fence(paths)?;
         verify_directory(&candidate)?;
-        fs::remove_dir_all(&candidate)
-            .map_err(|_| NativeOpenCode2InstallError::CleanupFailed)?;
+        fs::remove_dir_all(&candidate).map_err(|_| NativeOpenCode2InstallError::CleanupFailed)?;
         if fs::symlink_metadata(&candidate).is_ok() {
             return Err(NativeOpenCode2InstallError::CleanupFailed);
         }
@@ -937,11 +936,11 @@ fn member_name(header: &[u8; 512]) -> Result<String, NativeOpenCode2InstallError
 }
 
 fn text_field(field: &[u8]) -> Result<String, NativeOpenCode2InstallError> {
-    let end = field.iter().position(|byte| *byte == 0).unwrap_or(field.len());
-    if field[end..]
+    let end = field
         .iter()
-        .any(|byte| *byte != 0)
-    {
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
+    if field[end..].iter().any(|byte| *byte != 0) {
         return Err(NativeOpenCode2InstallError::ArchiveInvalid);
     }
     String::from_utf8(field[..end].to_vec())
@@ -1120,10 +1119,7 @@ fn verify_activation(
         return Err(failure);
     }
     let spec = NativeOpenCode2Authority::certified_install_spec();
-    let executable = paths
-        .versions_root
-        .join(generation_id)
-        .join(spec.binary());
+    let executable = paths.versions_root.join(generation_id).join(spec.binary());
     let published_id = verify_executable(&executable, &spec).map_err(|_| failure)?;
     if published_id != staged_id {
         return Err(failure);
@@ -1143,9 +1139,7 @@ mod tests {
         assert!(is_generation_name(
             "generation-0123456789abcdef0123456789abcdef"
         ));
-        assert!(!is_staging_name(
-            "staging-0123456789ABCDEF0123456789abcdef"
-        ));
+        assert!(!is_staging_name("staging-0123456789ABCDEF0123456789abcdef"));
         assert!(!is_generation_name("generation-0123456789abcdef"));
         for unsafe_name in [
             "",
@@ -1229,27 +1223,20 @@ mod tests {
         }
         let archive = tar_gzip(&[("package/bin/opencode2.exe", target, b'0')]);
         let mut decoder = GzDecoder::new(Cursor::new(archive));
-        assert!(parse_tar(
-            &mut decoder,
-            "package/bin/opencode2.exe",
-            &target_path,
-            target.len() as u64
-        )
-        .is_ok());
-
-        let archive = tar_gzip(&[(
-            "package/bin/opencode2.exe",
-            b"".as_slice(),
-            b'5',
-        )]);
-        let mut decoder = GzDecoder::new(Cursor::new(archive));
-        assert_eq!(
+        assert!(
             parse_tar(
                 &mut decoder,
                 "package/bin/opencode2.exe",
                 &target_path,
-                0,
-            ),
+                target.len() as u64
+            )
+            .is_ok()
+        );
+
+        let archive = tar_gzip(&[("package/bin/opencode2.exe", b"".as_slice(), b'5')]);
+        let mut decoder = GzDecoder::new(Cursor::new(archive));
+        assert_eq!(
+            parse_tar(&mut decoder, "package/bin/opencode2.exe", &target_path, 0,),
             Err(NativeOpenCode2InstallError::ArchiveTargetInvalid)
         );
     }
@@ -1258,7 +1245,7 @@ mod tests {
     fn archive_reader_rejects_unsupported_tar_entry_kinds() {
         let target_directory = tempfile::tempdir().unwrap();
         let target_path = target_directory.path().join("opencode2.exe");
-        for kind in [b'1', b'2', b'x', b'g', b'L', b'3'] {
+        for kind in *b"12xgL3" {
             let archive = tar_gzip(&[("unsupported", b"".as_slice(), kind)]);
             let mut decoder = GzDecoder::new(Cursor::new(archive));
             assert_eq!(
@@ -1342,20 +1329,20 @@ mod tests {
 
     #[test]
     fn archive_reader_rejects_bad_checksum_truncation_and_missing_terminal_block() {
-        let mut decoded = tar_bytes(&[("package/bin/opencode2.exe", b"a".as_slice(), b'0')]);
-        decoded[0] ^= 1;
-        let mut decoder = GzDecoder::new(Cursor::new(gzip(&decoded)));
+        let mut corrupted_tar = tar_bytes(&[("package/bin/opencode2.exe", b"a".as_slice(), b'0')]);
+        corrupted_tar[0] ^= 1;
+        let mut decoder = GzDecoder::new(Cursor::new(gzip(&corrupted_tar)));
         let target_directory = tempfile::tempdir().unwrap();
         let target_path = target_directory.path().join("target");
         assert!(parse_tar(&mut decoder, "package/bin/opencode2.exe", &target_path, 1).is_err());
 
         let archive = tar_gzip(&[("package/bin/opencode2.exe", b"a".as_slice(), b'0')]);
-        let mut decoded = Vec::new();
+        let mut truncated_tar = Vec::new();
         GzDecoder::new(Cursor::new(archive))
-            .read_to_end(&mut decoded)
+            .read_to_end(&mut truncated_tar)
             .unwrap();
-        decoded.truncate(decoded.len() - 512);
-        let mut decoder = GzDecoder::new(Cursor::new(gzip(&decoded)));
+        truncated_tar.truncate(truncated_tar.len() - 512);
+        let mut decoder = GzDecoder::new(Cursor::new(gzip(&truncated_tar)));
         assert!(parse_tar(&mut decoder, "package/bin/opencode2.exe", &target_path, 1).is_err());
     }
 
