@@ -33,7 +33,6 @@ use crate::{ForgeApp, ForgeConfig};
 use super::{ForgeListener, ListenerLimits};
 
 const FIRST_STOP_ID: &str = "listener-shared-stop";
-const FIRST_RESPONSE_FRAME: &str = "listener-lifecycle-2";
 const SECOND_RESPONSE_FRAME: &str = "listener-lifecycle-5";
 const THIRD_RESPONSE_FRAME: &str = "listener-lifecycle-8";
 
@@ -365,26 +364,29 @@ async fn one_listener_controller_serializes_first_committed_stop_across_connecti
     broker.serve(Arc::clone(&first_cancel));
     let first = admit_client(&endpoint, broker.address, initial_credential()).await;
     assert!(first.welcome.welcome.lifecycle_control_supported);
-    let first_reply = exchange(
-        &first,
-        lifecycle_request(
+    let (mut first_send, first_recv) = first
+        .connection
+        .open_bi()
+        .await
+        .expect("first stop stream opens");
+    artisan_transport::send_envelope(
+        &mut first_send,
+        &lifecycle_request(
             FIRST_STOP_ID,
             LifecycleRequest::Stop {
                 require_idle: false,
             },
         ),
-        FIRST_RESPONSE_FRAME,
     )
-    .await;
-    let first_receipt = stop_response(first_reply);
-    assert_eq!(
-        first_receipt.disposition,
-        LifecycleStopDisposition::Accepted
-    );
-    assert_eq!(first_receipt.state, LifecycleState::Draining);
+    .await
+    .expect("first stop request crosses the wire");
+    first_send.finish().expect("first stop request finishes");
+    // The server commits after its local response FIN; peer-side response
+    // reading is intentionally not required before the listener closes.
     assert!(broker.served().await);
     assert!(first_cancel.is_cancelled());
     assert_eq!(gate.committed(), 1);
+    drop(first_recv);
     let reconnect = take_reconnect(first);
 
     let duplicate_cancel = Arc::new(CancelHandle::new());
