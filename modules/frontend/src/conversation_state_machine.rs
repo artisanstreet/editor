@@ -18,8 +18,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use artisan_domain::{
-    AssistantMessagePhase, ConversationItem, ConversationLifecycle, ConversationPatch,
-    ConversationSnapshot, ItemId, RequestId, ThreadId, TurnId,
+    AssistantMessagePhase, ConversationItem, ConversationPatch, ConversationSnapshot, ItemId,
+    RequestId, ThreadId, TurnId,
 };
 use thiserror::Error;
 
@@ -921,8 +921,8 @@ impl ConversationStateController {
         )?;
         self.ensure_effect_capacity(1)?;
 
-        let scene_id =
-            steering_scene_id(&key).map_err(ConversationStateError::InvalidSceneIdentity)?;
+        let scene_id = steering_scene_id(&key)
+            .map_err(|error| ConversationStateError::InvalidSceneIdentity { error })?;
         if self
             .steerings
             .values()
@@ -1274,7 +1274,7 @@ impl ConversationStateController {
                 .steerings
                 .get_mut(&key)
                 .expect("steering was checked above");
-            record.controller.handle_event(event).map_err(|error| {
+            record.controller.handle_event(&event).map_err(|error| {
                 ConversationStateError::Steering {
                     command_id: key.command_id.clone(),
                     generation: key.generation,
