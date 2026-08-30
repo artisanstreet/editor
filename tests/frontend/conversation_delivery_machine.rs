@@ -184,7 +184,7 @@ fn request_generation(effect: &ConversationDeliveryEffect) -> Option<u64> {
 
 fn request_after(effect: &ConversationDeliveryEffect) -> Option<ConversationCursor> {
     match effect {
-        ConversationDeliveryEffect::RequestSnapshot { after, .. } => Some(*after),
+        ConversationDeliveryEffect::RequestSnapshot { after, .. } => *after,
         _ => None,
     }
 }
