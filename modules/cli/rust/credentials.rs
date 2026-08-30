@@ -854,7 +854,7 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let line = text.lines().next().ok_or_else(|| {
+    let Some(line) = text.lines().next() else {
         acl_diagnostic!(acl_diagnostic::record_identity(
             &output.stdout,
             &output.stderr,
@@ -862,8 +862,8 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
             None,
             None
         ));
-        ForgeCredentialError::WindowsAcl
-    })?;
+        return Err(ForgeCredentialError::WindowsAcl);
+    };
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -878,12 +878,12 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         }
     }
     parts.push(current.trim().to_string());
-    let field_count = parts.len();
+    let _field_count = parts.len();
     if parts.len() != 2 {
         acl_diagnostic!(acl_diagnostic::record_identity(
             &output.stdout,
             &output.stderr,
-            field_count,
+            _field_count,
             None,
             None
         ));
@@ -894,7 +894,7 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
     acl_diagnostic!(acl_diagnostic::record_identity(
         &output.stdout,
         &output.stderr,
-        field_count,
+        _field_count,
         Some(&sid),
         Some(&account),
     ));
