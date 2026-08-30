@@ -295,7 +295,10 @@ impl ResolvedOpenCode2Generation {
     }
 }
 
-pub(crate) struct NativeOpenCode2Authority;
+pub(crate) struct NativeOpenCode2Authority {
+    certified_executable_size_bytes: u64,
+    certified_executable_sha256: [u8; 32],
+}
 
 impl NativeOpenCode2Authority {
     pub(crate) const fn new() -> Self {
@@ -308,7 +311,10 @@ impl NativeOpenCode2Authority {
             CERTIFIED_DOWNLOAD_BOUND_BYTES,
             CERTIFIED_NPM_URL,
         );
-        Self
+        Self {
+            certified_executable_size_bytes: CERTIFIED_EXECUTABLE_SIZE_BYTES,
+            certified_executable_sha256: CERTIFIED_EXECUTABLE_SHA256,
+        }
     }
 
     pub(crate) fn inspect(
@@ -318,7 +324,7 @@ impl NativeOpenCode2Authority {
         if !is_supported_platform() {
             return Ok(OpenCode2Inspection::UnsupportedPlatform);
         }
-        match Self::resolve_active(instance) {
+        match self.resolve_active(instance) {
             Ok(generation) => Ok(OpenCode2Inspection::Ready(generation)),
             Err(NativeOpenCode2Error::StateMissing) => Ok(OpenCode2Inspection::NotInstalled),
             Err(error) => Err(error),
@@ -326,6 +332,7 @@ impl NativeOpenCode2Authority {
     }
 
     pub(crate) fn resolve_active(
+        &self,
         instance: &NativeInstanceConfig,
     ) -> Result<ResolvedOpenCode2Generation, NativeOpenCode2Error> {
         if !is_supported_platform() {
@@ -344,8 +351,8 @@ impl NativeOpenCode2Authority {
             .join(&state.active.binary);
         let verified_file_id = instance::verify_native_file(
             &executable,
-            CERTIFIED_EXECUTABLE_SIZE_BYTES,
-            &CERTIFIED_EXECUTABLE_SHA256,
+            self.certified_executable_size_bytes,
+            &self.certified_executable_sha256,
         )
         .map_err(|error| map_executable_error(&error))?;
         Ok(ResolvedOpenCode2Generation {
@@ -353,8 +360,8 @@ impl NativeOpenCode2Authority {
             generation_id: state.active.directory,
             version: CERTIFIED_VERSION,
             upstream_commit: CERTIFIED_UPSTREAM_COMMIT,
-            executable_size_bytes: CERTIFIED_EXECUTABLE_SIZE_BYTES,
-            executable_sha256: CERTIFIED_EXECUTABLE_SHA256,
+            executable_size_bytes: self.certified_executable_size_bytes,
+            executable_sha256: self.certified_executable_sha256,
             verified_file_id,
         })
     }
@@ -725,7 +732,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert!(
             !is_supported_platform()
-                || NativeOpenCode2Authority::resolve_active(&sample_instance(root.path())).is_err()
+                || NativeOpenCode2Authority::new()
+                    .resolve_active(&sample_instance(root.path()))
+                    .is_err()
         );
     }
 
