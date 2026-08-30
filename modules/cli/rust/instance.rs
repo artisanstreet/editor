@@ -1141,7 +1141,7 @@ mod tests {
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn native_file_replacement_rejects_temporary_path_substitution_while_handle_is_open() {
         let directory = tempfile::tempdir().unwrap();
