@@ -30,8 +30,7 @@ use artisan_protocol::{
     LocalCapability, ProtocolVersion, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
-    CancelHandle, LOOPBACK_SERVER_NAME, PinnedIdentity, bind_loopback_client, client_config,
-    client_handshake,
+    CancelHandle, LOOPBACK_SERVER_NAME, PinnedIdentity, client_config, client_handshake,
 };
 use quinn::{Connection, Endpoint, VarInt};
 use rustls_pki_types::CertificateDer;
@@ -596,7 +595,10 @@ fn readiness_is_exact_and_shutdown_removes_only_this_receipt() {
     assert_eq!(bytes, expected.as_bytes());
     assert!(!String::from_utf8_lossy(&bytes).contains(&"5a".repeat(32)));
     assert!(
-        !worker.is_finished(),
+        !worker
+            .as_ref()
+            .expect("readiness worker should still be owned")
+            .is_finished(),
         "service must remain alive before cancel"
     );
 
