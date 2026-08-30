@@ -847,6 +847,7 @@ mod tests {
     fn test_manifest() -> InstallationManifest {
         InstallationManifest {
             activation_state: "active".into(),
+            finalization_state: Some("complete".into()),
             active_version: Some("1.2.3".into()),
             install_root: if cfg!(windows) {
                 PathBuf::from(r"C:\Users\Ada\Artisan Street")

@@ -91,7 +91,7 @@ struct Arguments {
     activation: ActivationArguments,
 
     /// Per-user installation root.
-    #[arg(long, env = "ARTISAN_INSTALL_ROOT", global = true)]
+    #[arg(long, global = true)]
     install_root: Option<PathBuf>,
 }
 
@@ -126,10 +126,13 @@ async fn main() {
 async fn run() -> Result<()> {
     let arguments = Arguments::parse();
     let platform = Platform::detect()?;
-    let root = arguments
-        .install_root
-        .clone()
-        .unwrap_or_else(Platform::default_install_root);
+    let install_root_env = std::env::var_os("ARTISAN_INSTALL_ROOT").map(PathBuf::from);
+    let artisan_home_env = std::env::var_os("ARTISAN_HOME").map(PathBuf::from);
+    let root = platform::resolve_install_root(
+        arguments.install_root.as_deref(),
+        install_root_env.as_deref(),
+        artisan_home_env.as_deref(),
+    )?;
     #[cfg(debug_assertions)]
     platform::forbid_default_install_root(&root)?;
 
@@ -181,10 +184,8 @@ fn prepare_update(arguments: &Arguments, root: &std::path::Path) -> Result<()> {
     if arguments.activation.skip_retire {
         return Ok(());
     }
-    let installer = std::env::current_exe().map_err(InstallerError::CurrentExecutable)?;
-    let lifecycle_ae = installer
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
+    let lifecycle_ae = root
+        .join("bin")
         .join(if cfg!(windows) { "ae.exe" } else { "ae" });
     if !lifecycle_ae.is_file() {
         return Err(InstallerError::MissingCli(lifecycle_ae));
