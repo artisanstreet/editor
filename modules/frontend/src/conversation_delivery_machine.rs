@@ -175,7 +175,7 @@ impl Delivery {
     fn emit_snapshot_request(&mut self, context: &mut DeliveryContext) {
         match self.next_generation() {
             Ok(generation) => {
-                let after = self.projection.snapshot().map(|snapshot| snapshot.cursor());
+                let after = self.projection.snapshot().map(ConversationSnapshot::cursor);
                 context.push(ConversationDeliveryEffect::RequestSnapshot {
                     thread_id: self.thread_id.clone(),
                     generation,
@@ -376,7 +376,7 @@ impl Delivery {
     }
 
     #[superstate]
-    fn delivery(&mut self, event: &ConversationDeliveryEvent) -> Outcome<State> {
+    fn delivery(event: &ConversationDeliveryEvent) -> Outcome<State> {
         match event {
             ConversationDeliveryEvent::Closed => Transition(State::closed()),
             _ => Super,
@@ -384,7 +384,7 @@ impl Delivery {
     }
 
     #[state(entry_action = "enter_closed")]
-    fn closed(&mut self) -> Outcome<State> {
+    fn closed() -> Outcome<State> {
         Handled
     }
 
@@ -460,7 +460,7 @@ impl ConversationDeliveryController {
     /// allocated during this dispatch.
     pub fn dispatch(
         &mut self,
-        event: ConversationDeliveryEvent,
+        event: &ConversationDeliveryEvent,
     ) -> Result<(), ConversationDeliveryError> {
         let is_closed = matches!(
             Delivery::current_phase(self.machine.state()),
@@ -473,7 +473,7 @@ impl ConversationDeliveryController {
         }
 
         let before_len = self.outbox.len();
-        self.machine.handle_with_context(&event, &mut self.outbox);
+        self.machine.handle_with_context(event, &mut self.outbox);
 
         // Per-dispatch exhaustion: only effects produced by this dispatch count.
         let exhausted_this_dispatch = self.outbox[before_len..]
@@ -492,26 +492,52 @@ impl ConversationDeliveryController {
     }
 
     /// Convenience: dispatch an authoritative snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Snapshot handling does not allocate a request generation, so this
+    /// method does not return [`ConversationDeliveryError::GenerationExhausted`].
+    /// Refused snapshots are reported through
+    /// [`ConversationDeliveryEffect::ReportRefusal`] instead.
     pub fn on_snapshot(
         &mut self,
         snapshot: ConversationSnapshot,
     ) -> Result<(), ConversationDeliveryError> {
-        self.dispatch(ConversationDeliveryEvent::SnapshotReceived(snapshot))
+        self.dispatch(&ConversationDeliveryEvent::SnapshotReceived(snapshot))
     }
 
     /// Convenience: dispatch an authoritative patch batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationDeliveryError::GenerationExhausted`] when a
+    /// same-thread batch refusal enters recovery but its resnapshot request
+    /// generation cannot be allocated. Other batch refusals are reported
+    /// through [`ConversationDeliveryEffect::ReportRefusal`] and return `Ok`.
     pub fn on_batch(&mut self, batch: PatchBatch) -> Result<(), ConversationDeliveryError> {
-        self.dispatch(ConversationDeliveryEvent::BatchReceived(batch))
+        self.dispatch(&ConversationDeliveryEvent::BatchReceived(batch))
     }
 
     /// Convenience: request an explicit resnapshot retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationDeliveryError::GenerationExhausted`] when the
+    /// current state handles the retry by requesting a snapshot but the next
+    /// checked generation cannot be allocated. Inert retries return `Ok`.
     pub fn retry(&mut self) -> Result<(), ConversationDeliveryError> {
-        self.dispatch(ConversationDeliveryEvent::RetryRequested)
+        self.dispatch(&ConversationDeliveryEvent::RetryRequested)
     }
 
     /// Convenience: close the owner. Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Closing does not allocate a request generation, so this method returns
+    /// `Ok(())`; repeated closes remain idempotent and do not emit another
+    /// [`ConversationDeliveryEffect::OwnerClosed`].
     pub fn close(&mut self) -> Result<(), ConversationDeliveryError> {
-        self.dispatch(ConversationDeliveryEvent::Closed)
+        self.dispatch(&ConversationDeliveryEvent::Closed)
     }
 
     /// Drains the ordered outbox.
@@ -545,7 +571,7 @@ impl ConversationDeliveryController {
             cursor: inner
                 .projection
                 .snapshot()
-                .map(|snapshot| snapshot.cursor()),
+                .map(ConversationSnapshot::cursor),
             has_snapshot: inner.projection.snapshot().is_some(),
             pending_effects: self.outbox.len(),
         }
@@ -582,7 +608,7 @@ impl ConversationDeliveryController {
             .inner()
             .projection
             .snapshot()
-            .map(|s| s.cursor())
+            .map(ConversationSnapshot::cursor)
     }
 
     /// Returns the last allocated generation.
