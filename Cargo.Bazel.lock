@@ -1,5 +1,5 @@
 {
-  "checksum": "3ff18d30cc4154e30575d936659668318ca6e220fb09af560f2463fc28493cf1",
+  "checksum": "2b586188ea4c60e3d8d677b0be46a80f3122e6e14310199d58026035eff67fb8",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2469,6 +2469,10 @@
               "target": "clap"
             },
             {
+              "id": "flate2 1.1.10",
+              "target": "flate2"
+            },
+            {
               "id": "fs2 0.4.3",
               "target": "fs2"
             },
@@ -2479,6 +2483,10 @@
             {
               "id": "rcgen 0.14.9",
               "target": "rcgen"
+            },
+            {
+              "id": "reqwest 0.12.28",
+              "target": "reqwest"
             },
             {
               "id": "rustls 0.23.43",
@@ -2565,6 +2573,10 @@
             {
               "id": "statig 0.4.1",
               "target": "statig"
+            },
+            {
+              "id": "thiserror 2.0.20",
+              "target": "thiserror"
             },
             {
               "id": "url 2.5.8",
@@ -35335,6 +35347,7 @@
             "__rustls",
             "__rustls-ring",
             "__tls",
+            "blocking",
             "h2",
             "http2",
             "rustls-tls",
@@ -35386,6 +35399,10 @@
           "selects": {
             "aarch64-apple-darwin": [
               {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
                 "id": "h2 0.4.19",
                 "target": "h2"
               },
@@ -35415,6 +35432,10 @@
               }
             ],
             "aarch64-unknown-linux-gnu": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
               {
                 "id": "h2 0.4.19",
                 "target": "h2"
@@ -35526,6 +35547,10 @@
             ],
             "x86_64-pc-windows-msvc": [
               {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
                 "id": "h2 0.4.19",
                 "target": "h2"
               },
@@ -35556,6 +35581,10 @@
             ],
             "x86_64-unknown-linux-gnu": [
               {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
                 "id": "h2 0.4.19",
                 "target": "h2"
               },
@@ -35585,6 +35614,10 @@
               }
             ],
             "x86_64-unknown-nixos-gnu": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
               {
                 "id": "h2 0.4.19",
                 "target": "h2"
@@ -59911,6 +59944,7 @@
     "chrono 0.4.45",
     "clap 4.6.6",
     "ed25519-dalek 2.2.0",
+    "flate2 1.1.10",
     "fs2 0.4.3",
     "getrandom 0.3.4",
     "getrandom 0.4.3",
