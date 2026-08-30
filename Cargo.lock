@@ -459,12 +459,15 @@ dependencies = [
  "fs2",
  "getrandom 0.3.4",
  "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
  "winapi-util",
+ "x509-parser",
  "zeroize",
 ]
 

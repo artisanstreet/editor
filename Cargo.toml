@@ -81,6 +81,7 @@ tokio = { version = "=1.53.1", default-features = false }
 toml = "=1.1.4"
 url = "=2.5.8"
 winapi-util = "=0.1.11"
+x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
 zeroize = "=1.9.0"
 
 [workspace.lints.rust]
