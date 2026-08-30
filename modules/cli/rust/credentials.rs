@@ -416,6 +416,354 @@ impl Drop for ScopedTemp {
     }
 }
 
+#[cfg(all(test, windows))]
+mod acl_diagnostic {
+    use super::*;
+
+    pub(super) const MAX_STREAM_BYTES: usize = 4096;
+    pub(super) const MAX_EVENTS: usize = 16;
+    const MAX_ARTIFACT_BYTES: usize = 16 * 1024;
+    pub(super) const CANARIES: [&str; 7] = [
+        "S-1-5-21-1-2-3-1000",
+        "DOMAIN\\account-canary",
+        "C:\\sensitive\\path",
+        "whoami/icacls-output-canary",
+        "credential-bytes-canary",
+        "private-key-bytes-canary",
+        "bootstrap-capability-bytes-canary",
+    ];
+    #[derive(Debug, Serialize)]
+    struct AclDiagnosticEvent {
+        stage: &'static str,
+        kind: &'static str,
+        value: &'static str,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub(super) struct AclDiagnosticRecord {
+        schema_version: u8,
+        outcome: &'static str,
+        stage: &'static str,
+        event_count: u8,
+        overflow: bool,
+        events: Vec<AclDiagnosticEvent>,
+    }
+
+    impl AclDiagnosticRecord {
+        fn new() -> Self {
+            Self {
+                schema_version: 1,
+                outcome: "Other",
+                stage: "Unreached",
+                event_count: 0,
+                overflow: false,
+                events: Vec::with_capacity(MAX_EVENTS),
+            }
+        }
+
+        fn push(&mut self, stage: &'static str, kind: &'static str, value: &'static str) {
+            if self.events.len() < MAX_EVENTS {
+                self.events.push(AclDiagnosticEvent { stage, kind, value });
+            } else {
+                self.overflow = true;
+            }
+        }
+
+        pub(super) fn finish(mut self, outcome: &'static str) -> Self {
+            self.outcome = outcome;
+            if outcome == "Success" {
+                self.stage = "Completed";
+            }
+            self.event_count =
+                u8::try_from(self.events.len()).expect("diagnostic event count fits in u8");
+            self
+        }
+    }
+
+    thread_local! {
+        static ACTIVE: std::cell::RefCell<Option<AclDiagnosticRecord>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn capture<T>(operation: impl FnOnce() -> T) -> (T, AclDiagnosticRecord) {
+        ACTIVE.with(|active| *active.borrow_mut() = Some(AclDiagnosticRecord::new()));
+        let result = operation();
+        let record = ACTIVE
+            .with(|active| active.borrow_mut().take())
+            .unwrap_or_else(AclDiagnosticRecord::new);
+        (result, record)
+    }
+
+    pub(super) fn stage(stage: &'static str) {
+        ACTIVE.with(|active| {
+            if let Some(record) = active.borrow_mut().as_mut() {
+                record.stage = stage;
+            }
+        });
+    }
+
+    fn current_stage() -> &'static str {
+        ACTIVE.with(|active| active.borrow().as_ref().map_or("Unreached", |r| r.stage))
+    }
+
+    fn event_at(stage: &'static str, kind: &'static str, value: &'static str) {
+        ACTIVE.with(|active| {
+            if let Some(record) = active.borrow_mut().as_mut() {
+                record.push(stage, kind, value);
+            }
+        });
+    }
+
+    pub(super) fn event(kind: &'static str, value: &'static str) {
+        event_at(current_stage(), kind, value);
+    }
+
+    fn bounded(text: &str) -> &str {
+        let mut end = text.len().min(MAX_STREAM_BYTES);
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+
+    pub(super) fn stream_shape(bytes: &[u8]) -> &'static str {
+        if bytes.len() > MAX_STREAM_BYTES {
+            "Oversized"
+        } else if bytes.is_empty() {
+            "Empty"
+        } else if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            "Bom"
+        } else if std::str::from_utf8(bytes).is_ok() {
+            "Utf8"
+        } else {
+            "InvalidUtf8"
+        }
+    }
+
+    fn identity_shape(fields: usize, sid: Option<&str>, account: Option<&str>) -> &'static str {
+        if fields != 2 {
+            return "FieldCount";
+        }
+        let (Some(sid), Some(account)) = (sid, account) else {
+            return "Missing";
+        };
+        if sid.len() > MAX_STREAM_BYTES || account.len() > MAX_STREAM_BYTES {
+            return "Oversized";
+        }
+        if sid.is_empty() || account.is_empty() {
+            return "Empty";
+        }
+        let valid_account = account.matches('\\').count() == 1
+            && !account.starts_with('\\')
+            && !account.ends_with('\\')
+            && !account
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '/' | ':' | '"' | ','));
+        if is_valid_sid(sid) && valid_account {
+            "Valid"
+        } else {
+            "Malformed"
+        }
+    }
+
+    pub(super) fn record_identity(
+        stdout: &[u8],
+        stderr: &[u8],
+        fields: usize,
+        sid: Option<&str>,
+        account: Option<&str>,
+    ) {
+        for (kind, bytes) in [("stdout", stdout), ("stderr", stderr)] {
+            event_at("IdentityResolution", kind, stream_shape(bytes));
+        }
+        event_at(
+            "IdentityResolution",
+            "identity",
+            identity_shape(fields, sid, account),
+        );
+    }
+
+    fn summary(output: &str) -> &'static str {
+        let output = bounded(output).to_ascii_lowercase();
+        if let Some(line) = output
+            .lines()
+            .find(|line| line.trim_start().starts_with("successfully processed"))
+        {
+            if line.contains("failed processing") && line.bytes().any(|b| b.is_ascii_digit()) {
+                "Recognized"
+            } else {
+                "Malformed"
+            }
+        } else if output.contains("successfully")
+            || output.contains("processed")
+            || output.contains("processing")
+            || output.contains("failed")
+            || output.contains("files")
+        {
+            "LocalizedOrOther"
+        } else {
+            "Missing"
+        }
+    }
+
+    pub(super) fn record_acl(output: &str, count: usize) {
+        event(
+            "acl_count",
+            match count {
+                0 => "Zero",
+                1 => "One",
+                2 => "Two",
+                _ => "Many",
+            },
+        );
+        event("acl_summary", summary(output));
+    }
+
+    pub(super) fn probe(exe: &str, args: &[&str]) -> Option<&'static str> {
+        if exe.eq_ignore_ascii_case("whoami.exe") {
+            Some("Whoami")
+        } else if exe.eq_ignore_ascii_case("icacls.exe") {
+            Some(if args.contains(&"/grant:r") {
+                "IcaclsMutation"
+            } else {
+                "IcaclsQuery"
+            })
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn subprocess(probe: Option<&'static str>, outcome: &'static str) {
+        let Some(probe) = probe else {
+            return;
+        };
+        event_at(
+            if probe == "Whoami" {
+                "IdentityResolution"
+            } else {
+                current_stage()
+            },
+            probe,
+            outcome,
+        );
+    }
+
+    pub(super) fn ace_reason(
+        ace: &str,
+        identity: &CurrentIdentity,
+        expect_dir: bool,
+    ) -> &'static str {
+        let ace = bounded(ace);
+        let lower = ace.to_ascii_lowercase();
+        if lower.contains("deny") {
+            return "Deny";
+        }
+        if lower.contains("(i)") {
+            return "Inherited";
+        }
+        let Some(colon) = ace.find(':') else {
+            return "MalformedAce";
+        };
+        let principal = ace[..colon].trim();
+        let sid = bounded(&identity.sid);
+        let account = bounded(&identity.account);
+        let matches = (identity.sid.len() <= MAX_STREAM_BYTES
+            && !sid.is_empty()
+            && principal.eq_ignore_ascii_case(sid))
+            || (identity.account.len() <= MAX_STREAM_BYTES
+                && !account.is_empty()
+                && principal.eq_ignore_ascii_case(account));
+        if principal.is_empty() || !matches {
+            return "IdentityMismatch";
+        }
+        let flags = &lower[colon + 1..];
+        if !flags.contains("(f)") {
+            return "MissingFullControl";
+        }
+        if flags.matches("(f)").count() != 1
+            || flags.matches("(oi)").count() > 1
+            || flags.matches("(ci)").count() > 1
+            || flags
+                .chars()
+                .any(|c| c.is_ascii_alphabetic() && !matches!(c, 'f' | 'o' | 'i' | 'c'))
+        {
+            return "InvalidFlags";
+        }
+        if (expect_dir && (!flags.contains("(oi)") || !flags.contains("(ci)")))
+            || (!expect_dir && (flags.contains("(oi)") || flags.contains("(ci)")))
+        {
+            return "InheritanceMismatch";
+        }
+        if ["everyone", "builtin", "nt authority", "authenticated users"]
+            .iter()
+            .any(|forbidden| lower.contains(forbidden))
+        {
+            "BroadPrincipal"
+        } else {
+            "Accepted"
+        }
+    }
+
+    pub(super) fn write(path: &Path, record: &AclDiagnosticRecord) -> Option<()> {
+        if !path.is_absolute() {
+            return None;
+        }
+        let bytes = serde_json::to_vec(record).ok()?;
+        if bytes.len() > MAX_ARTIFACT_BYTES {
+            return None;
+        }
+        let parent = path.parent()?;
+        let file_name = path.file_name()?;
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).ok()?;
+        let temporary_path = parent.join(format!(
+            ".{}.{}.tmp",
+            file_name.to_string_lossy(),
+            encode_nonce_hex(&nonce)
+        ));
+        let result = (|| -> Option<()> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary_path)
+                .ok()?;
+            file.write_all(&bytes).ok()?;
+            file.sync_all().ok()?;
+            drop(file);
+            fs::rename(&temporary_path, path).ok()?;
+            Some(())
+        })();
+        if result.is_none() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        result
+    }
+
+    pub(super) fn assert_redacted(record: &AclDiagnosticRecord) {
+        let debug = format!("{record:?}");
+        let bytes = serde_json::to_vec(record).expect("structural diagnostic serialization");
+        assert!(bytes.len() <= MAX_ARTIFACT_BYTES);
+        let text = String::from_utf8_lossy(&bytes);
+        for canary in CANARIES {
+            assert!(!debug.contains(canary));
+            assert!(!text.contains(canary));
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+macro_rules! acl_diagnostic {
+    ($expression:expr) => {
+        $expression
+    };
+}
+
+#[cfg(not(all(test, windows)))]
+macro_rules! acl_diagnostic {
+    ($expression:expr) => {};
+}
+
 #[cfg(windows)]
 fn hidden_output(
     exe: &str,
@@ -424,6 +772,8 @@ fn hidden_output(
 ) -> Result<std::process::Output, ForgeCredentialError> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    #[cfg(all(test, windows))]
+    let probe = acl_diagnostic::probe(exe, args);
     let mut command = std::process::Command::new(exe);
     for arg in args {
         command.arg(arg);
@@ -433,9 +783,10 @@ fn hidden_output(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW);
-    let mut child = command
-        .spawn()
-        .map_err(|_| ForgeCredentialError::Provisioning)?;
+    let mut child = command.spawn().map_err(|_| {
+        acl_diagnostic!(acl_diagnostic::subprocess(probe, "SpawnFailed"));
+        ForgeCredentialError::Provisioning
+    })?;
     let start = std::time::Instant::now();
     loop {
         if start.elapsed() > timeout {
@@ -454,17 +805,30 @@ fn hidden_output(
                 }
             }
             let _ = child.try_wait();
+            acl_diagnostic!(acl_diagnostic::subprocess(probe, "TimedOut"));
             return Err(ForgeCredentialError::Provisioning);
         }
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => return Err(ForgeCredentialError::Provisioning),
+            Err(_) => {
+                acl_diagnostic!(acl_diagnostic::subprocess(probe, "WaitFailed"));
+                return Err(ForgeCredentialError::Provisioning);
+            }
         }
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|_| ForgeCredentialError::Provisioning)?;
+    let output = child.wait_with_output().map_err(|_| {
+        acl_diagnostic!(acl_diagnostic::subprocess(probe, "WaitFailed"));
+        ForgeCredentialError::Provisioning
+    })?;
+    acl_diagnostic!(acl_diagnostic::subprocess(
+        probe,
+        if output.status.success() {
+            "ExitedSuccess"
+        } else {
+            "ExitedNonZero"
+        },
+    ));
     Ok(output)
 }
 
@@ -482,13 +846,26 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         Duration::from_secs(5),
     )?;
     if !output.status.success() {
+        acl_diagnostic!(acl_diagnostic::record_identity(
+            &output.stdout,
+            &output.stderr,
+            0,
+            None,
+            None
+        ));
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let line = text
-        .lines()
-        .next()
-        .ok_or(ForgeCredentialError::WindowsAcl)?;
+    let Some(line) = text.lines().next() else {
+        acl_diagnostic!(acl_diagnostic::record_identity(
+            &output.stdout,
+            &output.stderr,
+            0,
+            None,
+            None
+        ));
+        return Err(ForgeCredentialError::WindowsAcl);
+    };
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -504,10 +881,24 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
     }
     parts.push(current.trim().to_string());
     if parts.len() != 2 {
+        acl_diagnostic!(acl_diagnostic::record_identity(
+            &output.stdout,
+            &output.stderr,
+            parts.len(),
+            None,
+            None
+        ));
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let account = parts[0].trim().trim_matches('"').trim().to_string();
     let sid = parts[1].trim().trim_matches('"').trim().to_string();
+    acl_diagnostic!(acl_diagnostic::record_identity(
+        &output.stdout,
+        &output.stderr,
+        parts.len(),
+        Some(&sid),
+        Some(&account),
+    ));
     if !is_valid_sid(&sid) {
         return Err(ForgeCredentialError::WindowsAcl);
     }
@@ -632,6 +1023,7 @@ fn collect_icacls_ace_lines(
         if !candidate.contains(':') || !candidate.contains('(') {
             // Any non-summary, non-ACE line is a failure
             if candidate.contains(':') || candidate.contains('\\') || candidate.contains('/') {
+                acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
                 return Err(ForgeCredentialError::WindowsAcl);
             }
             continue;
@@ -653,6 +1045,7 @@ fn collect_icacls_ace_lines(
                 break;
             }
             if chars[idx] != '(' {
+                acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
                 return Err(ForgeCredentialError::WindowsAcl);
             }
             let mut tok = String::new();
@@ -662,19 +1055,23 @@ fn collect_icacls_ace_lines(
                 idx += 1;
             }
             if idx >= chars.len() || chars[idx] != ')' {
+                acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
                 return Err(ForgeCredentialError::WindowsAcl);
             }
             idx += 1;
             has_content = true;
             if tok.is_empty() {
+                acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
                 return Err(ForgeCredentialError::WindowsAcl);
             }
         }
         if !has_content {
+            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
             return Err(ForgeCredentialError::WindowsAcl);
         }
         ace_lines.push(candidate);
     }
+    acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
     Ok(ace_lines)
 }
 
@@ -683,6 +1080,10 @@ fn validate_icacls_ace(
     identity: &CurrentIdentity,
     expect_dir: bool,
 ) -> Result<(), ForgeCredentialError> {
+    acl_diagnostic!(acl_diagnostic::event(
+        "ace",
+        acl_diagnostic::ace_reason(ace, identity, expect_dir)
+    ));
     let lower = ace.to_ascii_lowercase();
     if lower.contains("deny") {
         return Err(ForgeCredentialError::WindowsAcl);
@@ -773,6 +1174,7 @@ fn verify_windows_dacl(path: &Path, expected_sid: &str) -> Result<(), ForgeCrede
 
 #[cfg(windows)]
 fn restrict_directory_windows(dir: &Path) -> Result<(), ForgeCredentialError> {
+    acl_diagnostic!(acl_diagnostic::stage("DirectoryAclMutation"));
     let identity = resolve_current_identity()?;
     let dir_str = dir.to_string_lossy().to_string();
     let grant = format!("*{}:(OI)(CI)F", identity.sid);
@@ -784,12 +1186,14 @@ fn restrict_directory_windows(dir: &Path) -> Result<(), ForgeCredentialError> {
     if !output.status.success() {
         return Err(ForgeCredentialError::WindowsAcl);
     }
+    acl_diagnostic!(acl_diagnostic::stage("DirectoryAclVerification"));
     verify_windows_dacl(dir, &identity.sid)?;
     Ok(())
 }
 
 #[cfg(windows)]
 fn restrict_file_windows(path: &Path, sid: &str) -> Result<(), ForgeCredentialError> {
+    acl_diagnostic!(acl_diagnostic::stage("BundleAclMutation"));
     let identity = resolve_current_identity()?;
     if !identity.sid.eq_ignore_ascii_case(sid) {
         return Err(ForgeCredentialError::WindowsAcl);
@@ -804,6 +1208,7 @@ fn restrict_file_windows(path: &Path, sid: &str) -> Result<(), ForgeCredentialEr
     if !output.status.success() {
         return Err(ForgeCredentialError::WindowsAcl);
     }
+    acl_diagnostic!(acl_diagnostic::stage("BundleAclVerification"));
     verify_windows_dacl(path, sid)
 }
 
@@ -852,6 +1257,7 @@ fn ensure_credentials_dir(dir: &Path) -> Result<(), ForgeCredentialError> {
             check_dir_mode(dir)?;
             #[cfg(windows)]
             {
+                acl_diagnostic!(acl_diagnostic::stage("DirectoryAclVerification"));
                 let identity = resolve_current_identity()?;
                 verify_windows_dacl(dir, &identity.sid)?;
             }
@@ -954,6 +1360,7 @@ fn acquire_lock(lock_path: &Path) -> Result<File, ForgeCredentialError> {
     check_file_mode(lock_path)?;
     #[cfg(windows)]
     {
+        acl_diagnostic!(acl_diagnostic::stage("ProvisionLockVerification"));
         let identity = resolve_current_identity()?;
         let verified = verify_windows_dacl(lock_path, &identity.sid);
         if verified.is_err() {
@@ -1157,6 +1564,7 @@ fn validate_existing_bundle(paths: &ForgeCredentialPaths) -> Result<bool, ForgeC
         check_file_mode(file)?;
         #[cfg(windows)]
         {
+            acl_diagnostic!(acl_diagnostic::stage("BundleAclVerification"));
             let identity = resolve_current_identity()?;
             verify_windows_dacl(file, &identity.sid)?;
         }
@@ -1473,5 +1881,142 @@ mod parser_tests {
         // Trailing junk
         let trailing = format!("{file_path} {sid}:(F) extra");
         assert!(parse_icacls_strict_with_path(&trailing, sid, false, file_path).is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod diagnostic_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn assert_artifact(bytes: &[u8]) {
+        assert!(bytes.len() <= 16 * 1024);
+        let value: serde_json::Value = serde_json::from_slice(bytes).expect("diagnostic JSON");
+        let object = value.as_object().expect("diagnostic object");
+        assert_eq!(
+            object
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        let events = object
+            .get("events")
+            .and_then(serde_json::Value::as_array)
+            .expect("diagnostic events");
+        assert!(events.len() <= acl_diagnostic::MAX_EVENTS);
+        assert_eq!(
+            object
+                .get("event_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(events.len() as u64)
+        );
+        let text = String::from_utf8_lossy(bytes);
+        for canary in acl_diagnostic::CANARIES {
+            assert!(!text.contains(canary));
+        }
+    }
+
+    #[test]
+    fn diagnostic_capture_is_bounded_redacted_and_noninterfering() {
+        for (bytes, shape) in [
+            (&[][..], "Empty"),
+            (&[0xef, 0xbb, 0xbf][..], "Bom"),
+            (&[0xff][..], "InvalidUtf8"),
+        ] {
+            assert_eq!(acl_diagnostic::stream_shape(bytes), shape);
+        }
+        assert_eq!(
+            acl_diagnostic::stream_shape(&[b'x'; acl_diagnostic::MAX_STREAM_BYTES]),
+            "Utf8"
+        );
+        assert_eq!(
+            acl_diagnostic::stream_shape(&[b'x'; acl_diagnostic::MAX_STREAM_BYTES + 1]),
+            "Oversized"
+        );
+
+        let sid = "S-1-5-21-1-2-3-1000";
+        let identity = CurrentIdentity {
+            sid: sid.to_string(),
+            account: "DOMAIN\\account-canary".to_string(),
+        };
+        let raw_path = "C:\\sensitive\\path";
+        let raw_output = format!(
+            "{raw_path} {sid}:(OI)(CI)(F)\nSuccessfully processed 1 files; Failed processing 0 files."
+        );
+        let raw_stderr = acl_diagnostic::CANARIES.join("\n");
+        let (result, captured) = acl_diagnostic::capture(|| {
+            acl_diagnostic::stage("DirectoryAclVerification");
+            acl_diagnostic::record_identity(
+                raw_output.as_bytes(),
+                raw_stderr.as_bytes(),
+                2,
+                Some(sid),
+                Some(identity.account.as_str()),
+            );
+            parse_icacls_strict_with_identity(&raw_output, &identity, true, raw_path)
+        });
+        assert!(result.is_ok());
+        let record = captured.finish("Success");
+        acl_diagnostic::assert_redacted(&record);
+        let json = serde_json::to_string(&record).expect("structural diagnostic serialization");
+        assert!(
+            ["Completed", "identity", "acl_count", "ace", "Accepted"]
+                .iter()
+                .all(|value| json.contains(value))
+        );
+
+        for output in [
+            format!("C:\\creds {sid}:(OI)(CI)(F)"),
+            format!("C:\\creds {sid}:(DENY)(F)"),
+            format!("C:\\creds {sid}:(F) extra"),
+        ] {
+            let expected = parse_icacls_strict_with_identity(&output, &identity, true, "C:\\creds");
+            let (actual, captured) = acl_diagnostic::capture(|| {
+                parse_icacls_strict_with_identity(&output, &identity, true, "C:\\creds")
+            });
+            let record = captured.finish("Other");
+            if output.contains("DENY") {
+                assert!(serde_json::to_string(&record).unwrap().contains("Deny"));
+            }
+            assert_eq!(actual, expected);
+        }
+
+        let ((), captured) = acl_diagnostic::capture(|| {
+            for _ in 0..=acl_diagnostic::MAX_EVENTS {
+                acl_diagnostic::event("probe", "ExitedNonZero");
+            }
+        });
+        let overflow = captured.finish("WindowsAcl");
+        let bytes = serde_json::to_vec(&overflow).expect("bounded diagnostic serialization");
+        assert!(String::from_utf8_lossy(&bytes).contains("\"overflow\":true"));
+        assert_artifact(&bytes);
+    }
+
+    #[test]
+    fn retained_windows_acl_diagnostic() {
+        if std::env::var_os("ARTISAN_NATIVE_ACL_DIAGNOSTIC").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return;
+        }
+        let artifact_path = std::env::var_os("ARTISAN_NATIVE_ACL_DIAGNOSTIC_FILE").map_or_else(
+            || panic!("ARTISAN_NATIVE_ACL_DIAGNOSTIC_FILE is required"),
+            PathBuf::from,
+        );
+        assert!(artifact_path.is_absolute());
+        let home = tempfile::tempdir().expect("temporary diagnostic home");
+        let (result, captured) = acl_diagnostic::capture(|| provision_or_load(home.path()));
+        let outcome = match &result {
+            Ok(_) => "Success",
+            Err(ForgeCredentialError::WindowsAcl) => "WindowsAcl",
+            Err(ForgeCredentialError::Provisioning) => "Provisioning",
+            Err(_) => "Other",
+        };
+        let record = captured.finish(outcome);
+        acl_diagnostic::assert_redacted(&record);
+        acl_diagnostic::write(&artifact_path, &record)
+            .expect("unable to write retained ACL diagnostic artifact");
+        let artifact = fs::read(&artifact_path).expect("retained ACL diagnostic artifact missing");
+        assert_artifact(&artifact);
     }
 }
