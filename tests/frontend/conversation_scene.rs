@@ -2,11 +2,8 @@
 //!
 //! Structural enum assertions only: no string snapshots of debug output.
 
-#[path = "../../modules/frontend/src/conversation_scene.rs"]
-mod conversation_scene;
-
 use artisan_domain::{ConversationLifecycle, ItemId, MESSAGE_BODY_MAX_BYTES, MessageBody, TurnId};
-use conversation_scene::{
+use artisan_frontend::conversation_scene::{
     AssistantPhase, FileChangeStatus, SCENE_MAX_CHANGED_FILES_PER_CARD,
     SCENE_MAX_DISPLAY_PATH_BYTES, SCENE_MAX_ITEMS, SCENE_MAX_MESSAGE_BODY_BYTES,
     SCENE_MAX_NARRATIONS, SCENE_MAX_NATIVE_FACT_BYTES, SCENE_MAX_PLAN_ENTRIES,
