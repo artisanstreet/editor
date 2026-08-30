@@ -1052,6 +1052,62 @@ fn parse_icacls_strict_with_identity(
     }
 }
 
+fn validate_icacls_flag_tokens(
+    flags_part: &str,
+    output: &str,
+    ace_count: usize,
+) -> Result<(), ForgeCredentialError> {
+    // Flags must be exactly a sequence of (...) tokens with optional whitespace, nothing else
+    let mut idx = 0;
+    let chars: Vec<char> = flags_part.chars().collect();
+    let mut has_content = false;
+    while idx < chars.len() {
+        while idx < chars.len() && chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        if idx >= chars.len() {
+            break;
+        }
+        if chars[idx] != '(' {
+            acl_diagnostic!(acl_diagnostic::parser(
+                acl_diagnostic::ParserClassification::NonTokenContent
+            ));
+            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_count));
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+        let mut tok = String::new();
+        idx += 1;
+        while idx < chars.len() && chars[idx] != ')' {
+            tok.push(chars[idx]);
+            idx += 1;
+        }
+        if idx >= chars.len() || chars[idx] != ')' {
+            acl_diagnostic!(acl_diagnostic::parser(
+                acl_diagnostic::ParserClassification::UnterminatedToken
+            ));
+            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_count));
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+        idx += 1;
+        has_content = true;
+        if tok.is_empty() {
+            acl_diagnostic!(acl_diagnostic::parser(
+                acl_diagnostic::ParserClassification::EmptyToken
+            ));
+            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_count));
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+    }
+    if !has_content {
+        acl_diagnostic!(acl_diagnostic::parser(
+            acl_diagnostic::ParserClassification::NoTokens
+        ));
+        acl_diagnostic!(acl_diagnostic::record_acl(output, ace_count));
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    Ok(())
+}
+
 fn collect_icacls_ace_lines(
     output: &str,
     queried_path: &str,
@@ -1126,54 +1182,7 @@ fn collect_icacls_ace_lines(
             return Err(ForgeCredentialError::WindowsAcl);
         };
         let flags_part = &candidate[colon + 1..];
-        // Flags must be exactly a sequence of (...) tokens with optional whitespace, nothing else
-        let mut idx = 0;
-        let chars: Vec<char> = flags_part.chars().collect();
-        let mut has_content = false;
-        while idx < chars.len() {
-            while idx < chars.len() && chars[idx].is_whitespace() {
-                idx += 1;
-            }
-            if idx >= chars.len() {
-                break;
-            }
-            if chars[idx] != '(' {
-                acl_diagnostic!(acl_diagnostic::parser(
-                    acl_diagnostic::ParserClassification::NonTokenContent
-                ));
-                acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
-                return Err(ForgeCredentialError::WindowsAcl);
-            }
-            let mut tok = String::new();
-            idx += 1;
-            while idx < chars.len() && chars[idx] != ')' {
-                tok.push(chars[idx]);
-                idx += 1;
-            }
-            if idx >= chars.len() || chars[idx] != ')' {
-                acl_diagnostic!(acl_diagnostic::parser(
-                    acl_diagnostic::ParserClassification::UnterminatedToken
-                ));
-                acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
-                return Err(ForgeCredentialError::WindowsAcl);
-            }
-            idx += 1;
-            has_content = true;
-            if tok.is_empty() {
-                acl_diagnostic!(acl_diagnostic::parser(
-                    acl_diagnostic::ParserClassification::EmptyToken
-                ));
-                acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
-                return Err(ForgeCredentialError::WindowsAcl);
-            }
-        }
-        if !has_content {
-            acl_diagnostic!(acl_diagnostic::parser(
-                acl_diagnostic::ParserClassification::NoTokens
-            ));
-            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
-            return Err(ForgeCredentialError::WindowsAcl);
-        }
+        validate_icacls_flag_tokens(flags_part, output, ace_lines.len())?;
         ace_lines.push(candidate);
         acl_diagnostic!(acl_diagnostic::parser(
             acl_diagnostic::ParserClassification::AcceptedAce
