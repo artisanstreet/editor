@@ -42,6 +42,7 @@ pub mod conversation_status_labels;
 pub mod conversation_steering;
 pub mod conversation_steering_machine;
 pub mod conversation_turn_footer_policy;
+pub mod conversation_turn_machine;
 pub mod conversation_turn_navigator;
 pub mod conversation_view_machine;
 pub mod dev_instance_policy;

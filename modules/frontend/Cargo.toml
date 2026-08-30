@@ -147,6 +147,10 @@ name = "conversation_turn_footer_policy"
 path = "../../tests/frontend/conversation_turn_footer_policy.rs"
 
 [[test]]
+name = "conversation_turn_machine"
+path = "../../tests/frontend/conversation_turn_machine.rs"
+
+[[test]]
 name = "conversation_turn_navigator"
 path = "../../tests/frontend/conversation_turn_navigator.rs"
 
