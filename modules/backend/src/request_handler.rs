@@ -685,10 +685,10 @@ impl RequestHandler {
                         },
                     ));
                 }
-                let Some(authority) = self.directory_authority.as_ref() else {
+                let Some(picker) = self.directory_picker.as_ref() else {
                     return Err(unknown_directory_failure(request_id, &attach.directory_id));
                 };
-                let mut authority = authority.lock().await;
+                let mut authority = picker.authority.lock().await;
                 if let Some(replay) = self
                     .repository
                     .lookup_attach_project(&attach.request_id, &attach.directory_id)
