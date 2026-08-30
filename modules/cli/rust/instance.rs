@@ -282,7 +282,7 @@ pub enum NativeInstanceError {
         context: &'static str,
         path: PathBuf,
     },
-    InvalidManifest(String),
+    InvalidManifest,
     UnsafePath(PathBuf),
 }
 
@@ -293,7 +293,7 @@ impl std::fmt::Display for NativeInstanceError {
             Self::Io { context, path } => {
                 write!(f, "{context} at {}: [REDACTED]", path.display())
             }
-            Self::InvalidManifest(message) => write!(f, "invalid instance manifest: {message}"),
+            Self::InvalidManifest => write!(f, "invalid instance manifest"),
             Self::UnsafePath(path) => {
                 write!(
                     f,
@@ -317,10 +317,7 @@ impl std::fmt::Debug for NativeInstanceError {
                 .field("context", context)
                 .field("path", &path.display().to_string())
                 .finish(),
-            Self::InvalidManifest(_) => f
-                .debug_tuple("InvalidManifest")
-                .field(&"[REDACTED]")
-                .finish(),
+            Self::InvalidManifest => f.debug_tuple("InvalidManifest").finish(),
             Self::UnsafePath(path) => f
                 .debug_tuple("UnsafePath")
                 .field(&path.display().to_string())
@@ -469,22 +466,39 @@ impl NativeInstanceConfig {
     }
 
     pub fn load(path: &Path) -> Result<Self, NativeInstanceError> {
-        reject_native_symlink(path)?;
+        reject_native_symlink_parent(path)?;
+        let pre_meta = fs::symlink_metadata(path).map_err(|_| NativeInstanceError::Io {
+            context: "inspect instance file",
+            path: path.to_path_buf(),
+        })?;
+        if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+            return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+        }
+        let pre_id = native_file_id(path).ok();
         let bytes = fs::read(path).map_err(|_| NativeInstanceError::Io {
             context: "read instance file",
             path: path.to_path_buf(),
         })?;
-        let file: NativeInstanceFile = serde_json::from_slice(&bytes)
-            .map_err(|e| NativeInstanceError::InvalidManifest(format!("{e}")))?;
+        reject_native_symlink_parent(path)?;
+        let post_meta = fs::symlink_metadata(path).map_err(|_| NativeInstanceError::Io {
+            context: "inspect instance file",
+            path: path.to_path_buf(),
+        })?;
+        if post_meta.file_type().is_symlink() || !post_meta.is_file() {
+            return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+        }
+        if let (Some(before), Some(after)) = (pre_id, native_file_id(path).ok()) {
+            if before != after {
+                return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+            }
+        }
+        let file: NativeInstanceFile =
+            serde_json::from_slice(&bytes).map_err(|_| NativeInstanceError::InvalidManifest)?;
         if file.schema != "artisan-instance-v2" {
-            return Err(NativeInstanceError::InvalidManifest(
-                "invalid schema".into(),
-            ));
+            return Err(NativeInstanceError::InvalidManifest);
         }
         if file.version != 2 {
-            return Err(NativeInstanceError::InvalidManifest(
-                "invalid version".into(),
-            ));
+            return Err(NativeInstanceError::InvalidManifest);
         }
         Self::new(
             file.database_path,
@@ -504,7 +518,20 @@ impl NativeInstanceConfig {
 
     pub fn write(&self, path: &Path) -> Result<(), NativeInstanceError> {
         reject_native_symlink_parent(path)?;
-        reject_unsafe_native_destination(path)?;
+        match fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
+                return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+            }
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(NativeInstanceError::Io {
+                    context: "inspect instance destination",
+                    path: path.to_path_buf(),
+                });
+            }
+        }
         let file = NativeInstanceFile {
             schema: "artisan-instance-v2".to_string(),
             version: 2,
@@ -521,8 +548,8 @@ impl NativeInstanceConfig {
                 requests_per_connection: self.listener.requests_per_connection,
             },
         };
-        let bytes = serde_json::to_vec_pretty(&file)
-            .map_err(|e| NativeInstanceError::InvalidManifest(format!("{e}")))?;
+        let bytes =
+            serde_json::to_vec_pretty(&file).map_err(|_| NativeInstanceError::InvalidManifest)?;
         write_native_atomic(path, &bytes)
     }
 
@@ -603,17 +630,108 @@ fn reject_native_symlink_parent(path: &Path) -> Result<(), NativeInstanceError> 
     Ok(())
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeFileId {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeFileId {
+    volume: u64,
+    high: u64,
+    low: u64,
+}
+
+#[cfg(unix)]
+fn native_file_id(path: &Path) -> Result<NativeFileId, NativeInstanceError> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).map_err(|_| NativeInstanceError::Io {
+        context: "inspect file id",
+        path: path.to_path_buf(),
+    })?;
+    Ok(NativeFileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn native_file_id(path: &Path) -> Result<NativeFileId, NativeInstanceError> {
+    use std::os::windows::fs::MetadataExt;
+    let meta = fs::metadata(path).map_err(|_| NativeInstanceError::Io {
+        context: "inspect file id",
+        path: path.to_path_buf(),
+    })?;
+    Ok(NativeFileId {
+        volume: meta.volume_serial_number().unwrap_or(0) as u64,
+        high: meta.file_index_high().unwrap_or(0) as u64,
+        low: meta.file_index_low().unwrap_or(0) as u64,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeFileId {
+    dummy: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_file_id(_path: &Path) -> Result<NativeFileId, NativeInstanceError> {
+    Ok(NativeFileId { dummy: 0 })
+}
+
+struct NativeScopedTemp {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl NativeScopedTemp {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for NativeScopedTemp {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn write_native_atomic(path: &Path, bytes: &[u8]) -> Result<(), NativeInstanceError> {
     let directory = path
         .parent()
         .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
+    reject_native_symlink_parent(path)?;
+    let pre_existing_id = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
+            return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+        }
+        Ok(meta) if meta.is_file() => Some(native_file_id(path)?),
+        Ok(_) => return Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            return Err(NativeInstanceError::Io {
+                context: "inspect instance destination",
+                path: path.to_path_buf(),
+            });
+        }
+    };
     fs::create_dir_all(directory).map_err(|_| NativeInstanceError::Io {
         context: "create directory",
         path: directory.to_path_buf(),
     })?;
+    reject_native_symlink_parent(path)?;
     let mut nonce = [0_u8; 16];
-    getrandom::fill(&mut nonce)
-        .map_err(|e| NativeInstanceError::InvalidManifest(format!("random failed: {e}")))?;
+    getrandom::fill(&mut nonce).map_err(|_| NativeInstanceError::InvalidManifest)?;
     let nonce_hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
     let temp_name = format!(
         ".{}.{}.tmp",
@@ -623,44 +741,65 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> Result<(), NativeInstanceEr
         nonce_hex
     );
     let temporary = directory.join(temp_name);
-    let result = (|| -> Result<(), NativeInstanceError> {
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .map_err(|_| NativeInstanceError::Io {
-                context: "create temporary instance file",
-                path: temporary.clone(),
-            })?;
-        file.write_all(bytes).map_err(|_| NativeInstanceError::Io {
-            context: "write temporary instance file",
-            path: temporary.clone(),
-        })?;
-        file.sync_all().map_err(|_| NativeInstanceError::Io {
-            context: "sync temporary instance file",
-            path: temporary.clone(),
-        })?;
-        drop(file);
-        reject_unsafe_native_destination(path)?;
-        fs::rename(&temporary, path).map_err(|_| NativeInstanceError::Io {
-            context: "activate instance file",
-            path: path.to_path_buf(),
-        })?;
-        #[cfg(unix)]
-        {
-            let _ = fs::File::open(directory).and_then(|dir| dir.sync_all());
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    let mut guard = NativeScopedTemp::new(temporary.clone());
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    result
+    let mut file = options
+        .open(&temporary)
+        .map_err(|_| NativeInstanceError::Io {
+            context: "create temporary instance file",
+            path: temporary.clone(),
+        })?;
+    file.write_all(bytes).map_err(|_| NativeInstanceError::Io {
+        context: "write temporary instance file",
+        path: temporary.clone(),
+    })?;
+    file.sync_all().map_err(|_| NativeInstanceError::Io {
+        context: "sync temporary instance file",
+        path: temporary.clone(),
+    })?;
+    drop(file);
+    reject_native_symlink_parent(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
+            return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+        }
+        Ok(meta) if meta.is_file() => {
+            if let Some(expected) = pre_existing_id {
+                let current = native_file_id(path)?;
+                if current != expected {
+                    return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+                }
+            }
+        }
+        Ok(_) => return Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if pre_existing_id.is_some() {
+                return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+            }
+        }
+        Err(_) => {
+            return Err(NativeInstanceError::Io {
+                context: "inspect instance destination",
+                path: path.to_path_buf(),
+            });
+        }
+    }
+    fs::rename(&temporary, path).map_err(|_| NativeInstanceError::Io {
+        context: "activate instance file",
+        path: path.to_path_buf(),
+    })?;
+    guard.disarm();
+    #[cfg(unix)]
+    {
+        let _ = fs::File::open(directory).and_then(|dir| dir.sync_all());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -809,10 +948,12 @@ mod native_tests {
 
     #[test]
     fn native_redacted_debug() {
-        let err = NativeInstanceError::InvalidManifest("secret".into());
+        let err = NativeInstanceError::InvalidManifest;
         let debug = format!("{err:?}");
-        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("InvalidManifest"));
         assert!(!debug.contains("secret"));
+        let display = format!("{err}");
+        assert!(!display.contains("secret"));
     }
 
     #[test]
@@ -825,6 +966,53 @@ mod native_tests {
         config.write(&path).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn native_parent_symlink_rejected() {
+        let home = temp_dir("parent-symlink");
+        let config = sample_config(&home);
+        let path = NativeInstanceConfig::native_path(&home);
+        config.write(&path).unwrap();
+        let parent = path.parent().unwrap().to_path_buf();
+        let real = home.join("real");
+        fs::create_dir_all(&real).unwrap();
+        fs::rename(&parent, &real).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &parent).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &parent).unwrap_or_else(|_| {
+            fs::create_dir_all(&parent).unwrap();
+            return;
+        });
+        assert!(NativeInstanceConfig::load(&path).is_err());
+        let _ = fs::remove_file(&parent);
+        let _ = fs::remove_dir_all(&real);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn native_write_replaces_with_identity_fence() {
+        let home = temp_dir("replace-fence");
+        let config = sample_config(&home);
+        let path = NativeInstanceConfig::native_path(&home);
+        config.write(&path).unwrap();
+        let first_id = native_file_id(&path).unwrap();
+        let mut config2 = config.clone();
+        config2 = NativeInstanceConfig::new(
+            home.join("data2").join("artisan.sqlite"),
+            config2.custody_path().to_path_buf(),
+            config2.readiness_path().to_path_buf(),
+            config2.credentials_manifest().to_path_buf(),
+            sample_listener(),
+        )
+        .unwrap();
+        config2.write(&path).unwrap();
+        let second_id = native_file_id(&path).unwrap();
+        assert!(first_id != second_id);
+        let loaded = NativeInstanceConfig::load(&path).unwrap();
+        assert_eq!(loaded.database_path(), config2.database_path());
         fs::remove_dir_all(home).unwrap();
     }
 }
