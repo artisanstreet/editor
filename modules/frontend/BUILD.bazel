@@ -152,6 +152,7 @@ rust_library(
         "//modules/ui:ui",
         "@crates//:gpui",
         "@crates//:statig",
+        "@crates//:thiserror",
         "@crates//:url",
     ],
     edition = "2024",

@@ -16,6 +16,7 @@ artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
 statig.workspace = true
+thiserror.workspace = true
 url.workspace = true
 
 [[test]]
