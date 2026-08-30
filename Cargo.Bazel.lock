@@ -2469,6 +2469,10 @@
               "target": "clap"
             },
             {
+              "id": "flate2 1.1.10",
+              "target": "flate2"
+            },
+            {
               "id": "fs2 0.4.3",
               "target": "fs2"
             },
@@ -2479,6 +2483,10 @@
             {
               "id": "rcgen 0.14.9",
               "target": "rcgen"
+            },
+            {
+              "id": "reqwest 0.12.28",
+              "target": "reqwest"
             },
             {
               "id": "rustls 0.23.43",
