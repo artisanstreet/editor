@@ -38,4 +38,28 @@ jobs:
         run: bazel build //...
 
       - name: Test
+        id: bazel_test
         run: bazel test //...
+
+      - name: Capture retained native credential ACL shape
+        id: acl_diagnostic
+        if: steps.bazel_test.outcome == 'failure'
+        shell: pwsh
+        env:
+          ARTISAN_NATIVE_ACL_DIAGNOSTIC: "1"
+          ARTISAN_NATIVE_ACL_DIAGNOSTIC_FILE: "${{ runner.temp }}\\artisan-native-credentials-acl-v1.json"
+        run: >
+          bazel test //modules/cli:cli_unit_test
+          --test_filter=credentials::diagnostic_tests::retained_windows_acl_diagnostic
+          --test_env=ARTISAN_NATIVE_ACL_DIAGNOSTIC
+          --test_env=ARTISAN_NATIVE_ACL_DIAGNOSTIC_FILE
+          --test_output=errors
+
+      - name: Retain native credential ACL diagnostic
+        if: always() && steps.acl_diagnostic.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-credentials-acl-v1-${{ github.run_id }}
+          path: ${{ runner.temp }}\artisan-native-credentials-acl-v1.json
+          if-no-files-found: error
+          retention-days: 14
