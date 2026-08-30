@@ -355,9 +355,13 @@ fn spawn_background_forge(
     readiness_deadline: Instant,
 ) -> Result<StartResult> {
     ensure_forge_executable(spec)?;
-    let prior_readiness = match read_readiness_file(spec.readiness_path()) {
-        ReadinessFileRead::Present(snapshot) => Some(snapshot),
-        ReadinessFileRead::Missing | ReadinessFileRead::Invalid => None,
+    let prior_readiness = match background_start_decision(
+        read_readiness_file(spec.readiness_path()),
+        spec.executable(),
+        process_executable,
+    ) {
+        BackgroundStartDecision::AlreadyRunning => return Ok(StartResult::AlreadyRunning),
+        BackgroundStartDecision::Spawn { prior_readiness } => prior_readiness,
     };
     let mut command = forge_command(spec);
     command
@@ -395,6 +399,42 @@ enum ReadinessFileRead {
     Missing,
     Invalid,
     Present(ReadinessFileSnapshot),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BackgroundStartDecision {
+    AlreadyRunning,
+    Spawn {
+        prior_readiness: Option<ReadinessFileSnapshot>,
+    },
+}
+
+fn background_start_decision<F>(
+    existing: ReadinessFileRead,
+    expected_executable: &Path,
+    resolve_executable: F,
+) -> BackgroundStartDecision
+where
+    F: FnOnce(u32) -> Option<PathBuf>,
+{
+    match existing {
+        ReadinessFileRead::Present(snapshot) => {
+            let matches_live_forge =
+                ForgeReadiness::from_json(&snapshot.bytes).is_ok_and(|readiness| {
+                    readiness_matches_process(&readiness, expected_executable, resolve_executable)
+                });
+            if matches_live_forge {
+                BackgroundStartDecision::AlreadyRunning
+            } else {
+                BackgroundStartDecision::Spawn {
+                    prior_readiness: Some(snapshot),
+                }
+            }
+        }
+        ReadinessFileRead::Missing | ReadinessFileRead::Invalid => BackgroundStartDecision::Spawn {
+            prior_readiness: None,
+        },
+    }
 }
 
 fn read_readiness_file(path: &Path) -> ReadinessFileRead {
@@ -749,10 +789,11 @@ mod tests {
     };
 
     use super::{
-        ChildProbe, Command, ForgeLaunchSpec, ForgeReadiness, ReadinessFileIdentity,
-        ReadinessFileRead, ReadinessFileSnapshot, StartResult, configure_environment,
-        is_forbidden_environment_key, native_argv, poll_delay, readiness_file_replaced,
-        readiness_matches_child, readiness_matches_process, wait_for_readiness_with,
+        BackgroundStartDecision, ChildProbe, Command, ForgeLaunchSpec, ForgeReadiness,
+        ReadinessFileIdentity, ReadinessFileRead, ReadinessFileSnapshot, StartResult,
+        background_start_decision, configure_environment, is_forbidden_environment_key,
+        native_argv, poll_delay, readiness_file_replaced, readiness_matches_child,
+        readiness_matches_process, wait_for_readiness_with,
     };
 
     use crate::{
@@ -1001,6 +1042,134 @@ mod tests {
             pid,
         )
         .unwrap()
+    }
+
+    fn assert_spawn_preserves_prior(
+        decision: BackgroundStartDecision,
+        expected: &ReadinessFileSnapshot,
+    ) {
+        let BackgroundStartDecision::Spawn { prior_readiness } = decision else {
+            panic!("existing receipt unexpectedly authorized AlreadyRunning");
+        };
+        let Some(prior) = prior_readiness else {
+            panic!("existing receipt was not retained as a stale-file guard");
+        };
+        assert_eq!(&prior, expected);
+        assert!(!readiness_file_replaced(Some(&prior), &prior));
+    }
+
+    #[test]
+    fn live_existing_receipt_selects_already_running_without_spawning() {
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"C:\Artisan\versions\1.2.3\bin\forge.exe")
+        } else {
+            PathBuf::from("/opt/Artisan/versions/1.2.3/bin/forge")
+        };
+        let actual = expected.clone();
+        let existing = ReadinessFileRead::Present(ReadinessFileSnapshot {
+            identity: Some(ReadinessFileIdentity {
+                first: 1,
+                second: 10,
+            }),
+            bytes: serde_json::to_vec(&valid_readiness(42)).unwrap(),
+        });
+
+        assert_eq!(
+            background_start_decision(existing, &expected, move |_| Some(actual.clone())),
+            BackgroundStartDecision::AlreadyRunning
+        );
+    }
+
+    #[test]
+    fn stale_or_mismatched_existing_receipts_remain_spawn_only() {
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"C:\Artisan\versions\1.2.3\bin\forge.exe")
+        } else {
+            PathBuf::from("/opt/Artisan/versions/1.2.3/bin/forge")
+        };
+        let identity = Some(ReadinessFileIdentity {
+            first: 1,
+            second: 10,
+        });
+
+        let stale = ReadinessFileSnapshot {
+            identity,
+            bytes: serde_json::to_vec(&valid_readiness(42)).unwrap(),
+        };
+        assert_spawn_preserves_prior(
+            background_start_decision(ReadinessFileRead::Present(stale.clone()), &expected, |_| {
+                None
+            }),
+            &stale,
+        );
+
+        let malformed = ReadinessFileSnapshot {
+            identity,
+            bytes: b"not-json".to_vec(),
+        };
+        assert_spawn_preserves_prior(
+            background_start_decision(
+                ReadinessFileRead::Present(malformed.clone()),
+                &expected,
+                |_| panic!("malformed receipt must not resolve a process"),
+            ),
+            &malformed,
+        );
+
+        let wrong_pid = ReadinessFileSnapshot {
+            identity,
+            bytes: serde_json::to_vec(&valid_readiness(7)).unwrap(),
+        };
+        let live_expected = expected.clone();
+        assert_spawn_preserves_prior(
+            background_start_decision(
+                ReadinessFileRead::Present(wrong_pid.clone()),
+                &expected,
+                move |pid| {
+                    if pid == 42 {
+                        Some(live_expected.clone())
+                    } else {
+                        None
+                    }
+                },
+            ),
+            &wrong_pid,
+        );
+
+        let wrong_executable = ReadinessFileSnapshot {
+            identity,
+            bytes: serde_json::to_vec(&valid_readiness(42)).unwrap(),
+        };
+        let other = expected.with_file_name(if cfg!(windows) {
+            "editor.exe"
+        } else {
+            "editor"
+        });
+        assert_spawn_preserves_prior(
+            background_start_decision(
+                ReadinessFileRead::Present(wrong_executable.clone()),
+                &expected,
+                move |_| Some(other.clone()),
+            ),
+            &wrong_executable,
+        );
+
+        assert_eq!(
+            background_start_decision(ReadinessFileRead::Missing, &expected, |_| {
+                panic!("missing receipt must not resolve a process")
+            }),
+            BackgroundStartDecision::Spawn {
+                prior_readiness: None,
+            }
+        );
+        assert_eq!(
+            background_start_decision(ReadinessFileRead::Invalid, &expected, |_| {
+                panic!("unsafe receipt must not resolve a process")
+            }),
+            BackgroundStartDecision::Spawn {
+                prior_readiness: None,
+            }
+        );
     }
 
     #[test]
