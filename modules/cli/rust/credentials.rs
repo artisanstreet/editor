@@ -624,7 +624,7 @@ mod acl_diagnostic {
         if exe.eq_ignore_ascii_case("whoami.exe") {
             Some("Whoami")
         } else if exe.eq_ignore_ascii_case("icacls.exe") {
-            Some(if args.contains(&"/grant:r") {
+            Some(if args.contains(&"/grant:r") || args.contains(&"/remove") {
                 "IcaclsMutation"
             } else {
                 "IcaclsQuery"
@@ -902,29 +902,12 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
     if !is_valid_sid(&sid) {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    if account.is_empty()
-        || account.contains('\0')
-        || account.contains('/')
-        || account.contains(':')
-        || account.contains('"')
-        || account.contains(',')
-        || account.chars().any(char::is_control)
-    {
-        return Err(ForgeCredentialError::WindowsAcl);
-    }
-    if account.matches('\\').count() != 1 {
-        return Err(ForgeCredentialError::WindowsAcl);
-    }
-    let mut split = account.split('\\');
-    let domain = split.next().unwrap_or("");
-    let user = split.next().unwrap_or("");
-    if domain.is_empty() || user.is_empty() || split.next().is_some() {
+    if !is_valid_account(&account) {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     Ok(CurrentIdentity { sid, account })
 }
 
-#[cfg(windows)]
 fn is_valid_sid(sid: &str) -> bool {
     if !sid.starts_with("S-1-") {
         return false;
@@ -945,6 +928,26 @@ fn is_valid_sid(sid: &str) -> bool {
         }
     }
     true
+}
+
+fn is_valid_account(account: &str) -> bool {
+    if account.is_empty()
+        || account.contains('\0')
+        || account.contains('/')
+        || account.contains(':')
+        || account.contains('"')
+        || account.contains(',')
+        || account.chars().any(char::is_control)
+    {
+        return false;
+    }
+    if account.matches('\\').count() != 1 {
+        return false;
+    }
+    let mut split = account.split('\\');
+    let domain = split.next().unwrap_or("");
+    let user = split.next().unwrap_or("");
+    !domain.is_empty() && !user.is_empty() && split.next().is_none()
 }
 
 #[cfg(test)]
@@ -999,10 +1002,14 @@ fn collect_icacls_ace_lines(
         if trimmed.is_empty() {
             continue;
         }
-        if trimmed.to_ascii_lowercase().starts_with("successfully") {
-            continue;
-        }
         let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("successfully") {
+            if is_icacls_success_summary(&lower) {
+                continue;
+            }
+            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
         // Exact queried path prefix handling: strip only the complete queried path
         // (case-insensitive) from the first ACE line if present.
         let mut candidate = trimmed.to_string();
@@ -1021,12 +1028,9 @@ fn collect_icacls_ace_lines(
         }
         first_line = false;
         if !candidate.contains(':') || !candidate.contains('(') {
-            // Any non-summary, non-ACE line is a failure
-            if candidate.contains(':') || candidate.contains('\\') || candidate.contains('/') {
-                acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
-                return Err(ForgeCredentialError::WindowsAcl);
-            }
-            continue;
+            // Any non-summary, non-ACE line is a failure.
+            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
+            return Err(ForgeCredentialError::WindowsAcl);
         }
         // Ensure no trailing junk after the parenthesized flags
         let colon = candidate
@@ -1073,6 +1077,98 @@ fn collect_icacls_ace_lines(
     }
     acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
     Ok(ace_lines)
+}
+
+fn is_icacls_success_summary(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("successfully processed ") else {
+        return false;
+    };
+    let Some((processed, failed)) = rest.split_once("; failed processing ") else {
+        return false;
+    };
+    let Some(processed) = processed.strip_suffix(" files") else {
+        return false;
+    };
+    let Some(failed) = failed.strip_suffix(" files.") else {
+        return false;
+    };
+    processed.parse::<u64>().is_ok() && failed.parse::<u64>().is_ok()
+}
+
+fn plan_icacls_removals(
+    output: &str,
+    identity: &CurrentIdentity,
+    queried_path: &str,
+) -> Result<Vec<String>, ForgeCredentialError> {
+    if !is_valid_sid(&identity.sid)
+        || !is_valid_account(&identity.account)
+        || identity.sid.eq_ignore_ascii_case(&identity.account)
+    {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    let ace_lines = collect_icacls_ace_lines(output, queried_path)?;
+    let mut removals = Vec::new();
+    let mut current_identity_count = 0;
+    for ace in ace_lines {
+        let colon = ace.find(':').ok_or(ForgeCredentialError::WindowsAcl)?;
+        let principal = ace[..colon].trim();
+        if !is_safe_acl_principal(principal) {
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+        let flags = ace[colon + 1..].to_ascii_lowercase();
+        if flags.contains("(i)") {
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+        let is_deny = flags.contains("(deny)");
+        if principal.eq_ignore_ascii_case(&identity.sid)
+            || principal.eq_ignore_ascii_case(&identity.account)
+        {
+            current_identity_count += 1;
+            if current_identity_count > 1 {
+                return Err(ForgeCredentialError::WindowsAcl);
+            }
+            if is_deny {
+                removals.push(principal.to_owned());
+            }
+            continue;
+        }
+        if removals
+            .iter()
+            .any(|candidate: &String| candidate.eq_ignore_ascii_case(principal))
+        {
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+        removals.push(principal.to_owned());
+    }
+    Ok(removals)
+}
+
+fn is_safe_acl_principal(principal: &str) -> bool {
+    if principal
+        .chars()
+        .any(|character| matches!(character, '*' | '(' | ')'))
+    {
+        return false;
+    }
+    if is_valid_sid(principal) || is_valid_account(principal) {
+        return true;
+    }
+    matches!(
+        principal.to_ascii_lowercase().as_str(),
+        "everyone"
+            | "creator owner"
+            | "owner rights"
+            | "all application packages"
+            | "all restricted application packages"
+            | "authenticated users"
+            | "anonymous logon"
+            | "interactive"
+            | "local service"
+            | "network service"
+            | "administrators"
+            | "users"
+            | "system"
+    )
 }
 
 fn validate_icacls_ace(
@@ -1187,8 +1283,44 @@ fn restrict_directory_windows(dir: &Path) -> Result<(), ForgeCredentialError> {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     acl_diagnostic!(acl_diagnostic::stage("DirectoryAclVerification"));
+    let query = hidden_output("icacls.exe", &[&dir_str], Duration::from_secs(5))?;
+    if !query.status.success() {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    let text = String::from_utf8_lossy(&query.stdout).to_string();
+    let removals = plan_icacls_removals(&text, &identity, &dir_str)?;
+    acl_diagnostic!(acl_diagnostic::stage("DirectoryAclMutation"));
+    for principal in &removals {
+        let removal = icacls_remove_argument(principal);
+        let output = hidden_output(
+            "icacls.exe",
+            &[&dir_str, "/remove", removal.as_str()],
+            Duration::from_secs(5),
+        )?;
+        if !output.status.success() {
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+    }
+    let output = hidden_output(
+        "icacls.exe",
+        &[&dir_str, "/grant:r", &grant],
+        Duration::from_secs(5),
+    )?;
+    if !output.status.success() {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    acl_diagnostic!(acl_diagnostic::stage("DirectoryAclVerification"));
     verify_windows_dacl(dir, &identity.sid)?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn icacls_remove_argument(principal: &str) -> String {
+    if is_valid_sid(principal) {
+        format!("*{principal}")
+    } else {
+        principal.to_owned()
+    }
 }
 
 #[cfg(windows)]
@@ -1819,7 +1951,7 @@ pub fn ensure_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCred
 mod parser_tests {
     use super::{
         CurrentIdentity, parse_icacls_output_with_path, parse_icacls_strict_with_identity,
-        parse_icacls_strict_with_path,
+        parse_icacls_strict_with_path, plan_icacls_removals,
     };
 
     #[test]
@@ -1881,6 +2013,63 @@ mod parser_tests {
         // Trailing junk
         let trailing = format!("{file_path} {sid}:(F) extra");
         assert!(parse_icacls_strict_with_path(&trailing, sid, false, file_path).is_err());
+        let localized = format!("{dir_path} {sid}:(OI)(CI)(F)\nDacl access");
+        assert!(parse_icacls_output_with_path(&localized, sid, dir_path).is_err());
+    }
+
+    #[test]
+    fn dacl_convergence_plans_all_extra_explicit_principals() {
+        let sid = "S-1-5-21-1-2-3-1000";
+        let account = "TEST\\User";
+        let identity = CurrentIdentity {
+            sid: sid.to_string(),
+            account: account.to_string(),
+        };
+        let path = "C:\\creds";
+        let output = format!(
+            "{path} {sid}:(OI)(CI)(F)\nDOMAIN\\Runner:(OI)(CI)(F)\nBUILTIN\\Administrators:(F)\nEveryone:(F)"
+        );
+        assert_eq!(
+            plan_icacls_removals(&output, &identity, path).unwrap(),
+            vec![
+                "DOMAIN\\Runner".to_string(),
+                "BUILTIN\\Administrators".to_string(),
+                "Everyone".to_string(),
+            ]
+        );
+        assert!(parse_icacls_strict_with_identity(&output, &identity, true, path).is_err());
+
+        let account_output = format!("{path} {account}:(OI)(CI)(F)\nDOMAIN\\Runner:(OI)(CI)(F)");
+        assert_eq!(
+            plan_icacls_removals(&account_output, &identity, path).unwrap(),
+            vec!["DOMAIN\\Runner".to_string()]
+        );
+    }
+
+    #[test]
+    fn dacl_convergence_rejects_malformed_duplicate_and_ambiguous_identities() {
+        let sid = "S-1-5-21-1-2-3-1000";
+        let account = "TEST\\User";
+        let identity = CurrentIdentity {
+            sid: sid.to_string(),
+            account: account.to_string(),
+        };
+        let path = "C:\\creds";
+        for output in [
+            format!("{path} DOMAIN/Runner:(F)"),
+            format!("{path} DOMAIN\\Runner:(F)\nDOMAIN\\runner:(M)"),
+            format!("{path} {sid}:(F)\n{account}:(F)"),
+            format!("{path} {sid}:(I)(OI)(CI)(F)"),
+        ] {
+            assert!(plan_icacls_removals(&output, &identity, path).is_err());
+        }
+
+        let malformed_identity = CurrentIdentity {
+            sid: "not-a-sid".into(),
+            account: account.into(),
+        };
+        let exact = format!("{path} {sid}:(OI)(CI)(F)");
+        assert!(plan_icacls_removals(&exact, &malformed_identity, path).is_err());
     }
 }
 
