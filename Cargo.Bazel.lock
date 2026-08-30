@@ -2233,6 +2233,10 @@
               "target": "quinn"
             },
             {
+              "id": "rustls-pki-types 1.15.1",
+              "target": "rustls_pki_types"
+            },
+            {
               "id": "sea-orm 2.0.2",
               "target": "sea_orm"
             },
@@ -2271,10 +2275,6 @@
             {
               "id": "rcgen 0.14.9",
               "target": "rcgen"
-            },
-            {
-              "id": "rustls-pki-types 1.15.1",
-              "target": "rustls_pki_types"
             }
           ],
           "selects": {}
@@ -45781,6 +45781,7 @@
             "process",
             "rt",
             "rt-multi-thread",
+            "signal",
             "signal-hook-registry",
             "socket2",
             "sync",

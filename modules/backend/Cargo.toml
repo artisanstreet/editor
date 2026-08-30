@@ -24,10 +24,11 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 quinn.workspace = true
+rustls-pki-types.workspace = true
 sea-orm.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 zeroize.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -36,7 +37,6 @@ winapi-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
-rustls-pki-types.workspace = true
 
 [[test]]
 name = "activated_conversation_replay"
@@ -89,6 +89,10 @@ path = "../../tests/backend/engine_owner_fixture_smoke.rs"
 [[test]]
 name = "file_identity_policy"
 path = "../../tests/backend/file_identity_policy.rs"
+
+[[test]]
+name = "forge_runtime"
+path = "../../tests/backend/forge_runtime.rs"
 
 [[test]]
 name = "git_remote_url_policy"
