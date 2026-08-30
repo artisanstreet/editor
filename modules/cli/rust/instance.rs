@@ -5,10 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 
-use crate::{CliError, Result, error::io, paths::Layout};
+use crate::{error::io, paths::Layout, CliError, Result};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InstanceConfig {
@@ -838,7 +838,8 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
         return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
     }
     check_ancestors_all(path, true)?;
-    // Durability: open directory with backup semantics on Windows
+    // Unix directory sync remains strict; Windows cannot sync directory
+    // handles through File::sync_all, so validate the published directory.
     #[cfg(unix)]
     {
         fs::File::open(directory)
@@ -850,17 +851,16 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(directory)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|_| NativeInstanceError::Io {
-                context: "sync directory",
-                path: directory.to_path_buf(),
-            })?;
+        // The temporary file is flushed before atomic activation. Keep the
+        // post-publication path/reparse check without claiming a directory
+        // flush that the safe Windows file API cannot provide here.
+        let metadata = fs::symlink_metadata(directory).map_err(|_| NativeInstanceError::Io {
+            context: "inspect directory",
+            path: directory.to_path_buf(),
+        })?;
+        if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
+            return Err(NativeInstanceError::UnsafePath(directory.to_path_buf()));
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {

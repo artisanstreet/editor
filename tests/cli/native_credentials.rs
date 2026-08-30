@@ -1,4 +1,4 @@
-use artisan_editor_cli::credentials::{ForgeCredentialPaths, provision_or_load};
+use artisan_editor_cli::credentials::{provision_or_load, ForgeCredentialPaths};
 use std::{fs, path::PathBuf, thread};
 
 fn temp_home(label: &str) -> PathBuf {
@@ -265,7 +265,7 @@ fn unix_exact_modes() {
 
 #[test]
 fn forge_paths_require_absolute_home() {
-    let home = PathBuf::from("/tmp/abs-test-home");
+    let home = std::env::temp_dir().join("abs-test-home");
     let paths = ForgeCredentialPaths::new(&home).unwrap();
     assert!(paths.manifest_path().is_absolute());
     assert!(paths.capability_path().is_absolute());

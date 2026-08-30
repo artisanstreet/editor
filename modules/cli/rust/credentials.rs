@@ -830,20 +830,19 @@ fn sync_directory(dir: &Path) -> Result<(), ForgeCredentialError> {
 
 #[cfg(windows)]
 fn sync_directory(dir: &Path) -> Result<(), ForgeCredentialError> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(dir)
-        .map_err(|_| ForgeCredentialError::Io {
-            context: "sync directory",
-            path: dir.to_path_buf(),
-        })?;
-    file.sync_all().map_err(|_| ForgeCredentialError::Io {
-        context: "sync directory",
+    // Windows does not support File::sync_all on directory handles, even
+    // when they are opened with the directory-handle backup flag. The
+    // temporary file is flushed before publication, so retain a
+    // post-publication directory safety check without claiming that the
+    // directory was flushed.
+    let metadata = fs::symlink_metadata(dir).map_err(|_| ForgeCredentialError::Io {
+        context: "inspect directory",
         path: dir.to_path_buf(),
-    })
+    })?;
+    if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(ForgeCredentialError::UnsafePath(dir.to_path_buf()));
+    }
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1426,8 +1425,8 @@ pub fn ensure_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCred
 #[cfg(test)]
 mod parser_tests {
     use super::{
-        CurrentIdentity, parse_icacls_output_with_path, parse_icacls_strict_with_identity,
-        parse_icacls_strict_with_path,
+        parse_icacls_output_with_path, parse_icacls_strict_with_identity,
+        parse_icacls_strict_with_path, CurrentIdentity,
     };
 
     #[test]
