@@ -23,6 +23,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Audit Rust target registration
+        shell: pwsh
+        run: ./scripts/audit_rust_target_registration.ps1
+
       - name: Configure Bazel
         uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # v0.19.0
         with:
