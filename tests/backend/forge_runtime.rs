@@ -395,7 +395,21 @@ fn explicit_paths_are_the_only_configuration_and_secret_diagnostics_stay_clean()
     let config = config(&directory, &credentials, cancel);
     let debug = format!("{config:?}");
     let capability_hex = "5a".repeat(LOCAL_CAPABILITY_BYTES);
-    assert!(debug.contains(&directory.path("forge.sqlite3").display().to_string()));
+    assert_eq!(config.database_path(), directory.path("forge.sqlite3"));
+    assert_eq!(config.custody_path(), directory.path("forge.custody"));
+    assert_eq!(
+        config.certificate_der_paths(),
+        &[credentials.certificate_path.clone()]
+    );
+    assert_eq!(
+        config.private_key_der_path(),
+        credentials.private_key_path.as_path()
+    );
+    assert_eq!(
+        config.bootstrap_capability_path(),
+        credentials.capability_path.as_path()
+    );
+    assert_eq!(config.ready_file_path(), directory.path("forge.ready"));
     assert!(!debug.contains(&capability_hex));
     assert!(!debug.contains("database.sqlite3"));
 
@@ -851,10 +865,7 @@ fn run_config(config: ForgeLaunchConfig) -> ForgeRuntimeError {
         .build()
         .expect("test runtime should build");
     runtime
-        .block_on(tokio::time::timeout(
-            FUTURE_WAIT,
-            forge_runtime::run(config),
-        ))
+        .block_on(async { tokio::time::timeout(FUTURE_WAIT, forge_runtime::run(config)).await })
         .expect("Forge runtime future should be bounded")
         .expect_err("test scenario should produce a typed failure")
 }
@@ -868,10 +879,9 @@ fn spawn_runtime(config: ForgeLaunchConfig) -> JoinHandle<Result<(), ForgeRuntim
                 .build()
                 .expect("worker runtime should build");
             runtime
-                .block_on(tokio::time::timeout(
-                    FUTURE_WAIT,
-                    forge_runtime::run(config),
-                ))
+                .block_on(async {
+                    tokio::time::timeout(FUTURE_WAIT, forge_runtime::run(config)).await
+                })
                 .expect("Forge runtime future should be bounded")
         })
         .expect("Forge runtime worker should spawn")
