@@ -772,7 +772,10 @@ async fn response_failure_rolls_back_pending_stop_without_cancellation() {
     .await
     .expect("response failure dispatch settles");
     let failure = match outcome {
-        Ok(_) => panic!("the stopped response stream unexpectedly accepted the reply"),
+        Ok(connection) => {
+            drop(connection);
+            panic!("the stopped response stream unexpectedly accepted the reply");
+        }
         Err(failure) => failure,
     };
     assert!(matches!(
