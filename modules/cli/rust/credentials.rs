@@ -348,14 +348,14 @@ fn check_file_mode(path: &Path) -> Result<(), ForgeCredentialError> {
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct FileId {
     dev: u64,
     ino: u64,
 }
 
 #[cfg(windows)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct FileId {
     volume: u64,
     index: u64,
@@ -380,7 +380,7 @@ fn file_id(path: &Path) -> Result<FileId, ForgeCredentialError> {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct FileId;
 
 #[cfg(not(any(unix, windows)))]
@@ -1709,12 +1709,13 @@ fn acquire_lock(lock_path: &Path) -> Result<File, ForgeCredentialError> {
     Ok(file)
 }
 
-fn validate_private_file(path: &Path) -> Result<(), ForgeCredentialError> {
+fn validate_private_file(path: &Path) -> Result<FileId, ForgeCredentialError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| ForgeCredentialError::UnsafePath(path.to_path_buf()))?;
     if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
+    let permission_before_id = file_id(path)?;
     #[cfg(unix)]
     check_file_mode(path)?;
     #[cfg(windows)]
@@ -1723,13 +1724,17 @@ fn validate_private_file(path: &Path) -> Result<(), ForgeCredentialError> {
         let identity = resolve_current_identity()?;
         verify_windows_dacl(path, &identity.sid)?;
     }
-    Ok(())
+    let permission_after_id = file_id(path)?;
+    if permission_before_id != permission_after_id {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
+    Ok(permission_after_id)
 }
 
 fn validate_private_material(
     paths: &ForgeCredentialPaths,
     path: &Path,
-) -> Result<(), ForgeCredentialError> {
+) -> Result<FileId, ForgeCredentialError> {
     let credentials_dir = paths.credentials_dir();
     validate_private_directory(&credentials_dir)?;
     validate_private_file(path)
@@ -1862,15 +1867,23 @@ fn validate_key_matches_cert(key_der: &[u8], cert_der: &[u8]) -> Result<(), Forg
     Ok(())
 }
 
-fn file_identities_match<T: PartialEq>(pre: &T, opened: &T, post: &T) -> bool {
-    pre == opened && opened == post
+fn private_material_identity_chain_matches<T: PartialEq>(chain: &[T; 7]) -> bool {
+    chain.windows(2).all(|pair| pair[0] == pair[1])
+}
+
+struct BoundedMaterialRead {
+    bytes: Zeroizing<Vec<u8>>,
+    pre_id: FileId,
+    opened_id: FileId,
+    post_id: FileId,
 }
 
 fn open_and_read_bounded(
     path: &Path,
     read_limit: usize,
     oversized: ForgeCredentialError,
-) -> Result<Zeroizing<Vec<u8>>, ForgeCredentialError> {
+    expected_id: FileId,
+) -> Result<BoundedMaterialRead, ForgeCredentialError> {
     if read_limit == 0 {
         return Err(oversized);
     }
@@ -1884,6 +1897,9 @@ fn open_and_read_bounded(
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
     let pre_id = file_id(path)?;
+    if pre_id != expected_id {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
     let mut file =
         OpenOptions::new()
             .read(true)
@@ -1900,7 +1916,7 @@ fn open_and_read_bounded(
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
     let handle_id = file_id_from_file(&file)?;
-    if handle_id != pre_id {
+    if handle_id != expected_id || handle_id != pre_id {
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
     if handle_meta.len() >= read_limit_u64 {
@@ -1932,13 +1948,18 @@ fn open_and_read_bounded(
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
     let post_id = file_id(path)?;
-    if !file_identities_match(&pre_id, &handle_id, &post_id) {
+    if expected_id != pre_id || handle_id != pre_id || post_id != pre_id {
         return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
     }
     if post_meta.len() >= read_limit_u64 {
         return Err(oversized);
     }
-    Ok(bytes)
+    Ok(BoundedMaterialRead {
+        bytes,
+        pre_id,
+        opened_id: handle_id,
+        post_id,
+    })
 }
 
 fn read_private_material(
@@ -1947,10 +1968,22 @@ fn read_private_material(
     read_limit: usize,
     oversized: ForgeCredentialError,
 ) -> Result<Zeroizing<Vec<u8>>, ForgeCredentialError> {
-    validate_private_material(paths, path)?;
-    let bytes = open_and_read_bounded(path, read_limit, oversized)?;
-    validate_private_material(paths, path)?;
-    Ok(bytes)
+    let permission_before_id = validate_private_material(paths, path)?;
+    let read = open_and_read_bounded(path, read_limit, oversized, permission_before_id)?;
+    let permission_after_id = validate_private_material(paths, path)?;
+    let identity_chain = [
+        permission_before_id,
+        permission_before_id,
+        read.pre_id,
+        read.opened_id,
+        read.post_id,
+        permission_after_id,
+        permission_after_id,
+    ];
+    if !private_material_identity_chain_matches(&identity_chain) {
+        return Err(ForgeCredentialError::UnsafePath(path.to_path_buf()));
+    }
+    Ok(read.bytes)
 }
 
 fn validate_existing_bundle(paths: &ForgeCredentialPaths) -> Result<bool, ForgeCredentialError> {
@@ -2553,11 +2586,17 @@ mod client_credentials_tests {
     }
 
     #[test]
-    fn file_identity_decision_rejects_any_pre_open_post_mismatch() {
-        assert!(file_identities_match(&7_u8, &7_u8, &7_u8));
-        assert!(!file_identities_match(&6_u8, &7_u8, &6_u8));
-        assert!(!file_identities_match(&7_u8, &6_u8, &7_u8));
-        assert!(!file_identities_match(&7_u8, &7_u8, &6_u8));
+    fn file_identity_decision_rejects_mismatch_at_every_chain_position() {
+        let chain = [7_u8; 7];
+        assert!(private_material_identity_chain_matches(&chain));
+        for position in 0..chain.len() {
+            let mut mismatch = chain;
+            mismatch[position] = 6;
+            assert!(
+                !private_material_identity_chain_matches(&mismatch),
+                "identity mismatch at chain position {position}"
+            );
+        }
     }
 
     #[test]
@@ -2570,6 +2609,7 @@ mod client_credentials_tests {
                 &directory,
                 MAX_CERTIFICATE_READ_BYTES,
                 ForgeCredentialError::InvalidCertificate,
+                FileId::default(),
             ),
             Err(ForgeCredentialError::UnsafePath(_))
         ));
@@ -2590,6 +2630,7 @@ mod client_credentials_tests {
                 &symlink_file,
                 MAX_CERTIFICATE_READ_BYTES,
                 ForgeCredentialError::InvalidCertificate,
+                FileId::default(),
             ),
             Err(ForgeCredentialError::UnsafePath(_))
         ));
@@ -2606,6 +2647,7 @@ mod client_credentials_tests {
                 &substituted_path,
                 MAX_CERTIFICATE_READ_BYTES,
                 ForgeCredentialError::InvalidCertificate,
+                FileId::default(),
             ),
             Err(ForgeCredentialError::UnsafePath(_))
         ));
@@ -2617,7 +2659,8 @@ mod client_credentials_tests {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().expect("temporary mode home");
-        let credentials = root.path().join("credentials");
+        let paths = ForgeCredentialPaths::new(root.path()).expect("temporary mode paths");
+        let credentials = paths.credentials_dir();
         fs::create_dir(&credentials).expect("create credentials directory");
         fs::set_permissions(&credentials, fs::Permissions::from_mode(0o755))
             .expect("set unsafe directory mode");
@@ -2636,12 +2679,17 @@ mod client_credentials_tests {
 
         fs::set_permissions(&credentials, fs::Permissions::from_mode(0o700))
             .expect("restore directory mode");
-        let file = credentials.join("material");
+        let file = paths.manifest_path().to_path_buf();
         fs::write(&file, b"material").expect("write material");
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644))
             .expect("set unsafe file mode");
         assert!(matches!(
-            check_file_mode(&file),
+            read_private_material(
+                &paths,
+                &file,
+                MAX_MANIFEST_READ_BYTES,
+                ForgeCredentialError::ManifestMalformed,
+            ),
             Err(ForgeCredentialError::WindowsAcl)
         ));
         assert_eq!(
