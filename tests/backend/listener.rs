@@ -19,7 +19,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use artisan_backend::listener::{ServeUntilCancelError, ServiceCause};
+use artisan_backend::listener::ServeUntilCancelError;
 use artisan_backend::{
     AuthenticationStageError, CommandOrigin, CommandOriginClockError, CommandOriginEntropyError,
     ForgeApp, ForgeConfig, ForgeListener, ForgeShutdownError, ListenerError, ListenerLimits,
@@ -1548,7 +1548,7 @@ async fn pending_owning_serve_future_drop_abandons_admission() {
 struct UntilCancelBroker {
     addr: SocketAddr,
     cancel: Arc<CancelHandle>,
-    result_rx: tokio::sync::oneshot::Receiver<Result<(), ServeUntilCancelError>>,
+    result_rx: Option<tokio::sync::oneshot::Receiver<Result<(), ServeUntilCancelError>>>,
     done: std::sync::mpsc::Receiver<()>,
     handle: Option<JoinHandle<()>>,
     _temporary: TemporaryDatabase,
@@ -1564,17 +1564,21 @@ impl UntilCancelBroker {
     }
 
     async fn await_result(&mut self) -> Result<(), ServeUntilCancelError> {
-        tokio::time::timeout(WATCHDOG, &mut self.result_rx)
+        let receiver = self
+            .result_rx
+            .as_mut()
+            .expect("result receiver held until completion");
+        tokio::time::timeout(WATCHDOG, receiver)
             .await
             .expect("until-cancel settles under watchdog")
             .expect("broker sent result")
     }
 
-    fn bounded_complete(mut self, context: &str) -> Result<(), String> {
+    fn bounded_complete(&mut self, context: &str) -> Result<(), String> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
-        drop(self.result_rx);
+        drop(self.result_rx.take());
         let signalled = match self.done.recv_timeout(WATCHDOG) {
             Ok(()) => true,
             Err(RecvTimeoutError::Disconnected) => false,
@@ -1587,22 +1591,30 @@ impl UntilCancelBroker {
         while !handle.is_finished() {
             if Instant::now() >= finish_deadline {
                 drop(handle);
-                return Err(format!("{context}: broker did not finish"));
+                return Err(format!(
+                    "{context}: broker did not finish within {WATCHDOG:?} after its completion window; detaching it without joining"
+                ));
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         match handle.join() {
             Ok(()) if signalled => Ok(()),
-            Ok(()) => Err(format!("{context}: missing completion signal")),
+            Ok(()) => Err(format!(
+                "{context}: broker thread exited without its completion signal"
+            )),
             Err(_) => Err(format!("{context}: broker panicked")),
         }
+    }
+
+    fn complete(mut self, context: &str) -> Result<(), String> {
+        self.bounded_complete(context)
     }
 }
 
 impl Drop for UntilCancelBroker {
     fn drop(&mut self) {
-        if self.handle.is_some() {
-            let _ = self.bounded_complete("dropped until-cancel test side");
+        if let Err(failure) = self.bounded_complete("dropped until-cancel test side") {
+            eprintln!("broker cleanup failure on dropped until-cancel test side: {failure}");
         }
     }
 }
@@ -1665,7 +1677,7 @@ async fn start_until_cancel_broker(
     let broker = UntilCancelBroker {
         addr,
         cancel,
-        result_rx,
+        result_rx: Some(result_rx),
         done: done_rx,
         handle: Some(handle),
         _temporary: temporary,
@@ -1705,16 +1717,9 @@ async fn until_cancel_idle_timeout_leaves_same_listener_alive() {
     // Broker thread will have drained; endpoint must be closed.
     assert_connect_fails(&client_ep, start_addr).await;
     expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
-    // Ensure thread teardown is bounded.
-    let (done, handle) = (broker.done, broker.handle.take().unwrap());
-    let signalled = done.recv_timeout(WATCHDOG).is_ok();
-    assert!(signalled, "completion signal must arrive");
-    let deadline = Instant::now() + WATCHDOG;
-    while !handle.is_finished() {
-        assert!(Instant::now() < deadline, "broker must finish boundedly");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("broker joins");
+    broker
+        .complete("until-idle-alive")
+        .expect("bounded completion");
 }
 
 #[tokio::test]
@@ -1745,15 +1750,9 @@ async fn until_cancel_idle_timeouts_do_not_consume_capacity() {
     );
     drop(unread);
     assert_connect_fails(&client_ep, broker.addr()).await;
-    // Bounded join.
-    let (done, handle) = (broker.done, broker.handle.take().unwrap());
-    let _ = done.recv_timeout(WATCHDOG);
-    let deadline = Instant::now() + WATCHDOG;
-    while !handle.is_finished() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("join");
+    broker
+        .complete("until-idle-capacity")
+        .expect("bounded completion");
 }
 
 #[tokio::test]
@@ -1785,14 +1784,9 @@ async fn until_cancel_rejected_client_does_not_terminate() {
     assert!(outcome.is_ok(), "loop must survive auth rejection");
     expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
     assert_connect_fails(&client_ep, addr).await;
-    let (done, handle) = (broker.done, broker.handle.take().unwrap());
-    let _ = done.recv_timeout(WATCHDOG);
-    let deadline = Instant::now() + WATCHDOG;
-    while !handle.is_finished() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("join");
+    broker
+        .complete("until-rejected")
+        .expect("bounded completion");
 }
 
 #[tokio::test]
@@ -1887,14 +1881,9 @@ async fn until_cancel_cancellation_while_waiting_drains() {
     let outcome = broker.await_result().await;
     assert!(outcome.is_ok(), "cancel while waiting must drain Ok");
     assert_connect_fails(&client_ep, addr).await;
-    let (done, handle) = (broker.done, broker.handle.take().unwrap());
-    assert!(done.recv_timeout(WATCHDOG).is_ok());
-    let deadline = Instant::now() + WATCHDOG;
-    while !handle.is_finished() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("join");
+    broker
+        .complete("until-cancel-waiting")
+        .expect("bounded completion");
 }
 
 #[tokio::test]
@@ -1925,14 +1914,9 @@ async fn until_cancel_request_failure_is_terminal_with_primary() {
     let rendered = format!("{error}{error:?}");
     assert!(!rendered.contains("b7b7"), "must not leak bootstrap");
     assert_connect_fails(&client_ep, addr).await;
-    let (done, handle) = (broker.done, broker.handle.take().unwrap());
-    let _ = done.recv_timeout(WATCHDOG);
-    let deadline = Instant::now() + WATCHDOG;
-    while !handle.is_finished() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("join");
+    broker
+        .complete("until-request-terminal")
+        .expect("bounded completion");
 }
 
 #[tokio::test]
@@ -2001,14 +1985,7 @@ async fn until_cancel_error_hides_secrets_in_debug_display() {
     let rendered = format!("{error}{error:?}");
     assert!(!rendered.contains("b7b7"));
     assert!(!rendered.contains("5c5c"));
-    let (done, handle) = (broker.done, broker.handle.take().unwrap());
-    let _ = done.recv_timeout(WATCHDOG);
-    let deadline = Instant::now() + WATCHDOG;
-    while !handle.is_finished() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("join");
+    broker.complete("until-secret").expect("bounded completion");
 }
 
 #[tokio::test]
@@ -2040,14 +2017,7 @@ async fn until_cancel_family_mismatch_is_retryable_then_valid_succeeds() {
     assert!(outcome.is_ok(), "family mismatch must be retryable");
     expect_application_close(&client.connection, CONNECTION_RELEASE_REASON).await;
     assert_connect_fails(&client_ep, addr).await;
-    let (done, handle) = (broker.done, broker.handle.take().unwrap());
-    let _ = done.recv_timeout(WATCHDOG);
-    let deadline = Instant::now() + WATCHDOG;
-    while !handle.is_finished() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("join");
+    broker.complete("until-family").expect("bounded completion");
 }
 
 #[tokio::test]
@@ -2105,12 +2075,7 @@ async fn until_cancel_handshake_timeout_is_terminal_service_failure() {
     assert!(!rendered.contains("b7b7"));
 
     assert_connect_fails(&client_ep, addr).await;
-    let (done, handle) = (broker.done, broker.handle.take().unwrap());
-    let _ = done.recv_timeout(WATCHDOG);
-    let deadline = Instant::now() + WATCHDOG;
-    while !handle.is_finished() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("join");
+    broker
+        .complete("until-hs-timeout")
+        .expect("bounded completion");
 }
