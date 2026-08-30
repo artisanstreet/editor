@@ -520,7 +520,10 @@ fn generation_exhaustion_is_typed_and_never_wraps() {
     let effects = controller.drain_effects();
     // Should have report + request with MAX
     assert!(effects.iter().any(is_report));
-    let req = effects.iter().find(is_request).expect("request at MAX");
+    let req = effects
+        .iter()
+        .find(|effect| is_request(*effect))
+        .expect("request at MAX");
     assert_eq!(request_generation(req), Some(u64::MAX));
     assert_eq!(controller.generation(), u64::MAX);
 
