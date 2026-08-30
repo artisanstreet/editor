@@ -79,6 +79,10 @@ pub enum HandshakeError {
         /// Invalid selected or stamped revision.
         version: u32,
     },
+    /// The server selected native lifecycle control without an offer from
+    /// the client.
+    #[error("server selected native lifecycle control without a client offer")]
+    LifecycleFeatureNotOffered,
     /// The Welcome envelope revision disagreed with its selected revision.
     #[error(
         "Welcome envelope protocol version {envelope_version} disagrees with negotiated version {negotiated_version}"
@@ -177,6 +181,8 @@ fn validate_welcome(
 /// not Hello or the peer answers with neither Welcome nor `ProtocolError`,
 /// [`HandshakeError::VersionNotOffered`] or
 /// [`HandshakeError::WelcomeVersionMismatch`] for invalid negotiation,
+/// [`HandshakeError::LifecycleFeatureNotOffered`] when Welcome selects
+/// lifecycle control without a client offer,
 /// [`HandshakeError::Rejected`] for a typed peer rejection, and the typed
 /// send/receive variants for wire failures.
 pub async fn client_handshake(
@@ -184,10 +190,13 @@ pub async fn client_handshake(
     receive: &mut RecvStream,
     envelope: WireEnvelope,
 ) -> Result<ServerWelcome, HandshakeError> {
-    let offered = match &envelope.body {
+    let (offered, lifecycle_control_offered) = match &envelope.body {
         WireEnvelopeBody::Hello(hello) => {
             ensure_offered(&hello.supported_versions, envelope.protocol_version)?;
-            hello.supported_versions.clone()
+            (
+                hello.supported_versions.clone(),
+                hello.supports_lifecycle_control,
+            )
         }
         body => {
             return Err(HandshakeError::UnexpectedMessage {
@@ -209,6 +218,9 @@ pub async fn client_handshake(
     match body {
         WireEnvelopeBody::Welcome(welcome) => {
             validate_welcome(protocol_version, &welcome, &offered)?;
+            if welcome.lifecycle_control_supported && !lifecycle_control_offered {
+                return Err(HandshakeError::LifecycleFeatureNotOffered);
+            }
             Ok(ServerWelcome {
                 protocol_version,
                 frame_id,

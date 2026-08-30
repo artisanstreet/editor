@@ -29,6 +29,7 @@ fn hello() -> Result<WireEnvelope, Box<dyn Error>> {
         body: WireEnvelopeBody::Hello(Hello {
             supported_versions: VersionOffer::new(vec![1])?,
             credential: HelloCredential::Initial(LocalCapability::from_bytes(INITIAL_CAPABILITY)),
+            supports_lifecycle_control: false,
         }),
     })
 }
@@ -42,6 +43,7 @@ fn welcome() -> Result<WireEnvelope, Box<dyn Error>> {
             negotiated_version: ProtocolVersion::V1,
             connection_id: ConnectionId::parse("connection-1")?,
             reconnect_capability: ReconnectCapability::from_bytes(RECONNECT_CAPABILITY),
+            lifecycle_control_supported: false,
         }),
     })
 }
