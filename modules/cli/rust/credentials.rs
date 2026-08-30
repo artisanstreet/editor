@@ -493,7 +493,7 @@ mod acl_diagnostic {
     }
 
     impl PlannerClassification {
-        const fn as_str(&self) -> &'static str {
+        const fn as_str(self) -> &'static str {
             match self {
                 Self::InvalidValidatedIdentity => "InvalidValidatedIdentity",
                 Self::InheritedAce => "InheritedAce",
@@ -521,7 +521,7 @@ mod acl_diagnostic {
     }
 
     impl ParserClassification {
-        const fn as_str(&self) -> &'static str {
+        const fn as_str(self) -> &'static str {
             match self {
                 Self::MalformedSuccessSummary => "MalformedSuccessSummary",
                 Self::MissingSeparator => "MissingSeparator",
