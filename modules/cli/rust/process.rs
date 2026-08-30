@@ -448,9 +448,22 @@ fn read_readiness_file(path: &Path) -> ReadinessFileRead {
     if !is_safe_readiness_file(&path_metadata) {
         return ReadinessFileRead::Invalid;
     }
-    let Some(path_identity) = readiness_file_identity(&path_metadata) else {
+
+    let before_file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return ReadinessFileRead::Invalid,
+    };
+    let before_metadata = match before_file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return ReadinessFileRead::Invalid,
+    };
+    if !is_safe_readiness_file(&before_metadata) {
+        return ReadinessFileRead::Invalid;
+    }
+    let Some(before_identity) = readiness_file_identity(&before_file) else {
         return ReadinessFileRead::Invalid;
     };
+    drop(before_file);
 
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -460,10 +473,10 @@ fn read_readiness_file(path: &Path) -> ReadinessFileRead {
         Ok(metadata) => metadata,
         Err(_) => return ReadinessFileRead::Invalid,
     };
-    let Some(opened_identity) = readiness_file_identity(&opened_metadata) else {
+    let Some(opened_identity) = readiness_file_identity(&file) else {
         return ReadinessFileRead::Invalid;
     };
-    if path_identity != opened_identity || !is_safe_readiness_file(&opened_metadata) {
+    if before_identity != opened_identity || !is_safe_readiness_file(&opened_metadata) {
         return ReadinessFileRead::Invalid;
     }
 
@@ -480,7 +493,7 @@ fn read_readiness_file(path: &Path) -> ReadinessFileRead {
         Ok(metadata) => metadata,
         Err(_) => return ReadinessFileRead::Invalid,
     };
-    let Some(final_identity) = readiness_file_identity(&final_metadata) else {
+    let Some(final_identity) = readiness_file_identity(&file) else {
         return ReadinessFileRead::Invalid;
     };
     if opened_identity != final_identity || !is_safe_readiness_file(&final_metadata) {
@@ -490,8 +503,19 @@ fn read_readiness_file(path: &Path) -> ReadinessFileRead {
         Ok(metadata) => metadata,
         Err(_) => return ReadinessFileRead::Invalid,
     };
-    if !is_safe_readiness_file(&final_path_metadata)
-        || readiness_file_identity(&final_path_metadata) != Some(final_identity)
+    if !is_safe_readiness_file(&final_path_metadata) {
+        return ReadinessFileRead::Invalid;
+    }
+    let final_file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return ReadinessFileRead::Invalid,
+    };
+    let final_file_metadata = match final_file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return ReadinessFileRead::Invalid,
+    };
+    if !is_safe_readiness_file(&final_file_metadata)
+        || readiness_file_identity(&final_file) != Some(final_identity)
     {
         return ReadinessFileRead::Invalid;
     }
@@ -518,11 +542,12 @@ fn is_safe_readiness_file(metadata: &fs::Metadata) -> bool {
     true
 }
 
-fn readiness_file_identity(metadata: &fs::Metadata) -> Option<ReadinessFileIdentity> {
+fn readiness_file_identity(file: &File) -> Option<ReadinessFileIdentity> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
 
+        let metadata = file.metadata().ok()?;
         return Some(ReadinessFileIdentity {
             first: metadata.dev(),
             second: metadata.ino(),
@@ -530,16 +555,21 @@ fn readiness_file_identity(metadata: &fs::Metadata) -> Option<ReadinessFileIdent
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-
+        let information =
+            winapi_util::file::information(winapi_util::HandleRef::from_file(file)).ok()?;
+        let volume = information.volume_serial_number();
+        let index = information.file_index();
+        if volume == 0 && index == 0 {
+            return None;
+        }
         return Some(ReadinessFileIdentity {
-            first: u64::from(metadata.volume_serial_number()?),
-            second: metadata.file_index()?,
+            first: volume,
+            second: index,
         });
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = metadata;
+        let _ = file;
         None
     }
 }
@@ -634,8 +664,8 @@ fn process_executable(pid: u32) -> Option<PathBuf> {
     if !output.status.success() {
         return None;
     }
-    let path = String::from_utf8(output.stdout)
-        .ok()?
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let path = stdout
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())?;

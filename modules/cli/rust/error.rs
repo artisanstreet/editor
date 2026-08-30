@@ -157,10 +157,10 @@ impl CliError {
             Self::ForgeBusy { .. } => 5,
             Self::ForgeActivityUnavailable => 6,
             Self::ForgeReadinessTimeout => 71,
-            Self::ForgeTerminated { termination } => termination
-                .exit_code()
-                .filter(|code| *code > 0)
-                .unwrap_or(1),
+            Self::ForgeTerminated { termination } => match termination.exit_code() {
+                Some(code) if code > 0 => code,
+                _ => 1,
+            },
             _ => 1,
         }
     }
