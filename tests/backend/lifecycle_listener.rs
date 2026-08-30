@@ -33,8 +33,8 @@ use crate::{ForgeApp, ForgeConfig};
 use super::{ForgeListener, ListenerLimits};
 
 const FIRST_STOP_ID: &str = "listener-shared-stop";
-const SECOND_RESPONSE_FRAME: &str = "listener-lifecycle-5";
-const THIRD_RESPONSE_FRAME: &str = "listener-lifecycle-8";
+const SECOND_RESPONSE_FRAME: &str = "listener-lifecycle-6";
+const THIRD_RESPONSE_FRAME: &str = "listener-lifecycle-10";
 
 #[derive(Debug)]
 struct TestOrigin {
