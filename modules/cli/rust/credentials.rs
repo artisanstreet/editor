@@ -2385,7 +2385,7 @@ mod diagnostic_tests {
             collect_icacls_ace_lines(&format!("{path} {sid}:()"), path)
         });
         assert_parser_classification("NoTokens", false, || {
-            collect_icacls_ace_lines(&format!("{path} {sid}:"), path)
+            collect_icacls_ace_lines(&format!("{path} ({sid}:"), path)
         });
         assert_parser_classification("AcceptedAce", true, || {
             collect_icacls_ace_lines(&accepted, path)
