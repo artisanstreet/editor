@@ -5,10 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::io, paths::Layout, CliError, Result};
+use crate::{CliError, Result, error::io, paths::Layout};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InstanceConfig {

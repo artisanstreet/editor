@@ -1410,8 +1410,8 @@ pub fn ensure_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCred
 #[cfg(test)]
 mod parser_tests {
     use super::{
-        parse_icacls_output_with_path, parse_icacls_strict_with_identity,
-        parse_icacls_strict_with_path, CurrentIdentity,
+        CurrentIdentity, parse_icacls_output_with_path, parse_icacls_strict_with_identity,
+        parse_icacls_strict_with_path,
     };
 
     #[test]
