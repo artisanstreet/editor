@@ -1,5 +1,5 @@
 {
-  "checksum": "39734baf34ac39af964a5213db62c4ecac1e135dd518105939cd33d7c1471620",
+  "checksum": "24b3d9b40826e76bad3d8bf25c542173f9f87af2488d6e7f368ffce700afcb18",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2477,6 +2477,10 @@
               "target": "getrandom"
             },
             {
+              "id": "rcgen 0.14.9",
+              "target": "rcgen"
+            },
+            {
               "id": "serde 1.0.229",
               "target": "serde"
             },
@@ -2491,6 +2495,14 @@
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
+            },
+            {
+              "id": "winapi-util 0.1.11",
+              "target": "winapi_util"
+            },
+            {
+              "id": "zeroize 1.9.0",
+              "target": "zeroize"
             }
           ],
           "selects": {}
@@ -59834,6 +59846,7 @@
     "native-dialog 0.9.7",
     "pulldown-cmark 0.13.4",
     "quinn 0.11.11",
+    "rcgen 0.14.9",
     "reqwest 0.12.28",
     "rustls 0.23.43",
     "rustls-pki-types 1.15.1",
@@ -59860,7 +59873,6 @@
     "zstd 0.13.3"
   ],
   "direct_dev_deps": [
-    "rcgen 0.14.9",
     "roxmltree 0.20.0",
     "toml 1.1.4+spec-1.1.0"
   ],

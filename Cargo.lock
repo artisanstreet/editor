@@ -458,11 +458,14 @@ dependencies = [
  "clap",
  "fs2",
  "getrandom 0.3.4",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "winapi-util",
+ "zeroize",
 ]
 
 [[package]]
