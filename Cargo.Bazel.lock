@@ -1,5 +1,5 @@
 {
-  "checksum": "0e336d848e478f42d53dc73d88955617fd417a022ee4a995f2c0c2d6bbd06bdd",
+  "checksum": "2b586188ea4c60e3d8d677b0be46a80f3122e6e14310199d58026035eff67fb8",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2573,6 +2573,10 @@
             {
               "id": "statig 0.4.1",
               "target": "statig"
+            },
+            {
+              "id": "thiserror 2.0.20",
+              "target": "thiserror"
             },
             {
               "id": "url 2.5.8",
@@ -35343,6 +35347,7 @@
             "__rustls",
             "__rustls-ring",
             "__tls",
+            "blocking",
             "h2",
             "http2",
             "rustls-tls",
@@ -35394,6 +35399,10 @@
           "selects": {
             "aarch64-apple-darwin": [
               {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
                 "id": "h2 0.4.19",
                 "target": "h2"
               },
@@ -35423,6 +35432,10 @@
               }
             ],
             "aarch64-unknown-linux-gnu": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
               {
                 "id": "h2 0.4.19",
                 "target": "h2"
@@ -35534,6 +35547,10 @@
             ],
             "x86_64-pc-windows-msvc": [
               {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
                 "id": "h2 0.4.19",
                 "target": "h2"
               },
@@ -35564,6 +35581,10 @@
             ],
             "x86_64-unknown-linux-gnu": [
               {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
+              {
                 "id": "h2 0.4.19",
                 "target": "h2"
               },
@@ -35593,6 +35614,10 @@
               }
             ],
             "x86_64-unknown-nixos-gnu": [
+              {
+                "id": "futures-channel 0.3.34",
+                "target": "futures_channel"
+              },
               {
                 "id": "h2 0.4.19",
                 "target": "h2"
@@ -59919,6 +59944,7 @@
     "chrono 0.4.45",
     "clap 4.6.6",
     "ed25519-dalek 2.2.0",
+    "flate2 1.1.10",
     "fs2 0.4.3",
     "getrandom 0.3.4",
     "getrandom 0.4.3",
