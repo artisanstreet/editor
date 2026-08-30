@@ -40,9 +40,9 @@ pub mod time;
 pub use bounds::{
     CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES, DIRECTORY_LISTING_MAX_ENTRIES,
-    DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, IDENTIFIER_MAX_BYTES,
-    MESSAGE_BODY_MAX_BYTES, PROJECT_LISTING_MAX_PROJECTS, ROOT_PATH_MAX_BYTES,
-    THREAD_LISTING_MAX_THREADS, THREAD_TITLE_MAX_BYTES,
+    DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, ENGINE_PROFILE_ID_MAX_BYTES,
+    IDENTIFIER_MAX_BYTES, MESSAGE_BODY_MAX_BYTES, PROJECT_LISTING_MAX_PROJECTS,
+    ROOT_PATH_MAX_BYTES, THREAD_LISTING_MAX_THREADS, THREAD_TITLE_MAX_BYTES,
 };
 pub use commands::{
     AttachProject, Command, CreateThread, ListAttachedProjects, ListDirectories,
@@ -59,8 +59,8 @@ pub use conversation::{
 };
 pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
 pub use identifiers::{
-    DirectoryId, IdentifierError, ItemId, MessageId, PatchId, ProjectId, RequestId, RunId,
-    ThreadId, TurnId,
+    DirectoryId, EngineProfileId, EngineProfileIdError, IdentifierError, ItemId, MessageId,
+    PatchId, ProjectId, RequestId, RunId, ThreadId, TurnId,
 };
 pub use model::{
     CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,

@@ -8,12 +8,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use artisan_domain::EngineProfileId;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::{
     CliError, Result,
     credentials::{self, ForgeCredentialPaths},
-    engine_catalog::{NativeOpenCode2Authority, OpenCode2Inspection},
+    engine_catalog::{
+        EngineProfileSummary, NativeOpenCode2Authority, OpenCode2Inspection, ProfileHomeKind,
+        ProfileRegistrationOutcome,
+    },
     engine_install::{self, InstallOutcome},
     error::io,
     http::{self, PairResponse},
@@ -152,6 +156,49 @@ pub enum EngineCommand {
     },
     /// Install the certified native `OpenCode2` engine.
     Install,
+    /// Manage explicit certified OpenCode2 profile homes.
+    Profile {
+        #[command(subcommand)]
+        command: EngineProfileCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EngineProfileCommand {
+    /// Register one explicit OpenCode2 profile home.
+    Register {
+        #[arg(long, required = true, value_parser = parse_engine_profile_id)]
+        profile_id: EngineProfileId,
+        #[arg(long, required = true, value_enum)]
+        home: EngineProfileHomeArg,
+    },
+    /// List registered OpenCode2 profile homes.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one exact registered OpenCode2 profile home.
+    Read {
+        #[arg(long, required = true, value_parser = parse_engine_profile_id)]
+        profile_id: EngineProfileId,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum EngineProfileHomeArg {
+    Primary,
+    Named,
+}
+
+impl From<EngineProfileHomeArg> for ProfileHomeKind {
+    fn from(value: EngineProfileHomeArg) -> Self {
+        match value {
+            EngineProfileHomeArg::Primary => Self::Primary,
+            EngineProfileHomeArg::Named => Self::Named,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -202,11 +249,19 @@ pub fn run(cli: Cli) -> Result<()> {
             command: EngineCommand::Install,
         })
     );
+    let is_profile = matches!(
+        cli.command.as_ref(),
+        Some(Commands::Engine {
+            command: EngineCommand::Profile { .. },
+        })
+    );
     let layout = Layout::discover().map_err(|error| {
         if is_install {
             CliError::OpenCode2Install {
                 reason: "installation_invalid",
             }
+        } else if is_profile {
+            profile_surface_error()
         } else {
             error
         }
@@ -349,16 +404,128 @@ fn engine_command(layout: &Layout, command: &EngineCommand) -> Result<()> {
         };
     }
 
-    require_installation(layout)?;
-    let instance = load_native_instance(layout).map_err(|error| match error {
-        CliError::MissingInstance => CliError::MissingInstance,
-        _ => CliError::OpenCode2Authority {
-            reason: "instance_invalid",
-        },
+    let is_profile = matches!(command, EngineCommand::Profile { .. });
+    if is_profile {
+        require_installation(layout).map_err(|_| profile_surface_error())?;
+    } else {
+        require_installation(layout)?;
+    }
+    let instance = load_native_instance(layout).map_err(|error| {
+        if is_profile {
+            profile_surface_error()
+        } else {
+            match error {
+                CliError::MissingInstance => CliError::MissingInstance,
+                _ => CliError::OpenCode2Authority {
+                    reason: "instance_invalid",
+                },
+            }
+        }
     })?;
     match command {
         EngineCommand::List { json } => list_engines(&instance, *json),
         EngineCommand::Install => unreachable!("install is handled above"),
+        EngineCommand::Profile { command } => profile_command(&instance, command),
+    }
+}
+
+fn profile_command(instance: &NativeInstanceConfig, command: &EngineProfileCommand) -> Result<()> {
+    match command {
+        EngineProfileCommand::Register { profile_id, home } => {
+            let home = (*home).into();
+            let outcome = crate::engine_catalog::register_profile(instance, profile_id, home)
+                .map_err(profile_error)?;
+            let status = match outcome {
+                ProfileRegistrationOutcome::Registered => "Registered",
+                ProfileRegistrationOutcome::AlreadyRegistered => "Already registered",
+            };
+            println!(
+                "{status} OpenCode2 profile {profile_id} ({})",
+                home.as_str()
+            );
+            Ok(())
+        }
+        EngineProfileCommand::List { json } => {
+            let profiles = crate::engine_catalog::list_profiles(instance).map_err(profile_error)?;
+            print_profile_list(profiles, *json);
+            Ok(())
+        }
+        EngineProfileCommand::Read { profile_id, json } => {
+            let profile =
+                crate::engine_catalog::read_profile(instance, profile_id).map_err(profile_error)?;
+            print_profile_read(&profile, *json);
+            Ok(())
+        }
+    }
+}
+
+fn print_profile_list(profiles: Option<Vec<EngineProfileSummary>>, json: bool) {
+    let status = if profiles.is_some() {
+        "registered"
+    } else {
+        "not_registered"
+    };
+    let profiles = profiles.unwrap_or_default();
+    if json {
+        let profiles = profiles
+            .iter()
+            .map(|profile| {
+                serde_json::json!({
+                    "profile_id": profile.profile_id().as_str(),
+                    "home": profile.home().as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": "artisan-engine-profile-list-v1",
+                "status": status,
+                "profiles": profiles,
+            })
+        );
+        return;
+    }
+
+    if profiles.is_empty() {
+        println!("OpenCode2 profiles: {status}");
+    } else {
+        println!("OpenCode2 profiles: {status}");
+        for profile in profiles {
+            println!("{} ({})", profile.profile_id(), profile.home().as_str());
+        }
+    }
+}
+
+fn print_profile_read(profile: &EngineProfileSummary, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": "artisan-engine-profile-v1",
+                "profile_id": profile.profile_id().as_str(),
+                "home": profile.home().as_str(),
+                "status": "registered",
+            })
+        );
+    } else {
+        println!(
+            "OpenCode2 profile {} ({})",
+            profile.profile_id(),
+            profile.home().as_str()
+        );
+    }
+}
+
+fn profile_error(error: crate::engine_catalog::NativeOpenCode2ProfileError) -> CliError {
+    CliError::OpenCode2Profile {
+        reason: error.cli_reason(),
+    }
+}
+
+fn profile_surface_error() -> CliError {
+    CliError::OpenCode2Profile {
+        reason: "profile_registry_invalid",
     }
 }
 
@@ -471,6 +638,10 @@ fn parse_positive_u64(value: &str) -> std::result::Result<u64, String> {
         return Err("must be greater than zero".to_owned());
     }
     Ok(value)
+}
+
+fn parse_engine_profile_id(value: &str) -> std::result::Result<EngineProfileId, String> {
+    EngineProfileId::parse(value).map_err(|error| error.to_string())
 }
 
 fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {

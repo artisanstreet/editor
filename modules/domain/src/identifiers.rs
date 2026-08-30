@@ -8,17 +8,19 @@
 //! `modules/frontend/src/lib/root/draft-thread.ts` and detects byte-exact
 //! replays in `modules/backend/src/persistence/journal-store.ts`).
 //!
-//! Every identifier shares one validation rule and one documented UTF-8 byte
-//! bound ([`IDENTIFIER_MAX_BYTES`]): non-empty, no Unicode whitespace or
-//! control characters anywhere, and bounded. The legacy `Identifier` pattern
-//! (`/^\S+$/`) is preserved and tightened with an explicit ceiling.
+//! Every wire-facing Forge identifier shares one validation rule and one
+//! documented UTF-8 byte bound ([`IDENTIFIER_MAX_BYTES`]): non-empty, no
+//! Unicode whitespace or control characters anywhere, and bounded. The legacy
+//! `Identifier` pattern (`/^\S+$/`) is preserved and tightened with an
+//! explicit ceiling. The managed native profile identity below is a separate,
+//! narrower ASCII filename-safe type because the CLI derives a home from it.
 
 use std::fmt;
 use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::bounds::IDENTIFIER_MAX_BYTES;
+use crate::bounds::{ENGINE_PROFILE_ID_MAX_BYTES, IDENTIFIER_MAX_BYTES};
 
 /// Validation failure for a wire-facing identifier.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -191,4 +193,92 @@ wire_identifier! {
     /// machine, and never an alias of [`MessageId`] or a protocol frame id.
     /// Never supplied by clients.
     RunId
+}
+
+/// Validation failure for a managed native engine profile id.
+///
+/// The error deliberately carries no copy of the rejected value. Profile
+/// ids are later used in filesystem-derived locations, so parse diagnostics
+/// must remain safe even when the input came from an untrusted caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum EngineProfileIdError {
+    /// The supplied value was empty.
+    #[error("engine profile id must not be empty")]
+    Empty,
+    /// The supplied value exceeded the profile-id byte ceiling.
+    #[error("engine profile id is {length} bytes; the maximum is {maximum}")]
+    TooLong { length: usize, maximum: usize },
+    /// The supplied value did not match the ASCII filename-safe grammar.
+    #[error(
+        "engine profile id must start with an ASCII letter or digit and contain only ASCII letters, digits, '.', '_' or '-'"
+    )]
+    Invalid,
+}
+
+/// Explicit identity of one managed native engine profile.
+///
+/// This identity is intentionally not serializable and has no path helpers.
+/// The CLI owns the filesystem mapping, while the domain owns only the
+/// validated, bounded value that crosses that boundary.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EngineProfileId(String);
+
+impl EngineProfileId {
+    /// Parses an ASCII profile id in the form
+    /// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineProfileIdError`] when the value is empty, too long, or
+    /// contains anything outside the exact ASCII profile-id grammar.
+    pub fn parse(value: impl Into<String>) -> Result<Self, EngineProfileIdError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(EngineProfileIdError::Empty);
+        }
+        let bytes = value.as_bytes();
+        if !bytes[0].is_ascii_alphanumeric()
+            || !bytes[1..]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'-'))
+        {
+            return Err(EngineProfileIdError::Invalid);
+        }
+        if value.len() > ENGINE_PROFILE_ID_MAX_BYTES {
+            return Err(EngineProfileIdError::TooLong {
+                length: value.len(),
+                maximum: ENGINE_PROFILE_ID_MAX_BYTES,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated profile-id text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for EngineProfileId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("EngineProfileId")
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
+
+impl fmt::Display for EngineProfileId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EngineProfileId {
+    type Err = EngineProfileIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
 }
