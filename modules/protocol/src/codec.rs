@@ -668,14 +668,26 @@ fn encode_response(
         ResponsePayload::DirectoryPicked(outcome) => {
             encode_directory_picked(builder.reborrow().init_directory_picked(), outcome);
         }
-        ResponsePayload::Lifecycle(LifecycleResponse::Status(status)) => {
+        ResponsePayload::Lifecycle(value) => {
+            encode_lifecycle_response(builder.reborrow().init_lifecycle_control(), value)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_lifecycle_response(
+    mut builder: artisan_capnp::lifecycle_response::Builder<'_>,
+    value: &LifecycleResponse,
+) -> Result<(), ProtocolEncodeError> {
+    match value {
+        LifecycleResponse::Status(status) => {
             status.validate()?;
-            let mut encoded = builder.reborrow().init_lifecycle_control().init_status();
+            let mut encoded = builder.reborrow().init_status();
             encoded.set_state(encode_lifecycle_state(status.state));
             encoded.set_active_work_count(status.active_work_count);
         }
-        ResponsePayload::Lifecycle(LifecycleResponse::Stop(receipt)) => {
-            let mut encoded = builder.reborrow().init_lifecycle_control().init_stop();
+        LifecycleResponse::Stop(receipt) => {
+            let mut encoded = builder.reborrow().init_stop();
             encoded.set_disposition(encode_lifecycle_stop_disposition(receipt.disposition));
             encoded.set_state(encode_lifecycle_state(receipt.state));
         }

@@ -908,8 +908,8 @@ fn raw_lifecycle_request(stop: bool, require_idle: bool) -> Vec<u8> {
     let mut root = message.init_root::<envelope::Builder>();
     root.set_protocol_version(1);
     root.set_message_id("lifecycle-request-frame");
-    let mut request = root.reborrow().init_body().init_request();
-    let mut lifecycle = request.init_lifecycle_control();
+    let request = root.reborrow().init_body().init_request();
+    let lifecycle = request.init_lifecycle_control();
     if stop {
         lifecycle.init_stop().set_require_idle(require_idle);
     } else {
@@ -925,7 +925,7 @@ fn raw_lifecycle_status(state: WireLifecycleState, active_work_count: u32) -> Ve
     root.set_message_id("lifecycle-response-frame");
     let mut response = root.reborrow().init_body().init_response();
     response.set_request_id("lifecycle-request-id");
-    let mut lifecycle = response.init_lifecycle_control();
+    let lifecycle = response.init_lifecycle_control();
     let mut status = lifecycle.init_status();
     status.set_state(state);
     status.set_active_work_count(active_work_count);
@@ -942,7 +942,7 @@ fn raw_lifecycle_stop(
     root.set_message_id("lifecycle-response-frame");
     let mut response = root.reborrow().init_body().init_response();
     response.set_request_id("lifecycle-request-id");
-    let mut lifecycle = response.init_lifecycle_control();
+    let lifecycle = response.init_lifecycle_control();
     let mut receipt = lifecycle.init_stop();
     receipt.set_disposition(disposition);
     receipt.set_state(state);

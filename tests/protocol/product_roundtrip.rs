@@ -282,10 +282,10 @@ fn round_trips_negotiated_lifecycle_wire_vocabulary() -> capnp::Result<()> {
     for (stop, require_idle) in [(false, false), (true, false), (true, true)] {
         let encoded = {
             let mut message = frame();
-            let mut request = init_envelope(&mut message, CLIENT_REQUEST_ID)
+            let request = init_envelope(&mut message, CLIENT_REQUEST_ID)
                 .init_body()
                 .init_request();
-            let mut lifecycle = request.init_lifecycle_control();
+            let lifecycle = request.init_lifecycle_control();
             if stop {
                 lifecycle.init_stop().set_require_idle(require_idle);
             } else {
@@ -308,7 +308,6 @@ fn round_trips_negotiated_lifecycle_wire_vocabulary() -> capnp::Result<()> {
                         assert!(stop, "status request decoded as stop");
                         assert_eq!(stop_request?.get_require_idle(), require_idle);
                     }
-                    _ => panic!("unexpected lifecycle request arm"),
                 },
                 _ => panic!("expected lifecycleControl request"),
             },
