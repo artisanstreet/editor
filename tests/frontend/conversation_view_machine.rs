@@ -248,9 +248,11 @@ fn exact_item_anchor_removal_detaches_without_guessing_a_neighbor() {
     let effects = vp.handle(ViewportEvent::anchor_removed(anchor.clone()));
 
     assert_eq!(vp.state(), ViewportState::Detached);
-    assert!(effects
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::ShowJumpToLatest)));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::ShowJumpToLatest))
+    );
 
     let mut vp2 = ViewportController::anchored(anchor.clone(), 10);
     let effects2 = vp2.handle(ViewportEvent::anchor_removed(item_id("other")));
@@ -261,9 +263,11 @@ fn exact_item_anchor_removal_detaches_without_guessing_a_neighbor() {
             offset: 10,
         }
     );
-    assert!(!effects2
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::ShowJumpToLatest)));
+    assert!(
+        !effects2
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::ShowJumpToLatest))
+    );
 }
 
 #[test]
@@ -272,21 +276,27 @@ fn jump_to_bottom_uses_generation_fenced_scrolling_settling_following() {
     let effects = vp.handle(ViewportEvent::JumpToBottomRequested);
     let generation = request_generation(&effects);
     assert_eq!(vp.state(), ViewportState::Scrolling { generation });
-    assert!(effects
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::HideJumpToLatest)));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::HideJumpToLatest))
+    );
 
     let effects2 = vp.handle(ViewportEvent::scroll_completed(generation));
-    assert!(!effects2
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::CompletionRejected { .. })));
+    assert!(
+        !effects2
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::CompletionRejected { .. }))
+    );
     assert_eq!(vp.state(), ViewportState::Settling { generation });
 
     let effects3 = vp.handle(ViewportEvent::LayoutSettled);
     assert_eq!(vp.state(), ViewportState::Following);
-    assert!(effects3
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::HideJumpToLatest)));
+    assert!(
+        effects3
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::HideJumpToLatest))
+    );
 }
 
 #[test]
@@ -321,14 +331,18 @@ fn stale_completions_are_atomic_typed_refusals() {
     assert_eq!(vp.state(), ViewportState::Scrolling { generation: gen2 });
 
     let duplicate = vp.handle(ViewportEvent::ScrollCompleted { generation: gen1 });
-    assert!(duplicate
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::CompletionRejected { .. })));
+    assert!(
+        duplicate
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::CompletionRejected { .. }))
+    );
 
     let current = vp.handle(ViewportEvent::ScrollCompleted { generation: gen2 });
-    assert!(!current
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::CompletionRejected { .. })));
+    assert!(
+        !current
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::CompletionRejected { .. }))
+    );
     assert_eq!(vp.state(), ViewportState::Settling { generation: gen2 });
 }
 
@@ -350,9 +364,11 @@ fn programmatic_start_is_fenced_and_can_complete_the_generated_request() {
     let generation = request_generation(&request);
     let started = vp.handle(ViewportEvent::programmatic_scroll_started(generation));
     assert_eq!(vp.state(), ViewportState::Scrolling { generation });
-    assert!(started
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::InvalidateRender)));
+    assert!(
+        started
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::InvalidateRender))
+    );
 }
 
 #[test]
@@ -360,23 +376,29 @@ fn generation_overflow_never_wraps() {
     let max = ViewportGeneration::new(u64::MAX);
     let mut vp = ViewportController::seeded_for_test(max);
     let effects = vp.handle(ViewportEvent::JumpToBottomRequested);
-    assert!(effects
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::GenerationExhausted)));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::GenerationExhausted))
+    );
     assert_eq!(vp.generation(), max);
     assert_eq!(vp.state(), ViewportState::Following);
 
     let effects2 = vp.handle(ViewportEvent::ExtentChanged);
-    assert!(effects2
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::GenerationExhausted)));
+    assert!(
+        effects2
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::GenerationExhausted))
+    );
 
     let mut anchored = ViewportController::seeded_for_test(max);
     anchored.handle(ViewportEvent::anchor_observed(item_id("a"), 0));
     let effects3 = anchored.handle(ViewportEvent::ExtentChanged);
-    assert!(effects3
-        .iter()
-        .any(|effect| matches!(effect, ViewportEffect::GenerationExhausted)));
+    assert!(
+        effects3
+            .iter()
+            .any(|effect| matches!(effect, ViewportEffect::GenerationExhausted))
+    );
     assert_eq!(anchored.generation(), max);
     assert!(matches!(anchored.state(), ViewportState::Anchored { .. }));
 }
@@ -419,17 +441,21 @@ fn detached_never_jumps_on_token_arrival_and_following_always_jumps() {
     detached.handle(ViewportEvent::UserScrolled { at_bottom: false });
     for _ in 0..3 {
         let effects = detached.handle(ViewportEvent::ExtentChanged);
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, ViewportEffect::RequestBottomScroll { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, ViewportEffect::RequestBottomScroll { .. }))
+        );
     }
 
     let mut following = ViewportController::new();
     for _ in 0..3 {
         let effects = following.handle(ViewportEvent::ExtentChanged);
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect, ViewportEffect::RequestBottomScroll { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, ViewportEffect::RequestBottomScroll { .. }))
+        );
     }
 }
 
@@ -440,12 +466,16 @@ fn closed_is_terminal_for_viewport() {
     assert_eq!(vp.state(), ViewportState::Closed);
 
     let effects = vp.handle(ViewportEvent::ExtentChanged);
-    assert!(effects
-        .iter()
-        .all(|effect| matches!(effect, ViewportEffect::None)));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| matches!(effect, ViewportEffect::None))
+    );
     let effects2 = vp.handle(ViewportEvent::JumpToBottomRequested);
-    assert!(effects2
-        .iter()
-        .all(|effect| matches!(effect, ViewportEffect::None)));
+    assert!(
+        effects2
+            .iter()
+            .all(|effect| matches!(effect, ViewportEffect::None))
+    );
     assert_eq!(vp.state(), ViewportState::Closed);
 }
