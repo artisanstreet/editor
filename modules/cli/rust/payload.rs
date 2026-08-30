@@ -213,7 +213,7 @@ fn collect_unexpected(
                     PayloadDirectory::Optional,
                     manifest,
                     issues,
-                )
+                );
             }
             _ => {
                 issues.push(format!("unexpected: {relative}"));
@@ -299,7 +299,7 @@ fn is_non_executable_file(path: &Path, relative: &str) -> std::io::Result<bool> 
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        std::fs::metadata(path)?;
         Ok(true)
     }
 }

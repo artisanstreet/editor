@@ -184,7 +184,7 @@ fn is_non_executable_file(path: &Path, relative: &str) -> std::io::Result<bool> 
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        std::fs::metadata(path)?;
         Ok(true)
     }
 }
