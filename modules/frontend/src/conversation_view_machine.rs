@@ -139,13 +139,17 @@ mod disclosure_statig {
     )]
     impl Machine {
         #[state]
-        fn auto_open(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+        fn auto_open(context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
                 Event::Initialize { is_working: true } | Event::Seed(DisclosureState::AutoOpen) => {
                     Handled
                 }
                 Event::Initialize { is_working: false }
-                | Event::Seed(DisclosureState::AutoClosed) => Transition(State::auto_closed()),
+                | Event::Seed(DisclosureState::AutoClosed)
+                | Event::Public(
+                    DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted,
+                ) => Transition(State::auto_closed()),
                 Event::Seed(DisclosureState::UserOpen)
                 | Event::Public(DisclosureEvent::UserOpen) => Transition(State::user_open()),
                 Event::Seed(DisclosureState::UserClosed)
@@ -157,17 +161,18 @@ mod disclosure_statig {
                     Transition(State::retired())
                 }
                 Event::Public(DisclosureEvent::WorkBecameActive) => Handled,
-                Event::Public(
-                    DisclosureEvent::WorkSettledSuccessfully
-                    | DisclosureEvent::WorkFailedOrInterrupted,
-                ) => Transition(State::auto_closed()),
             }
         }
 
         #[state]
-        fn auto_closed(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+        fn auto_closed(context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::Initialize { .. } | Event::Seed(DisclosureState::AutoClosed) => Handled,
+                Event::Initialize { .. }
+                | Event::Seed(DisclosureState::AutoClosed)
+                | Event::Public(
+                    DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted,
+                ) => Handled,
                 Event::Seed(DisclosureState::AutoOpen)
                 | Event::Public(DisclosureEvent::WorkBecameActive) => {
                     Transition(State::auto_open())
@@ -182,20 +187,25 @@ mod disclosure_statig {
                     context.retire();
                     Transition(State::retired())
                 }
-                Event::Public(
-                    DisclosureEvent::WorkSettledSuccessfully
-                    | DisclosureEvent::WorkFailedOrInterrupted,
-                ) => Handled,
             }
         }
 
         #[state]
-        fn user_open(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+        fn user_open(context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::Initialize { .. } | Event::Seed(DisclosureState::UserOpen) => Handled,
-                Event::Seed(DisclosureState::AutoOpen)
-                | Event::Seed(DisclosureState::AutoClosed)
-                | Event::Seed(DisclosureState::UserClosed)
+                Event::Initialize { .. }
+                | Event::Seed(DisclosureState::UserOpen)
+                | Event::Public(
+                    DisclosureEvent::WorkBecameActive
+                    | DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted
+                    | DisclosureEvent::UserOpen,
+                ) => Handled,
+                Event::Seed(
+                    DisclosureState::AutoOpen
+                    | DisclosureState::AutoClosed
+                    | DisclosureState::UserClosed,
+                )
                 | Event::Public(DisclosureEvent::UserToggle | DisclosureEvent::UserClose) => {
                     Transition(State::user_closed())
                 }
@@ -203,22 +213,25 @@ mod disclosure_statig {
                     context.retire();
                     Transition(State::retired())
                 }
-                Event::Public(
-                    DisclosureEvent::WorkBecameActive
-                    | DisclosureEvent::WorkSettledSuccessfully
-                    | DisclosureEvent::WorkFailedOrInterrupted
-                    | DisclosureEvent::UserOpen,
-                ) => Handled,
             }
         }
 
         #[state]
-        fn user_closed(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+        fn user_closed(context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::Initialize { .. } | Event::Seed(DisclosureState::UserClosed) => Handled,
-                Event::Seed(DisclosureState::AutoOpen)
-                | Event::Seed(DisclosureState::AutoClosed)
-                | Event::Seed(DisclosureState::UserOpen)
+                Event::Initialize { .. }
+                | Event::Seed(DisclosureState::UserClosed)
+                | Event::Public(
+                    DisclosureEvent::WorkBecameActive
+                    | DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted
+                    | DisclosureEvent::UserClose,
+                ) => Handled,
+                Event::Seed(
+                    DisclosureState::AutoOpen
+                    | DisclosureState::AutoClosed
+                    | DisclosureState::UserOpen,
+                )
                 | Event::Public(DisclosureEvent::UserToggle | DisclosureEvent::UserOpen) => {
                     Transition(State::user_open())
                 }
@@ -226,17 +239,11 @@ mod disclosure_statig {
                     context.retire();
                     Transition(State::retired())
                 }
-                Event::Public(
-                    DisclosureEvent::WorkBecameActive
-                    | DisclosureEvent::WorkSettledSuccessfully
-                    | DisclosureEvent::WorkFailedOrInterrupted
-                    | DisclosureEvent::UserClose,
-                ) => Handled,
             }
         }
 
         #[state]
-        fn retired(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+        fn retired(context: &mut Context, event: &Event) -> Outcome<State> {
             let _ = context;
             let _ = event;
             Handled
@@ -244,7 +251,7 @@ mod disclosure_statig {
     }
 
     pub(super) fn new_machine() -> blocking::StateMachine<Machine> {
-        Machine::default().state_machine()
+        Machine.state_machine()
     }
 
     pub(super) fn public_state(state: &State) -> DisclosureState {
@@ -271,7 +278,7 @@ impl DisclosureController {
         };
         let mut context = disclosure_statig::Context::default();
         controller.machine.init_with_context(&mut context);
-        let _ = controller.dispatch(disclosure_statig::Event::Initialize { is_working });
+        let _ = controller.dispatch(&disclosure_statig::Event::Initialize { is_working });
         controller
     }
 
@@ -279,7 +286,7 @@ impl DisclosureController {
     #[must_use]
     pub fn from_state(state: DisclosureState) -> Self {
         let mut controller = Self::new(true);
-        let _ = controller.dispatch(disclosure_statig::Event::Seed(state));
+        let _ = controller.dispatch(&disclosure_statig::Event::Seed(state));
         controller
     }
 
@@ -310,12 +317,12 @@ impl DisclosureController {
 
     /// Applies one disclosure event and returns its typed effect.
     pub fn handle(&mut self, event: DisclosureEvent) -> DisclosureEffect {
-        self.dispatch(disclosure_statig::Event::Public(event))
+        self.dispatch(&disclosure_statig::Event::Public(event))
     }
 
-    fn dispatch(&mut self, event: disclosure_statig::Event) -> DisclosureEffect {
+    fn dispatch(&mut self, event: &disclosure_statig::Event) -> DisclosureEffect {
         let mut context = disclosure_statig::Context::default();
-        self.machine.handle_with_context(&event, &mut context);
+        self.machine.handle_with_context(event, &mut context);
         context.into_effect()
     }
 }
@@ -549,9 +556,7 @@ mod viewport_statig {
     impl Machine {
         #[state]
         fn following(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
-            let event = match event {
-                Event::Public(event) => event,
-            };
+            let Event::Public(event) = event;
             match event {
                 ViewportEvent::ExtentChanged => {
                     let Some(generation) = self.allocate_generation(context) else {
@@ -621,9 +626,7 @@ mod viewport_statig {
             context: &mut Context,
             event: &Event,
         ) -> Outcome<State> {
-            let event = match event {
-                Event::Public(event) => event,
-            };
+            let Event::Public(event) = event;
             match event {
                 ViewportEvent::ExtentChanged => {
                     let Some(generation) = self.allocate_generation(context) else {
@@ -678,16 +681,16 @@ mod viewport_statig {
                     });
                     Handled
                 }
-                ViewportEvent::LayoutSettled => {
-                    context.none();
-                    Handled
-                }
                 ViewportEvent::AnchorRemoved { anchor_id: removed } if removed == &*anchor_id => {
                     context.push(ViewportEffect::ShowJumpToLatest);
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::detached())
                 }
                 ViewportEvent::AnchorRemoved { .. } => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::LayoutSettled | ViewportEvent::AnchorRemoved { .. } => {
                     context.none();
                     Handled
                 }
@@ -700,11 +703,12 @@ mod viewport_statig {
 
         #[state]
         fn detached(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
-            let event = match event {
-                Event::Public(event) => event,
-            };
+            let Event::Public(event) = event;
             match event {
-                ViewportEvent::ExtentChanged => {
+                ViewportEvent::ExtentChanged
+                | ViewportEvent::UserScrolled { at_bottom: false }
+                | ViewportEvent::LayoutSettled
+                | ViewportEvent::AnchorRemoved { .. } => {
                     context.none();
                     Handled
                 }
@@ -712,10 +716,6 @@ mod viewport_statig {
                     context.push(ViewportEffect::HideJumpToLatest);
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::following())
-                }
-                ViewportEvent::UserScrolled { at_bottom: false } => {
-                    context.none();
-                    Handled
                 }
                 ViewportEvent::AnchorObserved { anchor_id, offset } => {
                     context.push(ViewportEffect::InvalidateRender);
@@ -750,10 +750,6 @@ mod viewport_statig {
                     });
                     Handled
                 }
-                ViewportEvent::LayoutSettled | ViewportEvent::AnchorRemoved { .. } => {
-                    context.none();
-                    Handled
-                }
                 ViewportEvent::OwnerClosed => {
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::closed())
@@ -768,13 +764,12 @@ mod viewport_statig {
             context: &mut Context,
             event: &Event,
         ) -> Outcome<State> {
-            let event = match event {
-                Event::Public(event) => event,
-            };
+            let Event::Public(event) = event;
             match event {
                 ViewportEvent::ExtentChanged
                 | ViewportEvent::UserScrolled { at_bottom: false }
-                | ViewportEvent::AnchorRemoved { .. } => {
+                | ViewportEvent::AnchorRemoved { .. }
+                | ViewportEvent::LayoutSettled => {
                     context.none();
                     Handled
                 }
@@ -828,10 +823,6 @@ mod viewport_statig {
                     });
                     Handled
                 }
-                ViewportEvent::LayoutSettled => {
-                    context.none();
-                    Handled
-                }
                 ViewportEvent::OwnerClosed => {
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::closed())
@@ -846,9 +837,7 @@ mod viewport_statig {
             context: &mut Context,
             event: &Event,
         ) -> Outcome<State> {
-            let event = match event {
-                Event::Public(event) => event,
-            };
+            let Event::Public(event) = event;
             match event {
                 ViewportEvent::ExtentChanged
                 | ViewportEvent::UserScrolled { at_bottom: false }
@@ -913,8 +902,7 @@ mod viewport_statig {
         }
 
         #[state]
-        fn closed(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
-            let _ = self;
+        fn closed(context: &mut Context, event: &Event) -> Outcome<State> {
             let _ = event;
             context.none();
             Handled
