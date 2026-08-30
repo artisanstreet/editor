@@ -335,10 +335,10 @@ fn batches_in_recovering_do_not_mutate_or_storm() {
     let effects = controller.drain_effects();
     // Each batch should report but not create new snapshot requests
     assert_eq!(effects.len(), 2);
-    assert!(effects.iter().all(|e| is_report(e)));
-    assert!(!effects.iter().any(|e| is_request(e)));
+    assert!(effects.iter().all(is_report));
+    assert!(!effects.iter().any(is_request));
     // No invalidation during recovering
-    assert!(!effects.iter().any(|e| is_invalidate(e)));
+    assert!(!effects.iter().any(is_invalidate));
 }
 
 // 6. explicit retry increments only generation and preserves recovery snapshot/cursor
@@ -439,9 +439,9 @@ fn foreign_frames_do_not_alter_phase_or_generation() {
     let effects = controller.drain_effects();
     // Both foreign frames should have produced refusal reports but no new requests or invalidations
     assert_eq!(effects.len(), 2);
-    assert!(effects.iter().all(|e| is_report(e)));
-    assert!(!effects.iter().any(|e| is_request(e)));
-    assert!(!effects.iter().any(|e| is_invalidate(e)));
+    assert!(effects.iter().all(is_report));
+    assert!(!effects.iter().any(is_request));
+    assert!(!effects.iter().any(is_invalidate));
 }
 
 // 9. close is terminal and idempotent
@@ -519,11 +519,8 @@ fn generation_exhaustion_is_typed_and_never_wraps() {
         .expect("gap to recovering at MAX");
     let effects = controller.drain_effects();
     // Should have report + request with MAX
-    assert!(effects.iter().any(|e| is_report(e)));
-    let req = effects
-        .iter()
-        .find(|e| is_request(e))
-        .expect("request at MAX");
+    assert!(effects.iter().any(is_report));
+    let req = effects.iter().find(is_request).expect("request at MAX");
     assert_eq!(request_generation(req), Some(u64::MAX));
     assert_eq!(controller.generation(), u64::MAX);
 
@@ -581,7 +578,7 @@ fn refused_snapshot_does_not_invent_recovery() {
     let effects = controller.drain_effects();
     assert_eq!(effects.len(), 1);
     assert!(is_report(&effects[0]));
-    assert!(!effects.iter().any(|e| is_request(e)));
+    assert!(!effects.iter().any(is_request));
 }
 
 // Additional: patch batches during recovering cannot emit invalidation
@@ -613,9 +610,9 @@ fn recovering_batches_do_not_invalidate() {
         ))
         .expect("batch during recovering");
     let effects = controller.drain_effects();
-    assert!(effects.iter().all(|e| is_report(e)));
-    assert!(!effects.iter().any(|e| is_invalidate(e)));
-    assert!(!effects.iter().any(|e| is_request(e)));
+    assert!(effects.iter().all(is_report));
+    assert!(!effects.iter().any(is_invalidate));
+    assert!(!effects.iter().any(is_request));
 }
 
 // Additional: view reports pending effect count without exposing mutable state
