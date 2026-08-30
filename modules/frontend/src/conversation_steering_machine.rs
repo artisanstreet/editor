@@ -556,7 +556,7 @@ pub struct SteeringInner {
     superstate(derive(Debug))
 )]
 impl SteeringInner {
-    #[state(superstate = "Superstate::active_submission")]
+    #[state(superstate = "active_submission")]
     fn pending_lip(
         &mut self,
         event: &SteeringEvent,
@@ -585,7 +585,7 @@ impl SteeringInner {
         }
     }
 
-    #[state(superstate = "Superstate::active_submission")]
+    #[state(superstate = "active_submission")]
     fn dispatching(
         &mut self,
         event: &SteeringEvent,
@@ -629,7 +629,7 @@ impl SteeringInner {
         }
     }
 
-    #[state(superstate = "Superstate::active_submission")]
+    #[state(superstate = "active_submission")]
     fn awaiting_projection(
         &mut self,
         event: &SteeringEvent,
@@ -695,7 +695,7 @@ impl SteeringInner {
         }
     }
 
-    #[state(superstate = "Superstate::active_submission")]
+    #[state(superstate = "active_submission")]
     fn awaiting_acknowledgement(
         &mut self,
         event: &SteeringEvent,
@@ -749,7 +749,7 @@ impl SteeringInner {
         }
     }
 
-    #[state(superstate = "Superstate::settled")]
+    #[state(superstate = "settled")]
     fn acknowledged(
         &mut self,
         event: &SteeringEvent,
@@ -774,7 +774,7 @@ impl SteeringInner {
         }
     }
 
-    #[state(superstate = "Superstate::settled")]
+    #[state(superstate = "settled")]
     fn failed(
         &mut self,
         event: &SteeringEvent,
@@ -797,7 +797,7 @@ impl SteeringInner {
         }
     }
 
-    #[state(superstate = "Superstate::settled")]
+    #[state(superstate = "settled")]
     fn cancelled(
         &mut self,
         event: &SteeringEvent,
@@ -825,7 +825,7 @@ impl SteeringInner {
         &mut self,
         _event: &SteeringEvent,
         _context: &mut VecDeque<SteeringEffect>,
-    ) -> Outcome<Superstate> {
+    ) -> Outcome<State> {
         Handled
     }
 
@@ -834,7 +834,7 @@ impl SteeringInner {
         &mut self,
         _event: &SteeringEvent,
         _context: &mut VecDeque<SteeringEffect>,
-    ) -> Outcome<Superstate> {
+    ) -> Outcome<State> {
         Handled
     }
 }
