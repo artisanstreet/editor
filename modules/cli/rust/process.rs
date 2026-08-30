@@ -1,18 +1,19 @@
 use std::{
-    fs::{self, OpenOptions},
-    path::Path,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant, SystemTime},
 };
 
-use fs2::FileExt;
-
 use crate::{
     CliError, Result,
+    credentials::ForgeCredentialPaths,
     error::io,
     http,
-    instance::{ForgeMode, InstanceConfig, InstancePaths, Secrets, State},
+    instance::{InstancePaths, NativeInstanceConfig, Secrets, State},
     manifest::InstallationManifest,
 };
 
@@ -21,13 +22,162 @@ const SHUTDOWN_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const INSTANCE_REGISTRY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const INSTANCE_REGISTRY_CARD_LIMIT: usize = 256;
-const PRELAUNCH_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(250);
-const PRELAUNCH_REGISTRY_CARD_LIMIT: usize = 1;
-const START_COORDINATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const START_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
-// Keep `ae start` aligned with `ae open --handoff`: a cold Forge may need up
-// to 30 seconds before its authenticated state becomes ready.
-const START_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForgeLaunchSpec {
+    executable: PathBuf,
+    argv: Vec<OsString>,
+}
+
+impl ForgeLaunchSpec {
+    pub fn new(
+        manifest: &InstallationManifest,
+        config: &NativeInstanceConfig,
+        credentials: &ForgeCredentialPaths,
+    ) -> Result<Self> {
+        validate_credential_manifest(config, credentials)?;
+
+        Ok(Self {
+            executable: manifest.forge_executable(),
+            argv: native_argv(
+                config,
+                credentials.certificate_paths(),
+                credentials.private_key_path(),
+                credentials.capability_path(),
+            ),
+        })
+    }
+
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    pub fn argv(&self) -> &[OsString] {
+        &self.argv
+    }
+}
+
+pub(crate) fn validate_credential_manifest(
+    config: &NativeInstanceConfig,
+    credentials: &ForgeCredentialPaths,
+) -> Result<()> {
+    let configured_manifest = config.credentials_manifest().to_path_buf();
+    let credential_manifest = credentials.manifest_path().to_path_buf();
+    if configured_manifest != credential_manifest {
+        return Err(CliError::CredentialManifestMismatch {
+            configured: configured_manifest,
+            credentials: credential_manifest,
+        });
+    }
+    Ok(())
+}
+
+fn native_argv(
+    config: &NativeInstanceConfig,
+    certificate_paths: &[PathBuf],
+    private_key_path: &Path,
+    capability_path: &Path,
+) -> Vec<OsString> {
+    let mut argv = Vec::with_capacity(22 + certificate_paths.len() * 2);
+    append_path(&mut argv, "--database", config.database_path());
+    append_path(&mut argv, "--custody", config.custody_path());
+    for certificate_path in certificate_paths {
+        append_path(&mut argv, "--certificate-der", certificate_path);
+    }
+    append_path(&mut argv, "--private-key-der", private_key_path);
+    append_path(&mut argv, "--bootstrap-capability", capability_path);
+    append_path(&mut argv, "--ready-file", config.readiness_path());
+    append_number(
+        &mut argv,
+        "--admission-timeout-ms",
+        config.listener().admission_timeout_ms(),
+    );
+    append_number(
+        &mut argv,
+        "--handshake-timeout-ms",
+        config.listener().handshake_timeout_ms(),
+    );
+    append_number(
+        &mut argv,
+        "--request-timeout-ms",
+        config.listener().request_timeout_ms(),
+    );
+    append_number(
+        &mut argv,
+        "--drain-timeout-ms",
+        config.listener().drain_timeout_ms(),
+    );
+    append_number(
+        &mut argv,
+        "--admission-capacity",
+        u64::from(config.listener().admission_capacity().get()),
+    );
+    append_number(
+        &mut argv,
+        "--requests-per-connection",
+        u64::from(config.listener().requests_per_connection().get()),
+    );
+    argv
+}
+
+fn append_path(argv: &mut Vec<OsString>, option: &str, path: &Path) {
+    argv.push(OsString::from(option));
+    argv.push(path.as_os_str().to_os_string());
+}
+
+fn append_number(argv: &mut Vec<OsString>, option: &str, value: u64) {
+    argv.push(OsString::from(option));
+    argv.push(value.to_string().into());
+}
+
+fn forge_command(spec: &ForgeLaunchSpec) -> Command {
+    let mut command = Command::new(spec.executable());
+    command.args(spec.argv());
+    configure_native_environment(&mut command);
+    command
+}
+
+fn configure_native_environment(command: &mut Command) {
+    configure_environment(command, env::vars_os());
+}
+
+fn configure_environment<I>(command: &mut Command, variables: I)
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    command.env_clear();
+    for (key, value) in variables {
+        if !is_forbidden_environment_key(&key) {
+            command.env(key, value);
+        }
+    }
+}
+
+fn is_forbidden_environment_key(key: &OsStr) -> bool {
+    starts_with_ascii_case_insensitive(key, b"ARTISAN_")
+        || starts_with_ascii_case_insensitive(key, b"NODE")
+        || starts_with_ascii_case_insensitive(key, b"ELECTRON")
+        || key
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(b"CODEX_SQLITE_HOME")
+}
+
+fn starts_with_ascii_case_insensitive(value: &OsStr, prefix: &[u8]) -> bool {
+    value
+        .as_encoded_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn ensure_forge_executable(spec: &ForgeLaunchSpec) -> Result<()> {
+    if spec.executable().is_file() {
+        return Ok(());
+    }
+    Err(CliError::Installation(format!(
+        "Forge binary is missing at {}",
+        spec.executable().display()
+    )))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartResult {
@@ -36,92 +186,25 @@ pub enum StartResult {
     ForegroundExited,
 }
 
-pub fn start(
-    manifest: &InstallationManifest,
-    paths: &InstancePaths,
-    config: &InstanceConfig,
-    secrets: &Secrets,
-    foreground: bool,
-) -> Result<StartResult> {
-    start_until(
-        manifest,
-        paths,
-        config,
-        secrets,
-        foreground,
-        Instant::now() + START_READY_TIMEOUT,
-    )
+pub fn start(spec: &ForgeLaunchSpec, foreground: bool) -> Result<StartResult> {
+    if foreground {
+        start_foreground(spec)
+    } else {
+        spawn_background_forge(spec).map(|pid| StartResult::Spawned { pid })
+    }
 }
 
 pub fn start_until(
-    manifest: &InstallationManifest,
-    paths: &InstancePaths,
-    config: &InstanceConfig,
-    secrets: &Secrets,
+    spec: &ForgeLaunchSpec,
     foreground: bool,
-    health_deadline: Instant,
+    _health_deadline: Instant,
 ) -> Result<StartResult> {
-    if foreground {
-        let discovery_deadline = prelaunch_discovery_deadline(Instant::now(), health_deadline);
-        if prelaunch_live_state_until(paths, secrets, discovery_deadline)?.is_some() {
-            return Ok(StartResult::AlreadyRunning);
-        }
-        return start_foreground(manifest, paths, config, secrets);
-    }
-
-    with_start_coordination(paths, health_deadline, || {
-        // Every background caller decides liveness while holding the home-local
-        // launch lease. A concurrent caller therefore re-probes after the first
-        // launch becomes ready instead of authorizing a second process.
-        let discovery_deadline = prelaunch_discovery_deadline(Instant::now(), health_deadline);
-        if prelaunch_live_state_until(paths, secrets, discovery_deadline)?.is_some() {
-            return Ok(StartResult::AlreadyRunning);
-        }
-        ensure_background_start_deadline(health_deadline)?;
-        let pid = spawn_background_forge(manifest, paths, config, secrets)?;
-        wait_until_ready(paths, secrets, health_deadline)?;
-        Ok(StartResult::Spawned { pid })
-    })
+    start(spec, foreground)
 }
 
-fn start_foreground(
-    manifest: &InstallationManifest,
-    paths: &InstancePaths,
-    config: &InstanceConfig,
-    secrets: &Secrets,
-) -> Result<StartResult> {
-    let executable = manifest.forge_executable();
-    let broker = manifest.broker_executable();
-    let forge_root = manifest.version_root().join("forge");
-    let legacy_host_entry = forge_root.join("host.js");
-    if !executable.is_file() {
-        return Err(CliError::Installation(format!(
-            "Forge binary is missing at {}",
-            executable.display()
-        )));
-    }
-    if !broker.is_file() {
-        return Err(CliError::Installation(format!(
-            "Artisan Broker is missing at {}",
-            broker.display()
-        )));
-    }
-    fs::create_dir_all(&config.data_root).map_err(io("create Forge data directory"))?;
-    let mut command = Command::new(executable);
-    let legacy_launcher = legacy_host_entry.is_file();
-    if legacy_launcher {
-        command.arg(&legacy_host_entry);
-    }
-    configure_forge_environment(
-        &mut command,
-        paths,
-        config,
-        secrets,
-        &forge_root,
-        legacy_launcher,
-    );
-    configure_broker_environment(&mut command, &broker);
-    let status = command.status().map_err(io("start Forge"))?;
+fn start_foreground(spec: &ForgeLaunchSpec) -> Result<StartResult> {
+    ensure_forge_executable(spec)?;
+    let status = forge_command(spec).status().map_err(io("start Forge"))?;
     if status.success() {
         Ok(StartResult::ForegroundExited)
     } else {
@@ -129,229 +212,15 @@ fn start_foreground(
     }
 }
 
-fn spawn_background_forge(
-    manifest: &InstallationManifest,
-    paths: &InstancePaths,
-    config: &InstanceConfig,
-    secrets: &Secrets,
-) -> Result<u32> {
-    let executable = manifest.forge_executable();
-    let broker = manifest.broker_executable();
-    let forge_root = manifest.version_root().join("forge");
-    let legacy_host_entry = forge_root.join("host.js");
-    if !executable.is_file() {
-        return Err(CliError::Installation(format!(
-            "Forge binary is missing at {}",
-            executable.display()
-        )));
-    }
-    if !broker.is_file() {
-        return Err(CliError::Installation(format!(
-            "Artisan Broker is missing at {}",
-            broker.display()
-        )));
-    }
-    fs::create_dir_all(&config.data_root).map_err(io("create Forge data directory"))?;
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&paths.log)
-        .map_err(io("open Forge log"))?;
-    let mut command = Command::new(executable);
-    let legacy_launcher = legacy_host_entry.is_file();
-    if legacy_launcher {
-        command.arg(&legacy_host_entry);
-    }
-    configure_forge_environment(
-        &mut command,
-        paths,
-        config,
-        secrets,
-        &forge_root,
-        legacy_launcher,
-    );
-    configure_broker_environment(&mut command, &broker);
+fn spawn_background_forge(spec: &ForgeLaunchSpec) -> Result<u32> {
+    ensure_forge_executable(spec)?;
+    let mut command = forge_command(spec);
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone().map_err(io("clone Forge log"))?))
-        .stderr(Stdio::from(log));
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     detach(&mut command);
     Ok(command.spawn().map_err(io("start Forge"))?.id())
-}
-
-fn wait_until_ready(paths: &InstancePaths, secrets: &Secrets, deadline: Instant) -> Result<()> {
-    while Instant::now() < deadline {
-        if live_state_until(
-            paths,
-            secrets,
-            None,
-            probe_deadline(deadline, INSTANCE_REGISTRY_PROBE_TIMEOUT),
-        )?
-        .is_some()
-        {
-            return Ok(());
-        }
-        sleep_until(deadline, START_READY_POLL_INTERVAL);
-    }
-    Err(CliError::Control("Forge did not become ready".into()))
-}
-
-fn with_start_coordination<T>(
-    paths: &InstancePaths,
-    deadline: Instant,
-    operation: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    let root = paths
-        .state
-        .parent()
-        .ok_or_else(|| CliError::UnsafePath(paths.state.clone()))?;
-    let lock_path = root.join(".forge-start.lock");
-    match fs::symlink_metadata(&lock_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(CliError::UnsafePath(lock_path));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(CliError::Io {
-                context: "inspect Forge start lock",
-                source,
-            });
-        }
-    }
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let lock = options
-        .open(&lock_path)
-        .map_err(io("open Forge start lock"))?;
-    loop {
-        match FileExt::try_lock_exclusive(&lock) {
-            Ok(()) => break,
-            Err(error) if start_lock_is_contended(&error) && Instant::now() < deadline => {
-                sleep_until(deadline, START_COORDINATION_POLL_INTERVAL);
-            }
-            Err(error) if start_lock_is_contended(&error) => {
-                return Err(CliError::Control(
-                    "Forge start coordination timed out".into(),
-                ));
-            }
-            Err(source) => {
-                return Err(CliError::Io {
-                    context: "lock Forge start coordination",
-                    source,
-                });
-            }
-        }
-    }
-    operation()
-}
-
-fn start_lock_is_contended(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // fs2 preserves LockFileEx's ERROR_LOCK_VIOLATION instead of mapping it
-        // to WouldBlock on Windows.
-        error.raw_os_error() == Some(33)
-    }
-    #[cfg(not(target_os = "windows"))]
-    false
-}
-
-fn ensure_background_start_deadline(deadline: Instant) -> Result<()> {
-    if background_start_can_continue(Instant::now(), deadline) {
-        Ok(())
-    } else {
-        Err(CliError::Control(
-            "Forge start timed out before background launch".into(),
-        ))
-    }
-}
-
-fn background_start_can_continue(now: Instant, deadline: Instant) -> bool {
-    now < deadline
-}
-
-fn prelaunch_discovery_deadline(now: Instant, health_deadline: Instant) -> Instant {
-    health_deadline.min(now + PRELAUNCH_DISCOVERY_TIMEOUT)
-}
-
-fn configure_forge_environment(
-    command: &mut Command,
-    paths: &InstancePaths,
-    config: &InstanceConfig,
-    secrets: &Secrets,
-    forge_root: &Path,
-    legacy_launcher: bool,
-) {
-    command
-        .env("ARTISAN_AUTH_TOKEN", &secrets.auth_token)
-        .env(
-            "ARTISAN_DATABASE_PATH",
-            config.data_root.join("artisan.sqlite"),
-        )
-        .env("CODEX_SQLITE_HOME", config.data_root.join("codex-sqlite"))
-        .env("ARTISAN_FORGE_STATE_PATH", &paths.state)
-        .env("ARTISAN_FORGE_LOG_PATH", &paths.log)
-        .env(
-            "ARTISAN_TELEMETRY_CONFIG_PATH",
-            paths.config.with_file_name("telemetry.json"),
-        )
-        .env(
-            "ARTISAN_FORGE_MODE",
-            match config.mode {
-                ForgeMode::Local => "local",
-                ForgeMode::Headless => "headless",
-            },
-        )
-        .env("ARTISAN_LISTEN_HOST", &config.listen_host)
-        .env("ARTISAN_LISTEN_PORT", config.listen_port.to_string());
-    if legacy_launcher {
-        configure_legacy_node_launcher(command, forge_root);
-    }
-    // Web hosting is a development capability. Without the flag, Forge
-    // exposes only its health and control/WS surfaces and SPA routes 404.
-    if config.serve_frontend {
-        command.env("ARTISAN_STATIC_FRONTEND_ROOT", forge_root.join("frontend"));
-    }
-}
-
-fn configure_broker_environment(command: &mut Command, broker: &Path) {
-    command
-        .env("ARTISAN_BROKER_PATH", broker)
-        .env("ARTISAN_BROKER_REQUIRED", "1");
-}
-
-/// Supports installations from before Forge became a self-contained Node SEA.
-/// New release payloads deliberately omit this entire loose Node runtime shape.
-fn configure_legacy_node_launcher(command: &mut Command, forge_root: &Path) {
-    let native_runtime = forge_root.join("native-runtime");
-    command
-        .env("ARTISAN_MIGRATIONS_PATH", forge_root.join("migrations"))
-        .env("ARTISAN_NODE_EXECUTABLE", forge_root.join(node_name()))
-        .env(
-            "ARTISAN_WINDOWS_PROCESS_HOST",
-            forge_root.join("windows-process-host.js"),
-        )
-        .env("ARTISAN_NATIVE_RUNTIME", &native_runtime)
-        .env("NODE_PATH", &native_runtime);
-}
-
-#[cfg(target_os = "windows")]
-const fn node_name() -> &'static str {
-    "node.exe"
-}
-
-#[cfg(not(target_os = "windows"))]
-const fn node_name() -> &'static str {
-    "node"
 }
 
 #[cfg(target_os = "windows")]
@@ -472,9 +341,8 @@ fn stop_state(state: &State, secrets: &Secrets, deadline: Instant) -> Result<()>
 
 /// Resolves this home's live Forge through its mutable state first, then the
 /// machine registry card the Forge itself owns. The native `ae` binary is the
-/// lifecycle boundary even when `state.json` was lost: Effect's filesystem and
-/// process services live inside Forge's Node runtime and cannot repair the
-/// permanent Rust CLI that must start it on a clean machine.
+/// lifecycle boundary even when `state.json` was lost; a registry card cannot
+/// repair the permanent Rust CLI that must start Forge on a clean machine.
 pub fn live_state_until(
     paths: &InstancePaths,
     secrets: &Secrets,
@@ -498,21 +366,6 @@ fn live_state_selected_until(
         expected_pid,
         deadline,
         INSTANCE_REGISTRY_CARD_LIMIT,
-    )
-}
-
-fn prelaunch_live_state_until(
-    paths: &InstancePaths,
-    secrets: &Secrets,
-    deadline: Instant,
-) -> Result<Option<State>> {
-    live_state_selected_bounded_until(
-        paths,
-        secrets,
-        None,
-        None,
-        deadline,
-        PRELAUNCH_REGISTRY_CARD_LIMIT,
     )
 }
 
@@ -703,128 +556,258 @@ fn should_stop_instance(expected_instance_id: Option<&str>, actual_instance_id: 
 #[cfg(test)]
 mod tests {
     use std::{
-        ffi::OsStr,
+        ffi::{OsStr, OsString},
         fs,
         io::{Read, Write},
         net::TcpListener,
+        num::NonZeroU32,
         path::{Path, PathBuf},
-        sync::{
-            Arc, Barrier,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
         thread,
         time::{Duration, Instant},
     };
 
     use super::{
-        Command, InstanceConfig, InstancePaths, SHUTDOWN_POLL_INTERVAL, SHUTDOWN_PROBE_TIMEOUT,
-        SHUTDOWN_TIMEOUT, START_READY_POLL_INTERVAL, START_READY_TIMEOUT, Secrets,
-        background_start_can_continue, configure_broker_environment, configure_forge_environment,
-        ensure_idle_for_shutdown, live_state_selected_until, live_state_until,
-        prelaunch_discovery_deadline, registered_states, should_stop_instance,
-        with_start_coordination,
+        Command, ForgeLaunchSpec, SHUTDOWN_POLL_INTERVAL, SHUTDOWN_PROBE_TIMEOUT, SHUTDOWN_TIMEOUT,
+        configure_environment, ensure_idle_for_shutdown, is_forbidden_environment_key,
+        live_state_selected_until, native_argv, registered_states, should_stop_instance,
     };
-    use crate::instance::ForgeMode;
-    use crate::{CliError, http::StatusResponse};
 
-    fn test_instance(serve_frontend: bool) -> (InstancePaths, InstanceConfig, Secrets) {
-        let home = PathBuf::from("C:/artisan-home");
-        (
-            InstancePaths {
-                config: home.join("config.json"),
-                secrets: home.join("secrets.json"),
-                state: home.join("state.json"),
-                log: home.join("forge.log"),
-            },
-            InstanceConfig {
-                data_root: home.join("data"),
-                listen_host: "127.0.0.1".into(),
-                listen_port: 0,
-                mode: ForgeMode::Local,
-                serve_frontend,
-                version: 1,
-            },
-            Secrets {
-                auth_token: "token".into(),
-                version: 1,
-            },
+    use crate::{
+        CliError,
+        credentials::ForgeCredentialPaths,
+        http::StatusResponse,
+        instance::{InstancePaths, NativeInstanceConfig, NativeListenerConfig, Secrets},
+        manifest::InstallationManifest,
+    };
+
+    fn test_native_config(home: &Path, credentials_manifest: &Path) -> NativeInstanceConfig {
+        NativeInstanceConfig::new(
+            home.join("data").join("forge.sqlite3"),
+            home.join("custody").join("forge.lock"),
+            home.join("readiness").join("forge.json"),
+            credentials_manifest.to_path_buf(),
+            NativeListenerConfig::new(
+                11,
+                12,
+                13,
+                14,
+                NonZeroU32::new(3).unwrap(),
+                NonZeroU32::new(4).unwrap(),
+            ),
         )
+        .unwrap()
     }
 
-    /// Installed-home gate: without the explicit development flag, the
-    /// launched Forge never receives a static frontend root, so it cannot
-    /// host the web renderer.
+    fn test_manifest() -> InstallationManifest {
+        InstallationManifest {
+            activation_state: "active".into(),
+            active_version: Some("1.2.3".into()),
+            install_root: if cfg!(windows) {
+                PathBuf::from(r"C:\Users\Ada\Artisan Street")
+            } else {
+                PathBuf::from("/opt/Artisan Street")
+            },
+            permanent_ae_path: None,
+        }
+    }
+
+    fn test_launch_spec() -> ForgeLaunchSpec {
+        let home = tempfile::tempdir().unwrap();
+        let credentials = ForgeCredentialPaths::from_home(home.path()).unwrap();
+        let config = test_native_config(home.path(), credentials.manifest_path());
+        ForgeLaunchSpec::new(&test_manifest(), &config, &credentials).unwrap()
+    }
+
     #[test]
-    fn static_hosting_is_absent_unless_the_home_opts_in() {
-        let forge_root = Path::new("C:/Artisan/versions/1.0.0/forge");
-        let (paths, config, secrets) = test_instance(false);
+    fn native_launch_spec_uses_the_versioned_forge_and_exact_argv() {
+        let spec = test_launch_spec();
+        assert_eq!(spec.executable, test_manifest().forge_executable());
+        assert_eq!(spec.argv.len(), 24);
+        assert_eq!(spec.argv[0], OsString::from("--database"));
+        assert_eq!(spec.argv[2], OsString::from("--custody"));
+        assert_eq!(spec.argv[4], OsString::from("--certificate-der"));
+        assert_eq!(spec.argv[6], OsString::from("--private-key-der"));
+        assert_eq!(spec.argv[8], OsString::from("--bootstrap-capability"));
+        assert_eq!(spec.argv[10], OsString::from("--ready-file"));
+        assert_eq!(spec.argv[12], OsString::from("--admission-timeout-ms"));
+        assert_eq!(spec.argv[14], OsString::from("--handshake-timeout-ms"));
+        assert_eq!(spec.argv[16], OsString::from("--request-timeout-ms"));
+        assert_eq!(spec.argv[18], OsString::from("--drain-timeout-ms"));
+        assert_eq!(spec.argv[20], OsString::from("--admission-capacity"));
+        assert_eq!(spec.argv[21], OsString::from("3"));
+        assert_eq!(spec.argv[22], OsString::from("--requests-per-connection"));
+        assert_eq!(spec.argv[23], OsString::from("4"));
+    }
+
+    #[test]
+    fn native_argv_preserves_repeated_certificate_order_and_os_paths() {
+        let home = tempfile::tempdir().unwrap();
+        let credentials = ForgeCredentialPaths::from_home(home.path()).unwrap();
+        let config = test_native_config(home.path(), credentials.manifest_path());
+        let certificates = vec![
+            home.path().join("Artisan Street").join("leaf.der"),
+            home.path().join("Artisan Street").join("intermediate.der"),
+        ];
+        let argv = native_argv(
+            &config,
+            &certificates,
+            credentials.private_key_path(),
+            credentials.capability_path(),
+        );
+
+        let mut expected = Vec::new();
+        for (option, path) in [
+            ("--database", config.database_path()),
+            ("--custody", config.custody_path()),
+        ] {
+            expected.push(OsString::from(option));
+            expected.push(path.as_os_str().to_os_string());
+        }
+        for certificate in &certificates {
+            expected.push(OsString::from("--certificate-der"));
+            expected.push(certificate.as_os_str().to_os_string());
+        }
+        for (option, path) in [
+            ("--private-key-der", credentials.private_key_path()),
+            ("--bootstrap-capability", credentials.capability_path()),
+            ("--ready-file", config.readiness_path()),
+        ] {
+            expected.push(OsString::from(option));
+            expected.push(path.as_os_str().to_os_string());
+        }
+        expected.extend([
+            OsString::from("--admission-timeout-ms"),
+            OsString::from("11"),
+            OsString::from("--handshake-timeout-ms"),
+            OsString::from("12"),
+            OsString::from("--request-timeout-ms"),
+            OsString::from("13"),
+            OsString::from("--drain-timeout-ms"),
+            OsString::from("14"),
+            OsString::from("--admission-capacity"),
+            OsString::from("3"),
+            OsString::from("--requests-per-connection"),
+            OsString::from("4"),
+        ]);
+        assert_eq!(argv, expected);
+    }
+
+    #[test]
+    fn foreground_and_background_commands_share_the_same_executable_and_argv() {
+        let spec = test_launch_spec();
+        let foreground = super::forge_command(&spec);
+        let mut background = super::forge_command(&spec);
+        background
+            .stdin(super::Stdio::null())
+            .stdout(super::Stdio::null())
+            .stderr(super::Stdio::null());
+
+        assert_eq!(foreground.get_program(), background.get_program());
+        assert_eq!(
+            foreground.get_args().collect::<Vec<_>>(),
+            background.get_args().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn credential_manifest_mismatch_is_a_typed_launch_error() {
+        let home = tempfile::tempdir().unwrap();
+        let credentials = ForgeCredentialPaths::from_home(home.path()).unwrap();
+        let config = test_native_config(home.path(), &home.path().join("other-manifest.json"));
+        assert!(matches!(
+            ForgeLaunchSpec::new(&test_manifest(), &config, &credentials),
+            Err(CliError::CredentialManifestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn native_forge_launch_drops_legacy_arguments_and_environment() {
+        let spec = test_launch_spec();
+        for forbidden in [
+            "--listen-port",
+            "--listen-host",
+            "--host",
+            "--mode",
+            "--static-root",
+            "--token",
+            "--state",
+            "--database-path",
+            "--broker",
+            "--node",
+        ] {
+            assert!(
+                !spec
+                    .argv
+                    .iter()
+                    .any(|argument| argument.as_os_str() == OsStr::new(forbidden))
+            );
+        }
+        assert!(
+            super::forge_command(&spec)
+                .get_envs()
+                .all(|(key, _)| !is_forbidden_environment_key(key))
+        );
+
         let mut command = Command::new("forge");
-        configure_forge_environment(&mut command, &paths, &config, &secrets, forge_root, false);
+        configure_environment(
+            &mut command,
+            [
+                (OsString::from("PATH"), OsString::from("safe")),
+                (OsString::from("ARTISAN_HOME"), OsString::from("legacy")),
+                (
+                    OsString::from("ARTISAN_AUTH_TOKEN"),
+                    OsString::from("secret"),
+                ),
+                (
+                    OsString::from("ARTISAN_DATABASE_PATH"),
+                    OsString::from("legacy.db"),
+                ),
+                (
+                    OsString::from("ARTISAN_FORGE_STATE_PATH"),
+                    OsString::from("legacy.state"),
+                ),
+                (
+                    OsString::from("ARTISAN_LISTEN_HOST"),
+                    OsString::from("127.0.0.1"),
+                ),
+                (
+                    OsString::from("ARTISAN_LISTEN_PORT"),
+                    OsString::from("4317"),
+                ),
+                (
+                    OsString::from("ARTISAN_FORGE_MODE"),
+                    OsString::from("local"),
+                ),
+                (
+                    OsString::from("ARTISAN_BROKER_PATH"),
+                    OsString::from("legacy-broker"),
+                ),
+                (
+                    OsString::from("ARTISAN_NODE_EXECUTABLE"),
+                    OsString::from("legacy-node"),
+                ),
+                (
+                    OsString::from("ARTISAN_STATIC_FRONTEND_ROOT"),
+                    OsString::from("legacy.frontend"),
+                ),
+                (OsString::from("NODE_PATH"), OsString::from("legacy.node")),
+                (OsString::from("ELECTRON_RUN_AS_NODE"), OsString::from("1")),
+                (
+                    OsString::from("CODEX_SQLITE_HOME"),
+                    OsString::from("legacy.sqlite"),
+                ),
+            ],
+        );
         assert!(
             command
                 .get_envs()
-                .all(|(key, _)| key != OsStr::new("ARTISAN_STATIC_FRONTEND_ROOT"))
+                .any(|(key, value)| key == OsStr::new("PATH") && value == Some(OsStr::new("safe")))
         );
-
-        let (paths, config, secrets) = test_instance(true);
-        let mut serving = Command::new("forge");
-        configure_forge_environment(&mut serving, &paths, &config, &secrets, forge_root, false);
-        assert!(serving.get_envs().any(|(key, value)| {
-            key == OsStr::new("ARTISAN_STATIC_FRONTEND_ROOT")
-                && value.is_some_and(|path| Path::new(path).ends_with("frontend"))
-        }));
-    }
-
-    #[test]
-    fn sea_launch_environment_has_no_loose_node_runtime_dependencies() {
-        let mut command = Command::new("forge");
-        let forge_root = Path::new("C:/Artisan/forge");
-        let (paths, config, secrets) = test_instance(false);
-
-        configure_forge_environment(&mut command, &paths, &config, &secrets, forge_root, false);
-
-        let environment = command.get_envs().collect::<Vec<_>>();
-        for name in [
-            "ARTISAN_MIGRATIONS_PATH",
-            "ARTISAN_NATIVE_RUNTIME",
-            "ARTISAN_NODE_EXECUTABLE",
-            "ARTISAN_WINDOWS_PROCESS_HOST",
-            "NODE_PATH",
-        ] {
-            assert!(environment.iter().all(|(key, _)| *key != OsStr::new(name)));
-        }
-    }
-
-    #[test]
-    fn installed_launch_requires_the_versioned_broker() {
-        let mut command = Command::new("forge");
-        let broker = Path::new("C:/Artisan/forge/Artisan Broker.exe");
-        configure_broker_environment(&mut command, broker);
-        assert!(command.get_envs().any(|(key, value)| {
-            key == OsStr::new("ARTISAN_BROKER_PATH")
-                && value.is_some_and(|path| path == broker.as_os_str())
-        }));
-        assert!(command.get_envs().any(|(key, value)| {
-            key == OsStr::new("ARTISAN_BROKER_REQUIRED")
-                && value.is_some_and(|marker| marker == OsStr::new("1"))
-        }));
-    }
-
-    #[test]
-    fn legacy_host_installations_keep_their_node_launcher_environment() {
-        let mut command = Command::new("forge");
-        let forge_root = Path::new("C:/Artisan/forge");
-        let native_runtime = forge_root.join("native-runtime");
-        let (paths, config, secrets) = test_instance(false);
-
-        configure_forge_environment(&mut command, &paths, &config, &secrets, forge_root, true);
-
-        let environment = command.get_envs().collect::<Vec<_>>();
-        for name in ["ARTISAN_NATIVE_RUNTIME", "NODE_PATH"] {
-            assert!(environment.iter().any(|(key, value)| {
-                *key == OsStr::new(name) && value.as_deref() == Some(native_runtime.as_os_str())
-            }));
-        }
+        assert!(
+            command
+                .get_envs()
+                .all(|(key, _)| !is_forbidden_environment_key(key))
+        );
     }
 
     #[test]
@@ -885,129 +868,6 @@ mod tests {
         assert!(SHUTDOWN_TIMEOUT <= Duration::from_secs(20));
         assert!(SHUTDOWN_PROBE_TIMEOUT < SHUTDOWN_TIMEOUT);
         assert!(SHUTDOWN_POLL_INTERVAL < SHUTDOWN_TIMEOUT);
-    }
-
-    #[test]
-    fn default_background_start_allows_the_installed_cold_start_budget() {
-        assert_eq!(START_READY_TIMEOUT, Duration::from_secs(30));
-        assert!(START_READY_POLL_INTERVAL < START_READY_TIMEOUT);
-    }
-
-    #[test]
-    fn background_start_never_continues_at_or_after_its_deadline() {
-        let now = Instant::now();
-        assert!(background_start_can_continue(
-            now,
-            now + Duration::from_millis(1)
-        ));
-        assert!(!background_start_can_continue(now, now));
-    }
-
-    #[test]
-    fn prelaunch_discovery_cannot_consume_the_readiness_budget() {
-        let now = Instant::now();
-        let readiness_deadline = now + Duration::from_secs(15);
-        assert_eq!(
-            prelaunch_discovery_deadline(now, readiness_deadline),
-            now + Duration::from_millis(250)
-        );
-    }
-
-    #[test]
-    fn prelaunch_discovery_accepts_an_authenticated_status_slower_than_the_old_cutoff() {
-        let live_pid = std::process::id();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = thread::spawn(move || {
-            let (mut connection, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2048];
-            let read = connection.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
-            assert!(request.contains("GET /api/control/status"));
-            assert!(request.contains("Authorization: Bearer delayed-token"));
-            thread::sleep(Duration::from_millis(150));
-            let body = format!(r#"{{"instance_id":"forge_delayed","pid":{live_pid}}}"#);
-            connection
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                )
-                .unwrap();
-        });
-        let root = tempfile::tempdir().unwrap();
-        let paths = InstancePaths {
-            config: root.path().join("config.json"),
-            secrets: root.path().join("secrets.json"),
-            state: root.path().join("state.json"),
-            log: root.path().join("forge.log"),
-        };
-        fs::write(
-            &paths.state,
-            format!(
-                r#"{{"endpoint":"http://127.0.0.1:{port}/","instance_id":"forge_delayed","pid":{live_pid}}}"#
-            ),
-        )
-        .unwrap();
-        let secrets = Secrets {
-            auth_token: "delayed-token".into(),
-            version: 1,
-        };
-        let now = Instant::now();
-
-        let state = live_state_until(
-            &paths,
-            &secrets,
-            None,
-            prelaunch_discovery_deadline(now, now + Duration::from_secs(15)),
-        )
-        .unwrap()
-        .expect("delayed authenticated state");
-
-        assert_eq!(state.instance_id, "forge_delayed");
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn start_coordination_serializes_reprobe_before_one_spawn() {
-        let root = tempfile::tempdir().unwrap();
-        let paths = InstancePaths {
-            config: root.path().join("config.json"),
-            secrets: root.path().join("secrets.json"),
-            state: root.path().join("state.json"),
-            log: root.path().join("forge.log"),
-        };
-        let ready = Arc::new(AtomicBool::new(false));
-        let spawn_count = Arc::new(AtomicUsize::new(0));
-        let start_gate = Arc::new(Barrier::new(3));
-        let mut workers = Vec::new();
-
-        for _ in 0..2 {
-            let paths = paths.clone();
-            let ready = Arc::clone(&ready);
-            let spawn_count = Arc::clone(&spawn_count);
-            let start_gate = Arc::clone(&start_gate);
-            workers.push(thread::spawn(move || {
-                start_gate.wait();
-                with_start_coordination(&paths, Instant::now() + Duration::from_secs(2), || {
-                    if !ready.load(Ordering::SeqCst) {
-                        thread::sleep(Duration::from_millis(50));
-                        spawn_count.fetch_add(1, Ordering::SeqCst);
-                        ready.store(true, Ordering::SeqCst);
-                    }
-                    Ok(())
-                })
-                .unwrap();
-            }));
-        }
-        start_gate.wait();
-        for worker in workers {
-            worker.join().unwrap();
-        }
-
-        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]

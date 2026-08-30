@@ -1,6 +1,7 @@
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{Read, Seek, SeekFrom},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -11,9 +12,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::{
     CliError, Result,
+    credentials::{self, ForgeCredentialPaths},
     error::io,
     http::{self, PairResponse},
-    instance::{self, ForgeMode, State},
+    instance::{self, NativeInstanceConfig, NativeListenerConfig, State},
     manifest::InstallationManifest,
     paths::Layout,
     payload, process,
@@ -46,18 +48,26 @@ pub enum Commands {
     },
     /// Explicitly create or update this home's Forge configuration.
     Setup {
-        #[arg(long, default_value_t = 0)]
-        listen_port: u16,
-        #[arg(long, value_enum, default_value_t = Mode::Local)]
-        mode: Mode,
-        #[arg(long)]
-        data_root: Option<PathBuf>,
+        #[arg(long, required = true, value_name = "PATH")]
+        database_path: PathBuf,
+        #[arg(long, required = true, value_name = "PATH")]
+        custody_path: PathBuf,
+        #[arg(long, required = true, value_name = "PATH")]
+        readiness_path: PathBuf,
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
+        admission_timeout_ms: u64,
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
+        handshake_timeout_ms: u64,
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
+        request_timeout_ms: u64,
+        #[arg(long, required = true, value_parser = parse_positive_u64)]
+        drain_timeout_ms: u64,
+        #[arg(long, required = true, value_parser = parse_nonzero_u32)]
+        admission_capacity: NonZeroU32,
+        #[arg(long, required = true, value_parser = parse_nonzero_u32)]
+        requests_per_connection: NonZeroU32,
         #[arg(long)]
         autostart: bool,
-        /// Serve the bundled web frontend from this Forge (development homes
-        /// only; installed homes render through the editor).
-        #[arg(long)]
-        serve_frontend: bool,
     },
     Start {
         #[arg(long)]
@@ -169,22 +179,6 @@ impl From<TelemetryChoice> for Preference {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
-pub enum Mode {
-    #[default]
-    Local,
-    Headless,
-}
-
-impl From<Mode> for ForgeMode {
-    fn from(value: Mode) -> Self {
-        match value {
-            Mode::Local => Self::Local,
-            Mode::Headless => Self::Headless,
-        }
-    }
-}
-
 pub fn run(cli: Cli) -> Result<()> {
     let layout = Layout::discover()?;
     match cli.command.unwrap_or(Commands::Open {
@@ -194,20 +188,33 @@ pub fn run(cli: Cli) -> Result<()> {
     }) {
         Commands::Protocol { url } => handle_protocol(&layout, &url),
         Commands::Setup {
-            listen_port,
-            mode,
-            data_root,
+            database_path,
+            custody_path,
+            readiness_path,
+            admission_timeout_ms,
+            handshake_timeout_ms,
+            request_timeout_ms,
+            drain_timeout_ms,
+            admission_capacity,
+            requests_per_connection,
             autostart,
-            serve_frontend,
         } => {
             require_installation(&layout)?;
-            let data_root = data_root.as_deref().map(validate_data_root).transpose()?;
-            instance::setup(
+            setup_native(
                 &layout,
-                mode.into(),
-                listen_port,
-                data_root.as_deref(),
-                serve_frontend,
+                NativeSetupValues {
+                    database_path,
+                    custody_path,
+                    readiness_path,
+                    listener: NativeListenerConfig::new(
+                        admission_timeout_ms,
+                        handshake_timeout_ms,
+                        request_timeout_ms,
+                        drain_timeout_ms,
+                        admission_capacity,
+                        requests_per_connection,
+                    ),
+                },
             )?;
             delegate_installer(&layout, "repair", false)?;
             if autostart {
@@ -304,11 +311,75 @@ fn require_installation(layout: &Layout) -> Result<InstallationManifest> {
     InstallationManifest::load(&layout.manifest)
 }
 
+#[derive(Debug)]
+struct NativeSetupValues {
+    database_path: PathBuf,
+    custody_path: PathBuf,
+    readiness_path: PathBuf,
+    listener: NativeListenerConfig,
+}
+
+fn parse_nonzero_u32(value: &str) -> std::result::Result<NonZeroU32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|_| "must be a positive 32-bit integer".to_owned())?;
+    NonZeroU32::new(value).ok_or_else(|| "must be greater than zero".to_owned())
+}
+
+fn parse_positive_u64(value: &str) -> std::result::Result<u64, String> {
+    let value = value
+        .parse::<u64>()
+        .map_err(|_| "must be a positive 64-bit integer".to_owned())?;
+    if value == 0 {
+        return Err("must be greater than zero".to_owned());
+    }
+    Ok(value)
+}
+
+fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {
+    let credential_paths = ForgeCredentialPaths::from_home(&layout.root)?;
+    let config = NativeInstanceConfig::new(
+        values.database_path,
+        values.custody_path,
+        values.readiness_path,
+        credential_paths.manifest_path().to_path_buf(),
+        values.listener,
+    )?;
+    fs::create_dir_all(&layout.root).map_err(io("create Artisan home directory"))?;
+    let provisioned = credentials::provision_or_load(&layout.root)?;
+    process::validate_credential_manifest(&config, &provisioned)?;
+    config.write_to_home(&layout.root)?;
+    Ok(())
+}
+
+fn load_native_instance(layout: &Layout) -> Result<NativeInstanceConfig> {
+    let path = layout.native_instance_path();
+    match fs::symlink_metadata(&path) {
+        Ok(_) => instance::load_native_config(&path).map_err(CliError::NativeInstance),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(CliError::MissingInstance)
+        }
+        Err(source) => Err(CliError::Io {
+            context: "inspect native Forge instance",
+            source,
+        }),
+    }
+}
+
+fn native_launch_spec(
+    layout: &Layout,
+    manifest: &InstallationManifest,
+) -> Result<process::ForgeLaunchSpec> {
+    let config = load_native_instance(layout)?;
+    let credentials = credentials::provision_or_load(&layout.root)?;
+    process::ForgeLaunchSpec::new(manifest, &config, &credentials)
+}
+
 fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
     let manifest = require_installation(layout)?;
     telemetry::load_or_create(layout)?;
-    let (paths, config, secrets) = instance::load(layout)?;
-    process::start(&manifest, &paths, &config, &secrets, foreground)
+    let spec = native_launch_spec(layout, &manifest)?;
+    process::start(&spec, foreground)
 }
 
 fn stop(layout: &Layout, instance_id: Option<&str>) -> Result<()> {
@@ -767,8 +838,7 @@ struct ReadyState {
 fn ready_state(layout: &Layout) -> Result<ReadyState> {
     let deadline = std::time::Instant::now() + FORGE_READY_TIMEOUT;
     // An already-healthy Forge needs no launch, so opening against one works
-    // even in homes without an installation manifest (the repo development
-    // Forge runs from `.dist/forge`, started by its own CLI).
+    // even in a home whose installation manifest is unavailable.
     if !layout.manifest.is_file() {
         let (paths, _, secrets) = instance::load(layout)?;
         if let Some(candidate) =
@@ -802,15 +872,8 @@ fn start_until(
     health_deadline: std::time::Instant,
 ) -> Result<process::StartResult> {
     let manifest = require_installation(layout)?;
-    let (paths, config, secrets) = instance::load(layout)?;
-    process::start_until(
-        &manifest,
-        &paths,
-        &config,
-        &secrets,
-        foreground,
-        health_deadline,
-    )
+    let spec = native_launch_spec(layout, &manifest)?;
+    process::start_until(&spec, foreground, health_deadline)
 }
 
 fn probe_deadline(deadline: std::time::Instant) -> std::time::Instant {
@@ -993,13 +1056,6 @@ fn detach_editor(_: &mut Command) {}
 
 fn resolve_browser_origin(origin: Option<&str>, forge_endpoint: &str) -> Result<String> {
     validate_origin(origin.unwrap_or(forge_endpoint))
-}
-
-fn validate_data_root(path: &Path) -> Result<PathBuf> {
-    if !path.is_absolute() || path.parent().is_none() {
-        return Err(CliError::UnsafePath(path.to_path_buf()));
-    }
-    Ok(path.to_path_buf())
 }
 
 fn validate_origin(origin: &str) -> Result<String> {
@@ -1332,23 +1388,161 @@ mod tests {
         assert!(FORGE_READY_INTERVAL < FORGE_READY_TIMEOUT);
     }
 
+    fn explicit_setup_args() -> Vec<String> {
+        let (database, custody, readiness) = if cfg!(windows) {
+            (
+                r"C:\Artisan Street\data\forge.sqlite3",
+                r"C:\Artisan Street\custody\forge.lock",
+                r"C:\Artisan Street\readiness\forge.json",
+            )
+        } else {
+            (
+                "/tmp/Artisan Street/data/forge.sqlite3",
+                "/tmp/Artisan Street/custody/forge.lock",
+                "/tmp/Artisan Street/readiness/forge.json",
+            )
+        };
+        [
+            "ae",
+            "setup",
+            "--database-path",
+            database,
+            "--custody-path",
+            custody,
+            "--readiness-path",
+            readiness,
+            "--admission-timeout-ms",
+            "101",
+            "--handshake-timeout-ms",
+            "202",
+            "--request-timeout-ms",
+            "303",
+            "--drain-timeout-ms",
+            "404",
+            "--admission-capacity",
+            "3",
+            "--requests-per-connection",
+            "4",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
     #[test]
-    fn setup_keeps_static_hosting_an_explicit_opt_in() {
-        let default_setup = Cli::try_parse_from(["ae", "setup"]).unwrap();
+    fn setup_requires_explicit_native_values_and_rejects_invalid_values() {
+        let valid = Cli::try_parse_from(explicit_setup_args()).unwrap();
         assert!(matches!(
-            default_setup.command,
+            valid.command,
             Some(Commands::Setup {
-                serve_frontend: false,
-                ..
-            })
+                database_path,
+                custody_path,
+                readiness_path,
+                admission_timeout_ms: 101,
+                handshake_timeout_ms: 202,
+                request_timeout_ms: 303,
+                drain_timeout_ms: 404,
+                admission_capacity,
+                requests_per_connection,
+                autostart: false,
+            }) if database_path.is_absolute()
+                && custody_path.is_absolute()
+                && readiness_path.is_absolute()
+                && admission_capacity.get() == 3
+                && requests_per_connection.get() == 4
         ));
-        let dev_setup = Cli::try_parse_from(["ae", "setup", "--serve-frontend"]).unwrap();
+
+        assert!(Cli::try_parse_from(["ae", "setup"]).is_err());
+        for index in [9, 11, 13, 15, 17, 19] {
+            let mut arguments = explicit_setup_args();
+            arguments[index] = "0".to_owned();
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "zero argument {index}"
+            );
+        }
+        assert_eq!(parse_positive_u64(&u64::MAX.to_string()), Ok(u64::MAX));
+        for (index, invalid) in [(17, "not-a-number"), (9, "-1")] {
+            let mut arguments = explicit_setup_args();
+            arguments[index] = invalid.to_owned();
+            assert!(Cli::try_parse_from(arguments).is_err(), "argument {index}");
+        }
+        for legacy in [
+            "--listen-port",
+            "--listen-host",
+            "--mode",
+            "--data-root",
+            "--serve-frontend",
+            "--token",
+        ] {
+            let mut arguments = explicit_setup_args();
+            arguments.push(legacy.to_owned());
+            arguments.push("legacy".to_owned());
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "legacy option {legacy}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_setup_writes_the_v2_instance_and_missing_config_is_typed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layout = Layout {
+            manifest: temporary.path().join("installation.json"),
+            root: temporary.path().join("Artisan Street"),
+        };
         assert!(matches!(
-            dev_setup.command,
-            Some(Commands::Setup {
-                serve_frontend: true,
-                ..
-            })
+            load_native_instance(&layout),
+            Err(CliError::MissingInstance)
+        ));
+
+        let values = NativeSetupValues {
+            database_path: layout.root.join("data").join("forge.sqlite3"),
+            custody_path: layout.root.join("custody").join("forge.lock"),
+            readiness_path: layout.root.join("readiness").join("forge.json"),
+            listener: NativeListenerConfig::new(
+                101,
+                202,
+                303,
+                404,
+                NonZeroU32::new(3).unwrap(),
+                NonZeroU32::new(4).unwrap(),
+            ),
+        };
+        setup_native(&layout, values).unwrap();
+
+        let config = load_native_instance(&layout).unwrap();
+        let credentials = ForgeCredentialPaths::from_home(&layout.root).unwrap();
+        assert_eq!(config.credentials_manifest(), credentials.manifest_path());
+        assert_eq!(config.listener().admission_timeout_ms(), 101);
+        assert_eq!(config.listener().requests_per_connection().get(), 4);
+        assert!(layout.native_instance_path().is_file());
+    }
+
+    #[test]
+    fn native_setup_rejects_invalid_explicit_paths_before_provisioning() {
+        let temporary = tempfile::tempdir().unwrap();
+        let layout = Layout {
+            manifest: temporary.path().join("installation.json"),
+            root: temporary.path().join("Artisan Street"),
+        };
+        let values = NativeSetupValues {
+            database_path: PathBuf::from("relative.sqlite3"),
+            custody_path: layout.root.join("custody").join("forge.lock"),
+            readiness_path: layout.root.join("readiness").join("forge.json"),
+            listener: NativeListenerConfig::new(
+                1,
+                2,
+                3,
+                4,
+                NonZeroU32::new(1).unwrap(),
+                NonZeroU32::new(1).unwrap(),
+            ),
+        };
+        assert!(matches!(
+            setup_native(&layout, values),
+            Err(CliError::NativeInstance(_))
         ));
     }
 
@@ -1409,17 +1603,6 @@ mod tests {
     #[test]
     fn project_root_is_not_a_supported_argument() {
         assert!(Cli::try_parse_from(["ae", "setup", "--project-root", "."]).is_err());
-    }
-
-    #[test]
-    fn setup_accepts_only_absolute_data_roots() {
-        assert!(validate_data_root(Path::new("relative")).is_err());
-        let absolute = if cfg!(windows) {
-            Path::new(r"C:\ArtisanData")
-        } else {
-            Path::new("/tmp/artisan")
-        };
-        assert!(validate_data_root(absolute).is_ok());
     }
 
     #[test]

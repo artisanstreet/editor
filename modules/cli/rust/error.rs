@@ -14,6 +14,17 @@ pub enum CliError {
     ForgeBusy { active_work_count: usize },
     #[error("Forge cannot report active work; refusing idle-only shutdown")]
     ForgeActivityUnavailable,
+    #[error("invalid native Forge instance configuration: {0}")]
+    NativeInstance(#[from] crate::instance::NativeInstanceError),
+    #[error("native Forge credentials are unavailable: {0}")]
+    Credentials(#[from] crate::credentials::ForgeCredentialError),
+    #[error(
+        "native Forge credential manifest does not match the configured instance manifest: {configured} != {credentials}"
+    )]
+    CredentialManifestMismatch {
+        configured: PathBuf,
+        credentials: PathBuf,
+    },
     #[error("Forge control request failed: {0}")]
     Control(String),
     #[error("unsupported operation: {0}")]
