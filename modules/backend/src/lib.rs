@@ -30,6 +30,7 @@ pub mod harness_config_registry_policy;
 pub mod host_identity_policy;
 pub mod host_machines_policy;
 pub mod host_suspend_detection_policy;
+pub mod lifecycle_control;
 pub mod listener;
 pub mod orchestration_intake_policy;
 pub mod preview_service_policy;
@@ -77,6 +78,7 @@ pub use forge_runtime::{
     CredentialMaterialError, ForgeCleanupError, ForgeConfigError, ForgeLaunchConfig,
     ForgePrimaryCleanupError, ForgeRuntimeError, ForgeServiceError, ReadinessError,
 };
+pub use lifecycle_control::LifecycleController;
 pub use listener::{
     AdmissionCause, ForgeListener, ListenerError, ListenerLimits, MetadataError,
     RequestTermination, ServiceReport,

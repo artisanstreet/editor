@@ -168,6 +168,7 @@ fn hello_envelope(credential: HelloCredential) -> WireEnvelope {
             supported_versions: VersionOffer::new(vec![APPLICATION_PROTOCOL_VERSION])
                 .expect("valid fixture version offer"),
             credential,
+            supports_lifecycle_control: false,
         }),
     }
 }

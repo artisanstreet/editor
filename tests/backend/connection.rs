@@ -21,6 +21,7 @@ use std::mem::size_of;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread::JoinHandle;
@@ -29,8 +30,8 @@ use std::time::Duration;
 use artisan_backend::conversation_subscription_registry::SubscriptionState;
 use artisan_backend::{
     AuthenticationStageError, ConnectionLimits, CredentialAuthenticationError, CredentialAuthority,
-    ForgeApp, ForgeConfig, ForgeConnection, RequestHandler, RequestStageError, ServerFrameStamp,
-    WelcomeMetadata,
+    ForgeApp, ForgeConfig, ForgeConnection, LifecycleController, RequestHandler, RequestStageError,
+    ServerFrameStamp, WelcomeMetadata,
 };
 use artisan_database::{
     AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
@@ -46,8 +47,9 @@ use artisan_domain::{
 use artisan_protocol::{
     APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ConversationSubscriptionStarted,
     ConversationSubscriptionStopped, ErrorCode, FirstMessageReceipt, FrameId, Hello,
-    HelloCredential, LocalCapability, ProtocolDecodeError, ProtocolVersion, ReconnectCapability,
-    ResponsePayload, ServerResponse, VersionOffer, WireEnvelope, WireEnvelopeBody, encode_envelope,
+    HelloCredential, LifecycleRequest, LocalCapability, ProtocolDecodeError, ProtocolVersion,
+    ReconnectCapability, ResponsePayload, ServerResponse, VersionOffer, WireEnvelope,
+    WireEnvelopeBody, encode_envelope,
 };
 use artisan_transport::{
     CancelHandle, DeadlineError, EnvelopeReceiveError, FrameError, HandshakeError,
@@ -388,6 +390,7 @@ fn hello_envelope(credential: HelloCredential) -> WireEnvelope {
             supported_versions: VersionOffer::new(vec![APPLICATION_PROTOCOL_VERSION])
                 .expect("valid fixture version offer"),
             credential,
+            supports_lifecycle_control: false,
         }),
     }
 }
@@ -413,6 +416,10 @@ fn list_directories_request(frame: &str) -> WireEnvelope {
         frame,
         ClientRequest::Query(Query::ListDirectories(ListDirectories { parent: None })),
     )
+}
+
+fn lifecycle_request(frame: &str, request: LifecycleRequest) -> WireEnvelope {
+    request_envelope(frame, ClientRequest::Lifecycle(request))
 }
 
 fn attach_project_command(frame: &str) -> WireEnvelope {
@@ -557,6 +564,11 @@ fn default_limits() -> ConnectionLimits {
     }
 }
 
+fn default_lifecycle() -> &'static LifecycleController {
+    static CONTROLLER: OnceLock<LifecycleController> = OnceLock::new();
+    CONTROLLER.get_or_init(LifecycleController::new)
+}
+
 /// Builds framed bytes whose nested first-message receipt id disagrees with
 /// its enclosing response id. The decoder derives command identities from
 /// their own frames, so this nested-response break is the correlation
@@ -647,7 +659,7 @@ async fn admitted_client<'authority, 'handler, 'cancel>(
 ) -> Result<
     (
         AuthenticatedClient,
-        ForgeConnection<'authority, 'handler, 'cancel>,
+        ForgeConnection<'authority, 'handler, 'cancel, 'static>,
     ),
     Box<dyn Error>,
 > {
@@ -673,6 +685,7 @@ async fn admitted_client<'authority, 'handler, 'cancel>(
         server_connection,
         authority,
         handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         cancel,
@@ -718,6 +731,7 @@ async fn rejected_admission(
         server_connection,
         authority,
         handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         cancel,
@@ -758,8 +772,14 @@ async fn round_trip<'authority, 'handler, 'cancel>(
     client: &AuthenticatedClient,
     request: WireEnvelope,
     stamp: ServerFrameStamp,
-    owner: ForgeConnection<'authority, 'handler, 'cancel>,
-) -> Result<(WireEnvelope, ForgeConnection<'authority, 'handler, 'cancel>), Box<dyn Error>> {
+    owner: ForgeConnection<'authority, 'handler, 'cancel, 'static>,
+) -> Result<
+    (
+        WireEnvelope,
+        ForgeConnection<'authority, 'handler, 'cancel, 'static>,
+    ),
+    Box<dyn Error>,
+> {
     // A deliberately cloned stamp serves the borrowed client half while the
     // original moves into the consuming dispatch half.
     let client_stamp = stamp.clone();
@@ -886,6 +906,53 @@ async fn send_raw_frame(connection: &Connection, payload: &[u8]) -> Result<(), B
 // ---------------------------------------------------------------------------
 // Composition coverage
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lifecycle_request_without_a_negotiated_witness_is_correlated_and_fail_closed()
+-> Result<(), Box<dyn Error>> {
+    let mut loopback = spawn_loopback();
+    let (_temporary, app) = opened_app("lifecycle-unsupported").await;
+    let handler = RequestHandler::new(app.repository().clone());
+    let mut authority = bootstrap_authority();
+    let cancel = CancelHandle::new();
+
+    let (client, owner) = admitted_client(
+        &mut loopback,
+        &mut authority,
+        &handler,
+        &cancel,
+        initial_credential(),
+    )
+    .await?;
+    assert!(!client.welcome.welcome.lifecycle_control_supported);
+
+    let (reply, owner) = round_trip(
+        &client,
+        lifecycle_request("lifecycle-unsupported", LifecycleRequest::Status),
+        response_stamp("lifecycle-unsupported-reply"),
+        owner,
+    )
+    .await?;
+    let WireEnvelopeBody::ProtocolError(failure) = reply.body else {
+        panic!("expected unsupported-feature protocol failure");
+    };
+    assert_eq!(failure.code, ErrorCode::UnsupportedFeature);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.request_id,
+        Some(RequestId::parse("lifecycle-unsupported").expect("valid request id"))
+    );
+    assert!(!cancel.is_cancelled());
+
+    drop(owner);
+    expect_application_close(&client.connection).await;
+    drop(client);
+    app.shutdown()
+        .await
+        .expect("application storage should close");
+    loopback.drain().await;
+    Ok(())
+}
 
 #[tokio::test]
 async fn bootstrap_admission_serves_a_real_listing_and_finishes_every_stream()
@@ -1408,6 +1475,7 @@ async fn non_hello_first_frames_never_touch_the_authority() -> Result<(), Box<dy
         server_connection,
         &mut authority,
         &handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         &cancel,
@@ -1487,6 +1555,7 @@ async fn truncated_first_frame_failure(
         server_connection,
         authority,
         handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         cancel,
@@ -1524,6 +1593,7 @@ async fn oversized_first_frame_failure(
         server_connection,
         authority,
         handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         cancel,
@@ -1632,6 +1702,7 @@ async fn zero_limit_handshake_failure(
             server_connection,
             authority,
             handler,
+            default_lifecycle(),
             welcome_metadata(),
             ConnectionLimits {
                 handshake: Duration::ZERO,
@@ -1663,6 +1734,7 @@ async fn precancelled_handshake_failure(
             server_connection,
             authority,
             handler,
+            default_lifecycle(),
             welcome_metadata(),
             default_limits(),
             &cancel,
@@ -1772,6 +1844,7 @@ async fn a_stalled_welcome_write_times_out_leaving_the_authority_awaiting_rotati
             server_connection,
             &mut authority,
             &handler,
+            default_lifecycle(),
             welcome_metadata(),
             ConnectionLimits {
                 handshake: Duration::from_millis(400),
@@ -1862,6 +1935,7 @@ async fn cancelling_a_blocked_welcome_keeps_queued_requests_undispatched()
             server_connection,
             &mut authority,
             &handler,
+            default_lifecycle(),
             welcome_metadata(),
             default_limits(),
             &cancel,
@@ -2002,6 +2076,7 @@ async fn pipelined_control_bytes_are_discarded_before_any_dispatch() -> Result<(
         server_connection,
         &mut authority,
         &handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         &cancel,
@@ -2135,6 +2210,7 @@ async fn dropping_unpolled_futures_and_ready_owners_closes_connections()
         server_connection,
         &mut authority,
         &handler,
+        default_lifecycle(),
         welcome_metadata(),
         default_limits(),
         &cancel,
@@ -2419,6 +2495,7 @@ async fn zero_next_request_timeout_returns_rotated(
         server_connection,
         authority,
         &handler,
+        default_lifecycle(),
         welcome_metadata(),
         ConnectionLimits {
             handshake: Duration::from_secs(2),

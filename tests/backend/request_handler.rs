@@ -36,7 +36,7 @@ use artisan_domain::{
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt,
-    ProtocolFailure, ResponsePayload, ServerResponse,
+    LifecycleRequest, ProtocolFailure, ResponsePayload, ServerResponse,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1099,6 +1099,33 @@ async fn pick_directory_fails_correlated_nonretryable_without_a_picker_process()
     assert_eq!(failure.code, ErrorCode::Internal);
     assert!(!failure.retryable);
     assert_eq!(failure.request_id, Some(request("frame-pick")));
+}
+
+#[tokio::test]
+async fn lifecycle_requests_use_the_defensive_unsupported_feature_fallback() {
+    let (_temporary, storage) = opened_storage("lifecycle-fallback").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+
+    let (response, receipt) = handler
+        .respond_with_receipt(
+            &request("frame-lifecycle-fallback"),
+            &ClientRequest::Lifecycle(LifecycleRequest::Status),
+        )
+        .await
+        .into_parts();
+    assert!(receipt.is_no_work());
+    let failure = failure_of(response);
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(failure.code, ErrorCode::UnsupportedFeature);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.request_id,
+        Some(request("frame-lifecycle-fallback"))
+    );
+    assert!(failure.detail.as_str().len() <= artisan_protocol::ERROR_DETAIL_MAX_BYTES);
+    assert!(!failure.detail.as_str().contains("frame-lifecycle-fallback"));
 }
 
 #[tokio::test]

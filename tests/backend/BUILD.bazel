@@ -57,6 +57,7 @@ exports_files([
     "engine_owner_custody.rs",
     "engine_owner_readiness.rs",
     "engine_owner_streaming.rs",
+    "lifecycle_control.rs",
     "listener_configuration.rs",
 ])
 

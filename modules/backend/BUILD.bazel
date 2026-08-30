@@ -50,6 +50,7 @@ rust_library(
         "src/host_machines_policy.rs",
         "src/host_suspend_detection_policy.rs",
         "src/lib.rs",
+        "src/lifecycle_control.rs",
         "src/listener.rs",
         "src/orchestration_intake_policy.rs",
         "src/preview_service_policy.rs",
@@ -76,6 +77,7 @@ rust_library(
         "//tests/backend:engine_owner_readiness.rs",
         "//tests/backend:engine_owner_streaming.rs",
         "//tests/backend:listener_configuration.rs",
+        "//tests/backend:lifecycle_control.rs",
     ],
     crate_name = "artisan_backend",
     deps = [

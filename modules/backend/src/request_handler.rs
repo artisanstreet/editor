@@ -368,6 +368,12 @@ impl RequestHandler {
             ClientRequest::Conversation(conversation) => {
                 self.conversation_outcome(request_id, conversation).await
             }
+            ClientRequest::Lifecycle(_) => Err(typed_failure(
+                ErrorCode::UnsupportedFeature,
+                "native lifecycle control was not negotiated",
+                false,
+                request_id,
+            )),
             // No native picker exists in this build; the separately owned
             // process/admission packet integrates the real chooser. Answer
             // through the established bounded, non-retryable unbacked path

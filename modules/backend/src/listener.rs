@@ -77,6 +77,7 @@ use crate::connection::{
     ServerFrameStamp, WelcomeMetadata,
 };
 use crate::credential_authority::{CredentialAuthenticationError, CredentialAuthority};
+use crate::lifecycle_control::LifecycleController;
 use crate::request_handler::RequestHandler;
 
 /// Fixed application close code used whenever this listener releases its own
@@ -416,6 +417,7 @@ pub struct ForgeListener {
     limits: ListenerLimits,
     admission_remaining: u32,
     requests_per_connection: NonZeroU32,
+    lifecycle: LifecycleController,
 }
 
 impl ForgeListener {
@@ -445,6 +447,27 @@ impl ForgeListener {
         admission_capacity: NonZeroU32,
         requests_per_connection: NonZeroU32,
     ) -> Result<Self, ListenerError> {
+        Self::bind_with_lifecycle(
+            server_config,
+            bootstrap,
+            origin,
+            limits,
+            admission_capacity,
+            requests_per_connection,
+            LifecycleController::new(),
+        )
+    }
+
+    /// Binds a listener with a crate-local lifecycle controller.
+    pub(crate) fn bind_with_lifecycle(
+        server_config: ServerConfig,
+        bootstrap: LocalCapability,
+        origin: Box<dyn CommandOrigin>,
+        limits: ListenerLimits,
+        admission_capacity: NonZeroU32,
+        requests_per_connection: NonZeroU32,
+        lifecycle: LifecycleController,
+    ) -> Result<Self, ListenerError> {
         if !limits.representable() {
             return Err(ListenerError::UnrepresentableLimits);
         }
@@ -460,6 +483,7 @@ impl ForgeListener {
             limits,
             admission_remaining: admission_capacity.get(),
             requests_per_connection,
+            lifecycle,
         })
     }
 
@@ -668,6 +692,7 @@ impl ForgeListener {
             connection,
             &mut self.authority,
             handler,
+            &self.lifecycle,
             metadata,
             connection_limits,
             cancel,
