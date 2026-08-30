@@ -1,20 +1,15 @@
 //! Conversation view state machines.
 //!
-//! Two pure synchronous owners replace ad-hoc booleans and racing
-//! scroll-settlement callbacks. The legacy TypeScript/Svelte
-//! implementation is a parity oracle only.
-//!
-//! * Disclosure controller — one per expandable work/compaction/change-set card.
-//! * Viewport controller — one per rendered thread.
-//!
-//! Both owners are synchronous, do not own durable projection, turn
-//! state, steering, DOM/GPUI handles, measurements, clocks, or actual
-//! scrolling. Outer adapters supply explicit events and execute typed
-//! effects. Generated Statig internals are hidden behind small public
-//! controller APIs.
+//! The public controllers own the blocking Statig machines below.  They are
+//! synchronous, do not own durable projection, turn state, steering, DOM or
+//! GPUI handles, measurements, clocks, or actual scrolling.  Outer adapters
+//! supply explicit events and execute the typed effects returned by handlers.
 
 #![allow(clippy::module_name_repetitions)]
 
+use core::fmt;
+
+use artisan_domain::ItemId;
 use statig::blocking;
 
 // ---------------------------------------------------------------------------
@@ -22,8 +17,6 @@ use statig::blocking;
 // ---------------------------------------------------------------------------
 
 /// The single closed disclosure view exposed to callers.
-///
-/// Never `default_open` plus `user_override` booleans.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Disclosure {
     Open,
@@ -42,13 +35,14 @@ impl Disclosure {
     }
 }
 
-/// The four modeled disclosure states.
+/// The modeled disclosure leaves.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DisclosureState {
     AutoOpen,
     AutoClosed,
     UserOpen,
     UserClosed,
+    Retired,
 }
 
 impl DisclosureState {
@@ -56,7 +50,7 @@ impl DisclosureState {
     pub const fn disclosure(self) -> Disclosure {
         match self {
             Self::AutoOpen | Self::UserOpen => Disclosure::Open,
-            Self::AutoClosed | Self::UserClosed => Disclosure::Closed,
+            Self::AutoClosed | Self::UserClosed | Self::Retired => Disclosure::Closed,
         }
     }
 
@@ -68,6 +62,16 @@ impl DisclosureState {
     #[must_use]
     pub const fn is_auto(self) -> bool {
         matches!(self, Self::AutoOpen | Self::AutoClosed)
+    }
+
+    #[must_use]
+    pub const fn is_retired(self) -> bool {
+        matches!(self, Self::Retired)
+    }
+
+    #[must_use]
+    pub const fn is_user_controlled(self) -> bool {
+        self.is_user()
     }
 }
 
@@ -83,208 +87,267 @@ pub enum DisclosureEvent {
     Removed,
 }
 
-/// Typed retirement effect for optional item removal.
+/// Typed effect emitted by disclosure handlers.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DisclosureEffect {
     None,
     Retired,
 }
 
-// Hidden Statig machine for disclosure. The public controller below is the
-// only API that callers use; this module demonstrates correct 0.4.1
-// blocking macro usage without leaking generated types.
-#[allow(dead_code)]
 mod disclosure_statig {
-    use super::DisclosureEvent as Event;
-    use super::DisclosureState as PublicState;
+    use super::{DisclosureEffect, DisclosureEvent, DisclosureState};
     use statig::blocking::{
-        self,
+        self, IntoStateMachineExt, Outcome,
         Outcome::{Handled, Transition},
     };
 
     #[derive(Default)]
-    pub(super) struct Machine {
-        pub state: PublicState,
-        pub retired: bool,
+    pub(super) struct Machine;
+
+    pub(super) enum Event {
+        Initialize { is_working: bool },
+        Seed(DisclosureState),
+        Public(DisclosureEvent),
+    }
+
+    pub(super) struct Context {
+        effect: DisclosureEffect,
+    }
+
+    impl Default for Context {
+        fn default() -> Self {
+            Self {
+                effect: DisclosureEffect::None,
+            }
+        }
+    }
+
+    impl Context {
+        fn retire(&mut self) {
+            self.effect = DisclosureEffect::Retired;
+        }
+
+        pub(super) fn into_effect(self) -> DisclosureEffect {
+            self.effect
+        }
     }
 
     #[blocking::state_machine(
         initial = "State::auto_open()",
-        state(derive(Debug)),
-        superstate(derive(Debug))
+        state(derive(Debug, PartialEq, Eq)),
+        superstate(derive(Debug, PartialEq, Eq))
     )]
     impl Machine {
         #[state]
-        fn auto_open(&mut self, event: &Event) -> Outcome<State> {
+        fn auto_open(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::WorkSettledSuccessfully | Event::WorkFailedOrInterrupted => {
-                    Transition(State::auto_closed())
+                Event::Initialize { is_working: true } | Event::Seed(DisclosureState::AutoOpen) => {
+                    Handled
                 }
-                Event::UserToggle => Transition(State::user_closed()),
-                Event::UserOpen => Transition(State::user_open()),
-                Event::UserClose => Transition(State::user_closed()),
-                Event::Removed => Transition(State::auto_open()),
-                Event::WorkBecameActive => Handled,
+                Event::Initialize { is_working: false }
+                | Event::Seed(DisclosureState::AutoClosed) => Transition(State::auto_closed()),
+                Event::Seed(DisclosureState::UserOpen)
+                | Event::Public(DisclosureEvent::UserOpen) => Transition(State::user_open()),
+                Event::Seed(DisclosureState::UserClosed)
+                | Event::Public(DisclosureEvent::UserToggle | DisclosureEvent::UserClose) => {
+                    Transition(State::user_closed())
+                }
+                Event::Seed(DisclosureState::Retired) | Event::Public(DisclosureEvent::Removed) => {
+                    context.retire();
+                    Transition(State::retired())
+                }
+                Event::Public(DisclosureEvent::WorkBecameActive) => Handled,
+                Event::Public(
+                    DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted,
+                ) => Transition(State::auto_closed()),
             }
         }
 
         #[state]
-        fn auto_closed(&mut self, event: &Event) -> Outcome<State> {
+        fn auto_closed(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::WorkBecameActive => Transition(State::auto_open()),
-                Event::UserToggle => Transition(State::user_open()),
-                Event::UserOpen => Transition(State::user_open()),
-                Event::UserClose => Transition(State::user_closed()),
-                Event::Removed => Transition(State::auto_closed()),
-                Event::WorkSettledSuccessfully | Event::WorkFailedOrInterrupted => Handled,
+                Event::Initialize { .. } | Event::Seed(DisclosureState::AutoClosed) => Handled,
+                Event::Seed(DisclosureState::AutoOpen)
+                | Event::Public(DisclosureEvent::WorkBecameActive) => {
+                    Transition(State::auto_open())
+                }
+                Event::Seed(DisclosureState::UserOpen)
+                | Event::Public(DisclosureEvent::UserOpen | DisclosureEvent::UserToggle) => {
+                    Transition(State::user_open())
+                }
+                Event::Seed(DisclosureState::UserClosed)
+                | Event::Public(DisclosureEvent::UserClose) => Transition(State::user_closed()),
+                Event::Seed(DisclosureState::Retired) | Event::Public(DisclosureEvent::Removed) => {
+                    context.retire();
+                    Transition(State::retired())
+                }
+                Event::Public(
+                    DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted,
+                ) => Handled,
             }
         }
 
         #[state]
-        fn user_open(&mut self, event: &Event) -> Outcome<State> {
+        fn user_open(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::UserToggle => Transition(State::user_closed()),
-                Event::UserClose => Transition(State::user_closed()),
-                Event::UserOpen => Handled,
-                Event::Removed => Transition(State::user_open()),
-                Event::WorkBecameActive
-                | Event::WorkSettledSuccessfully
-                | Event::WorkFailedOrInterrupted => Handled,
+                Event::Initialize { .. } | Event::Seed(DisclosureState::UserOpen) => Handled,
+                Event::Seed(DisclosureState::AutoOpen)
+                | Event::Seed(DisclosureState::AutoClosed)
+                | Event::Seed(DisclosureState::UserClosed)
+                | Event::Public(DisclosureEvent::UserToggle | DisclosureEvent::UserClose) => {
+                    Transition(State::user_closed())
+                }
+                Event::Seed(DisclosureState::Retired) | Event::Public(DisclosureEvent::Removed) => {
+                    context.retire();
+                    Transition(State::retired())
+                }
+                Event::Public(
+                    DisclosureEvent::WorkBecameActive
+                    | DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted
+                    | DisclosureEvent::UserOpen,
+                ) => Handled,
             }
         }
 
         #[state]
-        fn user_closed(&mut self, event: &Event) -> Outcome<State> {
+        fn user_closed(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::UserToggle => Transition(State::user_open()),
-                Event::UserOpen => Transition(State::user_open()),
-                Event::UserClose => Handled,
-                Event::Removed => Transition(State::user_closed()),
-                Event::WorkBecameActive
-                | Event::WorkSettledSuccessfully
-                | Event::WorkFailedOrInterrupted => Handled,
+                Event::Initialize { .. } | Event::Seed(DisclosureState::UserClosed) => Handled,
+                Event::Seed(DisclosureState::AutoOpen)
+                | Event::Seed(DisclosureState::AutoClosed)
+                | Event::Seed(DisclosureState::UserOpen)
+                | Event::Public(DisclosureEvent::UserToggle | DisclosureEvent::UserOpen) => {
+                    Transition(State::user_open())
+                }
+                Event::Seed(DisclosureState::Retired) | Event::Public(DisclosureEvent::Removed) => {
+                    context.retire();
+                    Transition(State::retired())
+                }
+                Event::Public(
+                    DisclosureEvent::WorkBecameActive
+                    | DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted
+                    | DisclosureEvent::UserClose,
+                ) => Handled,
             }
+        }
+
+        #[state]
+        fn retired(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+            let _ = context;
+            let _ = event;
+            Handled
+        }
+    }
+
+    pub(super) fn new_machine() -> blocking::StateMachine<Machine> {
+        Machine::default().state_machine()
+    }
+
+    pub(super) fn public_state(state: &State) -> DisclosureState {
+        match state {
+            State::AutoOpen { .. } => DisclosureState::AutoOpen,
+            State::AutoClosed { .. } => DisclosureState::AutoClosed,
+            State::UserOpen { .. } => DisclosureState::UserOpen,
+            State::UserClosed { .. } => DisclosureState::UserClosed,
+            State::Retired { .. } => DisclosureState::Retired,
         }
     }
 }
 
-/// Pure synchronous disclosure controller.
-///
-/// Frozen rules:
-/// * active work defaults open;
-/// * terminal work defaults closed only while still under automatic policy;
-/// * any explicit user choice wins over later automatic lifecycle changes;
-/// * user choice changes only on another explicit user action;
-/// * removal is terminal or emits a typed retirement effect.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Public owner for one disclosure view.
 pub struct DisclosureController {
-    state: DisclosureState,
-    retired: bool,
+    machine: blocking::StateMachine<disclosure_statig::Machine>,
 }
 
 impl DisclosureController {
-    /// Creates a disclosure controller seeded from liveness.
-    ///
-    /// Active work starts [`DisclosureState::AutoOpen`]; settled history
-    /// starts [`DisclosureState::AutoClosed`].
     #[must_use]
-    pub const fn new(is_working: bool) -> Self {
-        let state = if is_working {
-            DisclosureState::AutoOpen
-        } else {
-            DisclosureState::AutoClosed
+    pub fn new(is_working: bool) -> Self {
+        let mut controller = Self {
+            machine: disclosure_statig::new_machine(),
         };
-        Self {
-            state,
-            retired: false,
-        }
+        let mut context = disclosure_statig::Context::default();
+        controller.machine.init_with_context(&mut context);
+        let _ = controller.dispatch(disclosure_statig::Event::Initialize { is_working });
+        controller
     }
 
-    /// Creates a controller from an explicit state (useful for tests).
+    /// Seeds a settled or user-controlled view through an initialization event.
     #[must_use]
-    pub const fn from_state(state: DisclosureState) -> Self {
-        Self {
-            state,
-            retired: false,
-        }
-    }
-
-    #[must_use]
-    pub const fn state(&self) -> DisclosureState {
-        self.state
+    pub fn from_state(state: DisclosureState) -> Self {
+        let mut controller = Self::new(true);
+        let _ = controller.dispatch(disclosure_statig::Event::Seed(state));
+        controller
     }
 
     #[must_use]
-    pub const fn disclosure(&self) -> Disclosure {
-        self.state.disclosure()
+    pub fn state(&self) -> DisclosureState {
+        disclosure_statig::public_state(self.machine.state())
     }
 
     #[must_use]
-    pub const fn is_open(&self) -> bool {
-        matches!(
-            self.state,
-            DisclosureState::AutoOpen | DisclosureState::UserOpen
-        )
+    pub fn disclosure(&self) -> Disclosure {
+        self.state().disclosure()
     }
 
     #[must_use]
-    pub const fn is_retired(&self) -> bool {
-        self.retired
+    pub fn is_open(&self) -> bool {
+        self.disclosure().is_open()
     }
 
     #[must_use]
-    pub const fn is_user_controlled(&self) -> bool {
-        self.state.is_user()
+    pub fn is_retired(&self) -> bool {
+        self.state().is_retired()
     }
 
-    /// Applies one disclosure event and returns a typed effect.
+    #[must_use]
+    pub fn is_user_controlled(&self) -> bool {
+        self.state().is_user()
+    }
+
+    /// Applies one disclosure event and returns its typed effect.
     pub fn handle(&mut self, event: DisclosureEvent) -> DisclosureEffect {
-        if self.retired {
-            return DisclosureEffect::None;
-        }
-        match event {
-            DisclosureEvent::Removed => {
-                self.retired = true;
-                return DisclosureEffect::Retired;
-            }
-            DisclosureEvent::WorkBecameActive => {
-                if self.state == DisclosureState::AutoClosed {
-                    self.state = DisclosureState::AutoOpen;
-                }
-            }
-            DisclosureEvent::WorkSettledSuccessfully | DisclosureEvent::WorkFailedOrInterrupted => {
-                if self.state == DisclosureState::AutoOpen {
-                    self.state = DisclosureState::AutoClosed;
-                }
-            }
-            DisclosureEvent::UserToggle => {
-                self.state = match self.state {
-                    DisclosureState::AutoOpen | DisclosureState::UserOpen => {
-                        DisclosureState::UserClosed
-                    }
-                    DisclosureState::AutoClosed | DisclosureState::UserClosed => {
-                        DisclosureState::UserOpen
-                    }
-                };
-            }
-            DisclosureEvent::UserOpen => {
-                self.state = DisclosureState::UserOpen;
-            }
-            DisclosureEvent::UserClose => {
-                self.state = DisclosureState::UserClosed;
-            }
-        }
-        DisclosureEffect::None
+        self.dispatch(disclosure_statig::Event::Public(event))
+    }
+
+    fn dispatch(&mut self, event: disclosure_statig::Event) -> DisclosureEffect {
+        let mut context = disclosure_statig::Context::default();
+        self.machine.handle_with_context(&event, &mut context);
+        context.into_effect()
     }
 }
+
+impl Clone for DisclosureController {
+    fn clone(&self) -> Self {
+        Self::from_state(self.state())
+    }
+}
+
+impl fmt::Debug for DisclosureController {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DisclosureController")
+            .field("state", &self.state())
+            .finish()
+    }
+}
+
+impl PartialEq for DisclosureController {
+    fn eq(&self, other: &Self) -> bool {
+        self.state() == other.state()
+    }
+}
+
+impl Eq for DisclosureController {}
 
 // ---------------------------------------------------------------------------
 // Viewport
 // ---------------------------------------------------------------------------
 
-/// Checked monotonic command generation for fenced scroll commands.
-///
-/// Never wraps; overflow is a typed refusal.
+/// Monotonic generation used to fence asynchronous viewport effects.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ViewportGeneration(pub u64);
 
@@ -306,28 +369,25 @@ impl ViewportGeneration {
     }
 }
 
-/// The exact anchor preserved by [`ViewportState::Anchored`].
+/// The exact domain item and visual offset needed to restore an anchor.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ViewportAnchor {
-    pub anchor_id: String,
+    pub anchor_id: ItemId,
     pub offset: i32,
 }
 
 impl ViewportAnchor {
     #[must_use]
-    pub fn new(anchor_id: impl Into<String>, offset: i32) -> Self {
-        Self {
-            anchor_id: anchor_id.into(),
-            offset,
-        }
+    pub fn new(anchor_id: ItemId, offset: i32) -> Self {
+        Self { anchor_id, offset }
     }
 }
 
-/// Explicit viewport states.
+/// The viewport leaves.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ViewportState {
     Following,
-    Anchored { anchor_id: String, offset: i32 },
+    Anchored { anchor_id: ItemId, offset: i32 },
     Detached,
     Scrolling { generation: ViewportGeneration },
     Settling { generation: ViewportGeneration },
@@ -341,13 +401,13 @@ impl ViewportState {
     }
 
     #[must_use]
-    pub const fn is_detached(&self) -> bool {
-        matches!(self, Self::Detached)
+    pub const fn is_anchored(&self) -> bool {
+        matches!(self, Self::Anchored { .. })
     }
 
     #[must_use]
-    pub const fn is_anchored(&self) -> bool {
-        matches!(self, Self::Anchored { .. })
+    pub const fn is_detached(&self) -> bool {
+        matches!(self, Self::Detached)
     }
 
     #[must_use]
@@ -366,34 +426,29 @@ impl ViewportState {
     }
 }
 
-/// Viewport lifecycle events.
+/// Events that drive the viewport controller.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ViewportEvent {
     ExtentChanged,
     UserScrolled { at_bottom: bool },
-    AnchorObserved { anchor_id: String, offset: i32 },
+    AnchorObserved { anchor_id: ItemId, offset: i32 },
     JumpToBottomRequested,
     ProgrammaticScrollStarted { generation: ViewportGeneration },
     ScrollCompleted { generation: ViewportGeneration },
     LayoutSettled,
-    AnchorRemoved { anchor_id: String },
+    AnchorRemoved { anchor_id: ItemId },
     OwnerClosed,
 }
 
 impl ViewportEvent {
     #[must_use]
-    pub fn anchor_observed(anchor_id: impl Into<String>, offset: i32) -> Self {
-        Self::AnchorObserved {
-            anchor_id: anchor_id.into(),
-            offset,
-        }
+    pub fn anchor_observed(anchor_id: ItemId, offset: i32) -> Self {
+        Self::AnchorObserved { anchor_id, offset }
     }
 
     #[must_use]
-    pub fn anchor_removed(anchor_id: impl Into<String>) -> Self {
-        Self::AnchorRemoved {
-            anchor_id: anchor_id.into(),
-        }
+    pub fn anchor_removed(anchor_id: ItemId) -> Self {
+        Self::AnchorRemoved { anchor_id }
     }
 
     #[must_use]
@@ -407,7 +462,7 @@ impl ViewportEvent {
     }
 }
 
-/// Why a scroll completion was refused.
+/// Why a completion or start was rejected.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CompletionRejection {
     StaleGeneration,
@@ -415,7 +470,7 @@ pub enum CompletionRejection {
     GenerationExhausted,
 }
 
-/// Typed viewport effects.
+/// Typed viewport effects for an outer adapter to execute.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ViewportEffect {
     None,
@@ -423,7 +478,7 @@ pub enum ViewportEffect {
         generation: ViewportGeneration,
     },
     RequestAnchorRestore {
-        anchor_id: String,
+        anchor_id: ItemId,
         offset: i32,
         generation: ViewportGeneration,
     },
@@ -437,109 +492,466 @@ pub enum ViewportEffect {
     GenerationExhausted,
 }
 
-// Hidden Statig machine for viewport. Demonstrates hierarchical states and
-// generation fencing without leaking generated types. The public
-// `ViewportController` is the only caller-visible API.
-#[allow(dead_code)]
 mod viewport_statig {
-    use super::ViewportEvent as Event;
-    use super::ViewportGeneration;
-    use super::ViewportState as PublicState;
+    use super::{
+        CompletionRejection, ItemId, ViewportEffect, ViewportEvent, ViewportGeneration,
+        ViewportState,
+    };
     use statig::blocking::{
-        self,
+        self, IntoStateMachineExt, Outcome,
         Outcome::{Handled, Transition},
     };
 
+    pub(super) enum Event {
+        Public(ViewportEvent),
+    }
+
+    #[derive(Default)]
+    pub(super) struct Context {
+        effects: Vec<ViewportEffect>,
+    }
+
+    impl Context {
+        fn push(&mut self, effect: ViewportEffect) {
+            self.effects.push(effect);
+        }
+
+        fn none(&mut self) {
+            self.push(ViewportEffect::None);
+        }
+
+        pub(super) fn into_effects(self) -> Vec<ViewportEffect> {
+            self.effects
+        }
+    }
+
     #[derive(Default)]
     pub(super) struct Machine {
-        pub state: PublicState,
-        pub generation: ViewportGeneration,
+        last_generation: ViewportGeneration,
+    }
+
+    impl Machine {
+        fn allocate_generation(&mut self, context: &mut Context) -> Option<ViewportGeneration> {
+            let Some(generation) = self.last_generation.next() else {
+                context.push(ViewportEffect::GenerationExhausted);
+                return None;
+            };
+            self.last_generation = generation;
+            Some(generation)
+        }
     }
 
     #[blocking::state_machine(
         initial = "State::following()",
-        state(derive(Debug)),
-        superstate(derive(Debug))
+        state(derive(Debug, PartialEq, Eq)),
+        superstate(derive(Debug, PartialEq, Eq))
     )]
     impl Machine {
         #[state]
-        fn following(&mut self, event: &Event) -> Outcome<State> {
+        fn following(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+            let event = match event {
+                Event::Public(event) => event,
+            };
             match event {
-                Event::UserScrolled { at_bottom: false } => Transition(State::detached()),
-                Event::AnchorObserved { anchor_id, offset } => {
-                    let _ = (anchor_id, offset);
-                    Transition(State::anchored())
+                ViewportEvent::ExtentChanged => {
+                    let Some(generation) = self.allocate_generation(context) else {
+                        return Handled;
+                    };
+                    context.push(ViewportEffect::RequestBottomScroll { generation });
+                    Handled
                 }
-                Event::JumpToBottomRequested => Transition(State::scrolling()),
-                Event::OwnerClosed => Transition(State::closed()),
-                _ => Handled,
+                ViewportEvent::UserScrolled { at_bottom: true } => {
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    Handled
+                }
+                ViewportEvent::UserScrolled { at_bottom: false } => {
+                    context.push(ViewportEffect::ShowJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::detached())
+                }
+                ViewportEvent::AnchorObserved { anchor_id, offset } => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::anchored(anchor_id.clone(), *offset))
+                }
+                ViewportEvent::JumpToBottomRequested => {
+                    let Some(generation) = self.allocate_generation(context) else {
+                        return Handled;
+                    };
+                    context.push(ViewportEffect::RequestBottomScroll { generation });
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(generation))
+                }
+                ViewportEvent::ProgrammaticScrollStarted { generation }
+                    if *generation == self.last_generation =>
+                {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(*generation))
+                }
+                ViewportEvent::ProgrammaticScrollStarted { generation } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *generation,
+                        reason: CompletionRejection::StaleGeneration,
+                    });
+                    Handled
+                }
+                ViewportEvent::ScrollCompleted { generation } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *generation,
+                        reason: CompletionRejection::NoActiveScroll,
+                    });
+                    Handled
+                }
+                ViewportEvent::LayoutSettled | ViewportEvent::AnchorRemoved { .. } => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::OwnerClosed => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::closed())
+                }
             }
         }
 
-        #[state]
-        fn anchored(&mut self, event: &Event) -> Outcome<State> {
+        #[state(local_storage("anchor_id: ItemId", "offset: i32"))]
+        fn anchored(
+            &mut self,
+            anchor_id: &mut ItemId,
+            offset: &mut i32,
+            context: &mut Context,
+            event: &Event,
+        ) -> Outcome<State> {
+            let event = match event {
+                Event::Public(event) => event,
+            };
             match event {
-                Event::AnchorRemoved { .. } => Transition(State::detached()),
-                Event::UserScrolled { at_bottom: false } => Transition(State::detached()),
-                Event::JumpToBottomRequested => Transition(State::scrolling()),
-                Event::OwnerClosed => Transition(State::closed()),
-                _ => Handled,
+                ViewportEvent::ExtentChanged => {
+                    let Some(generation) = self.allocate_generation(context) else {
+                        return Handled;
+                    };
+                    context.push(ViewportEffect::RequestAnchorRestore {
+                        anchor_id: anchor_id.clone(),
+                        offset: *offset,
+                        generation,
+                    });
+                    Handled
+                }
+                ViewportEvent::UserScrolled { at_bottom: true } => {
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    Transition(State::following())
+                }
+                ViewportEvent::UserScrolled { at_bottom: false } => {
+                    context.push(ViewportEffect::ShowJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::detached())
+                }
+                ViewportEvent::AnchorObserved { anchor_id, offset } => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::anchored(anchor_id.clone(), *offset))
+                }
+                ViewportEvent::JumpToBottomRequested => {
+                    let Some(generation) = self.allocate_generation(context) else {
+                        return Handled;
+                    };
+                    context.push(ViewportEffect::RequestBottomScroll { generation });
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(generation))
+                }
+                ViewportEvent::ProgrammaticScrollStarted { generation }
+                    if *generation == self.last_generation =>
+                {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(*generation))
+                }
+                ViewportEvent::ProgrammaticScrollStarted { generation } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *generation,
+                        reason: CompletionRejection::StaleGeneration,
+                    });
+                    Handled
+                }
+                ViewportEvent::ScrollCompleted { generation } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *generation,
+                        reason: CompletionRejection::NoActiveScroll,
+                    });
+                    Handled
+                }
+                ViewportEvent::LayoutSettled => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::AnchorRemoved { anchor_id: removed } if removed == &*anchor_id => {
+                    context.push(ViewportEffect::ShowJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::detached())
+                }
+                ViewportEvent::AnchorRemoved { .. } => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::OwnerClosed => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::closed())
+                }
             }
         }
 
         #[state]
-        fn detached(&mut self, event: &Event) -> Outcome<State> {
+        fn detached(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+            let event = match event {
+                Event::Public(event) => event,
+            };
             match event {
-                Event::UserScrolled { at_bottom: true } => Transition(State::following()),
-                Event::JumpToBottomRequested => Transition(State::scrolling()),
-                Event::OwnerClosed => Transition(State::closed()),
-                _ => Handled,
+                ViewportEvent::ExtentChanged => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::UserScrolled { at_bottom: true } => {
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::following())
+                }
+                ViewportEvent::UserScrolled { at_bottom: false } => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::AnchorObserved { anchor_id, offset } => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::anchored(anchor_id.clone(), *offset))
+                }
+                ViewportEvent::JumpToBottomRequested => {
+                    let Some(generation) = self.allocate_generation(context) else {
+                        return Handled;
+                    };
+                    context.push(ViewportEffect::RequestBottomScroll { generation });
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(generation))
+                }
+                ViewportEvent::ProgrammaticScrollStarted { generation }
+                    if *generation == self.last_generation =>
+                {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(*generation))
+                }
+                ViewportEvent::ProgrammaticScrollStarted { generation } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *generation,
+                        reason: CompletionRejection::StaleGeneration,
+                    });
+                    Handled
+                }
+                ViewportEvent::ScrollCompleted { generation } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *generation,
+                        reason: CompletionRejection::NoActiveScroll,
+                    });
+                    Handled
+                }
+                ViewportEvent::LayoutSettled | ViewportEvent::AnchorRemoved { .. } => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::OwnerClosed => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::closed())
+                }
             }
         }
 
-        #[state]
-        fn scrolling(&mut self, event: &Event) -> Outcome<State> {
+        #[state(local_storage("generation: ViewportGeneration"))]
+        fn scrolling(
+            &mut self,
+            generation: &mut ViewportGeneration,
+            context: &mut Context,
+            event: &Event,
+        ) -> Outcome<State> {
+            let event = match event {
+                Event::Public(event) => event,
+            };
             match event {
-                Event::ScrollCompleted { .. } => Transition(State::settling()),
-                Event::OwnerClosed => Transition(State::closed()),
-                _ => Handled,
+                ViewportEvent::ExtentChanged
+                | ViewportEvent::UserScrolled { at_bottom: false }
+                | ViewportEvent::AnchorRemoved { .. } => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::UserScrolled { at_bottom: true } => {
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    Transition(State::following())
+                }
+                ViewportEvent::AnchorObserved { anchor_id, offset } => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::anchored(anchor_id.clone(), *offset))
+                }
+                ViewportEvent::JumpToBottomRequested => {
+                    let Some(next_generation) = self.allocate_generation(context) else {
+                        return Handled;
+                    };
+                    context.push(ViewportEffect::RequestBottomScroll {
+                        generation: next_generation,
+                    });
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(next_generation))
+                }
+                ViewportEvent::ProgrammaticScrollStarted {
+                    generation: started,
+                } if started == generation => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::ProgrammaticScrollStarted {
+                    generation: started,
+                } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *started,
+                        reason: CompletionRejection::StaleGeneration,
+                    });
+                    context.push(ViewportEffect::InvalidateRender);
+                    Handled
+                }
+                ViewportEvent::ScrollCompleted {
+                    generation: completed,
+                } if completed == generation => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::settling(*completed))
+                }
+                ViewportEvent::ScrollCompleted {
+                    generation: completed,
+                } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *completed,
+                        reason: CompletionRejection::StaleGeneration,
+                    });
+                    Handled
+                }
+                ViewportEvent::OwnerClosed => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::closed())
+                }
             }
         }
 
-        #[state]
-        fn settling(&mut self, event: &Event) -> Outcome<State> {
+        #[state(local_storage("generation: ViewportGeneration"))]
+        fn settling(
+            &mut self,
+            generation: &mut ViewportGeneration,
+            context: &mut Context,
+            event: &Event,
+        ) -> Outcome<State> {
+            let event = match event {
+                Event::Public(event) => event,
+            };
             match event {
-                Event::LayoutSettled => Transition(State::following()),
-                Event::OwnerClosed => Transition(State::closed()),
-                _ => Handled,
+                ViewportEvent::ExtentChanged
+                | ViewportEvent::UserScrolled { at_bottom: false }
+                | ViewportEvent::AnchorRemoved { .. } => {
+                    context.none();
+                    Handled
+                }
+                ViewportEvent::UserScrolled { at_bottom: true } => {
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    Transition(State::following())
+                }
+                ViewportEvent::AnchorObserved { anchor_id, offset } => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::anchored(anchor_id.clone(), *offset))
+                }
+                ViewportEvent::JumpToBottomRequested => {
+                    let Some(next_generation) = self.allocate_generation(context) else {
+                        return Handled;
+                    };
+                    context.push(ViewportEffect::RequestBottomScroll {
+                        generation: next_generation,
+                    });
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(next_generation))
+                }
+                ViewportEvent::ProgrammaticScrollStarted {
+                    generation: started,
+                } if *started == self.last_generation => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::scrolling(*started))
+                }
+                ViewportEvent::ProgrammaticScrollStarted {
+                    generation: started,
+                } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *started,
+                        reason: CompletionRejection::StaleGeneration,
+                    });
+                    Handled
+                }
+                ViewportEvent::ScrollCompleted {
+                    generation: completed,
+                } => {
+                    context.push(ViewportEffect::CompletionRejected {
+                        generation: *completed,
+                        reason: CompletionRejection::StaleGeneration,
+                    });
+                    Handled
+                }
+                ViewportEvent::LayoutSettled => {
+                    let _ = generation;
+                    context.push(ViewportEffect::HideJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::following())
+                }
+                ViewportEvent::OwnerClosed => {
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::closed())
+                }
             }
         }
 
         #[state]
-        fn closed(&mut self, _event: &Event) -> Outcome<State> {
+        fn closed(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
+            let _ = self;
+            let _ = event;
+            context.none();
             Handled
+        }
+    }
+
+    pub(super) fn new_machine(generation: ViewportGeneration) -> blocking::StateMachine<Machine> {
+        Machine {
+            last_generation: generation,
+        }
+        .state_machine()
+    }
+
+    pub(super) fn generation(machine: &blocking::StateMachine<Machine>) -> ViewportGeneration {
+        machine.inner().last_generation
+    }
+
+    pub(super) fn public_state(state: &State) -> ViewportState {
+        match state {
+            State::Following { .. } => ViewportState::Following,
+            State::Anchored {
+                anchor_id, offset, ..
+            } => ViewportState::Anchored {
+                anchor_id: anchor_id.clone(),
+                offset: *offset,
+            },
+            State::Detached { .. } => ViewportState::Detached,
+            State::Scrolling { generation, .. } => ViewportState::Scrolling {
+                generation: *generation,
+            },
+            State::Settling { generation, .. } => ViewportState::Settling {
+                generation: *generation,
+            },
+            State::Closed { .. } => ViewportState::Closed,
         }
     }
 }
 
-/// Pure synchronous conversation viewport controller.
-///
-/// Frozen rules:
-/// * only `Following` automatically follows streaming/appended content;
-/// * `Detached` never jumps because a token, work card, or changed-files block arrived;
-/// * `Anchored` restores the exact item and offset across compaction/virtualization
-///   changes when it still exists;
-/// * if the anchor is removed, transition deterministically to detached and show
-///   jump-to-latest rather than selecting a neighboring message;
-/// * jump-to-bottom begins one fenced scroll command and eventually returns to
-///   following only after matching completion plus settlement;
-/// * duplicate/stale completion does not clear an active newer scroll;
-/// * closed is terminal if modeled;
-/// * no viewport calculation reads a clock or actual GPUI geometry.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Public owner for one rendered thread's viewport state.
 pub struct ViewportController {
-    state: ViewportState,
-    generation: ViewportGeneration,
+    machine: blocking::StateMachine<viewport_statig::Machine>,
 }
 
 impl Default for ViewportController {
@@ -550,242 +962,91 @@ impl Default for ViewportController {
 
 impl ViewportController {
     #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            state: ViewportState::Following,
-            generation: ViewportGeneration::INITIAL,
-        }
-    }
-
-    /// Creates a controller anchored to an exact item and signed offset.
-    #[must_use]
-    pub fn anchored(anchor_id: impl Into<String>, offset: i32) -> Self {
-        Self {
-            state: ViewportState::Anchored {
-                anchor_id: anchor_id.into(),
-                offset,
-            },
-            generation: ViewportGeneration::INITIAL,
-        }
+    pub fn new() -> Self {
+        Self::from_machine(viewport_statig::new_machine(ViewportGeneration::INITIAL))
     }
 
     #[must_use]
-    pub fn state(&self) -> &ViewportState {
-        &self.state
+    pub fn anchored(anchor_id: ItemId, offset: i32) -> Self {
+        let mut controller = Self::new();
+        let _ = controller.handle(ViewportEvent::anchor_observed(anchor_id, offset));
+        controller
+    }
+
+    /// Creates a machine with a bounded pre-machine seed for overflow tests.
+    /// The generation cannot be changed after this constructor returns.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn seeded_for_test(generation: ViewportGeneration) -> Self {
+        Self::from_machine(viewport_statig::new_machine(generation))
     }
 
     #[must_use]
-    pub const fn generation(&self) -> ViewportGeneration {
-        self.generation
+    pub fn state(&self) -> ViewportState {
+        viewport_statig::public_state(self.machine.state())
     }
 
-    /// Test-only helper to set the monotonic generation directly.
     #[must_use]
-    pub fn with_generation(mut self, generation: ViewportGeneration) -> Self {
-        self.generation = generation;
-        self
-    }
-
-    pub fn set_generation(&mut self, generation: ViewportGeneration) {
-        self.generation = generation;
-    }
-
-    fn next_generation(&mut self) -> Result<ViewportGeneration, ViewportEffect> {
-        let Some(next) = self.generation.next() else {
-            return Err(ViewportEffect::GenerationExhausted);
-        };
-        self.generation = next;
-        Ok(next)
+    pub fn generation(&self) -> ViewportGeneration {
+        viewport_statig::generation(&self.machine)
     }
 
     /// Applies one viewport event and returns typed effects.
     pub fn handle(&mut self, event: ViewportEvent) -> Vec<ViewportEffect> {
-        if matches!(self.state, ViewportState::Closed) {
-            return vec![ViewportEffect::None];
-        }
-
-        match event {
-            ViewportEvent::OwnerClosed => {
-                self.state = ViewportState::Closed;
-                return vec![ViewportEffect::InvalidateRender];
-            }
-            ViewportEvent::ExtentChanged => return self.handle_extent_changed(),
-            ViewportEvent::UserScrolled { at_bottom } => {
-                return self.handle_user_scrolled(at_bottom);
-            }
-            ViewportEvent::AnchorObserved { anchor_id, offset } => {
-                self.state = ViewportState::Anchored { anchor_id, offset };
-                return vec![ViewportEffect::InvalidateRender];
-            }
-            ViewportEvent::JumpToBottomRequested => return self.handle_jump_requested(),
-            ViewportEvent::ProgrammaticScrollStarted { generation } => {
-                return self.handle_programmatic_started(generation);
-            }
-            ViewportEvent::ScrollCompleted { generation } => {
-                return self.handle_completion(generation);
-            }
-            ViewportEvent::LayoutSettled => return self.handle_layout_settled(),
-            ViewportEvent::AnchorRemoved { anchor_id } => {
-                return self.handle_anchor_removed(anchor_id);
-            }
-        }
+        let mut context = viewport_statig::Context::default();
+        let statig_event = viewport_statig::Event::Public(event);
+        self.machine
+            .handle_with_context(&statig_event, &mut context);
+        context.into_effects()
     }
 
-    fn handle_extent_changed(&mut self) -> Vec<ViewportEffect> {
-        match &self.state {
-            ViewportState::Following => {
-                let generation_value = match self.next_generation() {
-                    Ok(g) => g,
-                    Err(e) => return vec![e],
-                };
-                vec![ViewportEffect::RequestBottomScroll {
-                    generation: generation_value,
-                }]
-            }
-            ViewportState::Anchored { anchor_id, offset } => {
-                let anchor_id = anchor_id.clone();
-                let offset = *offset;
-                let generation_value = match self.next_generation() {
-                    Ok(g) => g,
-                    Err(e) => return vec![e],
-                };
-                vec![ViewportEffect::RequestAnchorRestore {
-                    anchor_id,
-                    offset,
-                    generation: generation_value,
-                }]
-            }
-            ViewportState::Detached
-            | ViewportState::Scrolling { .. }
-            | ViewportState::Settling { .. }
-            | ViewportState::Closed => vec![ViewportEffect::None],
-        }
-    }
-
-    fn handle_user_scrolled(&mut self, at_bottom: bool) -> Vec<ViewportEffect> {
-        if at_bottom {
-            let was_detached = matches!(self.state, ViewportState::Detached);
-            self.state = ViewportState::Following;
-            if was_detached {
-                return vec![
-                    ViewportEffect::HideJumpToLatest,
-                    ViewportEffect::InvalidateRender,
-                ];
-            }
-            return vec![ViewportEffect::HideJumpToLatest];
-        }
-        // User intentionally scrolled away.
-        match &self.state {
-            ViewportState::Following | ViewportState::Anchored { .. } => {
-                self.state = ViewportState::Detached;
-                vec![
-                    ViewportEffect::ShowJumpToLatest,
-                    ViewportEffect::InvalidateRender,
-                ]
-            }
-            ViewportState::Detached
-            | ViewportState::Scrolling { .. }
-            | ViewportState::Settling { .. }
-            | ViewportState::Closed => vec![ViewportEffect::None],
-        }
-    }
-
-    fn handle_jump_requested(&mut self) -> Vec<ViewportEffect> {
-        let generation_value = match self.next_generation() {
-            Ok(g) => g,
-            Err(e) => return vec![e],
-        };
-        self.state = ViewportState::Scrolling {
-            generation: generation_value,
-        };
-        vec![
-            ViewportEffect::RequestBottomScroll {
-                generation: generation_value,
-            },
-            ViewportEffect::HideJumpToLatest,
-            ViewportEffect::InvalidateRender,
-        ]
-    }
-
-    fn handle_programmatic_started(
-        &mut self,
-        generation: ViewportGeneration,
-    ) -> Vec<ViewportEffect> {
-        // Only accept if it matches the current scrolling generation or if we
-        // are not yet scrolling we adopt it as a fenced command.
-        match &self.state {
-            ViewportState::Scrolling { generation: active } if *active == generation => {
-                vec![ViewportEffect::None]
-            }
-            ViewportState::Scrolling { generation: active } => vec![
-                ViewportEffect::CompletionRejected {
-                    generation,
-                    reason: CompletionRejection::StaleGeneration,
-                },
-                ViewportEffect::InvalidateRender,
-            ],
-            _ => {
-                // Allow explicit start from detached/following/anchored by
-                // adopting the generation if it is the expected next.
-                if generation == self.generation {
-                    self.state = ViewportState::Scrolling { generation };
-                    vec![ViewportEffect::InvalidateRender]
-                } else {
-                    vec![ViewportEffect::CompletionRejected {
-                        generation,
-                        reason: CompletionRejection::StaleGeneration,
-                    }]
-                }
-            }
-        }
-    }
-
-    fn handle_completion(&mut self, generation: ViewportGeneration) -> Vec<ViewportEffect> {
-        match &self.state {
-            ViewportState::Scrolling { generation: active } if *active == generation => {
-                self.state = ViewportState::Settling { generation };
-                vec![ViewportEffect::InvalidateRender]
-            }
-            ViewportState::Scrolling { .. } | ViewportState::Settling { .. } => {
-                vec![ViewportEffect::CompletionRejected {
-                    generation,
-                    reason: CompletionRejection::StaleGeneration,
-                }]
-            }
-            _ => vec![ViewportEffect::CompletionRejected {
-                generation,
-                reason: CompletionRejection::NoActiveScroll,
-            }],
-        }
-    }
-
-    fn handle_layout_settled(&mut self) -> Vec<ViewportEffect> {
-        match &self.state {
-            ViewportState::Settling { .. } => {
-                self.state = ViewportState::Following;
-                vec![
-                    ViewportEffect::HideJumpToLatest,
-                    ViewportEffect::InvalidateRender,
-                ]
-            }
-            _ => vec![ViewportEffect::None],
-        }
-    }
-
-    fn handle_anchor_removed(&mut self, anchor_id: String) -> Vec<ViewportEffect> {
-        let should_detach = match &self.state {
-            ViewportState::Anchored {
-                anchor_id: current, ..
-            } => current == &anchor_id,
-            _ => false,
-        };
-        if should_detach {
-            self.state = ViewportState::Detached;
-            return vec![
-                ViewportEffect::ShowJumpToLatest,
-                ViewportEffect::InvalidateRender,
-            ];
-        }
-        vec![ViewportEffect::None]
+    fn from_machine(mut machine: blocking::StateMachine<viewport_statig::Machine>) -> Self {
+        let mut context = viewport_statig::Context::default();
+        machine.init_with_context(&mut context);
+        Self { machine }
     }
 }
+
+impl Clone for ViewportController {
+    fn clone(&self) -> Self {
+        let mut clone = Self::seeded_for_test(self.generation());
+        match self.state() {
+            ViewportState::Following => {}
+            ViewportState::Anchored { anchor_id, offset } => {
+                let _ = clone.handle(ViewportEvent::anchor_observed(anchor_id, offset));
+            }
+            ViewportState::Detached => {
+                let _ = clone.handle(ViewportEvent::UserScrolled { at_bottom: false });
+            }
+            ViewportState::Scrolling { generation } => {
+                let _ = clone.handle(ViewportEvent::ProgrammaticScrollStarted { generation });
+            }
+            ViewportState::Settling { generation } => {
+                let _ = clone.handle(ViewportEvent::ProgrammaticScrollStarted { generation });
+                let _ = clone.handle(ViewportEvent::ScrollCompleted { generation });
+            }
+            ViewportState::Closed => {
+                let _ = clone.handle(ViewportEvent::OwnerClosed);
+            }
+        }
+        clone
+    }
+}
+
+impl fmt::Debug for ViewportController {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ViewportController")
+            .field("state", &self.state())
+            .field("generation", &self.generation())
+            .finish()
+    }
+}
+
+impl PartialEq for ViewportController {
+    fn eq(&self, other: &Self) -> bool {
+        self.state() == other.state() && self.generation() == other.generation()
+    }
+}
+
+impl Eq for ViewportController {}
