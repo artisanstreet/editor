@@ -1,11 +1,7 @@
 //! Black-box coverage for the synchronous conversation turn state machine.
 
-#[path = "../../modules/frontend/src/conversation_turn_machine.rs"]
-mod conversation_turn_machine;
-
-use conversation_turn_machine::{
-    CompletionKind, ConversationTurnController, FailureKind, StateKind, TurnError, TurnEvent,
-    TurnNarration,
+use artisan_frontend::conversation_turn_machine::{
+    ConversationTurnController, FailureKind, StateKind, TurnError, TurnEvent, TurnNarration,
 };
 
 fn assert_single_narration(controller: &ConversationTurnController) {
@@ -25,6 +21,174 @@ fn assert_single_narration(controller: &ConversationTurnController) {
         | TurnNarration::Failed { .. }
         | TurnNarration::Interrupted { .. }
         | TurnNarration::Cancelled { .. } => {}
+    }
+}
+
+#[test]
+fn public_statig_view_exposes_every_leaf_under_the_expected_superstate() {
+    struct Case {
+        event: Option<TurnEvent>,
+        state: StateKind,
+        narration: TurnNarration,
+        active: bool,
+        settled: bool,
+        sealed: bool,
+    }
+
+    let cases = [
+        Case {
+            event: None,
+            state: StateKind::Pending,
+            narration: TurnNarration::Hidden,
+            active: false,
+            settled: false,
+            sealed: false,
+        },
+        Case {
+            event: Some(TurnEvent::WaitingForProvider { at: 1, revision: 1 }),
+            state: StateKind::WaitingForProvider,
+            narration: TurnNarration::WaitingForProvider,
+            active: true,
+            settled: false,
+            sealed: false,
+        },
+        Case {
+            event: Some(TurnEvent::Compacting { at: 1, revision: 1 }),
+            state: StateKind::Compacting,
+            narration: TurnNarration::Compacting,
+            active: true,
+            settled: false,
+            sealed: false,
+        },
+        Case {
+            event: Some(TurnEvent::Thinking { at: 1, revision: 1 }),
+            state: StateKind::Thinking,
+            narration: TurnNarration::Thinking,
+            active: true,
+            settled: false,
+            sealed: false,
+        },
+        Case {
+            event: Some(TurnEvent::Working { at: 1, revision: 1 }),
+            state: StateKind::Working,
+            narration: TurnNarration::Working,
+            active: true,
+            settled: false,
+            sealed: false,
+        },
+        Case {
+            event: Some(TurnEvent::StreamingReply { at: 1, revision: 1 }),
+            state: StateKind::StreamingReply,
+            narration: TurnNarration::StreamingReply,
+            active: true,
+            settled: false,
+            sealed: false,
+        },
+        Case {
+            event: Some(TurnEvent::WaitingForBackground { at: 1, revision: 1 }),
+            state: StateKind::WaitingForBackground,
+            narration: TurnNarration::WaitingForBackground,
+            active: true,
+            settled: false,
+            sealed: false,
+        },
+        Case {
+            event: Some(TurnEvent::Completed { at: 1, revision: 1 }),
+            state: StateKind::Completed,
+            narration: TurnNarration::ThoughtFor { elapsed_ms: 0 },
+            active: false,
+            settled: true,
+            sealed: true,
+        },
+        Case {
+            event: Some(TurnEvent::Failed {
+                at: 1,
+                revision: 1,
+                kind: Some(FailureKind::RateLimited),
+            }),
+            state: StateKind::Failed,
+            narration: TurnNarration::Failed {
+                elapsed_ms: 0,
+                kind: Some(FailureKind::RateLimited),
+            },
+            active: false,
+            settled: true,
+            sealed: true,
+        },
+        Case {
+            event: Some(TurnEvent::Interrupted { at: 1, revision: 1 }),
+            state: StateKind::Interrupted,
+            narration: TurnNarration::Interrupted { elapsed_ms: 0 },
+            active: false,
+            settled: true,
+            sealed: false,
+        },
+        Case {
+            event: Some(TurnEvent::Cancelled { at: 1, revision: 1 }),
+            state: StateKind::Cancelled,
+            narration: TurnNarration::Cancelled { elapsed_ms: 0 },
+            active: false,
+            settled: true,
+            sealed: true,
+        },
+    ];
+
+    for case in cases {
+        let mut controller = ConversationTurnController::new();
+        if let Some(event) = case.event {
+            controller.dispatch(event).unwrap();
+        }
+        let view = controller.view();
+        assert_eq!(view.state, case.state);
+        assert_eq!(view.narration, case.narration);
+        assert_eq!(view.state.is_active(), case.active);
+        assert_eq!(view.state.is_settled(), case.settled);
+        assert_eq!(view.state.is_sealed(), case.sealed);
+        assert_single_narration(&controller);
+    }
+}
+
+#[test]
+fn resume_only_transitions_interrupted_not_pending_or_active() {
+    let cases = [
+        (None, StateKind::Pending),
+        (
+            Some(TurnEvent::WaitingForProvider { at: 1, revision: 1 }),
+            StateKind::WaitingForProvider,
+        ),
+        (
+            Some(TurnEvent::Compacting { at: 1, revision: 1 }),
+            StateKind::Compacting,
+        ),
+        (
+            Some(TurnEvent::Thinking { at: 1, revision: 1 }),
+            StateKind::Thinking,
+        ),
+        (
+            Some(TurnEvent::Working { at: 1, revision: 1 }),
+            StateKind::Working,
+        ),
+        (
+            Some(TurnEvent::StreamingReply { at: 1, revision: 1 }),
+            StateKind::StreamingReply,
+        ),
+        (
+            Some(TurnEvent::WaitingForBackground { at: 1, revision: 1 }),
+            StateKind::WaitingForBackground,
+        ),
+    ];
+
+    for (initial, expected_state) in cases {
+        let mut controller = ConversationTurnController::new();
+        if let Some(event) = initial {
+            controller.dispatch(event).unwrap();
+        }
+        let before = controller.view();
+        controller
+            .dispatch(TurnEvent::Resume { at: 2, revision: 2 })
+            .unwrap();
+        assert_eq!(controller.state(), expected_state);
+        assert_eq!(controller.view(), before);
     }
 }
 
@@ -58,6 +222,8 @@ fn pending_through_provider_thinking_streaming_completes_as_thought() {
     })
     .unwrap();
     assert_eq!(ctl.view().narration, TurnNarration::StreamingReply);
+    assert_eq!(ctl.view().narration.label(), "");
+    assert!(!ctl.view().narration.label().contains("Streaming reply"));
     // Streaming suppresses quiet status but preserves evidence.
     assert!(ctl.reasoning_seen());
     assert_single_narration(&ctl);
@@ -319,6 +485,14 @@ fn sealed_failed_and_cancelled_reject_different_events_duplicate_is_idempotent()
     .unwrap();
     let failed_view = ctl.view();
     assert_eq!(failed_view.state, StateKind::Failed);
+    assert_eq!(failed_view.narration.label(), "Failed");
+    assert!(matches!(
+        &failed_view.narration,
+        TurnNarration::Failed {
+            kind: Some(FailureKind::Timeout),
+            ..
+        }
+    ));
 
     // Duplicate exact settlement is harmless (idempotent) even with same revision.
     let dup = ctl.dispatch(TurnEvent::Failed {
@@ -338,6 +512,7 @@ fn sealed_failed_and_cancelled_reject_different_events_duplicate_is_idempotent()
     // Our implementation treats same at/kind with higher revision as
     // duplicate idempotent (advances revision).
     assert!(dup2.is_ok());
+    assert_eq!(ctl.revision(), 3);
     assert_eq!(ctl.view().terminal_at, Some(11_000));
 
     // Different later work/terminal is rejected without changing data.
@@ -349,6 +524,15 @@ fn sealed_failed_and_cancelled_reject_different_events_duplicate_is_idempotent()
         })
         .unwrap_err();
     assert!(matches!(err, TurnError::Sealed { .. }));
+    assert_eq!(ctl.view(), before);
+
+    let err_resume = ctl
+        .dispatch(TurnEvent::Resume {
+            at: 12_000,
+            revision: 5,
+        })
+        .unwrap_err();
+    assert!(matches!(err_resume, TurnError::Sealed { .. }));
     assert_eq!(ctl.view(), before);
 
     let err2 = ctl

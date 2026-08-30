@@ -9,7 +9,9 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use statig::blocking as statig_blocking;
+use statig::Outcome::{Handled, Transition};
+use statig::blocking::{IntoStateMachineExt, StateMachine};
+use statig::prelude::*;
 
 /// How the provider's failure is redacted for the UI.
 ///
@@ -179,17 +181,51 @@ pub struct TurnView {
 /// This module never reads a clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEvent {
-    WaitingForProvider { at: i64, revision: u64 },
-    Compacting { at: i64, revision: u64 },
-    Thinking { at: i64, revision: u64 },
-    Working { at: i64, revision: u64 },
-    StreamingReply { at: i64, revision: u64 },
-    WaitingForBackground { at: i64, revision: u64 },
-    Completed { at: i64, revision: u64 },
-    Failed { at: i64, revision: u64, kind: Option<FailureKind> },
-    Interrupted { at: i64, revision: u64 },
-    Cancelled { at: i64, revision: u64 },
-    Resume { at: i64, revision: u64 },
+    WaitingForProvider {
+        at: i64,
+        revision: u64,
+    },
+    Compacting {
+        at: i64,
+        revision: u64,
+    },
+    Thinking {
+        at: i64,
+        revision: u64,
+    },
+    Working {
+        at: i64,
+        revision: u64,
+    },
+    StreamingReply {
+        at: i64,
+        revision: u64,
+    },
+    WaitingForBackground {
+        at: i64,
+        revision: u64,
+    },
+    Completed {
+        at: i64,
+        revision: u64,
+    },
+    Failed {
+        at: i64,
+        revision: u64,
+        kind: Option<FailureKind>,
+    },
+    Interrupted {
+        at: i64,
+        revision: u64,
+    },
+    Cancelled {
+        at: i64,
+        revision: u64,
+    },
+    Resume {
+        at: i64,
+        revision: u64,
+    },
 }
 
 impl TurnEvent {
@@ -253,9 +289,18 @@ pub enum TurnEffect {}
 /// Typed refusal reasons. The prior state/view is left unchanged on error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnError {
-    TimestampRegression { expected_at_least: i64, got: i64 },
-    StaleRevision { expected_at_least: u64, got: u64 },
-    Sealed { state: StateKind, event: &'static str },
+    TimestampRegression {
+        expected_at_least: i64,
+        got: i64,
+    },
+    StaleRevision {
+        expected_at_least: u64,
+        got: u64,
+    },
+    Sealed {
+        state: StateKind,
+        event: &'static str,
+    },
 }
 
 impl std::fmt::Display for TurnError {
@@ -347,6 +392,14 @@ impl TurnMachine {
         self.terminal_at = None;
         self.failure_kind = None;
     }
+
+    fn completion_kind(&self) -> CompletionKind {
+        if self.work_seen {
+            CompletionKind::Worked
+        } else {
+            CompletionKind::Thought
+        }
+    }
 }
 
 #[statig::state_machine(
@@ -356,477 +409,458 @@ impl TurnMachine {
 )]
 impl TurnMachine {
     #[state]
-    fn pending(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    fn pending(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
             TurnEvent::WaitingForProvider { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_provider())
+                Transition(State::waiting_for_provider())
             }
             TurnEvent::Compacting { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::compacting())
+                Transition(State::compacting())
             }
             TurnEvent::Thinking { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
-                statig_blocking::Response::Transition(State::thinking())
+                Transition(State::thinking())
             }
             TurnEvent::Working { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::streaming_reply())
+                Transition(State::streaming_reply())
             }
             TurnEvent::WaitingForBackground { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_background())
+                Transition(State::waiting_for_background())
             }
             TurnEvent::Completed { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::completed())
+                Transition(State::completed())
             }
             TurnEvent::Failed { at, revision, kind } => {
                 self.apply_terminal(*at, *revision, *kind);
-                statig_blocking::Response::Transition(State::failed())
+                Transition(State::failed())
             }
             TurnEvent::Interrupted { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::interrupted())
+                Transition(State::interrupted())
             }
             TurnEvent::Cancelled { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::cancelled())
+                Transition(State::cancelled())
             }
-            TurnEvent::Resume { at, revision } => {
-                self.apply_active(*at, *revision);
-                self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
-            }
+            TurnEvent::Resume { .. } => Handled,
         }
     }
 
-    #[state(superstate = "Superstate::active_work")]
-    fn waiting_for_provider(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "active_work")]
+    fn waiting_for_provider(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
             TurnEvent::WaitingForProvider { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_provider())
+                Transition(State::waiting_for_provider())
             }
             TurnEvent::Compacting { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::compacting())
+                Transition(State::compacting())
             }
             TurnEvent::Thinking { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
-                statig_blocking::Response::Transition(State::thinking())
+                Transition(State::thinking())
             }
             TurnEvent::Working { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::streaming_reply())
+                Transition(State::streaming_reply())
             }
             TurnEvent::WaitingForBackground { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_background())
+                Transition(State::waiting_for_background())
             }
             TurnEvent::Completed { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::completed())
+                Transition(State::completed())
             }
             TurnEvent::Failed { at, revision, kind } => {
                 self.apply_terminal(*at, *revision, *kind);
-                statig_blocking::Response::Transition(State::failed())
+                Transition(State::failed())
             }
             TurnEvent::Interrupted { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::interrupted())
+                Transition(State::interrupted())
             }
             TurnEvent::Cancelled { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::cancelled())
+                Transition(State::cancelled())
             }
-            TurnEvent::Resume { at, revision } => {
-                self.apply_active(*at, *revision);
-                self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
-            }
+            TurnEvent::Resume { .. } => Handled,
         }
     }
 
-    #[state(superstate = "Superstate::active_work")]
-    fn compacting(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "active_work")]
+    fn compacting(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
             TurnEvent::WaitingForProvider { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_provider())
+                Transition(State::waiting_for_provider())
             }
             TurnEvent::Compacting { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::compacting())
+                Transition(State::compacting())
             }
             TurnEvent::Thinking { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
-                statig_blocking::Response::Transition(State::thinking())
+                Transition(State::thinking())
             }
             TurnEvent::Working { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::streaming_reply())
+                Transition(State::streaming_reply())
             }
             TurnEvent::WaitingForBackground { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_background())
+                Transition(State::waiting_for_background())
             }
             TurnEvent::Completed { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::completed())
+                Transition(State::completed())
             }
             TurnEvent::Failed { at, revision, kind } => {
                 self.apply_terminal(*at, *revision, *kind);
-                statig_blocking::Response::Transition(State::failed())
+                Transition(State::failed())
             }
             TurnEvent::Interrupted { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::interrupted())
+                Transition(State::interrupted())
             }
             TurnEvent::Cancelled { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::cancelled())
+                Transition(State::cancelled())
             }
-            TurnEvent::Resume { at, revision } => {
-                self.apply_active(*at, *revision);
-                self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
-            }
+            TurnEvent::Resume { .. } => Handled,
         }
     }
 
-    #[state(superstate = "Superstate::active_work")]
-    fn thinking(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "active_work")]
+    fn thinking(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
             TurnEvent::WaitingForProvider { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_provider())
+                Transition(State::waiting_for_provider())
             }
             TurnEvent::Compacting { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::compacting())
+                Transition(State::compacting())
             }
             TurnEvent::Thinking { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
-                statig_blocking::Response::Transition(State::thinking())
+                Transition(State::thinking())
             }
             TurnEvent::Working { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::streaming_reply())
+                Transition(State::streaming_reply())
             }
             TurnEvent::WaitingForBackground { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_background())
+                Transition(State::waiting_for_background())
             }
             TurnEvent::Completed { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::completed())
+                Transition(State::completed())
             }
             TurnEvent::Failed { at, revision, kind } => {
                 self.apply_terminal(*at, *revision, *kind);
-                statig_blocking::Response::Transition(State::failed())
+                Transition(State::failed())
             }
             TurnEvent::Interrupted { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::interrupted())
+                Transition(State::interrupted())
             }
             TurnEvent::Cancelled { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::cancelled())
+                Transition(State::cancelled())
             }
-            TurnEvent::Resume { at, revision } => {
-                self.apply_active(*at, *revision);
-                self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
-            }
+            TurnEvent::Resume { .. } => Handled,
         }
     }
 
-    #[state(superstate = "Superstate::active_work")]
-    fn working(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "active_work")]
+    fn working(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
             TurnEvent::WaitingForProvider { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_provider())
+                Transition(State::waiting_for_provider())
             }
             TurnEvent::Compacting { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::compacting())
+                Transition(State::compacting())
             }
             TurnEvent::Thinking { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
-                statig_blocking::Response::Transition(State::thinking())
+                Transition(State::thinking())
             }
             TurnEvent::Working { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::streaming_reply())
+                Transition(State::streaming_reply())
             }
             TurnEvent::WaitingForBackground { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_background())
+                Transition(State::waiting_for_background())
             }
             TurnEvent::Completed { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::completed())
+                Transition(State::completed())
             }
             TurnEvent::Failed { at, revision, kind } => {
                 self.apply_terminal(*at, *revision, *kind);
-                statig_blocking::Response::Transition(State::failed())
+                Transition(State::failed())
             }
             TurnEvent::Interrupted { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::interrupted())
+                Transition(State::interrupted())
             }
             TurnEvent::Cancelled { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::cancelled())
+                Transition(State::cancelled())
             }
-            TurnEvent::Resume { at, revision } => {
-                self.apply_active(*at, *revision);
-                self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
-            }
+            TurnEvent::Resume { .. } => Handled,
         }
     }
 
-    #[state(superstate = "Superstate::active_work")]
-    fn streaming_reply(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "active_work")]
+    fn streaming_reply(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
             TurnEvent::WaitingForProvider { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_provider())
+                Transition(State::waiting_for_provider())
             }
             TurnEvent::Compacting { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::compacting())
+                Transition(State::compacting())
             }
             TurnEvent::Thinking { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
-                statig_blocking::Response::Transition(State::thinking())
+                Transition(State::thinking())
             }
             TurnEvent::Working { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::streaming_reply())
+                Transition(State::streaming_reply())
             }
             TurnEvent::WaitingForBackground { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_background())
+                Transition(State::waiting_for_background())
             }
             TurnEvent::Completed { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::completed())
+                Transition(State::completed())
             }
             TurnEvent::Failed { at, revision, kind } => {
                 self.apply_terminal(*at, *revision, *kind);
-                statig_blocking::Response::Transition(State::failed())
+                Transition(State::failed())
             }
             TurnEvent::Interrupted { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::interrupted())
+                Transition(State::interrupted())
             }
             TurnEvent::Cancelled { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::cancelled())
+                Transition(State::cancelled())
             }
-            TurnEvent::Resume { at, revision } => {
-                self.apply_active(*at, *revision);
-                self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
-            }
+            TurnEvent::Resume { .. } => Handled,
         }
     }
 
-    #[state(superstate = "Superstate::active_work")]
-    fn waiting_for_background(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "active_work")]
+    fn waiting_for_background(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
             TurnEvent::WaitingForProvider { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_provider())
+                Transition(State::waiting_for_provider())
             }
             TurnEvent::Compacting { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::compacting())
+                Transition(State::compacting())
             }
             TurnEvent::Thinking { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
-                statig_blocking::Response::Transition(State::thinking())
+                Transition(State::thinking())
             }
             TurnEvent::Working { at, revision } => {
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::streaming_reply())
+                Transition(State::streaming_reply())
             }
             TurnEvent::WaitingForBackground { at, revision } => {
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_background())
+                Transition(State::waiting_for_background())
             }
             TurnEvent::Completed { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::completed())
+                Transition(State::completed())
             }
             TurnEvent::Failed { at, revision, kind } => {
                 self.apply_terminal(*at, *revision, *kind);
-                statig_blocking::Response::Transition(State::failed())
+                Transition(State::failed())
             }
             TurnEvent::Interrupted { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::interrupted())
+                Transition(State::interrupted())
             }
             TurnEvent::Cancelled { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::cancelled())
+                Transition(State::cancelled())
             }
-            TurnEvent::Resume { at, revision } => {
-                self.apply_active(*at, *revision);
-                self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+            TurnEvent::Resume { .. } => Handled,
+        }
+    }
+
+    #[state(superstate = "settled")]
+    fn completed(&mut self, event: &TurnEvent) -> Outcome<State> {
+        match event {
+            TurnEvent::Completed { at, revision } => {
+                self.apply_terminal(*at, *revision, None);
+                Handled
             }
+            _ => Handled,
         }
     }
 
-    #[state(superstate = "Superstate::settled")]
-    fn completed(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "settled")]
+    fn failed(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
-            TurnEvent::Completed { .. } => statig_blocking::Response::Handled,
-            _ => statig_blocking::Response::Handled,
+            TurnEvent::Failed { at, revision, kind } => {
+                self.apply_terminal(*at, *revision, *kind);
+                Handled
+            }
+            _ => Handled,
         }
     }
 
-    #[state(superstate = "Superstate::settled")]
-    fn failed(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
-        match event {
-            TurnEvent::Failed { .. } => statig_blocking::Response::Handled,
-            _ => statig_blocking::Response::Handled,
-        }
-    }
-
-    #[state(superstate = "Superstate::settled")]
-    fn interrupted(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "settled")]
+    fn interrupted(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
             TurnEvent::Resume { at, revision } => {
                 self.clear_terminal_for_resume();
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::WaitingForProvider { at, revision } => {
                 self.clear_terminal_for_resume();
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_provider())
+                Transition(State::waiting_for_provider())
             }
             TurnEvent::Compacting { at, revision } => {
                 self.clear_terminal_for_resume();
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::compacting())
+                Transition(State::compacting())
             }
             TurnEvent::Thinking { at, revision } => {
                 self.clear_terminal_for_resume();
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
-                statig_blocking::Response::Transition(State::thinking())
+                Transition(State::thinking())
             }
             TurnEvent::Working { at, revision } => {
                 self.clear_terminal_for_resume();
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
-                statig_blocking::Response::Transition(State::working())
+                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.clear_terminal_for_resume();
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::streaming_reply())
+                Transition(State::streaming_reply())
             }
             TurnEvent::WaitingForBackground { at, revision } => {
                 self.clear_terminal_for_resume();
                 self.apply_active(*at, *revision);
-                statig_blocking::Response::Transition(State::waiting_for_background())
+                Transition(State::waiting_for_background())
             }
             TurnEvent::Completed { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::completed())
+                Transition(State::completed())
             }
             TurnEvent::Failed { at, revision, kind } => {
                 self.apply_terminal(*at, *revision, *kind);
-                statig_blocking::Response::Transition(State::failed())
+                Transition(State::failed())
             }
             TurnEvent::Cancelled { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::cancelled())
+                Transition(State::cancelled())
             }
             TurnEvent::Interrupted { at, revision } => {
                 self.apply_terminal(*at, *revision, None);
-                statig_blocking::Response::Transition(State::interrupted())
+                Transition(State::interrupted())
             }
         }
     }
 
-    #[state(superstate = "Superstate::settled")]
-    fn cancelled(&mut self, event: &TurnEvent) -> statig_blocking::Response<State> {
+    #[state(superstate = "settled")]
+    fn cancelled(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
-            TurnEvent::Cancelled { .. } => statig_blocking::Response::Handled,
-            _ => statig_blocking::Response::Handled,
+            TurnEvent::Cancelled { at, revision } => {
+                self.apply_terminal(*at, *revision, None);
+                Handled
+            }
+            _ => Handled,
         }
     }
 
     #[superstate]
-    fn active_work(&mut self, event: &TurnEvent) -> statig_blocking::Response<Superstate> {
+    fn active_work(&mut self, event: &TurnEvent) -> Outcome<State> {
         let _ = event;
-        statig_blocking::Response::Handled
+        Handled
     }
 
     #[superstate]
-    fn settled(&mut self, event: &TurnEvent) -> statig_blocking::Response<Superstate> {
+    fn settled(&mut self, event: &TurnEvent) -> Outcome<State> {
         let _ = event;
-        statig_blocking::Response::Handled
+        Handled
     }
 }
 
 /// Public synchronous controller. One instance per `TurnId` is kept by an
 /// outer aggregate.
 pub struct ConversationTurnController {
-    machine: statig_blocking::BlockingMachine<TurnMachine>,
+    machine: StateMachine<TurnMachine>,
 }
 
 impl Default for ConversationTurnController {
@@ -857,17 +891,17 @@ impl ConversationTurnController {
     #[must_use]
     pub fn state(&self) -> StateKind {
         match self.machine.state() {
-            State::Pending => StateKind::Pending,
-            State::WaitingForProvider => StateKind::WaitingForProvider,
-            State::Compacting => StateKind::Compacting,
-            State::Thinking => StateKind::Thinking,
-            State::Working => StateKind::Working,
-            State::StreamingReply => StateKind::StreamingReply,
-            State::WaitingForBackground => StateKind::WaitingForBackground,
-            State::Completed => StateKind::Completed,
-            State::Failed => StateKind::Failed,
-            State::Interrupted => StateKind::Interrupted,
-            State::Cancelled => StateKind::Cancelled,
+            State::Pending { .. } => StateKind::Pending,
+            State::WaitingForProvider { .. } => StateKind::WaitingForProvider,
+            State::Compacting { .. } => StateKind::Compacting,
+            State::Thinking { .. } => StateKind::Thinking,
+            State::Working { .. } => StateKind::Working,
+            State::StreamingReply { .. } => StateKind::StreamingReply,
+            State::WaitingForBackground { .. } => StateKind::WaitingForBackground,
+            State::Completed { .. } => StateKind::Completed,
+            State::Failed { .. } => StateKind::Failed,
+            State::Interrupted { .. } => StateKind::Interrupted,
+            State::Cancelled { .. } => StateKind::Cancelled,
         }
     }
 
@@ -921,17 +955,20 @@ impl ConversationTurnController {
             StateKind::StreamingReply => TurnNarration::StreamingReply,
             StateKind::WaitingForBackground => TurnNarration::WaitingForBackground,
             StateKind::Completed => {
-                let start = inner.started_at.unwrap_or_else(|| inner.terminal_at.unwrap_or(0));
+                let start = inner
+                    .started_at
+                    .unwrap_or_else(|| inner.terminal_at.unwrap_or(0));
                 let end = inner.terminal_at.unwrap_or(start);
                 let elapsed_ms = saturating_elapsed_ms(start, end);
-                if inner.work_seen {
-                    TurnNarration::WorkedFor { elapsed_ms }
-                } else {
-                    TurnNarration::ThoughtFor { elapsed_ms }
+                match inner.completion_kind() {
+                    CompletionKind::Worked => TurnNarration::WorkedFor { elapsed_ms },
+                    CompletionKind::Thought => TurnNarration::ThoughtFor { elapsed_ms },
                 }
             }
             StateKind::Failed => {
-                let start = inner.started_at.unwrap_or_else(|| inner.terminal_at.unwrap_or(0));
+                let start = inner
+                    .started_at
+                    .unwrap_or_else(|| inner.terminal_at.unwrap_or(0));
                 let end = inner.terminal_at.unwrap_or(start);
                 let elapsed_ms = saturating_elapsed_ms(start, end);
                 TurnNarration::Failed {
@@ -940,13 +977,17 @@ impl ConversationTurnController {
                 }
             }
             StateKind::Interrupted => {
-                let start = inner.started_at.unwrap_or_else(|| inner.terminal_at.unwrap_or(0));
+                let start = inner
+                    .started_at
+                    .unwrap_or_else(|| inner.terminal_at.unwrap_or(0));
                 let end = inner.terminal_at.unwrap_or(start);
                 let elapsed_ms = saturating_elapsed_ms(start, end);
                 TurnNarration::Interrupted { elapsed_ms }
             }
             StateKind::Cancelled => {
-                let start = inner.started_at.unwrap_or_else(|| inner.terminal_at.unwrap_or(0));
+                let start = inner
+                    .started_at
+                    .unwrap_or_else(|| inner.terminal_at.unwrap_or(0));
                 let end = inner.terminal_at.unwrap_or(start);
                 let elapsed_ms = saturating_elapsed_ms(start, end);
                 TurnNarration::Cancelled { elapsed_ms }
