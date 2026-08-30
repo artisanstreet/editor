@@ -1112,17 +1112,14 @@ fn plan_icacls_removals(
     for ace in ace_lines {
         let colon = ace.find(':').ok_or(ForgeCredentialError::WindowsAcl)?;
         let principal = ace[..colon].trim();
-        if !is_safe_acl_principal(principal) {
-            return Err(ForgeCredentialError::WindowsAcl);
-        }
         let flags = ace[colon + 1..].to_ascii_lowercase();
         if flags.contains("(i)") {
             return Err(ForgeCredentialError::WindowsAcl);
         }
         let is_deny = flags.contains("(deny)");
-        if principal.eq_ignore_ascii_case(&identity.sid)
-            || principal.eq_ignore_ascii_case(&identity.account)
-        {
+        let is_current_identity = principal.eq_ignore_ascii_case(&identity.sid)
+            || principal.eq_ignore_ascii_case(&identity.account);
+        if is_current_identity {
             current_identity_count += 1;
             if current_identity_count > 1 {
                 return Err(ForgeCredentialError::WindowsAcl);
@@ -1131,6 +1128,9 @@ fn plan_icacls_removals(
                 removals.push(principal.to_owned());
             }
             continue;
+        }
+        if !is_safe_acl_principal(principal) {
+            return Err(ForgeCredentialError::WindowsAcl);
         }
         if removals
             .iter()
@@ -2043,6 +2043,16 @@ mod parser_tests {
         assert_eq!(
             plan_icacls_removals(&account_output, &identity, path).unwrap(),
             vec!["DOMAIN\\Runner".to_string()]
+        );
+
+        let lowercase_sid = sid.to_ascii_lowercase();
+        let converged_output = format!("{path} {lowercase_sid}:(OI)(CI)(F)");
+        assert_eq!(
+            plan_icacls_removals(&converged_output, &identity, path).unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(
+            parse_icacls_strict_with_identity(&converged_output, &identity, true, path).is_ok()
         );
     }
 
