@@ -622,7 +622,7 @@ fn open_and_read_native_inner(
     match maximum_bytes {
         Some(maximum_bytes) => {
             let read_limit = maximum_bytes.saturating_add(1);
-            file.by_ref()
+            std::io::Read::by_ref(&mut file)
                 .take(u64::try_from(read_limit).unwrap_or(u64::MAX))
                 .read_to_end(&mut bytes)
                 .map_err(|_| NativeInstanceError::Io {
@@ -630,12 +630,13 @@ fn open_and_read_native_inner(
                     path: path.to_path_buf(),
                 })?;
         }
-        None => file
-            .read_to_end(&mut bytes)
-            .map_err(|_| NativeInstanceError::Io {
-                context: "read instance file",
-                path: path.to_path_buf(),
-            })?,
+        None => {
+            file.read_to_end(&mut bytes)
+                .map_err(|_| NativeInstanceError::Io {
+                    context: "read instance file",
+                    path: path.to_path_buf(),
+                })?;
+        }
     }
     check_ancestors_all(path, true)?;
     let post_meta = fs::symlink_metadata(path).map_err(|_| NativeInstanceError::Io {
@@ -740,7 +741,7 @@ pub(crate) fn verify_native_file(
     Ok(pre_id)
 }
 
-fn stream_and_verify<R: Read>(
+pub(crate) fn stream_and_verify<R: Read>(
     reader: &mut R,
     expected_size: u64,
     expected_sha256: &[u8; 32],

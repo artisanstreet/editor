@@ -854,21 +854,21 @@ mod tests {
         let bytes = b"a synthetic bounded fixture spanning a reader call";
         let expected = digest_array(bytes);
         let mut reader = std::io::Cursor::new(bytes.as_slice());
-        assert!(stream_and_verify(&mut reader, bytes.len() as u64, &expected).is_ok());
+        assert!(instance::stream_and_verify(&mut reader, bytes.len() as u64, &expected).is_ok());
 
         let mut short = std::io::Cursor::new(&bytes[..bytes.len() - 1]);
         assert_eq!(
-            stream_and_verify(&mut short, bytes.len() as u64, &expected),
+            instance::stream_and_verify(&mut short, bytes.len() as u64, &expected),
             Err(NativeInstanceError::FileSizeMismatch)
         );
         let mut wrong_hash = std::io::Cursor::new(bytes.as_slice());
         assert_eq!(
-            stream_and_verify(&mut wrong_hash, bytes.len() as u64, &[0; 32]),
+            instance::stream_and_verify(&mut wrong_hash, bytes.len() as u64, &[0; 32]),
             Err(NativeInstanceError::FileHashMismatch)
         );
         let mut oversized = std::io::Cursor::new([bytes.as_slice(), b"!"].concat());
         assert_eq!(
-            stream_and_verify(&mut oversized, bytes.len() as u64, &expected),
+            instance::stream_and_verify(&mut oversized, bytes.len() as u64, &expected),
             Err(NativeInstanceError::FileSizeMismatch)
         );
     }
