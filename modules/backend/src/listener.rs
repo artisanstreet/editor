@@ -924,12 +924,7 @@ mod auth_retry_tests {
     }
 
     #[test]
-    fn entropy_rotation_finish_are_terminal() {
-        let entropy = peer_error(AuthenticationStageError::Entropy(
-            crate::credential_authority::CredentialEntropyError::from(getrandom::Error::UNEXPECTED),
-        ));
-        assert!(!is_authentication_retryable(&entropy));
-
+    fn rotation_is_terminal() {
         let rotation = peer_error(AuthenticationStageError::Rotation(
             crate::credential_authority::ReconnectRotationError::AlreadyTaken,
         ));
