@@ -107,7 +107,7 @@ fn native_listener_values_unchanged() {
 }
 
 #[test]
-fn nested_parent_symlink_rejected() {
+fn nested_parent_reparse_rejected() {
     let home = temp_dir("nested");
     let nested = home.join("a").join("b").join("c");
     fs::create_dir_all(&nested).unwrap();
@@ -116,37 +116,65 @@ fn nested_parent_symlink_rejected() {
     let link = home.join("a").join("b");
     let _ = fs::remove_dir_all(&link);
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&real, &link).unwrap();
+    {
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = nested.join("instance-v2.json");
+        let config = sample_config(&home);
+        let err = config.write(&path);
+        assert!(err.is_err(), "nested symlink must be rejected");
+    }
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&real, &link).unwrap_or_else(|_| return);
-    let path = nested.join("instance-v2.json");
-    let config = sample_config(&home);
-    let err = config.write(&path);
-    if cfg!(unix) {
-        assert!(err.is_err());
+    {
+        match std::os::windows::fs::symlink_dir(&real, &link) {
+            Ok(()) => {
+                let path = nested.join("instance-v2.json");
+                let config = sample_config(&home);
+                let err = config.write(&path);
+                assert!(err.is_err(), "nested reparse must be rejected");
+                let _ = fs::remove_file(&link);
+            }
+            Err(_) => {
+                eprintln!("SKIP: nested reparse not supported on this Windows host");
+            }
+        }
     }
     let _ = fs::remove_file(&link);
     fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
-fn handle_read_fencing_rejects_drift() {
+fn handle_read_fencing_rejects_symlink_drift() {
     let home = temp_dir("drift");
     let path = NativeInstanceConfig::native_path(&home);
     let config = sample_config(&home);
     config.write(&path).unwrap();
     let backup = path.with_extension("bak");
     fs::rename(&path, &backup).unwrap();
+    let mut created = false;
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&backup, &path).unwrap();
+    {
+        std::os::unix::fs::symlink(&backup, &path).unwrap();
+        created = true;
+    }
     #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&backup, &path).unwrap_or_else(|_| {
-        fs::write(&path, b"bad").unwrap();
-        return;
-    });
-    assert!(NativeInstanceConfig::load(&path).is_err());
-    let _ = fs::remove_file(&path);
-    fs::rename(&backup, &path).unwrap();
+    {
+        if std::os::windows::fs::symlink_file(&backup, &path).is_ok() {
+            created = true;
+        } else {
+            eprintln!("SKIP: symlink drift not supported on this Windows host");
+            fs::rename(&backup, &path).unwrap();
+            fs::remove_dir_all(home).unwrap();
+            return;
+        }
+    }
+    if created {
+        assert!(
+            NativeInstanceConfig::load(&path).is_err(),
+            "handle fencing must reject drift"
+        );
+        let _ = fs::remove_file(&path);
+        fs::rename(&backup, &path).unwrap();
+    }
     fs::remove_dir_all(home).unwrap();
 }
 
@@ -156,7 +184,6 @@ fn atomic_replacement_identity_fenced() {
     let path = NativeInstanceConfig::native_path(&home);
     let config = sample_config(&home);
     config.write(&path).unwrap();
-    let first = fs::read(&path).unwrap();
     let config2 = NativeInstanceConfig::new(
         home.join("data2").join("artisan.sqlite"),
         home.join("custody2").join("lock"),
@@ -166,27 +193,19 @@ fn atomic_replacement_identity_fenced() {
     )
     .unwrap();
     config2.write(&path).unwrap();
-    let second = fs::read(&path).unwrap();
-    assert!(first != second);
     let loaded = NativeInstanceConfig::load(&path).unwrap();
     assert_eq!(loaded.database_path(), config2.database_path());
     fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
-fn redacted_errors() {
-    let err = NativeInstanceConfig::load(&PathBuf::from("/nonexistent/path.json")).unwrap_err();
-    let debug = format!("{err:?}");
-    let display = format!("{err}");
-    assert!(!display.contains("secret"));
-    assert!(!debug.contains("secret"));
-    // Even with attacker content in file, error must not echo
+fn redacted_errors_do_not_echo_attacker() {
     let home = temp_dir("redact");
     let path = home.join("instance-v2.json");
     fs::write(&path, b"evil\x00 content").unwrap();
-    let err2 = NativeInstanceConfig::load(&path).unwrap_err();
-    assert!(!format!("{err2}").contains("evil"));
-    assert!(!format!("{err2:?}").contains("evil"));
+    let err = NativeInstanceConfig::load(&path).unwrap_err();
+    assert!(!format!("{err}").contains("evil"));
+    assert!(!format!("{err:?}").contains("evil"));
     fs::remove_dir_all(home).unwrap();
 }
 

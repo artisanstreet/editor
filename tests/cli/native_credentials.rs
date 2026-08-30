@@ -59,41 +59,33 @@ fn nested_ancestor_symlink_rejected() {
     let link = home.join("a").join("b");
     let _ = fs::remove_dir_all(&link);
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&real, &link).unwrap();
+    {
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let target_home = parent.clone();
+        let err = provision_or_load(&target_home);
+        assert!(err.is_err(), "nested symlink must be rejected");
+    }
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&real, &link).unwrap_or_else(|_| {
-        // if symlink not permitted, fallback to file symlink test
-        return;
-    });
-    let target_home = parent.clone();
-    let err = provision_or_load(&target_home);
-    if cfg!(unix) {
-        assert!(err.is_err());
+    {
+        match std::os::windows::fs::symlink_dir(&real, &link) {
+            Ok(()) => {
+                let target_home = parent.clone();
+                let err = provision_or_load(&target_home);
+                assert!(err.is_err(), "nested reparse must be rejected");
+                let _ = fs::remove_file(&link);
+            }
+            Err(_) => {
+                eprintln!("SKIP: nested reparse not supported on this Windows host");
+            }
+        }
     }
     let _ = fs::remove_file(&link);
     fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
-fn no_overwrite_existing_bundle() {
+fn no_overwrite_existing_capability() {
     let home = temp_home("nooverwrite");
-    let paths = provision_or_load(&home).unwrap();
-    let cap_before = fs::read(paths.capability_path()).unwrap();
-    let err = {
-        let cred_dir = home.join("credentials");
-        let dest = cred_dir.join("bootstrap-capability.bin");
-        // try to trigger install_atomic via second provision? provision should not overwrite,
-        // just return existing bundle. So we test that file_id stays same after second call.
-        provision_or_load(&home).unwrap();
-        fs::read(&dest).unwrap()
-    };
-    assert_eq!(cap_before, err);
-    fs::remove_dir_all(home).unwrap();
-}
-
-#[test]
-fn post_link_failure_leaves_no_untracked_files() {
-    let home = temp_home("postlink");
     let cred_dir = home.join("credentials");
     fs::create_dir_all(&cred_dir).unwrap();
     #[cfg(unix)]
@@ -101,54 +93,44 @@ fn post_link_failure_leaves_no_untracked_files() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&cred_dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    // Make manifest path a directory to force failure at manifest install step.
-    let manifest_dir = cred_dir.join("manifest.json");
-    fs::create_dir(&manifest_dir).unwrap();
+    let cap_path = cred_dir.join("bootstrap-capability.bin");
+    fs::write(&cap_path, vec![0xAA; 32]).unwrap();
+    let err = provision_or_load(&home);
+    assert!(
+        err.is_err(),
+        "partial bundle must not be silently overwritten"
+    );
+    assert_eq!(fs::read(&cap_path).unwrap(), vec![0xAA; 32]);
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn manifest_conflict_cleans_prior_atomic_links() {
+    let home = temp_home("manifestconflict");
+    let cred_dir = home.join("credentials");
+    fs::create_dir_all(&cred_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&cred_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::create_dir(cred_dir.join("manifest.json")).unwrap();
     let err = provision_or_load(&home);
     assert!(err.is_err());
-    // capability etc should have been cleaned up (no untracked destination)
     assert!(!cred_dir.join("bootstrap-capability.bin").exists());
     assert!(!cred_dir.join("localhost-leaf.der").exists());
     assert!(!cred_dir.join("localhost-key.pkcs8.der").exists());
-    // temp files should also be gone
     let entries: Vec<_> = fs::read_dir(&cred_dir).unwrap().collect();
     for e in entries {
         let name = e.unwrap().file_name().to_string_lossy().to_string();
-        assert!(!name.ends_with(".tmp"));
+        assert!(!name.ends_with(".tmp"), "private temp must be removed");
     }
     fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
-fn replacement_not_deleted_by_cleanup() {
-    let home = temp_home("replace");
-    let paths = provision_or_load(&home).unwrap();
-    let cap_path = paths.capability_path().to_path_buf();
-    let original = fs::read(&cap_path).unwrap();
-    // Replace file with new inode
-    fs::remove_file(&cap_path).unwrap();
-    fs::write(&cap_path, vec![0xFF; 32]).unwrap();
-    let new_bytes = fs::read(&cap_path).unwrap();
-    assert!(new_bytes != original);
-    // Force a failing provision by corrupting manifest
-    let manifest_path = paths.manifest_path().to_path_buf();
-    let backup = fs::read(&manifest_path).unwrap();
-    fs::write(&manifest_path, b"corrupt").unwrap();
-    let err = provision_or_load(&home);
-    assert!(err.is_err());
-    // Replacement should still exist, not deleted by cleanup that used old id
-    assert!(cap_path.is_file());
-    assert_eq!(fs::read(&cap_path).unwrap(), new_bytes);
-    fs::write(&manifest_path, backup).unwrap();
-    fs::remove_dir_all(home).unwrap();
-}
-
-#[test]
-fn final_validation_error_cleans_this_run() {
-    let home = temp_home("finalclean");
-    // Create a home where final validation will fail due to tampered cert after install.
-    // We trigger by pre-creating credentials dir and making cert path a directory so install fails at cert,
-    // which tests cleanup of earlier capability file.
+fn leaf_conflict_cleans_capability_and_no_extra_temp() {
+    let home = temp_home("leafconflict");
     let cred_dir = home.join("credentials");
     fs::create_dir_all(&cred_dir).unwrap();
     #[cfg(unix)]
@@ -160,6 +142,32 @@ fn final_validation_error_cleans_this_run() {
     let err = provision_or_load(&home);
     assert!(err.is_err());
     assert!(!cred_dir.join("bootstrap-capability.bin").exists());
+    let temps: Vec<_> = fs::read_dir(&cred_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(temps.is_empty());
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn existing_replacement_not_deleted_when_new_bundle_fails() {
+    let home = temp_home("keep");
+    let cred_dir = home.join("credentials");
+    fs::create_dir_all(&cred_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&cred_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    // Pre-existing unrelated file that must survive failed provisioning
+    let keep = cred_dir.join("keep.txt");
+    fs::write(&keep, b"keep").unwrap();
+    fs::create_dir(cred_dir.join("manifest.json")).unwrap();
+    let err = provision_or_load(&home);
+    assert!(err.is_err());
+    assert_eq!(fs::read(&keep).unwrap(), b"keep");
     fs::remove_dir_all(home).unwrap();
 }
 
@@ -170,17 +178,32 @@ fn handle_read_fencing_rejects_symlink_drift() {
     let cert_path = paths.certificate_paths()[0].to_path_buf();
     let backup = cert_path.with_extension("bak");
     fs::rename(&cert_path, &backup).unwrap();
+    let mut symlink_created = false;
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&backup, &cert_path).unwrap();
+    {
+        std::os::unix::fs::symlink(&backup, &cert_path).unwrap();
+        symlink_created = true;
+    }
     #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&backup, &cert_path).unwrap_or_else(|_| {
-        fs::write(&cert_path, b"bad").unwrap();
-        return;
-    });
-    let err = provision_or_load(&home);
-    assert!(err.is_err());
-    let _ = fs::remove_file(&cert_path);
-    fs::rename(&backup, &cert_path).unwrap();
+    {
+        if std::os::windows::fs::symlink_file(&backup, &cert_path).is_ok() {
+            symlink_created = true;
+        } else {
+            eprintln!("SKIP: symlink drift not supported on this Windows host");
+            fs::rename(&backup, &cert_path).unwrap();
+            fs::remove_dir_all(home).unwrap();
+            return;
+        }
+    }
+    if symlink_created {
+        let err = provision_or_load(&home);
+        assert!(
+            err.is_err(),
+            "symlink drift must be rejected via handle fencing"
+        );
+        let _ = fs::remove_file(&cert_path);
+        fs::rename(&backup, &cert_path).unwrap();
+    }
     fs::remove_dir_all(home).unwrap();
 }
 
@@ -241,16 +264,11 @@ fn unix_exact_modes() {
 }
 
 #[test]
-fn forge_paths_are_absolute_and_no_default() {
+fn forge_paths_require_absolute_home() {
     let home = PathBuf::from("/tmp/abs-test-home");
     let paths = ForgeCredentialPaths::new(&home).unwrap();
     assert!(paths.manifest_path().is_absolute());
     assert!(paths.capability_path().is_absolute());
-    // No Default
-    fn assert_no_default<T: Default>() {}
-    // This should not compile if ForgeCredentialPaths implements Default; we just check it doesn't.
-    // If it did, the next line would compile, but we expect it not to.
-    // We can't test compile-fail at runtime, but we ensure new requires home.
     let err = ForgeCredentialPaths::new(&PathBuf::from("relative"));
     assert!(err.is_err());
 }

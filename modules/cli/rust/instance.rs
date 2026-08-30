@@ -462,49 +462,25 @@ struct NativeFileId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct NativeFileId {
     volume: u64,
-    high: u64,
-    low: u64,
+    index: u64,
 }
 
 #[cfg(unix)]
 fn native_file_id(path: &Path) -> Result<NativeFileId, NativeInstanceError> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = fs::metadata(path).map_err(|_| NativeInstanceError::Io {
+    let file = fs::File::open(path).map_err(|_| NativeInstanceError::Io {
         context: "inspect file id",
         path: path.to_path_buf(),
     })?;
-    Ok(NativeFileId {
-        dev: meta.dev(),
-        ino: meta.ino(),
-    })
+    native_file_id_from_file(&file)
 }
 
 #[cfg(windows)]
 fn native_file_id(path: &Path) -> Result<NativeFileId, NativeInstanceError> {
-    use std::os::windows::fs::MetadataExt;
-    let meta = fs::metadata(path).map_err(|_| NativeInstanceError::Io {
+    let file = fs::File::open(path).map_err(|_| NativeInstanceError::Io {
         context: "inspect file id",
         path: path.to_path_buf(),
     })?;
-    let volume = meta.volume_serial_number().ok_or(NativeInstanceError::Io {
-        context: "inspect file id",
-        path: path.to_path_buf(),
-    })? as u64;
-    let high = meta.file_index_high().ok_or(NativeInstanceError::Io {
-        context: "inspect file id",
-        path: path.to_path_buf(),
-    })? as u64;
-    let low = meta.file_index_low().ok_or(NativeInstanceError::Io {
-        context: "inspect file id",
-        path: path.to_path_buf(),
-    })? as u64;
-    if volume == 0 && high == 0 && low == 0 {
-        return Err(NativeInstanceError::Io {
-            context: "inspect file id",
-            path: path.to_path_buf(),
-        });
-    }
-    Ok(NativeFileId { volume, high, low })
+    native_file_id_from_file(&file)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -519,7 +495,7 @@ fn native_file_id(_path: &Path) -> Result<NativeFileId, NativeInstanceError> {
     })
 }
 
-fn native_file_id_from_file(file: &std::fs::File) -> Result<NativeFileId, NativeInstanceError> {
+fn native_file_id_from_file(file: &fs::File) -> Result<NativeFileId, NativeInstanceError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -534,30 +510,20 @@ fn native_file_id_from_file(file: &std::fs::File) -> Result<NativeFileId, Native
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let meta = file.metadata().map_err(|_| NativeInstanceError::Io {
-            context: "inspect file id",
-            path: PathBuf::from("<handle>"),
-        })?;
-        let volume = meta.volume_serial_number().ok_or(NativeInstanceError::Io {
-            context: "inspect file id",
-            path: PathBuf::from("<handle>"),
-        })? as u64;
-        let high = meta.file_index_high().ok_or(NativeInstanceError::Io {
-            context: "inspect file id",
-            path: PathBuf::from("<handle>"),
-        })? as u64;
-        let low = meta.file_index_low().ok_or(NativeInstanceError::Io {
-            context: "inspect file id",
-            path: PathBuf::from("<handle>"),
-        })? as u64;
-        if volume == 0 && high == 0 && low == 0 {
+        let info = winapi_util::file::information(winapi_util::HandleRef::from_file(file))
+            .map_err(|_| NativeInstanceError::Io {
+                context: "inspect file id",
+                path: PathBuf::from("<handle>"),
+            })?;
+        let volume = info.volume_serial_number();
+        let index = info.file_index();
+        if volume == 0 && index == 0 {
             return Err(NativeInstanceError::Io {
                 context: "inspect file id",
                 path: PathBuf::from("<handle>"),
             });
         }
-        Ok(NativeFileId { volume, high, low })
+        Ok(NativeFileId { volume, index })
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -833,6 +799,7 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> Result<(), NativeInstanceEr
         context: "sync temporary instance file",
         path: temporary.clone(),
     })?;
+    let temp_id = native_file_id_from_file(&file)?;
     drop(file);
     check_ancestors_all(path, false)?;
     match fs::symlink_metadata(path) {
@@ -862,19 +829,55 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> Result<(), NativeInstanceEr
             });
         }
     }
-    if pre_existing_id.is_none() {
-        check_ancestors_all(path, false)?;
-    }
     fs::rename(&temporary, path).map_err(|_| NativeInstanceError::Io {
         context: "activate instance file",
         path: path.to_path_buf(),
     })?;
-    fs::File::open(directory)
-        .and_then(|dir| dir.sync_all())
-        .map_err(|_| NativeInstanceError::Io {
-            context: "sync directory",
-            path: directory.to_path_buf(),
-        })?;
+    // Prove destination is the temp file
+    let dest_id = native_file_id(path)?;
+    if dest_id != temp_id {
+        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+    }
+    check_ancestors_all(path, true)?;
+    // Durability: open directory with backup semantics on Windows
+    #[cfg(unix)]
+    {
+        fs::File::open(directory)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|_| NativeInstanceError::Io {
+                context: "sync directory",
+                path: directory.to_path_buf(),
+            })?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(directory)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|_| NativeInstanceError::Io {
+                context: "sync directory",
+                path: directory.to_path_buf(),
+            })?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        fs::File::open(directory)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|_| NativeInstanceError::Io {
+                context: "sync directory",
+                path: directory.to_path_buf(),
+            })?;
+    }
+    if fs::remove_file(&temporary).is_err() {
+        return Err(NativeInstanceError::Io {
+            context: "remove temporary file",
+            path: temporary.clone(),
+        });
+    }
     guard.disarm();
     Ok(())
 }
