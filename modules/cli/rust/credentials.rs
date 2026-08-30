@@ -480,6 +480,34 @@ mod acl_diagnostic {
         }
     }
 
+    pub(super) enum PlannerClassification {
+        InvalidValidatedIdentity,
+        MissingAceSeparator,
+        InheritedAce,
+        CurrentIdentityMatch,
+        DuplicateCurrentIdentity,
+        SafeRemovableExtra,
+        UnsafeNonmatchingExtra,
+        DuplicateExtra,
+        PlanComplete,
+    }
+
+    impl PlannerClassification {
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::InvalidValidatedIdentity => "InvalidValidatedIdentity",
+                Self::MissingAceSeparator => "MissingAceSeparator",
+                Self::InheritedAce => "InheritedAce",
+                Self::CurrentIdentityMatch => "CurrentIdentityMatch",
+                Self::DuplicateCurrentIdentity => "DuplicateCurrentIdentity",
+                Self::SafeRemovableExtra => "SafeRemovableExtra",
+                Self::UnsafeNonmatchingExtra => "UnsafeNonmatchingExtra",
+                Self::DuplicateExtra => "DuplicateExtra",
+                Self::PlanComplete => "PlanComplete",
+            }
+        }
+    }
+
     thread_local! {
         static ACTIVE: std::cell::RefCell<Option<AclDiagnosticRecord>> = const {
             std::cell::RefCell::new(None)
@@ -517,6 +545,10 @@ mod acl_diagnostic {
 
     pub(super) fn event(kind: &'static str, value: &'static str) {
         event_at(current_stage(), kind, value);
+    }
+
+    pub(super) fn planner(classification: PlannerClassification) {
+        event("planner", classification.as_str());
     }
 
     fn bounded(text: &str) -> &str {
@@ -1027,7 +1059,15 @@ fn collect_icacls_ace_lines(
             continue;
         }
         first_line = false;
-        if !candidate.contains(':') || !candidate.contains('(') {
+        if !candidate.contains(':') {
+            acl_diagnostic!(acl_diagnostic::planner(
+                acl_diagnostic::PlannerClassification::MissingAceSeparator
+            ));
+            // Any non-summary, non-ACE line is a failure.
+            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+        if !candidate.contains('(') {
             // Any non-summary, non-ACE line is a failure.
             acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
             return Err(ForgeCredentialError::WindowsAcl);
@@ -1104,16 +1144,27 @@ fn plan_icacls_removals(
         || !is_valid_account(&identity.account)
         || identity.sid.eq_ignore_ascii_case(&identity.account)
     {
+        acl_diagnostic!(acl_diagnostic::planner(
+            acl_diagnostic::PlannerClassification::InvalidValidatedIdentity
+        ));
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let ace_lines = collect_icacls_ace_lines(output, queried_path)?;
     let mut removals = Vec::new();
     let mut current_identity_count = 0;
     for ace in ace_lines {
-        let colon = ace.find(':').ok_or(ForgeCredentialError::WindowsAcl)?;
+        let Some(colon) = ace.find(':') else {
+            acl_diagnostic!(acl_diagnostic::planner(
+                acl_diagnostic::PlannerClassification::MissingAceSeparator
+            ));
+            return Err(ForgeCredentialError::WindowsAcl);
+        };
         let principal = ace[..colon].trim();
         let flags = ace[colon + 1..].to_ascii_lowercase();
         if flags.contains("(i)") {
+            acl_diagnostic!(acl_diagnostic::planner(
+                acl_diagnostic::PlannerClassification::InheritedAce
+            ));
             return Err(ForgeCredentialError::WindowsAcl);
         }
         let is_deny = flags.contains("(deny)");
@@ -1122,24 +1173,42 @@ fn plan_icacls_removals(
         if is_current_identity {
             current_identity_count += 1;
             if current_identity_count > 1 {
+                acl_diagnostic!(acl_diagnostic::planner(
+                    acl_diagnostic::PlannerClassification::DuplicateCurrentIdentity
+                ));
                 return Err(ForgeCredentialError::WindowsAcl);
             }
+            acl_diagnostic!(acl_diagnostic::planner(
+                acl_diagnostic::PlannerClassification::CurrentIdentityMatch
+            ));
             if is_deny {
                 removals.push(principal.to_owned());
             }
             continue;
         }
         if !is_safe_acl_principal(principal) {
+            acl_diagnostic!(acl_diagnostic::planner(
+                acl_diagnostic::PlannerClassification::UnsafeNonmatchingExtra
+            ));
             return Err(ForgeCredentialError::WindowsAcl);
         }
         if removals
             .iter()
             .any(|candidate: &String| candidate.eq_ignore_ascii_case(principal))
         {
+            acl_diagnostic!(acl_diagnostic::planner(
+                acl_diagnostic::PlannerClassification::DuplicateExtra
+            ));
             return Err(ForgeCredentialError::WindowsAcl);
         }
+        acl_diagnostic!(acl_diagnostic::planner(
+            acl_diagnostic::PlannerClassification::SafeRemovableExtra
+        ));
         removals.push(principal.to_owned());
     }
+    acl_diagnostic!(acl_diagnostic::planner(
+        acl_diagnostic::PlannerClassification::PlanComplete
+    ));
     Ok(removals)
 }
 
@@ -2113,6 +2182,110 @@ mod diagnostic_tests {
         for canary in acl_diagnostic::CANARIES {
             assert!(!text.contains(canary));
         }
+    }
+
+    fn assert_planner_classification(
+        expected: &'static str,
+        expect_success: bool,
+        operation: impl FnOnce() -> Result<Vec<String>, ForgeCredentialError>,
+    ) {
+        let (result, captured) = acl_diagnostic::capture(operation);
+        assert_eq!(result.is_ok(), expect_success);
+        let record = captured.finish(if expect_success {
+            "Success"
+        } else {
+            "WindowsAcl"
+        });
+        acl_diagnostic::assert_redacted(&record);
+        let bytes = serde_json::to_vec(&record).expect("bounded planner diagnostic");
+        assert_artifact(&bytes);
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("planner JSON");
+        let events = value
+            .get("events")
+            .and_then(serde_json::Value::as_array)
+            .expect("planner events");
+        let allowed = [
+            "InvalidValidatedIdentity",
+            "MissingAceSeparator",
+            "InheritedAce",
+            "CurrentIdentityMatch",
+            "DuplicateCurrentIdentity",
+            "SafeRemovableExtra",
+            "UnsafeNonmatchingExtra",
+            "DuplicateExtra",
+            "PlanComplete",
+        ];
+        let planner_values: Vec<&str> = events
+            .iter()
+            .filter_map(|event| {
+                let object = event.as_object()?;
+                if object.get("kind").and_then(serde_json::Value::as_str) != Some("planner") {
+                    return None;
+                }
+                object.get("value").and_then(serde_json::Value::as_str)
+            })
+            .collect();
+        assert!(planner_values.contains(&expected));
+        assert!(planner_values.iter().all(|value| allowed.contains(value)));
+    }
+
+    #[test]
+    fn planner_diagnostic_classifications_are_bounded_and_redacted() {
+        let sid = acl_diagnostic::CANARIES[0];
+        let account = acl_diagnostic::CANARIES[1];
+        let path = acl_diagnostic::CANARIES[2];
+        let identity = CurrentIdentity {
+            sid: sid.to_string(),
+            account: account.to_string(),
+        };
+
+        let invalid_identity = CurrentIdentity {
+            sid: "not-a-sid".to_string(),
+            account: account.to_string(),
+        };
+        assert_planner_classification("InvalidValidatedIdentity", false, || {
+            plan_icacls_removals("", &invalid_identity, path)
+        });
+        assert_planner_classification("MissingAceSeparator", false, || {
+            plan_icacls_removals(&format!("{path} non-ace output"), &identity, path)
+        });
+        assert_planner_classification("InheritedAce", false, || {
+            plan_icacls_removals(&format!("{path} {sid}:(I)(OI)(CI)(F)"), &identity, path)
+        });
+        assert_planner_classification("CurrentIdentityMatch", true, || {
+            plan_icacls_removals(&format!("{path} {sid}:(OI)(CI)(F)"), &identity, path)
+        });
+        assert_planner_classification("DuplicateCurrentIdentity", false, || {
+            plan_icacls_removals(
+                &format!("{path} {sid}:(OI)(CI)(F)\n{account}:(OI)(CI)(F)"),
+                &identity,
+                path,
+            )
+        });
+        assert_planner_classification("SafeRemovableExtra", true, || {
+            plan_icacls_removals(
+                &format!("{path} {sid}:(OI)(CI)(F)\nEveryone:(F)"),
+                &identity,
+                path,
+            )
+        });
+        assert_planner_classification("UnsafeNonmatchingExtra", false, || {
+            plan_icacls_removals(
+                &format!("{path} {sid}:(OI)(CI)(F)\nmalformed/principal:(F)"),
+                &identity,
+                path,
+            )
+        });
+        assert_planner_classification("DuplicateExtra", false, || {
+            plan_icacls_removals(
+                &format!("{path} {sid}:(OI)(CI)(F)\nEveryone:(F)\nEVERYONE:(F)"),
+                &identity,
+                path,
+            )
+        });
+        assert_planner_classification("PlanComplete", true, || {
+            plan_icacls_removals(&format!("{path} {sid}:(OI)(CI)(F)"), &identity, path)
+        });
     }
 
     #[test]
