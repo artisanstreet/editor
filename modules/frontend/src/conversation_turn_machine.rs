@@ -130,12 +130,11 @@ impl TurnNarration {
     #[must_use]
     pub fn label(&self) -> String {
         match self {
-            Self::Hidden => String::new(),
+            Self::Hidden | Self::StreamingReply => String::new(),
             Self::WaitingForProvider => "Waiting for provider…".to_owned(),
             Self::Compacting => "Compacting the conversation…".to_owned(),
             Self::Thinking => "Thinking…".to_owned(),
             Self::Working => "Working…".to_owned(),
-            Self::StreamingReply => String::new(),
             Self::WaitingForBackground => "Waiting for background agents…".to_owned(),
             Self::WorkedFor { .. } => "Worked for".to_owned(),
             Self::ThoughtFor { .. } => "Thought for".to_owned(),
@@ -147,7 +146,7 @@ impl TurnNarration {
 
     /// Whether this narration is a terminal outcome.
     #[must_use]
-    pub const fn is_terminal(self: &Self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         matches!(
             self,
             Self::WorkedFor { .. }
@@ -179,7 +178,7 @@ pub struct TurnView {
 /// Closed typed event vocabulary. Every variant needing time carries a
 /// caller-supplied signed Unix millisecond timestamp and a monotonic revision.
 /// This module never reads a clock.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnEvent {
     WaitingForProvider {
         at: i64,
@@ -336,12 +335,7 @@ fn saturating_elapsed_ms(start: i64, end: i64) -> u64 {
     if diff <= 0 {
         0
     } else {
-        let diff_u128 = diff as u128;
-        if diff_u128 > u128::from(u64::MAX) {
-            u64::MAX
-        } else {
-            diff_u128 as u64
-        }
+        u64::try_from(diff).unwrap_or(u64::MAX)
     }
 }
 
@@ -776,7 +770,7 @@ impl TurnMachine {
     #[state(superstate = "settled")]
     fn interrupted(&mut self, event: &TurnEvent) -> Outcome<State> {
         match event {
-            TurnEvent::Resume { at, revision } => {
+            TurnEvent::Resume { at, revision } | TurnEvent::Working { at, revision } => {
                 self.clear_terminal_for_resume();
                 self.apply_active(*at, *revision);
                 self.work_seen = true;
@@ -797,12 +791,6 @@ impl TurnMachine {
                 self.apply_active(*at, *revision);
                 self.reasoning_seen = true;
                 Transition(State::thinking())
-            }
-            TurnEvent::Working { at, revision } => {
-                self.clear_terminal_for_resume();
-                self.apply_active(*at, *revision);
-                self.work_seen = true;
-                Transition(State::working())
             }
             TurnEvent::StreamingReply { at, revision } => {
                 self.clear_terminal_for_resume();
@@ -846,13 +834,13 @@ impl TurnMachine {
 
     #[superstate]
     fn active_work(&mut self, event: &TurnEvent) -> Outcome<State> {
-        let _ = event;
+        let _ = (self, event);
         Handled
     }
 
     #[superstate]
     fn settled(&mut self, event: &TurnEvent) -> Outcome<State> {
-        let _ = event;
+        let _ = (self, event);
         Handled
     }
 }
@@ -1009,19 +997,26 @@ impl ConversationTurnController {
     ///
     /// On error the prior state/view is left unchanged. Ordered typed effects
     /// are returned on success (currently none; the view is authoritative).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TurnError::TimestampRegression`] or
+    /// [`TurnError::StaleRevision`] when monotonic input validation fails, or
+    /// [`TurnError::Sealed`] when a sealed terminal state rejects a different
+    /// event.
     pub fn dispatch(&mut self, event: TurnEvent) -> Result<Vec<TurnEffect>, TurnError> {
         let at = event.at();
         let revision = event.revision();
         let event_name = event.name();
 
         let inner = self.machine.inner();
-        if let Some(last) = inner.last_timestamp {
-            if at < last {
-                return Err(TurnError::TimestampRegression {
-                    expected_at_least: last,
-                    got: at,
-                });
-            }
+        if let Some(last) = inner.last_timestamp
+            && at < last
+        {
+            return Err(TurnError::TimestampRegression {
+                expected_at_least: last,
+                got: at,
+            });
         }
         if revision < inner.revision {
             return Err(TurnError::StaleRevision {
@@ -1033,14 +1028,12 @@ impl ConversationTurnController {
         let state_kind = self.state();
         if state_kind.is_sealed() {
             let is_duplicate_settlement = match (state_kind, &event) {
-                (StateKind::Completed, TurnEvent::Completed { at: ea, .. }) => {
+                (StateKind::Completed, TurnEvent::Completed { at: ea, .. })
+                | (StateKind::Cancelled, TurnEvent::Cancelled { at: ea, .. }) => {
                     inner.terminal_at == Some(*ea)
                 }
                 (StateKind::Failed, TurnEvent::Failed { at: ea, kind, .. }) => {
                     inner.terminal_at == Some(*ea) && inner.failure_kind == *kind
-                }
-                (StateKind::Cancelled, TurnEvent::Cancelled { at: ea, .. }) => {
-                    inner.terminal_at == Some(*ea)
                 }
                 _ => false,
             };
