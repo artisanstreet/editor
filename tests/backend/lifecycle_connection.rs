@@ -771,13 +771,9 @@ async fn response_failure_rolls_back_pending_stop_without_cancellation() {
     )
     .await
     .expect("response failure dispatch settles");
-    let failure = match outcome {
-        Ok(connection) => {
-            drop(connection);
-            panic!("the stopped response stream unexpectedly accepted the reply");
-        }
-        Err(failure) => failure,
-    };
+    let failure = outcome.err().unwrap_or_else(|| {
+        panic!("the stopped response stream unexpectedly accepted the reply");
+    });
     assert!(matches!(
         failure,
         DeadlineError::Peer {
