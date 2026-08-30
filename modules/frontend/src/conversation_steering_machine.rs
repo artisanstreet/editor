@@ -5,10 +5,9 @@
 //! identity. This module does no network I/O, snapshot replay, timers,
 //! rendering, or GPUI work.
 //!
-//! # Statig 0.4.1 blocking chart (hidden)
+//! # Statig 0.4.1 blocking hierarchical chart
 //!
-//! The hierarchical chart is modelled as if expanded by `statig::blocking`
-//! `#[state_machine]`:
+//! The chart is implemented with `statig::blocking`:
 //!
 //! ```text
 //! active-submission (superstate)
@@ -22,36 +21,28 @@
 //!   └── Cancelled
 //! ```
 //!
-//! The generated `State`/`Superstate`/`Event`/`Action` types are intentionally
-//! hidden. Callers interact only through the small public controller API
-//! below. Statig dependency registration is intentionally absent from this
-//! clean base; the chart semantics below are authored to match Statig 0.4.1
-//! blocking macro semantics and the `statig` crate can be registered by the VP
-//! without changing this file's public surface.
-//!
-//! References to `statig` 0.4.1 are therefore conditional: when the `statig`
-//! feature is present the inner machine would be annotated with
-//! `#[state_machine]` and driven via `StateMachine<Inner>`. Until registration
-//! the synchronous `match` implementation below preserves the same transition
-//! table and fencing invariants.
+//! The public controller owns the generated `StateMachine<SteeringInner>` and
+//! dispatches every accepted event through real handlers returning
+//! `Outcome::Transition(State::...)`. `phase` and `placement` are derived from
+//! `machine.state()`; there is no parallel `phase` field that can diverge.
+//! Immutable submission data and anchor/timestamps live in the shared storage
+//! (`SteeringInner`) and mutate only inside handlers. Effects are produced via
+//! safe external context (`&mut VecDeque<SteeringEffect>`).
 //!
 //! # Invariant — lip retention while awaiting projection
 //!
-//! **Chosen invariant:** the composer pending lip remains visible through
-//! `PendingLip`, `Dispatching`, and `AwaitingProjection`. It is released only
-//! when the exact `ItemId` anchor is observed (`AwaitingAcknowledgement`) or
-//! when the controller settles. The renderer therefore shows:
+//! The composer pending lip remains visible through `PendingLip`,
+//! `Dispatching`, and `AwaitingProjection`. It is released only when the
+//! exact `ItemId` anchor is observed (`AwaitingAcknowledgement`) or when the
+//! controller settles. The renderer therefore shows:
 //!
 //! - `ComposerPendingLip` while awaiting projection (no label gap),
 //! - `AnchoredAfter` once anchored,
 //! - `SettledHidden` / `Failed` when settled.
 //!
 //! This retains optimism until the durable echo proves projection, mirroring
-//! the TypeScript `steering-stages.ts` behaviour where `TakeUp` (projection
-//! visible) releases the lip and raises the label. The alternative — hiding the
-//! lip immediately after accept and showing `NoVisibleLabel` — would flash empty
-//! space and was deliberately not chosen. The invariant is documented here and
-//! tested explicitly.
+//! `steering-stages.ts` where `TakeUp` releases the lip only when the durable
+//! item appears.
 //!
 //! # Fencing
 //!
@@ -68,15 +59,13 @@
 use std::collections::VecDeque;
 use std::fmt;
 
-use artisan_domain::ItemId;
+use artisan_domain::{ItemId, RequestId};
+use statig::blocking::{IntoStateMachineExt, StateMachine};
+use statig::prelude::*;
 
-// Statig 0.4.1 blocking import — pending VP dependency registration.
-// When the `statig` feature is enabled the inner machine is driven by the
-// generated state machine; until then the manual match table below preserves
-// identical semantics.
-#[cfg(feature = "statig")]
-#[allow(unused_imports)]
-use statig::blocking::{self as statig_blocking, StateMachine as StatigStateMachine};
+// ---------------------------------------------------------------------------
+// Label kind (redacted, never raw prompt)
+// ---------------------------------------------------------------------------
 
 /// Redacted display label kind. Never carries raw prompt text.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -92,6 +81,94 @@ impl fmt::Display for SteeringLabelKind {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bounded validated source reference (UTF-8 bytes, nonempty, no whitespace/control)
+// ---------------------------------------------------------------------------
+
+/// Validated source reference sent to Forge.
+///
+/// Bounds: nonempty, no Unicode whitespace/control, at most
+/// `SOURCE_REFERENCE_MAX_BYTES` UTF-8 bytes. The ceiling matches
+/// `IDENTIFIER_MAX_BYTES` (128) and keeps the routing value bounded while
+/// preserving compatibility with opaque Forge-minted references. The check is
+/// documented here so callers can reason about the byte ceiling without
+/// reading the validator body.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SourceReference(String);
+
+/// Maximum UTF-8 bytes for a source reference.
+pub const SOURCE_REFERENCE_MAX_BYTES: usize = 128;
+
+impl SourceReference {
+    /// Parses and validates a source reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SteeringControllerError::EmptySourceReference` when empty, or
+    /// `SteeringControllerError::InvalidSourceReference` when the value
+    /// contains whitespace/control or exceeds the byte ceiling.
+    pub fn parse(value: impl Into<String>) -> Result<Self, SteeringControllerError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(SteeringControllerError::EmptySourceReference);
+        }
+        if value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
+        {
+            return Err(SteeringControllerError::InvalidSourceReference(
+                value.clone(),
+            ));
+        }
+        if value.len() > SOURCE_REFERENCE_MAX_BYTES {
+            return Err(SteeringControllerError::InvalidSourceReference(value));
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the validated reference text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SourceReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Closed redacted failure kind (no prompt/provider/tool text)
+// ---------------------------------------------------------------------------
+
+/// Closed redacted failure kind. No raw prompt, provider, or tool text enters
+/// state, effects, `Debug`, or the renderer view.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SteeringFailureKind {
+    /// Dispatch transport/outer effect failed.
+    Dispatch,
+    /// Projection wait failed or timed out.
+    Projection,
+    /// Engine rejected the steering.
+    Rejected,
+}
+
+impl fmt::Display for SteeringFailureKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dispatch => formatter.write_str("dispatch"),
+            Self::Projection => formatter.write_str("projection"),
+            Self::Rejected => formatter.write_str("rejected"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase / placement / view
+// ---------------------------------------------------------------------------
 
 /// Renderer-visible phase, including both superstates.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -134,10 +211,10 @@ pub enum SteeringPlacement {
     ComposerPendingLip,
     /// Accepted but not yet anchored — no visible steering label.
     ///
-    /// Under the chosen invariant this variant is currently **not emitted**
-    /// for `AwaitingProjection`; the lip is retained instead. The variant
-    /// exists so the renderer vocabulary remains closed and the invariant
-    /// choice is reversible without changing the enum.
+    /// Under the chosen invariant this variant is currently not emitted for
+    /// `AwaitingProjection`; the lip is retained instead. The variant exists
+    /// so the renderer vocabulary remains closed and the invariant choice is
+    /// reversible without changing the enum.
     NoVisibleLabel,
     /// Steering label renders immediately after the exact `ItemId`.
     AnchoredAfter {
@@ -148,8 +225,8 @@ pub enum SteeringPlacement {
     SettledHidden,
     /// Bounded failed presentation retained for the renderer.
     Failed {
-        /// Bounded failure reason (identity only, never provider payload).
-        reason: String,
+        /// Redacted failure kind.
+        kind: SteeringFailureKind,
     },
 }
 
@@ -157,14 +234,14 @@ pub enum SteeringPlacement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteeringView {
     /// Immutable command identity.
-    pub command_id: String,
+    pub command_id: RequestId,
     /// Immutable submission generation (nonzero).
     pub generation: u64,
     /// Exact source reference sent to Forge.
-    pub source_reference: String,
+    pub source_reference: SourceReference,
     /// Redacted label kind.
     pub label_kind: SteeringLabelKind,
-    /// Current phase.
+    /// Current phase derived from the Statig state.
     pub phase: SteeringPhase,
     /// Closed placement.
     pub placement: SteeringPlacement,
@@ -178,6 +255,10 @@ pub struct SteeringView {
     pub pending_effect_count: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Effects (bounded identity/routing only)
+// ---------------------------------------------------------------------------
+
 /// Typed effects ordered in a drainable outbox. Effects carry only bounded
 /// identity/routing data, never raw prompt text, credentials, or provider
 /// payloads.
@@ -186,21 +267,20 @@ pub enum SteeringEffect {
     /// Dispatch the steering submission to the outer effect.
     Dispatch {
         /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
-        /// Exact source reference (bounded, not raw prompt).
-        source_reference: String,
+        /// Exact source reference (bounded).
+        source_reference: SourceReference,
     },
-    /// Watch/wait for the exact source reference to appear in the
-    /// projection.
+    /// Watch/wait for the exact source reference to appear in the projection.
     WatchProjection {
         /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
         /// Exact source reference to watch.
-        source_reference: String,
+        source_reference: SourceReference,
     },
     /// Release the pending composer lip for this generation only.
     ReleasePendingLip {
@@ -210,20 +290,24 @@ pub enum SteeringEffect {
     /// Request renderer invalidation.
     RenderInvalidation {
         /// Command identity (for routing, not payload).
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
     },
     /// Optional acknowledgement watch for the anchored item.
     WatchAcknowledgement {
         /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
         /// Anchored item to watch.
         anchor: ItemId,
     },
 }
+
+// ---------------------------------------------------------------------------
+// Events (fenced by command_id + generation)
+// ---------------------------------------------------------------------------
 
 /// Closed typed event vocabulary. Every asynchronous completion carries
 /// `(command_id, generation)` for fencing.
@@ -232,7 +316,7 @@ pub enum SteeringEvent {
     /// Outer effect should start dispatch.
     DispatchStarted {
         /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
         /// Caller timestamp (signed ms).
@@ -241,7 +325,7 @@ pub enum SteeringEvent {
     /// Outer effect accepted the submission.
     DispatchAccepted {
         /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
         /// Caller timestamp.
@@ -250,18 +334,18 @@ pub enum SteeringEvent {
     /// Dispatch failed.
     DispatchFailed {
         /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
         /// Caller timestamp.
         at_ms: i64,
-        /// Bounded failure reason.
-        reason: String,
+        /// Redacted failure kind.
+        kind: SteeringFailureKind,
     },
     /// Durable user item for this source reference became visible.
     DurableItemAnchored {
         /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
         /// Exact durable anchor.
@@ -272,7 +356,7 @@ pub enum SteeringEvent {
     /// Engine acknowledged the steering.
     EngineAcknowledged {
         /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
         /// Caller timestamp.
@@ -281,16 +365,7 @@ pub enum SteeringEvent {
     /// Steering cancelled.
     Cancelled {
         /// Command identity.
-        command_id: String,
-        /// Generation.
-        generation: u64,
-        /// Caller timestamp.
-        at_ms: i64,
-    },
-    /// Retry from failed — if supported, re-enters dispatching.
-    Retry {
-        /// Command identity.
-        command_id: String,
+        command_id: RequestId,
         /// Generation.
         generation: u64,
         /// Caller timestamp.
@@ -299,15 +374,14 @@ pub enum SteeringEvent {
 }
 
 impl SteeringEvent {
-    fn command_id(&self) -> &str {
+    fn command_id(&self) -> &RequestId {
         match self {
             Self::DispatchStarted { command_id, .. }
             | Self::DispatchAccepted { command_id, .. }
             | Self::DispatchFailed { command_id, .. }
             | Self::DurableItemAnchored { command_id, .. }
             | Self::EngineAcknowledged { command_id, .. }
-            | Self::Cancelled { command_id, .. }
-            | Self::Retry { command_id, .. } => command_id,
+            | Self::Cancelled { command_id, .. } => command_id,
         }
     }
 
@@ -318,8 +392,7 @@ impl SteeringEvent {
             | Self::DispatchFailed { generation, .. }
             | Self::DurableItemAnchored { generation, .. }
             | Self::EngineAcknowledged { generation, .. }
-            | Self::Cancelled { generation, .. }
-            | Self::Retry { generation, .. } => *generation,
+            | Self::Cancelled { generation, .. } => *generation,
         }
     }
 
@@ -330,8 +403,7 @@ impl SteeringEvent {
             | Self::DispatchFailed { at_ms, .. }
             | Self::DurableItemAnchored { at_ms, .. }
             | Self::EngineAcknowledged { at_ms, .. }
-            | Self::Cancelled { at_ms, .. }
-            | Self::Retry { at_ms, .. } => *at_ms,
+            | Self::Cancelled { at_ms, .. } => *at_ms,
         }
     }
 
@@ -343,10 +415,13 @@ impl SteeringEvent {
             Self::DurableItemAnchored { .. } => "DurableItemAnchored",
             Self::EngineAcknowledged { .. } => "EngineAcknowledged",
             Self::Cancelled { .. } => "Cancelled",
-            Self::Retry { .. } => "Retry",
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Rejections / construction errors
+// ---------------------------------------------------------------------------
 
 /// Why an event was refused. Refusals leave state and outbox unchanged.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -354,11 +429,11 @@ pub enum SteeringRejection {
     /// Command id or generation mismatch / stale event.
     StaleCommandOrGeneration {
         /// Expected command id.
-        expected_command_id: String,
+        expected_command_id: RequestId,
         /// Expected generation.
         expected_generation: u64,
         /// Received command id.
-        got_command_id: String,
+        got_command_id: RequestId,
         /// Received generation.
         got_generation: u64,
     },
@@ -435,6 +510,8 @@ pub enum SteeringControllerError {
     InvalidGeneration,
     /// Source reference was empty.
     EmptySourceReference,
+    /// Source reference contains whitespace/control or exceeds byte ceiling.
+    InvalidSourceReference(String),
 }
 
 impl fmt::Display for SteeringControllerError {
@@ -443,45 +520,334 @@ impl fmt::Display for SteeringControllerError {
             Self::InvalidCommandId(value) => write!(formatter, "invalid command id: {value:?}"),
             Self::InvalidGeneration => formatter.write_str("generation must be nonzero"),
             Self::EmptySourceReference => formatter.write_str("source reference must be nonempty"),
+            Self::InvalidSourceReference(value) => {
+                write!(formatter, "invalid source reference: {value:?}")
+            }
         }
     }
 }
 
 impl std::error::Error for SteeringControllerError {}
 
-fn validate_command_id(value: &str) -> Result<(), SteeringControllerError> {
-    if value.is_empty() {
-        return Err(SteeringControllerError::InvalidCommandId(
-            "empty".to_owned(),
-        ));
-    }
-    if value
-        .chars()
-        .any(|ch| ch.is_whitespace() || ch.is_control())
-    {
-        return Err(SteeringControllerError::InvalidCommandId(value.to_owned()));
-    }
-    if value.len() > 128 {
-        return Err(SteeringControllerError::InvalidCommandId(value.to_owned()));
-    }
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// Statig shared storage + hierarchical chart
+// ---------------------------------------------------------------------------
 
-/// Pure synchronous steering controller. The hierarchical Statig chart is
-/// hidden inside; callers use only this public surface and the drainable
-/// effect outbox.
+/// Shared storage for one steering submission. Immutable command identity,
+/// generation, source reference, and label kind never change after creation.
+/// Anchor, settlement, timestamps, and failure kind mutate only inside real
+/// Statig handlers.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConversationSteeringMachine {
-    command_id: String,
+pub struct SteeringInner {
+    command_id: RequestId,
     generation: u64,
-    source_reference: String,
+    source_reference: SourceReference,
     label_kind: SteeringLabelKind,
     started_at_ms: i64,
     last_observed_ms: i64,
     anchor: Option<ItemId>,
     settled_at_ms: Option<i64>,
-    phase: SteeringPhase,
-    failure_reason: Option<String>,
+    failure_kind: Option<SteeringFailureKind>,
+}
+
+#[state_machine(
+    initial = "State::pending_lip()",
+    state(derive(Debug, Clone, PartialEq)),
+    superstate(derive(Debug))
+)]
+impl SteeringInner {
+    #[state(superstate = "Superstate::active_submission")]
+    fn pending_lip(
+        &mut self,
+        event: &SteeringEvent,
+        context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<State> {
+        match event {
+            SteeringEvent::DispatchStarted { at_ms, .. } => {
+                self.last_observed_ms = *at_ms;
+                context.push_back(SteeringEffect::Dispatch {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                    source_reference: self.source_reference.clone(),
+                });
+                context.push_back(SteeringEffect::WatchProjection {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                    source_reference: self.source_reference.clone(),
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::dispatching())
+            }
+            _ => Handled,
+        }
+    }
+
+    #[state(superstate = "Superstate::active_submission")]
+    fn dispatching(
+        &mut self,
+        event: &SteeringEvent,
+        context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<State> {
+        match event {
+            SteeringEvent::DispatchAccepted { at_ms, .. } => {
+                self.last_observed_ms = *at_ms;
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::awaiting_projection())
+            }
+            SteeringEvent::DispatchFailed { at_ms, kind, .. } => {
+                self.last_observed_ms = *at_ms;
+                self.settled_at_ms = Some(*at_ms);
+                self.failure_kind = Some(*kind);
+                context.push_back(SteeringEffect::ReleasePendingLip {
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::failed())
+            }
+            SteeringEvent::Cancelled { at_ms, .. } => {
+                self.last_observed_ms = *at_ms;
+                self.settled_at_ms = Some(*at_ms);
+                context.push_back(SteeringEffect::ReleasePendingLip {
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::cancelled())
+            }
+            _ => Handled,
+        }
+    }
+
+    #[state(superstate = "Superstate::active_submission")]
+    fn awaiting_projection(
+        &mut self,
+        event: &SteeringEvent,
+        context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<State> {
+        match event {
+            SteeringEvent::DurableItemAnchored { item_id, at_ms, .. } => {
+                // Anchoring is immutable — duplicate equal is idempotent,
+                // different is handled as refusal before dispatch. This path
+                // receives only the first valid anchor.
+                self.last_observed_ms = *at_ms;
+                self.anchor = Some(item_id.clone());
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::WatchAcknowledgement {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                    anchor: item_id.clone(),
+                });
+                Transition(State::awaiting_acknowledgement())
+            }
+            SteeringEvent::EngineAcknowledged { at_ms, .. } => {
+                // Acknowledgement before anchor — settle without fabricating anchor.
+                self.last_observed_ms = *at_ms;
+                self.settled_at_ms = Some(*at_ms);
+                context.push_back(SteeringEffect::ReleasePendingLip {
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::acknowledged())
+            }
+            SteeringEvent::DispatchFailed { at_ms, kind, .. } => {
+                self.last_observed_ms = *at_ms;
+                self.settled_at_ms = Some(*at_ms);
+                self.failure_kind = Some(*kind);
+                context.push_back(SteeringEffect::ReleasePendingLip {
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::failed())
+            }
+            SteeringEvent::Cancelled { at_ms, .. } => {
+                self.last_observed_ms = *at_ms;
+                self.settled_at_ms = Some(*at_ms);
+                context.push_back(SteeringEffect::ReleasePendingLip {
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::cancelled())
+            }
+            _ => Handled,
+        }
+    }
+
+    #[state(superstate = "Superstate::active_submission")]
+    fn awaiting_acknowledgement(
+        &mut self,
+        event: &SteeringEvent,
+        context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<State> {
+        match event {
+            SteeringEvent::EngineAcknowledged { at_ms, .. } => {
+                self.last_observed_ms = *at_ms;
+                self.settled_at_ms = Some(*at_ms);
+                context.push_back(SteeringEffect::ReleasePendingLip {
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::acknowledged())
+            }
+            SteeringEvent::DispatchFailed { at_ms, kind, .. } => {
+                self.last_observed_ms = *at_ms;
+                self.settled_at_ms = Some(*at_ms);
+                self.failure_kind = Some(*kind);
+                // Failure after anchoring must not move the label — anchor unchanged.
+                context.push_back(SteeringEffect::ReleasePendingLip {
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::failed())
+            }
+            SteeringEvent::Cancelled { at_ms, .. } => {
+                self.last_observed_ms = *at_ms;
+                self.settled_at_ms = Some(*at_ms);
+                context.push_back(SteeringEffect::ReleasePendingLip {
+                    generation: self.generation,
+                });
+                context.push_back(SteeringEffect::RenderInvalidation {
+                    command_id: self.command_id.clone(),
+                    generation: self.generation,
+                });
+                Transition(State::cancelled())
+            }
+            SteeringEvent::DurableItemAnchored { at_ms, .. } => {
+                // Duplicate equal anchor is idempotent — advance timestamp without new effects.
+                self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
+                Handled
+            }
+            _ => Handled,
+        }
+    }
+
+    #[state(superstate = "Superstate::settled")]
+    fn acknowledged(
+        &mut self,
+        event: &SteeringEvent,
+        _context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<State> {
+        match event {
+            SteeringEvent::EngineAcknowledged { at_ms, .. } => {
+                self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
+                Handled
+            }
+            SteeringEvent::DurableItemAnchored { item_id, at_ms, .. } => {
+                if self.anchor.as_ref() == Some(item_id) {
+                    self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
+                    Handled
+                } else {
+                    // Anchor conflict after settlement is refused externally; handler
+                    // stays handled without transition.
+                    Handled
+                }
+            }
+            _ => Handled,
+        }
+    }
+
+    #[state(superstate = "Superstate::settled")]
+    fn failed(
+        &mut self,
+        event: &SteeringEvent,
+        _context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<State> {
+        match event {
+            SteeringEvent::DispatchFailed { at_ms, .. } => {
+                self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
+                Handled
+            }
+            SteeringEvent::DurableItemAnchored { item_id, at_ms, .. } => {
+                if self.anchor.as_ref() == Some(item_id) {
+                    self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
+                    Handled
+                } else {
+                    Handled
+                }
+            }
+            _ => Handled,
+        }
+    }
+
+    #[state(superstate = "Superstate::settled")]
+    fn cancelled(
+        &mut self,
+        event: &SteeringEvent,
+        _context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<State> {
+        match event {
+            SteeringEvent::Cancelled { at_ms, .. } => {
+                self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
+                Handled
+            }
+            SteeringEvent::DurableItemAnchored { item_id, at_ms, .. } => {
+                if self.anchor.as_ref() == Some(item_id) {
+                    self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
+                    Handled
+                } else {
+                    Handled
+                }
+            }
+            _ => Handled,
+        }
+    }
+
+    #[superstate]
+    fn active_submission(
+        &mut self,
+        _event: &SteeringEvent,
+        _context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<Superstate> {
+        Handled
+    }
+
+    #[superstate]
+    fn settled(
+        &mut self,
+        _event: &SteeringEvent,
+        _context: &mut VecDeque<SteeringEffect>,
+    ) -> Outcome<Superstate> {
+        Handled
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public controller — owns the generated StateMachine + external outbox
+// ---------------------------------------------------------------------------
+
+/// Pure synchronous steering controller. The hierarchical Statig chart is
+/// hidden inside; callers use only this public surface and the drainable
+/// effect outbox.
+pub struct ConversationSteeringMachine {
+    machine: StateMachine<SteeringInner>,
     outbox: VecDeque<SteeringEffect>,
 }
 
@@ -490,9 +856,8 @@ impl ConversationSteeringMachine {
     ///
     /// # Errors
     ///
-    /// Returns [`SteeringControllerError`] if the command id is empty /
-    /// whitespace / control / too long, generation is zero, or source
-    /// reference is empty.
+    /// Returns [`SteeringControllerError`] if the command id is invalid per
+    /// `RequestId`, generation is zero, or source reference is empty/invalid.
     pub fn new(
         command_id: impl Into<String>,
         generation: u64,
@@ -500,16 +865,14 @@ impl ConversationSteeringMachine {
         started_at_ms: i64,
         label_kind: SteeringLabelKind,
     ) -> Result<Self, SteeringControllerError> {
-        let command_id = command_id.into();
-        let source_reference = source_reference.into();
-        validate_command_id(&command_id)?;
+        let command_id_str = command_id.into();
+        let command_id = RequestId::parse(command_id_str.clone())
+            .map_err(|_| SteeringControllerError::InvalidCommandId(command_id_str))?;
         if generation == 0 {
             return Err(SteeringControllerError::InvalidGeneration);
         }
-        if source_reference.is_empty() {
-            return Err(SteeringControllerError::EmptySourceReference);
-        }
-        Ok(Self {
+        let source_reference = SourceReference::parse(source_reference)?;
+        let inner = SteeringInner {
             command_id,
             generation,
             source_reference,
@@ -518,52 +881,55 @@ impl ConversationSteeringMachine {
             last_observed_ms: started_at_ms,
             anchor: None,
             settled_at_ms: None,
-            phase: SteeringPhase::PendingLip,
-            failure_reason: None,
+            failure_kind: None,
+        };
+        let machine = inner.state_machine();
+        Ok(Self {
+            machine,
             outbox: VecDeque::new(),
         })
     }
 
     /// Returns the immutable command id.
     #[must_use]
-    pub fn command_id(&self) -> &str {
-        &self.command_id
+    pub fn command_id(&self) -> &RequestId {
+        &self.machine.inner().command_id
     }
 
     /// Returns the immutable generation.
     #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.generation
+    pub fn generation(&self) -> u64 {
+        self.machine.inner().generation
     }
 
     /// Returns the exact source reference sent to Forge.
     #[must_use]
-    pub fn source_reference(&self) -> &str {
-        &self.source_reference
+    pub fn source_reference(&self) -> &SourceReference {
+        &self.machine.inner().source_reference
     }
 
     /// Returns the redacted label kind.
     #[must_use]
-    pub const fn label_kind(&self) -> SteeringLabelKind {
-        self.label_kind
+    pub fn label_kind(&self) -> SteeringLabelKind {
+        self.machine.inner().label_kind
     }
 
     /// Returns the start timestamp.
     #[must_use]
-    pub const fn started_at_ms(&self) -> i64 {
-        self.started_at_ms
+    pub fn started_at_ms(&self) -> i64 {
+        self.machine.inner().started_at_ms
     }
 
     /// Returns the exact anchor when known.
     #[must_use]
     pub fn anchor(&self) -> Option<&ItemId> {
-        self.anchor.as_ref()
+        self.machine.inner().anchor.as_ref()
     }
 
-    /// Returns current phase.
+    /// Returns current phase derived from the Statig state.
     #[must_use]
-    pub const fn phase(&self) -> SteeringPhase {
-        self.phase
+    pub fn phase(&self) -> SteeringPhase {
+        phase_from_state(self.machine.state())
     }
 
     /// Returns the number of pending effects.
@@ -583,20 +949,20 @@ impl ConversationSteeringMachine {
         self.outbox.drain(..).collect()
     }
 
-    /// Immutable renderer view. The placement is derived solely from phase
-    /// and anchor; callers must not recombine booleans.
+    /// Immutable renderer view. Placement is derived solely from the Statig
+    /// state and anchor; callers must not recombine booleans.
     #[must_use]
     pub fn view(&self) -> SteeringView {
-        let placement = match self.phase {
+        let inner = self.machine.inner();
+        let phase = phase_from_state(self.machine.state());
+        let placement = match phase {
             SteeringPhase::PendingLip
             | SteeringPhase::Dispatching
             | SteeringPhase::AwaitingProjection => SteeringPlacement::ComposerPendingLip,
             SteeringPhase::AwaitingAcknowledgement => {
-                // Anchor is guaranteed Some in this phase.
-                if let Some(anchor) = self.anchor.clone() {
+                if let Some(anchor) = inner.anchor.clone() {
                     SteeringPlacement::AnchoredAfter { anchor }
                 } else {
-                    // Defensive; should never happen. Fall back to pending lip.
                     SteeringPlacement::ComposerPendingLip
                 }
             }
@@ -604,25 +970,25 @@ impl ConversationSteeringMachine {
                 SteeringPlacement::SettledHidden
             }
             SteeringPhase::Failed => {
-                if let Some(reason) = self.failure_reason.clone() {
-                    SteeringPlacement::Failed { reason }
+                if let Some(kind) = inner.failure_kind {
+                    SteeringPlacement::Failed { kind }
                 } else {
                     SteeringPlacement::Failed {
-                        reason: "failed".to_owned(),
+                        kind: SteeringFailureKind::Dispatch,
                     }
                 }
             }
         };
         SteeringView {
-            command_id: self.command_id.clone(),
-            generation: self.generation,
-            source_reference: self.source_reference.clone(),
-            label_kind: self.label_kind,
-            phase: self.phase,
+            command_id: inner.command_id.clone(),
+            generation: inner.generation,
+            source_reference: inner.source_reference.clone(),
+            label_kind: inner.label_kind,
+            phase,
             placement,
-            anchor: self.anchor.clone(),
-            started_at_ms: self.started_at_ms,
-            settled_at_ms: self.settled_at_ms,
+            anchor: inner.anchor.clone(),
+            started_at_ms: inner.started_at_ms,
+            settled_at_ms: inner.settled_at_ms,
             pending_effect_count: self.outbox.len(),
         }
     }
@@ -636,285 +1002,120 @@ impl ConversationSteeringMachine {
     /// Returns [`SteeringRejection`] on refusal. Idempotent duplicate
     /// anchor/completion returns `Ok(())` with no additional effects.
     pub fn handle_event(&mut self, event: SteeringEvent) -> Result<(), SteeringRejection> {
+        let inner = self.machine.inner();
         // Fencing: immutable identity must match exactly.
-        if event.command_id() != self.command_id || event.generation() != self.generation {
+        if event.command_id() != &inner.command_id || event.generation() != inner.generation {
             return Err(SteeringRejection::StaleCommandOrGeneration {
-                expected_command_id: self.command_id.clone(),
-                expected_generation: self.generation,
-                got_command_id: event.command_id().to_owned(),
+                expected_command_id: inner.command_id.clone(),
+                expected_generation: inner.generation,
+                got_command_id: event.command_id().clone(),
                 got_generation: event.generation(),
             });
         }
 
         // Timestamp regression — atomic refusal.
         let at_ms = event.at_ms();
-        if at_ms < self.last_observed_ms {
+        if at_ms < inner.last_observed_ms {
             return Err(SteeringRejection::TimestampRegression {
-                last_observed_ms: self.last_observed_ms,
+                last_observed_ms: inner.last_observed_ms,
                 attempted_ms: at_ms,
             });
         }
 
-        // Settled states are sealed; only exact duplicate completion is
-        // idempotent. Any other event from settled is refused.
-        if self.phase.is_settled() {
-            return self.handle_settled_event(event, at_ms);
+        // Anchor immutability: second different ItemId is a typed conflict.
+        if let SteeringEvent::DurableItemAnchored { item_id, .. } = &event {
+            if let Some(existing) = &inner.anchor {
+                if existing != item_id {
+                    return Err(SteeringRejection::AnchorConflict {
+                        existing: existing.clone(),
+                        attempted: item_id.clone(),
+                    });
+                }
+                // Duplicate equal anchor is allowed — handler will advance timestamp.
+            }
         }
 
-        // Active-submission transitions.
-        match (&self.phase, &event) {
-            (SteeringPhase::PendingLip, SteeringEvent::DispatchStarted { at_ms, .. }) => {
-                self.last_observed_ms = *at_ms;
-                self.phase = SteeringPhase::Dispatching;
-                self.push_dispatch_effects();
-                Ok(())
-            }
-            (SteeringPhase::Dispatching, SteeringEvent::DispatchAccepted { at_ms, .. }) => {
-                self.last_observed_ms = *at_ms;
-                self.phase = SteeringPhase::AwaitingProjection;
-                // Already watching projection from DispatchStarted; request
-                // render invalidation to reflect no visible label vs lip per
-                // invariant (lip retained, but renderer still invalidates).
-                self.outbox.push_back(SteeringEffect::RenderInvalidation {
-                    command_id: self.command_id.clone(),
-                    generation: self.generation,
-                });
-                Ok(())
-            }
-            (SteeringPhase::Dispatching, SteeringEvent::DispatchFailed { at_ms, reason, .. }) => {
-                self.last_observed_ms = *at_ms;
-                self.settled_at_ms = Some(*at_ms);
-                self.failure_reason = Some(bounded_reason(reason));
-                self.phase = SteeringPhase::Failed;
-                self.push_settlement_effects();
-                Ok(())
-            }
-            (SteeringPhase::Dispatching, SteeringEvent::Cancelled { at_ms, .. }) => {
-                self.last_observed_ms = *at_ms;
-                self.settled_at_ms = Some(*at_ms);
-                self.phase = SteeringPhase::Cancelled;
-                self.push_settlement_effects();
-                Ok(())
-            }
-            (
-                SteeringPhase::AwaitingProjection,
-                SteeringEvent::DurableItemAnchored { item_id, at_ms, .. },
-            ) => {
-                // Anchoring is immutable: first anchor wins.
-                if let Some(existing) = self.anchor.as_ref() {
-                    if existing == item_id {
-                        // Duplicate equal anchor — idempotent, but still
-                        // advance timestamp if newer.
-                        self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
-                        return Ok(());
-                    }
-                    return Err(SteeringRejection::AnchorConflict {
-                        existing: existing.clone(),
-                        attempted: item_id.clone(),
+        // Sealed settled states: only exact duplicate completion is allowed.
+        let phase = phase_from_state(self.machine.state());
+        if phase.is_settled() {
+            let allowed = match (&phase, &event) {
+                (SteeringPhase::Acknowledged, SteeringEvent::EngineAcknowledged { .. }) => true,
+                (SteeringPhase::Failed, SteeringEvent::DispatchFailed { .. }) => true,
+                (SteeringPhase::Cancelled, SteeringEvent::Cancelled { .. }) => true,
+                (_, SteeringEvent::DurableItemAnchored { item_id, .. }) => {
+                    // Duplicate equal anchor is idempotent even when settled.
+                    inner.anchor.as_ref() == Some(item_id)
+                }
+                _ => false,
+            };
+            if !allowed {
+                // For anchor conflict already handled above; otherwise already settled.
+                if let SteeringEvent::DurableItemAnchored { .. } = &event {
+                    // Equal case handled, different already returned AnchorConflict.
+                    return Err(SteeringRejection::InvalidTransition {
+                        from: phase,
+                        event: event.kind_str().to_owned(),
                     });
                 }
-                self.last_observed_ms = *at_ms;
-                self.anchor = Some(item_id.clone());
-                self.phase = SteeringPhase::AwaitingAcknowledgement;
-                self.outbox.push_back(SteeringEffect::RenderInvalidation {
-                    command_id: self.command_id.clone(),
-                    generation: self.generation,
-                });
-                self.outbox.push_back(SteeringEffect::WatchAcknowledgement {
-                    command_id: self.command_id.clone(),
-                    generation: self.generation,
-                    anchor: item_id.clone(),
-                });
-                Ok(())
+                return Err(SteeringRejection::AlreadySettled { phase });
             }
-            (
-                SteeringPhase::AwaitingProjection,
-                SteeringEvent::EngineAcknowledged { at_ms, .. },
-            ) => {
-                // Acknowledgement before anchor — settle without fabricating
-                // an anchor. No placement is fabricated.
-                self.last_observed_ms = *at_ms;
-                self.settled_at_ms = Some(*at_ms);
-                self.phase = SteeringPhase::Acknowledged;
-                self.push_settlement_effects();
-                Ok(())
-            }
-            (
-                SteeringPhase::AwaitingProjection,
-                SteeringEvent::DispatchFailed { at_ms, reason, .. },
-            ) => {
-                self.last_observed_ms = *at_ms;
-                self.settled_at_ms = Some(*at_ms);
-                self.failure_reason = Some(bounded_reason(reason));
-                self.phase = SteeringPhase::Failed;
-                self.push_settlement_effects();
-                Ok(())
-            }
-            (SteeringPhase::AwaitingProjection, SteeringEvent::Cancelled { at_ms, .. }) => {
-                self.last_observed_ms = *at_ms;
-                self.settled_at_ms = Some(*at_ms);
-                self.phase = SteeringPhase::Cancelled;
-                self.push_settlement_effects();
-                Ok(())
-            }
-            (
-                SteeringPhase::AwaitingAcknowledgement,
-                SteeringEvent::EngineAcknowledged { at_ms, .. },
-            ) => {
-                self.last_observed_ms = *at_ms;
-                self.settled_at_ms = Some(*at_ms);
-                self.phase = SteeringPhase::Acknowledged;
-                self.push_settlement_effects();
-                Ok(())
-            }
-            (
-                SteeringPhase::AwaitingAcknowledgement,
-                SteeringEvent::DispatchFailed { at_ms, reason, .. },
-            ) => {
-                // Failure after anchoring must not move the label.
-                self.last_observed_ms = *at_ms;
-                self.settled_at_ms = Some(*at_ms);
-                self.failure_reason = Some(bounded_reason(reason));
-                self.phase = SteeringPhase::Failed;
-                self.push_settlement_effects();
-                Ok(())
-            }
-            (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::Cancelled { at_ms, .. }) => {
-                self.last_observed_ms = *at_ms;
-                self.settled_at_ms = Some(*at_ms);
-                self.phase = SteeringPhase::Cancelled;
-                self.push_settlement_effects();
-                Ok(())
-            }
-            (
-                SteeringPhase::AwaitingAcknowledgement,
-                SteeringEvent::DurableItemAnchored { item_id, at_ms, .. },
-            ) => {
-                // Duplicate equal anchor is harmless; different anchor is conflict.
-                if let Some(existing) = self.anchor.as_ref() {
-                    if existing == item_id {
-                        self.last_observed_ms = (*at_ms).max(self.last_observed_ms);
-                        return Ok(());
-                    }
-                    return Err(SteeringRejection::AnchorConflict {
-                        existing: existing.clone(),
-                        attempted: item_id.clone(),
-                    });
-                }
-                // Should be unreachable because AwaitingAcknowledgement always has anchor.
-                self.last_observed_ms = *at_ms;
-                self.anchor = Some(item_id.clone());
-                self.outbox.push_back(SteeringEffect::RenderInvalidation {
-                    command_id: self.command_id.clone(),
-                    generation: self.generation,
-                });
-                Ok(())
-            }
-            _ => Err(SteeringRejection::InvalidTransition {
-                from: self.phase,
+        }
+
+        // Validate transition exists from current phase for this event.
+        if !is_valid_transition(phase, &event, inner.anchor.is_some()) {
+            // Duplicate equal anchor already allowed; this is truly invalid.
+            return Err(SteeringRejection::InvalidTransition {
+                from: phase,
                 event: event.kind_str().to_owned(),
-            }),
+            });
         }
-    }
 
-    fn handle_settled_event(
-        &mut self,
-        event: SteeringEvent,
-        at_ms: i64,
-    ) -> Result<(), SteeringRejection> {
-        match (&self.phase, &event) {
-            // Duplicate acknowledgement is idempotent.
-            (SteeringPhase::Acknowledged, SteeringEvent::EngineAcknowledged { .. }) => {
-                self.last_observed_ms = at_ms.max(self.last_observed_ms);
-                Ok(())
-            }
-            // Duplicate anchor equal is idempotent even when settled.
-            (_, SteeringEvent::DurableItemAnchored { item_id, .. }) => {
-                if let Some(existing) = self.anchor.as_ref() {
-                    if existing == item_id {
-                        self.last_observed_ms = at_ms.max(self.last_observed_ms);
-                        return Ok(());
-                    }
-                    return Err(SteeringRejection::AnchorConflict {
-                        existing: existing.clone(),
-                        attempted: item_id.clone(),
-                    });
-                }
-                // Settled without anchor — anchoring after settlement is not
-                // allowed to fabricate placement; treat as conflict/invalid.
-                Err(SteeringRejection::InvalidTransition {
-                    from: self.phase,
-                    event: event.kind_str().to_owned(),
-                })
-            }
-            // Duplicate failure/cancel with same phase is idempotent.
-            (SteeringPhase::Failed, SteeringEvent::DispatchFailed { .. }) => {
-                self.last_observed_ms = at_ms.max(self.last_observed_ms);
-                Ok(())
-            }
-            (SteeringPhase::Cancelled, SteeringEvent::Cancelled { .. }) => {
-                self.last_observed_ms = at_ms.max(self.last_observed_ms);
-                Ok(())
-            }
-            // Retry from Failed re-enters Dispatching.
-            (SteeringPhase::Failed, SteeringEvent::Retry { at_ms, .. }) => {
-                self.last_observed_ms = *at_ms;
-                self.phase = SteeringPhase::Dispatching;
-                self.settled_at_ms = None;
-                self.failure_reason = None;
-                self.push_dispatch_effects();
-                Ok(())
-            }
-            _ => Err(SteeringRejection::AlreadySettled { phase: self.phase }),
-        }
-    }
-
-    fn push_dispatch_effects(&mut self) {
-        self.outbox.push_back(SteeringEffect::Dispatch {
-            command_id: self.command_id.clone(),
-            generation: self.generation,
-            source_reference: self.source_reference.clone(),
-        });
-        self.outbox.push_back(SteeringEffect::WatchProjection {
-            command_id: self.command_id.clone(),
-            generation: self.generation,
-            source_reference: self.source_reference.clone(),
-        });
-        self.outbox.push_back(SteeringEffect::RenderInvalidation {
-            command_id: self.command_id.clone(),
-            generation: self.generation,
-        });
-    }
-
-    fn push_settlement_effects(&mut self) {
-        self.outbox.push_back(SteeringEffect::ReleasePendingLip {
-            generation: self.generation,
-        });
-        self.outbox.push_back(SteeringEffect::RenderInvalidation {
-            command_id: self.command_id.clone(),
-            generation: self.generation,
-        });
+        // All accepted state changes occur inside real Statig handlers.
+        self.machine.handle_with_context(&event, &mut self.outbox);
+        Ok(())
     }
 }
 
-fn bounded_reason(reason: &str) -> String {
-    const MAX: usize = 256;
-    if reason.len() <= MAX {
-        reason.to_owned()
-    } else {
-        // Truncate to bounded length on UTF-8 boundary.
-        let mut end = MAX;
-        while !reason.is_char_boundary(end) {
-            end -= 1;
+fn phase_from_state(state: &State) -> SteeringPhase {
+    match state {
+        State::PendingLip { .. } => SteeringPhase::PendingLip,
+        State::Dispatching { .. } => SteeringPhase::Dispatching,
+        State::AwaitingProjection { .. } => SteeringPhase::AwaitingProjection,
+        State::AwaitingAcknowledgement { .. } => SteeringPhase::AwaitingAcknowledgement,
+        State::Acknowledged { .. } => SteeringPhase::Acknowledged,
+        State::Failed { .. } => SteeringPhase::Failed,
+        State::Cancelled { .. } => SteeringPhase::Cancelled,
+    }
+}
+
+fn is_valid_transition(phase: SteeringPhase, event: &SteeringEvent, has_anchor: bool) -> bool {
+    match (phase, event) {
+        (SteeringPhase::PendingLip, SteeringEvent::DispatchStarted { .. }) => true,
+        (SteeringPhase::Dispatching, SteeringEvent::DispatchAccepted { .. }) => true,
+        (SteeringPhase::Dispatching, SteeringEvent::DispatchFailed { .. }) => true,
+        (SteeringPhase::Dispatching, SteeringEvent::Cancelled { .. }) => true,
+        (SteeringPhase::AwaitingProjection, SteeringEvent::DurableItemAnchored { .. }) => true,
+        (SteeringPhase::AwaitingProjection, SteeringEvent::EngineAcknowledged { .. }) => true,
+        (SteeringPhase::AwaitingProjection, SteeringEvent::DispatchFailed { .. }) => true,
+        (SteeringPhase::AwaitingProjection, SteeringEvent::Cancelled { .. }) => true,
+        (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::EngineAcknowledged { .. }) => true,
+        (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::DispatchFailed { .. }) => true,
+        (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::Cancelled { .. }) => true,
+        (SteeringPhase::AwaitingAcknowledgement, SteeringEvent::DurableItemAnchored { .. }) => {
+            has_anchor
         }
-        reason[..end].to_owned()
+        (SteeringPhase::Acknowledged, SteeringEvent::EngineAcknowledged { .. }) => true,
+        (SteeringPhase::Acknowledged, SteeringEvent::DurableItemAnchored { .. }) => has_anchor,
+        (SteeringPhase::Failed, SteeringEvent::DispatchFailed { .. }) => true,
+        (SteeringPhase::Failed, SteeringEvent::DurableItemAnchored { .. }) => has_anchor,
+        (SteeringPhase::Cancelled, SteeringEvent::Cancelled { .. }) => true,
+        (SteeringPhase::Cancelled, SteeringEvent::DurableItemAnchored { .. }) => has_anchor,
+        _ => false,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Convenience alias for tests — the spec names the controller per submission
-// and the outer aggregate keys by command identity. Both names alias the same
-// pure machine.
+// Convenience alias
 // ---------------------------------------------------------------------------
 
 /// Alias for ergonomic import in tests.
