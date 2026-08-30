@@ -271,7 +271,7 @@ rust_test(
         "//modules/domain:domain",
         "//modules/migrations:migrations",
         "@crates//:sea-orm",
-        "@crates//:sha2",
+        "@crates//:sha2-0.11.0",
         "@crates//:tokio",
     ],
     edition = "2024",
