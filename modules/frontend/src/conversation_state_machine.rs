@@ -811,6 +811,12 @@ impl ConversationStateController {
     /// All registry checks and relevant effect-capacity checks happen before
     /// child mutation. A child refusal is returned in a typed error and does
     /// not reorder or remove already pending aggregate effects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] when the owner is closed, an event
+    /// targets an unknown or conflicting identity, a bounded capacity is
+    /// exhausted, or a child rejects the event.
     pub fn dispatch(
         &mut self,
         event: ConversationStateEvent,
@@ -824,7 +830,7 @@ impl ConversationStateController {
             | ConversationStateEvent::Delivery(ConversationDeliveryEvent::Closed) => {
                 self.close_owner()
             }
-            ConversationStateEvent::Delivery(event) => self.dispatch_delivery(event),
+            ConversationStateEvent::Delivery(event) => self.dispatch_delivery(&event),
             ConversationStateEvent::RegisterTurn { turn_id } => self.register_turn(turn_id),
             ConversationStateEvent::Turn { turn_id, event } => self.dispatch_turn(turn_id, event),
             ConversationStateEvent::RegisterSteering {
@@ -836,11 +842,11 @@ impl ConversationStateController {
             } => self.register_steering(
                 command_id,
                 generation,
-                source_reference,
+                &source_reference,
                 started_at_ms,
                 label_kind,
             ),
-            ConversationStateEvent::Steering(event) => self.dispatch_steering(event),
+            ConversationStateEvent::Steering(event) => self.dispatch_steering(&event),
             ConversationStateEvent::RegisterDisclosure {
                 scene_id,
                 initially_working,
@@ -854,6 +860,10 @@ impl ConversationStateController {
     }
 
     /// Alias for [`Self::dispatch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ConversationStateError`] produced by [`Self::dispatch`].
     pub fn handle_event(
         &mut self,
         event: ConversationStateEvent,
@@ -862,6 +872,12 @@ impl ConversationStateController {
     }
 
     /// Routes one delivery event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] when the owner is closed, the
+    /// delivery event fails scene validation, capacity is exhausted, or the
+    /// delivery child rejects the event.
     pub fn on_delivery(
         &mut self,
         event: ConversationDeliveryEvent,
@@ -870,6 +886,12 @@ impl ConversationStateController {
     }
 
     /// Registers one turn controller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError::OwnerClosed`] for a closed owner,
+    /// [`ConversationStateError::DuplicateTurn`] for a duplicate identity, or
+    /// [`ConversationStateError::CapacityExhausted`] when a bound is full.
     pub fn register_turn(&mut self, turn_id: TurnId) -> Result<(), ConversationStateError> {
         if self.delivery.is_closed() {
             return Err(ConversationStateError::OwnerClosed);
@@ -877,7 +899,7 @@ impl ConversationStateController {
         if self.turns.contains_key(&turn_id) {
             return Err(ConversationStateError::DuplicateTurn { turn_id });
         }
-        self.ensure_capacity(
+        Self::ensure_capacity(
             CapacityResource::Turns,
             self.turns.len().saturating_add(1),
             MAX_TURN_CONTROLLERS,
@@ -890,6 +912,12 @@ impl ConversationStateController {
     }
 
     /// Routes one event to a registered turn controller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] when the owner or turn rejects the
+    /// event, including unknown turns, invalid transitions, or exhausted
+    /// effect capacity.
     pub fn on_turn(
         &mut self,
         turn_id: TurnId,
@@ -899,11 +927,17 @@ impl ConversationStateController {
     }
 
     /// Registers one exact steering command generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] for a closed owner, duplicate or
+    /// conflicting identity, exhausted capacity, invalid scene identity, or
+    /// rejected steering construction.
     pub fn register_steering(
         &mut self,
         command_id: RequestId,
         generation: u64,
-        source_reference: crate::conversation_steering_machine::SourceReference,
+        source_reference: &crate::conversation_steering_machine::SourceReference,
         started_at_ms: i64,
         label_kind: SteeringLabelKind,
     ) -> Result<(), ConversationStateError> {
@@ -920,7 +954,7 @@ impl ConversationStateController {
                 generation,
             });
         }
-        self.ensure_capacity(
+        Self::ensure_capacity(
             CapacityResource::Steerings,
             self.steerings.len().saturating_add(1),
             MAX_STEERING_CONTROLLERS,
@@ -979,11 +1013,22 @@ impl ConversationStateController {
     }
 
     /// Routes one fenced event to its exact steering controller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] when the owner or steering child
+    /// rejects the event, its anchor is invalid, or effect capacity is full.
     pub fn on_steering(&mut self, event: SteeringEvent) -> Result<(), ConversationStateError> {
         self.dispatch(ConversationStateEvent::Steering(event))
     }
 
     /// Registers one disclosure controller keyed by stable scene identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError::OwnerClosed`] for a closed owner,
+    /// [`ConversationStateError::DuplicateDisclosure`] for a duplicate key, or
+    /// [`ConversationStateError::CapacityExhausted`] when a bound is full.
     pub fn register_disclosure(
         &mut self,
         scene_id: SceneId,
@@ -995,7 +1040,7 @@ impl ConversationStateController {
         if self.disclosures.contains_key(&scene_id) {
             return Err(ConversationStateError::DuplicateDisclosure { scene_id });
         }
-        self.ensure_capacity(
+        Self::ensure_capacity(
             CapacityResource::Disclosures,
             self.disclosures.len().saturating_add(1),
             MAX_DISCLOSURE_CONTROLLERS,
@@ -1008,6 +1053,11 @@ impl ConversationStateController {
     }
 
     /// Routes one lifecycle or user disclosure event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] when the owner or disclosure key is
+    /// invalid, effect capacity is exhausted, or the child rejects the event.
     pub fn on_disclosure(
         &mut self,
         scene_id: SceneId,
@@ -1017,11 +1067,21 @@ impl ConversationStateController {
     }
 
     /// Routes one event to the sole viewport controller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] when the owner or viewport is closed
+    /// for the event, or when effect capacity is exhausted.
     pub fn on_viewport(&mut self, event: ViewportEvent) -> Result<(), ConversationStateError> {
         self.dispatch(ConversationStateEvent::Viewport(event))
     }
 
     /// Registers one bounded non-durable fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError`] for a closed owner, duplicate or
+    /// conflicting fact identity, invalid scene data, or exhausted capacity.
     pub fn register_fact(&mut self, fact: SceneFact) -> Result<(), ConversationStateError> {
         self.dispatch(ConversationStateEvent::Fact(SceneFactCommand::Register(
             fact,
@@ -1029,6 +1089,12 @@ impl ConversationStateController {
     }
 
     /// Removes one bounded non-durable fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError::OwnerClosed`] for a closed owner,
+    /// [`ConversationStateError::UnknownFact`] for an absent fact, or
+    /// [`ConversationStateError::CapacityExhausted`] when effects cannot wait.
     pub fn remove_fact(&mut self, id: SceneId) -> Result<(), ConversationStateError> {
         self.dispatch(ConversationStateEvent::Fact(SceneFactCommand::Remove {
             id,
@@ -1038,6 +1104,12 @@ impl ConversationStateController {
     /// Closes delivery and the sole viewport owner. The close operation is
     /// idempotent at the child boundary but a second aggregate close is a
     /// typed closed-owner refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError::OwnerClosed`] when already closed,
+    /// [`ConversationStateError::CapacityExhausted`] when close effects cannot
+    /// wait, or a child delivery error.
     pub fn close(&mut self) -> Result<(), ConversationStateError> {
         self.dispatch(ConversationStateEvent::Close)
     }
@@ -1142,6 +1214,11 @@ impl ConversationStateController {
     /// partially applied batch. Pending-lip, hidden, and failed steerings are
     /// intentionally absent from the scene and remain available through
     /// [`Self::view`] and aggregate effects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationStateError::Scene`] when bounded durable or
+    /// non-durable inputs cannot form a valid scene.
     pub fn scene(&self) -> Result<ConversationScene, ConversationStateError> {
         let mut turns = Vec::new();
         let mut items = Vec::new();
@@ -1203,6 +1280,10 @@ impl ConversationStateController {
     }
 
     /// Alias for [`Self::scene`] for renderer adapters.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ConversationStateError`] produced by [`Self::scene`].
     pub fn render_scene(&self) -> Result<ConversationScene, ConversationStateError> {
         self.scene()
     }
@@ -1223,9 +1304,9 @@ impl ConversationStateController {
 
     fn dispatch_delivery(
         &mut self,
-        event: ConversationDeliveryEvent,
+        event: &ConversationDeliveryEvent,
     ) -> Result<(), ConversationStateError> {
-        match &event {
+        match event {
             ConversationDeliveryEvent::SnapshotReceived(snapshot) => {
                 self.validate_snapshot_for_scene(snapshot)?;
             }
@@ -1235,7 +1316,7 @@ impl ConversationStateController {
             ConversationDeliveryEvent::RetryRequested | ConversationDeliveryEvent::Closed => {}
         }
         self.ensure_effect_capacity(MAX_DELIVERY_EFFECTS_PER_EVENT)?;
-        let result = self.delivery.dispatch(&event);
+        let result = self.delivery.dispatch(event);
         self.push_delivery_effects();
         result.map_err(ConversationStateError::Delivery)
     }
@@ -1265,8 +1346,8 @@ impl ConversationStateController {
         Ok(())
     }
 
-    fn dispatch_steering(&mut self, event: SteeringEvent) -> Result<(), ConversationStateError> {
-        let key = steering_key(&event);
+    fn dispatch_steering(&mut self, event: &SteeringEvent) -> Result<(), ConversationStateError> {
+        let key = steering_key(event);
         if !self.steerings.contains_key(&key) {
             return Err(ConversationStateError::UnknownSteering {
                 command_id: key.command_id.clone(),
@@ -1274,7 +1355,7 @@ impl ConversationStateController {
             });
         }
 
-        if let SteeringEvent::DurableItemAnchored { item_id, .. } = &event {
+        if let SteeringEvent::DurableItemAnchored { item_id, .. } = event {
             self.validate_steering_anchor(item_id)?;
         }
         self.ensure_effect_capacity(MAX_STEERING_EFFECTS_PER_EVENT)?;
@@ -1283,7 +1364,7 @@ impl ConversationStateController {
                 .steerings
                 .get_mut(&key)
                 .expect("steering was checked above");
-            record.controller.handle_event(&event).map_err(|error| {
+            record.controller.handle_event(event).map_err(|error| {
                 ConversationStateError::Steering {
                     command_id: key.command_id.clone(),
                     generation: key.generation,
@@ -1362,7 +1443,7 @@ impl ConversationStateController {
         if self.facts.contains_key(&fact.id) {
             return Err(ConversationStateError::DuplicateFact { id: fact.id });
         }
-        self.ensure_capacity(
+        Self::ensure_capacity(
             CapacityResource::SceneFacts,
             self.facts.len().saturating_add(1),
             MAX_SCENE_FACTS,
@@ -1385,7 +1466,7 @@ impl ConversationStateController {
                 turn_id: item.turn_id,
             });
         }
-        self.validate_fact_against_snapshot(&item, snapshot)?;
+        Self::validate_fact_against_snapshot(&item, snapshot)?;
         let prospective_item_count = snapshot
             .items()
             .len()
@@ -1494,10 +1575,10 @@ impl ConversationStateController {
 
         for record in self.steerings.values() {
             let view = record.controller.view();
-            if let ChildSteeringPlacement::AnchoredAfter { anchor } = view.placement {
-                if !snapshot_has_user_item(snapshot, &anchor) {
-                    return Err(ConversationStateError::SteeringAnchorUnavailable { anchor });
-                }
+            if let ChildSteeringPlacement::AnchoredAfter { anchor } = view.placement
+                && !snapshot_has_user_item(snapshot, &anchor)
+            {
+                return Err(ConversationStateError::SteeringAnchorUnavailable { anchor });
             }
         }
         Ok(())
@@ -1589,7 +1670,6 @@ impl ConversationStateController {
     }
 
     fn validate_fact_against_snapshot(
-        &self,
         item: &SceneItem,
         snapshot: &ConversationSnapshot,
     ) -> Result<(), ConversationStateError> {
@@ -1677,7 +1757,6 @@ impl ConversationStateController {
     }
 
     fn ensure_capacity(
-        &self,
         resource: CapacityResource,
         count: usize,
         maximum: usize,

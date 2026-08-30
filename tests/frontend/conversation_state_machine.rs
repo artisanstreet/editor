@@ -180,7 +180,7 @@ fn register_steering(controller: &mut ConversationStateController, command: &str
         .register_steering(
             artisan_domain::RequestId::parse(command).expect("valid request id"),
             generation,
-            steering_source(command),
+            &steering_source(command),
             0,
             SteeringLabelKind::Steering,
         )
@@ -780,7 +780,7 @@ fn closed_owner_registration_is_atomic() {
         closed.register_steering(
             steering_request("closed_command"),
             1,
-            steering_source("closed_command"),
+            &steering_source("closed_command"),
             0,
             SteeringLabelKind::Steering,
         ),
