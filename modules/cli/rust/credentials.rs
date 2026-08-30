@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_lines)]
-
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -110,6 +108,7 @@ impl std::error::Error for ForgeCredentialError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForgeCredentialPaths {
+    credentials_dir: PathBuf,
     manifest: PathBuf,
     capability: PathBuf,
     certificates: Vec<PathBuf>,
@@ -121,6 +120,7 @@ impl ForgeCredentialPaths {
         validate_home(home)?;
         let credentials_dir = home.join("credentials");
         Ok(Self {
+            credentials_dir: credentials_dir.clone(),
             manifest: credentials_dir.join("manifest.json"),
             capability: credentials_dir.join("bootstrap-capability.bin"),
             certificates: vec![credentials_dir.join("localhost-leaf.der")],
@@ -165,10 +165,7 @@ impl ForgeCredentialPaths {
     }
 
     pub fn credentials_dir(&self) -> PathBuf {
-        self.manifest
-            .parent()
-            .expect("manifest has parent")
-            .to_path_buf()
+        self.credentials_dir.clone()
     }
 
     pub fn lock_path(&self) -> PathBuf {
@@ -261,21 +258,6 @@ fn check_ancestors_all(path: &Path, must_exist: bool) -> Result<(), ForgeCredent
     Ok(())
 }
 
-fn reject_symlink_chain(path: &Path) -> Result<(), ForgeCredentialError> {
-    check_ancestors_all(path, false)?;
-    match fs::symlink_metadata(path) {
-        Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
-            Err(ForgeCredentialError::UnsafePath(path.to_path_buf()))
-        }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(ForgeCredentialError::Io {
-            context: "inspect path",
-            path: path.to_path_buf(),
-        }),
-    }
-}
-
 fn is_safe_filename(name: &str) -> bool {
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
         return false;
@@ -287,6 +269,15 @@ fn is_safe_filename(name: &str) -> bool {
         return false;
     }
     true
+}
+
+fn encode_nonce_hex(nonce: &[u8; 16]) -> String {
+    let mut encoded = String::with_capacity(32);
+    for &byte in nonce {
+        encoded.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('?'));
+        encoded.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('?'));
+    }
+    encoded
 }
 
 #[cfg(unix)]
@@ -322,16 +313,6 @@ fn check_file_mode(path: &Path) -> Result<(), ForgeCredentialError> {
     if mode != 0o600 {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_dir_mode(_path: &Path) -> Result<(), ForgeCredentialError> {
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_file_mode(_path: &Path) -> Result<(), ForgeCredentialError> {
     Ok(())
 }
 
@@ -463,14 +444,13 @@ fn hidden_output(
             let reap_deadline = Duration::from_secs(2);
             loop {
                 match child.try_wait() {
-                    Ok(Some(_)) => break,
+                    Ok(Some(_)) | Err(_) => break,
                     Ok(None) => {
                         if reap_start.elapsed() > reap_deadline {
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    Err(_) => break,
                 }
             }
             let _ = child.try_wait();
@@ -537,7 +517,7 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         || account.contains(':')
         || account.contains('"')
         || account.contains(',')
-        || account.chars().any(|c| c.is_control())
+        || account.chars().any(char::is_control)
     {
         return Err(ForgeCredentialError::WindowsAcl);
     }
@@ -551,11 +531,6 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     Ok(CurrentIdentity { sid, account })
-}
-
-#[cfg(windows)]
-fn resolve_current_sid() -> Result<String, ForgeCredentialError> {
-    Ok(resolve_current_identity()?.sid)
 }
 
 #[cfg(windows)]
@@ -581,6 +556,7 @@ fn is_valid_sid(sid: &str) -> bool {
     true
 }
 
+#[cfg(test)]
 fn parse_icacls_output_with_path(
     output: &str,
     expected_sid: &str,
@@ -593,6 +569,7 @@ fn parse_icacls_output_with_path(
     parse_icacls_strict_with_identity(output, &identity, true, queried_path)
 }
 
+#[cfg(test)]
 fn parse_icacls_strict_with_path(
     output: &str,
     expected_sid: &str,
@@ -612,6 +589,17 @@ fn parse_icacls_strict_with_identity(
     expect_dir: bool,
     queried_path: &str,
 ) -> Result<(), ForgeCredentialError> {
+    let ace_lines = collect_icacls_ace_lines(output, queried_path)?;
+    match ace_lines.as_slice() {
+        [ace] => validate_icacls_ace(ace, identity, expect_dir),
+        _ => Err(ForgeCredentialError::WindowsAcl),
+    }
+}
+
+fn collect_icacls_ace_lines(
+    output: &str,
+    queried_path: &str,
+) -> Result<Vec<String>, ForgeCredentialError> {
     let mut ace_lines: Vec<String> = Vec::new();
     let queried_lower = queried_path.to_ascii_lowercase();
     let mut first_line = true;
@@ -687,10 +675,14 @@ fn parse_icacls_strict_with_identity(
         }
         ace_lines.push(candidate);
     }
-    if ace_lines.len() != 1 {
-        return Err(ForgeCredentialError::WindowsAcl);
-    }
-    let ace = ace_lines[0].clone();
+    Ok(ace_lines)
+}
+
+fn validate_icacls_ace(
+    ace: &str,
+    identity: &CurrentIdentity,
+    expect_dir: bool,
+) -> Result<(), ForgeCredentialError> {
     let lower = ace.to_ascii_lowercase();
     if lower.contains("deny") {
         return Err(ForgeCredentialError::WindowsAcl);
@@ -700,11 +692,10 @@ fn parse_icacls_strict_with_identity(
     }
     let colon = ace.find(':').ok_or(ForgeCredentialError::WindowsAcl)?;
     let principal = ace[..colon].trim();
-    let principal_lower = principal.to_ascii_lowercase();
-    let sid_lower = identity.sid.to_ascii_lowercase();
-    let account_lower = identity.account.to_ascii_lowercase();
-    let matches_sid = !sid_lower.is_empty() && principal_lower == sid_lower;
-    let matches_account = !account_lower.is_empty() && principal_lower == account_lower;
+    let matches_sid =
+        !identity.sid.is_empty() && principal.eq_ignore_ascii_case(identity.sid.as_str());
+    let matches_account =
+        !identity.account.is_empty() && principal.eq_ignore_ascii_case(identity.account.as_str());
     if !matches_sid && !matches_account {
         return Err(ForgeCredentialError::WindowsAcl);
     }
@@ -718,7 +709,7 @@ fn parse_icacls_strict_with_identity(
     while let Some(ch) = chars.next() {
         if ch == '(' {
             let mut tok = String::new();
-            while let Some(c) = chars.next() {
+            for c in chars.by_ref() {
                 if c == ')' {
                     break;
                 }
@@ -728,13 +719,13 @@ fn parse_icacls_strict_with_identity(
         }
     }
     let mut seen_f = 0;
-    let mut seen_oi = 0;
-    let mut seen_ci = 0;
+    let mut object_inherit_count = 0;
+    let mut container_inherit_count = 0;
     for tok in &tokens {
         match tok.as_str() {
             "f" => seen_f += 1,
-            "oi" => seen_oi += 1,
-            "ci" => seen_ci += 1,
+            "oi" => object_inherit_count += 1,
+            "ci" => container_inherit_count += 1,
             _ => return Err(ForgeCredentialError::WindowsAcl),
         }
     }
@@ -742,17 +733,17 @@ fn parse_icacls_strict_with_identity(
         return Err(ForgeCredentialError::WindowsAcl);
     }
     if expect_dir {
-        if seen_oi != 1 || seen_ci != 1 {
+        if object_inherit_count != 1 || container_inherit_count != 1 {
             return Err(ForgeCredentialError::WindowsAcl);
         }
-    } else if seen_oi != 0 || seen_ci != 0 {
+    } else if object_inherit_count != 0 || container_inherit_count != 0 {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let mut stripped = flags_lower.clone();
     stripped = stripped.replace("(f)", "");
     stripped = stripped.replace("(oi)", "");
     stripped = stripped.replace("(ci)", "");
-    stripped = stripped.replace(' ', "").replace('\t', "").replace(',', "");
+    stripped = stripped.replace([' ', '\t', ','], "");
     if !stripped.trim().is_empty() {
         return Err(ForgeCredentialError::WindowsAcl);
     }
@@ -767,7 +758,7 @@ fn parse_icacls_strict_with_identity(
 #[cfg(windows)]
 fn verify_windows_dacl(path: &Path, expected_sid: &str) -> Result<(), ForgeCredentialError> {
     let identity = resolve_current_identity()?;
-    if identity.sid.to_ascii_lowercase() != expected_sid.to_ascii_lowercase() {
+    if !identity.sid.eq_ignore_ascii_case(expected_sid) {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let path_str = path.to_string_lossy().to_string();
@@ -776,7 +767,7 @@ fn verify_windows_dacl(path: &Path, expected_sid: &str) -> Result<(), ForgeCrede
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let is_dir = fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
+    let is_dir = fs::metadata(path).is_ok_and(|metadata| metadata.is_dir());
     parse_icacls_strict_with_identity(&text, &identity, is_dir, &path_str)
 }
 
@@ -800,11 +791,11 @@ fn restrict_directory_windows(dir: &Path) -> Result<(), ForgeCredentialError> {
 #[cfg(windows)]
 fn restrict_file_windows(path: &Path, sid: &str) -> Result<(), ForgeCredentialError> {
     let identity = resolve_current_identity()?;
-    if identity.sid.to_ascii_lowercase() != sid.to_ascii_lowercase() {
+    if !identity.sid.eq_ignore_ascii_case(sid) {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let path_str = path.to_string_lossy().to_string();
-    let grant = format!("*{}:F", sid);
+    let grant = format!("*{sid}:F");
     let output = hidden_output(
         "icacls.exe",
         &[&path_str, "/inheritance:r", "/grant:r", &grant],
@@ -854,7 +845,7 @@ fn ensure_credentials_dir(dir: &Path) -> Result<(), ForgeCredentialError> {
     check_ancestors_all(dir, false)?;
     match fs::symlink_metadata(dir) {
         Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
-            return Err(ForgeCredentialError::UnsafePath(dir.to_path_buf()));
+            Err(ForgeCredentialError::UnsafePath(dir.to_path_buf()))
         }
         Ok(meta) if meta.is_dir() => {
             #[cfg(unix)]
@@ -1206,7 +1197,7 @@ fn generate_material() -> Result<ProvisionalMaterial, ForgeCredentialError> {
                 .try_into()
                 .map_err(|_| ForgeCredentialError::Provisioning)?,
         ),
-        rcgen::SanType::IpAddress(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+        rcgen::SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)),
     ];
     let cert = params
         .self_signed(&key_pair)
@@ -1255,7 +1246,7 @@ fn install_atomic(
     check_ancestors_all(&dest, false)?;
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| ForgeCredentialError::Provisioning)?;
-    let nonce_hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let nonce_hex = encode_nonce_hex(&nonce);
     let temp_name = format!(".{filename}.{nonce_hex}.tmp");
     let temp_path = dir.join(&temp_name);
     let mut temp_guard = ScopedTemp::new(temp_path.clone());
@@ -1300,9 +1291,7 @@ fn install_atomic(
     if dest_id != temp_id {
         return Err(ForgeCredentialError::Provisioning);
     }
-    if let Err(e) = sync_directory(dir) {
-        return Err(e);
-    }
+    sync_directory(dir)?;
     #[cfg(unix)]
     {
         if let Err(e) = check_file_mode(&dest) {
@@ -1312,9 +1301,7 @@ fn install_atomic(
     #[cfg(windows)]
     {
         let identity = resolve_current_identity()?;
-        if let Err(e) = restrict_file_windows(&dest, &identity.sid) {
-            return Err(e);
-        }
+        restrict_file_windows(&dest, &identity.sid)?;
     }
     if fs::remove_file(&temp_path).is_err() {
         return Err(ForgeCredentialError::Io {
@@ -1338,10 +1325,8 @@ fn cleanup_created(mut created: Vec<CreatedFile>) {
         }
     }
     for entry in non_manifest.into_iter().chain(manifests) {
-        if let Ok(current_id) = file_id(&entry.path) {
-            if current_id == entry.id {
-                let _ = fs::remove_file(&entry.path);
-            }
+        if file_id(&entry.path).is_ok_and(|current_id| current_id == entry.id) {
+            let _ = fs::remove_file(&entry.path);
         }
     }
 }

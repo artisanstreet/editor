@@ -741,42 +741,45 @@ impl Drop for NativeScopedTemp {
     }
 }
 
-fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
+fn encode_nonce_hex(nonce: &[u8; 16]) -> String {
+    let mut encoded = String::with_capacity(32);
+    for &byte in nonce {
+        encoded.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('?'));
+        encoded.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('?'));
+    }
+    encoded
+}
+
+fn inspect_native_destination(path: &Path) -> NativeResult<Option<NativeFileId>> {
     check_ancestors_all(path, false)?;
-    let pre_existing_id = match fs::symlink_metadata(path) {
+    match fs::symlink_metadata(path) {
         Ok(meta) if metadata_is_symlink_or_reparse(&meta) || meta.is_dir() => {
-            return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+            Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
         }
-        Ok(meta) if meta.is_file() => Some(native_file_id(path)?),
-        Ok(_) => return Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => {
-            return Err(NativeInstanceError::Io {
-                context: "inspect instance destination",
-                path: path.to_path_buf(),
-            });
-        }
-    };
-    fs::create_dir_all(directory).map_err(|_| NativeInstanceError::Io {
-        context: "create directory",
-        path: directory.to_path_buf(),
-    })?;
-    check_ancestors_all(path, false)?;
+        Ok(meta) if meta.is_file() => native_file_id(path).map(Some),
+        Ok(_) => Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(NativeInstanceError::Io {
+            context: "inspect instance destination",
+            path: path.to_path_buf(),
+        }),
+    }
+}
+
+fn prepare_native_temp(
+    directory: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> NativeResult<(PathBuf, NativeScopedTemp, NativeFileId)> {
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| NativeInstanceError::InvalidManifest)?;
-    let nonce_hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
-    let temp_name = format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("instance"),
-        nonce_hex
-    );
-    let temporary = directory.join(temp_name);
-    let mut guard = NativeScopedTemp::new(temporary.clone());
+    let nonce_hex = encode_nonce_hex(&nonce);
+    let base_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("instance");
+    let temporary = directory.join(format!(".{base_name}.{nonce_hex}.tmp"));
+    let guard = NativeScopedTemp::new(temporary.clone());
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
@@ -800,47 +803,46 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
     })?;
     let temp_id = native_file_id_from_file(&file)?;
     drop(file);
+    Ok((temporary, guard, temp_id))
+}
+
+fn verify_native_destination(
+    path: &Path,
+    pre_existing_id: Option<NativeFileId>,
+) -> NativeResult<()> {
     check_ancestors_all(path, false)?;
     match fs::symlink_metadata(path) {
         Ok(meta) if metadata_is_symlink_or_reparse(&meta) || meta.is_dir() => {
-            return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+            Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
         }
         Ok(meta) if meta.is_file() => {
             if let Some(expected) = pre_existing_id {
                 let current = native_file_id(path)?;
-                if current != expected {
-                    return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+                if current == expected {
+                    Ok(())
+                } else {
+                    Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
                 }
             } else {
-                return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+                Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
             }
         }
-        Ok(_) => return Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
+        Ok(_) => Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if pre_existing_id.is_some() {
-                return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+                Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
+            } else {
+                Ok(())
             }
         }
-        Err(_) => {
-            return Err(NativeInstanceError::Io {
-                context: "inspect instance destination",
-                path: path.to_path_buf(),
-            });
-        }
+        Err(_) => Err(NativeInstanceError::Io {
+            context: "inspect instance destination",
+            path: path.to_path_buf(),
+        }),
     }
-    fs::rename(&temporary, path).map_err(|_| NativeInstanceError::Io {
-        context: "activate instance file",
-        path: path.to_path_buf(),
-    })?;
-    guard.disarm();
-    // Prove destination is the temp file
-    let dest_id = native_file_id(path)?;
-    if dest_id != temp_id {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    check_ancestors_all(path, true)?;
-    // Unix directory sync remains strict; Windows cannot sync directory
-    // handles through File::sync_all, so validate the published directory.
+}
+
+fn sync_native_directory(directory: &Path) -> NativeResult<()> {
     #[cfg(unix)]
     {
         fs::File::open(directory)
@@ -873,6 +875,31 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
             })?;
     }
     Ok(())
+}
+
+fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
+    let pre_existing_id = inspect_native_destination(path)?;
+    fs::create_dir_all(directory).map_err(|_| NativeInstanceError::Io {
+        context: "create directory",
+        path: directory.to_path_buf(),
+    })?;
+    check_ancestors_all(path, false)?;
+    let (temporary, mut guard, temp_id) = prepare_native_temp(directory, path, bytes)?;
+    verify_native_destination(path, pre_existing_id)?;
+    fs::rename(&temporary, path).map_err(|_| NativeInstanceError::Io {
+        context: "activate instance file",
+        path: path.to_path_buf(),
+    })?;
+    guard.disarm();
+    let dest_id = native_file_id(path)?;
+    if dest_id != temp_id {
+        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+    }
+    check_ancestors_all(path, true)?;
+    sync_native_directory(directory)
 }
 
 #[cfg(test)]
