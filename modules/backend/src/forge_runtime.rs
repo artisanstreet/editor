@@ -35,6 +35,9 @@ use crate::{
     ForgeApp, ForgeConfig, ForgeListener, ForgeProcessCustody, ForgeProcessCustodyError,
     ForgeShutdownError, ForgeStartupError, ListenerError, ListenerLimits, RequestHandler,
     SystemCommandOrigin,
+    directory_controller::{
+        ControllerStartError, DirectoryController, DirectoryControllerConfig, ShutdownReport,
+    },
     file_identity_policy::{FileIdentity, read_file_identity, same_file_identity},
     listener::ServeUntilCancelError,
 };
@@ -573,6 +576,15 @@ pub enum ForgeRuntimeError {
     #[error("Forge application startup failed")]
     ApplicationStartup(#[source] ForgeStartupError),
 
+    /// The running Forge executable could not be resolved for the native
+    /// directory controller.
+    #[error("Forge directory controller executable could not be resolved")]
+    DirectoryControllerExecutable,
+
+    /// The native directory controller could not be started.
+    #[error("Forge directory controller startup failed")]
+    DirectoryControllerStartup(#[source] ControllerStartError),
+
     /// The loaded TLS material could not produce a server configuration.
     #[error("Forge server configuration failed")]
     ServerConfiguration(#[source] TransportError),
@@ -619,6 +631,11 @@ pub enum ForgeRuntimeError {
     #[error("Forge readiness cleanup failed")]
     ReadinessCleanup(#[source] ReadinessError),
 
+    /// The native directory controller did not report a joined owner task
+    /// during cleanup.
+    #[error("Forge directory controller shutdown failed")]
+    DirectoryControllerShutdown(ShutdownReport),
+
     /// More than one failure was observed while stopping Forge.
     #[error("Forge shutdown encountered multiple failures")]
     Shutdown(#[source] ForgeCleanupError),
@@ -645,6 +662,9 @@ impl ForgeRuntimeError {
             Self::Configuration(_) | Self::Credentials(_) => EXIT_CODE_CONFIGURATION,
             Self::Custody(_) => EXIT_CODE_CUSTODY,
             Self::ApplicationStartup(_) => EXIT_CODE_APPLICATION_STARTUP,
+            Self::DirectoryControllerExecutable | Self::DirectoryControllerStartup(_) => {
+                EXIT_CODE_SERVER_STARTUP
+            }
             Self::ServerConfiguration(_)
             | Self::ListenerBind(_)
             | Self::Address(_)
@@ -656,6 +676,7 @@ impl ForgeRuntimeError {
             | Self::ListenerDrain(_)
             | Self::ApplicationShutdown(_)
             | Self::ReadinessCleanup(_)
+            | Self::DirectoryControllerShutdown(_)
             | Self::Shutdown(_) => EXIT_CODE_SHUTDOWN,
             Self::PrimaryWithCleanup(composite) => composite.primary().exit_code(),
         }
@@ -823,7 +844,41 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         }
     };
 
-    let handler = RequestHandler::with_subscriptions(app.repository().clone());
+    let Ok(forge_executable) = std::env::current_exe() else {
+        let handler = RequestHandler::with_subscriptions(app.repository().clone());
+        return finish(
+            app,
+            handler,
+            custody,
+            None,
+            None,
+            Some(ForgeRuntimeError::DirectoryControllerExecutable),
+        )
+        .await;
+    };
+    let directory_controller = match DirectoryController::start(
+        DirectoryControllerConfig::new(forge_executable),
+        &tokio::runtime::Handle::current(),
+    ) {
+        Ok(controller) => controller,
+        Err(error) => {
+            let handler = RequestHandler::with_subscriptions(app.repository().clone());
+            return finish(
+                app,
+                handler,
+                custody,
+                None,
+                None,
+                Some(ForgeRuntimeError::DirectoryControllerStartup(error)),
+            )
+            .await;
+        }
+    };
+    let handler = RequestHandler::with_directory_picker(
+        app.repository().clone(),
+        directory_controller,
+        config.listener_limits().next_request,
+    );
     let LoadedMaterial {
         certificate_chain,
         private_key,
@@ -940,7 +995,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
 /// Finishes every owner in the required order and preserves every failure.
 async fn finish(
     app: ForgeApp,
-    handler: RequestHandler,
+    mut handler: RequestHandler,
     custody: ForgeProcessCustody,
     listener: Option<ForgeListener>,
     receipt: Option<ReadinessReceipt>,
@@ -956,6 +1011,11 @@ async fn finish(
         && let Err(error) = receipt.remove()
     {
         cleanup_failures.push(ForgeRuntimeError::ReadinessCleanup(error));
+    }
+    if let Some(report) = handler.shutdown_directory_controller().await
+        && report != ShutdownReport::Joined
+    {
+        cleanup_failures.push(ForgeRuntimeError::DirectoryControllerShutdown(report));
     }
     drop(handler);
     if let Err(error) = app.shutdown().await {
