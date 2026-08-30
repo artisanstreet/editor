@@ -449,13 +449,11 @@ fn read_readiness_file(path: &Path) -> ReadinessFileRead {
         return ReadinessFileRead::Invalid;
     }
 
-    let before_file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return ReadinessFileRead::Invalid,
+    let Ok(before_file) = File::open(path) else {
+        return ReadinessFileRead::Invalid;
     };
-    let before_metadata = match before_file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return ReadinessFileRead::Invalid,
+    let Ok(before_metadata) = before_file.metadata() else {
+        return ReadinessFileRead::Invalid;
     };
     if !is_safe_readiness_file(&before_metadata) {
         return ReadinessFileRead::Invalid;
@@ -465,13 +463,11 @@ fn read_readiness_file(path: &Path) -> ReadinessFileRead {
     };
     drop(before_file);
 
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return ReadinessFileRead::Invalid,
+    let Ok(mut file) = File::open(path) else {
+        return ReadinessFileRead::Invalid;
     };
-    let opened_metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return ReadinessFileRead::Invalid,
+    let Ok(opened_metadata) = file.metadata() else {
+        return ReadinessFileRead::Invalid;
     };
     let Some(opened_identity) = readiness_file_identity(&file) else {
         return ReadinessFileRead::Invalid;
@@ -489,9 +485,8 @@ fn read_readiness_file(path: &Path) -> ReadinessFileRead {
     {
         return ReadinessFileRead::Invalid;
     }
-    let final_metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return ReadinessFileRead::Invalid,
+    let Ok(final_metadata) = file.metadata() else {
+        return ReadinessFileRead::Invalid;
     };
     let Some(final_identity) = readiness_file_identity(&file) else {
         return ReadinessFileRead::Invalid;
@@ -499,20 +494,17 @@ fn read_readiness_file(path: &Path) -> ReadinessFileRead {
     if opened_identity != final_identity || !is_safe_readiness_file(&final_metadata) {
         return ReadinessFileRead::Invalid;
     }
-    let final_path_metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(_) => return ReadinessFileRead::Invalid,
+    let Ok(final_path_metadata) = fs::symlink_metadata(path) else {
+        return ReadinessFileRead::Invalid;
     };
     if !is_safe_readiness_file(&final_path_metadata) {
         return ReadinessFileRead::Invalid;
     }
-    let final_file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return ReadinessFileRead::Invalid,
+    let Ok(final_file) = File::open(path) else {
+        return ReadinessFileRead::Invalid;
     };
-    let final_file_metadata = match final_file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => return ReadinessFileRead::Invalid,
+    let Ok(final_file_metadata) = final_file.metadata() else {
+        return ReadinessFileRead::Invalid;
     };
     if !is_safe_readiness_file(&final_file_metadata)
         || readiness_file_identity(&final_file) != Some(final_identity)
@@ -562,10 +554,10 @@ fn readiness_file_identity(file: &File) -> Option<ReadinessFileIdentity> {
         if volume == 0 && index == 0 {
             return None;
         }
-        return Some(ReadinessFileIdentity {
+        Some(ReadinessFileIdentity {
             first: volume,
             second: index,
-        });
+        })
     }
     #[cfg(not(any(unix, windows)))]
     {

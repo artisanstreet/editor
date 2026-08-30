@@ -652,14 +652,14 @@ fn status(layout: &Layout, json: bool) -> Result<()> {
         }
         process::ForgeReadinessStatus::Missing => {
             if json {
-                println!("{}", r#"{"readiness":"missing"}"#);
+                println!(r#"{{"readiness":"missing"}}"#);
             } else {
                 println!("missing");
             }
         }
         process::ForgeReadinessStatus::Invalid => {
             if json {
-                println!("{}", r#"{"readiness":"invalid"}"#);
+                println!(r#"{{"readiness":"invalid"}}"#);
             } else {
                 println!("invalid");
             }
