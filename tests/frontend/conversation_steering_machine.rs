@@ -52,6 +52,15 @@ fn pending_lip_placement(placement: &SteeringPlacement) -> bool {
 fn happy_path_view_and_effect_sequence() {
     let mut machine = new_controller("cmd-1", 1, "src-ref-1", 1000);
 
+    happy_path_initial_stage(&mut machine);
+    happy_path_dispatch_stage(&mut machine);
+    happy_path_accept_stage(&mut machine);
+    let anchor = happy_path_anchor_stage(&mut machine);
+    happy_path_acknowledgement_stage(&mut machine, &anchor);
+    happy_path_final_view_stage(&machine);
+}
+
+fn happy_path_initial_stage(machine: &mut ConversationSteeringMachine) {
     // Initial: pending lip
     let view = machine.view();
     assert_eq!(view.phase, SteeringPhase::PendingLip);
@@ -59,7 +68,9 @@ fn happy_path_view_and_effect_sequence() {
     assert_eq!(view.anchor, None);
     assert_eq!(view.pending_effect_count, 0);
     assert!(machine.drain_effects().is_empty());
+}
 
+fn happy_path_dispatch_stage(machine: &mut ConversationSteeringMachine) {
     // DispatchStarted -> Dispatching
     machine
         .handle_event(&SteeringEvent::DispatchStarted {
@@ -96,7 +107,9 @@ fn happy_path_view_and_effect_sequence() {
             assert_eq!(source_reference.as_str(), "src-ref-1");
         }
     }
+}
 
+fn happy_path_accept_stage(machine: &mut ConversationSteeringMachine) {
     // DispatchAccepted -> AwaitingProjection (lip retained per invariant)
     machine
         .handle_event(&SteeringEvent::DispatchAccepted {
@@ -116,7 +129,9 @@ fn happy_path_view_and_effect_sequence() {
             .iter()
             .any(|e| matches!(e, SteeringEffect::RenderInvalidation { .. }))
     );
+}
 
+fn happy_path_anchor_stage(machine: &mut ConversationSteeringMachine) -> ItemId {
     // DurableItemAnchored -> AwaitingAcknowledgement with exact anchor
     let anchor = item("item-aaaa");
     machine
@@ -140,7 +155,10 @@ fn happy_path_view_and_effect_sequence() {
             .iter()
             .any(|e| matches!(e, SteeringEffect::WatchAcknowledgement { .. }))
     );
+    anchor
+}
 
+fn happy_path_acknowledgement_stage(machine: &mut ConversationSteeringMachine, anchor: &ItemId) {
     // EngineAcknowledged -> Acknowledged (settled, hidden, releases lip)
     machine
         .handle_event(&SteeringEvent::EngineAcknowledged {
@@ -167,7 +185,9 @@ fn happy_path_view_and_effect_sequence() {
             .iter()
             .any(|e| matches!(e, SteeringEffect::RenderInvalidation { .. }))
     );
+}
 
+fn happy_path_final_view_stage(machine: &ConversationSteeringMachine) {
     // View reports correct identity/routing data and effect count.
     let view = machine.view();
     assert_eq!(view.command_id, request("cmd-1"));
