@@ -376,11 +376,7 @@ impl Delivery {
     }
 
     #[superstate]
-    fn delivery(
-        &mut self,
-        _context: &mut DeliveryContext,
-        event: &ConversationDeliveryEvent,
-    ) -> Outcome<State> {
+    fn delivery(&mut self, event: &ConversationDeliveryEvent) -> Outcome<State> {
         match event {
             ConversationDeliveryEvent::Closed => Transition(State::closed()),
             _ => Super,
@@ -388,11 +384,7 @@ impl Delivery {
     }
 
     #[state(entry_action = "enter_closed")]
-    fn closed(
-        &mut self,
-        _context: &mut DeliveryContext,
-        _event: &ConversationDeliveryEvent,
-    ) -> Outcome<State> {
+    fn closed(&mut self) -> Outcome<State> {
         Handled
     }
 
