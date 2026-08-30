@@ -1,23 +1,11 @@
 //! Black-box coverage for the bounded conversation composition controller.
 //!
-//! The staged child modules are included as crate-local modules because their
-//! registration is intentionally owned by the VP. Tests use only their public
-//! APIs and the public aggregate surface.
+//! Tests use only the public frontend crate boundary.
 
-#[path = "../../modules/frontend/src/conversation_delivery_machine.rs"]
-mod conversation_delivery_machine;
-#[path = "../../modules/frontend/src/conversation_projection.rs"]
-mod conversation_projection;
-#[path = "../../modules/frontend/src/conversation_scene.rs"]
-mod conversation_scene;
-#[path = "../../modules/frontend/src/conversation_state_machine.rs"]
-mod conversation_state_machine;
-#[path = "../../modules/frontend/src/conversation_steering_machine.rs"]
-mod conversation_steering_machine;
-#[path = "../../modules/frontend/src/conversation_turn_machine.rs"]
-mod conversation_turn_machine;
-#[path = "../../modules/frontend/src/conversation_view_machine.rs"]
-mod conversation_view_machine;
+use artisan_frontend::{
+    conversation_delivery_machine, conversation_scene, conversation_state_machine,
+    conversation_steering_machine, conversation_turn_machine, conversation_view_machine,
+};
 
 use artisan_domain::{
     AssistantBody, AssistantMessageItem, AssistantMessagePhase, ConversationCursor,
