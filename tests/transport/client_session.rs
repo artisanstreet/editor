@@ -1411,9 +1411,10 @@ async fn unnegotiated_lifecycle_request_is_rejected_before_request_io() -> Resul
 async fn negotiated_lifecycle_status_round_trips_exact_correlation() -> Result<(), Box<dyn Error>> {
     let (certificate, private_key, pin) = ephemeral_identity();
     let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_addr = server.addr;
     let client = async {
         let (session, welcome) = ClientSession::connect(
-            target(server.addr),
+            target(server_addr),
             certificate,
             pin,
             hello_envelope_with_lifecycle("status-hello", true)?,
@@ -1465,9 +1466,10 @@ async fn negotiated_lifecycle_stop_preserves_idle_policy_and_receipts() -> Resul
 {
     let (certificate, private_key, pin) = ephemeral_identity();
     let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_addr = server.addr;
     let client = async {
         let (mut session, welcome) = ClientSession::connect(
-            target(server.addr),
+            target(server_addr),
             certificate,
             pin,
             hello_envelope_with_lifecycle("stop-hello", true)?,
@@ -1545,9 +1547,10 @@ async fn negotiated_lifecycle_stop_preserves_idle_policy_and_receipts() -> Resul
 async fn correlated_lifecycle_failures_preserve_the_live_session() -> Result<(), Box<dyn Error>> {
     let (certificate, private_key, pin) = ephemeral_identity();
     let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let server_addr = server.addr;
     let client = async {
         let (session, welcome) = ClientSession::connect(
-            target(server.addr),
+            target(server_addr),
             certificate,
             pin,
             hello_envelope_with_lifecycle("failure-hello", true)?,
