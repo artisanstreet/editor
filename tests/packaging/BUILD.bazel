@@ -42,6 +42,25 @@ rust_test(
     visibility = ["//:__pkg__"],
 )
 
+# Freezes the four Cargo output identities independently from Bazel target
+# convergence. The manifests are compile-time inputs; the test never invokes
+# Cargo, executes a binary, or inspects the host filesystem.
+rust_test(
+    name = "cargo_binary_identity_test",
+    srcs = ["cargo_binary_identity.rs"],
+    compile_data = [
+        "//:modules/cli/Cargo.toml",
+        "//:modules/installer/Cargo.toml",
+        "//modules/backend:Cargo.toml",
+        "//modules/frontend:Cargo.toml",
+    ],
+    crate_name = "cargo_binary_identity_test",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
 # Deterministic archive proof: validates the stored ZIP produced by
 # //packaging/portable:portable_archive contains exactly the two Bazel-built
 # binaries under contract-derived names with deterministic metadata.
@@ -77,6 +96,7 @@ rust_clippy(
     name = "clippy",
     testonly = True,
     deps = [
+        ":cargo_binary_identity_test",
         ":portable_archive_test",
         ":portable_layout_test",
         ":versioned_layout_test",
@@ -87,6 +107,7 @@ rustfmt_test(
     name = "format_test",
     size = "small",
     targets = [
+        ":cargo_binary_identity_test",
         ":portable_archive_test",
         ":portable_layout_test",
         ":versioned_layout_test",
@@ -97,6 +118,7 @@ rustfmt_test(
 test_suite(
     name = "tests",
     tests = [
+        ":cargo_binary_identity_test",
         ":portable_archive_test",
         ":portable_layout_test",
         ":versioned_layout_test",
