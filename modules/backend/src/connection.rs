@@ -49,9 +49,10 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::time::Duration;
 
-use artisan_domain::UnixMillis;
+use artisan_domain::{RequestId, UnixMillis};
 use artisan_protocol::{
-    ConnectionId, FrameId, ProtocolVersion, Welcome, WireEnvelope, WireEnvelopeBody,
+    ClientRequest, ConnectionId, ErrorCode, ErrorDetail, FrameId, ProtocolFailure, ProtocolVersion,
+    ResponsePayload, ServerResponse, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, DeadlineError, HandshakeError, OperationKind, ServerDispatchError,
@@ -66,7 +67,8 @@ use crate::credential_authority::{
     CredentialAuthenticationError, CredentialAuthority, CredentialEntropyError,
     ReconnectRotationError,
 };
-use crate::request_handler::RequestHandler;
+use crate::lifecycle_control::{LifecycleControlReceipt, LifecycleController, LifecycleDispatch};
+use crate::request_handler::{RequestHandler, RequestHandlerReceipt};
 
 /// Fixed application close code used whenever this leaf releases a
 /// connection it owns.
@@ -188,16 +190,18 @@ pub enum RequestStageError {
 /// services it sequentially with [`Self::respond_next`]; no spawning,
 /// concurrent handler tasks, or background work exist inside this leaf.
 #[must_use = "an admitted connection must be serviced; dropping it closes the connection"]
-pub struct ForgeConnection<'authority, 'handler, 'cancel> {
+pub struct ForgeConnection<'authority, 'handler, 'cancel, 'lifecycle> {
     connection: Connection,
     authority: &'authority mut CredentialAuthority,
     handler: &'handler RequestHandler,
     cancel: &'cancel CancelHandle,
+    lifecycle: &'lifecycle LifecycleController,
+    lifecycle_witness: LifecycleWitness,
     limits: ConnectionLimits,
     protocol_version: ProtocolVersion,
 }
 
-impl ForgeConnection<'_, '_, '_> {
+impl ForgeConnection<'_, '_, '_, '_> {
     /// Admits one accepted connection through the full authentication
     /// ordering.
     ///
@@ -230,16 +234,17 @@ impl ForgeConnection<'_, '_, '_> {
     /// with the failing [`AuthenticationStageError`] preserved as the
     /// source of [`DeadlineError::Peer`].
     #[must_use = "dropping the authentication future closes the accepted connection"]
-    pub fn authenticate<'authority, 'handler, 'cancel>(
+    pub fn authenticate<'authority, 'handler, 'cancel, 'lifecycle>(
         connection: Connection,
         authority: &'authority mut CredentialAuthority,
         handler: &'handler RequestHandler,
+        lifecycle: &'lifecycle LifecycleController,
         metadata: WelcomeMetadata,
         limits: ConnectionLimits,
         cancel: &'cancel CancelHandle,
     ) -> impl Future<
         Output = Result<
-            ForgeConnection<'authority, 'handler, 'cancel>,
+            ForgeConnection<'authority, 'handler, 'cancel, 'lifecycle>,
             DeadlineError<AuthenticationStageError>,
         >,
     > {
@@ -258,6 +263,7 @@ impl ForgeConnection<'_, '_, '_> {
                 drive_authentication(
                     &connection,
                     &mut *authority,
+                    lifecycle,
                     &mut streams,
                     frame,
                     connection_id,
@@ -266,7 +272,7 @@ impl ForgeConnection<'_, '_, '_> {
             .await;
 
             match outcome {
-                Ok(protocol_version) => {
+                Ok((protocol_version, lifecycle_witness)) => {
                     // The stage completed: hand both directions back for
                     // ordinary drops without cleanup actions.
                     streams.release();
@@ -275,6 +281,8 @@ impl ForgeConnection<'_, '_, '_> {
                         authority,
                         handler,
                         cancel,
+                        lifecycle,
+                        lifecycle_witness,
                         limits,
                         protocol_version,
                     };
@@ -333,9 +341,12 @@ impl ForgeConnection<'_, '_, '_> {
             drive_request(
                 &self.connection,
                 self.handler,
+                self.lifecycle,
+                self.lifecycle_witness,
                 self.protocol_version,
                 stamp,
                 &mut streams,
+                self.cancel,
             ),
         )
         .await;
@@ -352,7 +363,7 @@ impl ForgeConnection<'_, '_, '_> {
     }
 }
 
-impl Drop for ForgeConnection<'_, '_, '_> {
+impl Drop for ForgeConnection<'_, '_, '_, '_> {
     fn drop(&mut self) {
         // The exclusive credential-authority lease is released together
         // with the owner; touching it here documents that the whole value —
@@ -371,10 +382,11 @@ impl Drop for ForgeConnection<'_, '_, '_> {
 async fn drive_authentication(
     connection: &Connection,
     authority: &mut CredentialAuthority,
+    lifecycle: &LifecycleController,
     streams: &mut StageStreams,
     frame: ServerFrameStamp,
     connection_id: ConnectionId,
-) -> Result<ProtocolVersion, AuthenticationStageError> {
+) -> Result<(ProtocolVersion, LifecycleWitness), AuthenticationStageError> {
     let (send, recv) = connection
         .accept_bi()
         .await
@@ -391,6 +403,8 @@ async fn drive_authentication(
 
     // Consume the owned credential exactly once, then stage the actual
     // system reconnect rotation and take its Welcome copy exactly once.
+    let lifecycle_control_supported =
+        hello.hello.supports_lifecycle_control && lifecycle.implementation_available();
     let grant = authority.authenticate(hello.hello.credential)?;
     let mut pending = grant.prepare_system_reconnect()?;
     let reconnect_capability = pending.take_for_welcome()?;
@@ -407,6 +421,7 @@ async fn drive_authentication(
             negotiated_version: negotiated,
             connection_id,
             reconnect_capability,
+            lifecycle_control_supported,
         }),
     };
 
@@ -420,17 +435,26 @@ async fn drive_authentication(
     // additional await between them and this synchronous rotation commit.
     pending.commit()?;
 
-    Ok(negotiated)
+    Ok((
+        negotiated,
+        LifecycleWitness {
+            supported: lifecycle_control_supported,
+        },
+    ))
 }
 
 /// Runs exactly one deadline-bounded request dispatch on the owned
 /// connection.
+#[allow(clippy::too_many_arguments)]
 async fn drive_request(
     connection: &Connection,
     handler: &RequestHandler,
+    lifecycle: &LifecycleController,
+    lifecycle_witness: LifecycleWitness,
     protocol_version: ProtocolVersion,
     stamp: ServerFrameStamp,
     streams: &mut StageStreams,
+    cancel: &CancelHandle,
 ) -> Result<(), RequestStageError> {
     let (send, recv) = connection
         .accept_bi()
@@ -438,20 +462,47 @@ async fn drive_request(
         .map_err(|source| RequestStageError::Accept { source })?;
     let (send, recv) = streams.install(send, recv);
 
-    // The incoming frame-derived request id stays authoritative; the
-    // adapter only maps the handler's typed outcomes onto the wire and can
-    // never fail locally. The receipt remains opaque until the transport has
-    // validated, written, and finished the correlated reply.
+    // The incoming frame-derived request id stays authoritative. Lifecycle
+    // requests are intercepted before the ordinary handler, while every
+    // other request follows the existing handler path. Receipts remain opaque
+    // until the transport has validated, written, and finished the correlated
+    // reply.
     let receipt = dispatch_server_request_with_receipt(send, recv, |incoming| async move {
-        let (answered, receipt) = handler
-            .respond_with_receipt(&incoming.request_id, &incoming.request)
-            .await
-            .into_parts();
+        let request_id = incoming.request_id;
+        let request = incoming.request;
+        let (answered, receipt) = match request {
+            ClientRequest::Lifecycle(_request) if !lifecycle_witness.supported => (
+                Err(unsupported_feature_failure(&request_id)),
+                PostResponseReceipt::Lifecycle(LifecycleControlReceipt::none()),
+            ),
+            ClientRequest::Lifecycle(request) => {
+                match lifecycle.dispatch(request_id.clone(), request).await {
+                    LifecycleDispatch::Reply { response, receipt } => (
+                        Ok(ServerResponse {
+                            request_id: request_id.clone(),
+                            payload: ResponsePayload::Lifecycle(response),
+                        }),
+                        PostResponseReceipt::Lifecycle(receipt),
+                    ),
+                    LifecycleDispatch::Failure(failure) => (
+                        Err(failure),
+                        PostResponseReceipt::Lifecycle(LifecycleControlReceipt::none()),
+                    ),
+                }
+            }
+            request => {
+                let (answered, receipt) = handler
+                    .respond_with_receipt(&request_id, &request)
+                    .await
+                    .into_parts();
+                (answered, PostResponseReceipt::Handler(receipt))
+            }
+        };
         let body = match answered {
             Ok(response) => WireEnvelopeBody::Response(response),
             Err(failure) => WireEnvelopeBody::ProtocolError(failure),
         };
-        Ok::<(WireEnvelope, crate::request_handler::RequestHandlerReceipt), Infallible>((
+        Ok::<(WireEnvelope, PostResponseReceipt), Infallible>((
             WireEnvelope {
                 protocol_version,
                 frame_id: stamp.frame_id,
@@ -467,8 +518,35 @@ async fn drive_request(
     // record must happen before the local activation await. Never reset a
     // finished send side, even when activation later fails or is cancelled.
     streams.mark_send_finished();
-    handler.activate_after_response(receipt).await?;
+    match receipt {
+        PostResponseReceipt::Handler(receipt) => {
+            let _activation = handler.activate_after_response(receipt).await?;
+        }
+        PostResponseReceipt::Lifecycle(receipt) => receipt.commit_after_response(cancel),
+    }
     Ok(())
+}
+
+/// A correlated, bounded failure for a lifecycle request sent without the
+/// negotiated per-connection witness.
+fn unsupported_feature_failure(request_id: &RequestId) -> ProtocolFailure {
+    ProtocolFailure {
+        code: ErrorCode::UnsupportedFeature,
+        detail: ErrorDetail::parse("native lifecycle control was not negotiated")
+            .expect("lifecycle detail is within the protocol bound"),
+        retryable: false,
+        request_id: Some(request_id.clone()),
+    }
+}
+
+enum PostResponseReceipt {
+    Handler(RequestHandlerReceipt),
+    Lifecycle(LifecycleControlReceipt),
+}
+
+#[derive(Clone, Copy)]
+struct LifecycleWitness {
+    supported: bool,
 }
 
 /// Private owner of one stage's bidirectional stream pair.
@@ -563,3 +641,7 @@ impl Drop for AdmissionGuard {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/backend/lifecycle_connection.rs"]
+pub(crate) mod lifecycle_connection_tests;

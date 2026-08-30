@@ -155,6 +155,7 @@ fn hello_envelope() -> WireEnvelope {
             supported_versions: VersionOffer::new(vec![APPLICATION_PROTOCOL_VERSION])
                 .expect("test version offer should be valid"),
             credential: HelloCredential::Initial(LocalCapability::from_bytes(TEST_CAPABILITY)),
+            supports_lifecycle_control: false,
         }),
     }
 }
