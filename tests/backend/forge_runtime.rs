@@ -679,6 +679,7 @@ fn accepted_service_failure_maps_to_72_and_keeps_listener_error() {
     connection.close(VarInt::from_u32(2), b"test service failure");
     let _ =
         runtime.block_on(async { tokio::time::timeout(FUTURE_WAIT, connection.closed()).await });
+    let _ = runtime.block_on(async { tokio::time::timeout(FUTURE_WAIT, client.wait_idle()).await });
 
     let error = join_within(
         worker
@@ -786,6 +787,7 @@ fn service_primary_survives_readiness_cleanup_failure_with_typed_cleanup() {
     connection.close(VarInt::from_u32(2), b"test primary failure");
     let _ =
         runtime.block_on(async { tokio::time::timeout(FUTURE_WAIT, connection.closed()).await });
+    let _ = runtime.block_on(async { tokio::time::timeout(FUTURE_WAIT, client.wait_idle()).await });
 
     let error = join_within(
         worker
