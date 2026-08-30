@@ -24,6 +24,7 @@ use crate::{
 };
 
 const ABSOLUTE_ARTIFACT_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+const NATIVE_PAYLOAD_LABEL: &str = "native payload";
 /// First install configures and verifies Forge, but deliberately leaves launch
 /// to the editor's background handoff. That gives the window exact ownership
 /// of the process it caused and lets normal window close stop that Forge. An
@@ -43,7 +44,6 @@ pub struct InstallOptions {
     pub manifest_url: Url,
     pub signature_url: Url,
     pub platform: Platform,
-    pub components: Vec<&'static str>,
     pub install_root: PathBuf,
     pub trust: TrustKey,
     pub run_setup: bool,
@@ -160,14 +160,13 @@ pub async fn install(options: InstallOptions) -> Result<()> {
                         || artifact.libc.as_deref() == Some(platform_libc()))
             })
             .ok_or_else(|| InstallerError::MissingArtifact {
-                component: options.components.join(","),
+                component: NATIVE_PAYLOAD_LABEL.to_owned(),
                 target: options.platform.target(),
             })?;
         let artifact_url = artifact_base_url
             .join(&artifact.file_name)
             .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
         install_artifact(&client, artifact, artifact_url, &stage).await?;
-        prune_unselected_components(&stage, &options.components)?;
         // The tree is final: record per-file digests so `ae doctor` can
         // detect payload drift after activation.
         crate::payload::write_manifest(&stage)?;
@@ -212,10 +211,8 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         }
         shortcuts::apply(&launchers)?;
-        if options.run_setup && options.components.contains(&"cli") {
-            for arguments in FIRST_RUN_CONFIGURATION_COMMANDS {
-                invoke_ae(&release, arguments)?;
-            }
+        if options.run_setup {
+            run_setup_sequence(&release)?;
         } else {
             restore_retired_forge(&options, &release, retirement)?;
         }
@@ -303,22 +300,17 @@ pub(crate) fn platform_libc() -> &'static str {
     }
 }
 
-fn prune_unselected_components(stage: &Path, selected: &[&str]) -> Result<()> {
-    for component in ["editor", "forge"] {
-        if !selected.contains(&component) {
-            let path = stage.join(component);
-            if path.exists() {
-                std::fs::remove_dir_all(&path).map_err(io(&path))?;
-            }
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Serialize)]
 struct Components {
     editor: bool,
     forge: bool,
+}
+
+fn installed_components() -> Components {
+    Components {
+        editor: true,
+        forge: true,
+    }
 }
 
 /// The launchers this run owns, or none when the caller opted out.
@@ -369,21 +361,21 @@ fn restore_retired_forge(
     release: &Path,
     retirement: Retirement,
 ) -> Result<()> {
-    if should_restore_retired_forge(options.run_setup, &options.components, retirement) {
+    if should_restore_retired_forge(options.run_setup, retirement) {
         invoke_ae(release, &["start"])?;
     }
     Ok(())
 }
 
-fn should_restore_retired_forge(
-    run_setup: bool,
-    components: &[&str],
-    retirement: Retirement,
-) -> bool {
-    !run_setup
-        && retirement.forges_stopped > 0
-        && components.contains(&"cli")
-        && components.contains(&"forge")
+fn run_setup_sequence(release: &Path) -> Result<()> {
+    for arguments in FIRST_RUN_CONFIGURATION_COMMANDS {
+        invoke_ae(release, arguments)?;
+    }
+    Ok(())
+}
+
+fn should_restore_retired_forge(run_setup: bool, retirement: Retirement) -> bool {
+    !run_setup && retirement.forges_stopped > 0
 }
 
 fn activate(
@@ -428,10 +420,7 @@ fn activate(
         "platform": options.platform.os,
         "architecture": options.platform.arch,
         "channel": manifest.channel.as_str(),
-        "components": Components {
-            editor: options.components.contains(&"editor"),
-            forge: options.components.contains(&"forge"),
-        },
+        "components": installed_components(),
         "integrations": integrations,
         "installed_at": now,
         "updated_at": now,
@@ -1018,7 +1007,6 @@ mod tests {
         );
         assert!(!super::should_restore_retired_forge(
             true,
-            &["editor", "forge", "cli"],
             super::Retirement {
                 editors_closed: 1,
                 forges_stopped: 1,
@@ -1030,7 +1018,6 @@ mod tests {
     fn maintenance_update_restores_a_previously_running_forge() {
         assert!(super::should_restore_retired_forge(
             false,
-            &["editor", "forge", "cli"],
             super::Retirement {
                 editors_closed: 0,
                 forges_stopped: 1,
@@ -1038,9 +1025,16 @@ mod tests {
         ));
         assert!(!super::should_restore_retired_forge(
             false,
-            &["editor", "forge", "cli"],
             super::Retirement::default(),
         ));
+    }
+
+    #[test]
+    fn installation_manifest_components_are_always_enabled() {
+        assert_eq!(
+            serde_json::to_value(super::installed_components()).expect("component projection"),
+            serde_json::json!({"editor": true, "forge": true})
+        );
     }
 
     #[cfg(windows)]
