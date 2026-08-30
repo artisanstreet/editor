@@ -25,8 +25,8 @@ use crate::conversation_projection::{
     ConversationProjection, ProjectionError, ProjectionStatus, SnapshotDisposition,
 };
 use artisan_domain::{ConversationCursor, ConversationSnapshot, PatchBatch, ThreadId};
-use statig::prelude::*;
 use statig::Outcome::{Handled, Super, Transition};
+use statig::prelude::*;
 
 // Re-export for tests that want to match on projection types without
 // reaching into the projection module separately.
