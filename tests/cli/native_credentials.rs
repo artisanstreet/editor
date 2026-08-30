@@ -1,4 +1,4 @@
-use artisan_editor_cli::credentials::{provision_or_load, ForgeCredentialPaths};
+use artisan_editor_cli::credentials::{ForgeCredentialPaths, provision_or_load};
 use std::{
     fs,
     path::{Path, PathBuf},
