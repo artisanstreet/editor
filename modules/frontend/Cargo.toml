@@ -136,6 +136,10 @@ name = "conversation_state_machine"
 path = "../../tests/frontend/conversation_state_machine.rs"
 
 [[test]]
+name = "conversation_surface"
+path = "../../tests/frontend/conversation_surface.rs"
+
+[[test]]
 name = "conversation_scroll_position"
 path = "../../tests/frontend/conversation_scroll_position.rs"
 

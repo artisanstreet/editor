@@ -37,6 +37,7 @@ rust_library(
         "src/conversation_relative_age.rs",
         "src/conversation_scene.rs",
         "src/conversation_state_machine.rs",
+        "src/conversation_surface.rs",
         "src/conversation_scroll_position.rs",
         "src/conversation_status_labels.rs",
         "src/conversation_steering.rs",

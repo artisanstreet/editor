@@ -1,13 +1,10 @@
 //! Deterministic contract tests for the native conversation surface.
 //!
 //! The pure selector, status, ordering, and action projections avoid a window;
-//! the final two tests use the existing in-memory GPUI harness. Registration
-//! remains integration-owned work.
+//! the final two tests use the existing in-memory GPUI harness. Tests cross the
+//! public frontend crate boundary.
 
-#[path = "../../modules/frontend/src/conversation_scene.rs"]
-mod conversation_scene;
-#[path = "../../modules/frontend/src/conversation_surface.rs"]
-mod conversation_surface;
+use artisan_frontend::{conversation_scene, conversation_surface};
 
 use artisan_domain::{ConversationLifecycle, ItemId, TurnId};
 use artisan_ui::theme::ThemeMode;
