@@ -1,5 +1,9 @@
 use artisan_editor_cli::credentials::{provision_or_load, ForgeCredentialPaths};
-use std::{fs, path::PathBuf, thread};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    thread,
+};
 
 fn temp_home(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -123,7 +127,12 @@ fn manifest_conflict_cleans_prior_atomic_links() {
     let entries: Vec<_> = fs::read_dir(&cred_dir).unwrap().collect();
     for e in entries {
         let name = e.unwrap().file_name().to_string_lossy().to_string();
-        assert!(!name.ends_with(".tmp"), "private temp must be removed");
+        assert!(
+            !Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp")),
+            "private temp must be removed"
+        );
     }
     fs::remove_dir_all(home).unwrap();
 }
@@ -144,8 +153,13 @@ fn leaf_conflict_cleans_capability_and_no_extra_temp() {
     assert!(!cred_dir.join("bootstrap-capability.bin").exists());
     let temps: Vec<_> = fs::read_dir(&cred_dir)
         .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .filter_map(std::result::Result::ok)
+        .filter(|e| {
+            let name = e.file_name();
+            Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+        })
         .collect();
     assert!(temps.is_empty());
     fs::remove_dir_all(home).unwrap();
@@ -175,26 +189,25 @@ fn existing_replacement_not_deleted_when_new_bundle_fails() {
 fn handle_read_fencing_rejects_symlink_drift() {
     let home = temp_home("drift");
     let paths = provision_or_load(&home).unwrap();
-    let cert_path = paths.certificate_paths()[0].to_path_buf();
+    let cert_path = paths.certificate_paths()[0].clone();
     let backup = cert_path.with_extension("bak");
     fs::rename(&cert_path, &backup).unwrap();
-    let mut symlink_created = false;
     #[cfg(unix)]
-    {
+    let symlink_created = {
         std::os::unix::fs::symlink(&backup, &cert_path).unwrap();
-        symlink_created = true;
-    }
+        true
+    };
     #[cfg(windows)]
-    {
+    let symlink_created = {
         if std::os::windows::fs::symlink_file(&backup, &cert_path).is_ok() {
-            symlink_created = true;
+            true
         } else {
             eprintln!("SKIP: symlink drift not supported on this Windows host");
             fs::rename(&backup, &cert_path).unwrap();
             fs::remove_dir_all(home).unwrap();
             return;
         }
-    }
+    };
     if symlink_created {
         let err = provision_or_load(&home);
         assert!(

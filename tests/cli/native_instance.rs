@@ -68,16 +68,14 @@ fn native_rejects_unknown_and_version() {
 #[test]
 fn native_rejects_relative_and_zero() {
     let home = temp_dir("relative");
-    assert!(
-        NativeInstanceConfig::new(
-            PathBuf::from("relative"),
-            PathBuf::from("/tmp/b"),
-            PathBuf::from("/tmp/c"),
-            PathBuf::from("/tmp/d"),
-            sample_listener()
-        )
-        .is_err()
-    );
+    assert!(NativeInstanceConfig::new(
+        PathBuf::from("relative"),
+        PathBuf::from("/tmp/b"),
+        PathBuf::from("/tmp/c"),
+        PathBuf::from("/tmp/d"),
+        sample_listener()
+    )
+    .is_err());
     let path = home.join("instance-v2.json");
     fs::write(
         &path,
@@ -150,23 +148,22 @@ fn handle_read_fencing_rejects_symlink_drift() {
     config.write(&path).unwrap();
     let backup = path.with_extension("bak");
     fs::rename(&path, &backup).unwrap();
-    let mut created = false;
     #[cfg(unix)]
-    {
+    let created = {
         std::os::unix::fs::symlink(&backup, &path).unwrap();
-        created = true;
-    }
+        true
+    };
     #[cfg(windows)]
-    {
+    let created = {
         if std::os::windows::fs::symlink_file(&backup, &path).is_ok() {
-            created = true;
+            true
         } else {
             eprintln!("SKIP: symlink drift not supported on this Windows host");
             fs::rename(&backup, &path).unwrap();
             fs::remove_dir_all(home).unwrap();
             return;
         }
-    }
+    };
     if created {
         assert!(
             NativeInstanceConfig::load(&path).is_err(),
