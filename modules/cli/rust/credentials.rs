@@ -2309,7 +2309,10 @@ mod diagnostic_tests {
                 object.get("value").and_then(serde_json::Value::as_str)
             })
             .collect();
-        assert!(classification_values.contains(&expected));
+        assert!(
+            classification_values.contains(&expected),
+            "ACL diagnostic classification mismatch: kind={kind}, expected={expected}, actual={classification_values:?}"
+        );
         assert!(
             classification_values
                 .iter()
