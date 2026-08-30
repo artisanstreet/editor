@@ -516,6 +516,7 @@ fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
     let manifest = require_installation(layout)?;
     telemetry::load_or_create(layout)?;
     let spec = native_launch_spec(layout, &manifest)?;
+    payload::require_verified(&manifest.version_root())?;
     process::start_until(&spec, foreground, Instant::now() + FORGE_READY_TIMEOUT)
 }
 
@@ -994,6 +995,7 @@ fn start_until(
 ) -> Result<process::StartResult> {
     let manifest = require_installation(layout)?;
     let spec = native_launch_spec(layout, &manifest)?;
+    payload::require_verified(&manifest.version_root())?;
     process::start_until(&spec, foreground, readiness_deadline)
 }
 
@@ -1085,6 +1087,7 @@ fn launch_editor(layout: &Layout) -> Result<()> {
     let manifest = require_installation(layout)?;
     telemetry::load_or_create(layout)?;
     let editor = manifest.editor_executable();
+    payload::require_verified(&manifest.version_root())?;
     if !editor.is_file() {
         return Err(CliError::Installation(format!(
             "the Artisan editor is missing at {}; run `ae doctor --fix` or use `ae open --browser`",
@@ -1335,6 +1338,22 @@ mod tests {
         assert_eq!(
             resolved_open_flow(OpenFlow::Editor, false),
             OpenFlow::Browser
+        );
+    }
+
+    #[test]
+    fn doctor_keeps_unverifiable_payload_diagnostic_while_launch_admission_rejects_it() {
+        let root = tempfile::tempdir().unwrap();
+        let health = payload::verify(root.path());
+
+        assert_eq!(health, payload::PayloadHealth::Unverifiable);
+        assert_eq!(health.as_str(), "unverifiable");
+        assert!(!matches!(health, payload::PayloadHealth::Modified(_)));
+
+        let error = payload::require_verified(root.path()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Artisan is not installed correctly: active version payload is not verified"
         );
     }
 

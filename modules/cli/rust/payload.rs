@@ -23,6 +23,8 @@ use std::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::{CliError, Result};
+
 pub const PAYLOAD_MANIFEST_NAME: &str = "payload-manifest.json";
 const SUPPORTED_FORMAT_VERSION: u64 = 1;
 const MAX_REPORTED_ISSUES: usize = 5;
@@ -137,6 +139,16 @@ pub fn verify(version_root: &Path) -> PayloadHealth {
         issues.push(format!("and {remainder} more"));
     }
     PayloadHealth::Modified(issues)
+}
+
+/// Refuses launch when the active version payload cannot be fully verified.
+pub(crate) fn require_verified(version_root: &Path) -> Result<()> {
+    match verify(version_root) {
+        PayloadHealth::Verified => Ok(()),
+        PayloadHealth::Modified(_) | PayloadHealth::Unverifiable => Err(CliError::Installation(
+            "active version payload is not verified".to_owned(),
+        )),
+    }
 }
 
 fn is_safe_relative(candidate: &str) -> bool {
@@ -351,7 +363,23 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use std::{collections::BTreeMap, path::Path};
 
-    use super::{PAYLOAD_MANIFEST_NAME, PayloadHealth, REQUIRED_PAYLOAD_FILES, hash_file, verify};
+    use crate::CliError;
+
+    use super::{
+        PAYLOAD_MANIFEST_NAME, PayloadHealth, REQUIRED_PAYLOAD_FILES, hash_file, require_verified,
+        verify,
+    };
+
+    fn assert_launch_admission_rejected(root: &Path) {
+        let error = require_verified(root).expect_err("unverified payload was admitted");
+        assert_eq!(
+            error.to_string(),
+            "Artisan is not installed correctly: active version payload is not verified"
+        );
+        assert!(
+            matches!(error, CliError::Installation(message) if message == "active version payload is not verified")
+        );
+    }
 
     fn write_payload(root: &Path) {
         std::fs::create_dir_all(root.join("bin")).expect("bin directory");
@@ -392,6 +420,7 @@ mod tests {
         let root = tempfile::tempdir().expect("temp");
         write_payload(root.path());
         assert_eq!(verify(root.path()), PayloadHealth::Verified);
+        require_verified(root.path()).expect("verified payload was rejected");
     }
 
     #[test]
@@ -405,6 +434,7 @@ mod tests {
                 panic!("modified binary was accepted: {relative}");
             };
             assert!(issues.contains(&format!("modified: {relative}")));
+            assert_launch_admission_rejected(root.path());
         }
     }
 
@@ -419,6 +449,7 @@ mod tests {
                 panic!("missing binary was accepted: {relative}");
             };
             assert!(issues.contains(&format!("missing: {relative}")));
+            assert_launch_admission_rejected(root.path());
         }
     }
 
@@ -432,6 +463,7 @@ mod tests {
             panic!("extra binary was accepted");
         };
         assert!(issues.contains(&"unexpected: bin/extra".to_owned()));
+        assert_launch_admission_rejected(root.path());
 
         let root = tempfile::tempdir().expect("temp");
         write_payload(root.path());
@@ -441,6 +473,7 @@ mod tests {
             panic!("extra bin directory was accepted");
         };
         assert!(issues.contains(&"unexpected: bin/extra-directory".to_owned()));
+        assert_launch_admission_rejected(root.path());
     }
 
     #[test]
@@ -529,6 +562,7 @@ mod tests {
                 issue == &format!("unexpected: {namespace}")
                     || issue == &format!("unexpected: {relative}")
             }));
+            assert_launch_admission_rejected(root.path());
         }
     }
 
@@ -570,6 +604,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join("bin")).expect("bin");
         std::fs::write(root.path().join(REQUIRED_PAYLOAD_FILES[0]), b"artisan").expect("ae");
         assert_eq!(verify(root.path()), PayloadHealth::Unverifiable);
+        assert_launch_admission_rejected(root.path());
     }
 
     #[test]
@@ -585,6 +620,7 @@ mod tests {
         )
         .expect("future format");
         assert_eq!(verify(root.path()), PayloadHealth::Unverifiable);
+        assert_launch_admission_rejected(root.path());
     }
 
     #[test]
@@ -601,5 +637,6 @@ mod tests {
             panic!("unsafe manifest entry was accepted");
         };
         assert!(issues.contains(&"invalid manifest entry: ../ae".to_owned()));
+        assert_launch_admission_rejected(root.path());
     }
 }
