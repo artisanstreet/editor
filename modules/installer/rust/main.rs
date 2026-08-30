@@ -11,7 +11,7 @@ mod shortcuts;
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use error::{InstallerError, Result};
 use install::{InstallIntegrationOptions, InstallOptions, diagnose, install, repair, uninstall};
 use manifest::TrustKey;
@@ -20,23 +20,6 @@ use processes::{RetirementPolicy, retire_superseded};
 use url::Url;
 
 const DEFAULT_MANIFEST: &str = "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release-manifest.json";
-
-#[derive(Clone, Debug, ValueEnum)]
-enum Component {
-    Editor,
-    Forge,
-    Cli,
-}
-
-impl Component {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Editor => "editor",
-            Self::Forge => "forge",
-            Self::Cli => "cli",
-        }
-    }
-}
 
 #[derive(Args, Debug)]
 struct AutomationArguments {
@@ -98,11 +81,6 @@ struct Arguments {
     #[arg(long, env = "ARTISAN_INSTALLER_PUBLIC_KEY", global = true)]
     public_key: Option<String>,
 
-    /// Components to install, comma separated or repeated. Defaults to Editor,
-    /// Forge, and the permanent ae CLI.
-    #[arg(long, value_enum, value_delimiter = ',', global = true)]
-    component: Vec<Component>,
-
     #[command(flatten)]
     automation: AutomationArguments,
 
@@ -148,11 +126,6 @@ async fn main() {
 async fn run() -> Result<()> {
     let arguments = Arguments::parse();
     let platform = Platform::detect()?;
-    let components = if arguments.component.is_empty() {
-        vec!["editor", "forge", "cli"]
-    } else {
-        arguments.component.iter().map(Component::as_str).collect()
-    };
     let root = arguments
         .install_root
         .clone()
@@ -167,7 +140,7 @@ async fn run() -> Result<()> {
             Operation::Update => {
                 let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
                 install(make_install_options(
-                    &arguments, platform, components, root, trust, false,
+                    &arguments, platform, root, trust, false,
                 ))
                 .await?;
             }
@@ -185,7 +158,6 @@ async fn run() -> Result<()> {
         }),
         manifest_url: arguments.manifest_url,
         platform,
-        components,
         install_root: root,
         trust,
         run_setup: !arguments.activation.skip_setup,
@@ -238,7 +210,6 @@ fn prepare_update(arguments: &Arguments, root: &std::path::Path) -> Result<()> {
 fn make_install_options(
     arguments: &Arguments,
     platform: Platform,
-    components: Vec<&'static str>,
     install_root: PathBuf,
     trust: TrustKey,
     run_setup: bool,
@@ -250,7 +221,6 @@ fn make_install_options(
         }),
         manifest_url: arguments.manifest_url.clone(),
         platform,
-        components,
         install_root,
         trust,
         run_setup,
@@ -321,6 +291,14 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_install_invocation_is_supported_without_component_flags() {
+        let arguments =
+            Arguments::try_parse_from(["ae-installer", "--install-root", "/tmp/artisan"])
+                .expect("ordinary install invocation");
+        assert!(arguments.operation.is_none());
+    }
+
+    #[test]
     fn data_removal_is_explicit() {
         let arguments =
             Arguments::try_parse_from(["ae-installer", "uninstall"]).expect("uninstall");
@@ -330,19 +308,17 @@ mod tests {
         ));
     }
 
-    /// One spelling for component selection, comma separated or repeated,
-    /// rather than a second flag meaning the same thing.
     #[test]
-    fn components_accept_a_comma_separated_list() {
-        let arguments =
-            Arguments::try_parse_from(["ae-installer", "update", "--component", "editor,forge"])
-                .expect("component list");
-        let selected: Vec<&str> = arguments
-            .component
-            .iter()
-            .map(super::Component::as_str)
-            .collect();
-        assert_eq!(selected, vec!["editor", "forge"]);
+    fn former_component_selection_invocations_are_rejected() {
+        for invocation in [
+            ["ae-installer", "update", "--component", "editor,forge"],
+            ["ae-installer", "update", "--component", "editor,forge,cli"],
+        ] {
+            assert!(
+                Arguments::try_parse_from(invocation).is_err(),
+                "former component invocation must be rejected"
+            );
+        }
     }
 
     /// `--yes` answers prompts; it must never imply the destructive path.
