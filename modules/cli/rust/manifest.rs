@@ -69,7 +69,7 @@ impl InstallationManifest {
         // The selected root is the authority for all later version and
         // process resolution. Keep an equivalent manifest spelling from
         // becoming a second root authority.
-        value.install_root = selected_root.clone();
+        value.install_root.clone_from(&selected_root);
         let stable_name = if cfg!(windows) { "ae.exe" } else { "ae" };
         value.permanent_ae_path = Some(selected_root.join("bin").join(stable_name));
         Ok(value)

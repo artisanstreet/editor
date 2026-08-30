@@ -113,13 +113,13 @@ fn discover_root_from(
         return Err(CliError::Installation(ROOT_CONFLICT.into()));
     }
     if let Some(root) = install_root.or(artisan_home) {
-        return select_root_with_source(root, RootSource::Explicit);
+        return select_root_with_source(&root, RootSource::Explicit);
     }
 
     if let Some(current_executable) = current_executable
         && let Some(root) = installed_executable_root(current_executable, platform)
     {
-        return select_root(root, RootSource::InstalledExecutable);
+        return select_root_with_source(&root, RootSource::InstalledExecutable);
     }
 
     let (default_root, legacy_root) =
@@ -132,15 +132,11 @@ fn discover_root_from(
             legacy_root.display()
         )));
     }
-    select_root_with_source(default_root, RootSource::PlatformDefault)
+    select_root_with_source(&default_root, RootSource::PlatformDefault)
 }
 
-fn select_root(root: PathBuf, source: RootSource) -> Result<PathBuf> {
-    select_root_with_source(root, source)
-}
-
-fn select_root_with_source(root: PathBuf, source: RootSource) -> Result<PathBuf> {
-    let root = normalize_absolute_root(&root)?;
+fn select_root_with_source(root: &Path, source: RootSource) -> Result<PathBuf> {
+    let root = normalize_absolute_root(root)?;
     if matches!(
         source,
         RootSource::Explicit | RootSource::InstalledExecutable
