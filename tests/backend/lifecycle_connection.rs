@@ -107,7 +107,7 @@ impl ActivityGate for TestActivityGate {
     fn begin_stop(&self, require_idle: bool) -> Result<StopAdmission, ActivityGateError> {
         self.begin_stop_calls.fetch_add(1, Ordering::AcqRel);
         self.last_require_idle
-            .store(if require_idle { 1 } else { 0 }, Ordering::Release);
+            .store(u8::from(require_idle), Ordering::Release);
         let active_work_count = self.active_work_count.load(Ordering::Acquire);
         if require_idle && active_work_count != 0 {
             return Ok(StopAdmission::Busy { active_work_count });
@@ -524,7 +524,7 @@ async fn exchange(
             received: 0,
         })) if expected == size_of::<u32>() => {}
         Ok(_) => panic!("lifecycle dispatch returned more than one response"),
-        Err(_) => panic!("lifecycle response did not end with a clean FIN"),
+        Err(error) => panic!("lifecycle response did not end with a clean FIN: {error:?}"),
     }
     drop(send);
     drop(recv);

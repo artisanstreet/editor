@@ -332,7 +332,7 @@ async fn exchange(
     match &reply.body {
         WireEnvelopeBody::Response(response) => assert_eq!(response.request_id, request_id),
         WireEnvelopeBody::ProtocolError(failure) => {
-            assert_eq!(failure.request_id, Some(request_id))
+            assert_eq!(failure.request_id, Some(request_id));
         }
         _ => panic!("listener returned an unexpected lifecycle wire family"),
     }

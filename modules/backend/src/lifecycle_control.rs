@@ -329,8 +329,7 @@ fn status_dispatch(
     let active_work_count = snapshot.active_work_count();
     let state = match controller_state {
         LifecycleState::Ready if active_work_count == 0 => LifecycleState::Ready,
-        LifecycleState::Ready => LifecycleState::Busy,
-        LifecycleState::Busy => LifecycleState::Busy,
+        LifecycleState::Ready | LifecycleState::Busy => LifecycleState::Busy,
         LifecycleState::Draining => LifecycleState::Draining,
     };
     match LifecycleStatus::new(state, active_work_count) {
