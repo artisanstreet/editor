@@ -508,7 +508,6 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         .lines()
         .next()
         .ok_or(ForgeCredentialError::WindowsAcl)?;
-    // CSV is "DOMAIN\User","SID"
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -523,19 +522,32 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         }
     }
     parts.push(current.trim().to_string());
-    if parts.len() < 2 {
+    if parts.len() != 2 {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     let account = parts[0].trim().trim_matches('"').trim().to_string();
     let sid = parts[1].trim().trim_matches('"').trim().to_string();
-    if !is_valid_sid(&sid) || account.is_empty() || account.contains('\0') {
+    if !is_valid_sid(&sid) {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    if account.contains('/') || account.contains('\\') && account.matches('\\').count() != 1 {
-        // allow DOMAIN\User single backslash, reject other slashes
-        if account.matches('\\').count() != 1 {
-            // still strictly validate shape: no control chars
-        }
+    if account.is_empty()
+        || account.contains('\0')
+        || account.contains('/')
+        || account.contains(':')
+        || account.contains('"')
+        || account.contains(',')
+        || account.chars().any(|c| c.is_control())
+    {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    if account.matches('\\').count() != 1 {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    let mut split = account.split('\\');
+    let domain = split.next().unwrap_or("");
+    let user = split.next().unwrap_or("");
+    if domain.is_empty() || user.is_empty() || split.next().is_some() {
+        return Err(ForgeCredentialError::WindowsAcl);
     }
     Ok(CurrentIdentity { sid, account })
 }
@@ -569,11 +581,19 @@ fn is_valid_sid(sid: &str) -> bool {
 }
 
 fn parse_icacls_output(output: &str, expected_sid: &str) -> Result<(), ForgeCredentialError> {
+    parse_icacls_output_with_path(output, expected_sid, "")
+}
+
+fn parse_icacls_output_with_path(
+    output: &str,
+    expected_sid: &str,
+    queried_path: &str,
+) -> Result<(), ForgeCredentialError> {
     let identity = CurrentIdentity {
         sid: expected_sid.to_string(),
         account: String::new(),
     };
-    parse_icacls_strict_with_identity(output, &identity, true)
+    parse_icacls_strict_with_identity(output, &identity, true, queried_path)
 }
 
 fn parse_icacls_strict(
@@ -581,21 +601,31 @@ fn parse_icacls_strict(
     expected_sid: &str,
     expect_dir: bool,
 ) -> Result<(), ForgeCredentialError> {
+    parse_icacls_strict_with_path(output, expected_sid, expect_dir, "")
+}
+
+fn parse_icacls_strict_with_path(
+    output: &str,
+    expected_sid: &str,
+    expect_dir: bool,
+    queried_path: &str,
+) -> Result<(), ForgeCredentialError> {
     let identity = CurrentIdentity {
         sid: expected_sid.to_string(),
         account: String::new(),
     };
-    parse_icacls_strict_with_identity(output, &identity, expect_dir)
+    parse_icacls_strict_with_identity(output, &identity, expect_dir, queried_path)
 }
 
 fn parse_icacls_strict_with_identity(
     output: &str,
     identity: &CurrentIdentity,
     expect_dir: bool,
+    queried_path: &str,
 ) -> Result<(), ForgeCredentialError> {
     let mut ace_lines: Vec<String> = Vec::new();
-    let mut first = true;
-    let mut path_prefix: Option<String> = None;
+    let queried_lower = queried_path.to_ascii_lowercase();
+    let mut first_line = true;
     for line in output.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -604,42 +634,69 @@ fn parse_icacls_strict_with_identity(
         if trimmed.to_ascii_lowercase().starts_with("successfully") {
             continue;
         }
-        // First line that looks like a path (contains :\ and no '(') is header
-        if first && trimmed.contains(":\\") && !trimmed.contains('(') {
-            first = false;
-            continue;
-        }
-        first = false;
-        if !trimmed.contains(':') || !trimmed.contains('(') {
-            continue;
-        }
-        // Strip exact queried path prefix if present on first ACE line: icacls prints
-        // "C:\path SID:(...)" on same line for single ACE case.
-        let mut ace_part = trimmed.to_string();
-        if let Some(prefix) = &path_prefix {
-            if ace_part
-                .to_ascii_lowercase()
-                .starts_with(&prefix.to_ascii_lowercase())
-            {
-                ace_part = ace_part[prefix.len()..].trim().to_string();
+        let lower = trimmed.to_ascii_lowercase();
+        // Exact queried path prefix handling: strip only the complete queried path
+        // (case-insensitive) from the first ACE line if present.
+        let mut candidate = trimmed.to_string();
+        if !queried_path.is_empty() && lower.starts_with(&queried_lower) {
+            let remainder = trimmed[queried_path.len()..].trim();
+            if remainder.is_empty() {
+                // Header line containing only the path, no ACE
+                first_line = false;
+                continue;
             }
-        } else if trimmed.contains(":\\") {
-            // Try to strip up to first space after :\  (path + space + ACE)
-            if let Some(idx) = trimmed.find(":\\") {
-                if let Some(space_after) = trimmed[idx..].find(' ') {
-                    let prefix_len = idx + space_after + 1;
-                    let maybe_ace = trimmed[prefix_len..].trim();
-                    if maybe_ace.contains(':') && maybe_ace.contains('(') {
-                        path_prefix = Some(trimmed[..prefix_len].trim().to_string());
-                        ace_part = maybe_ace.to_string();
-                    }
-                }
-            }
-        }
-        if ace_part.is_empty() {
+            candidate = remainder.to_string();
+        } else if first_line && trimmed.contains(":\\") && !trimmed.contains('(') {
+            // Header without queried_path provided (parser test without path)
+            first_line = false;
             continue;
         }
-        ace_lines.push(ace_part);
+        first_line = false;
+        if !candidate.contains(':') || !candidate.contains('(') {
+            // Any non-summary, non-ACE line is a failure
+            if candidate.contains(':') || candidate.contains('\\') || candidate.contains('/') {
+                return Err(ForgeCredentialError::WindowsAcl);
+            }
+            continue;
+        }
+        // Ensure no trailing junk after the parenthesized flags
+        let colon = candidate
+            .find(':')
+            .ok_or(ForgeCredentialError::WindowsAcl)?;
+        let flags_part = &candidate[colon + 1..];
+        // Flags must be exactly a sequence of (...) tokens with optional whitespace, nothing else
+        let mut idx = 0;
+        let chars: Vec<char> = flags_part.chars().collect();
+        let mut has_content = false;
+        while idx < chars.len() {
+            while idx < chars.len() && chars[idx].is_whitespace() {
+                idx += 1;
+            }
+            if idx >= chars.len() {
+                break;
+            }
+            if chars[idx] != '(' {
+                return Err(ForgeCredentialError::WindowsAcl);
+            }
+            let mut tok = String::new();
+            idx += 1;
+            while idx < chars.len() && chars[idx] != ')' {
+                tok.push(chars[idx]);
+                idx += 1;
+            }
+            if idx >= chars.len() || chars[idx] != ')' {
+                return Err(ForgeCredentialError::WindowsAcl);
+            }
+            idx += 1;
+            has_content = true;
+            if tok.is_empty() {
+                return Err(ForgeCredentialError::WindowsAcl);
+            }
+        }
+        if !has_content {
+            return Err(ForgeCredentialError::WindowsAcl);
+        }
+        ace_lines.push(candidate);
     }
     if ace_lines.len() != 1 {
         return Err(ForgeCredentialError::WindowsAcl);
@@ -652,7 +709,6 @@ fn parse_icacls_strict_with_identity(
     if lower.contains("(i)") {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    // Extract principal before first ':'
     let colon = ace.find(':').ok_or(ForgeCredentialError::WindowsAcl)?;
     let principal = ace[..colon].trim();
     let principal_lower = principal.to_ascii_lowercase();
@@ -660,19 +716,14 @@ fn parse_icacls_strict_with_identity(
     let account_lower = identity.account.to_ascii_lowercase();
     let matches_sid = !sid_lower.is_empty() && principal_lower == sid_lower;
     let matches_account = !account_lower.is_empty() && principal_lower == account_lower;
-    // Exact match required, not substring; also reject SID-prefix trick.
     if !matches_sid && !matches_account {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    // Check for extra flags: only allow (F) plus (OI)(CI) for dir, nothing else.
-    // Extract flags inside parentheses.
     let flags_part = &ace[colon + 1..];
     let flags_lower = flags_part.to_ascii_lowercase();
-    // Must contain (f)
     if !flags_lower.contains("(f)") {
         return Err(ForgeCredentialError::WindowsAcl);
     }
-    // Collect all parenthesized tokens
     let mut tokens: Vec<String> = Vec::new();
     let mut chars = flags_lower.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -687,19 +738,33 @@ fn parse_icacls_strict_with_identity(
             tokens.push(tok);
         }
     }
+    let mut seen_f = 0;
+    let mut seen_oi = 0;
+    let mut seen_ci = 0;
     for tok in &tokens {
-        let t = tok.as_str();
-        if t == "f" || t == "oi" || t == "ci" {
-            continue;
+        match tok.as_str() {
+            "f" => seen_f += 1,
+            "oi" => seen_oi += 1,
+            "ci" => seen_ci += 1,
+            _ => return Err(ForgeCredentialError::WindowsAcl),
         }
-        // Any other token like "i", "deny", "m", etc. is forbidden
+    }
+    if seen_f != 1 {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     if expect_dir {
-        if !flags_lower.contains("(oi)") || !flags_lower.contains("(ci)") {
+        if seen_oi != 1 || seen_ci != 1 {
             return Err(ForgeCredentialError::WindowsAcl);
         }
-    } else if flags_lower.contains("(oi)") || flags_lower.contains("(ci)") {
+    } else if seen_oi != 0 || seen_ci != 0 {
+        return Err(ForgeCredentialError::WindowsAcl);
+    }
+    let mut stripped = flags_lower.clone();
+    stripped = stripped.replace("(f)", "");
+    stripped = stripped.replace("(oi)", "");
+    stripped = stripped.replace("(ci)", "");
+    stripped = stripped.replace(' ', "").replace('\t', "").replace(',', "");
+    if !stripped.trim().is_empty() {
         return Err(ForgeCredentialError::WindowsAcl);
     }
     for forbidden in ["everyone", "builtin", "nt authority", "authenticated users"] {
@@ -713,9 +778,8 @@ fn parse_icacls_strict_with_identity(
 #[cfg(windows)]
 fn verify_windows_dacl(path: &Path, expected_sid: &str) -> Result<(), ForgeCredentialError> {
     let identity = resolve_current_identity()?;
-    // Ensure expected_sid matches current identity to avoid confused deputy
     if identity.sid.to_ascii_lowercase() != expected_sid.to_ascii_lowercase() {
-        // still verify against resolved identity, not caller-supplied mismatched sid
+        return Err(ForgeCredentialError::WindowsAcl);
     }
     let path_str = path.to_string_lossy().to_string();
     let output = hidden_output("icacls.exe", &[&path_str], Duration::from_secs(5))?;
@@ -724,7 +788,7 @@ fn verify_windows_dacl(path: &Path, expected_sid: &str) -> Result<(), ForgeCrede
     }
     let text = String::from_utf8_lossy(&output.stdout).to_string();
     let is_dir = fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
-    parse_icacls_strict_with_identity(&text, &identity, is_dir)
+    parse_icacls_strict_with_identity(&text, &identity, is_dir, &path_str)
 }
 
 #[cfg(windows)]
@@ -1234,7 +1298,11 @@ fn install_atomic(
         context: "activate file",
         path: dest.clone(),
     })?;
-    // Open destination handle to prove it is the temp file
+    created.push(CreatedFile {
+        path: dest.clone(),
+        id: temp_id,
+        is_manifest,
+    });
     let dest_handle = File::open(&dest).map_err(|_| ForgeCredentialError::Io {
         context: "inspect file id",
         path: dest.clone(),
@@ -1244,11 +1312,6 @@ fn install_atomic(
     if dest_id != temp_id {
         return Err(ForgeCredentialError::Provisioning);
     }
-    created.push(CreatedFile {
-        path: dest.clone(),
-        id: dest_id,
-        is_manifest,
-    });
     if let Err(e) = sync_directory(dir) {
         return Err(e);
     }
@@ -1374,8 +1437,8 @@ pub fn ensure_credentials(home: &Path) -> Result<ForgeCredentialPaths, ForgeCred
 #[cfg(test)]
 mod parser_tests {
     use super::{
-        CurrentIdentity, parse_icacls_output, parse_icacls_strict,
-        parse_icacls_strict_with_identity,
+        CurrentIdentity, parse_icacls_output, parse_icacls_output_with_path, parse_icacls_strict,
+        parse_icacls_strict_with_identity, parse_icacls_strict_with_path,
     };
 
     #[test]
@@ -1390,7 +1453,7 @@ mod parser_tests {
         assert!(parse_icacls_output(&good_dir_sid, sid).is_ok());
         assert!(parse_icacls_strict(&good_dir_sid, sid, true).is_ok());
         let good_dir_account = format!("C:\\creds {account}:(OI)(CI)(F)");
-        assert!(parse_icacls_strict_with_identity(&good_dir_account, &identity, true).is_ok());
+        assert!(parse_icacls_strict_with_identity(&good_dir_account, &identity, true, "").is_ok());
         let good_file = format!("C:\\creds\\file {sid}:(F)");
         assert!(parse_icacls_strict(&good_file, sid, false).is_ok());
         let sid_prefix = format!("C:\\creds {sid}00:(F)");
@@ -1410,5 +1473,24 @@ mod parser_tests {
         assert!(parse_icacls_strict(&extra_flags, sid, true).is_err());
         let broad = format!("C:\\creds {sid}:(OI)(CI)(M)");
         assert!(parse_icacls_strict(&broad, sid, true).is_err());
+        // Exact queried path containing spaces
+        let spaced_path = "C:\\My Documents\\Artisan creds";
+        let spaced_good = format!("{spaced_path} {sid}:(OI)(CI)(F)");
+        assert!(parse_icacls_strict_with_path(&spaced_good, sid, true, spaced_path).is_ok());
+        assert!(
+            parse_icacls_strict_with_identity(&spaced_good, &identity, true, spaced_path).is_ok()
+        );
+        let spaced_wrong_prefix = format!("C:\\My Documents\\Other {sid}:(OI)(CI)(F)");
+        assert!(
+            parse_icacls_strict_with_path(&spaced_wrong_prefix, sid, true, spaced_path).is_err()
+        );
+        // Duplicate tokens
+        let dup_f_file = format!("C:\\creds {sid}:(F)(F)");
+        assert!(parse_icacls_strict(&dup_f_file, sid, false).is_err());
+        let dup_oi_dir = format!("C:\\creds {sid}:(OI)(OI)(CI)(F)");
+        assert!(parse_icacls_strict(&dup_oi_dir, sid, true).is_err());
+        // Trailing junk
+        let trailing = format!("C:\\creds {sid}:(F) extra");
+        assert!(parse_icacls_strict(&trailing, sid, false).is_err());
     }
 }
