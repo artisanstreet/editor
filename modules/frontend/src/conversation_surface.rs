@@ -70,6 +70,12 @@ pub struct ViewportObservation {
     pub first_visible: Option<ConversationSurfaceTarget>,
     /// The last visible stable target, if the viewport has one.
     pub last_visible: Option<ConversationSurfaceTarget>,
+    /// Whether the viewport is currently at the transcript's bottom edge.
+    ///
+    /// This is deliberately explicit. The viewport controller must not infer
+    /// follow-tail state from the identity observations or from GPUI scroll
+    /// completion.
+    pub at_bottom: bool,
 }
 
 /// Typed effects emitted by the transcript surface.
@@ -422,6 +428,29 @@ impl ConversationSurface {
         &self.actions
     }
 
+    /// Borrows the oldest pending action without removing it.
+    ///
+    /// The host uses this head peek to make downstream capacity decisions
+    /// before acknowledging an action. That keeps a refused action at the
+    /// surface boundary instead of losing a drained tail.
+    #[must_use]
+    pub fn next_action(&self) -> Option<&ConversationSurfaceAction> {
+        self.actions.first()
+    }
+
+    /// Removes and returns exactly the oldest pending action.
+    ///
+    /// This one-action operation is intentionally separate from
+    /// [`Self::take_actions`]. Host routing can therefore acknowledge actions
+    /// one at a time after the controller or outer effect outbox accepts them.
+    pub fn take_next_action(&mut self) -> Option<ConversationSurfaceAction> {
+        if self.actions.is_empty() {
+            None
+        } else {
+            Some(self.actions.remove(0))
+        }
+    }
+
     /// Drains pending actions in FIFO order.
     pub fn take_actions(&mut self) -> Vec<ConversationSurfaceAction> {
         std::mem::take(&mut self.actions)
@@ -612,10 +641,7 @@ impl ConversationSurface {
             .first()
             .map(work_item_id)
             .cloned()
-            .unwrap_or_else(|| {
-                SceneId::parse(turn_id.as_str())
-                    .expect("validated domain turn ids fit scene identities")
-            });
+            .or_else(|| SceneId::parse(turn_id.as_str()).ok());
         let title = block
             .label
             .map_or_else(|| "Work".to_owned(), format_work_group_label);
@@ -628,6 +654,16 @@ impl ConversationSurface {
         for item in &block.items {
             items = items.child(Self::render_work_item(item, &selector, theme));
         }
+
+        let Some(group_id) = group_id else {
+            let fallback_selector = selector.clone();
+            let mut card = compact_card(style).w_full();
+            card = card.debug_selector(move || fallback_selector.clone());
+            return card
+                .child(compact_card_content(style).child(card_heading(title, theme)))
+                .child(compact_card_content(style).child(items))
+                .into_any_element();
+        };
 
         self.render_controlled_card(
             ControlledCardOptions {

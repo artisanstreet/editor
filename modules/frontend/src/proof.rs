@@ -12,11 +12,13 @@ use std::cell::Cell;
 use std::process::ExitCode;
 use std::rc::Rc;
 
-use crate::project_picker;
+use crate::{conversation_host, project_picker};
+use artisan_domain::ThreadId;
+use artisan_ui::theme::ThemeMode;
 use gpui::{
     App, AppContext as _, Application, Bounds, Context, Entity, FocusHandle, KeyBinding,
-    MouseButton, MouseDownEvent, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
-    div,
+    MouseButton, MouseDownEvent, Subscription, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _},
     px, rgb, size,
 };
@@ -47,7 +49,12 @@ const WINDOW_TITLE: &str = "Artisan — phase 1 GPUI proof";
 /// Feasibility-only surface width in logical pixels.
 const SURFACE_WIDTH: f32 = 640.0;
 /// Feasibility-only surface height in logical pixels.
-const SURFACE_HEIGHT: f32 = 420.0;
+const SURFACE_HEIGHT: f32 = 720.0;
+/// Bounded application-side queue for effects awaiting a future adapter.
+pub const PROOF_MAX_CONVERSATION_EFFECTS: usize = conversation_host::CONVERSATION_HOST_MAX_EFFECTS;
+/// Height reserved for the genuine native conversation child in the proof
+/// layout.
+const CONVERSATION_HEIGHT: f32 = 360.0;
 /// Feasibility-only background color.
 const BACKGROUND: u32 = 0x10_14_18;
 /// Feasibility-only foreground color.
@@ -61,6 +68,13 @@ pub struct ProofSurface {
     clicks: usize,
     /// The native project-picker leaf hosted by this feasibility surface.
     picker: Entity<project_picker::ProjectPickerView>,
+    /// The genuine controller/surface host mounted beside the picker.
+    conversation_host: Option<Entity<conversation_host::ConversationHost>>,
+    /// Keeps the proof-level adapter subscribed for the full proof lifetime.
+    _conversation_host_subscription: Option<Subscription>,
+    /// Typed, bounded application boundary for host effects. No transport or
+    /// window action is executed by this proof surface.
+    conversation_effects: Vec<conversation_host::ConversationHostEffect>,
 }
 
 impl ProofSurface {
@@ -73,24 +87,82 @@ impl ProofSurface {
         focus_handle.focus(window);
         let (projects, current) = proof_catalog();
         let picker = cx.new(|picker_cx| {
-            project_picker::ProjectPickerView::new(
-                projects,
-                current,
-                artisan_ui::theme::ThemeMode::Dark,
-                picker_cx,
-            )
+            project_picker::ProjectPickerView::new(projects, current, ThemeMode::Dark, picker_cx)
         });
-        Self {
+        let mut conversation_effects = Vec::with_capacity(PROOF_MAX_CONVERSATION_EFFECTS);
+        let (conversation_host, conversation_host_subscription) =
+            match ThreadId::parse("proof-conversation") {
+                Ok(thread_id) => match conversation_host::ConversationHost::mount(
+                    thread_id,
+                    ThemeMode::Dark,
+                    &mut *cx,
+                ) {
+                    Ok(host) => {
+                        suppress_conversation_tab_stops(&host, cx);
+                        let subscription = cx.observe(&host, |proof, host, cx| {
+                            proof.collect_conversation_effects(host, cx);
+                        });
+                        (Some(host), Some(subscription))
+                    }
+                    Err(error) => {
+                        conversation_effects.push(
+                            conversation_host::ConversationHostEffect::Refused {
+                                refusal: conversation_host::ConversationHostRefusal::Initialization(
+                                    error,
+                                ),
+                            },
+                        );
+                        (None, None)
+                    }
+                },
+                Err(error) => {
+                    conversation_effects.push(conversation_host::ConversationHostEffect::Refused {
+                        refusal: conversation_host::ConversationHostRefusal::Initialization(
+                            conversation_host::ConversationHostError::InvalidThreadId(error),
+                        ),
+                    });
+                    (None, None)
+                }
+            };
+        let mut proof = Self {
             focus_handle,
             clicks: 0,
             picker,
+            conversation_host,
+            _conversation_host_subscription: conversation_host_subscription,
+            conversation_effects,
+        };
+        if let Some(host) = proof.conversation_host.clone() {
+            proof.collect_conversation_effects(host, cx);
         }
+        proof
     }
 
     /// The embedded project-picker leaf.
     #[must_use]
     pub fn picker(&self) -> &Entity<project_picker::ProjectPickerView> {
         &self.picker
+    }
+
+    /// The genuine conversation host entity, when initialization succeeded.
+    #[must_use]
+    pub fn conversation_host(&self) -> Option<&Entity<conversation_host::ConversationHost>> {
+        self.conversation_host.as_ref()
+    }
+
+    /// Effects retained at the actual proof/application boundary.
+    #[must_use]
+    pub fn pending_conversation_effects(&self) -> &[conversation_host::ConversationHostEffect] {
+        &self.conversation_effects
+    }
+
+    /// Drains application-bound conversation effects in FIFO order.
+    #[must_use]
+    pub fn drain_conversation_effects(&mut self) -> Vec<conversation_host::ConversationHostEffect> {
+        std::mem::replace(
+            &mut self.conversation_effects,
+            Vec::with_capacity(PROOF_MAX_CONVERSATION_EFFECTS),
+        )
     }
 
     /// The proof surface's own tracked focus handle (its startup focus).
@@ -110,6 +182,51 @@ impl ProofSurface {
         self.clicks += 1;
         cx.notify();
     }
+
+    fn collect_conversation_effects(
+        &mut self,
+        host: Entity<conversation_host::ConversationHost>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        loop {
+            let pending = host.read(cx).pending_effect_count();
+            let available =
+                PROOF_MAX_CONVERSATION_EFFECTS.saturating_sub(self.conversation_effects.len());
+            if pending == 0 || pending > available {
+                break;
+            }
+            let effects = host.update(cx, |host, _| host.drain_effects());
+            if effects.is_empty() {
+                break;
+            }
+            self.conversation_effects.extend(effects);
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+}
+
+/// Keeps the existing picker-only proof traversal contract while the genuine
+/// conversation remains visible beside it. The conversation surface retains
+/// its normal focus handles for direct application focus; only this
+/// feasibility window removes those two handles from its shared Tab map.
+fn suppress_conversation_tab_stops(
+    host: &Entity<conversation_host::ConversationHost>,
+    cx: &Context<ProofSurface>,
+) {
+    let (transcript_focus, disclosure_focus) = {
+        let host = host.read(cx);
+        let surface = host.surface().read(cx);
+        (
+            surface.transcript_focus_handle().clone(),
+            surface.disclosure_focus_handle().clone(),
+        )
+    };
+    transcript_focus.tab_stop(false);
+    disclosure_focus.tab_stop(false);
 }
 
 impl Render for ProofSurface {
@@ -144,6 +261,34 @@ impl Render for ProofSurface {
                     .text_color(rgb(MUTED))
                     .child(picker_summary(self.picker.read(cx).last_action())),
             )
+            .child({
+                let mut conversation_panel = div()
+                    .w_full()
+                    .h(px(CONVERSATION_HEIGHT))
+                    .rounded(px(8.0))
+                    .bg(rgb(BACKGROUND));
+                if let Some(host) = self.conversation_host.clone() {
+                    conversation_panel = conversation_panel.child(host);
+                } else {
+                    conversation_panel = conversation_panel
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .child("conversation host unavailable");
+                }
+                conversation_panel
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child(format!(
+                        "conversation effects queued: {}",
+                        self.conversation_effects.len()
+                    )),
+            )
     }
 }
 
@@ -155,14 +300,18 @@ fn proof_catalog() -> (
 ) {
     use artisan_domain::ProjectId;
 
-    let option = |name: &str| project_picker::ProjectOption {
-        id: ProjectId::parse(format!("proof-{name}")).expect("proof ids are valid"),
-        name: name.to_string().into(),
-    };
-
-    let projects = vec![option("core"), option("docs-site"), option("playground")];
-    let current = ProjectId::parse("proof-core").expect("proof id is valid");
-    (projects, Some(current))
+    let mut projects = Vec::with_capacity(3);
+    for name in ["core", "docs-site", "playground"] {
+        let Ok(id) = ProjectId::parse(format!("proof-{name}")) else {
+            return (Vec::new(), None);
+        };
+        projects.push(project_picker::ProjectOption {
+            id,
+            name: name.to_owned().into(),
+        });
+    }
+    let current = projects.first().map(|project| project.id.clone());
+    (projects, current)
 }
 
 /// One-line observation of what the picker leaf has done so far.
