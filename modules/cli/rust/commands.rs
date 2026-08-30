@@ -14,6 +14,7 @@ use crate::{
     CliError, Result,
     credentials::{self, ForgeCredentialPaths},
     engine_catalog::{NativeOpenCode2Authority, OpenCode2Inspection},
+    engine_install::{self, InstallOutcome},
     error::io,
     http::{self, PairResponse},
     instance::{self, NativeInstanceConfig, NativeListenerConfig},
@@ -149,6 +150,8 @@ pub enum EngineCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Install the certified native OpenCode2 engine.
+    Install,
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -193,7 +196,21 @@ impl From<TelemetryChoice> for Preference {
 }
 
 pub fn run(cli: Cli) -> Result<()> {
-    let layout = Layout::discover()?;
+    let is_install = matches!(
+        cli.command.as_ref(),
+        Some(Commands::Engine {
+            command: EngineCommand::Install,
+        })
+    );
+    let layout = Layout::discover().map_err(|error| {
+        if is_install {
+            CliError::OpenCode2Install {
+                reason: "installation_invalid",
+            }
+        } else {
+            error
+        }
+    })?;
     match cli.command.unwrap_or(Commands::Open {
         origin: None,
         browser: false,
@@ -309,6 +326,29 @@ fn require_installation(layout: &Layout) -> Result<InstallationManifest> {
 }
 
 fn engine_command(layout: &Layout, command: &EngineCommand) -> Result<()> {
+    if matches!(command, EngineCommand::Install) {
+        require_installation(layout).map_err(|_| CliError::OpenCode2Install {
+            reason: "installation_invalid",
+        })?;
+        let instance = load_native_instance(layout).map_err(|_| CliError::OpenCode2Install {
+            reason: "instance_invalid",
+        })?;
+        return match engine_install::install(&instance).map_err(|error| {
+            CliError::OpenCode2Install {
+                reason: error.cli_reason(),
+            }
+        })? {
+            InstallOutcome::Installed => {
+                println!("OpenCode2 installed");
+                Ok(())
+            }
+            InstallOutcome::AlreadyInstalled => {
+                println!("OpenCode2 already installed");
+                Ok(())
+            }
+        };
+    }
+
     require_installation(layout)?;
     let instance = load_native_instance(layout).map_err(|error| match error {
         CliError::MissingInstance => CliError::MissingInstance,
@@ -318,6 +358,7 @@ fn engine_command(layout: &Layout, command: &EngineCommand) -> Result<()> {
     })?;
     match command {
         EngineCommand::List { json } => list_engines(&instance, *json),
+        EngineCommand::Install => unreachable!("install is handled above"),
     }
 }
 
