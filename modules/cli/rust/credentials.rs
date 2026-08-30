@@ -508,6 +508,34 @@ mod acl_diagnostic {
         }
     }
 
+    pub(super) enum ParserClassification {
+        MalformedSuccessSummary,
+        MissingSeparator,
+        MissingOpeningToken,
+        NonTokenContent,
+        UnterminatedToken,
+        EmptyToken,
+        NoTokens,
+        AcceptedAce,
+        ParserComplete,
+    }
+
+    impl ParserClassification {
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::MalformedSuccessSummary => "MalformedSuccessSummary",
+                Self::MissingSeparator => "MissingSeparator",
+                Self::MissingOpeningToken => "MissingOpeningToken",
+                Self::NonTokenContent => "NonTokenContent",
+                Self::UnterminatedToken => "UnterminatedToken",
+                Self::EmptyToken => "EmptyToken",
+                Self::NoTokens => "NoTokens",
+                Self::AcceptedAce => "AcceptedAce",
+                Self::ParserComplete => "ParserComplete",
+            }
+        }
+    }
+
     thread_local! {
         static ACTIVE: std::cell::RefCell<Option<AclDiagnosticRecord>> = const {
             std::cell::RefCell::new(None)
@@ -549,6 +577,10 @@ mod acl_diagnostic {
 
     pub(super) fn planner(classification: PlannerClassification) {
         event("planner", classification.as_str());
+    }
+
+    pub(super) fn parser(classification: ParserClassification) {
+        event("parser", classification.as_str());
     }
 
     fn bounded(text: &str) -> &str {
@@ -1039,6 +1071,9 @@ fn collect_icacls_ace_lines(
             if is_icacls_success_summary(&lower) {
                 continue;
             }
+            acl_diagnostic!(acl_diagnostic::parser(
+                acl_diagnostic::ParserClassification::MalformedSuccessSummary
+            ));
             acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
             return Err(ForgeCredentialError::WindowsAcl);
         }
@@ -1060,22 +1095,38 @@ fn collect_icacls_ace_lines(
         }
         first_line = false;
         if !candidate.contains(':') {
-            acl_diagnostic!(acl_diagnostic::planner(
-                acl_diagnostic::PlannerClassification::MissingAceSeparator
+            acl_diagnostic!(acl_diagnostic::parser(
+                acl_diagnostic::ParserClassification::MissingSeparator
             ));
             // Any non-summary, non-ACE line is a failure.
             acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
             return Err(ForgeCredentialError::WindowsAcl);
         }
         if !candidate.contains('(') {
+            if candidate
+                .split_once(':')
+                .is_some_and(|(_, flags)| flags.trim().is_empty())
+            {
+                acl_diagnostic!(acl_diagnostic::parser(
+                    acl_diagnostic::ParserClassification::NoTokens
+                ));
+            } else {
+                acl_diagnostic!(acl_diagnostic::parser(
+                    acl_diagnostic::ParserClassification::MissingOpeningToken
+                ));
+            }
             // Any non-summary, non-ACE line is a failure.
             acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
             return Err(ForgeCredentialError::WindowsAcl);
         }
         // Ensure no trailing junk after the parenthesized flags
-        let colon = candidate
-            .find(':')
-            .ok_or(ForgeCredentialError::WindowsAcl)?;
+        let Some(colon) = candidate.find(':') else {
+            acl_diagnostic!(acl_diagnostic::parser(
+                acl_diagnostic::ParserClassification::MissingSeparator
+            ));
+            acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
+            return Err(ForgeCredentialError::WindowsAcl);
+        };
         let flags_part = &candidate[colon + 1..];
         // Flags must be exactly a sequence of (...) tokens with optional whitespace, nothing else
         let mut idx = 0;
@@ -1089,6 +1140,9 @@ fn collect_icacls_ace_lines(
                 break;
             }
             if chars[idx] != '(' {
+                acl_diagnostic!(acl_diagnostic::parser(
+                    acl_diagnostic::ParserClassification::NonTokenContent
+                ));
                 acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
                 return Err(ForgeCredentialError::WindowsAcl);
             }
@@ -1099,23 +1153,38 @@ fn collect_icacls_ace_lines(
                 idx += 1;
             }
             if idx >= chars.len() || chars[idx] != ')' {
+                acl_diagnostic!(acl_diagnostic::parser(
+                    acl_diagnostic::ParserClassification::UnterminatedToken
+                ));
                 acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
                 return Err(ForgeCredentialError::WindowsAcl);
             }
             idx += 1;
             has_content = true;
             if tok.is_empty() {
+                acl_diagnostic!(acl_diagnostic::parser(
+                    acl_diagnostic::ParserClassification::EmptyToken
+                ));
                 acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
                 return Err(ForgeCredentialError::WindowsAcl);
             }
         }
         if !has_content {
+            acl_diagnostic!(acl_diagnostic::parser(
+                acl_diagnostic::ParserClassification::NoTokens
+            ));
             acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
             return Err(ForgeCredentialError::WindowsAcl);
         }
         ace_lines.push(candidate);
+        acl_diagnostic!(acl_diagnostic::parser(
+            acl_diagnostic::ParserClassification::AcceptedAce
+        ));
     }
     acl_diagnostic!(acl_diagnostic::record_acl(output, ace_lines.len()));
+    acl_diagnostic!(acl_diagnostic::parser(
+        acl_diagnostic::ParserClassification::ParserComplete
+    ));
     Ok(ace_lines)
 }
 
@@ -2184,9 +2253,11 @@ mod diagnostic_tests {
         }
     }
 
-    fn assert_planner_classification(
+    fn assert_classification(
+        kind: &'static str,
         expected: &'static str,
         expect_success: bool,
+        allowed: &[&str],
         operation: impl FnOnce() -> Result<Vec<String>, ForgeCredentialError>,
     ) {
         let (result, captured) = acl_diagnostic::capture(operation);
@@ -2197,13 +2268,36 @@ mod diagnostic_tests {
             "WindowsAcl"
         });
         acl_diagnostic::assert_redacted(&record);
-        let bytes = serde_json::to_vec(&record).expect("bounded planner diagnostic");
+        let bytes = serde_json::to_vec(&record).expect("bounded classification diagnostic");
         assert_artifact(&bytes);
-        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("planner JSON");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("classification JSON");
         let events = value
             .get("events")
             .and_then(serde_json::Value::as_array)
-            .expect("planner events");
+            .expect("classification events");
+        let classification_values: Vec<&str> = events
+            .iter()
+            .filter_map(|event| {
+                let object = event.as_object()?;
+                if object.get("kind").and_then(serde_json::Value::as_str) != Some(kind) {
+                    return None;
+                }
+                object.get("value").and_then(serde_json::Value::as_str)
+            })
+            .collect();
+        assert!(classification_values.contains(&expected));
+        assert!(
+            classification_values
+                .iter()
+                .all(|value| allowed.contains(value))
+        );
+    }
+
+    fn assert_planner_classification(
+        expected: &'static str,
+        expect_success: bool,
+        operation: impl FnOnce() -> Result<Vec<String>, ForgeCredentialError>,
+    ) {
         let allowed = [
             "InvalidValidatedIdentity",
             "MissingAceSeparator",
@@ -2215,18 +2309,66 @@ mod diagnostic_tests {
             "DuplicateExtra",
             "PlanComplete",
         ];
-        let planner_values: Vec<&str> = events
-            .iter()
-            .filter_map(|event| {
-                let object = event.as_object()?;
-                if object.get("kind").and_then(serde_json::Value::as_str) != Some("planner") {
-                    return None;
-                }
-                object.get("value").and_then(serde_json::Value::as_str)
-            })
-            .collect();
-        assert!(planner_values.contains(&expected));
-        assert!(planner_values.iter().all(|value| allowed.contains(value)));
+        assert_classification("planner", expected, expect_success, &allowed, operation);
+    }
+
+    fn assert_parser_classification(
+        expected: &'static str,
+        expect_success: bool,
+        operation: impl FnOnce() -> Result<Vec<String>, ForgeCredentialError>,
+    ) {
+        let allowed = [
+            "MalformedSuccessSummary",
+            "MissingSeparator",
+            "MissingOpeningToken",
+            "NonTokenContent",
+            "UnterminatedToken",
+            "EmptyToken",
+            "NoTokens",
+            "AcceptedAce",
+            "ParserComplete",
+        ];
+        assert_classification("parser", expected, expect_success, &allowed, operation);
+    }
+
+    #[test]
+    fn parser_diagnostic_classifications_are_bounded_and_redacted() {
+        let sid = acl_diagnostic::CANARIES[0];
+        let path = acl_diagnostic::CANARIES[2];
+        let accepted = format!("{path} {sid}:(OI)(CI)(F)");
+
+        assert_parser_classification("MalformedSuccessSummary", false, || {
+            collect_icacls_ace_lines(
+                &format!(
+                    "{accepted}\nSuccessfully processed many files; Failed processing 0 files."
+                ),
+                path,
+            )
+        });
+        assert_parser_classification("MissingSeparator", false, || {
+            collect_icacls_ace_lines(&format!("{path} non-ace output"), path)
+        });
+        assert_parser_classification("MissingOpeningToken", false, || {
+            collect_icacls_ace_lines(&format!("{path} {sid}:F"), path)
+        });
+        assert_parser_classification("NonTokenContent", false, || {
+            collect_icacls_ace_lines(&format!("{path} {sid}:(F) trailing"), path)
+        });
+        assert_parser_classification("UnterminatedToken", false, || {
+            collect_icacls_ace_lines(&format!("{path} {sid}:(F"), path)
+        });
+        assert_parser_classification("EmptyToken", false, || {
+            collect_icacls_ace_lines(&format!("{path} {sid}:()"), path)
+        });
+        assert_parser_classification("NoTokens", false, || {
+            collect_icacls_ace_lines(&format!("{path} {sid}:"), path)
+        });
+        assert_parser_classification("AcceptedAce", true, || {
+            collect_icacls_ace_lines(&accepted, path)
+        });
+        assert_parser_classification("ParserComplete", true, || {
+            collect_icacls_ace_lines(&accepted, path)
+        });
     }
 
     #[test]
