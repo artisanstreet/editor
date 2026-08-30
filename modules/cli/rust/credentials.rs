@@ -474,14 +474,16 @@ mod acl_diagnostic {
             if outcome == "Success" {
                 self.stage = "Completed";
             }
-            self.event_count = self.events.len() as u8;
+            self.event_count =
+                u8::try_from(self.events.len()).expect("diagnostic event count fits in u8");
             self
         }
     }
 
     thread_local! {
-        static ACTIVE: std::cell::RefCell<Option<AclDiagnosticRecord>> =
-            std::cell::RefCell::new(None);
+        static ACTIVE: std::cell::RefCell<Option<AclDiagnosticRecord>> = const {
+            std::cell::RefCell::new(None)
+        };
     }
 
     pub(super) fn capture<T>(operation: impl FnOnce() -> T) -> (T, AclDiagnosticRecord) {
@@ -622,7 +624,7 @@ mod acl_diagnostic {
         if exe.eq_ignore_ascii_case("whoami.exe") {
             Some("Whoami")
         } else if exe.eq_ignore_ascii_case("icacls.exe") {
-            Some(if args.iter().any(|arg| *arg == "/grant:r") {
+            Some(if args.contains(&"/grant:r") {
                 "IcaclsMutation"
             } else {
                 "IcaclsQuery"
@@ -878,12 +880,11 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
         }
     }
     parts.push(current.trim().to_string());
-    let _field_count = parts.len();
     if parts.len() != 2 {
         acl_diagnostic!(acl_diagnostic::record_identity(
             &output.stdout,
             &output.stderr,
-            _field_count,
+            parts.len(),
             None,
             None
         ));
@@ -894,7 +895,7 @@ fn resolve_current_identity() -> Result<CurrentIdentity, ForgeCredentialError> {
     acl_diagnostic!(acl_diagnostic::record_identity(
         &output.stdout,
         &output.stderr,
-        _field_count,
+        parts.len(),
         Some(&sid),
         Some(&account),
     ));
@@ -1940,8 +1941,7 @@ mod diagnostic_tests {
         };
         let raw_path = "C:\\sensitive\\path";
         let raw_output = format!(
-            "{} {}:(OI)(CI)(F)\nSuccessfully processed 1 files; Failed processing 0 files.",
-            raw_path, sid
+            "{raw_path} {sid}:(OI)(CI)(F)\nSuccessfully processed 1 files; Failed processing 0 files."
         );
         let raw_stderr = acl_diagnostic::CANARIES.join("\n");
         let (result, captured) = acl_diagnostic::capture(|| {
@@ -1966,9 +1966,9 @@ mod diagnostic_tests {
         );
 
         for output in [
-            format!("C:\\creds {}:(OI)(CI)(F)", sid),
-            format!("C:\\creds {}:(DENY)(F)", sid),
-            format!("C:\\creds {}:(F) extra", sid),
+            format!("C:\\creds {sid}:(OI)(CI)(F)"),
+            format!("C:\\creds {sid}:(DENY)(F)"),
+            format!("C:\\creds {sid}:(F) extra"),
         ] {
             let expected = parse_icacls_strict_with_identity(&output, &identity, true, "C:\\creds");
             let (actual, captured) = acl_diagnostic::capture(|| {
@@ -1981,7 +1981,7 @@ mod diagnostic_tests {
             assert_eq!(actual, expected);
         }
 
-        let (_, captured) = acl_diagnostic::capture(|| {
+        let ((), captured) = acl_diagnostic::capture(|| {
             for _ in 0..=acl_diagnostic::MAX_EVENTS {
                 acl_diagnostic::event("probe", "ExitedNonZero");
             }
@@ -1999,9 +1999,10 @@ mod diagnostic_tests {
         {
             return;
         }
-        let artifact_path = std::env::var_os("ARTISAN_NATIVE_ACL_DIAGNOSTIC_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| panic!("ARTISAN_NATIVE_ACL_DIAGNOSTIC_FILE is required"));
+        let artifact_path = std::env::var_os("ARTISAN_NATIVE_ACL_DIAGNOSTIC_FILE").map_or_else(
+            || panic!("ARTISAN_NATIVE_ACL_DIAGNOSTIC_FILE is required"),
+            PathBuf::from,
+        );
         assert!(artifact_path.is_absolute());
         let home = tempfile::tempdir().expect("temporary diagnostic home");
         let (result, captured) = acl_diagnostic::capture(|| provision_or_load(home.path()));
