@@ -160,7 +160,7 @@ impl ConversationHost {
         cx: &mut Context<Self>,
     ) -> Self {
         let surface_subscription = cx.observe(&surface, |host, surface, cx| {
-            host.route_surface_actions(surface, cx);
+            host.route_surface_actions(&surface, cx);
         });
         let mut host = Self {
             controller,
@@ -252,7 +252,7 @@ impl ConversationHost {
     /// drained effects without causing a new surface notification.
     pub fn process_pending_actions(&mut self, cx: &mut Context<Self>) {
         let surface = self.surface.clone();
-        self.route_surface_actions(surface, cx);
+        self.route_surface_actions(&surface, cx);
     }
 
     /// Dispatches one typed aggregate event.
@@ -311,14 +311,11 @@ impl ConversationHost {
 
     fn route_surface_actions(
         &mut self,
-        surface: Entity<ConversationSurface>,
+        surface: &Entity<ConversationSurface>,
         cx: &mut Context<Self>,
     ) {
         self.flush_controller_effects();
-        loop {
-            let Some(action) = surface.read(cx).next_action().cloned() else {
-                break;
-            };
+        while let Some(action) = surface.read(cx).next_action().cloned() {
             let decision = match action {
                 ConversationSurfaceAction::DisclosureToggleRequested { id, requested_open } => self
                     .route_controller_event(
@@ -364,12 +361,15 @@ impl ConversationHost {
         cx: &mut Context<Self>,
     ) -> SurfaceRouteDecision {
         match self.dispatch(event, cx) {
-            Ok(()) | Err(ConversationHostError::Controller(_)) => SurfaceRouteDecision::Accepted,
+            Ok(())
+            | Err(
+                ConversationHostError::Controller(_)
+                | ConversationHostError::SceneProjection(_)
+                | ConversationHostError::InvalidThreadId(_),
+            ) => SurfaceRouteDecision::Accepted,
             Err(ConversationHostError::EffectOutboxFull { .. }) => {
                 SurfaceRouteDecision::Backpressured
             }
-            Err(ConversationHostError::SceneProjection(_))
-            | Err(ConversationHostError::InvalidThreadId(_)) => SurfaceRouteDecision::Accepted,
         }
     }
 
@@ -426,16 +426,16 @@ impl ConversationHost {
 }
 
 fn effect_invalidates_render(effect: &ConversationStateEffect) -> bool {
-    match effect {
-        ConversationStateEffect::SceneInvalidated => true,
-        ConversationStateEffect::Delivery(ConversationDeliveryEffect::Invalidate) => true,
-        ConversationStateEffect::Steering {
-            effect: SteeringEffect::RenderInvalidation { .. },
-            ..
-        }
-        | ConversationStateEffect::Viewport(ViewportEffect::InvalidateRender) => true,
-        _ => false,
-    }
+    matches!(
+        effect,
+        ConversationStateEffect::SceneInvalidated
+            | ConversationStateEffect::Delivery(ConversationDeliveryEffect::Invalidate)
+            | ConversationStateEffect::Steering {
+                effect: SteeringEffect::RenderInvalidation { .. },
+                ..
+            }
+            | ConversationStateEffect::Viewport(ViewportEffect::InvalidateRender)
+    )
 }
 
 impl Render for ConversationHost {

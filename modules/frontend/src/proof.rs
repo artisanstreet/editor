@@ -100,7 +100,7 @@ impl ProofSurface {
                     Ok(host) => {
                         suppress_conversation_tab_stops(&host, cx);
                         let subscription = cx.observe(&host, |proof, host, cx| {
-                            proof.collect_conversation_effects(host, cx);
+                            proof.collect_conversation_effects(&host, cx);
                         });
                         (Some(host), Some(subscription))
                     }
@@ -133,7 +133,7 @@ impl ProofSurface {
             conversation_effects,
         };
         if let Some(host) = proof.conversation_host.clone() {
-            proof.collect_conversation_effects(host, cx);
+            proof.collect_conversation_effects(&host, cx);
         }
         proof
     }
@@ -199,7 +199,7 @@ impl ProofSurface {
 
     fn collect_conversation_effects(
         &mut self,
-        host: Entity<conversation_host::ConversationHost>,
+        host: &Entity<conversation_host::ConversationHost>,
         cx: &mut Context<Self>,
     ) {
         let mut changed = false;
@@ -239,11 +239,14 @@ impl ProofSurface {
         host: Entity<conversation_host::ConversationHost>,
         cx: &mut Context<Self>,
     ) {
-        self.collect_conversation_effects(host.clone(), cx);
+        self.collect_conversation_effects(&host, cx);
         if host.read(cx).total_pending_effect_count() == 0 {
-            host.update(cx, |host, host_cx| host.process_pending_actions(host_cx));
+            host.update(
+                cx,
+                conversation_host::ConversationHost::process_pending_actions,
+            );
         }
-        self.collect_conversation_effects(host, cx);
+        self.collect_conversation_effects(&host, cx);
     }
 }
 
