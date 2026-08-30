@@ -234,6 +234,7 @@ rust_test(
     deps = [
         "//modules/backend:backend",
         "//modules/database:database",
+        "//modules/domain:domain",
         "//modules/protocol:protocol",
         "//modules/transport:transport",
         "@crates//:quinn",
