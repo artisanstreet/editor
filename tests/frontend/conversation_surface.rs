@@ -212,7 +212,7 @@ fn ordered_scene_items() -> Vec<SceneItem> {
             },
             None,
         ),
-    ];
+    ]
 }
 
 #[test]
