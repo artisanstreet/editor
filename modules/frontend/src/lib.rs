@@ -34,6 +34,7 @@ pub mod conversation_checklist;
 pub mod conversation_delivery_machine;
 pub mod conversation_diff_stat;
 pub mod conversation_error_card_policy;
+pub mod conversation_host;
 pub mod conversation_presentation;
 pub mod conversation_projection;
 pub mod conversation_relative_age;
