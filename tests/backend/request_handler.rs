@@ -11,7 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use artisan_backend::conversation_subscription_registry::{ActivateError, SubscriptionState};
+use artisan_backend::conversation_subscription_registry::{
+    ActivateError, ApplyBatchError, SubscriptionLease, SubscriptionState, SubscriptionView,
+};
+use artisan_backend::request_handler::{
+    ActivatedConversationSubscription, ConversationSubscriptionRegistrar, RequestHandlerReceipt,
+};
 use artisan_backend::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeStorage, RequestHandler,
 };
@@ -22,10 +27,12 @@ use artisan_database::{
     RunLaunchCredentials, RunStartKey, SqliteConfig,
 };
 use artisan_domain::{
-    Command, ConversationCursor, ConversationQuery, ConversationQueryBounds, ConversationRequest,
-    ConversationSubscribe, ConversationUnsubscribe, DirectoryId, DisplayName, ListAttachedProjects,
-    ListDirectories, ListProjectThreads, MessageBody, MessageId, ProjectId, Query, QueryTurnCount,
-    ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadSummary, ThreadTitle, UnixMillis,
+    Command, ConversationCursor, ConversationPatch, ConversationQuery, ConversationQueryBounds,
+    ConversationRequest, ConversationSubscribe, ConversationUnsubscribe, DirectoryId, DisplayName,
+    IncrementalText, ItemId, ListAttachedProjects, ListDirectories, ListProjectThreads,
+    MessageBody, MessageId, PatchBatch, PatchId, PatchSequence, ProjectId, Query, QueryTurnCount,
+    ReceiptDisposition, RequestId, Revision, RootPath, ThreadId, ThreadSummary, ThreadTitle,
+    UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt,
@@ -387,6 +394,95 @@ async fn seed_conversation(repository: &Repository, thread_id: &str, label: &str
         bound,
         BindRunProviderOutcome::Bound(_) | BindRunProviderOutcome::AlreadyBound(_)
     ));
+}
+
+fn single_patch_batch(thread_id: ThreadId, from: u64, to: u64, patch_id: &str) -> PatchBatch {
+    PatchBatch::new(
+        thread_id,
+        ConversationCursor::new(from),
+        ConversationCursor::new(to),
+        vec![ConversationPatch::ItemAppend {
+            patch_id: PatchId::parse(patch_id).expect("fixture patch id should be valid"),
+            sequence: PatchSequence::new(to).expect("fixture sequence should be positive"),
+            item_id: ItemId::parse("item-registrar").expect("fixture item id should be valid"),
+            revision: Revision::new(to),
+            text: IncrementalText::parse("x").expect("fixture fragment should be valid"),
+            updated_at: UnixMillis::from_millis(1),
+        }],
+    )
+    .expect("fixture batch should be valid")
+}
+
+async fn subscription_request(
+    handler: &RequestHandler,
+    frame_id: &str,
+    subscription: ConversationSubscribe,
+) -> (
+    Result<ServerResponse, ProtocolFailure>,
+    RequestHandlerReceipt,
+) {
+    handler
+        .respond_with_receipt(
+            &request(frame_id),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(subscription)),
+        )
+        .await
+        .into_parts()
+}
+
+async fn unsubscribe_request(
+    handler: &RequestHandler,
+    frame_id: &str,
+    thread_id: ThreadId,
+) -> (
+    Result<ServerResponse, ProtocolFailure>,
+    RequestHandlerReceipt,
+) {
+    handler
+        .respond_with_receipt(
+            &request(frame_id),
+            &ClientRequest::Conversation(ConversationRequest::Unsubscribe(
+                ConversationUnsubscribe { thread_id },
+            )),
+        )
+        .await
+        .into_parts()
+}
+
+async fn activate_subscription(
+    handler: &RequestHandler,
+    receipt: RequestHandlerReceipt,
+) -> ActivatedConversationSubscription {
+    handler
+        .activate_after_response(receipt)
+        .await
+        .expect("subscription receipt should activate")
+        .expect("subscription receipt should carry activation work")
+}
+
+async fn registrar_view(
+    registrar: &ConversationSubscriptionRegistrar,
+    thread_id: &ThreadId,
+) -> SubscriptionView {
+    registrar
+        .subscription_view(thread_id)
+        .await
+        .expect("subscription should be visible")
+}
+
+async fn assert_batch_error(
+    registrar: &ConversationSubscriptionRegistrar,
+    lease: &SubscriptionLease,
+    batch: &PatchBatch,
+    expected: ApplyBatchError,
+    thread_id: &ThreadId,
+    view: &SubscriptionView,
+) {
+    assert_eq!(
+        registrar.record_published_batch(lease, batch).await,
+        Err(expected)
+    );
+    assert_eq!(registrar_view(registrar, thread_id).await, view.clone());
 }
 
 #[tokio::test]
@@ -2501,5 +2597,482 @@ async fn receipt_handler_non_subscription_query_and_command_match_respond_withou
         .into_parts();
     assert_eq!(receipt_command, ordinary_command);
     assert!(command_receipt.is_no_work());
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn supplied_registrar_observes_fresh_and_resume_after_activation() {
+    let (_temporary, storage) = opened_storage("registrar-observes").await;
+    let repository = storage.repository();
+    let fresh_thread = ThreadId::parse("thread-registrar-fresh").expect("valid thread id");
+    let resume_thread = ThreadId::parse("thread-registrar-resume").expect("valid thread id");
+    seed_conversation(repository, fresh_thread.as_str(), "registrar-fresh").await;
+    seed_conversation(repository, resume_thread.as_str(), "registrar-resume").await;
+
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let retained_registrar = registrar.clone();
+    let handler = RequestHandler::with_subscription_registrar(repository.clone(), registrar);
+
+    let (fresh_wire, fresh_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-registrar-fresh"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(fresh_thread.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    let fresh_response = fresh_wire.expect("fresh subscription should answer");
+    let ResponsePayload::ConversationSubscriptionStarted(ConversationSubscriptionStarted::Fresh(
+        start,
+    )) = fresh_response.payload
+    else {
+        panic!("expected a fresh subscription response");
+    };
+    let fresh_cursor = start.snapshot().cursor();
+    let fresh_pending = retained_registrar
+        .subscription_view(&fresh_thread)
+        .await
+        .expect("retained registrar should see fresh registration");
+    assert_eq!(fresh_pending.state(), SubscriptionState::Pending);
+    assert_eq!(fresh_pending.cursor(), fresh_cursor);
+
+    let fresh_activated = handler
+        .activate_after_response(fresh_receipt)
+        .await
+        .expect("fresh receipt should activate")
+        .expect("fresh receipt should carry activation work");
+    assert_eq!(fresh_activated.lease(), fresh_pending.lease());
+    assert_eq!(fresh_activated.cursor(), fresh_cursor);
+    let fresh_active = retained_registrar
+        .subscription_view(&fresh_thread)
+        .await
+        .expect("retained registrar should see active fresh registration");
+    assert_eq!(fresh_active.state(), SubscriptionState::Active);
+    assert_eq!(fresh_active.cursor(), fresh_cursor);
+
+    let resume_cursor = ConversationCursor::new(1);
+    let (resume_wire, resume_receipt) = handler
+        .respond_with_receipt(
+            &request("frame-registrar-resume"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::resume(resume_thread.clone(), resume_cursor),
+            )),
+        )
+        .await
+        .into_parts();
+    let resume_response = resume_wire.expect("resume subscription should answer");
+    let ResponsePayload::ConversationSubscriptionStarted(
+        ConversationSubscriptionStarted::Resumed { thread_id, cursor },
+    ) = resume_response.payload
+    else {
+        panic!("expected a resumed subscription response");
+    };
+    assert_eq!(thread_id, resume_thread);
+    assert_eq!(cursor, resume_cursor);
+    let resume_pending = retained_registrar
+        .subscription_view(&resume_thread)
+        .await
+        .expect("retained registrar should see resume registration");
+    assert_eq!(resume_pending.state(), SubscriptionState::Pending);
+    assert_eq!(resume_pending.cursor(), resume_cursor);
+
+    let resume_activated = handler
+        .activate_after_response(resume_receipt)
+        .await
+        .expect("resume receipt should activate")
+        .expect("resume receipt should carry activation work");
+    assert_eq!(resume_activated.lease(), resume_pending.lease());
+    assert_eq!(resume_activated.cursor(), resume_cursor);
+    let resume_active = retained_registrar
+        .subscription_view(&resume_thread)
+        .await
+        .expect("retained registrar should see active resume registration");
+    assert_eq!(resume_active.state(), SubscriptionState::Active);
+    assert_eq!(resume_active.cursor(), resume_cursor);
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn retained_registrar_records_publication_only_after_explicit_call() {
+    let (_temporary, storage) = opened_storage("registrar-publication").await;
+    let repository = storage.repository();
+    let thread_id = ThreadId::parse("thread-registrar-publication").expect("valid thread id");
+    seed_conversation(repository, thread_id.as_str(), "registrar-publication").await;
+
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let retained_registrar = registrar.clone();
+    let handler = RequestHandler::with_subscription_registrar(repository.clone(), registrar);
+    let (wire, receipt) = handler
+        .respond_with_receipt(
+            &request("frame-registrar-publication"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_id.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    wire.expect("subscription should answer");
+    let pending = retained_registrar
+        .subscription_view(&thread_id)
+        .await
+        .expect("subscription should be visible");
+    let lease = pending.lease().clone();
+    let activated = handler
+        .activate_after_response(receipt)
+        .await
+        .expect("subscription should activate")
+        .expect("subscription should carry activation work");
+    assert_eq!(activated.cursor(), ConversationCursor::new(2));
+
+    let before_publication = handler
+        .subscription_view(&thread_id)
+        .await
+        .expect("active subscription should be visible");
+    assert_eq!(before_publication.state(), SubscriptionState::Active);
+    assert_eq!(before_publication.cursor(), ConversationCursor::new(2));
+
+    let batch = single_patch_batch(thread_id.clone(), 2, 3, "patch-registrar-publication");
+    assert_eq!(
+        handler
+            .subscription_view(&thread_id)
+            .await
+            .expect("subscription should remain visible")
+            .cursor(),
+        ConversationCursor::new(2)
+    );
+    assert_eq!(
+        retained_registrar
+            .record_published_batch(&lease, &batch)
+            .await,
+        Ok(ConversationCursor::new(3))
+    );
+    assert_eq!(
+        handler
+            .subscription_view(&thread_id)
+            .await
+            .expect("published subscription should remain visible")
+            .cursor(),
+        ConversationCursor::new(3)
+    );
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn registrar_publication_preserves_pending_stale_and_thread_fences() {
+    let (_temporary, storage) = opened_storage("registrar-publication-fences").await;
+    let repository = storage.repository();
+    let thread_a = ThreadId::parse("thread-registrar-fence-a").expect("valid thread id");
+    let thread_b = ThreadId::parse("thread-registrar-fence-b").expect("valid thread id");
+    seed_conversation(repository, thread_a.as_str(), "registrar-fence-a").await;
+    seed_conversation(repository, thread_b.as_str(), "registrar-fence-b").await;
+
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let handler =
+        RequestHandler::with_subscription_registrar(repository.clone(), registrar.clone());
+
+    let (first_wire, first_receipt) = subscription_request(
+        &handler,
+        "frame-registrar-fence-first",
+        ConversationSubscribe::fresh(thread_a.clone()),
+    )
+    .await;
+    first_wire.expect("first subscription should answer");
+    let first_pending = registrar
+        .subscription_view(&thread_a)
+        .await
+        .expect("first subscription should be visible");
+    let first_lease = first_pending.lease().clone();
+    let pending_batch = single_patch_batch(thread_a.clone(), 2, 3, "patch-registrar-pending");
+    assert_batch_error(
+        &registrar,
+        &first_lease,
+        &pending_batch,
+        ApplyBatchError::NotActive,
+        &thread_a,
+        &first_pending,
+    )
+    .await;
+    drop(first_receipt);
+
+    let (replacement_wire, replacement_receipt) = subscription_request(
+        &handler,
+        "frame-registrar-fence-replacement",
+        ConversationSubscribe::resume(thread_a.clone(), ConversationCursor::new(2)),
+    )
+    .await;
+    replacement_wire.expect("replacement subscription should answer");
+    let replacement_pending = registrar_view(&registrar, &thread_a).await;
+    assert_ne!(first_pending.lease(), replacement_pending.lease());
+    assert_batch_error(
+        &registrar,
+        &first_lease,
+        &pending_batch,
+        ApplyBatchError::StaleLease,
+        &thread_a,
+        &replacement_pending,
+    )
+    .await;
+    let replacement_lease = replacement_pending.lease().clone();
+    let replacement_activated = activate_subscription(&handler, replacement_receipt).await;
+    assert_eq!(replacement_activated.cursor(), ConversationCursor::new(2));
+
+    let (other_wire, other_receipt) = subscription_request(
+        &handler,
+        "frame-registrar-fence-other",
+        ConversationSubscribe::fresh(thread_b.clone()),
+    )
+    .await;
+    other_wire.expect("other subscription should answer");
+    let other_activated = activate_subscription(&handler, other_receipt).await;
+    assert_eq!(other_activated.cursor(), ConversationCursor::new(2));
+
+    let before_a = registrar_view(&registrar, &thread_a).await;
+    let before_b = registrar_view(&registrar, &thread_b).await;
+    let thread_mismatch = single_patch_batch(thread_b.clone(), 2, 3, "patch-registrar-mismatch");
+    assert_batch_error(
+        &registrar,
+        &replacement_lease,
+        &thread_mismatch,
+        ApplyBatchError::ThreadMismatch,
+        &thread_a,
+        &before_a,
+    )
+    .await;
+    assert_eq!(registrar_view(&registrar, &thread_b).await, before_b);
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn registrar_publication_preserves_duplicate_regression_and_gap_cursor_fences() {
+    let (_temporary, storage) = opened_storage("registrar-cursor-fences").await;
+    let repository = storage.repository();
+    let thread_id = ThreadId::parse("thread-registrar-cursor-fence").expect("valid thread id");
+    seed_conversation(repository, thread_id.as_str(), "registrar-cursor-fence").await;
+
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let handler =
+        RequestHandler::with_subscription_registrar(repository.clone(), registrar.clone());
+    let (wire, receipt) = subscription_request(
+        &handler,
+        "frame-registrar-cursor-fence",
+        ConversationSubscribe::fresh(thread_id.clone()),
+    )
+    .await;
+    wire.expect("subscription should answer");
+    let activated = activate_subscription(&handler, receipt).await;
+    assert_eq!(activated.cursor(), ConversationCursor::new(2));
+    let lease = registrar_view(&registrar, &thread_id).await.lease().clone();
+
+    let advance = single_patch_batch(thread_id.clone(), 2, 3, "patch-registrar-advance");
+    assert_eq!(
+        registrar.record_published_batch(&lease, &advance).await,
+        Ok(ConversationCursor::new(3))
+    );
+    let after_advance = registrar_view(&registrar, &thread_id).await;
+    assert_eq!(after_advance.state(), SubscriptionState::Active);
+    assert_eq!(after_advance.cursor(), ConversationCursor::new(3));
+
+    let duplicate = single_patch_batch(thread_id.clone(), 2, 3, "patch-registrar-duplicate");
+    assert_batch_error(
+        &registrar,
+        &lease,
+        &duplicate,
+        ApplyBatchError::CursorMismatch {
+            expected: ConversationCursor::new(3),
+            actual: ConversationCursor::new(2),
+        },
+        &thread_id,
+        &after_advance,
+    )
+    .await;
+
+    let regression = single_patch_batch(thread_id.clone(), 1, 2, "patch-registrar-regression");
+    assert_batch_error(
+        &registrar,
+        &lease,
+        &regression,
+        ApplyBatchError::CursorMismatch {
+            expected: ConversationCursor::new(3),
+            actual: ConversationCursor::new(1),
+        },
+        &thread_id,
+        &after_advance,
+    )
+    .await;
+
+    let gap = single_patch_batch(thread_id.clone(), 4, 5, "patch-registrar-gap");
+    assert_batch_error(
+        &registrar,
+        &lease,
+        &gap,
+        ApplyBatchError::CursorMismatch {
+            expected: ConversationCursor::new(3),
+            actual: ConversationCursor::new(4),
+        },
+        &thread_id,
+        &after_advance,
+    )
+    .await;
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn shared_registrar_keeps_receipt_identity_private() {
+    let (_temporary, storage) = opened_storage("registrar-shared-identity").await;
+    let repository = storage.repository();
+    let thread_a = ThreadId::parse("thread-registrar-shared-a").expect("valid thread id");
+    let thread_b = ThreadId::parse("thread-registrar-shared-b").expect("valid thread id");
+    seed_conversation(repository, thread_a.as_str(), "registrar-shared-a").await;
+    seed_conversation(repository, thread_b.as_str(), "registrar-shared-b").await;
+
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let handler_a =
+        RequestHandler::with_subscription_registrar(repository.clone(), registrar.clone());
+    let handler_b =
+        RequestHandler::with_subscription_registrar(repository.clone(), registrar.clone());
+
+    let (a_wire, a_receipt) = handler_a
+        .respond_with_receipt(
+            &request("frame-registrar-shared-a"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_a.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    a_wire.expect("handler A subscription should answer");
+    let (a_other_wire, a_other_receipt) = handler_a
+        .respond_with_receipt(
+            &request("frame-registrar-shared-other"),
+            &ClientRequest::Conversation(ConversationRequest::Subscribe(
+                ConversationSubscribe::fresh(thread_b.clone()),
+            )),
+        )
+        .await
+        .into_parts();
+    a_other_wire.expect("handler A second subscription should answer");
+
+    let a_pending = registrar
+        .subscription_view(&thread_a)
+        .await
+        .expect("shared registrar should see handler A subscription");
+    assert_eq!(a_pending.state(), SubscriptionState::Pending);
+    assert_eq!(
+        handler_b.activate_after_response(a_receipt).await,
+        Err(ActivateError::StaleLease)
+    );
+    assert_eq!(
+        registrar.subscription_view(&thread_a).await,
+        Some(a_pending.clone())
+    );
+
+    let a_other_activated = handler_a
+        .activate_after_response(a_other_receipt)
+        .await
+        .expect("handler A should activate its own receipt")
+        .expect("handler A receipt should carry activation work");
+    assert_eq!(a_other_activated.cursor(), ConversationCursor::new(2));
+    assert_eq!(
+        handler_b
+            .subscription_view(&thread_b)
+            .await
+            .expect("handler B should observe the shared active entry")
+            .state(),
+        SubscriptionState::Active
+    );
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn handler_unsubscribe_and_replacement_stale_retained_publication_leases() {
+    let (_temporary, storage) = opened_storage("registrar-stale-retained").await;
+    let repository = storage.repository();
+    let thread_id = ThreadId::parse("thread-registrar-stale-retained").expect("valid thread id");
+    seed_conversation(repository, thread_id.as_str(), "registrar-stale-retained").await;
+
+    let registrar = ConversationSubscriptionRegistrar::new();
+    let retained_registrar = registrar.clone();
+    let handler = RequestHandler::with_subscription_registrar(repository.clone(), registrar);
+    let (wire, receipt) = subscription_request(
+        &handler,
+        "frame-registrar-stale-initial",
+        ConversationSubscribe::fresh(thread_id.clone()),
+    )
+    .await;
+    wire.expect("initial subscription should answer");
+    let initial_activated = activate_subscription(&handler, receipt).await;
+    assert_eq!(initial_activated.cursor(), ConversationCursor::new(2));
+    let initial_lease = registrar_view(&retained_registrar, &thread_id)
+        .await
+        .lease()
+        .clone();
+    let initial_batch =
+        single_patch_batch(thread_id.clone(), 2, 3, "patch-registrar-stale-unsubscribe");
+
+    let (stop_wire, stop_receipt) = unsubscribe_request(
+        &handler,
+        "frame-registrar-stale-unsubscribe",
+        thread_id.clone(),
+    )
+    .await;
+    stop_wire.expect("unsubscribe should answer");
+    assert!(stop_receipt.is_no_work());
+    assert!(
+        retained_registrar
+            .subscription_view(&thread_id)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        retained_registrar
+            .record_published_batch(&initial_lease, &initial_batch)
+            .await,
+        Err(ApplyBatchError::StaleLease)
+    );
+
+    let (second_wire, second_receipt) = subscription_request(
+        &handler,
+        "frame-registrar-stale-second",
+        ConversationSubscribe::fresh(thread_id.clone()),
+    )
+    .await;
+    second_wire.expect("second subscription should answer");
+    let second_activated = activate_subscription(&handler, second_receipt).await;
+    assert_eq!(second_activated.cursor(), ConversationCursor::new(2));
+    let replaced_lease = registrar_view(&retained_registrar, &thread_id)
+        .await
+        .lease()
+        .clone();
+
+    let (replacement_wire, replacement_receipt) = subscription_request(
+        &handler,
+        "frame-registrar-stale-replacement",
+        ConversationSubscribe::resume(thread_id.clone(), ConversationCursor::new(2)),
+    )
+    .await;
+    replacement_wire.expect("replacement subscription should answer");
+    let replacement = registrar_view(&retained_registrar, &thread_id).await;
+    assert_eq!(replacement.state(), SubscriptionState::Pending);
+    assert_ne!(replacement.lease(), &replaced_lease);
+    let replacement_batch =
+        single_patch_batch(thread_id.clone(), 2, 3, "patch-registrar-stale-replacement");
+    assert_eq!(
+        retained_registrar
+            .record_published_batch(&replaced_lease, &replacement_batch)
+            .await,
+        Err(ApplyBatchError::StaleLease)
+    );
+    assert_eq!(
+        retained_registrar.subscription_view(&thread_id).await,
+        Some(replacement)
+    );
+    drop(replacement_receipt);
+
     storage.close().await.expect("storage should close");
 }

@@ -35,8 +35,8 @@ use std::sync::Arc;
 use artisan_database::{CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError};
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
-    ConversationUnsubscribe, CreateThread, DirectoryId, MessageId, Query, QueueFirstMessage,
-    RequestId, ThreadId, UnixMillis,
+    ConversationUnsubscribe, CreateThread, DirectoryId, MessageId, PatchBatch, Query,
+    QueueFirstMessage, RequestId, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, ErrorCode, ErrorDetail, FirstMessageReceipt, ProtocolFailure, ResponsePayload,
@@ -51,8 +51,8 @@ use crate::conversation_subscription_preparation::{
     PrepareSubscriptionError, prepare_conversation_subscription, stop_conversation_subscription,
 };
 use crate::conversation_subscription_registry::{
-    ActivateError, ConversationSubscriptionRegistry, RegisterError, SubscriptionLease,
-    SubscriptionView,
+    ActivateError, ApplyBatchError, ConversationSubscriptionRegistry, RegisterError,
+    SubscriptionLease, SubscriptionView,
 };
 
 /// Detail used when a diagnostic text would exceed the protocol-owned
@@ -66,6 +66,61 @@ const RESNAPSHOT_REQUIRED_DETAIL: &str = "a fresh conversation resnapshot is req
 /// exhausted.
 const SUBSCRIPTION_GENERATION_EXHAUSTED_DETAIL: &str =
     "conversation subscription registration capacity is exhausted";
+
+/// Cloneable owner of one connection-local conversation subscription table.
+///
+/// Cloning this registrar shares custody of the same private table without
+/// exposing its mutex, map, or synchronous registry. Request-handler receipt
+/// identity is deliberately kept outside this value so a registrar clone
+/// cannot activate another handler's receipt.
+#[derive(Clone, Debug)]
+pub struct ConversationSubscriptionRegistrar {
+    registry: Arc<Mutex<ConversationSubscriptionRegistry>>,
+}
+
+impl Default for ConversationSubscriptionRegistrar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConversationSubscriptionRegistrar {
+    /// Creates one empty, independent connection-local subscription table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            registry: Arc::new(Mutex::new(ConversationSubscriptionRegistry::new())),
+        }
+    }
+
+    /// Returns an owned snapshot of one registered subscription, if present.
+    ///
+    /// The registry remains private and the returned [`SubscriptionView`] is
+    /// detached from later table mutations.
+    pub async fn subscription_view(&self, thread_id: &ThreadId) -> Option<SubscriptionView> {
+        self.registry.lock().await.view(thread_id)
+    }
+
+    /// Records a patch batch whose wire publication has already succeeded.
+    ///
+    /// Callers must invoke this only after the later writer reports successful
+    /// wire publication. This method performs no publication, retry, or cursor
+    /// reinterpretation; it applies the exact registry lease, thread, state,
+    /// and `from_cursor` fences once.
+    ///
+    /// # Errors
+    ///
+    /// Returns the exact [`ApplyBatchError`] from the private registry when
+    /// the lease, thread, lifecycle state, or cursor fence is not accepted.
+    pub async fn record_published_batch(
+        &self,
+        lease: &SubscriptionLease,
+        batch: &PatchBatch,
+    ) -> Result<ConversationCursor, ApplyBatchError> {
+        let mut registry = self.registry.lock().await;
+        registry.publish_batch(lease, batch)
+    }
+}
 
 /// Private, non-zero-sized allocation identity for one handler-owned
 /// subscription registrar.
@@ -185,7 +240,7 @@ impl ActivatedConversationSubscription {
 pub struct RequestHandler {
     repository: Repository,
     origin: AdmissionOrigin,
-    subscriptions: Option<Mutex<ConversationSubscriptionRegistry>>,
+    subscriptions: Option<ConversationSubscriptionRegistrar>,
     subscription_identity: Option<Arc<SubscriptionRegistrarIdentity>>,
 }
 
@@ -253,21 +308,33 @@ impl RequestHandler {
         }
     }
 
-    /// Creates a handler with the normal system admission origin and one
-    /// connection-local conversation subscription registry.
+    /// Creates a handler with the normal system admission origin and a
+    /// supplied connection-local conversation subscription registrar.
     ///
-    /// The registry is owned exclusively by this handler behind an async
-    /// mutex. It is neither shared nor cloneable, and ordinary [`Self::respond`]
-    /// calls continue to use the unbacked subscription behavior.
+    /// A new private allocation identity fences this handler's receipts even
+    /// when the registrar is deliberately shared with another handler.
     #[must_use]
-    pub fn with_subscriptions(repository: Repository) -> Self {
+    pub fn with_subscription_registrar(
+        repository: Repository,
+        registrar: ConversationSubscriptionRegistrar,
+    ) -> Self {
         let subscription_identity = Arc::new(0_u8);
         Self {
             repository,
             origin: AdmissionOrigin::system(),
-            subscriptions: Some(Mutex::new(ConversationSubscriptionRegistry::new())),
+            subscriptions: Some(registrar),
             subscription_identity: Some(subscription_identity),
         }
+    }
+
+    /// Creates a handler with a fresh connection-local conversation
+    /// subscription registrar.
+    ///
+    /// Ordinary [`Self::respond`] calls continue to use the unbacked
+    /// subscription behavior.
+    #[must_use]
+    pub fn with_subscriptions(repository: Repository) -> Self {
+        Self::with_subscription_registrar(repository, ConversationSubscriptionRegistrar::new())
     }
 
     /// Resolves one correlated application request to its typed outcome.
@@ -376,10 +443,10 @@ impl RequestHandler {
         if !Arc::ptr_eq(subscription_identity, &activation.registrar) {
             return Err(ActivateError::StaleLease);
         }
-        let Some(subscriptions) = self.subscriptions.as_ref() else {
+        let Some(registrar) = self.subscriptions.as_ref() else {
             return Err(ActivateError::StaleLease);
         };
-        let mut registry = subscriptions.lock().await;
+        let mut registry = registrar.registry.lock().await;
         let cursor = registry.activate(&activation.lease)?;
         Ok(Some(ActivatedConversationSubscription {
             lease: activation.lease,
@@ -389,11 +456,13 @@ impl RequestHandler {
 
     /// Returns an owned read-only view of one handler-local subscription.
     ///
-    /// A handler created without [`Self::with_subscriptions`] always returns
+    /// A handler created without a subscription registrar always returns
     /// `None`; the registry itself is never exposed.
     pub async fn subscription_view(&self, thread_id: &ThreadId) -> Option<SubscriptionView> {
-        let subscriptions = self.subscriptions.as_ref()?;
-        subscriptions.lock().await.view(thread_id)
+        self.subscriptions
+            .as_ref()?
+            .subscription_view(thread_id)
+            .await
     }
 
     async fn subscribe_with_receipt(
@@ -402,7 +471,7 @@ impl RequestHandler {
         request: &ClientRequest,
         subscribe: &ConversationSubscribe,
     ) -> RequestHandlerResponse {
-        let Some(subscriptions) = self.subscriptions.as_ref() else {
+        let Some(registrar) = self.subscriptions.as_ref() else {
             return RequestHandlerResponse::without_receipt(
                 self.respond(request_id, request).await,
             );
@@ -412,7 +481,7 @@ impl RequestHandler {
                 self.respond(request_id, request).await,
             );
         };
-        let mut registry = subscriptions.lock().await;
+        let mut registry = registrar.registry.lock().await;
         match prepare_conversation_subscription(&self.repository, &mut registry, subscribe).await {
             Ok(prepared) => {
                 let (started, lease) = prepared.into_parts();
@@ -436,12 +505,12 @@ impl RequestHandler {
         request: &ClientRequest,
         unsubscribe: &ConversationUnsubscribe,
     ) -> RequestHandlerResponse {
-        let Some(subscriptions) = self.subscriptions.as_ref() else {
+        let Some(registrar) = self.subscriptions.as_ref() else {
             return RequestHandlerResponse::without_receipt(
                 self.respond(request_id, request).await,
             );
         };
-        let mut registry = subscriptions.lock().await;
+        let mut registry = registrar.registry.lock().await;
         let (stopped, _outcome) =
             stop_conversation_subscription(&mut registry, unsubscribe).into_parts();
         RequestHandlerResponse::without_receipt(Ok(outcome(
