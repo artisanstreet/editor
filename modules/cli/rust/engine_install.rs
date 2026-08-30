@@ -650,9 +650,7 @@ fn download_archive(
         declared_length,
         spec.download_bound_bytes(),
     )?;
-    if digest != expected {
-        return Err(NativeOpenCode2InstallError::IntegrityMismatch);
-    }
+    verify_compressed_integrity(&digest, &expected)?;
     verify_archive_custody(&archive)?;
     lock.fence(paths)?;
     archive
@@ -690,6 +688,17 @@ fn certified_integrity(
     decoded
         .try_into()
         .map_err(|_| NativeOpenCode2InstallError::IntegrityInvalid)
+}
+
+fn verify_compressed_integrity(
+    actual: &[u8; 64],
+    expected: &[u8; 64],
+) -> Result<(), NativeOpenCode2InstallError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(NativeOpenCode2InstallError::IntegrityMismatch)
+    }
 }
 
 fn copy_bounded<R: Read, W: Write>(
@@ -1154,11 +1163,17 @@ mod tests {
     }
 
     #[test]
-    fn bounded_copy_rejects_declared_and_streamed_overflow() {
+    fn bounded_copy_enforces_declared_and_streamed_bounds() {
         let mut output = Vec::new();
         let mut reader = Cursor::new(b"12345".to_vec());
         assert_eq!(
             copy_bounded(&mut reader, &mut output, Some(6), 5),
+            Err(NativeOpenCode2InstallError::DownloadTooLarge)
+        );
+        let mut output = Vec::new();
+        let mut reader = Cursor::new(b"12345".to_vec());
+        assert_eq!(
+            copy_bounded(&mut reader, &mut output, Some(4), 5),
             Err(NativeOpenCode2InstallError::DownloadFailed)
         );
         let mut output = Vec::new();
@@ -1169,13 +1184,31 @@ mod tests {
         );
         let mut output = Vec::new();
         let mut reader = Cursor::new(b"12345".to_vec());
-        assert!(copy_bounded(&mut reader, &mut output, Some(5), 5).is_ok());
+        let digest = copy_bounded(&mut reader, &mut output, Some(5), 5).unwrap();
+        let expected = Sha512::digest(b"12345");
+        let mut expected_digest = [0_u8; 64];
+        expected_digest.copy_from_slice(&expected);
+        assert_eq!(digest, expected_digest);
+        assert_eq!(output, b"12345");
     }
 
     #[test]
     fn integrity_decoding_is_the_certified_sha512_length() {
         let spec = NativeOpenCode2Authority::certified_install_spec();
         assert_eq!(certified_integrity(&spec).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn compressed_integrity_requires_exact_certified_digest() {
+        let spec = NativeOpenCode2Authority::certified_install_spec();
+        let expected = certified_integrity(&spec).unwrap();
+        assert_eq!(verify_compressed_integrity(&expected, &expected), Ok(()));
+        let mut actual = expected;
+        actual[0] ^= 1;
+        assert_eq!(
+            verify_compressed_integrity(&actual, &expected),
+            Err(NativeOpenCode2InstallError::IntegrityMismatch)
+        );
     }
 
     #[test]
@@ -1223,6 +1256,21 @@ mod tests {
     }
 
     #[test]
+    fn archive_reader_rejects_unsupported_tar_entry_kinds() {
+        let target_directory = tempfile::tempdir().unwrap();
+        let target_path = target_directory.path().join("opencode2.exe");
+        for kind in [b'1', b'2', b'x', b'g', b'L', b'3'] {
+            let archive = tar_gzip(&[("unsupported", b"".as_slice(), kind)]);
+            let mut decoder = GzDecoder::new(Cursor::new(archive));
+            assert_eq!(
+                parse_tar(&mut decoder, "package/bin/opencode2.exe", &target_path, 0),
+                Err(NativeOpenCode2InstallError::ArchiveInvalid),
+                "type flag {kind}"
+            );
+        }
+    }
+
+    #[test]
     fn archive_reader_rejects_duplicates_case_collisions_and_ancestors() {
         for entries in [
             vec![
@@ -1247,6 +1295,50 @@ mod tests {
                 Err(NativeOpenCode2InstallError::ArchiveInvalid)
             );
         }
+    }
+
+    #[test]
+    fn archive_reader_rejects_entry_count_overflow_without_payloads() {
+        let archive = tar_many_entries(MAX_ARCHIVE_ENTRIES + 1);
+        let mut reader = Cursor::new(archive);
+        let target_directory = tempfile::tempdir().unwrap();
+        let target_path = target_directory.path().join("opencode2.exe");
+        assert_eq!(
+            parse_tar(&mut reader, "package/bin/opencode2.exe", &target_path, 0),
+            Err(NativeOpenCode2InstallError::ArchiveInvalid)
+        );
+    }
+
+    #[test]
+    fn archive_reader_rejects_expanded_size_overflow_before_reading_payload() {
+        let archive = tar_declared_size("oversized", EXPANDED_ARCHIVE_BOUND + 1, b'0');
+        let mut reader = Cursor::new(archive);
+        let target_directory = tempfile::tempdir().unwrap();
+        let target_path = target_directory.path().join("opencode2.exe");
+        assert_eq!(
+            parse_tar(&mut reader, "package/bin/opencode2.exe", &target_path, 0),
+            Err(NativeOpenCode2InstallError::ArchiveInvalid)
+        );
+    }
+
+    #[test]
+    fn archive_reader_rejects_missing_and_mismatched_target() {
+        let target_directory = tempfile::tempdir().unwrap();
+        let target_path = target_directory.path().join("opencode2.exe");
+
+        let archive = tar_gzip(&[("package/other", b"a".as_slice(), b'0')]);
+        let mut decoder = GzDecoder::new(Cursor::new(archive));
+        assert_eq!(
+            parse_tar(&mut decoder, "package/bin/opencode2.exe", &target_path, 1),
+            Err(NativeOpenCode2InstallError::ArchiveTargetMissing)
+        );
+
+        let archive = tar_gzip(&[("package/bin/opencode2.exe", b"a".as_slice(), b'0')]);
+        let mut decoder = GzDecoder::new(Cursor::new(archive));
+        assert_eq!(
+            parse_tar(&mut decoder, "package/bin/opencode2.exe", &target_path, 2),
+            Err(NativeOpenCode2InstallError::ArchiveTargetInvalid)
+        );
     }
 
     #[test]
@@ -1303,6 +1395,18 @@ mod tests {
         assert_eq!(
             ensure_gzip_end(decoder),
             Err(NativeOpenCode2InstallError::ArchiveInvalid)
+        );
+    }
+
+    #[test]
+    fn executable_size_and_hash_mismatches_map_to_one_path_free_error() {
+        assert_eq!(
+            map_executable_error(NativeInstanceError::FileSizeMismatch),
+            NativeOpenCode2InstallError::ExecutableInvalid
+        );
+        assert_eq!(
+            map_executable_error(NativeInstanceError::FileHashMismatch),
+            NativeOpenCode2InstallError::ExecutableInvalid
         );
     }
 
@@ -1424,24 +1528,45 @@ mod tests {
     fn tar_bytes(entries: &[(&str, &[u8], u8)]) -> Vec<u8> {
         let mut archive = Vec::new();
         for (name, body, kind) in entries {
-            let mut header = [0_u8; 512];
-            header[..name.len()].copy_from_slice(name.as_bytes());
-            write_octal(&mut header[100..108], 0o644);
-            write_octal(&mut header[108..116], 0);
-            write_octal(&mut header[116..124], 0);
-            write_octal(&mut header[124..136], body.len() as u64);
-            write_octal(&mut header[136..148], 0);
-            header[156] = *kind;
-            header[257..263].copy_from_slice(b"ustar\0");
-            for byte in &mut header[148..156] {
-                *byte = b' ';
-            }
-            let checksum = header.iter().map(|byte| u64::from(*byte)).sum();
-            write_octal(&mut header[148..156], checksum);
+            let header = tar_header(name, body.len() as u64, *kind);
             archive.extend_from_slice(&header);
             archive.extend_from_slice(body);
             archive.resize(archive.len() + ((512 - body.len() % 512) % 512), 0);
         }
+        archive.resize(archive.len() + 1024, 0);
+        archive
+    }
+
+    fn tar_header(name: &str, size: u64, kind: u8) -> [u8; 512] {
+        let mut header = [0_u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        write_octal(&mut header[100..108], 0o644);
+        write_octal(&mut header[108..116], 0);
+        write_octal(&mut header[116..124], 0);
+        write_octal(&mut header[124..136], size);
+        write_octal(&mut header[136..148], 0);
+        header[156] = kind;
+        header[257..263].copy_from_slice(b"ustar\0");
+        for byte in &mut header[148..156] {
+            *byte = b' ';
+        }
+        let checksum = header.iter().map(|byte| u64::from(*byte)).sum();
+        write_octal(&mut header[148..156], checksum);
+        header
+    }
+
+    fn tar_many_entries(count: usize) -> Vec<u8> {
+        let mut archive = Vec::with_capacity(count.saturating_mul(512).saturating_add(1024));
+        for index in 0..count {
+            let name = format!("entry-{index}");
+            archive.extend_from_slice(&tar_header(&name, 0, b'0'));
+        }
+        archive.resize(archive.len() + 1024, 0);
+        archive
+    }
+
+    fn tar_declared_size(name: &str, size: u64, kind: u8) -> Vec<u8> {
+        let mut archive = tar_header(name, size, kind).to_vec();
         archive.resize(archive.len() + 1024, 0);
         archive
     }
