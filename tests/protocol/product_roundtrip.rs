@@ -276,6 +276,12 @@ fn negotiates_hello_to_welcome_with_rotating_credentials() -> capnp::Result<()> 
 
 #[test]
 fn round_trips_negotiated_lifecycle_wire_vocabulary() -> capnp::Result<()> {
+    round_trip_lifecycle_requests()?;
+    round_trip_lifecycle_status_responses()?;
+    round_trip_lifecycle_stop_responses()
+}
+
+fn round_trip_lifecycle_requests() -> capnp::Result<()> {
     // Request @10: status is an empty nested struct, while stop carries only
     // the peer-controlled requireIdle option. The enclosing message id is
     // the complete request correlation; no nested request id is present.
@@ -315,9 +321,13 @@ fn round_trips_negotiated_lifecycle_wire_vocabulary() -> capnp::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn round_trip_lifecycle_status_responses() -> capnp::Result<()> {
     // Response @11: status exercises every lifecycle state and stop exercises
-    // every disposition/state combination. Response correlation stays on the
-    // existing outer requestId field.
+    // every status state. Response correlation stays on the existing outer
+    // requestId field.
     for (index, (state, count)) in [
         (LifecycleState::Ready, 0_u32),
         (LifecycleState::Busy, 1_u32),
@@ -352,7 +362,9 @@ fn round_trips_negotiated_lifecycle_wire_vocabulary() -> capnp::Result<()> {
                             assert_eq!(status.get_state()?, state);
                             assert_eq!(status.get_active_work_count(), count);
                         }
-                        _ => panic!("expected lifecycle status response"),
+                        lifecycle_response::Which::Stop(_) => {
+                            panic!("expected lifecycle status response")
+                        }
                     },
                     _ => panic!("expected lifecycleControl response"),
                 }
@@ -361,6 +373,10 @@ fn round_trips_negotiated_lifecycle_wire_vocabulary() -> capnp::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn round_trip_lifecycle_stop_responses() -> capnp::Result<()> {
     for state in [
         LifecycleState::Ready,
         LifecycleState::Busy,
@@ -393,7 +409,9 @@ fn round_trips_negotiated_lifecycle_wire_vocabulary() -> capnp::Result<()> {
                             assert_eq!(receipt.get_disposition()?, disposition);
                             assert_eq!(receipt.get_state()?, state);
                         }
-                        _ => panic!("expected lifecycle stop response"),
+                        lifecycle_response::Which::Status(_) => {
+                            panic!("expected lifecycle stop response")
+                        }
                     },
                     _ => panic!("expected lifecycleControl response"),
                 },
