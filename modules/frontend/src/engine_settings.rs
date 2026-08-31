@@ -440,7 +440,7 @@ impl EngineSettingsDraft {
     }
 
     fn build_runtime_controls(&self) -> Result<EngineRuntimeControls, EngineConfigError> {
-        Ok(EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        EngineRuntimeControls::new(EngineRuntimeControlsInput {
             attempt_budget: parse_millis("attempt_budget", &self.attempt_budget)?,
             readiness_budget: parse_millis("readiness_budget", &self.readiness_budget)?,
             health_budget: parse_millis("health_budget", &self.health_budget)?,
@@ -461,7 +461,7 @@ impl EngineSettingsDraft {
             )?,
             max_stderr_bytes: parse_bytes("max_stderr_bytes", &self.max_stderr_bytes)?,
             observation_capacity: parse_count("observation_capacity", &self.observation_capacity)?,
-        })?)
+        })
     }
 
     /// Attempts to build a complete validated `EngineRunConfig`.

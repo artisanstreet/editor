@@ -264,20 +264,20 @@ impl NativeApplication {
                 self.handle_registered_profiles_failed(failure, cx);
             }
             NativeTransportEvent::ThreadEngineConfigSet(result, retained) => {
-                self.handle_engine_config_set(result, *retained, cx);
+                self.handle_engine_config_set(&result, *retained, cx);
             }
             NativeTransportEvent::ThreadEngineConfigConflict {
                 thread_id,
                 request_id,
             } => {
-                self.handle_engine_conflict(thread_id, request_id, cx);
+                self.handle_engine_conflict(thread_id, &request_id, cx);
             }
             NativeTransportEvent::ThreadEngineConfigFailed {
                 thread_id,
                 request_id,
                 failure,
             } => {
-                self.handle_engine_config_failed(thread_id, request_id, failure, cx);
+                self.handle_engine_config_failed(&thread_id, &request_id, failure, cx);
             }
             NativeTransportEvent::ThreadEngineSettingsFailed {
                 thread_id,
@@ -835,21 +835,21 @@ impl NativeApplication {
 
     fn handle_engine_config_set(
         &mut self,
-        result: artisan_protocol::SetThreadEngineConfigResult,
+        result: &artisan_protocol::SetThreadEngineConfigResult,
         retained: artisan_domain::EngineRunConfig,
         cx: &mut Context<Self>,
     ) {
-        self.engine_settings.on_save_succeeded(&result, retained);
+        self.engine_settings.on_save_succeeded(result, retained);
         cx.notify();
     }
 
     fn handle_engine_conflict(
         &mut self,
         thread_id: ThreadId,
-        request_id: artisan_domain::RequestId,
+        request_id: &artisan_domain::RequestId,
         cx: &mut Context<Self>,
     ) {
-        self.engine_settings.on_conflict(thread_id, &request_id);
+        self.engine_settings.on_conflict(thread_id, request_id);
         if self.engine_settings.pending_reload_thread().is_some() {
             self.request_engine_settings_for_selected(cx);
         } else {
@@ -859,13 +859,13 @@ impl NativeApplication {
 
     fn handle_engine_config_failed(
         &mut self,
-        thread_id: ThreadId,
-        request_id: artisan_domain::RequestId,
+        thread_id: &ThreadId,
+        request_id: &artisan_domain::RequestId,
         failure: ServiceFailure,
         cx: &mut Context<Self>,
     ) {
         self.engine_settings
-            .on_save_failed(&thread_id, &request_id, failure);
+            .on_save_failed(thread_id, request_id, failure);
         cx.notify();
     }
 
@@ -881,8 +881,8 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn select_engine_profile(&mut self, profile_id: EngineProfileId, cx: &mut Context<Self>) {
-        if self.engine_settings.select_profile(&profile_id) {
+    fn select_engine_profile(&mut self, profile_id: &EngineProfileId, cx: &mut Context<Self>) {
+        if self.engine_settings.select_profile(profile_id) {
             cx.notify();
         }
     }
@@ -904,12 +904,7 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn handle_copy_manual_configuration(
-        &mut self,
-        _: &ClickEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_copy_manual_configuration(_: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         Self::copy_manual_configuration_template(cx);
     }
 
@@ -924,7 +919,7 @@ impl NativeApplication {
 
     fn handle_select_engine_profile(
         &mut self,
-        profile_id: EngineProfileId,
+        profile_id: &EngineProfileId,
         _: &ClickEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
@@ -1474,7 +1469,7 @@ fn certified_profile_choices(
                     .debug_selector(move || selector)
                     .on_click(cx.listener(move |application, event, window, cx| {
                         application.handle_select_engine_profile(
-                            profile_id_for_click.clone(),
+                            &profile_id_for_click,
                             event,
                             window,
                             cx,
@@ -1550,7 +1545,9 @@ fn engine_settings_action_controls(
     let copy_button = div()
         .id("artisan-native-engine-settings-copy-template")
         .debug_selector(|| format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-copy-template"))
-        .on_click(cx.listener(NativeApplication::handle_copy_manual_configuration))
+        .on_click(cx.listener(|_, event, window, cx| {
+            NativeApplication::handle_copy_manual_configuration(event, window, cx);
+        }))
         .p(px(4.0))
         .text_sm()
         .text_color(theme.colors.foreground.to_paint())
