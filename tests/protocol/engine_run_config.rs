@@ -443,7 +443,9 @@ fn thread_engine_settings_configured_response_round_trip_preserves_thread_revisi
                 assert_eq!(revision.get(), 7);
                 assert_eq!(*actual_config, config(true));
             }
-            other => panic!("expected configured result, got {other:?}"),
+            other @ artisan_protocol::ThreadEngineSettingsResult::Unconfigured { .. } => {
+                panic!("expected configured result, got {other:?}")
+            }
         }
     } else {
         panic!("expected thread engine settings response");
