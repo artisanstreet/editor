@@ -86,6 +86,7 @@ rust_library(
         "src/model_selection_presentation.rs",
         "src/motion_spring.rs",
         "src/native_application.rs",
+        "src/native_composer.rs",
         "src/native_transport_service.rs",
         "src/new_thread_draft.rs",
         "src/new_thread_interaction.rs",
