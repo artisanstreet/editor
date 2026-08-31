@@ -37,6 +37,9 @@ hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio
 native-dialog = { version = "=0.9.7", default-features = false, features = [
     "windows_dpi_awareness",
 ] }
+processkit = { version = "=3.3.4", default-features = false, features = [
+    "process-control",
+] }
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 quinn = { version = "=0.11.11", default-features = false, features = [
     "runtime-tokio",

@@ -1,5 +1,5 @@
 {
-  "checksum": "2b586188ea4c60e3d8d677b0be46a80f3122e6e14310199d58026035eff67fb8",
+  "checksum": "90d646b101827d8ed5254d5f2b69a5f1c28e2e81f50344672cb1307ae2e38aa0",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2481,6 +2481,10 @@
               "target": "getrandom"
             },
             {
+              "id": "processkit 3.3.4",
+              "target": "processkit"
+            },
+            {
               "id": "rcgen 0.14.9",
               "target": "rcgen"
             },
@@ -2515,6 +2519,10 @@
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
+            },
+            {
+              "id": "tokio 1.53.1",
+              "target": "tokio"
             },
             {
               "id": "winapi-util 0.1.11",
@@ -17022,25 +17030,10 @@
         "crate_features": {
           "common": [
             "alloc",
+            "default",
             "std"
           ],
-          "selects": {
-            "aarch64-apple-darwin": [
-              "default"
-            ],
-            "aarch64-unknown-linux-gnu": [
-              "default"
-            ],
-            "x86_64-pc-windows-msvc": [
-              "default"
-            ],
-            "x86_64-unknown-linux-gnu": [
-              "default"
-            ],
-            "x86_64-unknown-nixos-gnu": [
-              "default"
-            ]
-          }
+          "selects": {}
         },
         "edition": "2018",
         "version": "0.3.34"
@@ -26732,6 +26725,44 @@
       ],
       "license_file": "LICENSE-APACHE.md"
     },
+    "mutants 0.0.4": {
+      "name": "mutants",
+      "version": "0.0.4",
+      "package_url": "https://github.com/sourcefrog/cargo-mutants",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/mutants/0.0.4/download",
+          "sha256": "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
+        }
+      },
+      "targets": [
+        {
+          "ProcMacro": {
+            "crate_name": "mutants",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "mutants",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2018",
+        "version": "0.0.4"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": null
+    },
     "naga 25.0.1": {
       "name": "naga",
       "version": "25.0.1",
@@ -32125,6 +32156,101 @@
         "MIT"
       ],
       "license_file": "LICENSE-APACHE"
+    },
+    "processkit 3.3.4": {
+      "name": "processkit",
+      "version": "3.3.4",
+      "package_url": "https://github.com/ZelAnton/ProcessKit-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/processkit/3.3.4/download",
+          "sha256": "1549b59abbe4fc78aa39860e36c81da89262c1278679b8f7299ef4ad7668c004"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "processkit",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "processkit",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "process-control"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "encoding_rs 0.8.35",
+              "target": "encoding_rs"
+            },
+            {
+              "id": "thiserror 2.0.20",
+              "target": "thiserror"
+            },
+            {
+              "id": "tokio 1.53.1",
+              "target": "tokio"
+            },
+            {
+              "id": "tokio-stream 0.1.19",
+              "target": "tokio_stream"
+            },
+            {
+              "id": "tokio-util 0.7.19",
+              "target": "tokio_util"
+            }
+          ],
+          "selects": {
+            "cfg(unix)": [
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              }
+            ],
+            "cfg(windows)": [
+              {
+                "id": "windows-sys 0.61.2",
+                "target": "windows_sys"
+              }
+            ]
+          }
+        },
+        "edition": "2024",
+        "proc_macro_deps": {
+          "common": [
+            {
+              "id": "async-trait 0.1.92",
+              "target": "async_trait"
+            },
+            {
+              "id": "mutants 0.0.4",
+              "target": "mutants"
+            }
+          ],
+          "selects": {}
+        },
+        "version": "3.3.4"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
     },
     "profiling 1.0.18": {
       "name": "profiling",
@@ -46226,7 +46352,10 @@
           "common": [
             "default",
             "fs",
-            "time"
+            "io-util",
+            "sync",
+            "time",
+            "tokio-util"
           ],
           "selects": {}
         },
@@ -46243,6 +46372,10 @@
             {
               "id": "tokio 1.53.1",
               "target": "tokio"
+            },
+            {
+              "id": "tokio-util 0.7.19",
+              "target": "tokio_util"
             }
           ],
           "selects": {}
@@ -46287,12 +46420,35 @@
         ],
         "crate_features": {
           "common": [
-            "codec",
-            "default",
-            "io",
-            "libc"
+            "default"
           ],
-          "selects": {}
+          "selects": {
+            "aarch64-apple-darwin": [
+              "codec",
+              "io",
+              "libc"
+            ],
+            "aarch64-unknown-linux-gnu": [
+              "codec",
+              "io",
+              "libc"
+            ],
+            "x86_64-pc-windows-msvc": [
+              "codec",
+              "io",
+              "libc"
+            ],
+            "x86_64-unknown-linux-gnu": [
+              "codec",
+              "io",
+              "libc"
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              "codec",
+              "io",
+              "libc"
+            ]
+          }
         },
         "deps": {
           "common": [
@@ -53112,7 +53268,9 @@
             "Win32_System_Console",
             "Win32_System_Diagnostics",
             "Win32_System_Diagnostics_Debug",
+            "Win32_System_Diagnostics_ToolHelp",
             "Win32_System_IO",
+            "Win32_System_JobObjects",
             "Win32_System_LibraryLoader",
             "Win32_System_Memory",
             "Win32_System_Pipes",
@@ -53122,6 +53280,7 @@
             "Win32_System_WindowsProgramming",
             "Win32_UI",
             "Win32_UI_Shell",
+            "Win32_UI_WindowsAndMessaging",
             "default"
           ],
           "selects": {}
@@ -59955,6 +60114,7 @@
     "hyper 1.11.0",
     "hyper-util 0.1.20",
     "native-dialog 0.9.7",
+    "processkit 3.3.4",
     "pulldown-cmark 0.13.4",
     "quinn 0.11.11",
     "rcgen 0.14.9",

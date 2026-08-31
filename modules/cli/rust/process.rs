@@ -1,6 +1,7 @@
 use std::{
     env,
     ffi::{OsStr, OsString},
+    fmt,
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -20,15 +21,25 @@ use crate::{
 };
 
 const FORGE_START_TIMEOUT: Duration = Duration::from_secs(30);
+const FORGE_SHUTDOWN_GRACE_MAX: Duration = Duration::from_secs(2);
 const FORGE_READY_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_READINESS_BYTES: usize = 4096;
 const READY_SCHEMA: &str = "artisan-forge-ready-v1";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ForgeLaunchSpec {
     executable: PathBuf,
     argv: Vec<OsString>,
     readiness_path: PathBuf,
+}
+
+impl fmt::Debug for ForgeLaunchSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ForgeLaunchSpec")
+            .field("argv_count", &self.argv.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ForgeLaunchSpec {
@@ -320,6 +331,391 @@ pub enum StartResult {
     AlreadyRunning,
     Spawned { pid: u32 },
     ForegroundExited,
+}
+
+const OWNED_FORGE_ALREADY_RUNNING: &str =
+    "refusing to adopt an already-running Forge without process ownership";
+const OWNED_FORGE_START_FAILURE: &str = "owned Forge process operation failed during startup";
+const OWNED_FORGE_READINESS_FAILURE: &str = "owned Forge readiness operation failed";
+const OWNED_FORGE_SHUTDOWN_FAILURE: &str = "could not confirm owned Forge shutdown";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OwnedStartDecision {
+    RefuseAlreadyRunning,
+    Spawn {
+        prior_readiness: Option<ReadinessFileSnapshot>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnedProcessStartInfo {
+    QueryFailed,
+    Missing,
+    MissingStartTime,
+    Present(u64),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnedProcessIdentity {
+    Match,
+    FailClosed,
+}
+
+fn owned_start_decision<F>(
+    existing: ReadinessFileRead,
+    expected_executable: &Path,
+    resolve_executable: F,
+) -> OwnedStartDecision
+where
+    F: FnOnce(u32) -> Option<PathBuf>,
+{
+    match background_start_decision(existing, expected_executable, resolve_executable) {
+        BackgroundStartDecision::AlreadyRunning => OwnedStartDecision::RefuseAlreadyRunning,
+        BackgroundStartDecision::Spawn { prior_readiness } => {
+            OwnedStartDecision::Spawn { prior_readiness }
+        }
+    }
+}
+
+fn forge_owned_command(spec: &ForgeLaunchSpec) -> processkit::Command {
+    forge_owned_command_with_environment(spec, env::vars_os())
+}
+
+fn forge_owned_command_with_environment<I>(
+    spec: &ForgeLaunchSpec,
+    variables: I,
+) -> processkit::Command
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let mut command = processkit::Command::new(spec.executable())
+        .args(spec.argv())
+        .env_clear()
+        .stdin(processkit::Stdin::empty())
+        .stdout(processkit::StdioMode::Null)
+        .stderr(processkit::StdioMode::Null)
+        .create_no_window();
+    for (key, value) in variables {
+        if !is_forbidden_environment_key(&key) {
+            command = command.env(key, value);
+        }
+    }
+    command
+}
+
+fn owned_process_start_info(pid: u32) -> OwnedProcessStartInfo {
+    match processkit::process_info(pid) {
+        Ok(Some(info)) => match info.start_time() {
+            Some(start_time) => OwnedProcessStartInfo::Present(start_time),
+            None => OwnedProcessStartInfo::MissingStartTime,
+        },
+        Ok(None) => OwnedProcessStartInfo::Missing,
+        Err(_) => OwnedProcessStartInfo::QueryFailed,
+    }
+}
+
+fn owned_process_identity(
+    expected_start_time: u64,
+    current: OwnedProcessStartInfo,
+) -> OwnedProcessIdentity {
+    match current {
+        OwnedProcessStartInfo::Present(current_start_time)
+            if current_start_time == expected_start_time =>
+        {
+            OwnedProcessIdentity::Match
+        }
+        OwnedProcessStartInfo::QueryFailed
+        | OwnedProcessStartInfo::Missing
+        | OwnedProcessStartInfo::MissingStartTime
+        | OwnedProcessStartInfo::Present(_) => OwnedProcessIdentity::FailClosed,
+    }
+}
+
+fn owned_process_identity_matches(
+    expected_start_time: u64,
+    current: OwnedProcessStartInfo,
+) -> bool {
+    owned_process_identity(expected_start_time, current) == OwnedProcessIdentity::Match
+}
+
+fn owned_readiness_candidate<F>(
+    current: ReadinessFileRead,
+    prior_readiness: Option<&ReadinessFileSnapshot>,
+    child_pid: u32,
+    expected_executable: &Path,
+    expected_start_time: u64,
+    current_process_info: OwnedProcessStartInfo,
+    resolve_executable: F,
+) -> Option<ForgeReadiness>
+where
+    F: FnOnce(u32) -> Option<PathBuf>,
+{
+    if !owned_process_identity_matches(expected_start_time, current_process_info) {
+        return None;
+    }
+    let ReadinessFileRead::Present(snapshot) = current else {
+        return None;
+    };
+    if !readiness_file_replaced(prior_readiness, &snapshot) {
+        return None;
+    }
+    let readiness = ForgeReadiness::from_json(&snapshot.bytes).ok()?;
+    readiness_matches_child(
+        &readiness,
+        child_pid,
+        expected_executable,
+        resolve_executable,
+    )
+    .then_some(readiness)
+}
+
+fn owned_process_failure(context: &'static str) -> CliError {
+    // Do not format a processkit error here: its diagnostic may include the
+    // command's program or other launch details, while Forge argv contains
+    // credential paths. The CLI boundary intentionally exposes only a bounded
+    // lifecycle message.
+    CliError::Control(context.to_owned())
+}
+
+fn owned_already_running_failure() -> CliError {
+    CliError::Unsupported(OWNED_FORGE_ALREADY_RUNNING.to_owned())
+}
+
+fn owned_shutdown_failure() -> CliError {
+    CliError::Io {
+        context: "shutdown Forge",
+        source: std::io::Error::other(OWNED_FORGE_SHUTDOWN_FAILURE),
+    }
+}
+
+fn forge_startup_outcome_error(outcome: processkit::Outcome) -> CliError {
+    match outcome {
+        processkit::Outcome::Exited(code) => CliError::ForgeTerminated {
+            termination: ForgeTermination::from_code(Some(code)),
+        },
+        processkit::Outcome::Signalled(_) => CliError::ForgeTerminated {
+            termination: ForgeTermination::from_code(None),
+        },
+        _ => owned_process_failure(OWNED_FORGE_START_FAILURE),
+    }
+}
+
+fn clamp_shutdown_grace(requested_grace: Duration) -> Duration {
+    requested_grace.min(FORGE_SHUTDOWN_GRACE_MAX)
+}
+
+async fn owned_child_has_exited(process: &mut processkit::RunningProcess) -> Result<bool> {
+    // `wait_for` is the public processkit nonblocking exit-observation seam:
+    // the false predicate never accepts readiness, while the zero-duration
+    // probe still reaps and caches an already-exited child for `wait()` below.
+    match process.wait_for(|| async { false }, Duration::ZERO).await {
+        Ok(()) => Ok(false),
+        Err(error) => match error.into_reason() {
+            processkit::ErrorReason::NotReady { .. } => Ok(process.pid().is_none()),
+            _ => Err(owned_process_failure(OWNED_FORGE_READINESS_FAILURE)),
+        },
+    }
+}
+
+async fn owned_child_exit_failure<T>(process: processkit::RunningProcess) -> Result<T> {
+    match process.wait().await {
+        Ok(outcome) => Err(forge_startup_outcome_error(outcome)),
+        Err(_) => Err(owned_process_failure(OWNED_FORGE_START_FAILURE)),
+    }
+}
+
+async fn teardown_owned_process<T>(
+    process: processkit::RunningProcess,
+    failure: CliError,
+) -> Result<T> {
+    match process.shutdown(Duration::ZERO).await {
+        Ok(_) => Err(failure),
+        Err(_) => Err(owned_shutdown_failure()),
+    }
+}
+
+async fn owned_failure_after_probe<T>(
+    process: processkit::RunningProcess,
+    failure: CliError,
+) -> Result<T> {
+    let mut process = process;
+    match owned_child_has_exited(&mut process).await {
+        Ok(true) => owned_child_exit_failure(process).await,
+        Ok(false) => teardown_owned_process(process, failure).await,
+        Err(error) => teardown_owned_process(process, error).await,
+    }
+}
+
+/// A live Forge process whose process tree is owned by the caller.
+///
+/// The normal lifecycle ordering is for the owner to stop accepting new work,
+/// send the Forge's normal stop/control commands, and await the transport
+/// session's shutdown before calling [`Self::shutdown`]. This CLI layer
+/// deliberately does not import transport; it only performs the final bounded
+/// process-custody step. Dropping a live lease is an emergency hard-kill
+/// backstop, not a substitute for that orderly shutdown.
+pub struct ForgeProcessLease {
+    process: processkit::RunningProcess,
+    pid: u32,
+    readiness: ForgeReadiness,
+}
+
+impl fmt::Debug for ForgeProcessLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ForgeProcessLease")
+            .field("pid", &self.pid)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ForgeProcessLease {
+    pub fn readiness(&self) -> &ForgeReadiness {
+        &self.readiness
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Finish releasing the owned Forge process tree with a bounded grace.
+    ///
+    /// The caller must have already sent normal Forge stop/control commands and
+    /// awaited its transport session shutdown. `processkit` applies its
+    /// signal/grace/escalation policy to the owned group on Unix, after the
+    /// requested grace is clamped to [`FORGE_SHUTDOWN_GRACE_MAX`]. On Windows,
+    /// the crate documents that graceful signal delivery degrades to an atomic
+    /// Job Object kill, so this method does not claim a Windows grace period.
+    /// The consuming processkit operation confirms normal exit or tree
+    /// termination; a failure is returned as a bounded [`CliError::Io`].
+    pub async fn shutdown(self, requested_grace: Duration) -> Result<()> {
+        self.process
+            .shutdown(clamp_shutdown_grace(requested_grace))
+            .await
+            .map(|_| ())
+            .map_err(|_| owned_shutdown_failure())
+    }
+}
+
+/// Start a newly owned Forge and wait for its replacement readiness receipt.
+///
+/// An existing live receipt is intentionally refused: this API never adopts a
+/// Forge launched through the detached CLI path. The returned lease owns the
+/// processkit private group, including the Windows Job Object containment path.
+pub async fn start_owned(spec: &ForgeLaunchSpec) -> Result<ForgeProcessLease> {
+    start_owned_until(spec, Instant::now() + FORGE_START_TIMEOUT).await
+}
+
+pub async fn start_owned_until(
+    spec: &ForgeLaunchSpec,
+    readiness_deadline: Instant,
+) -> Result<ForgeProcessLease> {
+    ensure_forge_executable(spec)?;
+    let prior_readiness = match owned_start_decision(
+        read_readiness_file(spec.readiness_path()),
+        spec.executable(),
+        process_executable,
+    ) {
+        OwnedStartDecision::RefuseAlreadyRunning => {
+            return Err(owned_already_running_failure());
+        }
+        OwnedStartDecision::Spawn { prior_readiness } => prior_readiness,
+    };
+
+    let mut process = forge_owned_command(spec)
+        .start()
+        .await
+        .map_err(|_| owned_process_failure(OWNED_FORGE_START_FAILURE))?;
+    let Some(pid) = process.pid() else {
+        return owned_failure_after_probe(
+            process,
+            owned_process_failure(OWNED_FORGE_START_FAILURE),
+        )
+        .await;
+    };
+    if !process.kills_tree_on_drop() {
+        return owned_failure_after_probe(
+            process,
+            owned_process_failure(OWNED_FORGE_START_FAILURE),
+        )
+        .await;
+    }
+
+    let launch_start_time = match owned_process_start_info(pid) {
+        OwnedProcessStartInfo::Present(start_time) => start_time,
+        OwnedProcessStartInfo::QueryFailed
+        | OwnedProcessStartInfo::Missing
+        | OwnedProcessStartInfo::MissingStartTime => {
+            return owned_failure_after_probe(
+                process,
+                owned_process_failure(OWNED_FORGE_START_FAILURE),
+            )
+            .await;
+        }
+    };
+
+    let readiness_path = spec.readiness_path().to_path_buf();
+    let expected_executable = spec.executable().to_path_buf();
+    let prior_readiness_ref = prior_readiness.as_ref();
+
+    loop {
+        match owned_child_has_exited(&mut process).await {
+            Ok(true) => return owned_child_exit_failure(process).await,
+            Ok(false) => {}
+            Err(error) => return teardown_owned_process(process, error).await,
+        }
+
+        if Instant::now() >= readiness_deadline {
+            return owned_failure_after_probe(process, CliError::ForgeReadinessTimeout).await;
+        }
+
+        let current_process_info = owned_process_start_info(pid);
+        if !owned_process_identity_matches(launch_start_time, current_process_info) {
+            return owned_failure_after_probe(
+                process,
+                owned_process_failure(OWNED_FORGE_READINESS_FAILURE),
+            )
+            .await;
+        }
+
+        if let Some(readiness) = owned_readiness_candidate(
+            read_readiness_file(&readiness_path),
+            prior_readiness_ref,
+            pid,
+            &expected_executable,
+            launch_start_time,
+            current_process_info,
+            process_executable,
+        ) {
+            if Instant::now() >= readiness_deadline {
+                return owned_failure_after_probe(process, CliError::ForgeReadinessTimeout).await;
+            }
+
+            let final_process_info = owned_process_start_info(pid);
+            if !owned_process_identity_matches(launch_start_time, final_process_info) {
+                return owned_failure_after_probe(
+                    process,
+                    owned_process_failure(OWNED_FORGE_READINESS_FAILURE),
+                )
+                .await;
+            }
+            if Instant::now() >= readiness_deadline {
+                return owned_failure_after_probe(process, CliError::ForgeReadinessTimeout).await;
+            }
+
+            return Ok(ForgeProcessLease {
+                process,
+                pid,
+                readiness,
+            });
+        }
+
+        let remaining = readiness_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return owned_failure_after_probe(process, CliError::ForgeReadinessTimeout).await;
+        }
+        tokio::time::sleep(remaining.min(FORGE_READY_INTERVAL)).await;
+    }
 }
 
 pub fn start(spec: &ForgeLaunchSpec, foreground: bool) -> Result<StartResult> {
@@ -811,11 +1207,15 @@ mod tests {
     };
 
     use super::{
-        BackgroundStartDecision, ChildProbe, Command, ForgeLaunchSpec, ForgeReadiness,
-        ReadinessFileIdentity, ReadinessFileRead, ReadinessFileSnapshot, StartResult,
-        background_start_decision, configure_environment, is_forbidden_environment_key,
-        native_argv, poll_delay, readiness_file_replaced, readiness_matches_child,
-        readiness_matches_process, wait_for_readiness_with,
+        BackgroundStartDecision, ChildProbe, Command, FORGE_SHUTDOWN_GRACE_MAX, ForgeLaunchSpec,
+        ForgeProcessLease, ForgeReadiness, OwnedProcessIdentity, OwnedProcessStartInfo,
+        OwnedStartDecision, ReadinessFileIdentity, ReadinessFileRead, ReadinessFileSnapshot,
+        StartResult, background_start_decision, clamp_shutdown_grace, configure_environment,
+        forge_owned_command_with_environment, forge_startup_outcome_error,
+        is_forbidden_environment_key, native_argv, owned_already_running_failure,
+        owned_process_identity, owned_process_identity_matches, owned_readiness_candidate,
+        owned_shutdown_failure, owned_start_decision, poll_delay, readiness_file_replaced,
+        readiness_matches_child, readiness_matches_process, wait_for_readiness_with,
     };
 
     use crate::{
@@ -887,6 +1287,29 @@ mod tests {
     }
 
     #[test]
+    fn launch_spec_debug_redacts_credential_paths_and_argv_values() {
+        let spec = ForgeLaunchSpec {
+            executable: PathBuf::from("FORGE-EXECUTABLE-SECRET"),
+            argv: vec![
+                OsString::from("--private-key-der"),
+                OsString::from("ARGV-CREDENTIAL-SECRET"),
+            ],
+            readiness_path: PathBuf::from("READINESS-PATH-SECRET"),
+        };
+
+        let debug = format!("{spec:?}");
+        assert!(debug.contains("ForgeLaunchSpec"));
+        assert!(debug.contains("argv_count: 2"));
+        for secret in [
+            "FORGE-EXECUTABLE-SECRET",
+            "ARGV-CREDENTIAL-SECRET",
+            "READINESS-PATH-SECRET",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}");
+        }
+    }
+
+    #[test]
     fn native_argv_preserves_repeated_certificate_order_and_os_paths() {
         let home = tempfile::tempdir().unwrap();
         let credentials = ForgeCredentialPaths::from_home(home.path()).unwrap();
@@ -954,6 +1377,81 @@ mod tests {
             foreground.get_args().collect::<Vec<_>>(),
             background.get_args().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn owned_processkit_command_projects_exact_launch_and_safe_policy() {
+        let spec = test_launch_spec();
+        let command = forge_owned_command_with_environment(
+            &spec,
+            [
+                (OsString::from("PATH"), OsString::from("safe")),
+                (OsString::from("ARTISAN_SECRET"), OsString::from("secret")),
+                (OsString::from("NODE_OPTIONS"), OsString::from("legacy")),
+                (OsString::from("ELECTRON_RUN_AS_NODE"), OsString::from("1")),
+                (
+                    OsString::from("CODEX_SQLITE_HOME"),
+                    OsString::from("legacy.sqlite"),
+                ),
+            ],
+        );
+
+        assert_eq!(command.program(), spec.executable().as_os_str());
+        assert_eq!(command.arguments(), spec.argv());
+        assert!(command.stdin_source().is_some());
+        let environment = command.env_overrides();
+        assert!(environment.iter().any(|(key, value)| {
+            key == OsStr::new("PATH") && value.as_deref() == Some(OsStr::new("safe"))
+        }));
+        assert!(
+            environment
+                .iter()
+                .all(|(key, _)| !is_forbidden_environment_key(key))
+        );
+
+        // processkit's public Debug view exposes the non-secret launch intent
+        // while redacting argv/environment values; use it only for the fields
+        // that do not contain credential material.
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("args: 24"));
+        assert!(debug.contains("env_clear: true"));
+        assert!(debug.contains("stdin: Some(Stdin(\"Empty\"))"));
+        assert!(debug.contains("stdout_mode: Null"));
+        assert!(debug.contains("stderr_mode: Null"));
+        assert!(debug.contains("creation_flags_extra: 134217728"));
+    }
+
+    #[tokio::test]
+    async fn forge_process_lease_debug_redacts_process_details() {
+        let command = if cfg!(windows) {
+            processkit::Command::new("cmd.exe").args(["/C", "ping", "-n", "6", "127.0.0.1"])
+        } else {
+            processkit::Command::new("sh").args(["-c", "sleep 5"])
+        };
+        let process = command
+            .stdin(processkit::Stdin::empty())
+            .stdout(processkit::StdioMode::Null)
+            .stderr(processkit::StdioMode::Null)
+            .create_no_window()
+            .start()
+            .await
+            .expect("test process must start");
+        let pid = process.pid().expect("test process must have a PID");
+        let lease = ForgeProcessLease {
+            process,
+            pid,
+            readiness: valid_readiness(pid),
+        };
+
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("ForgeProcessLease"));
+        assert!(debug.contains(&format!("pid: {pid}")));
+        assert!(!debug.contains("LEASE-CREDENTIAL-SECRET"));
+        lease
+            .shutdown(Duration::ZERO)
+            .await
+            .expect("test process teardown must be confirmed");
     }
 
     #[test]
@@ -1101,6 +1599,53 @@ mod tests {
             background_start_decision(existing, &expected, move |_| Some(actual.clone())),
             BackgroundStartDecision::AlreadyRunning
         );
+    }
+
+    #[test]
+    fn owned_launch_refuses_a_live_receipt_instead_of_adopting_it() {
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"C:\Artisan\versions\1.2.3\bin\forge.exe")
+        } else {
+            PathBuf::from("/opt/Artisan/versions/1.2.3/bin/forge")
+        };
+        let actual = expected.clone();
+        let existing = ReadinessFileRead::Present(ReadinessFileSnapshot {
+            identity: Some(ReadinessFileIdentity {
+                first: 1,
+                second: 10,
+            }),
+            bytes: serde_json::to_vec(&valid_readiness(42)).unwrap(),
+        });
+
+        assert_eq!(
+            owned_start_decision(existing, &expected, move |_| Some(actual)),
+            OwnedStartDecision::RefuseAlreadyRunning
+        );
+        assert!(matches!(
+            owned_already_running_failure(),
+            CliError::Unsupported(message) if message == super::OWNED_FORGE_ALREADY_RUNNING
+        ));
+    }
+
+    #[test]
+    fn owned_process_identity_requires_an_exact_start_token() {
+        let expected = 900;
+        assert_eq!(
+            owned_process_identity(expected, OwnedProcessStartInfo::Present(expected)),
+            OwnedProcessIdentity::Match
+        );
+        for current in [
+            OwnedProcessStartInfo::QueryFailed,
+            OwnedProcessStartInfo::Missing,
+            OwnedProcessStartInfo::MissingStartTime,
+            OwnedProcessStartInfo::Present(expected + 1),
+        ] {
+            assert_eq!(
+                owned_process_identity(expected, current),
+                OwnedProcessIdentity::FailClosed
+            );
+            assert!(!owned_process_identity_matches(expected, current));
+        }
     }
 
     #[test]
@@ -1437,6 +1982,102 @@ mod tests {
     }
 
     #[test]
+    fn owned_readiness_requires_spawned_pid_exact_path_and_replaced_identity() {
+        let expected = Path::new("/opt/Artisan/versions/1.2.3/bin/forge");
+        let prior = ReadinessFileSnapshot {
+            identity: Some(ReadinessFileIdentity {
+                first: 1,
+                second: 10,
+            }),
+            bytes: serde_json::to_vec(&valid_readiness(7)).unwrap(),
+        };
+        let current = ReadinessFileSnapshot {
+            identity: Some(ReadinessFileIdentity {
+                first: 1,
+                second: 11,
+            }),
+            bytes: serde_json::to_vec(&valid_readiness(42)).unwrap(),
+        };
+
+        assert!(
+            owned_readiness_candidate(
+                ReadinessFileRead::Present(current.clone()),
+                Some(&prior),
+                42,
+                expected,
+                900,
+                OwnedProcessStartInfo::Present(900),
+                |_| Some(expected.to_path_buf()),
+            )
+            .is_some()
+        );
+
+        for unavailable in [
+            OwnedProcessStartInfo::QueryFailed,
+            OwnedProcessStartInfo::Missing,
+            OwnedProcessStartInfo::MissingStartTime,
+            OwnedProcessStartInfo::Present(901),
+        ] {
+            assert!(
+                owned_readiness_candidate(
+                    ReadinessFileRead::Present(current.clone()),
+                    Some(&prior),
+                    42,
+                    expected,
+                    900,
+                    unavailable,
+                    |_| Some(expected.to_path_buf()),
+                )
+                .is_none()
+            );
+        }
+
+        let unchanged = ReadinessFileSnapshot {
+            identity: prior.identity,
+            ..current.clone()
+        };
+        assert!(
+            owned_readiness_candidate(
+                ReadinessFileRead::Present(unchanged),
+                Some(&prior),
+                42,
+                expected,
+                900,
+                OwnedProcessStartInfo::Present(900),
+                |_| Some(expected.to_path_buf()),
+            )
+            .is_none()
+        );
+
+        assert!(
+            owned_readiness_candidate(
+                ReadinessFileRead::Present(current.clone()),
+                Some(&prior),
+                7,
+                expected,
+                900,
+                OwnedProcessStartInfo::Present(900),
+                |_| Some(expected.to_path_buf()),
+            )
+            .is_none()
+        );
+
+        let other = expected.with_file_name("editor");
+        assert!(
+            owned_readiness_candidate(
+                ReadinessFileRead::Present(current),
+                Some(&prior),
+                42,
+                expected,
+                900,
+                OwnedProcessStartInfo::Present(900),
+                |_| Some(other),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn readiness_poll_uses_one_absolute_deadline_and_bounded_interval() {
         let now = Instant::now();
         let deadline = now + Duration::from_secs(5);
@@ -1456,5 +2097,49 @@ mod tests {
             poll_delay(deadline, Duration::from_millis(100), deadline),
             None
         );
+    }
+
+    #[test]
+    fn owned_shutdown_grace_is_clamped_to_two_seconds() {
+        assert_eq!(clamp_shutdown_grace(Duration::ZERO), Duration::ZERO);
+        assert_eq!(
+            clamp_shutdown_grace(Duration::from_millis(1_500)),
+            Duration::from_millis(1_500)
+        );
+        assert_eq!(
+            clamp_shutdown_grace(FORGE_SHUTDOWN_GRACE_MAX),
+            FORGE_SHUTDOWN_GRACE_MAX
+        );
+        assert_eq!(
+            clamp_shutdown_grace(Duration::from_secs(3)),
+            FORGE_SHUTDOWN_GRACE_MAX
+        );
+    }
+
+    #[test]
+    fn owned_shutdown_failure_is_a_bounded_io_error() {
+        let error = owned_shutdown_failure();
+        assert!(matches!(
+            error,
+            CliError::Io { context, source }
+                if context == "shutdown Forge"
+                    && source.to_string() == super::OWNED_FORGE_SHUTDOWN_FAILURE
+        ));
+    }
+
+    #[test]
+    fn owned_startup_outcomes_keep_existing_forge_termination_mapping() {
+        assert!(matches!(
+            forge_startup_outcome_error(processkit::Outcome::Exited(70)),
+            CliError::ForgeTerminated { termination } if termination.exit_code() == Some(70)
+        ));
+        assert!(matches!(
+            forge_startup_outcome_error(processkit::Outcome::Signalled(Some(9))),
+            CliError::ForgeTerminated { termination } if termination.exit_code().is_none()
+        ));
+        assert!(matches!(
+            forge_startup_outcome_error(processkit::Outcome::TimedOut),
+            CliError::Control(message) if message == super::OWNED_FORGE_START_FAILURE
+        ));
     }
 }

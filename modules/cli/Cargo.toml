@@ -21,6 +21,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 fs2 = "0.4"
 getrandom = "0.3"
+processkit.workspace = true
 rcgen.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rustls.workspace = true
@@ -30,6 +31,7 @@ serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
+tokio.workspace = true
 winapi-util.workspace = true
 x509-parser.workspace = true
 zeroize.workspace = true

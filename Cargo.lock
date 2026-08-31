@@ -454,11 +454,13 @@ dependencies = [
 name = "artisan-editor-cli"
 version = "0.0.0"
 dependencies = [
+ "artisan-domain",
  "base64",
  "clap",
  "flate2",
  "fs2",
  "getrandom 0.3.4",
+ "processkit",
  "rcgen",
  "reqwest",
  "rustls",
@@ -468,6 +470,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "winapi-util",
  "x509-parser",
  "zeroize",
@@ -4416,6 +4419,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mutants"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
+
+[[package]]
 name = "naga"
 version = "25.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5264,6 +5273,23 @@ dependencies = [
  "syn 2.0.119",
  "version_check",
  "yansi",
+]
+
+[[package]]
+name = "processkit"
+version = "3.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1549b59abbe4fc78aa39860e36c81da89262c1278679b8f7299ef4ad7668c004"
+dependencies = [
+ "async-trait",
+ "encoding_rs",
+ "libc",
+ "mutants",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7566,6 +7592,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
