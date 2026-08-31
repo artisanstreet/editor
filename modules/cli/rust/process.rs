@@ -225,7 +225,7 @@ fn native_argv(
     private_key_path: &Path,
     capability_path: &Path,
 ) -> Vec<OsString> {
-    let mut argv = Vec::with_capacity(22 + certificate_paths.len() * 2);
+    let mut argv = Vec::with_capacity(38 + certificate_paths.len() * 2);
     append_path(&mut argv, "--database", config.database_path());
     append_path(&mut argv, "--custody", config.custody_path());
     for certificate_path in certificate_paths {
@@ -264,6 +264,46 @@ fn native_argv(
         "--requests-per-connection",
         u64::from(config.listener().requests_per_connection().get()),
     );
+    append_number(
+        &mut argv,
+        "--native-run-claim-lease-ms",
+        config.native_run().claim_lease_ms(),
+    );
+    append_number(
+        &mut argv,
+        "--native-run-poll-interval-ms",
+        config.native_run().poll_interval_ms(),
+    );
+    append_number(
+        &mut argv,
+        "--native-run-retry-backoff-ms",
+        config.native_run().retry_backoff_ms(),
+    );
+    append_number(
+        &mut argv,
+        "--native-run-shutdown-budget-ms",
+        config.native_run().shutdown_budget_ms(),
+    );
+    append_number(
+        &mut argv,
+        "--native-run-queue-capacity",
+        u64::from(config.native_run().queue_capacity().get()),
+    );
+    append_number(
+        &mut argv,
+        "--native-run-max-command-retries",
+        u64::from(config.native_run().max_command_retries().get()),
+    );
+    append_text(
+        &mut argv,
+        "--native-run-prompt-delivery",
+        config.native_run().prompt_delivery(),
+    );
+    append_number(
+        &mut argv,
+        "--native-run-stream-after",
+        config.native_run().stream_after(),
+    );
     argv
 }
 
@@ -275,6 +315,11 @@ fn append_path(argv: &mut Vec<OsString>, option: &str, path: &Path) {
 fn append_number(argv: &mut Vec<OsString>, option: &str, value: u64) {
     argv.push(OsString::from(option));
     argv.push(value.to_string().into());
+}
+
+fn append_text(argv: &mut Vec<OsString>, option: &str, value: &str) {
+    argv.push(OsString::from(option));
+    argv.push(OsString::from(value));
 }
 
 fn forge_command(spec: &ForgeLaunchSpec) -> Command {
@@ -1222,7 +1267,9 @@ mod tests {
         CliError,
         credentials::ForgeCredentialPaths,
         error::{ForgeExitCode, ForgeTermination},
-        instance::{NativeInstanceConfig, NativeListenerConfig},
+        instance::{
+            NativeInstanceConfig, NativeListenerConfig, NativeRunConfig, NativeRunConfigInput,
+        },
         manifest::InstallationManifest,
     };
 
@@ -1240,6 +1287,17 @@ mod tests {
                 NonZeroU32::new(3).unwrap(),
                 NonZeroU32::new(4).unwrap(),
             ),
+            NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: 15,
+                poll_interval_ms: 16,
+                retry_backoff_ms: 17,
+                shutdown_budget_ms: 18,
+                queue_capacity: 5,
+                max_command_retries: 6,
+                prompt_delivery: "queue".to_owned(),
+                stream_after: 7,
+            })
+            .unwrap(),
         )
         .unwrap()
     }
@@ -1269,7 +1327,7 @@ mod tests {
     fn native_launch_spec_uses_the_versioned_forge_and_exact_argv() {
         let spec = test_launch_spec();
         assert_eq!(spec.executable, test_manifest().forge_executable());
-        assert_eq!(spec.argv.len(), 24);
+        assert_eq!(spec.argv.len(), 40);
         assert_eq!(spec.argv[0], OsString::from("--database"));
         assert_eq!(spec.argv[2], OsString::from("--custody"));
         assert_eq!(spec.argv[4], OsString::from("--certificate-der"));
@@ -1284,6 +1342,37 @@ mod tests {
         assert_eq!(spec.argv[21], OsString::from("3"));
         assert_eq!(spec.argv[22], OsString::from("--requests-per-connection"));
         assert_eq!(spec.argv[23], OsString::from("4"));
+        assert_eq!(spec.argv[24], OsString::from("--native-run-claim-lease-ms"));
+        assert_eq!(spec.argv[25], OsString::from("15"));
+        assert_eq!(
+            spec.argv[26],
+            OsString::from("--native-run-poll-interval-ms")
+        );
+        assert_eq!(spec.argv[27], OsString::from("16"));
+        assert_eq!(
+            spec.argv[28],
+            OsString::from("--native-run-retry-backoff-ms")
+        );
+        assert_eq!(spec.argv[29], OsString::from("17"));
+        assert_eq!(
+            spec.argv[30],
+            OsString::from("--native-run-shutdown-budget-ms")
+        );
+        assert_eq!(spec.argv[31], OsString::from("18"));
+        assert_eq!(spec.argv[32], OsString::from("--native-run-queue-capacity"));
+        assert_eq!(spec.argv[33], OsString::from("5"));
+        assert_eq!(
+            spec.argv[34],
+            OsString::from("--native-run-max-command-retries")
+        );
+        assert_eq!(spec.argv[35], OsString::from("6"));
+        assert_eq!(
+            spec.argv[36],
+            OsString::from("--native-run-prompt-delivery")
+        );
+        assert_eq!(spec.argv[37], OsString::from("queue"));
+        assert_eq!(spec.argv[38], OsString::from("--native-run-stream-after"));
+        assert_eq!(spec.argv[39], OsString::from("7"));
     }
 
     #[test]
@@ -1358,6 +1447,22 @@ mod tests {
             OsString::from("3"),
             OsString::from("--requests-per-connection"),
             OsString::from("4"),
+            OsString::from("--native-run-claim-lease-ms"),
+            OsString::from("15"),
+            OsString::from("--native-run-poll-interval-ms"),
+            OsString::from("16"),
+            OsString::from("--native-run-retry-backoff-ms"),
+            OsString::from("17"),
+            OsString::from("--native-run-shutdown-budget-ms"),
+            OsString::from("18"),
+            OsString::from("--native-run-queue-capacity"),
+            OsString::from("5"),
+            OsString::from("--native-run-max-command-retries"),
+            OsString::from("6"),
+            OsString::from("--native-run-prompt-delivery"),
+            OsString::from("queue"),
+            OsString::from("--native-run-stream-after"),
+            OsString::from("7"),
         ]);
         assert_eq!(argv, expected);
     }
@@ -1414,7 +1519,7 @@ mod tests {
         // that do not contain credential material.
         let debug = format!("{command:?}");
         assert!(!debug.contains("secret"));
-        assert!(debug.contains("args: 24"));
+        assert!(debug.contains("args: 40"));
         assert!(debug.contains("env_clear: true"));
         assert!(debug.contains("stdin: Some(Stdin(\"Empty\"))"));
         assert!(debug.contains("stdout_mode: Null"));

@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},
 };
 
@@ -276,6 +276,7 @@ pub enum NativeInstanceError {
         path: PathBuf,
     },
     InvalidManifest,
+    InvalidNativeRunConfiguration,
     UnsafePath(PathBuf),
 }
 
@@ -292,6 +293,9 @@ impl std::fmt::Display for NativeInstanceError {
                 write!(f, "{context} at {}: [REDACTED]", path.display())
             }
             Self::InvalidManifest => write!(f, "invalid instance manifest"),
+            Self::InvalidNativeRunConfiguration => {
+                write!(f, "invalid native-run configuration")
+            }
             Self::UnsafePath(path) => {
                 write!(
                     f,
@@ -311,20 +315,17 @@ impl std::fmt::Debug for NativeInstanceError {
             Self::FileChanged => f.debug_tuple("FileChanged").finish(),
             Self::FileSizeMismatch => f.debug_tuple("FileSizeMismatch").finish(),
             Self::FileHashMismatch => f.debug_tuple("FileHashMismatch").finish(),
-            Self::InvalidPath(path) => f
-                .debug_tuple("InvalidPath")
-                .field(&path.display().to_string())
-                .finish(),
-            Self::Io { context, path } => f
+            Self::InvalidPath(_) => f.debug_tuple("InvalidPath").field(&"<redacted>").finish(),
+            Self::Io { context, .. } => f
                 .debug_struct("Io")
                 .field("context", context)
-                .field("path", &path.display().to_string())
+                .field("path", &"<redacted>")
                 .finish(),
             Self::InvalidManifest => f.debug_tuple("InvalidManifest").finish(),
-            Self::UnsafePath(path) => f
-                .debug_tuple("UnsafePath")
-                .field(&path.display().to_string())
-                .finish(),
+            Self::InvalidNativeRunConfiguration => {
+                f.debug_tuple("InvalidNativeRunConfiguration").finish()
+            }
+            Self::UnsafePath(_) => f.debug_tuple("UnsafePath").field(&"<redacted>").finish(),
         }
     }
 }
@@ -333,7 +334,7 @@ impl std::error::Error for NativeInstanceError {}
 
 type NativeResult<T> = std::result::Result<T, NativeInstanceError>;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeInstanceFile {
     schema: String,
@@ -343,6 +344,7 @@ struct NativeInstanceFile {
     readiness_path: PathBuf,
     credentials_manifest: PathBuf,
     listener: NativeListenerFile,
+    native_run: NativeRunFile,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -354,6 +356,19 @@ struct NativeListenerFile {
     drain_timeout_ms: u64,
     admission_capacity: NonZeroU32,
     requests_per_connection: NonZeroU32,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeRunFile {
+    claim_lease_ms: NonZeroU64,
+    poll_interval_ms: NonZeroU64,
+    retry_backoff_ms: NonZeroU64,
+    shutdown_budget_ms: NonZeroU64,
+    queue_capacity: NonZeroU32,
+    max_command_retries: NonZeroU32,
+    prompt_delivery: String,
+    stream_after: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -410,13 +425,177 @@ impl NativeListenerConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+// Forge converts native-run millisecond durations to signed values.
+const MAX_NATIVE_RUN_DURATION_MS: u64 = u64::MAX / 2;
+const MAX_NATIVE_RUN_PROMPT_DELIVERY_BYTES: usize = 256;
+
+pub(crate) fn is_valid_native_run_duration_ms(value: u64) -> bool {
+    value != 0 && value <= MAX_NATIVE_RUN_DURATION_MS
+}
+
+pub(crate) fn is_valid_native_run_prompt_delivery(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_NATIVE_RUN_PROMPT_DELIVERY_BYTES
+        && value
+            .chars()
+            .all(|character| !character.is_control() && character != '\r' && character != '\n')
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct NativeRunConfigInput {
+    pub claim_lease_ms: u64,
+    pub poll_interval_ms: u64,
+    pub retry_backoff_ms: u64,
+    pub shutdown_budget_ms: u64,
+    pub queue_capacity: u32,
+    pub max_command_retries: u32,
+    pub prompt_delivery: String,
+    pub stream_after: u64,
+}
+
+impl std::fmt::Debug for NativeRunConfigInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRunConfigInput")
+            .field("claim_lease_ms", &self.claim_lease_ms)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("retry_backoff_ms", &self.retry_backoff_ms)
+            .field("shutdown_budget_ms", &self.shutdown_budget_ms)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_command_retries", &self.max_command_retries)
+            .field("prompt_delivery_bytes", &self.prompt_delivery.len())
+            .field("stream_after", &self.stream_after)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct NativeRunConfig {
+    claim_lease_ms: NonZeroU64,
+    poll_interval_ms: NonZeroU64,
+    retry_backoff_ms: NonZeroU64,
+    shutdown_budget_ms: NonZeroU64,
+    queue_capacity: NonZeroU32,
+    max_command_retries: NonZeroU32,
+    prompt_delivery: String,
+    stream_after: u64,
+}
+
+impl std::fmt::Debug for NativeRunConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRunConfig")
+            .field("claim_lease_ms", &self.claim_lease_ms)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("retry_backoff_ms", &self.retry_backoff_ms)
+            .field("shutdown_budget_ms", &self.shutdown_budget_ms)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_command_retries", &self.max_command_retries)
+            .field("prompt_delivery_bytes", &self.prompt_delivery.len())
+            .field("stream_after", &self.stream_after)
+            .finish()
+    }
+}
+
+impl NativeRunConfig {
+    pub fn new(input: NativeRunConfigInput) -> NativeResult<Self> {
+        let NativeRunConfigInput {
+            claim_lease_ms,
+            poll_interval_ms,
+            retry_backoff_ms,
+            shutdown_budget_ms,
+            queue_capacity,
+            max_command_retries,
+            prompt_delivery,
+            stream_after,
+        } = input;
+        if ![
+            claim_lease_ms,
+            poll_interval_ms,
+            retry_backoff_ms,
+            shutdown_budget_ms,
+        ]
+        .into_iter()
+        .all(is_valid_native_run_duration_ms)
+            || queue_capacity == 0
+            || max_command_retries == 0
+            || !is_valid_native_run_prompt_delivery(&prompt_delivery)
+        {
+            return Err(NativeInstanceError::InvalidNativeRunConfiguration);
+        }
+        Ok(Self {
+            claim_lease_ms: NonZeroU64::new(claim_lease_ms)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            poll_interval_ms: NonZeroU64::new(poll_interval_ms)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            retry_backoff_ms: NonZeroU64::new(retry_backoff_ms)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            shutdown_budget_ms: NonZeroU64::new(shutdown_budget_ms)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            queue_capacity: NonZeroU32::new(queue_capacity)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            max_command_retries: NonZeroU32::new(max_command_retries)
+                .ok_or(NativeInstanceError::InvalidNativeRunConfiguration)?,
+            prompt_delivery,
+            stream_after,
+        })
+    }
+
+    pub fn claim_lease_ms(&self) -> u64 {
+        self.claim_lease_ms.get()
+    }
+
+    pub fn poll_interval_ms(&self) -> u64 {
+        self.poll_interval_ms.get()
+    }
+
+    pub fn retry_backoff_ms(&self) -> u64 {
+        self.retry_backoff_ms.get()
+    }
+
+    pub fn shutdown_budget_ms(&self) -> u64 {
+        self.shutdown_budget_ms.get()
+    }
+
+    pub fn queue_capacity(&self) -> NonZeroU32 {
+        self.queue_capacity
+    }
+
+    pub fn max_command_retries(&self) -> NonZeroU32 {
+        self.max_command_retries
+    }
+
+    pub fn prompt_delivery(&self) -> &str {
+        &self.prompt_delivery
+    }
+
+    pub fn stream_after(&self) -> u64 {
+        self.stream_after
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct NativeInstanceConfig {
     database_path: PathBuf,
     custody_path: PathBuf,
     readiness_path: PathBuf,
     credentials_manifest: PathBuf,
     listener: NativeListenerConfig,
+    native_run: NativeRunConfig,
+}
+
+impl std::fmt::Debug for NativeInstanceConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeInstanceConfig")
+            .field("database_path", &"<redacted>")
+            .field("custody_path", &"<redacted>")
+            .field("readiness_path", &"<redacted>")
+            .field("credentials_manifest", &"<redacted>")
+            .field("listener", &self.listener)
+            .field("native_run", &self.native_run)
+            .finish()
+    }
 }
 
 fn metadata_is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
@@ -501,6 +680,7 @@ impl NativeInstanceConfig {
         readiness_path: PathBuf,
         credentials_manifest: PathBuf,
         listener: NativeListenerConfig,
+        native_run: NativeRunConfig,
     ) -> NativeResult<Self> {
         for path in [
             &database_path,
@@ -518,6 +698,7 @@ impl NativeInstanceConfig {
             readiness_path,
             credentials_manifest,
             listener,
+            native_run,
         })
     }
 
@@ -539,6 +720,10 @@ impl NativeInstanceConfig {
 
     pub fn listener(&self) -> &NativeListenerConfig {
         &self.listener
+    }
+
+    pub fn native_run(&self) -> &NativeRunConfig {
+        &self.native_run
     }
 
     pub fn native_path(home: &Path) -> PathBuf {
@@ -568,6 +753,16 @@ impl NativeInstanceConfig {
                 file.listener.admission_capacity,
                 file.listener.requests_per_connection,
             ),
+            NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: file.native_run.claim_lease_ms.get(),
+                poll_interval_ms: file.native_run.poll_interval_ms.get(),
+                retry_backoff_ms: file.native_run.retry_backoff_ms.get(),
+                shutdown_budget_ms: file.native_run.shutdown_budget_ms.get(),
+                queue_capacity: file.native_run.queue_capacity.get(),
+                max_command_retries: file.native_run.max_command_retries.get(),
+                prompt_delivery: file.native_run.prompt_delivery,
+                stream_after: file.native_run.stream_after,
+            })?,
         )
     }
 
@@ -601,6 +796,16 @@ impl NativeInstanceConfig {
                 drain_timeout_ms: self.listener.drain_timeout_ms,
                 admission_capacity: self.listener.admission_capacity,
                 requests_per_connection: self.listener.requests_per_connection,
+            },
+            native_run: NativeRunFile {
+                claim_lease_ms: self.native_run.claim_lease_ms,
+                poll_interval_ms: self.native_run.poll_interval_ms,
+                retry_backoff_ms: self.native_run.retry_backoff_ms,
+                shutdown_budget_ms: self.native_run.shutdown_budget_ms,
+                queue_capacity: self.native_run.queue_capacity,
+                max_command_retries: self.native_run.max_command_retries,
+                prompt_delivery: self.native_run.prompt_delivery.clone(),
+                stream_after: self.native_run.stream_after,
             },
         };
         let bytes =

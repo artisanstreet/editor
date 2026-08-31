@@ -17,7 +17,9 @@ use crate::{
     engine_install::{self, InstallOutcome},
     error::io,
     http::{self, PairResponse},
-    instance::{self, NativeInstanceConfig, NativeListenerConfig},
+    instance::{
+        self, NativeInstanceConfig, NativeListenerConfig, NativeRunConfig, NativeRunConfigInput,
+    },
     manifest::InstallationManifest,
     paths::Layout,
     payload, process,
@@ -68,6 +70,50 @@ pub enum Commands {
         admission_capacity: NonZeroU32,
         #[arg(long, required = true, value_parser = parse_nonzero_u32)]
         requests_per_connection: NonZeroU32,
+        #[arg(
+            long = "native-run-claim-lease-ms",
+            required = true,
+            value_parser = parse_native_run_duration_ms
+        )]
+        native_run_claim_lease_ms: u64,
+        #[arg(
+            long = "native-run-poll-interval-ms",
+            required = true,
+            value_parser = parse_native_run_duration_ms
+        )]
+        native_run_poll_interval_ms: u64,
+        #[arg(
+            long = "native-run-retry-backoff-ms",
+            required = true,
+            value_parser = parse_native_run_duration_ms
+        )]
+        native_run_retry_backoff_ms: u64,
+        #[arg(
+            long = "native-run-shutdown-budget-ms",
+            required = true,
+            value_parser = parse_native_run_duration_ms
+        )]
+        native_run_shutdown_budget_ms: u64,
+        #[arg(
+            long = "native-run-queue-capacity",
+            required = true,
+            value_parser = parse_nonzero_u32
+        )]
+        native_run_queue_capacity: NonZeroU32,
+        #[arg(
+            long = "native-run-max-command-retries",
+            required = true,
+            value_parser = parse_nonzero_u32
+        )]
+        native_run_max_command_retries: NonZeroU32,
+        #[arg(
+            long = "native-run-prompt-delivery",
+            required = true,
+            value_parser = parse_native_run_prompt_delivery
+        )]
+        native_run_prompt_delivery: String,
+        #[arg(long = "native-run-stream-after", required = true)]
+        native_run_stream_after: u64,
         #[arg(long)]
         autostart: bool,
     },
@@ -242,6 +288,14 @@ pub fn run(cli: Cli) -> Result<()> {
             drain_timeout_ms,
             admission_capacity,
             requests_per_connection,
+            native_run_claim_lease_ms,
+            native_run_poll_interval_ms,
+            native_run_retry_backoff_ms,
+            native_run_shutdown_budget_ms,
+            native_run_queue_capacity,
+            native_run_max_command_retries,
+            native_run_prompt_delivery,
+            native_run_stream_after,
             autostart,
         } => {
             require_installation(&layout)?;
@@ -259,6 +313,16 @@ pub fn run(cli: Cli) -> Result<()> {
                         admission_capacity,
                         requests_per_connection,
                     ),
+                    native_run: NativeRunConfig::new(NativeRunConfigInput {
+                        claim_lease_ms: native_run_claim_lease_ms,
+                        poll_interval_ms: native_run_poll_interval_ms,
+                        retry_backoff_ms: native_run_retry_backoff_ms,
+                        shutdown_budget_ms: native_run_shutdown_budget_ms,
+                        queue_capacity: native_run_queue_capacity.get(),
+                        max_command_retries: native_run_max_command_retries.get(),
+                        prompt_delivery: native_run_prompt_delivery,
+                        stream_after: native_run_stream_after,
+                    })?,
                 },
             )?;
             delegate_installer(&layout, "repair", false)?;
@@ -487,6 +551,7 @@ struct NativeSetupValues {
     custody_path: PathBuf,
     readiness_path: PathBuf,
     listener: NativeListenerConfig,
+    native_run: NativeRunConfig,
 }
 
 fn parse_nonzero_u32(value: &str) -> std::result::Result<NonZeroU32, String> {
@@ -506,6 +571,26 @@ fn parse_positive_u64(value: &str) -> std::result::Result<u64, String> {
     Ok(value)
 }
 
+fn parse_native_run_duration_ms(value: &str) -> std::result::Result<u64, String> {
+    let value = value
+        .parse::<u64>()
+        .map_err(|_| "must be a positive 64-bit duration in milliseconds".to_owned())?;
+    if !instance::is_valid_native_run_duration_ms(value) {
+        return Err("must be positive and fit the native-run duration range".to_owned());
+    }
+    Ok(value)
+}
+
+fn parse_native_run_prompt_delivery(value: &str) -> std::result::Result<String, String> {
+    if !instance::is_valid_native_run_prompt_delivery(value) {
+        return Err(
+            "must be nonempty, at most 256 bytes, and contain no control characters or line breaks"
+                .to_owned(),
+        );
+    }
+    Ok(value.to_owned())
+}
+
 fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {
     let credential_paths = ForgeCredentialPaths::from_home(&layout.root)?;
     let config = NativeInstanceConfig::new(
@@ -514,6 +599,7 @@ fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {
         values.readiness_path,
         credential_paths.manifest_path().to_path_buf(),
         values.listener,
+        values.native_run,
     )?;
     fs::create_dir_all(&layout.root).map_err(io("create Artisan home directory"))?;
     let provisioned = credentials::provision_or_load(&layout.root)?;
@@ -1547,14 +1633,38 @@ mod tests {
             "3",
             "--requests-per-connection",
             "4",
+            "--native-run-claim-lease-ms",
+            "505",
+            "--native-run-poll-interval-ms",
+            "506",
+            "--native-run-retry-backoff-ms",
+            "507",
+            "--native-run-shutdown-budget-ms",
+            "508",
+            "--native-run-queue-capacity",
+            "9",
+            "--native-run-max-command-retries",
+            "10",
+            "--native-run-prompt-delivery",
+            "queue",
+            "--native-run-stream-after",
+            "0",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect()
     }
 
+    fn replace_setup_value(arguments: &mut [String], option: &str, value: &str) {
+        let position = arguments
+            .iter()
+            .position(|argument| argument == option)
+            .expect("setup option should exist");
+        arguments[position + 1] = value.to_owned();
+    }
+
     #[test]
-    fn setup_requires_explicit_native_values_and_rejects_invalid_values() {
+    fn setup_requires_explicit_native_values_and_preserves_exact_values() {
         let valid = Cli::try_parse_from(explicit_setup_args()).unwrap();
         assert!(matches!(
             valid.command,
@@ -1568,28 +1678,109 @@ mod tests {
                 drain_timeout_ms: 404,
                 admission_capacity,
                 requests_per_connection,
+                native_run_claim_lease_ms: 505,
+                native_run_poll_interval_ms: 506,
+                native_run_retry_backoff_ms: 507,
+                native_run_shutdown_budget_ms: 508,
+                native_run_queue_capacity,
+                native_run_max_command_retries,
+                native_run_prompt_delivery,
+                native_run_stream_after: 0,
                 autostart: false,
             }) if database_path.is_absolute()
                 && custody_path.is_absolute()
                 && readiness_path.is_absolute()
                 && admission_capacity.get() == 3
                 && requests_per_connection.get() == 4
+                && native_run_queue_capacity.get() == 9
+                && native_run_max_command_retries.get() == 10
+                && native_run_prompt_delivery == "queue"
         ));
 
         assert!(Cli::try_parse_from(["ae", "setup"]).is_err());
-        for index in [9, 11, 13, 15, 17, 19] {
+        for option in [
+            "--admission-timeout-ms",
+            "--handshake-timeout-ms",
+            "--request-timeout-ms",
+            "--drain-timeout-ms",
+            "--native-run-claim-lease-ms",
+            "--native-run-poll-interval-ms",
+            "--native-run-retry-backoff-ms",
+            "--native-run-shutdown-budget-ms",
+            "--native-run-queue-capacity",
+            "--native-run-max-command-retries",
+        ] {
             let mut arguments = explicit_setup_args();
-            arguments[index] = "0".to_owned();
+            replace_setup_value(&mut arguments, option, "0");
             assert!(
                 Cli::try_parse_from(arguments).is_err(),
-                "zero argument {index}"
+                "zero argument {option}"
             );
         }
+    }
+
+    #[test]
+    fn setup_rejects_native_run_boundary_and_legacy_values() {
         assert_eq!(parse_positive_u64(&u64::MAX.to_string()), Ok(u64::MAX));
-        for (index, invalid) in [(17, "not-a-number"), (9, "-1")] {
+        assert_eq!(
+            parse_native_run_duration_ms(&(u64::MAX / 2).to_string()),
+            Ok(u64::MAX / 2)
+        );
+        assert_eq!(
+            parse_native_run_prompt_delivery(&"p".repeat(256)),
+            Ok("p".repeat(256))
+        );
+        assert_eq!(
+            parse_native_run_duration_ms("0"),
+            Err(String::from(
+                "must be positive and fit the native-run duration range"
+            ))
+        );
+        assert_eq!(
+            parse_native_run_prompt_delivery("queue"),
+            Ok(String::from("queue"))
+        );
+        for (option, invalid) in [
+            ("--native-run-prompt-delivery", ""),
+            ("--native-run-prompt-delivery", "line\nbreak"),
+            ("--native-run-claim-lease-ms", "not-a-number"),
+            ("--native-run-retry-backoff-ms", "-1"),
+        ] {
             let mut arguments = explicit_setup_args();
-            arguments[index] = invalid.to_owned();
-            assert!(Cli::try_parse_from(arguments).is_err(), "argument {index}");
+            replace_setup_value(&mut arguments, option, invalid);
+            assert!(Cli::try_parse_from(arguments).is_err(), "argument {option}");
+        }
+        let too_long_prompt = "p".repeat(257);
+        let mut arguments = explicit_setup_args();
+        replace_setup_value(
+            &mut arguments,
+            "--native-run-prompt-delivery",
+            &too_long_prompt,
+        );
+        assert!(Cli::try_parse_from(arguments).is_err());
+        for option in [
+            "--native-run-claim-lease-ms",
+            "--native-run-poll-interval-ms",
+            "--native-run-retry-backoff-ms",
+            "--native-run-shutdown-budget-ms",
+        ] {
+            let mut arguments = explicit_setup_args();
+            replace_setup_value(&mut arguments, option, &(u64::MAX / 2 + 1).to_string());
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "overflow argument {option}"
+            );
+        }
+        for (option, invalid) in [
+            ("--native-run-queue-capacity", "4294967296"),
+            ("--native-run-max-command-retries", "4294967296"),
+        ] {
+            let mut arguments = explicit_setup_args();
+            replace_setup_value(&mut arguments, option, invalid);
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "overflow argument {option}"
+            );
         }
         for legacy in [
             "--listen-port",
@@ -1633,6 +1824,17 @@ mod tests {
                 NonZeroU32::new(3).unwrap(),
                 NonZeroU32::new(4).unwrap(),
             ),
+            native_run: NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: 505,
+                poll_interval_ms: 506,
+                retry_backoff_ms: 507,
+                shutdown_budget_ms: 508,
+                queue_capacity: 9,
+                max_command_retries: 10,
+                prompt_delivery: "queue".to_owned(),
+                stream_after: 0,
+            })
+            .unwrap(),
         };
         setup_native(&layout, values).unwrap();
 
@@ -1641,6 +1843,14 @@ mod tests {
         assert_eq!(config.credentials_manifest(), credentials.manifest_path());
         assert_eq!(config.listener().admission_timeout_ms(), 101);
         assert_eq!(config.listener().requests_per_connection().get(), 4);
+        assert_eq!(config.native_run().claim_lease_ms(), 505);
+        assert_eq!(config.native_run().poll_interval_ms(), 506);
+        assert_eq!(config.native_run().retry_backoff_ms(), 507);
+        assert_eq!(config.native_run().shutdown_budget_ms(), 508);
+        assert_eq!(config.native_run().queue_capacity().get(), 9);
+        assert_eq!(config.native_run().max_command_retries().get(), 10);
+        assert_eq!(config.native_run().prompt_delivery(), "queue");
+        assert_eq!(config.native_run().stream_after(), 0);
         assert!(layout.native_instance_path().is_file());
     }
 
@@ -1663,6 +1873,17 @@ mod tests {
                 NonZeroU32::new(1).unwrap(),
                 NonZeroU32::new(1).unwrap(),
             ),
+            native_run: NativeRunConfig::new(NativeRunConfigInput {
+                claim_lease_ms: 1,
+                poll_interval_ms: 2,
+                retry_backoff_ms: 3,
+                shutdown_budget_ms: 4,
+                queue_capacity: 1,
+                max_command_retries: 1,
+                prompt_delivery: "queue".to_owned(),
+                stream_after: 0,
+            })
+            .unwrap(),
         };
         assert!(matches!(
             setup_native(&layout, values),
