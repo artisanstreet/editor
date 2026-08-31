@@ -39,7 +39,7 @@ fn dispatcher() -> NativeRunDispatcherConfig {
             stream_after: 0,
         },
     )
-    .expect("complete dispatcher policy");
+    .expect("complete dispatcher policy")
 }
 
 #[test]
