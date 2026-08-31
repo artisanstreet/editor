@@ -267,15 +267,15 @@ impl From<TelemetryChoice> for Preference {
     }
 }
 
-pub fn run(cli: Cli) -> Result<()> {
+fn discover_layout(command: Option<&Commands>) -> Result<Layout> {
     let is_install = matches!(
-        cli.command.as_ref(),
+        command,
         Some(Commands::Engine {
             command: EngineCommand::Install,
         })
     );
     let is_profile = matches!(
-        cli.command.as_ref(),
+        command,
         Some(Commands::Engine {
             command: EngineCommand::Profile { .. },
         })
@@ -291,6 +291,11 @@ pub fn run(cli: Cli) -> Result<()> {
             error
         }
     })?;
+    Ok(layout)
+}
+
+pub fn run(cli: Cli) -> Result<()> {
+    let layout = discover_layout(cli.command.as_ref())?;
     match cli.command.unwrap_or(Commands::Open {
         origin: None,
         browser: false,
