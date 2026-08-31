@@ -397,6 +397,7 @@ async fn assert_generation_rejections(
     let bad_ctx = LaunchContext {
         start_key: RunStartKey::new([0x99; 32]),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -416,6 +417,7 @@ async fn assert_generation_rejections(
     let bad_ctx2 = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: bad_cred,
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -683,6 +685,7 @@ async fn check_remaining_owner_erased(
     repository: &Repository,
     replay_claimed: &ClaimedMessageDispatch,
     receipt: &artisan_database::LaunchedRunReceipt,
+    context: &LaunchContext,
     binding: &ProviderBindingBytes,
     before: &PersistedRows,
     database: &DatabaseConnection,
@@ -692,6 +695,7 @@ async fn check_remaining_owner_erased(
     let different_ctx = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: different_owner_cred,
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -711,6 +715,7 @@ async fn check_remaining_owner_erased(
     let different_claim_ctx = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: different_claim,
+        engine_settings: context.engine_settings.clone(),
     };
     let replay_with_different_claim = repository
         .bind_run_provider(bind_command(
@@ -882,11 +887,12 @@ async fn successful_bind_writes_exact_blob_version_time() {
 
 #[tokio::test]
 async fn post_dispatch_fence_failure_rolls_back_dispatch_stamp() {
-    let (database, repository, claimed, receipt, _context, _) = seeded_repository().await;
+    let (database, repository, claimed, receipt, context, _) = seeded_repository().await;
     let before = persisted_rows(&database).await;
     let wrong_context = LaunchContext {
         start_key: RunStartKey::new([0xff; 32]),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let binding = ProviderBindingBytes::new(vec![1, 2, 3]).expect("binding");
     let err = repository
@@ -1104,6 +1110,7 @@ async fn changed_version_payload_time_credential_rejection_and_erased_token_limi
         &repository,
         &replay_claimed,
         &receipt,
+        &context,
         &binding,
         &before,
         &database,
@@ -1573,12 +1580,13 @@ async fn max_attempt_binds_independent_of_generation() {
 
 #[tokio::test]
 async fn fresh_run_owner_lease_rejected() {
-    let (database, repository, claimed, receipt, _, _) = seeded_repository().await;
+    let (database, repository, claimed, receipt, context, _) = seeded_repository().await;
     let before = persisted_rows(&database).await;
     let binding = ProviderBindingBytes::new(vec![9; 8]).expect("binding");
     let ctx_owner = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: RunLaunchCredentials::new([0x99; 32], LEASE_BYTES, CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -1599,6 +1607,7 @@ async fn fresh_run_owner_lease_rejected() {
     let ctx_lease = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, [0x88; 32], CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -1641,6 +1650,7 @@ async fn replay_remaining_capabilities_rejected() {
         let ctx = LaunchContext {
             start_key: RunStartKey::new(START_KEY_BYTES),
             credentials: cred,
+            engine_settings: context.engine_settings.clone(),
         };
         let err = repository
             .bind_run_provider(bind_command(
@@ -1662,6 +1672,7 @@ async fn replay_remaining_capabilities_rejected() {
     let bad_key_ctx = LaunchContext {
         start_key: RunStartKey::new([0xff; 32]),
         credentials: RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES),
+        engine_settings: context.engine_settings.clone(),
     };
     let err = repository
         .bind_run_provider(bind_command(
@@ -1728,6 +1739,7 @@ async fn erased_claim_exact_receipt_and_rows() {
     let different_ctx = LaunchContext {
         start_key: RunStartKey::new(START_KEY_BYTES),
         credentials: different_claim,
+        engine_settings: context.engine_settings.clone(),
     };
     let replay = repository
         .bind_run_provider(bind_command(
