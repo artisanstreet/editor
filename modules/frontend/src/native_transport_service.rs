@@ -24,8 +24,8 @@ use std::{
 use artisan_domain::{
     AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationQuery,
     ConversationQueryBounds, ConversationRequest, ConversationSnapshot, CreateThread, DirectoryId,
-    ListAttachedProjects, ListProjectThreads, ProjectId, ProjectListing, Query, QueryTurnCount,
-    RequestId, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
+    ListAttachedProjects, ListProjectThreads, ProjectId, ProjectListing, ProjectSummary, Query,
+    QueryTurnCount, RequestId, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{NativeClientCredentials, load_client_credentials},

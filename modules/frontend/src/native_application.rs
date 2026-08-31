@@ -924,7 +924,7 @@ fn intake_failure_panel(theme: &ArtisanTheme, retryable: bool) -> Div {
     status_panel_with_text(theme, "Project intake unavailable", detail)
 }
 
-fn status_panel_with_text(theme: &ArtisanTheme, heading: &str, detail: String) -> Div {
+fn status_panel_with_text(theme: &ArtisanTheme, heading: &'static str, detail: String) -> Div {
     div()
         .w_full()
         .flex()
