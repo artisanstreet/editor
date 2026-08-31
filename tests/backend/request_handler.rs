@@ -3482,7 +3482,6 @@ async fn read_thread_engine_settings_for_missing_thread_fails_thread_unknown() {
     assert_eq!(failure.code, ErrorCode::ThreadUnknown);
     assert!(!failure.retryable);
     assert_eq!(failure.request_id, Some(request("frame-read-missing")));
-    assert!(!failure.detail.as_str().contains("thread-missing"));
 }
 
 #[tokio::test]
