@@ -816,7 +816,7 @@ mod tests {
         ProjectSummary, RootPath, ThreadId, UnixMillis,
     };
     use artisan_ui::theme::ThemeMode;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
 
     fn project(id: &str, name: &str) -> ProjectSummary {
         ProjectSummary {

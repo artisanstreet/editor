@@ -503,7 +503,7 @@ pub fn validate_readiness(
 
 #[cfg(test)]
 fn payload_health_decision(
-    health: artisan_editor_cli::payload::PayloadHealth,
+    health: &artisan_editor_cli::payload::PayloadHealth,
 ) -> Result<(), StartupError> {
     match health {
         artisan_editor_cli::payload::PayloadHealth::Verified => Ok(()),
@@ -1177,13 +1177,13 @@ mod tests {
 
     #[test]
     fn payload_acceptance_is_exact() {
-        assert!(payload_health_decision(PayloadHealth::Verified).is_ok());
+        assert!(payload_health_decision(&PayloadHealth::Verified).is_ok());
         assert_eq!(
-            payload_health_decision(PayloadHealth::Modified(Vec::new())),
+            payload_health_decision(&PayloadHealth::Modified(Vec::new())),
             Err(StartupError::PayloadUnverified)
         );
         assert_eq!(
-            payload_health_decision(PayloadHealth::Unverifiable),
+            payload_health_decision(&PayloadHealth::Unverifiable),
             Err(StartupError::PayloadUnverified)
         );
     }
@@ -1320,7 +1320,7 @@ mod tests {
     #[test]
     fn empty_and_first_real_rows_are_selected_in_forge_order() {
         let empty = ProjectListing::new(Vec::new()).expect("empty projects");
-        assert!(empty.projects().first().is_none());
+        assert!(empty.projects().is_empty());
         let listing = ProjectListing::new(vec![project("p1", "First"), project("p2", "Second")])
             .expect("projects");
         assert_eq!(
@@ -1333,7 +1333,7 @@ mod tests {
             "p1"
         );
         let empty_threads = ThreadListing::new(Vec::new()).expect("empty threads");
-        assert!(empty_threads.threads().first().is_none());
+        assert!(empty_threads.threads().is_empty());
         let threads =
             ThreadListing::new(vec![thread("t1", "p1"), thread("t2", "p1")]).expect("threads");
         assert_eq!(
