@@ -7,6 +7,8 @@ version.workspace = true
 
 [dependencies]
 artisan-domain = { path = "../domain" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json.workspace = true
 sea-orm.workspace = true
 sha2.workspace = true
 # Crate Universe resolves SQLx's target-specific `sqlx-core/offline` edge on
@@ -44,6 +46,10 @@ path = "../../tests/database/seaorm_sqlite.rs"
 [[test]]
 name = "command_receipt_entities"
 path = "../../tests/database/command_receipt_entities.rs"
+
+[[test]]
+name = "thread_engine_config"
+path = "../../tests/database/thread_engine_config.rs"
 
 [[test]]
 name = "conversation_execution_core_entities"

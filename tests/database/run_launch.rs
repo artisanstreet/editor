@@ -2,6 +2,7 @@
 //! public repository APIs.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use artisan_database::entities::{self, AssistantRunLifecycle, DispatchState};
@@ -9,16 +10,20 @@ use artisan_database::{
     ClaimMessageDispatch, ClaimedMessageDispatch, CompleteMessageDispatch, CreateThreadInput,
     DispatchFailureReason, DispatchLeaseOwner, FailMessageDispatch, LaunchClaimedRun,
     LaunchClaimedRunOutcome, QueueFirstMessageInput, Repository, RepositoryError,
-    RequeueMessageDispatch, RunLaunchCredentials, RunLaunchError, RunStartKey, SqliteConfig,
-    connect,
+    RequeueMessageDispatch, RunLaunchCredentials, RunLaunchError, RunStartKey,
+    SetThreadEngineConfigInput, SqliteConfig, ThreadEngineSettings, connect,
 };
 use artisan_domain::{
-    ItemId, MessageBody, MessageId, PatchId, ProjectId, RequestId, RunId, ThreadId, ThreadTitle,
-    TurnId, UnixMillis,
+    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
+    EngineRuntimeControls, EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody,
+    MessageId, NetworkAccess, OpenCode2Selection, PatchId, PermissionId, ProjectId, RequestId,
+    RunId, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, IntoActiveModel,
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, EntityTrait,
+    IntoActiveModel,
 };
 
 const OWNER_BYTES: [u8; 32] = [0xa1; 32];
@@ -41,6 +46,8 @@ const ACCEPTED_AT_MS: i64 = 50;
 const CLAIMED_AT_MS: i64 = 100;
 const LEASE_EXPIRES_AT_MS: i64 = 600;
 const OPERATED_AT_MS: i64 = 150;
+
+static ENGINE_SETTINGS: OnceLock<ThreadEngineSettings> = OnceLock::new();
 
 const _: fn() = || {
     struct Marker;
@@ -161,7 +168,73 @@ async fn seed_project_and_thread(database: &DatabaseConnection, repository: &Rep
 async fn seeded_repository() -> (DatabaseConnection, Repository) {
     let (database, repository) = memory_database().await;
     seed_project_and_thread(&database, &repository).await;
+    let thread_id = ThreadId::parse(THREAD_ID).expect("fixture thread id");
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("seed-engine-config").expect("fixture request id"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: launch_config(),
+            accepted_at: UnixMillis::from_millis(THREAD_CREATED_AT_MS),
+        })
+        .await
+        .expect("fixture engine configuration should create");
+    let settings = repository
+        .read_thread_engine_settings(&thread_id)
+        .await
+        .expect("fixture engine configuration should read")
+        .expect("fixture engine configuration should be present");
+    let _ = ENGINE_SETTINGS.set(settings);
     (database, repository)
+}
+
+fn launch_engine_settings() -> &'static ThreadEngineSettings {
+    ENGINE_SETTINGS
+        .get()
+        .expect("seeded launch settings should be initialized")
+}
+
+fn launch_config() -> EngineRunConfig {
+    launch_config_with_profile("profile-launch")
+}
+
+fn launch_config_with_profile(profile: &str) -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(
+        FiniteMillis::new(100).expect("attempt budget is valid"),
+        one,
+        one,
+        one,
+        one,
+        one,
+        ByteLimit::new(8_192).expect("json body limit is valid"),
+        ByteLimit::new(4_096).expect("sse line limit is valid"),
+        ByteLimit::new(8_192).expect("sse event limit is valid"),
+        ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        CountLimit::new(8).expect("header count is valid"),
+        ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        ByteLimit::new(4_096).expect("stderr limit is valid"),
+        CountLimit::new(16).expect("observation capacity is valid"),
+    )
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-launch").expect("permission id is valid"),
+        EngineAgentId::parse("agent-launch").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse(profile).expect("profile id is valid"),
+            EngineModelId::parse("model-launch").expect("model id is valid"),
+            EngineRouteId::parse("route-launch").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
 }
 
 fn queue_input() -> QueueFirstMessageInput {
@@ -265,6 +338,7 @@ fn launch_command<'a>(
         operated_at: UnixMillis::from_millis(OPERATED_AT_MS),
         run_start_key: &context.start_key,
         credentials: &context.credentials,
+        engine_settings: launch_engine_settings(),
     }
 }
 
@@ -410,9 +484,91 @@ async fn started_launch_writes_the_exact_graph_once() {
 
     assert_launched_dispatch_row(&database).await;
     assert_launched_run_row(&database).await;
+    let immutable = database
+        .execute_unprepared(
+            "UPDATE assistant_runs SET engine_run_config_revision = 2 WHERE run_id = 'run-1'",
+        )
+        .await;
+    assert!(immutable.is_err(), "run engine snapshots must be immutable");
+    assert_launched_run_row(&database).await;
     assert_launched_turn_item_patch_rows(&database).await;
     assert_ledger_and_state_advanced(&database).await;
     assert_originals_unchanged(&database).await;
+}
+
+#[tokio::test]
+async fn launch_fence_rejects_a_changed_thread_configuration_without_writes() {
+    let (database, repository) = seeded_repository().await;
+    let claimed = claim_live_dispatch(&repository).await;
+    let identity = launch_identity();
+    let context = LaunchContext::fixture();
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("update-before-launch").expect("request id is valid"),
+            thread_id: ThreadId::parse(THREAD_ID).expect("thread id is valid"),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                launch_engine_settings().revision(),
+            ),
+            config: launch_config_with_profile("profile-launch-updated"),
+            accepted_at: UnixMillis::from_millis(OPERATED_AT_MS + 1),
+        })
+        .await
+        .expect("configuration revision should update");
+    let before = persisted_rows(&database).await;
+
+    let error = repository
+        .launch_claimed_run(launch_command(&claimed, &identity, &context))
+        .await
+        .expect_err("a stale engine snapshot must not launch");
+    assert!(matches!(error, RunLaunchError::SnapshotMismatch { .. }));
+    assert_rollback_preserved(&database, &before).await;
+}
+
+#[tokio::test]
+async fn thread_configuration_changes_do_not_mutate_an_existing_run_snapshot() {
+    let (database, repository) = seeded_repository().await;
+    let claimed = claim_live_dispatch(&repository).await;
+    let identity = launch_identity();
+    let context = LaunchContext::fixture();
+    repository
+        .launch_claimed_run(launch_command(&claimed, &identity, &context))
+        .await
+        .expect("fresh launch should succeed");
+    let original_run = entities::assistant_run::Entity::find_by_id(RUN_ID)
+        .one(&database)
+        .await
+        .expect("run should query")
+        .expect("run should exist");
+    let original_revision = original_run.engine_run_config_revision;
+    let original_blob = original_run.engine_run_config.clone();
+
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("update-engine-config").expect("request id is valid"),
+            thread_id: ThreadId::parse(THREAD_ID).expect("thread id is valid"),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                launch_engine_settings().revision(),
+            ),
+            config: launch_config_with_profile("profile-launch-updated"),
+            accepted_at: UnixMillis::from_millis(OPERATED_AT_MS + 1),
+        })
+        .await
+        .expect("configuration revision should update");
+
+    let updated_run = entities::assistant_run::Entity::find_by_id(RUN_ID)
+        .one(&database)
+        .await
+        .expect("run should query after thread update")
+        .expect("run should remain present after thread update");
+    assert_eq!(updated_run.engine_run_config_revision, original_revision);
+    assert_eq!(updated_run.engine_run_config, original_blob);
+
+    let replay_claimed = replayable_claim(&claimed);
+    let replay = repository
+        .launch_claimed_run(launch_command(&replay_claimed, &identity, &context))
+        .await
+        .expect("the immutable original snapshot should still diagnose an exact replay");
+    assert!(matches!(replay, LaunchClaimedRunOutcome::AlreadyStarted(_)));
 }
 
 async fn assert_launched_dispatch_row(database: &DatabaseConnection) {
@@ -463,6 +619,22 @@ async fn assert_launched_run_row(database: &DatabaseConnection) {
     assert!(run.error_code.is_none());
     assert!(run.error_message.is_none());
     assert!(run.terminal_at_ms.is_none());
+    assert_eq!(run.engine_run_config_version, Some(1));
+    assert_eq!(run.engine_run_config_revision, Some(1));
+    let thread = entities::thread::Entity::find_by_id(THREAD_ID)
+        .one(database)
+        .await
+        .expect("thread should query")
+        .expect("thread should exist");
+    assert_eq!(
+        run.engine_run_config
+            .as_ref()
+            .map(entities::OpaqueBytes::as_slice),
+        thread
+            .engine_run_config
+            .as_ref()
+            .map(entities::OpaqueBytes::as_slice)
+    );
 }
 
 async fn assert_launched_turn_item_patch_rows(database: &DatabaseConnection) {

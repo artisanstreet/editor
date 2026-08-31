@@ -8,6 +8,8 @@ rust_library(
     crate_name = "artisan_database",
     deps = [
         "//modules/domain:domain",
+        "@crates//:serde",
+        "@crates//:serde_json",
         "@crates//:sea-orm",
         "@crates//:sha2-0.11.0",
         "@crates//:sqlx-sqlite",

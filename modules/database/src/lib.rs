@@ -5,6 +5,7 @@
 //! repositories, and transaction boundaries.
 
 mod connection;
+mod engine_run_config;
 pub mod entities;
 mod repository;
 
@@ -21,10 +22,10 @@ pub use repository::{
     MessageDispatchPayload, ProviderBindingBytes, QueueFirstMessageInput, QueueFirstMessageResult,
     Repository, RepositoryError, RequeueMessageDispatch, RunBatchReceiptInfo, RunBatchScope,
     RunBindingError, RunErrorCode, RunErrorMessage, RunLaunchCredentials, RunLaunchError,
-    RunObservationError, RunStartKey, StartupReconciliationCandidate,
-    StartupReconciliationCandidates, StartupReconciliationDisposition,
-    StartupReconciliationDispositionError, StartupReconciliationDispositionOutcome,
-    StartupReconciliationDispositionReceipt, StartupReconciliationError,
-    StartupReconciliationQuery, StartupRunLifecycle, TerminalRunReceipt,
-    TransitionedMessageDispatch,
+    RunObservationError, RunStartKey, SetThreadEngineConfigInput, SetThreadEngineConfigResult,
+    StartupReconciliationCandidate, StartupReconciliationCandidates,
+    StartupReconciliationDisposition, StartupReconciliationDispositionError,
+    StartupReconciliationDispositionOutcome, StartupReconciliationDispositionReceipt,
+    StartupReconciliationError, StartupReconciliationQuery, StartupRunLifecycle,
+    TerminalRunReceipt, ThreadEngineSettings, TransitionedMessageDispatch,
 };

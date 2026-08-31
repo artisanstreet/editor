@@ -32,6 +32,9 @@ async fn command_receipt_entity_round_trips_exact_queue_payload_and_relation() {
         title: Set("First thread".to_owned()),
         created_at_ms: Set(200),
         updated_at_ms: Set(200),
+        engine_run_config_version: Set(None),
+        engine_run_config_revision: Set(0),
+        engine_run_config: Set(None),
     }
     .insert(&database)
     .await
@@ -55,6 +58,10 @@ async fn command_receipt_entity_round_trips_exact_queue_payload_and_relation() {
         title: Set(None),
         message_id: Set(Some("message-1".to_owned())),
         body: Set(Some("Hello".to_owned())),
+        engine_run_config_version: Set(None),
+        engine_run_config: Set(None),
+        engine_run_config_expected_revision: Set(None),
+        engine_run_config_result_revision: Set(None),
         accepted_at_ms: Set(300),
     }
     .insert(&database)

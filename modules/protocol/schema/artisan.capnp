@@ -156,6 +156,7 @@ enum ErrorCode {
   idempotencyConflict @6;
   unsupportedFeature @7;
   lifecycleBusy @8;
+  engineConfigConflict @9;
 }
 
 # One Forge-visible directory in a listing.
@@ -458,10 +459,70 @@ struct QueueFirstMessageRequest {
 # complete catalog, so stale or unknown ids can never fail this request.
 struct ListAttachedProjectsRequest {}
 
-# The request arms of the native protocol: the six of the first workflow,
-# the three conversation read/subscription requests appended below them, the
-# explicit host-interaction pickDirectory request, and lifecycle control
-# appended last as the eleventh arm.
+struct SetThreadEngineConfigRequest {
+  threadId @0 :Text;
+  precondition @1 :EngineConfigPrecondition;
+  config @2 :EngineRunConfig;
+}
+
+struct EngineConfigPrecondition {
+  kind @0 :Text;
+  revision @1 :UInt64;
+}
+
+struct EngineRunConfig {
+  schemaVersion @0 :UInt16;
+  engine @1 :Text;
+  profileId @2 :Text;
+  modelId @3 :Text;
+  routeId @4 :Text;
+  variant @5 :EngineVariant;
+  permission @6 :EnginePermissionPolicy;
+  runtime @7 :EngineRuntimeControls;
+}
+
+struct EngineVariant {
+  kind @0 :Text;
+  id @1 :Text;
+}
+
+struct EnginePermissionPolicy {
+  permissionId @0 :Text;
+  agentId @1 :Text;
+  approval @2 :Text;
+  filesystem @3 :Text;
+  network @4 :Text;
+  webSearch @5 :Text;
+}
+
+struct EngineRuntimeControls {
+  attemptBudgetMs @0 :UInt64;
+  readinessBudgetMs @1 :UInt64;
+  healthBudgetMs @2 :UInt64;
+  promptBudgetMs @3 :UInt64;
+  streamBudgetMs @4 :UInt64;
+  closeBudgetMs @5 :UInt64;
+  maxJsonBodyBytes @6 :UInt64;
+  maxSseLineBytes @7 :UInt64;
+  maxSseEventBytes @8 :UInt64;
+  maxReadinessLineBytes @9 :UInt64;
+  maxHeaderCount @10 :UInt64;
+  maxHttpBufferBytes @11 :UInt64;
+  maxStderrBytes @12 :UInt64;
+  observationCapacity @13 :UInt64;
+}
+
+struct SetThreadEngineConfigResult {
+  requestId @0 :Text;
+  threadId @1 :Text;
+  revision @2 :UInt64;
+  disposition @3 :ReceiptDisposition;
+}
+
+# The request arms of the native protocol: the five original workflow
+# requests, project rediscovery, the three conversation read/subscription
+# requests, explicit host interaction, lifecycle control, and durable engine
+# configuration appended last as the twelfth arm.
 struct Request {
   union {
     listDirectories @0 :ListDirectoriesRequest;
@@ -496,6 +557,7 @@ struct Request {
   # remain compatible with messages that omit this fresh arm. Authorization
   # is enforced by transport/backend packets, not by this wire-only leaf.
     lifecycleControl @10 :LifecycleRequest;
+    setThreadEngineConfig @11 :SetThreadEngineConfigRequest;
   }
 }
 
@@ -539,6 +601,7 @@ struct Response {
     # Negotiated native lifecycle status/stop result. Appended at a fresh
     # ordinal; existing response arms remain frozen.
     lifecycleControl @11 :LifecycleResponse;
+    threadEngineConfigSet @12 :SetThreadEngineConfigResult;
   }
 }
 

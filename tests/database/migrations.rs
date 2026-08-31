@@ -13,6 +13,7 @@ use sea_orm_migration::sea_orm::{ConnectionTrait, DbBackend, Statement};
 const INITIAL_MIGRATION: &str = "m20260824_000001_initial_native_schema";
 const RECEIPTS_MIGRATION: &str = "m20260824_000002_global_command_receipts";
 const EXECUTION_MIGRATION: &str = "m20260824_000003_conversation_execution";
+const ENGINE_CONFIG_MIGRATION: &str = "m20260830_000004_engine_run_config";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -76,7 +77,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        3
+        4
     );
     first
         .execute_unprepared(
@@ -110,7 +111,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        3
+        4
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -167,7 +168,8 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
         [
             INITIAL_MIGRATION.to_string(),
             RECEIPTS_MIGRATION.to_string(),
-            EXECUTION_MIGRATION.to_string()
+            EXECUTION_MIGRATION.to_string(),
+            ENGINE_CONFIG_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -416,6 +418,109 @@ async fn schema_enforces_queue_and_relationship_invariants() -> Result<(), Box<d
         .execute_unprepared("DELETE FROM messages WHERE message_id = 'm1'")
         .await;
     assert!(referenced_message.is_err());
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn engine_config_migration_preserves_legacy_receipts_and_allows_set_history()
+-> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    Migrator::up(&database, Some(3)).await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 2)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, directory_id, project_id, accepted_at_ms) VALUES ('legacy-r1', 'attach_project', 'd1', 'p1', 3)",
+        )
+        .await?;
+
+    migrate_to_current(&database).await?;
+
+    let legacy = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT command_kind, engine_run_config_version, engine_run_config FROM command_receipts WHERE request_id = 'legacy-r1'",
+        ))
+        .await?
+        .ok_or_else(|| std::io::Error::other("legacy receipt did not survive migration"))?;
+    let legacy_kind: String = legacy.try_get_by_index(0)?;
+    let legacy_version: Option<i64> = legacy.try_get_by_index(1)?;
+    let legacy_blob: Option<Vec<u8>> = legacy.try_get_by_index(2)?;
+    assert_eq!(legacy_kind, "attach_project");
+    assert!(legacy_version.is_none());
+    assert!(legacy_blob.is_none());
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT engine_run_config_revision FROM threads WHERE thread_id = 't1'",
+        )
+        .await?,
+        0
+    );
+
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('engine-r1', 'set_thread_engine_config', 't1', 4, 1, X'00', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_expected_revision, engine_run_config_result_revision) VALUES ('engine-r2', 'set_thread_engine_config', 't1', 5, 1, X'01', 1, 2)",
+        )
+        .await?;
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT count(*) FROM command_receipts WHERE command_kind = 'set_thread_engine_config' AND thread_id = 't1'",
+        )
+        .await?,
+        2
+    );
+
+    let oversized_receipt = database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('engine-oversized', 'set_thread_engine_config', 't1', 6, 1, zeroblob(65537), 3)",
+        )
+        .await;
+    assert!(oversized_receipt.is_err());
+    let zero_expected_revision = database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_expected_revision, engine_run_config_result_revision) VALUES ('engine-zero-expected', 'set_thread_engine_config', 't1', 7, 1, X'02', 0, 3)",
+        )
+        .await;
+    assert!(zero_expected_revision.is_err());
+    let zero_result_revision = database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('engine-zero-result', 'set_thread_engine_config', 't1', 8, 1, X'03', 0)",
+        )
+        .await;
+    assert!(zero_result_revision.is_err());
+
+    let invalid_thread_shape = database
+        .execute_unprepared(
+            "UPDATE threads SET engine_run_config_revision = 1 WHERE thread_id = 't1'",
+        )
+        .await;
+    assert!(invalid_thread_shape.is_err());
+
+    let index_sql = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'uq_command_receipts_kind_thread_id'",
+        ))
+        .await?
+        .ok_or_else(|| std::io::Error::other("engine receipt index did not survive migration"))?;
+    let index_sql: String = index_sql.try_get_by_index(0)?;
+    assert!(index_sql.contains("WHERE command_kind <> 'set_thread_engine_config'"));
     database.close().await?;
     Ok(())
 }
