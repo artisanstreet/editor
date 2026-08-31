@@ -400,7 +400,7 @@ fn read_thread_engine_settings_request_round_trip_carries_exact_thread_id_at_arm
     let value = read_settings_request_envelope("thread-protocol", "read-frame-1");
     let encoded = encode_envelope(&value)?;
     let decoded = decode_envelope(&encoded)?;
-    assert_eq!(decoded, value);
+    assert!(decoded == value);
     let mut encoded_slice = encoded.as_slice();
     let message =
         serialize::read_message_from_flat_slice(&mut encoded_slice, ReaderOptions::new())?;
@@ -427,7 +427,7 @@ fn thread_engine_settings_configured_response_round_trip_preserves_thread_revisi
     );
     let encoded = encode_envelope(&value)?;
     let decoded = decode_envelope(&encoded)?;
-    assert_eq!(decoded, value);
+    assert!(decoded == value);
     if let WireEnvelopeBody::Response(ServerResponse {
         payload: ResponsePayload::ThreadEngineSettings(result),
         ..
@@ -437,11 +437,11 @@ fn thread_engine_settings_configured_response_round_trip_preserves_thread_revisi
             artisan_protocol::ThreadEngineSettingsResult::Configured {
                 thread_id,
                 revision,
-                config,
+                actual_config,
             } => {
                 assert_eq!(thread_id.as_str(), "thread-protocol");
                 assert_eq!(revision.get(), 7);
-                assert_eq!(config, config(true));
+                assert_eq!(actual_config, config(true));
             }
             other => panic!("expected configured result, got {other:?}"),
         }
@@ -471,7 +471,7 @@ fn thread_engine_settings_unconfigured_response_remains_distinct() -> Result<(),
     let encoded_unconfigured = encode_envelope(&unconfigured)?;
     let decoded_configured = decode_envelope(&encoded_configured)?;
     let decoded_unconfigured = decode_envelope(&encoded_unconfigured)?;
-    assert_ne!(decoded_configured, decoded_unconfigured);
+    assert!(decoded_configured != decoded_unconfigured);
     assert!(matches!(
         decoded_unconfigured.body,
         WireEnvelopeBody::Response(ServerResponse {
