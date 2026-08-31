@@ -1110,7 +1110,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         }
     };
 
-    run_with_context(ForgeRunContext {
+    Box::pin(run_with_context(ForgeRunContext {
         app,
         custody,
         material,
@@ -1121,7 +1121,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         requests_per_connection,
         cancel,
         native_run,
-    })
+    }))
     .await
 }
 
