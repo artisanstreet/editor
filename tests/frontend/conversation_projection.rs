@@ -258,7 +258,7 @@ fn exact_resumed_ack_clears_recovery_without_replacing_complete_snapshot() {
     let before = projection.snapshot().cloned().expect("baseline is present");
     let before_ptr = projection
         .snapshot()
-        .map(|snapshot| std::ptr::from_ref::<ConversationSnapshot>(snapshot))
+        .map(std::ptr::from_ref::<ConversationSnapshot>)
         .expect("baseline pointer is present");
 
     assert_eq!(
@@ -288,7 +288,7 @@ fn exact_resumed_ack_clears_recovery_without_replacing_complete_snapshot() {
     );
     let after_ptr = projection
         .snapshot()
-        .map(|snapshot| std::ptr::from_ref::<ConversationSnapshot>(snapshot))
+        .map(std::ptr::from_ref::<ConversationSnapshot>)
         .expect("snapshot pointer remains");
     assert_eq!(before_ptr, after_ptr, "resume only changes delivery health");
 }
@@ -299,7 +299,7 @@ fn exact_resumed_ack_is_idempotent_when_projection_is_ready() {
     let before = projection.snapshot().cloned().expect("baseline is present");
     let before_ptr = projection
         .snapshot()
-        .map(|snapshot| std::ptr::from_ref::<ConversationSnapshot>(snapshot))
+        .map(std::ptr::from_ref::<ConversationSnapshot>)
         .expect("baseline pointer is present");
 
     assert_eq!(
@@ -321,7 +321,7 @@ fn exact_resumed_ack_is_idempotent_when_projection_is_ready() {
     assert_eq!(projection.snapshot(), Some(&before));
     let after_ptr = projection
         .snapshot()
-        .map(|snapshot| std::ptr::from_ref::<ConversationSnapshot>(snapshot))
+        .map(std::ptr::from_ref::<ConversationSnapshot>)
         .expect("snapshot pointer remains");
     assert_eq!(before_ptr, after_ptr, "repeated resume remains status-only");
 }
