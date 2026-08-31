@@ -437,7 +437,7 @@ fn thread_engine_settings_configured_response_round_trip_preserves_thread_revisi
             artisan_protocol::ThreadEngineSettingsResult::Configured {
                 thread_id,
                 revision,
-                actual_config,
+                config: actual_config,
             } => {
                 assert_eq!(thread_id.as_str(), "thread-protocol");
                 assert_eq!(revision.get(), 7);
