@@ -55,6 +55,7 @@ rust_library(
         "src/editor_view_state_policy.rs",
         "src/editor_workspace_identity.rs",
         "src/engine_section_indicator_policy.rs",
+        "src/engine_settings.rs",
         "src/engine_usage_cache.rs",
         "src/file_icon.rs",
         "src/forge_endpoint_policy.rs",

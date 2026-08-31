@@ -57,6 +57,7 @@ pub mod editor_route_gate_policy;
 pub mod editor_view_state_policy;
 pub mod editor_workspace_identity;
 pub mod engine_section_indicator_policy;
+pub mod engine_settings;
 pub mod engine_usage_cache;
 pub mod file_icon;
 pub mod forge_endpoint_policy;
