@@ -543,7 +543,7 @@ fn project_options_from_listing(listing: &ProjectListing) -> Vec<ProjectOption> 
         .iter()
         .map(|project| ProjectOption {
             id: project.project_id.clone(),
-            name: gpui::SharedString::from(project.display_name.as_str()),
+            name: gpui::SharedString::from(project.display_name.as_str().to_owned()),
         })
         .collect()
 }
@@ -830,7 +830,7 @@ mod tests {
         ProjectSummary, RootPath, ThreadId, UnixMillis,
     };
     use artisan_ui::theme::ThemeMode;
-    use gpui::{TestAppContext, prelude::AppContext as _};
+    use gpui::{AppContext as _, TestAppContext};
 
     fn project(id: &str, name: &str) -> ProjectSummary {
         ProjectSummary {
