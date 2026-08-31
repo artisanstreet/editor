@@ -67,6 +67,29 @@ async fn native_table_count(
     .await
 }
 
+async fn migrated_engine_config_database()
+-> Result<sea_orm_migration::sea_orm::DatabaseConnection, Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    Migrator::up(&database, Some(3)).await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 2)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, directory_id, project_id, accepted_at_ms) VALUES ('legacy-r1', 'attach_project', 'd1', 'p1', 3)",
+        )
+        .await?;
+    migrate_to_current(&database).await?;
+    Ok(database)
+}
+
 #[tokio::test]
 async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), Box<dyn Error>> {
     let temp = TempDatabase::new("restart")?;
@@ -425,25 +448,7 @@ async fn schema_enforces_queue_and_relationship_invariants() -> Result<(), Box<d
 #[tokio::test]
 async fn engine_config_migration_preserves_legacy_receipts_and_allows_set_history()
 -> Result<(), Box<dyn Error>> {
-    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
-    Migrator::up(&database, Some(3)).await?;
-    database
-        .execute_unprepared(
-            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
-        )
-        .await?;
-    database
-        .execute_unprepared(
-            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 2)",
-        )
-        .await?;
-    database
-        .execute_unprepared(
-            "INSERT INTO command_receipts (request_id, command_kind, directory_id, project_id, accepted_at_ms) VALUES ('legacy-r1', 'attach_project', 'd1', 'p1', 3)",
-        )
-        .await?;
-
-    migrate_to_current(&database).await?;
+    let database = migrated_engine_config_database().await?;
 
     let legacy = database
         .query_one_raw(Statement::from_string(
@@ -521,6 +526,105 @@ async fn engine_config_migration_preserves_legacy_receipts_and_allows_set_histor
         .ok_or_else(|| std::io::Error::other("engine receipt index did not survive migration"))?;
     let index_sql: String = index_sql.try_get_by_index(0)?;
     assert!(index_sql.contains("WHERE command_kind <> 'set_thread_engine_config'"));
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn engine_config_migration_enforces_thread_and_run_snapshot_shapes()
+-> Result<(), Box<dyn Error>> {
+    let database = migrated_engine_config_database().await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t2', 'p1', 'Configured thread', 4, 4, 1, 1, X'00')",
+        )
+        .await?;
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT engine_run_config_version FROM threads WHERE thread_id = 't2'",
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT engine_run_config_revision FROM threads WHERE thread_id = 't2'",
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT length(engine_run_config) FROM threads WHERE thread_id = 't2'",
+        )
+        .await?,
+        1
+    );
+
+    let invalid_partial_thread = database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t3', 'p1', 'Partial thread', 5, 5, 1, 1, NULL)",
+        )
+        .await;
+    assert!(invalid_partial_thread.is_err());
+    let oversized_thread = database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t4', 'p1', 'Oversized thread', 6, 6, 1, 1, zeroblob(65537))",
+        )
+        .await;
+    assert!(oversized_thread.is_err());
+
+    database
+        .execute_unprepared(
+            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m1', 't1', 0, 'hello', 7)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO conversation_ordinals (thread_id, ordinal, kind, entity_id) VALUES ('t1', 0, 'turn', 'turn1')",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO conversation_turns (turn_id, thread_id, ordinal, kind, revision, lifecycle, created_at_ms, updated_at_ms) VALUES ('turn1', 't1', 0, 'turn', 0, 'pending', 7, 7)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m2', 't1', 1, 'world', 8)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO conversation_ordinals (thread_id, ordinal, kind, entity_id) VALUES ('t1', 1, 'turn', 'turn2')",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO conversation_turns (turn_id, thread_id, ordinal, kind, revision, lifecycle, created_at_ms, updated_at_ms) VALUES ('turn2', 't1', 1, 'turn', 0, 'pending', 8, 8)",
+        )
+        .await?;
+
+    database
+        .execute_unprepared(
+            "INSERT INTO assistant_runs (run_id, thread_id, run_start_key, origin_message_id, origin_turn_id, lifecycle, generation, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('run-valid', 't1', zeroblob(32), 'm1', 'turn1', 'queued', 0, 10, 10, 1, 1, X'00')",
+        )
+        .await?;
+    let invalid_snapshot = database
+        .execute_unprepared(
+            "INSERT INTO assistant_runs (run_id, thread_id, run_start_key, origin_message_id, origin_turn_id, lifecycle, generation, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('run-invalid', 't1', zeroblob(31) || X'01', 'm2', 'turn2', 'queued', 0, 11, 11, 1, 1, NULL)",
+        )
+        .await;
+    assert!(invalid_snapshot.is_err());
+    let immutable_snapshot_update = database
+        .execute_unprepared(
+            "UPDATE assistant_runs SET engine_run_config = X'01' WHERE run_id = 'run-valid'",
+        )
+        .await;
+    assert!(immutable_snapshot_update.is_err());
     database.close().await?;
     Ok(())
 }

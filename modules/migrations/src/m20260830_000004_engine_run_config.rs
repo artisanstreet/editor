@@ -7,8 +7,8 @@
 use sea_orm_migration::SchemaManagerConnection;
 use sea_orm_migration::prelude::*;
 
-const THREAD_CONFIG_SHAPE: &str = "((engine_run_config_version IS NULL AND engine_run_config_revision = 0 AND engine_run_config IS NULL) OR (typeof(engine_run_config_version) = 'integer' AND engine_run_config_version = 1 AND typeof(engine_run_config_revision) = 'integer' AND engine_run_config_revision BETWEEN 1 AND 9223372036854775807 AND typeof(engine_run_config) = 'blob' AND length(engine_run_config) BETWEEN 1 AND 65536))";
-const CONFIGURED_SNAPSHOT_SHAPE: &str = "(typeof(engine_run_config_version) = 'integer' AND engine_run_config_version = 1 AND typeof(engine_run_config_revision) = 'integer' AND engine_run_config_revision BETWEEN 1 AND 9223372036854775807 AND typeof(engine_run_config) = 'blob' AND length(engine_run_config) BETWEEN 1 AND 65536)";
+const THREAD_CONFIG_SHAPE: &str = "((NEW.engine_run_config_version IS NULL AND NEW.engine_run_config_revision = 0 AND NEW.engine_run_config IS NULL) OR (typeof(NEW.engine_run_config_version) = 'integer' AND NEW.engine_run_config_version = 1 AND typeof(NEW.engine_run_config_revision) = 'integer' AND NEW.engine_run_config_revision BETWEEN 1 AND 9223372036854775807 AND typeof(NEW.engine_run_config) = 'blob' AND length(NEW.engine_run_config) BETWEEN 1 AND 65536))";
+const CONFIGURED_SNAPSHOT_SHAPE: &str = "(typeof(NEW.engine_run_config_version) = 'integer' AND NEW.engine_run_config_version = 1 AND typeof(NEW.engine_run_config_revision) = 'integer' AND NEW.engine_run_config_revision BETWEEN 1 AND 9223372036854775807 AND typeof(NEW.engine_run_config) = 'blob' AND length(NEW.engine_run_config) BETWEEN 1 AND 65536)";
 
 /// Adds engine configuration columns, snapshot fences, and the set-command
 /// receipt shape.
