@@ -589,6 +589,7 @@ impl ForgeConnection<'_, '_, '_, '_> {
                             return self.fail_connection(source, completed_requests).await;
                         }
                     };
+                    completed_requests += 1;
 
                     let result = {
                         let driver = self
@@ -607,7 +608,6 @@ impl ForgeConnection<'_, '_, '_, '_> {
                     if let Err(source) = result {
                         return self.fail_connection(source, completed_requests).await;
                     }
-                    completed_requests += 1;
                 }
             }
         }

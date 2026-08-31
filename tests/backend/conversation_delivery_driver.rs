@@ -552,7 +552,7 @@ async fn resumed_activation_sends_exact_replay_on_real_forge_delivery_stream()
         Box::new(TestOrigin::new()),
         listener_limits(),
         std::num::NonZeroU32::new(1).expect("admission capacity"),
-        std::num::NonZeroU32::new(2).expect("request capacity"),
+        std::num::NonZeroU32::new(3).expect("request capacity"),
     )?;
     let address = listener.local_addr()?;
     let cancel = CancelHandle::new();
@@ -562,7 +562,11 @@ async fn resumed_activation_sends_exact_replay_on_real_forge_delivery_stream()
         assert_eq!(report.completed_requests, 2);
         assert!(matches!(
             report.termination,
-            RequestTermination::BudgetReached
+            RequestTermination::Failed {
+                source: DeadlineError::Cancelled {
+                    operation: OperationKind::Receive
+                }
+            }
         ));
         listener.drain().await?;
         Ok::<(), Box<dyn Error>>(())
@@ -636,6 +640,7 @@ async fn resumed_activation_sends_exact_replay_on_real_forge_delivery_stream()
             artisan_transport::receive_envelope(&mut unsubscribe_recv),
         )
         .await??;
+        cancel.cancel();
         let eof = tokio::time::timeout(
             TEST_DEADLINE,
             artisan_transport::receive_envelope(&mut delivery_stream),
