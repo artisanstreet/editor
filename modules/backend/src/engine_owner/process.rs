@@ -118,7 +118,7 @@ pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<Ch
     Ok(child)
 }
 
-/// Spawns the exact certified OpenCode2 profile selected for one durable run.
+/// Spawns the exact certified `OpenCode2` profile selected for one durable run.
 ///
 /// Revalidation is deliberately the last authority operation before the
 /// child is created.  The capability owns the installation fence for the

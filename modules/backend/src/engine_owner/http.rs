@@ -154,7 +154,7 @@ pub(crate) struct PromptInput<'a> {
     text: &'a str,
 }
 
-/// Every persisted OpenCode2 selection and permission field, plus the exact
+/// Every persisted `OpenCode2` selection and permission field, plus the exact
 /// project root, carried into one session-creation request.
 pub(crate) struct CreateSessionInput<'a> {
     pub(crate) directory: &'a str,
@@ -176,7 +176,7 @@ impl fmt::Debug for CreateSessionInput<'_> {
     }
 }
 
-/// The bounded session identity returned by OpenCode2.
+/// The bounded session identity returned by `OpenCode2`.
 pub(crate) struct CreateSessionReceipt {
     session: String,
 }
@@ -759,7 +759,7 @@ pub(crate) async fn perform_prompt(
     Ok(PromptReceipt)
 }
 
-/// Creates exactly one OpenCode2 session from the immutable persisted
+/// Creates exactly one `OpenCode2` session from the immutable persisted
 /// selection.  The response is reduced to a bounded session id before the
 /// caller may send the prompt.
 pub(crate) async fn perform_create_session(

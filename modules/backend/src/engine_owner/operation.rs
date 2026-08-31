@@ -187,7 +187,7 @@ pub(crate) enum Job {
     /// A fully immutable configured turn handed to the owner after durable
     /// launch. The owner alone may move the verified profile capability.
     Turn {
-        input: super::EngineTurnInput,
+        input: Box<super::EngineTurnInput>,
         deadline: Instant,
         control: Arc<CancelHandle>,
         prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
@@ -244,7 +244,7 @@ impl Drop for AcceptedLaunch {
     }
 }
 
-/// Safe session metadata released only after OpenCode2 CreateSession.
+/// Safe session metadata released only after `OpenCode2` `CreateSession`.
 pub(crate) struct PreparedSession {
     session: String,
 }
@@ -318,7 +318,7 @@ impl AcceptedTurn {
             .take()
             .ok_or(EngineOperationError::ProviderRequestFailed)?
             .send(())
-            .map_err(|_| EngineOperationError::ProviderRequestFailed)
+            .map_err(|()| EngineOperationError::ProviderRequestFailed)
     }
 
     pub(crate) async fn next_observation(&mut self) -> Option<EngineObservation> {
@@ -722,7 +722,7 @@ async fn execute_legacy_job(
     handle_health_phase(parts, generation, endpoint, secret, respond, ctx).await
 }
 
-/// Executes one configured OpenCode2 turn.  The profile capability and the
+/// Executes one configured `OpenCode2` turn.  The profile capability and the
 /// settings snapshot are moved into this owner call and are never reread from
 /// durable state or ambient process configuration.
 async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execution {
@@ -739,64 +739,149 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         unreachable!("configured executor received a legacy launch");
     };
 
-    let super::EngineTurnInput {
-        run_id,
-        project_root,
-        prompt_id,
-        prompt_text,
-        settings,
-        launch,
-        prompt_delivery,
-        stream_after,
-        control_capacity,
-    } = input;
-    let runtime = match configured_runtime(&settings, control_capacity) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            let _ = prepared.send(Err(error.clone()));
-            let _ = respond.send(Err(error));
-            return Execution::Completed;
-        }
+    let request = ConfiguredTurnRequest {
+        input: *input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
     };
-    let selection = settings.config().selection().as_opencode2();
-    if launch.profile_id() != selection.profile_id() {
-        let error = EngineOperationError::Configuration;
-        let _ = prepared.send(Err(error.clone()));
-        let _ = respond.send(Err(error));
-        return Execution::Completed;
+    let runtime = match configured_runtime(&request.input.settings, request.input.control_capacity)
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return request.fail(error),
+    };
+    let selection = request.input.settings.config().selection().as_opencode2();
+    if request.input.launch.profile_id() != selection.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
     }
     if shutdown.is_cancelled() {
-        let error = EngineOperationError::Shutdown;
-        let _ = prepared.send(Err(error.clone()));
-        let _ = respond.send(Err(error));
-        return Execution::Completed;
+        return request.fail(EngineOperationError::Shutdown);
     }
-    if control.is_cancelled() {
-        let error = EngineOperationError::Cancelled;
-        let _ = prepared.send(Err(error.clone()));
-        let _ = respond.send(Err(error));
-        return Execution::Completed;
+    if request.control.is_cancelled() {
+        return request.fail(EngineOperationError::Cancelled);
     }
 
-    let secret = match HealthSecret::generate() {
-        Ok(secret) => secret,
-        Err(_) => {
-            let error = EngineOperationError::EntropyFailed;
-            let _ = prepared.send(Err(error.clone()));
-            let _ = respond.send(Err(error));
-            return Execution::Completed;
-        }
+    execute_configured_turn(request, runtime, shutdown).await
+}
+
+struct ConfiguredTurnRequest {
+    input: super::EngineTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+}
+
+impl ConfiguredTurnRequest {
+    fn fail(self, error: EngineOperationError) -> Execution {
+        let _ = self.prepared.send(Err(error.clone()));
+        let _ = self.respond.send(Err(error));
+        Execution::Completed
+    }
+}
+
+struct ConfiguredProcess {
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    secret: HealthSecret,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+}
+
+struct PreparedConfiguredSession {
+    input: super::EngineTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+    secret: HealthSecret,
+    runtime: ConfiguredRuntime,
+    session: String,
+}
+
+struct ConfiguredSession {
+    input: super::EngineTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+    secret: HealthSecret,
+    runtime: ConfiguredRuntime,
+    session: String,
+}
+
+impl ConfiguredSession {
+    async fn abort(self, shutdown: &Arc<CancelHandle>, cause: EngineOperationError) -> Execution {
+        let ConfiguredSession {
+            input,
+            deadline,
+            control: _,
+            authorize: _,
+            observations,
+            respond,
+            parts,
+            endpoint,
+            secret,
+            runtime,
+            session,
+        } = self;
+        abort_after_session(AbortAfterSession {
+            parts,
+            endpoint: &endpoint,
+            secret: &secret,
+            runtime: &runtime,
+            session: &session,
+            run_id: &input.run_id,
+            stream_after: input.stream_after,
+            observations,
+            respond,
+            shutdown,
+            cause,
+            attempt_deadline: deadline,
+        })
+        .await
+    }
+}
+
+async fn execute_configured_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let process = match prepare_configured_process(request, runtime, shutdown).await {
+        Ok(process) => process,
+        Err(execution) => return execution,
     };
-    let spawned = match spawn_configured_engine(&launch, &project_root, secret.as_str()) {
-        Ok(child) => child,
-        Err(_) => {
-            let error = EngineOperationError::SpawnFailed;
-            let _ = prepared.send(Err(error.clone()));
-            let _ = respond.send(Err(error));
-            return Execution::Completed;
-        }
+    execute_configured_session(process, shutdown).await
+}
+
+async fn prepare_configured_process(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Result<ConfiguredProcess, Execution> {
+    let Ok(secret) = HealthSecret::generate() else {
+        return Err(request.fail(EngineOperationError::EntropyFailed));
     };
-    let mut child = spawned;
+    let Ok(mut child) = spawn_configured_engine(
+        &request.input.launch,
+        &request.input.project_root,
+        secret.as_str(),
+    ) else {
+        return Err(request.fail(EngineOperationError::SpawnFailed));
+    };
     let lifeline = LifelineWriter::take(&mut child);
     let maybe_stdout = child.stdout.take();
     let stderr_counter = StderrCounter::new(child.stderr.take(), runtime.bounds.stderr_cap_bytes);
@@ -808,8 +893,7 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
             stderr_counter,
         };
         let error = EngineOperationError::ReadinessFailed(ReadinessError::Io);
-        let _ = prepared.send(Err(error.clone()));
-        return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+        return Err(finish_configured_start(request, parts, error, runtime.limits.close).await);
     };
     let mut parts = ChildParts {
         child,
@@ -817,13 +901,12 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         stdout: None,
         stderr_counter,
     };
-    let readiness_deadline = phase_deadline(runtime.limits.readiness, deadline);
     let endpoint = match drive_readiness(
         &mut stdout,
         &mut parts,
-        readiness_deadline,
+        phase_deadline(runtime.limits.readiness, request.deadline),
         shutdown,
-        &control,
+        &request.control,
         runtime.bounds.max_readiness_line,
     )
     .await
@@ -832,36 +915,87 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         Err(error) => {
             drop(stdout);
             let error = map_readiness_error(error);
-            let _ = prepared.send(Err(error.clone()));
-            return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+            return Err(finish_configured_start(request, parts, error, runtime.limits.close).await);
         }
     };
     drop(stdout);
-
-    let health_deadline = phase_deadline(runtime.limits.health, deadline);
     if let Err(error) = super::http::perform_health(
         &endpoint,
         &secret,
         &runtime.bounds,
-        health_deadline,
-        &control,
+        phase_deadline(runtime.limits.health, request.deadline),
+        &request.control,
         shutdown,
-        Some(launch.version()),
+        Some(request.input.launch.version()),
     )
     .await
     {
         let error = map_health_error(error);
-        let _ = prepared.send(Err(error.clone()));
-        return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+        return Err(finish_configured_start(request, parts, error, runtime.limits.close).await);
     }
+    Ok(ConfiguredProcess {
+        request,
+        runtime,
+        secret,
+        parts,
+        endpoint,
+    })
+}
 
+async fn finish_configured_start(
+    request: ConfiguredTurnRequest,
+    parts: ChildParts,
+    error: EngineOperationError,
+    close_budget: Duration,
+) -> Execution {
+    let ConfiguredTurnRequest {
+        prepared, respond, ..
+    } = request;
+    let _ = prepared.send(Err(error.clone()));
+    finish_turn_result(parts, Err(error), respond, close_budget).await
+}
+
+async fn execute_configured_session(
+    process: ConfiguredProcess,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let state = match create_configured_session(process, shutdown).await {
+        Ok(state) => state,
+        Err(execution) => return execution,
+    };
+    authorize_configured_session(state, shutdown).await
+}
+
+async fn create_configured_session(
+    process: ConfiguredProcess,
+    shutdown: &Arc<CancelHandle>,
+) -> Result<PreparedConfiguredSession, Execution> {
+    let ConfiguredProcess {
+        request,
+        runtime,
+        secret,
+        parts,
+        endpoint,
+    } = process;
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+    } = request;
+    let selection = input.settings.config().selection().as_opencode2();
     let permission = selection.permission();
     let create_input = CreateSessionInput {
-        directory: project_root.as_str(),
+        directory: input.project_root.as_str(),
         profile_id: selection.profile_id().as_str(),
         model_id: selection.model_id().as_str(),
         route_id: selection.route_id().as_str(),
-        variant_id: selection.variant_id().map(|value| value.as_str()),
+        variant_id: selection
+            .variant_id()
+            .map(artisan_domain::EngineVariantId::as_str),
         permission_id: permission.permission_id().as_str(),
         agent_id: permission.agent_id().as_str(),
         approval: permission.approval().as_str(),
@@ -869,12 +1003,11 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         network: permission.network().as_str(),
         web_search: permission.web_search().as_str(),
     };
-    let session_deadline = phase_deadline(runtime.limits.prompt, deadline);
     let session_receipt = match perform_create_session(
         &endpoint,
         &secret,
         &runtime.bounds,
-        session_deadline,
+        phase_deadline(runtime.limits.prompt, deadline),
         &control,
         shutdown,
         create_input,
@@ -884,110 +1017,142 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         Ok(receipt) => receipt,
         Err(error) => {
             let error = map_prompt_error(error);
-            let _ = prepared.send(Err(error.clone()));
-            return finish_turn_result(parts, Err(error), respond, runtime.limits.close).await;
+            return Err(finish_configured_start(
+                ConfiguredTurnRequest {
+                    input,
+                    deadline,
+                    control,
+                    prepared,
+                    authorize,
+                    observations,
+                    respond,
+                },
+                parts,
+                error,
+                runtime.limits.close,
+            )
+            .await);
         }
     };
-    let session = session_receipt.session().to_owned();
+    Ok(PreparedConfiguredSession {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session: session_receipt.session().to_owned(),
+    })
+}
+
+async fn authorize_configured_session(
+    state: PreparedConfiguredSession,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let PreparedConfiguredSession {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session,
+    } = state;
+    let session = ConfiguredSession {
+        input,
+        deadline,
+        control,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session,
+    };
     if prepared
-        .send(Ok(PreparedSession::new(session.clone())))
+        .send(Ok(PreparedSession::new(session.session.clone())))
         .is_err()
     {
-        return abort_after_session(
-            parts,
-            &endpoint,
-            &secret,
-            &runtime,
-            &session,
-            &run_id,
-            stream_after,
-            observations,
-            respond,
-            shutdown,
-            EngineOperationError::Cancelled,
-            deadline,
-        )
-        .await;
+        return session
+            .abort(shutdown, EngineOperationError::Cancelled)
+            .await;
     }
+    execute_authorized_configured_turn(session, shutdown).await
+}
 
-    let mut authorize = authorize;
-    if let Err(error) =
-        wait_for_authorization(&mut parts, &mut authorize, deadline, shutdown, &control).await
+async fn execute_authorized_configured_turn(
+    mut session: ConfiguredSession,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    if let Err(error) = wait_for_authorization(
+        &mut session.parts,
+        &mut session.authorize,
+        session.deadline,
+        shutdown,
+        &session.control,
+    )
+    .await
     {
-        return abort_after_session(
-            parts,
-            &endpoint,
-            &secret,
-            &runtime,
-            &session,
-            &run_id,
-            stream_after,
-            observations,
-            respond,
-            shutdown,
-            error,
-            deadline,
-        )
-        .await;
+        return session.abort(shutdown, error).await;
     }
-
     let files: [PromptFile; 0] = [];
-    let prompt_deadline = phase_deadline(runtime.limits.prompt, deadline);
     if let Err(error) = perform_prompt(
-        &endpoint,
-        &secret,
-        &runtime.bounds,
-        prompt_deadline,
-        &control,
+        &session.endpoint,
+        &session.secret,
+        &session.runtime.bounds,
+        phase_deadline(session.runtime.limits.prompt, session.deadline),
+        &session.control,
         shutdown,
         PromptInput::new(
-            &session,
-            &prompt_delivery,
+            &session.session,
+            &session.input.prompt_delivery,
             &files,
-            &prompt_id,
+            &session.input.prompt_id,
             false,
-            prompt_text.as_str(),
+            session.input.prompt_text.as_str(),
         ),
     )
     .await
     {
-        return abort_after_session(
-            parts,
-            &endpoint,
-            &secret,
-            &runtime,
-            &session,
-            &run_id,
-            stream_after,
-            observations,
-            respond,
-            shutdown,
-            map_prompt_error(error),
-            deadline,
-        )
-        .await;
+        return session.abort(shutdown, map_prompt_error(error)).await;
     }
-
-    let stream_deadline = phase_deadline(runtime.limits.sse, deadline);
-    let stream_cancel = &control;
     let stream_result = follow_stream_for_run(
         StreamInput::new((
-            &endpoint,
-            &secret,
-            &runtime.bounds,
-            stream_deadline,
-            stream_cancel,
+            &session.endpoint,
+            &session.secret,
+            &session.runtime.bounds,
+            phase_deadline(session.runtime.limits.sse, session.deadline),
+            &session.control,
             shutdown,
-            &session,
-            stream_after,
-            observations.clone(),
+            &session.session,
+            session.input.stream_after,
+            session.observations.clone(),
         )),
-        &run_id,
+        &session.input.run_id,
     )
     .await;
     match stream_result {
         Ok(receipt) => {
             let terminal = receipt.state();
+            let ConfiguredSession {
+                parts,
+                runtime,
+                observations,
+                respond,
+                ..
+            } = session;
             drop(observations);
             finish_turn_result(
                 parts,
@@ -997,23 +1162,7 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
             )
             .await
         }
-        Err(error) => {
-            abort_after_session(
-                parts,
-                &endpoint,
-                &secret,
-                &runtime,
-                &session,
-                &run_id,
-                stream_after,
-                observations,
-                respond,
-                shutdown,
-                map_stream_error(error),
-                deadline,
-            )
-            .await
-        }
+        Err(error) => session.abort(shutdown, map_stream_error(error)).await,
     }
 }
 
@@ -1113,20 +1262,36 @@ async fn wait_for_authorization(
     }
 }
 
-async fn abort_after_session(
+struct AbortAfterSession<'a> {
     parts: ChildParts,
-    endpoint: &ValidatedEndpoint,
-    secret: &HealthSecret,
-    runtime: &ConfiguredRuntime,
-    session: &str,
-    run_id: &RunId,
+    endpoint: &'a ValidatedEndpoint,
+    secret: &'a HealthSecret,
+    runtime: &'a ConfiguredRuntime,
+    session: &'a str,
+    run_id: &'a RunId,
     stream_after: u64,
     observations: mpsc::Sender<EngineObservation>,
     respond: oneshot::Sender<TurnResult>,
-    shutdown: &Arc<CancelHandle>,
+    shutdown: &'a Arc<CancelHandle>,
     cause: EngineOperationError,
     attempt_deadline: Instant,
-) -> Execution {
+}
+
+async fn abort_after_session(input: AbortAfterSession<'_>) -> Execution {
+    let AbortAfterSession {
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session,
+        run_id,
+        stream_after,
+        observations,
+        respond,
+        shutdown,
+        cause,
+        attempt_deadline,
+    } = input;
     let interrupt_cancel = CancelHandle::new();
     let interrupt_deadline = phase_deadline(runtime.limits.close, attempt_deadline);
     let _ = perform_interrupt(
@@ -1230,8 +1395,7 @@ async fn finish_turn_result(
         CleanupObservation::Retained(engine) => {
             let primary = result
                 .err()
-                .map(Box::new)
-                .unwrap_or_else(|| Box::new(EngineOperationError::ReapUnresolved));
+                .map_or_else(|| Box::new(EngineOperationError::ReapUnresolved), Box::new);
             let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring { primary }));
             Execution::Quarantined(engine)
         }

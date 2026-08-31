@@ -1110,6 +1110,48 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         }
     };
 
+    run_with_context(ForgeRunContext {
+        app,
+        custody,
+        material,
+        database,
+        ready_file,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+        cancel,
+        native_run,
+    })
+    .await
+}
+
+struct ForgeRunContext {
+    app: ForgeApp,
+    custody: ForgeProcessCustody,
+    material: LoadedMaterial,
+    database: PathBuf,
+    ready_file: PathBuf,
+    limits: ListenerLimits,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+    cancel: Arc<CancelHandle>,
+    native_run: NativeRunDispatcherConfig,
+}
+
+async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeError> {
+    let ForgeRunContext {
+        app,
+        custody,
+        material,
+        database,
+        ready_file,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+        cancel,
+        native_run,
+    } = context;
+
     let Ok(forge_executable) = std::env::current_exe() else {
         let handler = RequestHandler::with_subscriptions(app.repository().clone());
         return finish(
@@ -1150,29 +1192,56 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
     .with_registered_engine_profiles_reader(
         crate::request_handler::NativeRegisteredEngineProfilesReader::new(database.clone()),
     );
+    run_with_handler(
+        ForgeRunContext {
+            app,
+            custody,
+            material,
+            database,
+            ready_file,
+            limits,
+            admission_capacity,
+            requests_per_connection,
+            cancel,
+            native_run,
+        },
+        handler,
+    )
+    .await
+}
+
+struct ForgeListenerStartup {
+    listener: ForgeListener,
+    address: SocketAddr,
+    leaf: CertificateDer<'static>,
+}
+
+struct ForgeListenerStartupError {
+    listener: Option<ForgeListener>,
+    error: ForgeRuntimeError,
+}
+
+fn prepare_forge_listener(
+    material: LoadedMaterial,
+    limits: ListenerLimits,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+) -> Result<ForgeListenerStartup, ForgeListenerStartupError> {
     let LoadedMaterial {
         certificate_chain,
         private_key,
         bootstrap,
         leaf,
     } = material;
-
     let server = match server_config(certificate_chain, private_key) {
         Ok(server) => server,
         Err(error) => {
-            return finish(
-                app,
-                handler,
-                custody,
-                None,
-                None,
-                None,
-                Some(ForgeRuntimeError::ServerConfiguration(error)),
-            )
-            .await;
+            return Err(ForgeListenerStartupError {
+                listener: None,
+                error: ForgeRuntimeError::ServerConfiguration(error),
+            });
         }
     };
-
     let listener = match ForgeListener::bind(
         server,
         bootstrap,
@@ -1183,54 +1252,80 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
     ) {
         Ok(listener) => listener,
         Err(error) => {
-            return finish(
-                app,
-                handler,
-                custody,
-                None,
-                None,
-                None,
-                Some(ForgeRuntimeError::ListenerBind(error)),
-            )
-            .await;
+            return Err(ForgeListenerStartupError {
+                listener: None,
+                error: ForgeRuntimeError::ListenerBind(error),
+            });
         }
     };
-
     let address = match listener.local_addr() {
         Ok(address) if is_required_loopback(address) => address,
         Ok(address) => {
-            return finish(
-                app,
-                handler,
-                custody,
-                Some(listener),
-                None,
-                None,
-                Some(ForgeRuntimeError::Address(io::Error::new(
+            return Err(ForgeListenerStartupError {
+                listener: Some(listener),
+                error: ForgeRuntimeError::Address(io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
                     format!("Forge listener address is not required loopback: {address}"),
-                ))),
-            )
-            .await;
+                )),
+            });
         }
         Err(error) => {
+            return Err(ForgeListenerStartupError {
+                listener: Some(listener),
+                error: ForgeRuntimeError::Address(error),
+            });
+        }
+    };
+    Ok(ForgeListenerStartup {
+        listener,
+        address,
+        leaf,
+    })
+}
+
+async fn run_with_handler(
+    context: ForgeRunContext,
+    handler: RequestHandler,
+) -> Result<(), ForgeRuntimeError> {
+    let ForgeRunContext {
+        app,
+        custody,
+        material,
+        database,
+        ready_file,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+        cancel,
+        native_run,
+    } = context;
+    let ForgeListenerStartup {
+        listener,
+        address,
+        leaf,
+    } = match prepare_forge_listener(
+        material,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+    ) {
+        Ok(startup) => startup,
+        Err(startup_error) => {
             return finish(
                 app,
                 handler,
                 custody,
-                Some(listener),
+                startup_error.listener,
                 None,
                 None,
-                Some(ForgeRuntimeError::Address(error)),
+                Some(startup_error.error),
             )
             .await;
         }
     };
-
     if cancel.is_cancelled() {
         return finish(app, handler, custody, Some(listener), None, None, None).await;
     }
-
     // The leaf is retained separately so this identity computation happens
     // only after the actual listener address has been observed.
     let identity = PinnedIdentity::from_certificate(&leaf);
@@ -1249,7 +1344,6 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
             .await;
         }
     };
-
     let native_dispatcher = NativeRunDispatcher::start(
         app.repository().clone(),
         database,
@@ -1257,7 +1351,6 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         Arc::clone(&cancel),
         &tokio::runtime::Handle::current(),
     );
-
     let primary = match listener.serve_until_cancel(&handler, &cancel).await {
         Ok(()) => None,
         Err(error) if error.is_service_failure() => Some(ForgeRuntimeError::Service(error)),
@@ -1267,7 +1360,6 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         // keep the conservative shutdown exit rather than flattening it.
         Err(error) => Some(ForgeRuntimeError::ListenerDrain(error)),
     };
-
     // `serve_until_cancel` consumes the listener on every path. No listener
     // owner or endpoint custody remains to pass into the cleanup tail.
     finish(
@@ -1298,13 +1390,13 @@ async fn finish(
     {
         cleanup_failures.push(ForgeRuntimeError::ListenerShutdown(error));
     }
-    if let Some(dispatcher) = native_dispatcher.as_mut() {
-        if !matches!(
+    if let Some(dispatcher) = native_dispatcher.as_mut()
+        && !matches!(
             dispatcher.shutdown().await,
             NativeRunDispatcherShutdown::Joined
-        ) {
-            cleanup_failures.push(ForgeRuntimeError::NativeRunDispatcherShutdown);
-        }
+        )
+    {
+        cleanup_failures.push(ForgeRuntimeError::NativeRunDispatcherShutdown);
     }
     if let Some(receipt) = receipt
         && let Err(error) = receipt.remove()

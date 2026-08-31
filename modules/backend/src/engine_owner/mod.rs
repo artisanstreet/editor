@@ -70,7 +70,7 @@ mod engine_owner_configured;
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
 
-/// Immutable input handed to the configured OpenCode2 owner.
+/// Immutable input handed to the configured `OpenCode2` owner.
 ///
 /// The dispatcher constructs this only after reading the durable settings and
 /// resolving the exact registered profile.  The owner never rereads the
@@ -484,7 +484,7 @@ impl EngineOwner {
         }
     }
 
-    /// Admits one configured OpenCode2 turn into the single owner queue.
+    /// Admits one configured `OpenCode2` turn into the single owner queue.
     ///
     /// The observation channel is created at the persisted capacity carried
     /// by the immutable run settings.  The returned handoff exposes session
@@ -522,7 +522,7 @@ impl EngineOwner {
         let (respond, receiver) = oneshot::channel();
         let (observations, observation_receiver) = mpsc::channel(observation_capacity);
         let job = Job::Turn {
-            input,
+            input: Box::new(input),
             deadline,
             control: Arc::clone(&control),
             prepared,

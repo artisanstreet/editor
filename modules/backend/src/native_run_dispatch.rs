@@ -1,4 +1,4 @@
-//! Durable first-message execution for configured OpenCode2 profiles.
+//! Durable first-message execution for configured `OpenCode2` profiles.
 //!
 //! This module is the one production dispatcher for the native first-turn
 //! workflow. It claims a queued message, carries the immutable settings
@@ -21,15 +21,15 @@ use artisan_database::{
     AssistantChange, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome, CompleteRun,
     DispatchFailureReason, DispatchLeaseOwner, FailMessageDispatch, InterruptRun, LaunchClaimedRun,
-    LaunchClaimedRunOutcome, ProviderBindingBytes, Repository, RequeueMessageDispatch,
-    RunBatchScope, RunErrorCode, RunErrorMessage, RunLaunchCredentials, RunLaunchError,
-    RunStartKey,
+    LaunchClaimedRunOutcome, LaunchedRunReceipt, ProviderBindingBytes, Repository,
+    RequeueMessageDispatch, RunBatchScope, RunErrorCode, RunErrorMessage, RunLaunchCredentials,
+    RunLaunchError, RunStartKey,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, IncrementalText, ItemId, PatchId, Revision, RunId,
-    TurnId, UnixMillis,
+    AssistantBody, AssistantMessagePhase, IncrementalText, ItemId, PatchId, Revision, RootPath,
+    RunId, TurnId, UnixMillis,
 };
-use artisan_native_engine::NativeOpenCode2Authority;
+use artisan_native_engine::{NativeOpenCode2Authority, VerifiedOpenCode2ProfileLaunch};
 use artisan_transport::CancelHandle;
 use tokio::{runtime::Handle, task::JoinHandle};
 
@@ -38,7 +38,7 @@ use crate::{
     conversation_commit_notifier::ConversationCommitNotifier,
     engine_owner::EngineTurnInput,
     engine_owner::observation::{EngineObservation, TerminalState},
-    engine_owner::operation::EngineOperationError,
+    engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession},
     engine_owner::{EngineOwner, EngineOwnerShutdown},
 };
 
@@ -54,7 +54,7 @@ const INTERRUPTED_MESSAGE: &str = "OpenCode2 provider turn interrupted";
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum SettingsLoadDecision {
     /// A validated immutable settings snapshot is ready for the launch fence.
-    Ready(artisan_database::ThreadEngineSettings),
+    Ready(Box<artisan_database::ThreadEngineSettings>),
     /// The claim must be returned for a bounded later attempt.
     Requeue(&'static str),
     /// The claim contains a permanent configuration or project defect.
@@ -73,7 +73,7 @@ pub(crate) fn classify_settings_load(
     >,
 ) -> SettingsLoadDecision {
     match result {
-        Ok(Some(settings)) => SettingsLoadDecision::Ready(settings),
+        Ok(Some(settings)) => SettingsLoadDecision::Ready(Box::new(settings)),
         Ok(None) => SettingsLoadDecision::Requeue("engine unconfigured"),
         Err(error) if is_permanent_configuration_error(&error) => {
             SettingsLoadDecision::Fail("engine settings corrupt")
@@ -232,6 +232,11 @@ impl std::fmt::Debug for NativeRunDispatcherConfig {
 
 impl NativeRunDispatcherConfig {
     /// Creates a complete injected scheduler policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a duration, prompt selector, or queue capacity
+    /// is outside the configured scheduler bounds.
     pub fn new(
         authority: NativeOpenCode2Authority,
         notifier: ConversationCommitNotifier,
@@ -366,8 +371,8 @@ impl NativeRunDispatcher {
             }) => NativeRunDispatcherShutdown::BudgetExceeded,
             Ok(DispatchLoopExit {
                 owner: EngineOwnerShutdown::Quarantined,
-            }) => NativeRunDispatcherShutdown::TaskLost,
-            Ok(DispatchLoopExit {
+            })
+            | Ok(DispatchLoopExit {
                 owner: EngineOwnerShutdown::TaskLost,
             })
             | Err(_) => NativeRunDispatcherShutdown::TaskLost,
@@ -423,32 +428,29 @@ async fn dispatch_loop(
             claimed_at,
             lease_expires_at,
         };
-        let claimed = match repository.claim_next_message_dispatch(claim).await {
-            Ok(Some(claimed)) => claimed,
-            Ok(None) | Err(_) => {
-                if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
-                    break;
-                }
-                continue;
+        let Ok(Some(claimed)) = repository.claim_next_message_dispatch(claim).await else {
+            if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
+                break;
             }
+            continue;
         };
-        execute_claim(
-            &repository,
-            Path::new(&database_path),
-            &config,
-            &origin,
-            &stop,
-            &process_cancel,
-            &owner,
+        execute_claim(ClaimExecution {
+            repository: &repository,
+            database_path: Path::new(&database_path),
+            config: &config,
+            origin: &origin,
+            stop: &stop,
+            process_cancel: &process_cancel,
+            owner: &owner,
             claimed,
-        )
+        })
         .await;
     }
 
     let owner_shutdown = loop {
-        match owner.shutdown().await {
-            EngineOwnerShutdown::Quarantined => continue,
-            outcome => break outcome,
+        let outcome = owner.shutdown().await;
+        if !matches!(outcome, EngineOwnerShutdown::Quarantined) {
+            break outcome;
         }
     };
     DispatchLoopExit {
@@ -522,171 +524,205 @@ fn mint_patch_id(origin: &SystemCommandOrigin) -> Option<PatchId> {
     PatchId::parse(origin.mint_identity().ok()?).ok()
 }
 
-async fn execute_claim(
-    repository: &Repository,
-    database_path: &Path,
-    config: &NativeRunDispatcherConfig,
-    origin: &SystemCommandOrigin,
-    stop: &CancelHandle,
-    process_cancel: &CancelHandle,
-    owner: &EngineOwner,
+struct ClaimExecution<'a> {
+    repository: &'a Repository,
+    database_path: &'a Path,
+    config: &'a NativeRunDispatcherConfig,
+    origin: &'a SystemCommandOrigin,
+    stop: &'a CancelHandle,
+    process_cancel: &'a CancelHandle,
+    owner: &'a EngineOwner,
     claimed: ClaimedMessageDispatch,
-) {
-    if stop.is_cancelled() || process_cancel.is_cancelled() {
-        requeue_claim(repository, claimed, config, origin, "dispatcher stopping").await;
-        return;
-    }
-    let Some(payload) = read_payload(repository, &claimed).await else {
+}
+
+impl ClaimExecution<'_> {
+    async fn requeue(self, reason: &'static str) {
         requeue_claim(
-            repository,
-            claimed,
-            config,
-            origin,
-            "message payload unavailable",
+            self.repository,
+            self.claimed,
+            self.config,
+            self.origin,
+            reason,
         )
         .await;
+    }
+
+    async fn fail(self, reason: &'static str) {
+        fail_claim(self.repository, self.claimed, self.origin, reason).await;
+    }
+}
+
+struct LoadedClaim<'a> {
+    context: ClaimExecution<'a>,
+    payload: artisan_database::MessageDispatchPayload,
+    settings: artisan_database::ThreadEngineSettings,
+    project_root: RootPath,
+    launch: VerifiedOpenCode2ProfileLaunch,
+}
+
+struct ClaimIds {
+    run_id: RunId,
+    turn_id: TurnId,
+    item_id: ItemId,
+    first_patch_id: PatchId,
+    second_patch_id: PatchId,
+    operated_at: UnixMillis,
+    run_start_key: RunStartKey,
+    credentials: RunLaunchCredentials,
+}
+
+struct LaunchedClaim<'a> {
+    context: ClaimExecution<'a>,
+    payload: artisan_database::MessageDispatchPayload,
+    settings: artisan_database::ThreadEngineSettings,
+    project_root: RootPath,
+    launch: VerifiedOpenCode2ProfileLaunch,
+    ids: ClaimIds,
+    receipt: LaunchedRunReceipt,
+}
+
+struct PreparedClaim<'a> {
+    context: ClaimExecution<'a>,
+    ids: ClaimIds,
+    receipt: LaunchedRunReceipt,
+    settings: artisan_database::ThreadEngineSettings,
+    turn: AcceptedTurn,
+    session: PreparedSession,
+}
+
+struct BoundClaim<'a> {
+    context: ClaimExecution<'a>,
+    ids: ClaimIds,
+    receipt: LaunchedRunReceipt,
+    bound: artisan_database::BoundRunReceipt,
+    bound_at: UnixMillis,
+    turn: AcceptedTurn,
+}
+
+async fn execute_claim(context: ClaimExecution<'_>) {
+    if context.stop.is_cancelled() || context.process_cancel.is_cancelled() {
+        context.requeue("dispatcher stopping").await;
+        return;
+    }
+    let Some(loaded) = load_claim(context).await else {
         return;
     };
+    let ids = match mint_claim_ids(loaded.context.origin, loaded.context.claimed.updated_at) {
+        Ok(ids) => ids,
+        Err(reason) => {
+            loaded.context.requeue(reason).await;
+            return;
+        }
+    };
+    let Some(launched) = launch_claim(loaded, ids).await else {
+        return;
+    };
+    let Some(prepared) = admit_claim(launched).await else {
+        return;
+    };
+    let Some(bound) = bind_claim(prepared).await else {
+        return;
+    };
+    consume_bound_claim(bound).await;
+}
+
+async fn load_claim<'a>(context: ClaimExecution<'a>) -> Option<LoadedClaim<'a>> {
+    let Some(payload) = read_payload(context.repository, &context.claimed).await else {
+        context.requeue("message payload unavailable").await;
+        return None;
+    };
     let settings = match classify_settings_load(
-        repository
+        context
+            .repository
             .read_thread_engine_settings(&payload.thread_id)
             .await,
     ) {
-        SettingsLoadDecision::Ready(settings) => settings,
+        SettingsLoadDecision::Ready(settings) => *settings,
         SettingsLoadDecision::Requeue(reason) => {
-            requeue_claim(repository, claimed, config, origin, reason).await;
-            return;
+            context.requeue(reason).await;
+            return None;
         }
         SettingsLoadDecision::Fail(reason) => {
-            fail_claim(repository, claimed, origin, reason).await;
-            return;
+            context.fail(reason).await;
+            return None;
         }
     };
-    let project_root = match repository
+    let project_root = match context
+        .repository
         .read_thread_project_root(&payload.thread_id)
         .await
     {
         Ok(root) => root,
         Err(error) => {
             if is_permanent_configuration_error(&error) {
-                fail_claim(repository, claimed, origin, "project root corrupt").await;
+                context.fail("project root corrupt").await;
             } else {
-                requeue_claim(
-                    repository,
-                    claimed,
-                    config,
-                    origin,
-                    "project root unavailable",
-                )
-                .await;
+                context.requeue("project root unavailable").await;
             }
-            return;
+            return None;
         }
     };
     let profile_id = settings.config().selection().as_opencode2().profile_id();
-    let launch = match config
+    let Ok(launch) = context
+        .config
         .authority
-        .resolve_profile_launch(database_path, profile_id)
-    {
-        Ok(launch) => launch,
-        Err(_) => {
-            requeue_claim(
-                repository,
-                claimed,
-                config,
-                origin,
-                "engine profile unavailable",
-            )
-            .await;
-            return;
-        }
+        .resolve_profile_launch(context.database_path, profile_id)
+    else {
+        context.requeue("engine profile unavailable").await;
+        return None;
     };
-    let Some(run_id) = mint_run_id(origin) else {
-        requeue_claim(
-            repository,
-            claimed,
-            config,
-            origin,
-            "run identity unavailable",
-        )
-        .await;
-        return;
-    };
-    let Some(turn_id) = mint_turn_id(origin) else {
-        requeue_claim(
-            repository,
-            claimed,
-            config,
-            origin,
-            "run identity unavailable",
-        )
-        .await;
-        return;
-    };
-    let Some(item_id) = mint_item_id(origin) else {
-        requeue_claim(
-            repository,
-            claimed,
-            config,
-            origin,
-            "run identity unavailable",
-        )
-        .await;
-        return;
-    };
-    let Some(first_patch_id) = mint_patch_id(origin) else {
-        requeue_claim(
-            repository,
-            claimed,
-            config,
-            origin,
-            "run identity unavailable",
-        )
-        .await;
-        return;
-    };
-    let Some(second_patch_id) = mint_patch_id(origin) else {
-        requeue_claim(
-            repository,
-            claimed,
-            config,
-            origin,
-            "run identity unavailable",
-        )
-        .await;
-        return;
-    };
-    let Some(operated_at) = at_or_after(origin, claimed.updated_at) else {
-        requeue_claim(repository, claimed, config, origin, "run clock unavailable").await;
-        return;
-    };
-    let Some((run_start_key, credentials)) = mint_run_capabilities() else {
-        requeue_claim(
-            repository,
-            claimed,
-            config,
-            origin,
-            "run capability unavailable",
-        )
-        .await;
-        return;
-    };
+    Some(LoadedClaim {
+        context,
+        payload,
+        settings,
+        project_root,
+        launch,
+    })
+}
 
-    let launch_command = LaunchClaimedRun {
-        claimed: &claimed,
-        run_id: &run_id,
-        turn_id: &turn_id,
-        item_id: &item_id,
-        first_patch_id: &first_patch_id,
-        second_patch_id: &second_patch_id,
+fn mint_claim_ids(
+    origin: &SystemCommandOrigin,
+    updated_at: UnixMillis,
+) -> Result<ClaimIds, &'static str> {
+    let run_id = mint_run_id(origin).ok_or("run identity unavailable")?;
+    let turn_id = mint_turn_id(origin).ok_or("run identity unavailable")?;
+    let item_id = mint_item_id(origin).ok_or("run identity unavailable")?;
+    let first_patch_id = mint_patch_id(origin).ok_or("run identity unavailable")?;
+    let second_patch_id = mint_patch_id(origin).ok_or("run identity unavailable")?;
+    let operated_at = at_or_after(origin, updated_at).ok_or("run clock unavailable")?;
+    let (run_start_key, credentials) =
+        mint_run_capabilities().ok_or("run capability unavailable")?;
+    Ok(ClaimIds {
+        run_id,
+        turn_id,
+        item_id,
+        first_patch_id,
+        second_patch_id,
         operated_at,
-        run_start_key: &run_start_key,
-        credentials: &credentials,
-        engine_settings: &settings,
-    };
-    let launch_result =
-        launch_with_retry(repository, launch_command, config.max_command_retries).await;
-    let launched = match classify_launch_result(&launch_result) {
+        run_start_key,
+        credentials,
+    })
+}
+
+async fn launch_claim<'a>(loaded: LoadedClaim<'a>, ids: ClaimIds) -> Option<LaunchedClaim<'a>> {
+    let launch_result = launch_with_retry(
+        loaded.context.repository,
+        LaunchClaimedRun {
+            claimed: &loaded.context.claimed,
+            run_id: &ids.run_id,
+            turn_id: &ids.turn_id,
+            item_id: &ids.item_id,
+            first_patch_id: &ids.first_patch_id,
+            second_patch_id: &ids.second_patch_id,
+            operated_at: ids.operated_at,
+            run_start_key: &ids.run_start_key,
+            credentials: &ids.credentials,
+            engine_settings: &loaded.settings,
+        },
+        loaded.context.config.max_command_retries,
+    )
+    .await;
+    let receipt = match classify_launch_result(&launch_result) {
         LaunchAuthority::Started => match launch_result {
             Ok(LaunchClaimedRunOutcome::Started(receipt)) => receipt,
             _ => unreachable!("started launch authority has a started receipt"),
@@ -695,44 +731,79 @@ async fn execute_claim(
         // contact OpenCode. Leave the launching run for the recovery path;
         // creating another provider session here could duplicate an unknown
         // external effect from the original attempt.
-        LaunchAuthority::Replay => return,
+        LaunchAuthority::Replay => return None,
         LaunchAuthority::Requeue => {
-            requeue_claim(
-                repository,
-                claimed,
-                config,
-                origin,
-                "run launch unavailable",
-            )
-            .await;
-            return;
+            loaded.context.requeue("run launch unavailable").await;
+            return None;
         }
     };
+    let LoadedClaim {
+        context,
+        payload,
+        settings,
+        project_root,
+        launch,
+    } = loaded;
+    Some(LaunchedClaim {
+        context,
+        payload,
+        settings,
+        project_root,
+        launch,
+        ids,
+        receipt,
+    })
+}
+
+async fn admit_claim<'a>(claim: LaunchedClaim<'a>) -> Option<PreparedClaim<'a>> {
+    let LaunchedClaim {
+        context,
+        payload,
+        settings,
+        project_root,
+        launch,
+        ids,
+        receipt,
+    } = claim;
     let attempt_budget = Duration::from_millis(settings.config().runtime().attempt_budget().get());
     let input = EngineTurnInput {
-        run_id: launched.run_id.clone(),
+        run_id: receipt.run_id.clone(),
         project_root,
         prompt_id: payload.message_id.as_str().to_owned(),
         prompt_text: payload.body,
         settings: settings.clone(),
         launch,
-        prompt_delivery: config.prompt_delivery.clone(),
-        stream_after: config.stream_after,
-        control_capacity: config.queue_capacity.get(),
+        prompt_delivery: context.config.prompt_delivery.clone(),
+        stream_after: context.config.stream_after,
+        control_capacity: context.config.queue_capacity.get(),
     };
-    let mut turn = match owner.admit_turn(input, attempt_budget) {
-        Ok(turn) => turn,
-        Err(_) => return,
+    let Ok(mut turn) = context.owner.admit_turn(input, attempt_budget) else {
+        return None;
     };
-    let prepared = turn.prepare().await;
-    let session = match prepared {
-        Ok(session) => session,
-        Err(_) => {
-            let _ = turn.finish().await;
-            return;
-        }
+    let Ok(session) = turn.prepare().await else {
+        let _ = turn.finish().await;
+        return None;
     };
-    let binding_bytes = match provider_binding_bytes(
+    Some(PreparedClaim {
+        context,
+        ids,
+        receipt,
+        settings,
+        turn,
+        session,
+    })
+}
+
+async fn bind_claim<'a>(claim: PreparedClaim<'a>) -> Option<BoundClaim<'a>> {
+    let PreparedClaim {
+        context,
+        ids,
+        receipt,
+        settings,
+        mut turn,
+        session,
+    } = claim;
+    let Some(binding_bytes) = provider_binding_bytes(
         settings
             .config()
             .selection()
@@ -740,72 +811,79 @@ async fn execute_claim(
             .profile_id()
             .as_str(),
         session.session(),
-    ) {
-        Some(bytes) => bytes,
-        None => {
-            turn.cancel();
-            let _ = drain_turn(&mut turn, stop, process_cancel).await;
-            let _ = turn.finish().await;
-            return;
-        }
+    ) else {
+        abandon_turn(turn, context.stop, context.process_cancel).await;
+        return None;
     };
-    let Some(bound_at) = at_or_after(origin, operated_at) else {
-        turn.cancel();
-        let _ = drain_turn(&mut turn, stop, process_cancel).await;
-        let _ = turn.finish().await;
-        return;
+    let Some(bound_at) = at_or_after(context.origin, ids.operated_at) else {
+        abandon_turn(turn, context.stop, context.process_cancel).await;
+        return None;
     };
-    let bind_command = BindRunProvider {
-        claimed: &claimed,
-        receipt: &launched,
-        run_start_key: &run_start_key,
-        credentials: &credentials,
-        expected_launch_at: operated_at,
-        bound_at,
-        binding_version: PROVIDER_BINDING_VERSION,
-        binding_bytes: &binding_bytes,
-    };
-    let bind_result = bind_with_retry(repository, bind_command, config.max_command_retries).await;
+    let bind_result = bind_with_retry(
+        context.repository,
+        BindRunProvider {
+            claimed: &context.claimed,
+            receipt: &receipt,
+            run_start_key: &ids.run_start_key,
+            credentials: &ids.credentials,
+            expected_launch_at: ids.operated_at,
+            bound_at,
+            binding_version: PROVIDER_BINDING_VERSION,
+            binding_bytes: &binding_bytes,
+        },
+        context.config.max_command_retries,
+    )
+    .await;
     let (bound, already_bound) = match bind_result {
         Ok(BindRunProviderOutcome::Bound(receipt)) => (receipt, false),
         Ok(BindRunProviderOutcome::AlreadyBound(receipt)) => (receipt, true),
         Err(_) => {
-            turn.cancel();
-            let _ = drain_turn(&mut turn, stop, process_cancel).await;
-            let _ = turn.finish().await;
-            return;
+            abandon_turn(turn, context.stop, context.process_cancel).await;
+            return None;
         }
     };
     if matches!(
         prompt_authorization_after_binding(already_bound),
         PromptAuthorization::DoNotAuthorize
-    ) {
-        turn.cancel();
-        let _ = drain_turn(&mut turn, stop, process_cancel).await;
-        let _ = turn.finish().await;
-        return;
+    ) || turn.authorize().is_err()
+    {
+        abandon_turn(turn, context.stop, context.process_cancel).await;
+        return None;
     }
-    if turn.authorize().is_err() {
-        turn.cancel();
-        let _ = drain_turn(&mut turn, stop, process_cancel).await;
-        let _ = turn.finish().await;
-        return;
-    }
+    Some(BoundClaim {
+        context,
+        ids,
+        receipt,
+        bound,
+        bound_at,
+        turn,
+    })
+}
+
+async fn consume_bound_claim(bound: BoundClaim<'_>) {
+    let BoundClaim {
+        context,
+        ids,
+        receipt,
+        bound,
+        bound_at,
+        turn,
+    } = bound;
     let scope = RunBatchScope {
-        claimed: &claimed,
-        launched: &launched,
+        claimed: &context.claimed,
+        launched: &receipt,
         bound: &bound,
-        run_start_key: &run_start_key,
-        credentials: &credentials,
-        expected_launch_at: operated_at,
+        run_start_key: &ids.run_start_key,
+        credentials: &ids.credentials,
+        expected_launch_at: ids.operated_at,
         expected_updated_at: bound_at,
     };
     consume_turn(
-        repository,
-        config,
-        origin,
-        stop,
-        process_cancel,
+        context.repository,
+        context.config,
+        context.origin,
+        context.stop,
+        context.process_cancel,
         turn,
         scope,
     )
@@ -882,9 +960,9 @@ async fn fail_claim(
         .await;
 }
 
-async fn launch_with_retry<'a>(
+async fn launch_with_retry(
     repository: &Repository,
-    command: LaunchClaimedRun<'a>,
+    command: LaunchClaimedRun<'_>,
     retries: std::num::NonZeroUsize,
 ) -> Result<LaunchClaimedRunOutcome, artisan_database::RunLaunchError> {
     let LaunchClaimedRun {
@@ -923,9 +1001,9 @@ async fn launch_with_retry<'a>(
     Err(last_error.expect("positive retry count always records a result"))
 }
 
-async fn bind_with_retry<'a>(
+async fn bind_with_retry(
     repository: &Repository,
-    command: BindRunProvider<'a>,
+    command: BindRunProvider<'_>,
     retries: std::num::NonZeroUsize,
 ) -> Result<BindRunProviderOutcome, artisan_database::RunBindingError> {
     let BindRunProvider {
@@ -970,8 +1048,14 @@ fn provider_binding_bytes(profile_id: &str, session_id: &str) -> Option<Provider
     ProviderBindingBytes::new(bytes).ok()
 }
 
+async fn abandon_turn(mut turn: AcceptedTurn, stop: &CancelHandle, process_cancel: &CancelHandle) {
+    turn.cancel();
+    let _ = drain_turn(&mut turn, stop, process_cancel).await;
+    let _ = turn.finish().await;
+}
+
 async fn drain_turn(
-    turn: &mut crate::engine_owner::operation::AcceptedTurn,
+    turn: &mut AcceptedTurn,
     stop: &CancelHandle,
     process_cancel: &CancelHandle,
 ) -> bool {
@@ -986,16 +1070,28 @@ async fn drain_turn(
     true
 }
 
-async fn commit_batch_with_retry(
-    repository: &Repository,
-    notifier: &ConversationCommitNotifier,
-    scope: &RunBatchScope<'_>,
+struct CommitBatchRequest<'a> {
+    repository: &'a Repository,
+    notifier: &'a ConversationCommitNotifier,
+    scope: &'a RunBatchScope<'a>,
     batch_sequence: i64,
     operated_at: UnixMillis,
-    activate_turn_patch_id: Option<&PatchId>,
-    changes: &[AssistantChange<'_>],
+    activate_turn_patch_id: Option<&'a PatchId>,
+    changes: &'a [AssistantChange<'a>],
     retries: std::num::NonZeroUsize,
-) -> bool {
+}
+
+async fn commit_batch_with_retry(request: CommitBatchRequest<'_>) -> bool {
+    let CommitBatchRequest {
+        repository,
+        notifier,
+        scope,
+        batch_sequence,
+        operated_at,
+        activate_turn_patch_id,
+        changes,
+        retries,
+    } = request;
     for _ in 0..retries.get() {
         let result = repository
             .commit_run_batch(CommitRunBatch {
@@ -1018,8 +1114,8 @@ async fn commit_batch_with_retry(
         if notify_after_commit(
             matches!(
                 result,
-                Ok(CommitRunBatchOutcome::Committed(_))
-                    | Ok(CommitRunBatchOutcome::AlreadyCommitted(_))
+                Ok(CommitRunBatchOutcome::Committed(_)
+                    | CommitRunBatchOutcome::AlreadyCommitted(_))
             ),
             || {
                 let _ = notifier.publish(&scope.launched.thread_id);
@@ -1043,6 +1139,40 @@ fn copy_scope<'a>(scope: &RunBatchScope<'a>) -> RunBatchScope<'a> {
     }
 }
 
+struct TurnConsumptionContext<'a> {
+    repository: &'a Repository,
+    config: &'a NativeRunDispatcherConfig,
+    origin: &'a SystemCommandOrigin,
+    stop: &'a CancelHandle,
+    process_cancel: &'a CancelHandle,
+}
+
+struct TurnConsumptionState<'a> {
+    scope: RunBatchScope<'a>,
+    assistant_item: Option<ItemId>,
+    assistant_revision: Revision,
+    assistant_body: String,
+    batch_sequence: i64,
+    forced_interrupted: bool,
+    progress_uncertain: bool,
+    terminal: Option<TerminalState>,
+}
+
+impl<'a> TurnConsumptionState<'a> {
+    fn new(scope: RunBatchScope<'a>) -> Self {
+        Self {
+            scope,
+            assistant_item: None,
+            assistant_revision: Revision::new(0),
+            assistant_body: String::new(),
+            batch_sequence: 1,
+            forced_interrupted: false,
+            progress_uncertain: false,
+            terminal: None,
+        }
+    }
+}
+
 async fn consume_turn(
     repository: &Repository,
     config: &NativeRunDispatcherConfig,
@@ -1052,254 +1182,323 @@ async fn consume_turn(
     mut turn: crate::engine_owner::operation::AcceptedTurn,
     scope: RunBatchScope<'_>,
 ) {
-    let mut scope = scope;
-    let mut assistant_item = None;
-    let mut assistant_revision = Revision::new(0);
-    let mut assistant_body = String::new();
-    let mut batch_sequence = 1_i64;
-    let mut forced_interrupted = false;
-    let mut progress_uncertain = false;
-    let mut terminal = None;
+    let context = TurnConsumptionContext {
+        repository,
+        config,
+        origin,
+        stop,
+        process_cancel,
+    };
+    let mut state = TurnConsumptionState::new(scope);
 
     loop {
         tokio::select! {
             biased;
-            () = stop.wait() => {
-                forced_interrupted = true;
+            () = context.stop.wait() => {
+                state.forced_interrupted = true;
                 turn.cancel();
             }
-            () = process_cancel.wait() => {
-                forced_interrupted = true;
+            () = context.process_cancel.wait() => {
+                state.forced_interrupted = true;
                 turn.cancel();
             }
             observation = turn.next_observation() => {
                 let Some(observation) = observation else { break; };
-                match observation {
-                    EngineObservation::TextDelta(delta) => {
-                        let Some(next_length) = assistant_body
-                            .len()
-                            .checked_add(delta.delta().len())
-                        else {
-                            forced_interrupted = true;
-                            progress_uncertain = true;
-                            turn.cancel();
-                            continue;
-                        };
-                        if next_length > AssistantBody::MAX_BYTES {
-                            forced_interrupted = true;
-                            progress_uncertain = true;
-                            turn.cancel();
-                            continue;
-                        }
-                        assistant_body.push_str(delta.delta());
-                        if assistant_item.is_none() {
-                            let Some(item_id) = mint_item_id(origin) else {
-                                forced_interrupted = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            let Ok(body) = AssistantBody::parse(assistant_body.clone()) else {
-                                forced_interrupted = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            let Some(patch_id) = mint_patch_id(origin) else {
-                                forced_interrupted = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            let Some(activation_patch_id) = mint_patch_id(origin) else {
-                                forced_interrupted = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            let changes = [AssistantChange::Start {
-                                item_id: &item_id,
-                                phase: AssistantMessagePhase::Unspecified,
-                                body: &body,
-                                patch_id: &patch_id,
-                            }];
-                            let Some(operated_at) = at_or_after(origin, scope.expected_updated_at) else {
-                                forced_interrupted = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            if !commit_batch_with_retry(
-                                repository,
-                                &config.notifier,
-                                &scope,
-                                batch_sequence,
-                                operated_at,
-                                Some(&activation_patch_id),
-                                &changes,
-                                config.max_command_retries,
-                            ).await {
-                                forced_interrupted = true;
-                                progress_uncertain = true;
-                                turn.cancel();
-                                continue;
-                            }
-                            assistant_item = Some(item_id);
-                            assistant_revision = Revision::new(0);
-                            scope.expected_updated_at = operated_at;
-                            let Some(next_sequence) = batch_sequence.checked_add(1) else {
-                                forced_interrupted = true;
-                                progress_uncertain = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            batch_sequence = next_sequence;
-                        } else {
-                            let Some(item_id) = assistant_item.as_ref() else {
-                                forced_interrupted = true;
-                                progress_uncertain = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            let Ok(fragment) = IncrementalText::parse(delta.delta().to_owned()) else {
-                                forced_interrupted = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            let Some(patch_id) = mint_patch_id(origin) else {
-                                forced_interrupted = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            let changes = [AssistantChange::Append {
-                                item_id,
-                                expected_revision: assistant_revision,
-                                text: &fragment,
-                                patch_id: &patch_id,
-                            }];
-                            let Some(operated_at) = at_or_after(origin, scope.expected_updated_at) else {
-                                forced_interrupted = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            if !commit_batch_with_retry(
-                                repository,
-                                &config.notifier,
-                                &scope,
-                                batch_sequence,
-                                operated_at,
-                                None,
-                                &changes,
-                                config.max_command_retries,
-                            ).await {
-                                forced_interrupted = true;
-                                progress_uncertain = true;
-                                turn.cancel();
-                                continue;
-                            }
-                            assistant_revision = match assistant_revision.checked_next() {
-                                Ok(next) => next,
-                                Err(_) => {
-                                    forced_interrupted = true;
-                                    progress_uncertain = true;
-                                    turn.cancel();
-                                    continue;
-                                }
-                            };
-                            scope.expected_updated_at = operated_at;
-                            let Some(next_sequence) = batch_sequence.checked_add(1) else {
-                                forced_interrupted = true;
-                                progress_uncertain = true;
-                                turn.cancel();
-                                continue;
-                            };
-                            batch_sequence = next_sequence;
-                        }
-                    }
-                    EngineObservation::Terminal(observation) => {
-                        terminal = Some(observation.state());
-                        if forced_interrupted {
-                            turn.cancel();
-                        }
-                    }
-                }
+                handle_observation(&context, &mut state, &mut turn, observation).await;
             }
         }
-        if terminal.is_some() {
+        if state.terminal.is_some() {
             break;
         }
     }
-
     let owner_result = turn.finish().await;
-    if progress_uncertain {
+    if state.progress_uncertain {
         return;
     }
-    let terminal = if forced_interrupted {
-        TerminalState::Interrupted
-    } else if let Some(terminal) = terminal {
-        terminal
-    } else {
-        match owner_result {
-            Ok(result) => result.terminal(),
-            Err(EngineOperationError::Cancelled) => TerminalState::Cancelled,
-            Err(EngineOperationError::Shutdown | EngineOperationError::Deadline) => {
-                TerminalState::Interrupted
-            }
-            Err(
-                EngineOperationError::ReapUnresolved
-                | EngineOperationError::UnresolvedReapDuring { .. },
-            ) => return,
-            Err(_) => TerminalState::Failed,
-        }
+    let Some(terminal) = resolve_terminal(state.forced_interrupted, state.terminal, owner_result)
+    else {
+        return;
     };
-    if assistant_item.is_none() {
-        let Some(item_id) = mint_item_id(origin) else {
-            return;
-        };
-        let Ok(body) = AssistantBody::parse(assistant_body.clone()) else {
-            return;
-        };
-        let Some(patch_id) = mint_patch_id(origin) else {
-            return;
-        };
-        let Some(activation_patch_id) = mint_patch_id(origin) else {
-            return;
-        };
-        let changes = [AssistantChange::Start {
-            item_id: &item_id,
-            phase: AssistantMessagePhase::Unspecified,
-            body: &body,
-            patch_id: &patch_id,
-        }];
-        let Some(operated_at) = at_or_after(origin, scope.expected_updated_at) else {
-            return;
-        };
-        if !commit_batch_with_retry(
-            repository,
-            &config.notifier,
-            &scope,
-            batch_sequence,
-            operated_at,
-            Some(&activation_patch_id),
-            &changes,
-            config.max_command_retries,
-        )
-        .await
-        {
-            return;
-        }
-        assistant_item = Some(item_id);
-        assistant_revision = Revision::new(0);
-        scope.expected_updated_at = operated_at;
+    if !ensure_assistant_item(&context, &mut state).await {
+        return;
     }
-    let Some(item_id) = assistant_item else {
+    settle_terminal(&context, state, terminal).await;
+}
+
+fn mark_interrupted(
+    state: &mut TurnConsumptionState<'_>,
+    turn: &AcceptedTurn,
+    progress_uncertain: bool,
+) {
+    state.forced_interrupted = true;
+    state.progress_uncertain |= progress_uncertain;
+    turn.cancel();
+}
+
+async fn handle_observation(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    observation: EngineObservation,
+) {
+    match observation {
+        EngineObservation::TextDelta(delta) => {
+            handle_text_delta(context, state, turn, delta).await;
+        }
+        EngineObservation::Terminal(observation) => {
+            state.terminal = Some(observation.state());
+            if state.forced_interrupted {
+                turn.cancel();
+            }
+        }
+    }
+}
+
+async fn handle_text_delta(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    delta: IncrementalText,
+) {
+    let Some(next_length) = state.assistant_body.len().checked_add(delta.delta().len()) else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    if next_length > AssistantBody::MAX_BYTES {
+        mark_interrupted(state, turn, true);
+        return;
+    }
+    state.assistant_body.push_str(delta.delta());
+    if state.assistant_item.is_none() {
+        start_assistant_item(context, state, turn).await;
+    } else {
+        append_assistant_delta(context, state, turn, delta).await;
+    }
+}
+
+async fn start_assistant_item(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+) {
+    let Some(item_id) = mint_item_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    let Some(patch_id) = mint_patch_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    let Some(activation_patch_id) = mint_patch_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    let changes = [AssistantChange::Start {
+        item_id: &item_id,
+        phase: AssistantMessagePhase::Unspecified,
+        body: &body,
+        patch_id: &patch_id,
+    }];
+    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    if !commit_batch_with_retry(CommitBatchRequest {
+        repository: context.repository,
+        notifier: &context.config.notifier,
+        scope: &state.scope,
+        batch_sequence: state.batch_sequence,
+        operated_at,
+        activate_turn_patch_id: Some(&activation_patch_id),
+        changes: &changes,
+        retries: context.config.max_command_retries,
+    })
+    .await
+    {
+        mark_interrupted(state, turn, true);
+        return;
+    }
+    state.assistant_item = Some(item_id);
+    state.assistant_revision = Revision::new(0);
+    state.scope.expected_updated_at = operated_at;
+    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    state.batch_sequence = next_sequence;
+}
+
+async fn append_assistant_delta(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    delta: IncrementalText,
+) {
+    let Some(item_id) = state.assistant_item.as_ref() else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    let Ok(fragment) = IncrementalText::parse(delta.delta().to_owned()) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    let Some(patch_id) = mint_patch_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    let changes = [AssistantChange::Append {
+        item_id,
+        expected_revision: state.assistant_revision,
+        text: &fragment,
+        patch_id: &patch_id,
+    }];
+    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    if !commit_batch_with_retry(CommitBatchRequest {
+        repository: context.repository,
+        notifier: &context.config.notifier,
+        scope: &state.scope,
+        batch_sequence: state.batch_sequence,
+        operated_at,
+        activate_turn_patch_id: None,
+        changes: &changes,
+        retries: context.config.max_command_retries,
+    })
+    .await
+    {
+        mark_interrupted(state, turn, true);
+        return;
+    }
+    let Ok(next_revision) = state.assistant_revision.checked_next() else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    state.assistant_revision = next_revision;
+    state.scope.expected_updated_at = operated_at;
+    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    state.batch_sequence = next_sequence;
+}
+
+fn resolve_terminal(
+    forced_interrupted: bool,
+    terminal: Option<TerminalState>,
+    owner_result: TurnResult,
+) -> Option<TerminalState> {
+    if forced_interrupted {
+        return Some(TerminalState::Interrupted);
+    }
+    if let Some(terminal) = terminal {
+        return Some(terminal);
+    }
+    match owner_result {
+        Ok(result) => Some(result.terminal()),
+        Err(EngineOperationError::Cancelled) => Some(TerminalState::Cancelled),
+        Err(EngineOperationError::Shutdown | EngineOperationError::Deadline) => {
+            Some(TerminalState::Interrupted)
+        }
+        Err(
+            EngineOperationError::ReapUnresolved
+            | EngineOperationError::UnresolvedReapDuring { .. },
+        ) => None,
+        Err(_) => Some(TerminalState::Failed),
+    }
+}
+
+async fn ensure_assistant_item(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+) -> bool {
+    if state.assistant_item.is_some() {
+        return true;
+    }
+    let Some(item_id) = mint_item_id(context.origin) else {
+        return false;
+    };
+    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
+        return false;
+    };
+    let Some(patch_id) = mint_patch_id(context.origin) else {
+        return false;
+    };
+    let Some(activation_patch_id) = mint_patch_id(context.origin) else {
+        return false;
+    };
+    let changes = [AssistantChange::Start {
+        item_id: &item_id,
+        phase: AssistantMessagePhase::Unspecified,
+        body: &body,
+        patch_id: &patch_id,
+    }];
+    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
+        return false;
+    };
+    if !commit_batch_with_retry(CommitBatchRequest {
+        repository: context.repository,
+        notifier: &context.config.notifier,
+        scope: &state.scope,
+        batch_sequence: state.batch_sequence,
+        operated_at,
+        activate_turn_patch_id: Some(&activation_patch_id),
+        changes: &changes,
+        retries: context.config.max_command_retries,
+    })
+    .await
+    {
+        return false;
+    }
+    state.assistant_item = Some(item_id);
+    state.assistant_revision = Revision::new(0);
+    state.scope.expected_updated_at = operated_at;
+    true
+}
+
+struct TerminalSettlement<'a> {
+    repository: &'a Repository,
+    scope: &'a RunBatchScope<'a>,
+    retries: std::num::NonZeroUsize,
+    operated_at: UnixMillis,
+    item_id: &'a ItemId,
+    expected_revision: Revision,
+    body: &'a AssistantBody,
+    phase: AssistantMessagePhase,
+    item_patch_id: &'a PatchId,
+    turn_patch_id: &'a PatchId,
+}
+
+async fn settle_terminal(
+    context: &TurnConsumptionContext<'_>,
+    state: TurnConsumptionState<'_>,
+    terminal: TerminalState,
+) {
+    let TurnConsumptionState {
+        scope,
+        assistant_item: Some(item_id),
+        assistant_revision,
+        assistant_body,
+        ..
+    } = state
+    else {
         return;
     };
     let Ok(body) = AssistantBody::parse(assistant_body) else {
         return;
     };
-    let Some(item_patch_id) = mint_patch_id(origin) else {
+    let Some(item_patch_id) = mint_patch_id(context.origin) else {
         return;
     };
-    let Some(turn_patch_id) = mint_patch_id(origin) else {
+    let Some(turn_patch_id) = mint_patch_id(context.origin) else {
         return;
     };
-    let Some(operated_at) = at_or_after(origin, scope.expected_updated_at) else {
+    let Some(operated_at) = at_or_after(context.origin, scope.expected_updated_at) else {
         return;
     };
     let phase = if matches!(terminal, TerminalState::Completed) {
@@ -1307,114 +1506,139 @@ async fn consume_turn(
     } else {
         AssistantMessagePhase::Unspecified
     };
-    let mut terminal_persisted = false;
+    let settlement = TerminalSettlement {
+        repository: context.repository,
+        scope: &scope,
+        retries: context.config.max_command_retries,
+        operated_at,
+        item_id: &item_id,
+        expected_revision: assistant_revision,
+        body: &body,
+        phase,
+        item_patch_id: &item_patch_id,
+        turn_patch_id: &turn_patch_id,
+    };
+    if persist_terminal_settlement(&settlement, terminal).await {
+        let _ = context.config.notifier.publish(&scope.launched.thread_id);
+    }
+}
+
+async fn persist_terminal_settlement(
+    settlement: &TerminalSettlement<'_>,
+    terminal: TerminalState,
+) -> bool {
     match terminal {
-        TerminalState::Completed => {
-            for _ in 0..config.max_command_retries.get() {
-                if repository
-                    .complete_run(CompleteRun {
-                        scope: copy_scope(&scope),
-                        operated_at,
-                        item_id: &item_id,
-                        expected_revision: assistant_revision,
-                        body: &body,
-                        phase,
-                        item_patch_id: &item_patch_id,
-                        turn_patch_id: &turn_patch_id,
-                    })
-                    .await
-                    .is_ok()
-                {
-                    terminal_persisted = true;
-                    break;
-                }
-            }
-        }
-        TerminalState::Failed => {
-            let Some(error_code) = RunErrorCode::parse(PROVIDER_FAILURE_CODE.to_owned()).ok()
-            else {
-                return;
-            };
-            let Some(error_message) =
-                RunErrorMessage::parse(PROVIDER_FAILURE_MESSAGE.to_owned()).ok()
-            else {
-                return;
-            };
-            for _ in 0..config.max_command_retries.get() {
-                if repository
-                    .fail_run(artisan_database::FailRun {
-                        scope: copy_scope(&scope),
-                        operated_at,
-                        item_id: &item_id,
-                        expected_revision: assistant_revision,
-                        body: &body,
-                        phase,
-                        item_patch_id: &item_patch_id,
-                        turn_patch_id: &turn_patch_id,
-                        error_code: &error_code,
-                        error_message: &error_message,
-                    })
-                    .await
-                    .is_ok()
-                {
-                    terminal_persisted = true;
-                    break;
-                }
-            }
-        }
-        TerminalState::Cancelled => {
-            for _ in 0..config.max_command_retries.get() {
-                if repository
-                    .cancel_run(artisan_database::CancelRun {
-                        scope: copy_scope(&scope),
-                        operated_at,
-                        item_id: &item_id,
-                        expected_revision: assistant_revision,
-                        body: &body,
-                        phase,
-                        item_patch_id: &item_patch_id,
-                        turn_patch_id: &turn_patch_id,
-                    })
-                    .await
-                    .is_ok()
-                {
-                    terminal_persisted = true;
-                    break;
-                }
-            }
-        }
-        TerminalState::Interrupted => {
-            let Some(error_code) = RunErrorCode::parse(INTERRUPTED_CODE.to_owned()).ok() else {
-                return;
-            };
-            let Some(error_message) = RunErrorMessage::parse(INTERRUPTED_MESSAGE.to_owned()).ok()
-            else {
-                return;
-            };
-            for _ in 0..config.max_command_retries.get() {
-                if repository
-                    .interrupt_run(InterruptRun {
-                        scope: copy_scope(&scope),
-                        operated_at,
-                        item_id: &item_id,
-                        expected_revision: assistant_revision,
-                        body: &body,
-                        phase,
-                        item_patch_id: &item_patch_id,
-                        turn_patch_id: &turn_patch_id,
-                        error_code: &error_code,
-                        error_message: &error_message,
-                    })
-                    .await
-                    .is_ok()
-                {
-                    terminal_persisted = true;
-                    break;
-                }
-            }
+        TerminalState::Completed => persist_completed(settlement).await,
+        TerminalState::Failed => persist_failed(settlement).await,
+        TerminalState::Cancelled => persist_cancelled(settlement).await,
+        TerminalState::Interrupted => persist_interrupted(settlement).await,
+    }
+}
+
+async fn persist_completed(settlement: &TerminalSettlement<'_>) -> bool {
+    for _ in 0..settlement.retries.get() {
+        if settlement
+            .repository
+            .complete_run(CompleteRun {
+                scope: copy_scope(settlement.scope),
+                operated_at: settlement.operated_at,
+                item_id: settlement.item_id,
+                expected_revision: settlement.expected_revision,
+                body: settlement.body,
+                phase: settlement.phase,
+                item_patch_id: settlement.item_patch_id,
+                turn_patch_id: settlement.turn_patch_id,
+            })
+            .await
+            .is_ok()
+        {
+            return true;
         }
     }
-    if terminal_persisted {
-        let _ = config.notifier.publish(&scope.launched.thread_id);
+    false
+}
+
+async fn persist_failed(settlement: &TerminalSettlement<'_>) -> bool {
+    let Ok(error_code) = RunErrorCode::parse(PROVIDER_FAILURE_CODE.to_owned()) else {
+        return false;
+    };
+    let Ok(error_message) = RunErrorMessage::parse(PROVIDER_FAILURE_MESSAGE.to_owned()) else {
+        return false;
+    };
+    for _ in 0..settlement.retries.get() {
+        if settlement
+            .repository
+            .fail_run(artisan_database::FailRun {
+                scope: copy_scope(settlement.scope),
+                operated_at: settlement.operated_at,
+                item_id: settlement.item_id,
+                expected_revision: settlement.expected_revision,
+                body: settlement.body,
+                phase: settlement.phase,
+                item_patch_id: settlement.item_patch_id,
+                turn_patch_id: settlement.turn_patch_id,
+                error_code: &error_code,
+                error_message: &error_message,
+            })
+            .await
+            .is_ok()
+        {
+            return true;
+        }
     }
+    false
+}
+
+async fn persist_cancelled(settlement: &TerminalSettlement<'_>) -> bool {
+    for _ in 0..settlement.retries.get() {
+        if settlement
+            .repository
+            .cancel_run(artisan_database::CancelRun {
+                scope: copy_scope(settlement.scope),
+                operated_at: settlement.operated_at,
+                item_id: settlement.item_id,
+                expected_revision: settlement.expected_revision,
+                body: settlement.body,
+                phase: settlement.phase,
+                item_patch_id: settlement.item_patch_id,
+                turn_patch_id: settlement.turn_patch_id,
+            })
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+async fn persist_interrupted(settlement: &TerminalSettlement<'_>) -> bool {
+    let Ok(error_code) = RunErrorCode::parse(INTERRUPTED_CODE.to_owned()) else {
+        return false;
+    };
+    let Ok(error_message) = RunErrorMessage::parse(INTERRUPTED_MESSAGE.to_owned()) else {
+        return false;
+    };
+    for _ in 0..settlement.retries.get() {
+        if settlement
+            .repository
+            .interrupt_run(InterruptRun {
+                scope: copy_scope(settlement.scope),
+                operated_at: settlement.operated_at,
+                item_id: settlement.item_id,
+                expected_revision: settlement.expected_revision,
+                body: settlement.body,
+                phase: settlement.phase,
+                item_patch_id: settlement.item_patch_id,
+                turn_patch_id: settlement.turn_patch_id,
+                error_code: &error_code,
+                error_message: &error_message,
+            })
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
 }
