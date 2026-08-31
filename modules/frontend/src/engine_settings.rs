@@ -1272,39 +1272,41 @@ mod tests {
     }
 
     fn manual_document(draft: &EngineSettingsDraft) -> String {
-        MANUAL_CONFIGURATION_KEYS
-            .iter()
-            .map(|key| {
-                let value = match *key {
-                    "profile_id" => &draft.profile_id,
-                    "model_id" => &draft.model_id,
-                    "route_id" => &draft.route_id,
-                    "variant_id" => &draft.variant_id,
-                    "permission_id" => &draft.permission_id,
-                    "agent_id" => &draft.agent_id,
-                    "approval" => &draft.approval,
-                    "filesystem" => &draft.filesystem,
-                    "network" => &draft.network,
-                    "web_search" => &draft.web_search,
-                    "attempt_budget" => &draft.attempt_budget,
-                    "readiness_budget" => &draft.readiness_budget,
-                    "health_budget" => &draft.health_budget,
-                    "prompt_budget" => &draft.prompt_budget,
-                    "stream_budget" => &draft.stream_budget,
-                    "close_budget" => &draft.close_budget,
-                    "max_json_body_bytes" => &draft.max_json_body_bytes,
-                    "max_sse_line_bytes" => &draft.max_sse_line_bytes,
-                    "max_sse_event_bytes" => &draft.max_sse_event_bytes,
-                    "max_readiness_line_bytes" => &draft.max_readiness_line_bytes,
-                    "max_header_count" => &draft.max_header_count,
-                    "max_http_buffer_bytes" => &draft.max_http_buffer_bytes,
-                    "max_stderr_bytes" => &draft.max_stderr_bytes,
-                    "observation_capacity" => &draft.observation_capacity,
-                    _ => unreachable!("manual field table diverged"),
-                };
-                format!("{key}={value}\n")
-            })
-            .collect()
+        let mut document = String::new();
+        for key in MANUAL_CONFIGURATION_KEYS {
+            let value = match key {
+                "profile_id" => &draft.profile_id,
+                "model_id" => &draft.model_id,
+                "route_id" => &draft.route_id,
+                "variant_id" => &draft.variant_id,
+                "permission_id" => &draft.permission_id,
+                "agent_id" => &draft.agent_id,
+                "approval" => &draft.approval,
+                "filesystem" => &draft.filesystem,
+                "network" => &draft.network,
+                "web_search" => &draft.web_search,
+                "attempt_budget" => &draft.attempt_budget,
+                "readiness_budget" => &draft.readiness_budget,
+                "health_budget" => &draft.health_budget,
+                "prompt_budget" => &draft.prompt_budget,
+                "stream_budget" => &draft.stream_budget,
+                "close_budget" => &draft.close_budget,
+                "max_json_body_bytes" => &draft.max_json_body_bytes,
+                "max_sse_line_bytes" => &draft.max_sse_line_bytes,
+                "max_sse_event_bytes" => &draft.max_sse_event_bytes,
+                "max_readiness_line_bytes" => &draft.max_readiness_line_bytes,
+                "max_header_count" => &draft.max_header_count,
+                "max_http_buffer_bytes" => &draft.max_http_buffer_bytes,
+                "max_stderr_bytes" => &draft.max_stderr_bytes,
+                "observation_capacity" => &draft.observation_capacity,
+                _ => unreachable!("manual field table diverged"),
+            };
+            document.push_str(key);
+            document.push('=');
+            document.push_str(value);
+            document.push('\n');
+        }
+        document
     }
 
     fn bridge_busy() -> ServiceFailure {
