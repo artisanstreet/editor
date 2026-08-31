@@ -455,6 +455,17 @@ impl NativeComposer {
         let range = self.selection.clone();
         self.replace_range(range, "", None, cx);
     }
+
+    fn byte_index_for_global_point(&self, point: Point<Pixels>) -> Option<usize> {
+        let bounds = self.painted_bounds.as_ref()?;
+        let point = localize_painted_point(bounds, point)?;
+        let layout = self.layout.as_ref()?;
+        let index = match layout.index_for_position(point) {
+            Ok(index) | Err(index) => index,
+        };
+        (index <= self.state.draft().len())
+            .then(|| previous_char_boundary(self.state.draft(), index))
+    }
 }
 
 impl Render for NativeComposer {
@@ -731,17 +742,6 @@ impl gpui::EntityInputHandler for NativeComposer {
         let draft = self.state.draft();
         let byte_index = self.byte_index_for_global_point(point)?;
         utf8_offset_to_utf16(draft, byte_index)
-    }
-
-    fn byte_index_for_global_point(&self, point: Point<Pixels>) -> Option<usize> {
-        let bounds = self.painted_bounds.as_ref()?;
-        let point = localize_painted_point(bounds, point)?;
-        let layout = self.layout.as_ref()?;
-        let index = match layout.index_for_position(point) {
-            Ok(index) | Err(index) => index,
-        };
-        (index <= self.state.draft().len())
-            .then(|| previous_char_boundary(self.state.draft(), index))
     }
 }
 
