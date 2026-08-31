@@ -694,7 +694,7 @@ fn encode_response(
             encode_lifecycle_response(builder.reborrow().init_lifecycle_control(), value)?;
         }
         ResponsePayload::ThreadEngineConfigSet(result) => {
-            encode_thread_engine_config_result(builder.reborrow(), result)
+            encode_thread_engine_config_result(builder.reborrow(), result);
         }
     }
     Ok(())
