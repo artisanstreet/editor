@@ -25,9 +25,9 @@ use artisan_domain::{
     AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationQuery,
     ConversationQueryBounds, ConversationRequest, ConversationSnapshot, CreateThread, DirectoryId,
     EngineRunConfig, ListAttachedProjects, ListProjectThreads, ListRegisteredEngineProfiles,
-    ProjectId, ProjectListing, ProjectSummary, Query, QueryTurnCount, ReadThreadEngineSettings,
-    RequestId, SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle,
-    UnixMillis,
+    ProjectId, ProjectListing, ProjectSummary, Query, QueryTurnCount, QueueFirstMessage,
+    ReadThreadEngineSettings, RequestId, SetThreadEngineConfig, ThreadId, ThreadListing,
+    ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{NativeClientCredentials, load_client_credentials},
@@ -37,8 +37,8 @@ use artisan_editor_cli::{
     process::{ForgeLaunchSpec, ForgeProcessLease, start_owned},
 };
 use artisan_protocol::{
-    ClientRequest, ErrorCode, FrameId, Hello, HelloCredential, ProtocolVersion,
-    RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
+    ClientRequest, ErrorCode, FirstMessageReceipt, FrameId, Hello, HelloCredential,
+    ProtocolVersion, RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
     ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
@@ -88,7 +88,7 @@ impl SettingsLoadGeneration {
 }
 
 /// Commands accepted by the native service.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum NativeTransportCommand {
     /// Start a fresh opaque-directory project intake.
     BeginProjectIntake,
@@ -109,8 +109,28 @@ pub enum NativeTransportCommand {
     ListRegisteredProfiles,
     /// Durably save one complete thread engine configuration.
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
+    /// Durably queue the first exact message body on one known thread.
+    QueueFirstMessage(Box<QueueFirstMessage>),
     /// Stop accepting work and release the session and owned Forge.
     Shutdown,
+}
+
+impl std::fmt::Debug for NativeTransportCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Self::BeginProjectIntake => "BeginProjectIntake",
+            Self::RetryProjectIntake => "RetryProjectIntake",
+            Self::SelectProject(_) => "SelectProject",
+            Self::RequestSnapshot(_) => "RequestSnapshot",
+            Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
+            Self::ListRegisteredProfiles => "ListRegisteredProfiles",
+            Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
+            Self::QueueFirstMessage(_) => "QueueFirstMessage",
+            Self::Shutdown => "Shutdown",
+        };
+        formatter.write_str("NativeTransportCommand::")?;
+        formatter.write_str(variant)
+    }
 }
 
 /// Redacted stage of a service failure.
@@ -358,6 +378,17 @@ pub enum NativeTransportEvent {
         /// Thread whose save failed.
         thread_id: ThreadId,
         /// Exact save request that failed.
+        request_id: RequestId,
+        /// Redacted failure.
+        failure: ServiceFailure,
+    },
+    /// Durable first-message queue accepted or replayed by Forge.
+    FirstMessageQueued(FirstMessageReceipt),
+    /// Durable first-message queue failed with a redacted diagnostic.
+    FirstMessageFailed {
+        /// Thread whose queue request failed.
+        thread_id: ThreadId,
+        /// Exact queue request that failed.
         request_id: RequestId,
         /// Redacted failure.
         failure: ServiceFailure,
@@ -820,6 +851,27 @@ fn engine_config_stable_mutation(
     })
 }
 
+fn first_message_stable_mutation(
+    command: Box<QueueFirstMessage>,
+) -> Result<StableMutation, ServiceFailure> {
+    let request_id = command.request_id.clone();
+    let frame_id = FrameId::parse(request_id.as_str().to_owned())
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let frame_request_id = frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    if frame_request_id != request_id || command.request_id != request_id {
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+    }
+    let sent_at =
+        real_unix_millis().map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    Ok(StableMutation {
+        frame_id,
+        sent_at,
+        command: Command::QueueFirstMessage(*command),
+    })
+}
+
 fn make_request_frame(
     frames: &mut FrameFactory,
     protocol_version: ProtocolVersion,
@@ -904,6 +956,7 @@ fn create_mutation(
     )
 }
 
+#[derive(Clone)]
 enum ExpectedResponse {
     Directory,
     Projects,
@@ -914,6 +967,10 @@ enum ExpectedResponse {
     ThreadEngineSettings(ThreadId),
     RegisteredProfiles,
     ThreadEngineConfigSet {
+        thread_id: ThreadId,
+        request_id: RequestId,
+    },
+    FirstMessageQueued {
         thread_id: ThreadId,
         request_id: RequestId,
     },
@@ -1223,6 +1280,15 @@ fn validate_response_family(
             ResponsePayload::ThreadEngineConfigSet(result),
         ) if result.thread_id == thread_id && result.request_id == request_id => {
             Ok(ResponsePayload::ThreadEngineConfigSet(result))
+        }
+        (
+            ExpectedResponse::FirstMessageQueued {
+                thread_id,
+                request_id,
+            },
+            ResponsePayload::FirstMessageQueued(receipt),
+        ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
+            Ok(ResponsePayload::FirstMessageQueued(receipt))
         }
         _ => Err(ServiceFailure::new(
             ServiceFailureStage::Request,
@@ -1726,6 +1792,9 @@ async fn command_loop(
             }
             Ok(NativeTransportCommand::SetThreadEngineConfig(command)) => {
                 set_thread_engine_config(runtime, frames, events, command).await?;
+            }
+            Ok(NativeTransportCommand::QueueFirstMessage(command)) => {
+                queue_first_message(runtime, frames, events, command).await?;
             }
         }
     }
@@ -2397,6 +2466,97 @@ async fn list_registered_profiles(
     publish(events, NativeTransportEvent::RegisteredProfiles(result))
 }
 
+async fn queue_first_message(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    command: Box<QueueFirstMessage>,
+) -> Result<(), ServiceFailure> {
+    let thread_id = command.thread_id.clone();
+    let request_id = command.request_id.clone();
+    if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
+        return publish(
+            events,
+            NativeTransportEvent::FirstMessageFailed {
+                thread_id,
+                request_id,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    }
+    let mutation = match first_message_stable_mutation(command) {
+        Ok(mutation) => mutation,
+        Err(failure) => {
+            return publish(
+                events,
+                NativeTransportEvent::FirstMessageFailed {
+                    thread_id,
+                    request_id,
+                    failure,
+                },
+            );
+        }
+    };
+    let payload = match durable_save_request(
+        runtime,
+        frames,
+        &mutation,
+        ExpectedResponse::FirstMessageQueued {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        },
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return publish(
+                events,
+                NativeTransportEvent::FirstMessageFailed {
+                    thread_id,
+                    request_id,
+                    failure: error.into(),
+                },
+            );
+        }
+    };
+    let ResponsePayload::FirstMessageQueued(receipt) = payload else {
+        return publish(
+            events,
+            NativeTransportEvent::FirstMessageFailed {
+                thread_id,
+                request_id,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    };
+    if receipt.thread_id != thread_id || receipt.request_id != request_id {
+        return publish(
+            events,
+            NativeTransportEvent::FirstMessageFailed {
+                thread_id,
+                request_id,
+                failure: ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                ),
+            },
+        );
+    }
+    publish(events, NativeTransportEvent::FirstMessageQueued(receipt))
+}
+
+fn known_thread_for_queue(
+    known_threads: &HashSet<ThreadId>,
+    thread_id: &ThreadId,
+) -> Result<(), ServiceFailure> {
+    if known_threads.contains(thread_id) {
+        Ok(())
+    } else {
+        Err(ServiceFailure::invalid(ServiceFailureStage::Request))
+    }
+}
+
 async fn set_thread_engine_config(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
@@ -2420,22 +2580,23 @@ async fn set_thread_engine_config(
             return publish_engine_config_failure(events, thread_id, request_id, failure);
         }
     };
-    let payload =
-        match durable_save_request(runtime, frames, &mutation, &thread_id, &request_id).await {
-            Ok(payload) => payload,
-            Err(DurableSaveFailure::Conflict) => {
-                return publish_engine_config_conflict(events, thread_id, request_id);
-            }
-            Err(DurableSaveFailure::Request(error)) => {
-                return publish_engine_config_failure(events, thread_id, request_id, error.into());
-            }
-        };
+    let payload = match durable_save_request(
+        runtime,
+        frames,
+        &mutation,
+        expected_engine_config_response(&thread_id, &request_id),
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(error) if error.code() == Some(ErrorCode::EngineConfigConflict) => {
+            return publish_engine_config_conflict(events, thread_id, request_id);
+        }
+        Err(error) => {
+            return publish_engine_config_failure(events, thread_id, request_id, error.into());
+        }
+    };
     finish_engine_config_save(events, thread_id, request_id, retained, payload)
-}
-
-enum DurableSaveFailure {
-    Conflict,
-    Request(RequestFailure),
 }
 
 fn expected_engine_config_response(
@@ -2452,38 +2613,19 @@ async fn durable_save_request(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
     mutation: &StableMutation,
-    thread_id: &ThreadId,
-    request_id: &RequestId,
-) -> Result<ResponsePayload, DurableSaveFailure> {
+    expected: ExpectedResponse,
+) -> Result<ResponsePayload, RequestFailure> {
     let first_attempt = runtime
-        .request_stable(
-            frames,
-            mutation,
-            expected_engine_config_response(thread_id, request_id),
-            false,
-        )
+        .request_stable(frames, mutation, expected.clone(), false)
         .await;
     match first_attempt {
         Ok(payload) => Ok(payload),
-        Err(error) if error.code() == Some(ErrorCode::EngineConfigConflict) => {
-            Err(DurableSaveFailure::Conflict)
+        Err(error) if error.durable_save_retry_allowed() => {
+            runtime
+                .request_stable(frames, mutation, expected, true)
+                .await
         }
-        Err(error) if error.durable_save_retry_allowed() => runtime
-            .request_stable(
-                frames,
-                mutation,
-                expected_engine_config_response(thread_id, request_id),
-                true,
-            )
-            .await
-            .map_err(|error| {
-                if error.code() == Some(ErrorCode::EngineConfigConflict) {
-                    DurableSaveFailure::Conflict
-                } else {
-                    DurableSaveFailure::Request(error)
-                }
-            }),
-        Err(error) => Err(DurableSaveFailure::Request(error)),
+        Err(error) => Err(error),
     }
 }
 
@@ -2568,23 +2710,26 @@ mod tests {
         PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
         ServiceFailureCategory, StartupError, ThreadSelectionDecision, attach_mutation,
         contains_exact_project, contains_exact_thread, create_command_values, create_mutation,
-        engine_config_stable_mutation, finite_duration, make_request_frame,
-        payload_health_decision, project_request, reconnect_hello, session_needs_reconnect,
-        snapshot_request, thread_engine_settings_request, thread_selection_decision,
-        threads_request, try_send_command, validate_readiness, validate_response_family,
+        engine_config_stable_mutation, finite_duration, first_message_stable_mutation,
+        known_thread_for_queue, make_request_frame, payload_health_decision, project_request,
+        reconnect_hello, session_needs_reconnect, snapshot_request, thread_engine_settings_request,
+        thread_selection_decision, threads_request, try_send_command, validate_readiness,
+        validate_response_family,
     };
     use artisan_domain::{
         AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
         ConversationQueryBounds, ConversationSnapshot, CreateThread, DirectoryId, DisplayName,
-        EngineProfileId, ListProjectThreads, ProjectId, ProjectListing, ProjectSummary, Query,
-        QueryTurnCount, ReceiptDisposition, RequestId, RootPath, SetThreadEngineConfig, ThreadId,
-        ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
+        EngineProfileId, ListProjectThreads, MessageBody, ProjectId, ProjectListing,
+        ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, ReceiptDisposition, RequestId,
+        RootPath, SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle,
+        UnixMillis,
     };
     use artisan_editor_cli::payload::PayloadHealth;
     use artisan_protocol::{
-        ClientRequest, DirectoryPickOutcome, ErrorCode, HelloCredential, ProtocolVersion,
-        RECONNECT_CAPABILITY_BYTES, ReconnectCapability, RegisteredEngineProfilesResult,
-        ResponsePayload, SetThreadEngineConfigResult, WireEnvelopeBody,
+        ClientRequest, DirectoryPickOutcome, ErrorCode, FirstMessageReceipt, HelloCredential,
+        ProtocolVersion, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
+        RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
+        WireEnvelopeBody, encode_envelope,
     };
     use artisan_transport::{
         ClientRequestError, DeadlineError, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
@@ -2803,6 +2948,129 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn first_message_response_family_requires_exact_request_and_thread() {
+        let thread_id = ThreadId::parse("thread-a").expect("thread");
+        let other_thread_id = ThreadId::parse("thread-b").expect("thread");
+        let request_id = RequestId::parse("native-message-a").expect("request");
+        let other_request_id = RequestId::parse("native-message-b").expect("request");
+        let receipt = FirstMessageReceipt {
+            request_id: request_id.clone(),
+            message_id: artisan_domain::MessageId::parse("message-a").expect("message"),
+            thread_id: thread_id.clone(),
+            disposition: ReceiptDisposition::Accepted,
+        };
+        let expected = ExpectedResponse::FirstMessageQueued {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        };
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::FirstMessageQueued(receipt.clone())
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
+                    disposition: ReceiptDisposition::Duplicate,
+                    ..receipt.clone()
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
+                    request_id: other_request_id,
+                    ..receipt.clone()
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
+                    thread_id: other_thread_id,
+                    ..receipt.clone()
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_response_family(
+                expected,
+                ResponsePayload::ProjectListing(
+                    ProjectListing::new(vec![project("project-a", "A")]).expect("projects"),
+                )
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn first_message_stable_retry_keeps_every_wire_byte_and_identity() {
+        let request_id = RequestId::parse("native-message-stable").expect("request");
+        let thread_id = ThreadId::parse("thread-a").expect("thread");
+        let body = MessageBody::parse("  hello\n世界  ").expect("body");
+        let mutation = first_message_stable_mutation(Box::new(QueueFirstMessage {
+            request_id: request_id.clone(),
+            thread_id: thread_id.clone(),
+            body: body.clone(),
+        }))
+        .expect("stable mutation");
+        let (first, first_id) = mutation
+            .envelope(ProtocolVersion::V1)
+            .expect("first envelope");
+        let (retry, retry_id) = mutation
+            .envelope(ProtocolVersion::V1)
+            .expect("retry envelope");
+        assert_eq!(first_id, request_id);
+        assert_eq!(retry_id, request_id);
+        assert_eq!(first.frame_id, retry.frame_id);
+        assert_eq!(first.sent_at, retry.sent_at);
+        assert_eq!(
+            encode_envelope(&first).expect("first bytes"),
+            encode_envelope(&retry).expect("retry bytes")
+        );
+        assert!(matches!(
+            first.body,
+            WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueFirstMessage(command)))
+                if command.request_id == request_id
+                    && command.thread_id == thread_id
+                    && command.body == body
+        ));
+    }
+
+    #[test]
+    fn unknown_first_message_thread_is_rejected_before_forge_admission() {
+        let known = ThreadId::parse("known-thread").expect("thread");
+        let unknown = ThreadId::parse("unknown-thread").expect("thread");
+        let mut known_threads = std::collections::HashSet::new();
+        known_threads.insert(known.clone());
+        assert!(known_thread_for_queue(&known_threads, &known).is_ok());
+        assert_eq!(
+            known_thread_for_queue(&known_threads, &unknown),
+            Err(ServiceFailure::invalid(super::ServiceFailureStage::Request))
+        );
+    }
+
+    #[test]
+    fn command_debug_for_body_bearing_queue_is_variant_only() {
+        let command = NativeTransportCommand::QueueFirstMessage(Box::new(QueueFirstMessage {
+            request_id: RequestId::parse("native-message-redacted").expect("request"),
+            thread_id: ThreadId::parse("thread-a").expect("thread"),
+            body: MessageBody::parse("secret message text").expect("body"),
+        }));
+        let diagnostic = format!("{command:?}");
+        assert_eq!(diagnostic, "NativeTransportCommand::QueueFirstMessage");
+        assert!(!diagnostic.contains("secret message text"));
     }
 
     #[test]
@@ -3079,6 +3347,25 @@ mod tests {
             retryable_local_session_loss: false,
         };
         assert!(!invalid_input.durable_save_retry_allowed());
+
+        for code in [
+            ErrorCode::IdempotencyConflict,
+            ErrorCode::UnsupportedVersion,
+            ErrorCode::UnsupportedFeature,
+        ] {
+            let excluded = RequestFailure {
+                failure: ServiceFailure::new(
+                    super::ServiceFailureStage::Request,
+                    ServiceFailureCategory::Peer,
+                ),
+                peer: Some(PeerFailure {
+                    code,
+                    retryable: true,
+                }),
+                retryable_local_session_loss: false,
+            };
+            assert!(!excluded.durable_save_retry_allowed());
+        }
 
         let conflict = RequestFailure {
             failure: ServiceFailure::new(
