@@ -191,7 +191,7 @@ impl Repository {
             ],
         );
         let updated = transaction
-            .execute(&update)
+            .execute_raw(update)
             .await
             .map_err(|source| database_error("update thread engine configuration", source))?;
         if updated.rows_affected() != 1 {
