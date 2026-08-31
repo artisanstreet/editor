@@ -1046,14 +1046,14 @@ fn durable_save_retry_classification(error: RequestFailure) -> DurableSaveRetryC
 fn local_session_request_loss_is_retryable(error: &ClientRequestError) -> bool {
     match error {
         ClientRequestError::Exchange(DeadlineError::Timeout { .. }) => true,
-        ClientRequestError::Exchange(DeadlineError::Peer { error, .. }) => match error {
-            ExchangeError::Open(_) => true,
-            ExchangeError::Send(EnvelopeSendError::Frame(FrameError::Write(_))) => true,
-            ExchangeError::Receive(EnvelopeReceiveError::Frame(
-                FrameError::Read(_) | FrameError::Truncated { .. },
-            )) => true,
-            _ => false,
-        },
+        ClientRequestError::Exchange(DeadlineError::Peer { error, .. }) => matches!(
+            error,
+            ExchangeError::Open(_)
+                | ExchangeError::Send(EnvelopeSendError::Frame(FrameError::Write(_)))
+                | ExchangeError::Receive(EnvelopeReceiveError::Frame(
+                    FrameError::Read(_) | FrameError::Truncated { .. },
+                ))
+        ),
         _ => false,
     }
 }
@@ -1221,7 +1221,7 @@ fn validate_response_family(
                 request_id,
             },
             ResponsePayload::ThreadEngineConfigSet(result),
-        ) if &result.thread_id == &thread_id && &result.request_id == &request_id => {
+        ) if result.thread_id == thread_id && result.request_id == request_id => {
             Ok(ResponsePayload::ThreadEngineConfigSet(result))
         }
         _ => Err(ServiceFailure::new(
@@ -2404,115 +2404,143 @@ async fn set_thread_engine_config(
     command: Box<SetThreadEngineConfig>,
 ) -> Result<(), ServiceFailure> {
     let thread_id = command.thread_id().clone();
+    let request_id = command.request_id().clone();
     let retained = command.config().clone();
     if !runtime.known_threads.contains(&thread_id) {
-        return publish(
+        return publish_engine_config_failure(
             events,
-            NativeTransportEvent::ThreadEngineConfigFailed {
-                thread_id,
-                request_id: command.request_id().clone(),
-                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-            },
+            thread_id,
+            request_id,
+            ServiceFailure::invalid(ServiceFailureStage::Request),
         );
     }
-    let expected_request_id = command.request_id().clone();
     let mutation = match engine_config_stable_mutation(command) {
         Ok(mutation) => mutation,
         Err(failure) => {
-            return publish(
-                events,
-                NativeTransportEvent::ThreadEngineConfigFailed {
-                    thread_id,
-                    request_id: expected_request_id,
-                    failure,
-                },
-            );
+            return publish_engine_config_failure(events, thread_id, request_id, failure);
         }
     };
-    let expected = ExpectedResponse::ThreadEngineConfigSet {
+    let payload =
+        match durable_save_request(runtime, frames, &mutation, &thread_id, &request_id).await {
+            Ok(payload) => payload,
+            Err(DurableSaveFailure::Conflict) => {
+                return publish_engine_config_conflict(events, thread_id, request_id);
+            }
+            Err(DurableSaveFailure::Request(error)) => {
+                return publish_engine_config_failure(events, thread_id, request_id, error.into());
+            }
+        };
+    finish_engine_config_save(events, thread_id, request_id, retained, payload)
+}
+
+enum DurableSaveFailure {
+    Conflict,
+    Request(RequestFailure),
+}
+
+fn expected_engine_config_response(
+    thread_id: &ThreadId,
+    request_id: &RequestId,
+) -> ExpectedResponse {
+    ExpectedResponse::ThreadEngineConfigSet {
         thread_id: thread_id.clone(),
-        request_id: expected_request_id.clone(),
-    };
+        request_id: request_id.clone(),
+    }
+}
+
+async fn durable_save_request(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    mutation: &StableMutation,
+    thread_id: &ThreadId,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, DurableSaveFailure> {
     let first_attempt = runtime
-        .request_stable(frames, &mutation, expected, false)
+        .request_stable(
+            frames,
+            mutation,
+            expected_engine_config_response(thread_id, request_id),
+            false,
+        )
         .await;
-    let payload = match first_attempt {
-        Ok(payload) => payload,
-        Err(error) => {
-            if error.code() == Some(ErrorCode::EngineConfigConflict) {
-                return publish(
-                    events,
-                    NativeTransportEvent::ThreadEngineConfigConflict {
-                        thread_id: thread_id.clone(),
-                        request_id: expected_request_id.clone(),
-                    },
-                );
-            }
-            if error.durable_save_retry_allowed() {
-                let retry_expected = ExpectedResponse::ThreadEngineConfigSet {
-                    thread_id: thread_id.clone(),
-                    request_id: expected_request_id.clone(),
-                };
-                match runtime
-                    .request_stable(frames, &mutation, retry_expected, true)
-                    .await
-                {
-                    Ok(payload) => payload,
-                    Err(retry_error) => {
-                        if retry_error.code() == Some(ErrorCode::EngineConfigConflict) {
-                            return publish(
-                                events,
-                                NativeTransportEvent::ThreadEngineConfigConflict {
-                                    thread_id: thread_id.clone(),
-                                    request_id: expected_request_id.clone(),
-                                },
-                            );
-                        }
-                        let failure: ServiceFailure = retry_error.into();
-                        return publish(
-                            events,
-                            NativeTransportEvent::ThreadEngineConfigFailed {
-                                thread_id: thread_id.clone(),
-                                request_id: expected_request_id.clone(),
-                                failure,
-                            },
-                        );
-                    }
-                }
-            } else {
-                let failure: ServiceFailure = error.into();
-                return publish(
-                    events,
-                    NativeTransportEvent::ThreadEngineConfigFailed {
-                        thread_id: thread_id.clone(),
-                        request_id: expected_request_id.clone(),
-                        failure,
-                    },
-                );
-            }
+    match first_attempt {
+        Ok(payload) => Ok(payload),
+        Err(error) if error.code() == Some(ErrorCode::EngineConfigConflict) => {
+            Err(DurableSaveFailure::Conflict)
         }
-    };
+        Err(error) if error.durable_save_retry_allowed() => runtime
+            .request_stable(
+                frames,
+                mutation,
+                expected_engine_config_response(thread_id, request_id),
+                true,
+            )
+            .await
+            .map_err(|error| {
+                if error.code() == Some(ErrorCode::EngineConfigConflict) {
+                    DurableSaveFailure::Conflict
+                } else {
+                    DurableSaveFailure::Request(error)
+                }
+            }),
+        Err(error) => Err(DurableSaveFailure::Request(error)),
+    }
+}
+
+fn publish_engine_config_failure(
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    request_id: RequestId,
+    failure: ServiceFailure,
+) -> Result<(), ServiceFailure> {
+    publish(
+        events,
+        NativeTransportEvent::ThreadEngineConfigFailed {
+            thread_id,
+            request_id,
+            failure,
+        },
+    )
+}
+
+fn publish_engine_config_conflict(
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    request_id: RequestId,
+) -> Result<(), ServiceFailure> {
+    publish(
+        events,
+        NativeTransportEvent::ThreadEngineConfigConflict {
+            thread_id,
+            request_id,
+        },
+    )
+}
+
+fn finish_engine_config_save(
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    request_id: RequestId,
+    retained: EngineRunConfig,
+    payload: ResponsePayload,
+) -> Result<(), ServiceFailure> {
     let ResponsePayload::ThreadEngineConfigSet(result) = payload else {
-        return publish(
+        return publish_engine_config_failure(
             events,
-            NativeTransportEvent::ThreadEngineConfigFailed {
-                thread_id,
-                request_id: expected_request_id,
-                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-            },
+            thread_id,
+            request_id,
+            ServiceFailure::invalid(ServiceFailureStage::Request),
         );
     };
-    if &result.thread_id != &thread_id || &result.request_id != &expected_request_id {
-        return publish(
+    if result.thread_id != thread_id || result.request_id != request_id {
+        return publish_engine_config_failure(
             events,
-            NativeTransportEvent::ThreadEngineConfigFailed {
-                thread_id,
-                request_id: expected_request_id,
-                failure: ServiceFailure::new(
-                    ServiceFailureStage::Request,
-                    ServiceFailureCategory::Integrity,
-                ),
-            },
+            thread_id,
+            request_id,
+            ServiceFailure::new(
+                ServiceFailureStage::Request,
+                ServiceFailureCategory::Integrity,
+            ),
         );
     }
     publish(

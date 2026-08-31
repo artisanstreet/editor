@@ -586,7 +586,7 @@ impl NativeApplication {
             return;
         };
         self.selected_thread = Some(thread_id.clone());
-        self.engine_settings.select_thread(Some(thread_id.clone()));
+        self.engine_settings.select_thread(Some(&thread_id));
         self.request_engine_settings_for_selected(cx);
         let Ok(host) = ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx) else {
             self.set_failure(invalid_service_failure(), cx);
@@ -788,7 +788,7 @@ impl NativeApplication {
             Ok(()) => {
                 if !self
                     .engine_settings
-                    .mark_settings_load_admitted(thread_id.clone(), generation)
+                    .mark_settings_load_admitted(&thread_id, generation)
                 {
                     self.engine_settings.on_settings_load_admission_failed(
                         thread_id,
@@ -839,7 +839,7 @@ impl NativeApplication {
         retained: artisan_domain::EngineRunConfig,
         cx: &mut Context<Self>,
     ) {
-        self.engine_settings.on_save_succeeded(result, retained);
+        self.engine_settings.on_save_succeeded(&result, retained);
         cx.notify();
     }
 
@@ -849,7 +849,7 @@ impl NativeApplication {
         request_id: artisan_domain::RequestId,
         cx: &mut Context<Self>,
     ) {
-        self.engine_settings.on_conflict(thread_id, request_id);
+        self.engine_settings.on_conflict(thread_id, &request_id);
         if self.engine_settings.pending_reload_thread().is_some() {
             self.request_engine_settings_for_selected(cx);
         } else {
@@ -865,7 +865,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.engine_settings
-            .on_save_failed(thread_id, request_id, failure);
+            .on_save_failed(&thread_id, &request_id, failure);
         cx.notify();
     }
 
@@ -882,11 +882,12 @@ impl NativeApplication {
     }
 
     fn select_engine_profile(&mut self, profile_id: EngineProfileId, cx: &mut Context<Self>) {
-        self.engine_settings.select_profile(profile_id);
-        cx.notify();
+        if self.engine_settings.select_profile(&profile_id) {
+            cx.notify();
+        }
     }
 
-    fn copy_manual_configuration_template(&mut self, cx: &mut Context<Self>) {
+    fn copy_manual_configuration_template(cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(manual_configuration_template()));
         cx.notify();
     }
@@ -909,7 +910,7 @@ impl NativeApplication {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.copy_manual_configuration_template(cx);
+        Self::copy_manual_configuration_template(cx);
     }
 
     fn handle_paste_manual_configuration(
@@ -1029,12 +1030,30 @@ static SAVE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 
 fn create_save_request_id() -> Result<artisan_domain::RequestId, ServiceFailure> {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(1);
-    let counter = SAVE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let value = format!("engine-save-{}-{}", millis, counter);
+    let millis = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ServiceFailure {
+                stage: ServiceFailureStage::Request,
+                category: ServiceFailureCategory::Integrity,
+            })?
+            .as_millis(),
+    )
+    .map_err(|_| ServiceFailure {
+        stage: ServiceFailureStage::Request,
+        category: ServiceFailureCategory::Integrity,
+    })?;
+    let counter = SAVE_COUNTER
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| current.checked_add(1),
+        )
+        .map_err(|_| ServiceFailure {
+            stage: ServiceFailureStage::Request,
+            category: ServiceFailureCategory::Integrity,
+        })?;
+    let value = format!("engine-save-{millis}-{counter}");
     artisan_domain::RequestId::parse(value).map_err(|_| ServiceFailure {
         stage: ServiceFailureStage::Request,
         category: ServiceFailureCategory::Integrity,
@@ -1343,15 +1362,11 @@ fn engine_settings_failure_detail(controller: &EngineSettingsController) -> Stri
     }
 }
 
-fn engine_settings_panel(
-    theme: &ArtisanTheme,
+fn engine_settings_status_detail(
     controller: &EngineSettingsController,
     selected_thread: Option<&ThreadId>,
-    cx: &Context<NativeApplication>,
-) -> Div {
-    let status = controller.status();
-    let registry_view = controller.registry_view();
-    let (heading, detail) = match status {
+) -> (&'static str, String) {
+    match controller.status() {
         EngineSettingsStatus::Unselected => (
             "Engine settings — no thread selected",
             "Select a real thread to load engine settings.".to_owned(),
@@ -1377,15 +1392,15 @@ fn engine_settings_panel(
             }),
         ),
         EngineSettingsStatus::Ready => {
-            let rev = controller
+            let revision = controller
                 .revision()
-                .map_or("unknown revision".to_owned(), |r| {
-                    format!("rev {}", r.get())
+                .map_or("unknown revision".to_owned(), |revision| {
+                    format!("rev {}", revision.get())
                 });
             (
                 "Engine settings — configured",
                 format!(
-                    "Thread {} is configured ({rev}).",
+                    "Thread {} is configured ({revision}).",
                     selected_thread.map_or("unknown", |id| id.as_str())
                 ),
             )
@@ -1414,27 +1429,37 @@ fn engine_settings_panel(
             "Engine settings — unavailable",
             engine_settings_failure_detail(controller),
         ),
-    };
-    let certified_profiles = match &registry_view {
+    }
+}
+
+fn certified_profiles_detail(registry_view: &RegistryView) -> String {
+    match registry_view {
+        RegistryView::Present(ids) if ids.is_empty() => {
+            "Certified profiles: none (registry empty)".to_owned()
+        }
         RegistryView::Present(ids) => {
-            if ids.is_empty() {
-                "Certified profiles: none (registry empty)".to_owned()
-            } else {
-                let list = ids
-                    .iter()
-                    .map(|id| id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("Certified profiles: {list}")
-            }
+            let list = ids
+                .iter()
+                .map(EngineProfileId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Certified profiles: {list}")
         }
         RegistryView::Missing => "Certified profiles: registry missing".to_owned(),
         RegistryView::PresentEmpty => "Certified profiles: none".to_owned(),
         RegistryView::Loading => "Certified profiles: loading".to_owned(),
-    };
+    }
+}
+
+fn certified_profile_choices(
+    theme: &ArtisanTheme,
+    controller: &EngineSettingsController,
+    registry_view: &RegistryView,
+    cx: &Context<NativeApplication>,
+) -> Div {
     let draft = controller.draft();
-    let mut certified_profile_choices = div().flex().flex_col().gap_1();
-    if let RegistryView::Present(ids) = &registry_view {
+    let mut choices = div().flex().flex_col().gap_1();
+    if let RegistryView::Present(ids) = registry_view {
         for (index, profile_id) in ids.iter().enumerate() {
             let profile_id_for_click = profile_id.clone();
             let label = if draft.profile_id == profile_id.as_str() {
@@ -1443,7 +1468,7 @@ fn engine_settings_panel(
                 format!("certified profile: {}", profile_id.as_str())
             };
             let selector = format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-profile-{index}");
-            certified_profile_choices = certified_profile_choices.child(
+            choices = choices.child(
                 div()
                     .id((NATIVE_ENGINE_SETTINGS_SELECTOR, index))
                     .debug_selector(move || selector)
@@ -1462,16 +1487,11 @@ fn engine_settings_panel(
             );
         }
     }
-    let save_enabled = controller.can_save() && selected_thread.is_some();
-    let cancel_enabled = controller.can_cancel();
-    let save_label = "Save";
-    let cancel_label = "Cancel edits";
-    let action_detail = if save_enabled {
-        "Save is enabled for this complete, valid, dirty configuration."
-    } else {
-        "Save is disabled until a complete valid dirty configuration is ready."
-    };
-    // Manual fields are unverified until A6.
+    choices
+}
+
+fn engine_settings_value_details(controller: &EngineSettingsController) -> (String, String) {
+    let draft = controller.draft();
     let manual_fields = format!(
         "Manual/unverified — model: '{}', route: '{}', variant: '{}', permission: '{}', agent: '{}', approval: '{}', fs: '{}', net: '{}', web-search: '{}'",
         draft.model_id,
@@ -1505,9 +1525,22 @@ fn engine_settings_panel(
         draft.max_stderr_bytes,
         draft.observation_capacity
     );
-    let thread_bound = selected_thread.map_or("No thread bound".to_owned(), |id| {
-        format!("Bound to thread {}", id.as_str())
-    });
+    (manual_fields, runtime_fields)
+}
+
+fn engine_settings_action_controls(
+    theme: &ArtisanTheme,
+    controller: &EngineSettingsController,
+    selected_thread: Option<&ThreadId>,
+    cx: &Context<NativeApplication>,
+) -> (Div, Div, Div, Div, Div) {
+    let save_enabled = controller.can_save() && selected_thread.is_some();
+    let cancel_enabled = controller.can_cancel();
+    let action_detail = if save_enabled {
+        "Save is enabled for this complete, valid, dirty configuration."
+    } else {
+        "Save is disabled until a complete valid dirty configuration is ready."
+    };
     let copy_button = div()
         .id("artisan-native-engine-settings-copy-template")
         .debug_selector(|| format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-copy-template"))
@@ -1530,7 +1563,7 @@ fn engine_settings_panel(
         .p(px(4.0))
         .text_sm()
         .text_color(theme.colors.foreground.to_paint())
-        .child(save_label);
+        .child("Save");
     if save_enabled {
         save_button =
             save_button.on_click(cx.listener(NativeApplication::handle_save_engine_settings));
@@ -1543,13 +1576,47 @@ fn engine_settings_panel(
         .p(px(4.0))
         .text_sm()
         .text_color(theme.colors.foreground.to_paint())
-        .child(cancel_label);
+        .child("Cancel edits");
     if cancel_enabled {
         cancel_button =
             cancel_button.on_click(cx.listener(NativeApplication::handle_cancel_engine_settings));
     } else {
         cancel_button = cancel_button.opacity(0.5);
     }
+    let action_detail = div()
+        .text_sm()
+        .text_color(if save_enabled {
+            theme.colors.foreground.to_paint()
+        } else {
+            theme.colors.muted_foreground.to_paint()
+        })
+        .child(action_detail);
+    (
+        copy_button,
+        paste_button,
+        action_detail,
+        save_button,
+        cancel_button,
+    )
+}
+
+fn engine_settings_panel(
+    theme: &ArtisanTheme,
+    controller: &EngineSettingsController,
+    selected_thread: Option<&ThreadId>,
+    cx: &Context<NativeApplication>,
+) -> Div {
+    let registry_view = controller.registry_view();
+    let (heading, detail) = engine_settings_status_detail(controller, selected_thread);
+    let certified_profiles = certified_profiles_detail(&registry_view);
+    let certified_profile_choices =
+        certified_profile_choices(theme, controller, &registry_view, cx);
+    let (manual_fields, runtime_fields) = engine_settings_value_details(controller);
+    let thread_bound = selected_thread.map_or("No thread bound".to_owned(), |id| {
+        format!("Bound to thread {}", id.as_str())
+    });
+    let (copy_button, paste_button, action_detail, save_button, cancel_button) =
+        engine_settings_action_controls(theme, controller, selected_thread, cx);
     div()
         .w_full()
         .flex()
@@ -1601,16 +1668,7 @@ fn engine_settings_panel(
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child(runtime_fields),
         )
-        .child(
-            div()
-                .text_sm()
-                .text_color(if save_enabled {
-                    theme.colors.foreground.to_paint()
-                } else {
-                    theme.colors.muted_foreground.to_paint()
-                })
-                .child(action_detail),
-        )
+        .child(action_detail)
         .child(save_button)
         .child(cancel_button)
 }
