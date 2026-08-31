@@ -305,11 +305,30 @@ fn native_run_config_rejects_zero_and_out_of_range_values() {
 #[test]
 fn native_config_debug_redacts_paths_and_prompt_delivery() {
     let home = temp_dir("debug");
-    let config = sample_config(&home);
+    let canary = "ATTACKER_NATIVE_RUN_PROMPT_CANARY_7F3A";
+    let config = NativeInstanceConfig::new(
+        home.join("data").join("artisan.sqlite"),
+        home.join("custody").join("lock"),
+        home.join("readiness").join("ready"),
+        home.join("credentials").join("manifest.json"),
+        sample_listener(),
+        NativeRunConfig::new(NativeRunConfigInput {
+            claim_lease_ms: 501,
+            poll_interval_ms: 502,
+            retry_backoff_ms: 503,
+            shutdown_budget_ms: 504,
+            queue_capacity: 505,
+            max_command_retries: 506,
+            prompt_delivery: canary.to_owned(),
+            stream_after: 0,
+        })
+        .unwrap(),
+    )
+    .unwrap();
     let debug = format!("{config:?}");
     assert!(debug.contains("NativeInstanceConfig"));
     assert!(debug.contains("prompt_delivery_bytes"));
-    assert!(!debug.contains("queue"));
+    assert!(!debug.contains(canary));
     for path in [
         config.database_path(),
         config.custody_path(),
