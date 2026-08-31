@@ -37,8 +37,8 @@ use crate::{
     CommandOrigin, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
     engine_owner::EngineTurnInput,
-    engine_owner::observation::{EngineObservation, TerminalState},
-    engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession},
+    engine_owner::observation::{EngineObservation, TerminalState, TextDelta},
+    engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
     engine_owner::{EngineOwner, EngineOwnerShutdown},
 };
 
@@ -1258,7 +1258,7 @@ async fn handle_text_delta(
     context: &TurnConsumptionContext<'_>,
     state: &mut TurnConsumptionState<'_>,
     turn: &mut AcceptedTurn,
-    delta: IncrementalText,
+    delta: TextDelta,
 ) {
     let Some(next_length) = state.assistant_body.len().checked_add(delta.delta().len()) else {
         mark_interrupted(state, turn, true);
