@@ -30,10 +30,9 @@ use thiserror::Error;
 use crate::artisan_capnp::{
     self, conversation_item, conversation_patch, conversation_query_request,
     conversation_subscribe_request, conversation_subscription_started, directory_listing,
-    directory_pick_outcome, engine_config_precondition, engine_permission_policy,
-    engine_run_config, engine_runtime_controls, envelope, event, lifecycle_request,
-    lifecycle_response, list_directories_request, protocol_error, query_range, request, response,
-    set_thread_engine_config_request,
+    directory_pick_outcome, engine_config_precondition, engine_run_config, envelope, event,
+    lifecycle_request, lifecycle_response, list_directories_request, protocol_error, query_range,
+    request, response, set_thread_engine_config_request,
 };
 use crate::types::{
     ClientRequest, ConnectionId, ConversationSubscriptionStarted, ConversationSubscriptionStopped,
@@ -535,14 +534,7 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             queue.set_body(command.body.as_str());
         }
         ClientRequest::Command(Command::SetThreadEngineConfig(command)) => {
-            let command = command.as_ref();
-            let mut encoded = builder.reborrow().init_set_thread_engine_config();
-            encoded.set_thread_id(command.thread_id().as_str());
-            encode_engine_config_precondition(
-                encoded.reborrow().init_precondition(),
-                command.precondition(),
-            );
-            encode_engine_run_config(encoded.init_config(), command.config());
+            encode_set_thread_engine_config(builder.reborrow(), command.as_ref());
         }
         ClientRequest::Conversation(ConversationRequest::Query(query)) => {
             let mut encoded = builder.reborrow().init_conversation_query();
@@ -702,14 +694,34 @@ fn encode_response(
             encode_lifecycle_response(builder.reborrow().init_lifecycle_control(), value)?;
         }
         ResponsePayload::ThreadEngineConfigSet(result) => {
-            let mut encoded = builder.reborrow().init_thread_engine_config_set();
-            encoded.set_request_id(result.request_id.as_str());
-            encoded.set_thread_id(result.thread_id.as_str());
-            encoded.set_revision(result.revision.get());
-            encoded.set_disposition(encode_disposition(result.disposition));
+            encode_thread_engine_config_result(builder.reborrow(), result)
         }
     }
     Ok(())
+}
+
+fn encode_set_thread_engine_config(
+    mut builder: artisan_capnp::request::Builder<'_>,
+    command: &SetThreadEngineConfig,
+) {
+    let mut encoded = builder.reborrow().init_set_thread_engine_config();
+    encoded.set_thread_id(command.thread_id().as_str());
+    encode_engine_config_precondition(
+        encoded.reborrow().init_precondition(),
+        command.precondition(),
+    );
+    encode_engine_run_config(encoded.init_config(), command.config());
+}
+
+fn encode_thread_engine_config_result(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    result: &SetThreadEngineConfigResult,
+) {
+    let mut encoded = builder.reborrow().init_thread_engine_config_set();
+    encoded.set_request_id(result.request_id.as_str());
+    encoded.set_thread_id(result.thread_id.as_str());
+    encoded.set_revision(result.revision.get());
+    encoded.set_disposition(encode_disposition(result.disposition));
 }
 
 fn encode_engine_config_precondition(
@@ -1505,19 +1517,19 @@ fn decode_engine_permission(
             EngineConfigReason::InvalidIdentifier,
         )
     })?;
-    let approval = parse_approval(read_text(
+    let approval = parse_approval(&read_text(
         value.get_approval(),
         "request.setThreadEngineConfig.config.permission.approval",
     )?)?;
-    let filesystem = parse_filesystem(read_text(
+    let filesystem = parse_filesystem(&read_text(
         value.get_filesystem(),
         "request.setThreadEngineConfig.config.permission.filesystem",
     )?)?;
-    let network = parse_network(read_text(
+    let network = parse_network(&read_text(
         value.get_network(),
         "request.setThreadEngineConfig.config.permission.network",
     )?)?;
-    let web_search = parse_web_search(read_text(
+    let web_search = parse_web_search(&read_text(
         value.get_web_search(),
         "request.setThreadEngineConfig.config.permission.webSearch",
     )?)?;
@@ -1531,8 +1543,8 @@ fn decode_engine_permission(
     ))
 }
 
-fn parse_approval(value: String) -> Result<ApprovalMode, ProtocolDecodeError> {
-    match value.as_str() {
+fn parse_approval(value: &str) -> Result<ApprovalMode, ProtocolDecodeError> {
+    match value {
         "never" => Ok(ApprovalMode::Never),
         "on_request" => Ok(ApprovalMode::OnRequest),
         "always" => Ok(ApprovalMode::Always),
@@ -1543,8 +1555,8 @@ fn parse_approval(value: String) -> Result<ApprovalMode, ProtocolDecodeError> {
     }
 }
 
-fn parse_filesystem(value: String) -> Result<FilesystemAccess, ProtocolDecodeError> {
-    match value.as_str() {
+fn parse_filesystem(value: &str) -> Result<FilesystemAccess, ProtocolDecodeError> {
+    match value {
         "none" => Ok(FilesystemAccess::None),
         "workspace" => Ok(FilesystemAccess::Workspace),
         "host" => Ok(FilesystemAccess::Host),
@@ -1555,8 +1567,8 @@ fn parse_filesystem(value: String) -> Result<FilesystemAccess, ProtocolDecodeErr
     }
 }
 
-fn parse_network(value: String) -> Result<NetworkAccess, ProtocolDecodeError> {
-    match value.as_str() {
+fn parse_network(value: &str) -> Result<NetworkAccess, ProtocolDecodeError> {
+    match value {
         "disabled" => Ok(NetworkAccess::Disabled),
         "enabled" => Ok(NetworkAccess::Enabled),
         _ => Err(engine_config_error(
@@ -1566,8 +1578,8 @@ fn parse_network(value: String) -> Result<NetworkAccess, ProtocolDecodeError> {
     }
 }
 
-fn parse_web_search(value: String) -> Result<WebSearchAccess, ProtocolDecodeError> {
-    match value.as_str() {
+fn parse_web_search(value: &str) -> Result<WebSearchAccess, ProtocolDecodeError> {
+    match value {
         "disabled" => Ok(WebSearchAccess::Disabled),
         "enabled" => Ok(WebSearchAccess::Enabled),
         _ => Err(engine_config_error(
