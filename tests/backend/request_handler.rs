@@ -422,11 +422,7 @@ async fn seed_conversation(repository: &Repository, thread_id: &str, label: &str
         artisan_domain::PatchId::parse(format!("patch-{label}-first")).expect("valid patch id");
     let second_patch_id =
         artisan_domain::PatchId::parse(format!("patch-{label}-second")).expect("valid patch id");
-    let mut run_start_key_bytes = [0x44; 32];
-    for (index, byte) in label.as_bytes().iter().take(32).enumerate() {
-        run_start_key_bytes[index] = *byte;
-    }
-    let run_start_key = RunStartKey::new(run_start_key_bytes);
+    let run_start_key = run_start_key(label);
     let credentials = RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]);
     let engine_settings = repository
         .read_thread_engine_settings(&ThreadId::parse(thread_id).expect("valid thread id"))
@@ -470,6 +466,14 @@ async fn seed_conversation(repository: &Repository, thread_id: &str, label: &str
         bound,
         BindRunProviderOutcome::Bound(_) | BindRunProviderOutcome::AlreadyBound(_)
     ));
+}
+
+fn run_start_key(label: &str) -> RunStartKey {
+    let mut bytes = [0x44; 32];
+    for (index, byte) in label.as_bytes().iter().take(32).enumerate() {
+        bytes[index] = *byte;
+    }
+    RunStartKey::new(bytes)
 }
 
 fn single_patch_batch(thread_id: ThreadId, from: u64, to: u64, patch_id: &str) -> PatchBatch {
