@@ -23,7 +23,7 @@ use artisan_domain::{ConversationSnapshot, EngineProfileId, ProjectId, ProjectLi
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
     App, AppContext as _, Application, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FocusHandle, KeyBinding, Render, StatefulInteractiveElement, Subscription, Task,
+    FocusHandle, KeyBinding, Render, Stateful, StatefulInteractiveElement, Subscription, Task,
     TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
@@ -1533,7 +1533,13 @@ fn engine_settings_action_controls(
     controller: &EngineSettingsController,
     selected_thread: Option<&ThreadId>,
     cx: &Context<NativeApplication>,
-) -> (Div, Div, Div, Div, Div) {
+) -> (
+    Stateful<Div>,
+    Stateful<Div>,
+    Div,
+    Stateful<Div>,
+    Stateful<Div>,
+) {
     let save_enabled = controller.can_save() && selected_thread.is_some();
     let cancel_enabled = controller.can_cancel();
     let action_detail = if save_enabled {
