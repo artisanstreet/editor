@@ -41,7 +41,8 @@ pub use types::{
     Hello, HelloCredential, LOCAL_CAPABILITY_BYTES, LifecycleRequest, LifecycleResponse,
     LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
     LocalCapability, LocalCapabilityError, ProtocolFailure, ProtocolValueError, ProtocolVersion,
-    RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ReconnectCapabilityError, ResponsePayload,
-    ServerEvent, ServerResponse, SetThreadEngineConfigResult, ThreadEngineSettingsResult,
-    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ReconnectCapabilityError,
+    RegisteredEngineProfilesResult, ResponsePayload, ServerEvent, ServerResponse,
+    SetThreadEngineConfigResult, ThreadEngineSettingsResult, VersionOffer, VersionOfferError,
+    Welcome, WireEnvelope, WireEnvelopeBody,
 };
