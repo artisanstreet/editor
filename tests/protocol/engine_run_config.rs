@@ -627,7 +627,7 @@ fn raw_registered_profiles_response(ids: Vec<&str>, state: &str) -> Vec<u8> {
     root.set_sent_at_millis(14);
     let mut response = root.init_body().init_response();
     response.set_request_id("raw-list-profiles");
-    let mut result = response.init_registered_engine_profiles();
+    let result = response.init_registered_engine_profiles();
     match state {
         "missing" => {
             result.init_state().set_registry_missing(());
@@ -652,7 +652,7 @@ fn list_registered_profiles_request_round_trip_selects_appended_arm_13()
     let value = list_registered_profiles_request_envelope("list-profiles-frame");
     let encoded = encode_envelope(&value)?;
     let decoded = decode_envelope(&encoded)?;
-    assert_eq!(decoded, value);
+    assert!(decoded == value);
     let mut slice = encoded.as_slice();
     let message = serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new())?;
     let root: envelope::Reader = message.get_root()?;
@@ -690,10 +690,10 @@ fn registered_profiles_missing_present_empty_and_ordered_round_trip_through_arm_
     for value in [&missing, &present_empty, &ordered] {
         let encoded = encode_envelope(value)?;
         let decoded = decode_envelope(&encoded)?;
-        assert_eq!(&decoded, value);
+        assert!(decoded == *value);
     }
-    assert_ne!(missing, present_empty);
-    assert_ne!(present_empty, ordered);
+    assert!(missing != present_empty);
+    assert!(present_empty != ordered);
     let encoded = encode_envelope(&ordered)?;
     let mut slice = encoded.as_slice();
     let message = serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new())?;
@@ -731,13 +731,13 @@ fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_an
     let empty_id = decode_envelope(&raw_registered_profiles_response(vec![""], "present"));
     assert!(
         matches!(empty_id, Err(ProtocolDecodeError::EngineConfig { .. })),
-        "empty id should be rejected: {empty_id:?}"
+        "empty profile id should be rejected"
     );
 
     let malformed = decode_envelope(&raw_registered_profiles_response(vec!["a/b"], "present"));
     assert!(
         matches!(malformed, Err(ProtocolDecodeError::EngineConfig { .. })),
-        "malformed id should be rejected: {malformed:?}"
+        "malformed profile id should be rejected"
     );
 
     let duplicate = decode_envelope(&raw_registered_profiles_response(
@@ -746,7 +746,7 @@ fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_an
     ));
     assert!(
         matches!(duplicate, Err(ProtocolDecodeError::EngineConfig { .. })),
-        "duplicate should be rejected: {duplicate:?}"
+        "duplicate profile id should be rejected"
     );
 
     let distinct_many: Vec<String> = (0..65).map(|index| format!("profile-{index:02}")).collect();
@@ -757,7 +757,7 @@ fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_an
     ));
     assert!(
         matches!(over_limit, Err(ProtocolDecodeError::EngineConfig { .. })),
-        "65th should be rejected: {over_limit:?}"
+        "65th profile id should be rejected"
     );
 
     let valid = raw_registered_profiles_response(vec![], "present");
@@ -855,10 +855,7 @@ fn pre1_engine_settings_ordinals_and_round_trips_remain_frozen() -> Result<(), B
         response::Which::ThreadEngineSettings(_)
     ));
 
-    assert_eq!(
-        decode_envelope(&encode_envelope(&read_request)?)?,
-        read_request
-    );
-    assert_eq!(decode_envelope(&encode_envelope(&configured)?)?, configured);
+    assert!(decode_envelope(&encode_envelope(&read_request)?)? == read_request);
+    assert!(decode_envelope(&encode_envelope(&configured)?)? == configured);
     Ok(())
 }

@@ -720,7 +720,7 @@ fn encode_response_payload(
 }
 
 fn encode_project_listing_response(
-    mut builder: artisan_capnp::response::Builder<'_>,
+    builder: artisan_capnp::response::Builder<'_>,
     listing: &ProjectListing,
 ) -> Result<(), ProtocolEncodeError> {
     let mut projects = builder.init_project_list().init_projects(list_length(
@@ -783,7 +783,7 @@ fn encode_thread_engine_settings_result(
 }
 
 fn encode_registered_engine_profiles_result(
-    mut builder: artisan_capnp::registered_engine_profiles_result::Builder<'_>,
+    builder: artisan_capnp::registered_engine_profiles_result::Builder<'_>,
     value: &RegisteredEngineProfilesResult,
 ) -> Result<(), ProtocolEncodeError> {
     match value {
