@@ -1336,7 +1336,7 @@ async fn append_assistant_delta(
     context: &TurnConsumptionContext<'_>,
     state: &mut TurnConsumptionState<'_>,
     turn: &mut AcceptedTurn,
-    delta: IncrementalText,
+    delta: TextDelta,
 ) {
     let Some(item_id) = state.assistant_item.as_ref() else {
         mark_interrupted(state, turn, true);
