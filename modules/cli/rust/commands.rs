@@ -43,6 +43,25 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+#[derive(Clone)]
+pub struct NativeRunPromptDelivery(String);
+
+impl std::fmt::Debug for NativeRunPromptDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRunPromptDelivery")
+            .field("byte_length", &self.0.len())
+            .field("category", &"validated")
+            .finish()
+    }
+}
+
+impl NativeRunPromptDelivery {
+    fn into_string(self) -> String {
+        self.0
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Handle one fixed operating-system URL capability.
@@ -111,7 +130,7 @@ pub enum Commands {
             required = true,
             value_parser = parse_native_run_prompt_delivery
         )]
-        native_run_prompt_delivery: String,
+        native_run_prompt_delivery: NativeRunPromptDelivery,
         #[arg(long = "native-run-stream-after", required = true)]
         native_run_stream_after: u64,
         #[arg(long)]
@@ -320,7 +339,7 @@ pub fn run(cli: Cli) -> Result<()> {
                         shutdown_budget_ms: native_run_shutdown_budget_ms,
                         queue_capacity: native_run_queue_capacity.get(),
                         max_command_retries: native_run_max_command_retries.get(),
-                        prompt_delivery: native_run_prompt_delivery,
+                        prompt_delivery: native_run_prompt_delivery.into_string(),
                         stream_after: native_run_stream_after,
                     })?,
                 },
@@ -581,14 +600,16 @@ fn parse_native_run_duration_ms(value: &str) -> std::result::Result<u64, String>
     Ok(value)
 }
 
-fn parse_native_run_prompt_delivery(value: &str) -> std::result::Result<String, String> {
+fn parse_native_run_prompt_delivery(
+    value: &str,
+) -> std::result::Result<NativeRunPromptDelivery, String> {
     if !instance::is_valid_native_run_prompt_delivery(value) {
         return Err(
             "must be nonempty, at most 256 bytes, and contain no control characters or line breaks"
                 .to_owned(),
         );
     }
-    Ok(value.to_owned())
+    Ok(NativeRunPromptDelivery(value.to_owned()))
 }
 
 fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {
@@ -1694,7 +1715,7 @@ mod tests {
                 && requests_per_connection.get() == 4
                 && native_run_queue_capacity.get() == 9
                 && native_run_max_command_retries.get() == 10
-                && native_run_prompt_delivery == "queue"
+                && native_run_prompt_delivery.0 == "queue"
         ));
 
         assert!(Cli::try_parse_from(["ae", "setup"]).is_err());
@@ -1727,7 +1748,8 @@ mod tests {
             Ok(u64::MAX / 2)
         );
         assert_eq!(
-            parse_native_run_prompt_delivery(&"p".repeat(256)),
+            parse_native_run_prompt_delivery(&"p".repeat(256))
+                .map(NativeRunPromptDelivery::into_string),
             Ok("p".repeat(256))
         );
         assert_eq!(
@@ -1737,7 +1759,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            parse_native_run_prompt_delivery("queue"),
+            parse_native_run_prompt_delivery("queue").map(NativeRunPromptDelivery::into_string),
             Ok(String::from("queue"))
         );
         for (option, invalid) in [
@@ -1948,6 +1970,19 @@ mod tests {
     #[test]
     fn project_root_is_not_a_supported_argument() {
         assert!(Cli::try_parse_from(["ae", "setup", "--project-root", "."]).is_err());
+    }
+
+    #[test]
+    fn parsed_setup_debug_redacts_native_run_prompt_delivery() {
+        let canary = "native-run-prompt-delivery-canary";
+        let mut arguments = explicit_setup_args();
+        replace_setup_value(&mut arguments, "--native-run-prompt-delivery", canary);
+        let cli = Cli::try_parse_from(arguments).unwrap();
+        let debug = format!("{cli:?}");
+        assert!(!debug.contains(canary));
+        assert!(debug.contains("NativeRunPromptDelivery"));
+        assert!(debug.contains("byte_length:"));
+        assert!(debug.contains("category: \"validated\""));
     }
 
     #[test]
