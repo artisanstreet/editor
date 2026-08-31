@@ -287,7 +287,6 @@ impl NativeTransportService {
     ///
     /// Returns [`ServiceSpawnError::Thread`] if the service thread cannot be
     /// created.
-    #[must_use]
     pub fn spawn() -> Result<Self, ServiceSpawnError> {
         let (command_tx, command_rx) = sync_channel(COMMAND_CAPACITY);
         let (event_tx, event_rx) = sync_channel(EVENT_CAPACITY);
@@ -298,20 +297,17 @@ impl NativeTransportService {
             .spawn(move || {
                 let starting_sent = event_tx.send(NativeTransportEvent::Starting).is_ok();
                 if starting_sent {
-                    match tokio::runtime::Builder::new_current_thread()
+                    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                     {
-                        Ok(runtime) => {
-                            runtime.block_on(service_main(command_rx, event_tx));
-                        }
-                        Err(_) => {
-                            let _ = event_tx.send(NativeTransportEvent::Failed(
-                                ServiceFailure::unavailable(ServiceFailureStage::Handshake),
-                            ));
-                            let _ = event_tx
-                                .send(NativeTransportEvent::Stopped(ServiceStopStatus::Failed));
-                        }
+                        runtime.block_on(service_main(command_rx, event_tx));
+                    } else {
+                        let _ = event_tx.send(NativeTransportEvent::Failed(
+                            ServiceFailure::unavailable(ServiceFailureStage::Handshake),
+                        ));
+                        let _ =
+                            event_tx.send(NativeTransportEvent::Stopped(ServiceStopStatus::Failed));
                     }
                 }
                 finished_for_thread.store(true, Ordering::Release);
@@ -333,7 +329,6 @@ impl NativeTransportService {
     ///
     /// Returns [`CommandSendError::Busy`] when the bounded command queue is
     /// full, or [`CommandSendError::Stopped`] after the service has stopped.
-    #[must_use]
     pub fn submit(&self, command: NativeTransportCommand) -> Result<(), CommandSendError> {
         match command {
             NativeTransportCommand::Shutdown => self.request_shutdown(),
@@ -352,7 +347,6 @@ impl NativeTransportService {
     ///
     /// Returns [`CommandSendError::Busy`] when the bounded command queue is
     /// full, or [`CommandSendError::Stopped`] when its receiver is gone.
-    #[must_use]
     pub fn request_shutdown(&self) -> Result<(), CommandSendError> {
         if self
             .shutdown_requested
@@ -377,7 +371,6 @@ impl NativeTransportService {
     ///
     /// Returns [`EventReceiveError::Stopped`] when the service has released
     /// the event sender.
-    #[must_use]
     pub fn try_recv(&self) -> Result<Option<NativeTransportEvent>, EventReceiveError> {
         let receiver = self.events.lock().unwrap_or_else(PoisonError::into_inner);
         match receiver.try_recv() {
@@ -399,7 +392,6 @@ impl NativeTransportService {
     ///
     /// Returns [`ServiceJoinError::NotFinished`] if joining would block, or
     /// [`ServiceJoinError::Panicked`] if the service thread panicked.
-    #[must_use]
     pub fn join(&self) -> Result<(), ServiceJoinError> {
         if !self.is_finished() {
             return Err(ServiceJoinError::NotFinished);
@@ -444,11 +436,12 @@ impl StartupError {
             ),
             Self::Stage(stage) => {
                 let category = match stage {
-                    ServiceFailureStage::Payload => ServiceFailureCategory::Integrity,
+                    ServiceFailureStage::Payload | ServiceFailureStage::Readiness => {
+                        ServiceFailureCategory::Integrity
+                    }
                     ServiceFailureStage::Credentials | ServiceFailureStage::Handshake => {
                         ServiceFailureCategory::Authentication
                     }
-                    ServiceFailureStage::Readiness => ServiceFailureCategory::Integrity,
                     ServiceFailureStage::Instance | ServiceFailureStage::Manifest => {
                         ServiceFailureCategory::InvalidConfiguration
                     }
@@ -482,7 +475,6 @@ pub enum ReadinessValidationError {
 /// Returns a typed readiness error when the endpoint is not exact loopback,
 /// the reported PID differs from the owned lease, or the certificate pins do
 /// not agree.
-#[must_use]
 pub fn validate_readiness(
     endpoint: &str,
     readiness_pid: u32,
@@ -654,13 +646,14 @@ fn thread_selection_decision(listing: &ThreadListing) -> ThreadSelectionDecision
     listing
         .threads()
         .first()
-        .map(|thread| ThreadSelectionDecision::AwaitHostSnapshot(thread.thread_id.clone()))
-        .unwrap_or(ThreadSelectionDecision::Empty)
+        .map_or(ThreadSelectionDecision::Empty, |thread| {
+            ThreadSelectionDecision::AwaitHostSnapshot(thread.thread_id.clone())
+        })
 }
 
 enum RequestAttemptError {
     Retained {
-        session: ClientSession,
+        session: Box<ClientSession>,
         failure: ServiceFailure,
     },
     Terminal {
@@ -695,7 +688,7 @@ async fn request_payload(
     let (settled_request_id, outcome) = resolved.into_parts();
     if settled_request_id != expected_request_id {
         return Err(RequestAttemptError::Retained {
-            session,
+            session: Box::new(session),
             failure: ServiceFailure::new(
                 ServiceFailureStage::Request,
                 ServiceFailureCategory::Integrity,
@@ -707,7 +700,7 @@ async fn request_payload(
         RequestOutcome::Failure(failure) => {
             if failure.request_id.as_ref() != Some(&expected_request_id) {
                 return Err(RequestAttemptError::Retained {
-                    session,
+                    session: Box::new(session),
                     failure: ServiceFailure::new(
                         ServiceFailureStage::Request,
                         ServiceFailureCategory::Integrity,
@@ -715,7 +708,7 @@ async fn request_payload(
                 });
             }
             Err(RequestAttemptError::Retained {
-                session,
+                session: Box::new(session),
                 failure: ServiceFailure::new(
                     ServiceFailureStage::Request,
                     ServiceFailureCategory::Peer,
@@ -725,7 +718,7 @@ async fn request_payload(
         RequestOutcome::Response(response) => {
             if response.request_id != expected_request_id {
                 return Err(RequestAttemptError::Retained {
-                    session,
+                    session: Box::new(session),
                     failure: ServiceFailure::new(
                         ServiceFailureStage::Request,
                         ServiceFailureCategory::Integrity,
@@ -734,7 +727,10 @@ async fn request_payload(
             }
             match validate_response_family(expected, response.payload) {
                 Ok(payload) => Ok((session, payload)),
-                Err(failure) => Err(RequestAttemptError::Retained { session, failure }),
+                Err(failure) => Err(RequestAttemptError::Retained {
+                    session: Box::new(session),
+                    failure,
+                }),
             }
         }
     }
@@ -787,7 +783,7 @@ fn cleanup_plan(
     has_lease: bool,
     has_reconnect_capability: bool,
 ) -> Vec<CustodyStep> {
-    let mut plan = Vec::with_capacity(3);
+    let mut plan = Vec::with_capacity(4);
     if has_session {
         plan.push(CustodyStep::SessionShutdown);
     }
@@ -797,6 +793,7 @@ fn cleanup_plan(
     if has_reconnect_capability {
         plan.push(CustodyStep::ReconnectDrop);
     }
+    plan.push(CustodyStep::Stopped);
     plan
 }
 
@@ -823,7 +820,7 @@ impl ServiceRuntime {
                 Ok(payload)
             }
             Err(RequestAttemptError::Retained { session, failure }) => {
-                self.session = Some(session);
+                self.session = Some(*session);
                 Err(failure)
             }
             Err(RequestAttemptError::Terminal { failure }) => Err(failure),
@@ -938,16 +935,16 @@ async fn establish_session(
     StartupError,
 > {
     let readiness_endpoint = lease.readiness().endpoint().to_owned();
-    let readiness_pid = lease.readiness().pid();
-    let readiness_pin = lease.readiness().certificate_sha256().to_owned();
+    let readiness_process_id = lease.readiness().pid();
+    let readiness_certificate_pin = lease.readiness().certificate_sha256().to_owned();
     let (certificate, capability) = credentials.into_parts();
     let pinned_identity = PinnedIdentity::from_certificate(&certificate);
     let expected_pin = pinned_identity.to_hex();
     let target = validate_readiness(
         &readiness_endpoint,
-        readiness_pid,
+        readiness_process_id,
         lease.pid(),
-        &readiness_pin,
+        &readiness_certificate_pin,
         &expected_pin,
     )
     .map_err(|_| StartupError::Stage(ServiceFailureStage::Readiness))?;
@@ -1137,9 +1134,7 @@ fn publish(
 
 #[cfg(test)]
 fn custody_trace() -> Vec<CustodyStep> {
-    let mut trace = cleanup_plan(true, true, true);
-    trace.push(CustodyStep::Stopped);
-    trace
+    cleanup_plan(true, true, true)
 }
 
 #[cfg(test)]

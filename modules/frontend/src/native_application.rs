@@ -2,7 +2,7 @@
 //!
 //! This module owns only application-thread composition. Installation,
 //! transport, process custody, and protocol work live in
-//! native_transport_service; the conversation host remains the sole owner of
+//! `native_transport_service`; the conversation host remains the sole owner of
 //! controller and surface policy.
 
 #![forbid(unsafe_code)]
@@ -75,19 +75,19 @@ pub struct NativeApplication {
     focus_handle: FocusHandle,
     service: Option<Arc<NativeTransportService>>,
     picker: Option<Entity<ProjectPickerView>>,
-    _picker_subscription: Option<Subscription>,
+    picker_subscription: Option<Subscription>,
     project_options: Vec<ProjectOption>,
     selected_project: Option<ProjectId>,
     selected_thread: Option<ThreadId>,
     pending_thread: Option<ThreadId>,
     pending_snapshot: Option<ConversationSnapshot>,
     conversation_host: Option<Entity<ConversationHost>>,
-    _conversation_host_subscription: Option<Subscription>,
+    conversation_host_subscription: Option<Subscription>,
     conversation_effects: Vec<ConversationHostEffect>,
     last_picker_action: Option<ProjectPickerAction>,
     state: NativeViewState,
     service_stopped: bool,
-    _poll_task: Option<Task<()>>,
+    poll_task: Option<Task<()>>,
 }
 
 impl NativeApplication {
@@ -113,31 +113,31 @@ impl NativeApplication {
             focus_handle,
             service,
             picker: None,
-            _picker_subscription: None,
+            picker_subscription: None,
             project_options: Vec::new(),
             selected_project: None,
             selected_thread: None,
             pending_thread: None,
             pending_snapshot: None,
             conversation_host: None,
-            _conversation_host_subscription: None,
+            conversation_host_subscription: None,
             conversation_effects: Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
             last_picker_action: None,
             state,
             service_stopped: false,
-            _poll_task: None,
+            poll_task: None,
         }
     }
 
     /// Begins the application-thread poller for service events.
     fn start_polling(&mut self, cx: &mut Context<Self>) {
-        if self.service.is_none() {
+        if self.service.is_none() || self.poll_task.is_some() {
             return;
         }
         let task = cx.spawn(async move |view, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
-                let Some(keep_polling) = view.update(cx, |view, cx| view.poll_service(cx)).ok()
+                let Some(keep_polling) = view.update(cx, NativeApplication::poll_service).ok()
                 else {
                     break;
                 };
@@ -146,7 +146,7 @@ impl NativeApplication {
                 }
             }
         });
-        self._poll_task = Some(task);
+        self.poll_task = Some(task);
     }
 
     /// Returns the picker entity once real project rows have arrived.
@@ -196,11 +196,11 @@ impl NativeApplication {
                 self.state = NativeViewState::Loading;
                 cx.notify();
             }
-            NativeTransportEvent::Projects(listing) => self.handle_projects(listing, cx),
+            NativeTransportEvent::Projects(listing) => self.handle_projects(&listing, cx),
             NativeTransportEvent::Threads {
                 project_id,
                 listing,
-            } => self.handle_threads(project_id, listing, cx),
+            } => self.handle_threads(&project_id, &listing, cx),
             NativeTransportEvent::Snapshot(snapshot) => self.handle_snapshot(snapshot, cx),
             NativeTransportEvent::EmptyProjects => {
                 self.pending_thread = None;
@@ -240,10 +240,10 @@ impl NativeApplication {
         }
     }
 
-    fn handle_projects(&mut self, listing: ProjectListing, cx: &mut Context<Self>) {
-        let options = project_options_from_listing(&listing);
+    fn handle_projects(&mut self, listing: &ProjectListing, cx: &mut Context<Self>) {
+        let options = project_options_from_listing(listing);
         self.retire_host(cx);
-        self.project_options = options.clone();
+        self.project_options.clone_from(&options);
         self.selected_project = options.first().map(|project| project.id.clone());
         self.pending_thread = None;
         self.pending_snapshot = None;
@@ -264,21 +264,21 @@ impl NativeApplication {
             application.route_picker_action(&picker, cx);
         });
         self.picker = Some(picker);
-        self._picker_subscription = Some(subscription);
+        drop(self.picker_subscription.replace(subscription));
         self.last_picker_action = None;
     }
 
     fn handle_threads(
         &mut self,
-        project_id: ProjectId,
-        listing: artisan_domain::ThreadListing,
+        project_id: &ProjectId,
+        listing: &artisan_domain::ThreadListing,
         cx: &mut Context<Self>,
     ) {
-        if self.selected_project.as_ref() != Some(&project_id)
+        if self.selected_project.as_ref() != Some(project_id)
             || listing
                 .threads()
                 .iter()
-                .any(|thread| thread.project_id != project_id)
+                .any(|thread| &thread.project_id != project_id)
         {
             self.set_failure(invalid_service_failure(), cx);
             return;
@@ -311,12 +311,12 @@ impl NativeApplication {
             self.pending_snapshot = Some(snapshot);
             return;
         };
-        self.dispatch_snapshot(host, snapshot, cx);
+        self.dispatch_snapshot(&host, snapshot, cx);
     }
 
     fn dispatch_snapshot(
         &mut self,
-        host: Entity<ConversationHost>,
+        host: &Entity<ConversationHost>,
         snapshot: ConversationSnapshot,
         cx: &mut Context<Self>,
     ) {
@@ -333,7 +333,7 @@ impl NativeApplication {
         } else {
             self.pending_snapshot = None;
             self.state = NativeViewState::Ready;
-            self.pump_host_boundary(&host, cx);
+            self.pump_host_boundary(host, cx);
             cx.notify();
         }
     }
@@ -390,19 +390,16 @@ impl NativeApplication {
             return;
         };
         self.selected_thread = Some(thread_id.clone());
-        let host = match ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx) {
-            Ok(host) => host,
-            Err(_) => {
-                self.set_failure(invalid_service_failure(), cx);
-                return;
-            }
+        let Ok(host) = ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx) else {
+            self.set_failure(invalid_service_failure(), cx);
+            return;
         };
         let subscription = cx.observe(&host, |application, host, cx| {
             application.collect_host_effects(&host, cx);
             application.pump_host_boundary(&host, cx);
         });
         self.conversation_host = Some(host.clone());
-        self._conversation_host_subscription = Some(subscription);
+        drop(self.conversation_host_subscription.replace(subscription));
         suppress_conversation_tab_stops(&host, cx);
         self.collect_host_effects(&host, cx);
         self.pump_host_boundary(&host, cx);
@@ -410,10 +407,9 @@ impl NativeApplication {
             .pending_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.thread_id() == &thread_id)
+            && let Some(snapshot) = self.pending_snapshot.take()
         {
-            if let Some(snapshot) = self.pending_snapshot.take() {
-                self.dispatch_snapshot(host, snapshot, cx);
-            }
+            self.dispatch_snapshot(&host, snapshot, cx);
         }
     }
 
@@ -425,7 +421,7 @@ impl NativeApplication {
         self.pump_host_boundary(&host, cx);
         if self.conversation_effects.is_empty() && host.read(cx).total_pending_effect_count() == 0 {
             self.conversation_host = None;
-            self._conversation_host_subscription = None;
+            drop(self.conversation_host_subscription.take());
             self.selected_thread = None;
         }
     }
@@ -501,11 +497,9 @@ impl NativeApplication {
                         }
                     }
                     ConversationHostEffect::Controller(
-                        ConversationStateEffect::SceneInvalidated,
-                    )
-                    | ConversationHostEffect::Controller(ConversationStateEffect::Delivery(
-                        ConversationDeliveryEffect::Invalidate,
-                    )) => {
+                        ConversationStateEffect::SceneInvalidated
+                        | ConversationStateEffect::Delivery(ConversationDeliveryEffect::Invalidate),
+                    ) => {
                         self.conversation_effects.remove(0);
                     }
                     _ => {
@@ -521,7 +515,7 @@ impl NativeApplication {
                 return;
             }
             retried_surface = true;
-            host.update(cx, |host, host_cx| host.process_pending_actions(host_cx));
+            host.update(cx, ConversationHost::process_pending_actions);
         }
     }
 
@@ -600,7 +594,7 @@ fn suppress_conversation_tab_stops(
     disclosure_focus.tab_stop(false);
 }
 
-fn status_panel(theme: ArtisanTheme, state: &NativeViewState) -> Div {
+fn status_panel(theme: &ArtisanTheme, state: &NativeViewState) -> Div {
     let (heading, detail): (&str, String) = match state {
         NativeViewState::Loading => (
             "Loading Artisan data",
@@ -677,10 +671,10 @@ impl Render for NativeApplication {
             if let Some(host) = self.conversation_host.clone() {
                 body = body.child(host);
             } else {
-                body = body.child(status_panel(self.theme, &self.state));
+                body = body.child(status_panel(&self.theme, &self.state));
             }
         } else {
-            body = body.child(status_panel(self.theme, &self.state));
+            body = body.child(status_panel(&self.theme, &self.state));
         }
 
         div()
@@ -722,7 +716,7 @@ fn bind_native_actions(cx: &mut App) {
 fn request_app_shutdown(
     cx: &mut App,
     service: Option<Arc<NativeTransportService>>,
-    shutdown_started: Arc<AtomicBool>,
+    shutdown_started: &Arc<AtomicBool>,
 ) {
     if shutdown_started.swap(true, Ordering::AcqRel) {
         return;
@@ -759,22 +753,14 @@ pub fn run() -> ExitCode {
         let service_for_action = service.clone();
         let shutdown_for_action = Arc::clone(&shutdown_started);
         cx.on_action(move |_: &Quit, cx| {
-            request_app_shutdown(
-                cx,
-                service_for_action.clone(),
-                Arc::clone(&shutdown_for_action),
-            );
+            request_app_shutdown(cx, service_for_action.clone(), &shutdown_for_action);
         });
 
         let service_for_close = service.clone();
         let shutdown_for_close = Arc::clone(&shutdown_started);
         cx.on_window_closed(move |cx| {
             if cx.windows().is_empty() {
-                request_app_shutdown(
-                    cx,
-                    service_for_close.clone(),
-                    Arc::clone(&shutdown_for_close),
-                );
+                request_app_shutdown(cx, service_for_close.clone(), &shutdown_for_close);
             }
         })
         .detach();
@@ -793,7 +779,7 @@ pub fn run() -> ExitCode {
             move |window, cx| {
                 let view =
                     cx.new(|view_cx| NativeApplication::new(service_for_view, window, view_cx));
-                view.update(cx, |view, view_cx| view.start_polling(view_cx));
+                view.update(cx, NativeApplication::start_polling);
                 view
             },
         );
@@ -802,7 +788,7 @@ pub fn run() -> ExitCode {
             launch_flag.set(true);
             cx.activate(true);
         } else {
-            request_app_shutdown(cx, service.clone(), Arc::clone(&shutdown_started));
+            request_app_shutdown(cx, service.clone(), &shutdown_started);
         }
     });
 
@@ -915,7 +901,7 @@ mod tests {
                 // request, so model that already-accepted command before
                 // exercising the ordinary no-replacement boundary.
                 application.conversation_effects.clear();
-                application.dispatch_snapshot(host.clone(), snapshot, application_cx);
+                application.dispatch_snapshot(&host, snapshot, application_cx);
                 assert!(matches!(&application.state, NativeViewState::Ready));
                 assert!(
                     host.read(application_cx)
@@ -923,7 +909,7 @@ mod tests {
                         .delivery
                         .has_snapshot
                 );
-                assert!(application._conversation_host_subscription.is_some());
+                assert!(application.conversation_host_subscription.is_some());
 
                 application.try_mount_pending_thread(application_cx);
 
@@ -968,7 +954,7 @@ mod tests {
                 application.pending_thread = Some(thread_id.clone());
                 application.try_mount_pending_thread(application_cx);
                 let host = application.conversation_host.clone().expect("real host");
-                application.dispatch_snapshot(host.clone(), snapshot, application_cx);
+                application.dispatch_snapshot(&host, snapshot, application_cx);
                 assert!(
                     host.read(application_cx)
                         .controller_view()
