@@ -850,11 +850,11 @@ impl RequestFailure {
         }
     }
 
-    fn retryable(&self) -> bool {
+    fn retryable(self) -> bool {
         self.peer.is_some_and(|peer| peer.retryable)
     }
 
-    fn code(&self) -> Option<ErrorCode> {
+    fn code(self) -> Option<ErrorCode> {
         self.peer.map(|peer| peer.code)
     }
 }
@@ -1662,7 +1662,7 @@ async fn attach_project_with_mutation(
     {
         Ok(payload) => payload,
         Err(error) => {
-            let allow_retry = attach_retry_allowed(&error);
+            let allow_retry = attach_retry_allowed(error);
             return report_intake_failure(
                 runtime,
                 events,
@@ -1951,7 +1951,7 @@ fn report_intake_failure(
     retry: Option<IntakeRetry>,
     allow_retry: bool,
 ) -> Result<(), ServiceFailure> {
-    let retryable = retry.is_some() && report_retry_allowed(&error, allow_retry);
+    let retryable = retry.is_some() && report_retry_allowed(error, allow_retry);
     runtime.intake.retry = if retryable { retry } else { None };
     publish(
         events,
@@ -1963,11 +1963,11 @@ fn report_intake_failure(
     )
 }
 
-fn report_retry_allowed(error: &RequestFailure, allow_retry: bool) -> bool {
+fn report_retry_allowed(error: RequestFailure, allow_retry: bool) -> bool {
     allow_retry && error.retryable()
 }
 
-fn attach_retry_allowed(error: &RequestFailure) -> bool {
+fn attach_retry_allowed(error: RequestFailure) -> bool {
     error.code() != Some(ErrorCode::DirectoryUnknown) && error.retryable()
 }
 
@@ -2606,7 +2606,7 @@ mod tests {
         assert_eq!(failure.code(), Some(ErrorCode::DirectoryUnknown));
         // The attach path treats this exact code as terminal; the retained
         // failure classification itself remains redacted.
-        assert!(!super::attach_retry_allowed(&failure));
+        assert!(!super::attach_retry_allowed(failure));
     }
 
     #[test]
