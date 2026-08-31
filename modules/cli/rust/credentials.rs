@@ -2294,7 +2294,7 @@ pub fn provision_or_load(home: &Path) -> Result<ForgeCredentialPaths, ForgeCrede
 }
 
 fn local_capability_from_bytes(
-    bytes: Zeroizing<Vec<u8>>,
+    bytes: &[u8],
     path: &Path,
 ) -> Result<artisan_protocol::LocalCapability, ForgeCredentialError> {
     classify_capability_length(bytes.len(), path)?;
@@ -2327,7 +2327,7 @@ pub fn load_client_credentials(
             path: capability_path.to_path_buf(),
         },
     )?;
-    let capability = local_capability_from_bytes(capability_bytes, capability_path)?;
+    let capability = local_capability_from_bytes(capability_bytes.as_slice(), capability_path)?;
 
     Ok(NativeClientCredentials {
         paths,
@@ -2532,7 +2532,7 @@ mod client_credentials_tests {
         let path = Path::new("capability.bin");
         for (length, valid) in [(31, false), (32, true), (33, false)] {
             let material = Zeroizing::new(vec![0xa5_u8; length]);
-            let result = local_capability_from_bytes(material, path);
+            let result = local_capability_from_bytes(material.as_slice(), path);
             if valid {
                 assert!(result.is_ok());
             } else {
@@ -2708,7 +2708,7 @@ mod client_credentials_tests {
         const CERTIFICATE_CANARY: &[u8] = b"certificate-bytes-canary";
         const KEY_CANARY: &[u8] = b"private-key-bytes-canary";
         let capability_error = match local_capability_from_bytes(
-            Zeroizing::new(CAPABILITY_CANARY.to_vec()),
+            Zeroizing::new(CAPABILITY_CANARY.to_vec()).as_slice(),
             Path::new("capability.bin"),
         ) {
             Ok(_) => panic!("canary capability must fail length validation"),
