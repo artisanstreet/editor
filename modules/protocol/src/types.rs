@@ -10,8 +10,9 @@ use std::fmt;
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
     ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision,
-    EngineRunConfig, Event, IdentifierError, MessageId, PatchBatch, ProjectListing, ProjectSummary,
-    Query, ReceiptDisposition, RequestId, ThreadId, ThreadListing, ThreadSummary, UnixMillis,
+    EngineProfileId, EngineRunConfig, Event, IdentifierError, MessageId, PatchBatch,
+    ProjectListing, ProjectSummary, Query, ReceiptDisposition, RequestId, ThreadId, ThreadListing,
+    ThreadSummary, UnixMillis,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -751,6 +752,37 @@ impl ThreadEngineSettingsResult {
     }
 }
 
+/// Registered engine profiles catalogue with absence distinction.
+///
+/// `RegistryMissing` means no registry file exists; `RegistryPresent` means
+/// the registry file exists and contains exactly the ordered profile ids
+/// supplied by the authority, which may be empty and contains no home, path,
+/// or executable details.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegisteredEngineProfilesResult {
+    /// The profile registry does not exist.
+    RegistryMissing,
+    /// The registry exists and contains the exact ordered profile ids.
+    RegistryPresent { profile_ids: Vec<EngineProfileId> },
+}
+
+impl RegisteredEngineProfilesResult {
+    /// Returns whether the registry is missing.
+    #[must_use]
+    pub const fn is_missing(&self) -> bool {
+        matches!(self, Self::RegistryMissing)
+    }
+
+    /// Returns the present ordered profile ids, if present.
+    #[must_use]
+    pub fn profile_ids(&self) -> Option<&[EngineProfileId]> {
+        match self {
+            Self::RegistryMissing => None,
+            Self::RegistryPresent { profile_ids } => Some(profile_ids),
+        }
+    }
+}
+
 /// Successful first-workflow response payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResponsePayload {
@@ -790,6 +822,8 @@ pub enum ResponsePayload {
     ThreadEngineConfigSet(SetThreadEngineConfigResult),
     /// Authoritative persisted thread engine settings.
     ThreadEngineSettings(ThreadEngineSettingsResult),
+    /// Registered engine profile catalogue with absence semantics.
+    RegisteredEngineProfiles(RegisteredEngineProfilesResult),
 }
 
 /// Successful response correlated to a client request frame.

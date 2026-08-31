@@ -32,6 +32,7 @@
 
 use std::{
     fmt,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -42,13 +43,14 @@ use artisan_database::{
 };
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
-    ConversationUnsubscribe, CreateThread, DirectoryId, MessageId, PatchBatch, ProjectId, Query,
-    QueueFirstMessage, RequestId, RootPath, SetThreadEngineConfig, ThreadId, UnixMillis,
+    ConversationUnsubscribe, CreateThread, DirectoryId, EngineProfileId, MessageId, PatchBatch,
+    ProjectId, Query, QueueFirstMessage, RequestId, RootPath, SetThreadEngineConfig, ThreadId,
+    UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome, ErrorCode, ErrorDetail,
-    FirstMessageReceipt, ProtocolFailure, ResponsePayload, ServerResponse,
-    SetThreadEngineConfigResult,
+    FirstMessageReceipt, ProtocolFailure, RegisteredEngineProfilesResult, ResponsePayload,
+    ServerResponse, SetThreadEngineConfigResult,
 };
 use tokio::sync::Mutex;
 
@@ -260,6 +262,7 @@ pub struct RequestHandler {
     subscriptions: Option<ConversationSubscriptionRegistrar>,
     subscription_identity: Option<Arc<SubscriptionRegistrarIdentity>>,
     directory_picker: Option<DirectoryPicker>,
+    registered_engine_profiles: Option<Box<dyn RegisteredEngineProfilesReader>>,
 }
 
 impl fmt::Debug for RequestHandler {
@@ -300,6 +303,73 @@ impl AdmissionOrigin {
     }
 }
 
+/// Finite, path-free error for the registered engine profile catalogue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegisteredEngineProfilesError;
+
+impl fmt::Display for RegisteredEngineProfilesError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("registered engine profiles are unavailable")
+    }
+}
+
+impl std::error::Error for RegisteredEngineProfilesError {}
+
+/// Narrow, path-free reader boundary for the registered engine profile
+/// catalogue.
+///
+/// The trait surface is intentionally finite and `Send + Sync` so tests can
+/// inject a deterministic implementation and production can delegate to the
+/// certified native authority without leaking path, registry bytes,
+/// executable, install, or raw authority details through `Debug` or `Display`.
+pub trait RegisteredEngineProfilesReader: fmt::Debug + Send + Sync {
+    /// Lists the validated registry entries.
+    ///
+    /// `Ok(None)` means the registry file is missing. `Ok(Some(ids))` means
+    /// the registry file exists and contains exactly the ordered profile ids,
+    /// which may be empty. Any `Err` is treated as an internal, non-retryable,
+    /// path-free failure.
+    fn list_profiles(&self) -> Result<Option<Vec<EngineProfileId>>, RegisteredEngineProfilesError>;
+}
+
+/// Production native reader that owns only the explicit database path and
+/// delegates to the certified `artisan-native-engine` authority.
+///
+/// `Debug` is payload-free so no path or authority material can leak.
+pub struct NativeRegisteredEngineProfilesReader {
+    database_path: PathBuf,
+}
+
+impl NativeRegisteredEngineProfilesReader {
+    /// Creates a production reader owning the explicit database path.
+    #[must_use]
+    pub fn new(database_path: PathBuf) -> Self {
+        Self { database_path }
+    }
+}
+
+impl fmt::Debug for NativeRegisteredEngineProfilesReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NativeRegisteredEngineProfilesReader { <payload-free> }")
+    }
+}
+
+impl RegisteredEngineProfilesReader for NativeRegisteredEngineProfilesReader {
+    fn list_profiles(&self) -> Result<Option<Vec<EngineProfileId>>, RegisteredEngineProfilesError> {
+        let authority = artisan_native_engine::NativeOpenCode2Authority::new();
+        match authority.list_profiles(&self.database_path) {
+            Ok(None) => Ok(None),
+            Ok(Some(profiles)) => Ok(Some(
+                profiles
+                    .into_iter()
+                    .map(|profile| profile.profile_id().clone())
+                    .collect(),
+            )),
+            Err(_) => Err(RegisteredEngineProfilesError),
+        }
+    }
+}
+
 impl RequestHandler {
     /// Creates a handler answering from the supplied repository facade with
     /// real operating-system entropy and wall-clock time behind fresh
@@ -312,6 +382,7 @@ impl RequestHandler {
             subscriptions: None,
             subscription_identity: None,
             directory_picker: None,
+            registered_engine_profiles: None,
         }
     }
 
@@ -331,6 +402,7 @@ impl RequestHandler {
             subscriptions: None,
             subscription_identity: None,
             directory_picker: None,
+            registered_engine_profiles: None,
         }
     }
 
@@ -351,6 +423,7 @@ impl RequestHandler {
             subscriptions: Some(registrar),
             subscription_identity: Some(subscription_identity),
             directory_picker: None,
+            registered_engine_profiles: None,
         }
     }
 
@@ -380,6 +453,22 @@ impl RequestHandler {
             budget: pick_budget,
         });
         handler
+    }
+
+    /// Attaches a deterministic or native registered engine profile reader.
+    ///
+    /// The reader is path-free and `Send + Sync` so tests can inject a scripted
+    /// implementation while production wires the native authority. Existing
+    /// constructors stay unconfigured by default; calling this method adds the
+    /// single bounded reader without creating a second handler, repository
+    /// connection, or authority.
+    #[must_use]
+    pub fn with_registered_engine_profiles_reader(
+        mut self,
+        reader: impl RegisteredEngineProfilesReader + 'static,
+    ) -> Self {
+        self.registered_engine_profiles = Some(Box::new(reader));
+        self
     }
 
     /// Resolves one correlated application request to its typed outcome.
@@ -674,6 +763,36 @@ impl RequestHandler {
                         ),
                     )),
                     Err(error) => Err(repository_failure(&error, request_id)),
+                }
+            }
+            Query::ListRegisteredEngineProfiles(_) => {
+                let Some(reader) = self.registered_engine_profiles.as_ref() else {
+                    return Err(typed_failure(
+                        ErrorCode::UnsupportedFeature,
+                        "registered engine profiles are not supported",
+                        false,
+                        request_id,
+                    ));
+                };
+                match reader.list_profiles() {
+                    Ok(None) => Ok(outcome(
+                        request_id,
+                        ResponsePayload::RegisteredEngineProfiles(
+                            RegisteredEngineProfilesResult::RegistryMissing,
+                        ),
+                    )),
+                    Ok(Some(profile_ids)) => Ok(outcome(
+                        request_id,
+                        ResponsePayload::RegisteredEngineProfiles(
+                            RegisteredEngineProfilesResult::RegistryPresent { profile_ids },
+                        ),
+                    )),
+                    Err(_) => Err(typed_failure(
+                        ErrorCode::Internal,
+                        "registered engine profiles are unavailable",
+                        false,
+                        request_id,
+                    )),
                 }
             }
         }

@@ -40,9 +40,9 @@ use crate::types::{
     HelloCredential, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
     LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
     ProtocolFailure, ProtocolValueError, ProtocolVersion, ReconnectCapability,
-    ReconnectCapabilityError, ResponsePayload, ServerEvent, ServerResponse,
-    SetThreadEngineConfigResult, VersionOffer, VersionOfferError, Welcome, WireEnvelope,
-    WireEnvelopeBody,
+    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResponsePayload, ServerEvent,
+    ServerResponse, SetThreadEngineConfigResult, VersionOffer, VersionOfferError, Welcome,
+    WireEnvelope, WireEnvelopeBody,
 };
 
 /// Maximum Cap'n Proto graph traversal for one already-framed application
@@ -598,6 +598,9 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
                 .init_read_thread_engine_settings()
                 .set_thread_id(query.thread_id().as_str());
         }
+        ClientRequest::Query(Query::ListRegisteredEngineProfiles(_)) => {
+            builder.reborrow().init_list_registered_engine_profiles();
+        }
     }
 }
 
@@ -698,6 +701,12 @@ fn encode_response_payload(
         ResponsePayload::ThreadEngineSettings(result) => {
             encode_thread_engine_settings_result(builder.reborrow(), result);
         }
+        ResponsePayload::RegisteredEngineProfiles(result) => {
+            encode_registered_engine_profiles_result(
+                builder.reborrow().init_registered_engine_profiles(),
+                result,
+            )?;
+        }
     }
     Ok(())
 }
@@ -763,6 +772,48 @@ fn encode_thread_engine_settings_result(
             encode_engine_run_config(configured.init_config(), config);
         }
     }
+}
+
+fn encode_registered_engine_profiles_result(
+    mut builder: artisan_capnp::registered_engine_profiles_result::Builder<'_>,
+    value: &RegisteredEngineProfilesResult,
+) -> Result<(), ProtocolEncodeError> {
+    match value {
+        RegisteredEngineProfilesResult::RegistryMissing => {
+            builder.init_state().set_registry_missing(());
+        }
+        RegisteredEngineProfilesResult::RegistryPresent { profile_ids } => {
+            if profile_ids.len() > 64 {
+                return Err(ProtocolEncodeError::CollectionTooLarge {
+                    field: "response.registeredEngineProfiles.profileIds",
+                    length: profile_ids.len(),
+                });
+            }
+            let mut seen = std::collections::HashSet::with_capacity(profile_ids.len());
+            for id in profile_ids {
+                if !seen.insert(id.as_str()) {
+                    return Err(ProtocolEncodeError::CollectionTooLarge {
+                        field: "response.registeredEngineProfiles.profileIds",
+                        length: profile_ids.len(),
+                    });
+                }
+            }
+            let mut list = builder
+                .init_state()
+                .init_registry_present()
+                .init_profile_ids(list_length(
+                    "response.registeredEngineProfiles.profileIds",
+                    profile_ids.len(),
+                )?);
+            for (index, id) in profile_ids.iter().enumerate() {
+                list.set(
+                    list_index("response.registeredEngineProfiles.profileIds", index)?,
+                    id.as_str(),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn encode_engine_config_precondition(
@@ -1352,6 +1403,12 @@ fn decode_request(
         request::Which::ReadThreadEngineSettings(query) => {
             decode_read_thread_engine_settings(query?)
         }
+        request::Which::ListRegisteredEngineProfiles(query) => {
+            query?;
+            Ok(ClientRequest::Query(Query::ListRegisteredEngineProfiles(
+                artisan_domain::commands::ListRegisteredEngineProfiles,
+            )))
+        }
     }
 }
 
@@ -1888,6 +1945,9 @@ fn decode_response(
         response::Which::ThreadEngineSettings(result) => {
             decode_thread_engine_settings_result(result?)?
         }
+        response::Which::RegisteredEngineProfiles(result) => {
+            decode_registered_engine_profiles_result(result?)?
+        }
     };
     Ok(ServerResponse {
         request_id,
@@ -1955,6 +2015,49 @@ fn decode_thread_engine_settings_result(
         }
     };
     Ok(ResponsePayload::ThreadEngineSettings(result))
+}
+
+fn decode_registered_engine_profiles_result(
+    value: artisan_capnp::registered_engine_profiles_result::Reader<'_>,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let result = match value.get_state().which()? {
+        artisan_capnp::registered_engine_profiles_result::state::Which::RegistryMissing(()) => {
+            RegisteredEngineProfilesResult::RegistryMissing
+        }
+        artisan_capnp::registered_engine_profiles_result::state::Which::RegistryPresent(
+            present,
+        ) => {
+            let present = present?;
+            let ids = present.get_profile_ids()?;
+            let count = ids.len() as usize;
+            if count > 64 {
+                return Err(engine_config_error(
+                    "response.registeredEngineProfiles.profileIds",
+                    EngineConfigReason::OutOfRange,
+                ));
+            }
+            let mut profile_ids = Vec::with_capacity(count);
+            let mut seen = std::collections::HashSet::with_capacity(count);
+            for raw in ids.iter() {
+                let text = read_text(raw, "response.registeredEngineProfiles.profileIds")?;
+                let id = EngineProfileId::parse(text).map_err(|_| {
+                    engine_config_error(
+                        "response.registeredEngineProfiles.profileIds",
+                        EngineConfigReason::InvalidIdentifier,
+                    )
+                })?;
+                if !seen.insert(id.as_str().to_owned()) {
+                    return Err(engine_config_error(
+                        "response.registeredEngineProfiles.profileIds",
+                        EngineConfigReason::Inconsistent,
+                    ));
+                }
+                profile_ids.push(id);
+            }
+            RegisteredEngineProfilesResult::RegistryPresent { profile_ids }
+        }
+    };
+    Ok(ResponsePayload::RegisteredEngineProfiles(result))
 }
 
 fn decode_lifecycle_response(

@@ -176,6 +176,15 @@ impl ReadThreadEngineSettings {
     }
 }
 
+/// Lists every registered native engine profile.
+///
+/// The registry may be absent, empty, or contain up to 64 ordered profile
+/// identifiers. This query carries no thread, database path, home kind,
+/// engine path, or request identity; correlation stays on the triggering
+/// frame.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ListRegisteredEngineProfiles;
+
 /// Every query of the first native workflow.
 ///
 /// Queries carry no [`RequestId`]: they are pure reads with no durable effect
@@ -190,4 +199,6 @@ pub enum Query {
     ListAttachedProjects(ListAttachedProjects),
     /// See [`ReadThreadEngineSettings`].
     ReadThreadEngineSettings(ReadThreadEngineSettings),
+    /// See [`ListRegisteredEngineProfiles`].
+    ListRegisteredEngineProfiles(ListRegisteredEngineProfiles),
 }

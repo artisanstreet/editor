@@ -536,6 +536,19 @@ struct ConfiguredThreadEngineSettings {
   config @1 :EngineRunConfig;
 }
 
+struct ListRegisteredEngineProfilesRequest {}
+
+struct RegisteredEngineProfilesResult {
+  state :union {
+    registryMissing @0 :Void;
+    registryPresent @1 :RegisteredEngineProfileList;
+  }
+}
+
+struct RegisteredEngineProfileList {
+  profileIds @0 :List(Text);
+}
+
 # The request arms of the native protocol: the five original workflow
 # requests, project rediscovery, the three conversation read/subscription
 # requests, explicit host interaction, lifecycle control, durable engine
@@ -577,6 +590,7 @@ struct Request {
     lifecycleControl @10 :LifecycleRequest;
     setThreadEngineConfig @11 :SetThreadEngineConfigRequest;
     readThreadEngineSettings @12 :ReadThreadEngineSettingsRequest;
+    listRegisteredEngineProfiles @13 :ListRegisteredEngineProfilesRequest;
   }
 }
 
@@ -622,6 +636,7 @@ struct Response {
     lifecycleControl @11 :LifecycleResponse;
     threadEngineConfigSet @12 :SetThreadEngineConfigResult;
     threadEngineSettings @13 :ThreadEngineSettingsResult;
+    registeredEngineProfiles @14 :RegisteredEngineProfilesResult;
   }
 }
 
