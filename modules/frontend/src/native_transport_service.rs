@@ -836,6 +836,7 @@ struct PeerFailure {
 }
 
 /// Redacted request failure used by the intake policy.
+#[derive(Clone, Copy)]
 struct RequestFailure {
     failure: ServiceFailure,
     peer: Option<PeerFailure>,
@@ -1115,7 +1116,7 @@ impl ServiceRuntime {
             Ok(hello) => hello,
             Err(failure) => return Err(failure),
         };
-        match ClientSession::connect(
+        if let Ok((session, welcome)) = ClientSession::connect(
             self.target,
             self.certificate.clone(),
             self.pinned_identity,
@@ -1125,21 +1126,18 @@ impl ServiceRuntime {
         )
         .await
         {
-            Ok((session, welcome)) => {
-                self.session = Some(session);
-                self.reconnect_capability = Some(welcome.welcome.reconnect_capability);
-                Ok(())
-            }
-            Err(_) => {
-                // The old session and the only current capability are gone;
-                // an uncertain handshake cannot safely be retried here.
-                self.session = None;
-                self.reconnect_capability = None;
-                Err(ServiceFailure::new(
-                    ServiceFailureStage::Handshake,
-                    ServiceFailureCategory::Authentication,
-                ))
-            }
+            self.session = Some(session);
+            self.reconnect_capability = Some(welcome.welcome.reconnect_capability);
+            Ok(())
+        } else {
+            // The old session and the only current capability are gone;
+            // an uncertain handshake cannot safely be retried here.
+            self.session = None;
+            self.reconnect_capability = None;
+            Err(ServiceFailure::new(
+                ServiceFailureStage::Handshake,
+                ServiceFailureCategory::Authentication,
+            ))
         }
     }
 
@@ -1739,18 +1737,15 @@ async fn refresh_projects(
         );
     }
     runtime.intake.projects = Some(projects.clone());
-    let title = match ThreadTitle::parse("New thread") {
-        Ok(title) => title,
-        Err(_) => {
-            return report_intake_failure(
-                runtime,
-                events,
-                NativeProjectIntakeOperation::CreateThread,
-                RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
-                None,
-                false,
-            );
-        }
+    let Ok(title) = ThreadTitle::parse("New thread") else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::CreateThread,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
     };
     create_thread(
         runtime,

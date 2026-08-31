@@ -211,7 +211,7 @@ impl NativeApplication {
             } => self.handle_threads(&project_id, &listing, cx),
             NativeTransportEvent::Snapshot(snapshot) => self.handle_snapshot(snapshot, cx),
             NativeTransportEvent::ProjectIntakeProgress(stage) => {
-                self.handle_intake_progress(stage, cx)
+                self.handle_intake_progress(stage, cx);
             }
             NativeTransportEvent::ProjectIntakeCancelled => self.handle_intake_cancelled(cx),
             NativeTransportEvent::ProjectIntakeReady {
@@ -219,7 +219,7 @@ impl NativeApplication {
                 project_id,
                 threads,
                 thread_id,
-            } => self.handle_intake_ready(projects, project_id, threads, thread_id, cx),
+            } => self.handle_intake_ready(&projects, project_id, &threads, thread_id, cx),
             NativeTransportEvent::ProjectIntakeFailed {
                 operation,
                 failure,
@@ -310,13 +310,13 @@ impl NativeApplication {
 
     fn handle_intake_ready(
         &mut self,
-        projects: ProjectListing,
+        projects: &ProjectListing,
         project_id: ProjectId,
-        threads: artisan_domain::ThreadListing,
+        threads: &artisan_domain::ThreadListing,
         thread_id: ThreadId,
         cx: &mut Context<Self>,
     ) {
-        if !ready_membership_is_valid(&projects, &project_id, &threads, &thread_id) {
+        if !ready_membership_is_valid(projects, &project_id, threads, &thread_id) {
             self.handle_intake_failed(
                 NativeProjectIntakeOperation::RefreshThreads,
                 invalid_service_failure(),
@@ -325,8 +325,8 @@ impl NativeApplication {
             );
             return;
         }
-        let options = project_options_from_listing(&projects);
-        self.project_options = options.clone();
+        let options = project_options_from_listing(projects);
+        self.project_options.clone_from(&options);
         self.selected_project = Some(project_id.clone());
         self.selected_thread = None;
         self.pending_thread = Some(thread_id);
@@ -1345,9 +1345,9 @@ mod tests {
         cx.update(|app| {
             view.update(app, |application, application_cx| {
                 application.handle_intake_ready(
-                    projects,
+                    &projects,
                     project_id.clone(),
-                    threads,
+                    &threads,
                     thread_id.clone(),
                     application_cx,
                 );
@@ -1407,9 +1407,9 @@ mod tests {
                     ThreadListing::new(vec![thread("forge-t2", "forge-p2", "New thread")])
                         .expect("threads");
                 application.handle_intake_ready(
-                    mismatched_projects,
+                    &mismatched_projects,
                     ProjectId::parse("forge-p2").expect("project"),
-                    mismatched_threads,
+                    &mismatched_threads,
                     ThreadId::parse("forge-t2").expect("thread"),
                     application_cx,
                 );
