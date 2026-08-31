@@ -131,7 +131,7 @@ async fn receipt_count(database: &sea_orm::DatabaseConnection) -> usize {
 
 async fn replace_thread_blob(database: &sea_orm::DatabaseConnection, blob: Vec<u8>) {
     database
-        .execute(&Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "UPDATE threads SET engine_run_config = ? WHERE thread_id = ?",
             [
@@ -291,7 +291,7 @@ async fn configuration_update_keeps_newer_current_timestamp_after_stale_read() {
     assert_eq!(stale_row.updated_at_ms, 100);
 
     database
-        .execute(&Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "UPDATE threads SET updated_at_ms = ? WHERE thread_id = ?",
             [
@@ -319,7 +319,7 @@ async fn configuration_update_keeps_newer_current_timestamp_after_stale_read() {
     );
     assert_eq!(
         database
-            .execute(&update)
+            .execute_raw(update)
             .await
             .expect("conditional update should work")
             .rows_affected(),
