@@ -1,0 +1,1292 @@
+//! Durable first-message execution for configured OpenCode2 profiles.
+//!
+//! This module is the one production dispatcher for the native first-turn
+//! workflow. It claims a queued message, carries the immutable settings
+//! snapshot through the launch fence, retains the certified profile
+//! capability until the single owner spawns, binds the created provider
+//! session before authorizing one prompt, and commits bounded observations
+//! before issuing a wake hint. Network transcript delivery remains inside the
+//! owner; this module owns only durable orchestration and its injected
+//! scheduler policy.
+
+#![forbid(unsafe_code)]
+#![allow(clippy::module_name_repetitions)]
+
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+use artisan_database::{
+    AssistantChange, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
+    ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome, CompleteRun,
+    DispatchFailureReason, DispatchLeaseOwner, FailMessageDispatch, InterruptRun, LaunchClaimedRun,
+    LaunchClaimedRunOutcome, ProviderBindingBytes, Repository, RequeueMessageDispatch,
+    RunBatchScope, RunErrorCode, RunErrorMessage, RunLaunchCredentials, RunStartKey,
+};
+use artisan_domain::{
+    AssistantBody, AssistantMessagePhase, IncrementalText, ItemId, PatchId, Revision, RunId,
+    TurnId, UnixMillis,
+};
+use artisan_native_engine::NativeOpenCode2Authority;
+use artisan_transport::CancelHandle;
+use tokio::{runtime::Handle, task::JoinHandle};
+
+use crate::{
+    CommandOrigin, EngineOwner, EngineOwnerShutdown, SystemCommandOrigin,
+    conversation_commit_notifier::ConversationCommitNotifier,
+    engine_owner::EngineTurnInput,
+    engine_owner::observation::{EngineObservation, TerminalState},
+    engine_owner::operation::EngineOperationError,
+};
+
+const PROMPT_DELIVERY_MAX_BYTES: usize = 256;
+const PROVIDER_BINDING_VERSION: i64 = 1;
+const PROVIDER_BINDING_ENGINE: &str = "opencode2";
+const PROVIDER_FAILURE_CODE: &str = "provider_failed";
+const PROVIDER_FAILURE_MESSAGE: &str = "OpenCode2 provider turn failed";
+const INTERRUPTED_CODE: &str = "provider_interrupted";
+const INTERRUPTED_MESSAGE: &str = "OpenCode2 provider turn interrupted";
+
+/// Validation failures for the explicit Forge native-run scheduler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum NativeRunDispatcherConfigError {
+    /// A scheduler duration was zero.
+    #[error("native run dispatcher duration must be positive")]
+    ZeroDuration,
+    /// A scheduler duration cannot be represented as signed milliseconds.
+    #[error("native run dispatcher duration is outside the supported range")]
+    DurationOverflow,
+    /// The prompt delivery selector was empty or too large.
+    #[error("native run dispatcher prompt delivery is outside its bound")]
+    InvalidPromptDelivery,
+    /// The prompt delivery selector contained a control or line-break byte.
+    #[error("native run dispatcher prompt delivery contains a forbidden character")]
+    InvalidPromptDeliveryCharacter,
+    /// The queue capacity cannot be represented by Tokio's bounded channel.
+    #[error("native run dispatcher queue capacity is outside the supported range")]
+    CapacityOverflow,
+}
+
+/// Explicit scheduler and provider-composition policy for one Forge process.
+///
+/// No field has a hidden default. The authority and notifier are both owned
+/// by the dispatcher after [`Self::new`] succeeds; the caller must retain no
+/// separate provider capability.
+pub struct NativeRunDispatcherConfig {
+    authority: NativeOpenCode2Authority,
+    notifier: ConversationCommitNotifier,
+    claim_lease: Duration,
+    poll_interval: Duration,
+    retry_backoff: Duration,
+    shutdown_budget: Duration,
+    queue_capacity: std::num::NonZeroUsize,
+    max_command_retries: std::num::NonZeroUsize,
+    prompt_delivery: String,
+    stream_after: u64,
+}
+
+impl std::fmt::Debug for NativeRunDispatcherConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRunDispatcherConfig")
+            .field("claim_lease", &self.claim_lease)
+            .field("poll_interval", &self.poll_interval)
+            .field("retry_backoff", &self.retry_backoff)
+            .field("shutdown_budget", &self.shutdown_budget)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_command_retries", &self.max_command_retries)
+            .field("prompt_delivery_bytes", &self.prompt_delivery.len())
+            .field("stream_after", &self.stream_after)
+            .field("authority", &"caller-selected certified authority")
+            .field("notifier", &"caller-selected notifier")
+            .finish()
+    }
+}
+
+impl NativeRunDispatcherConfig {
+    /// Creates a complete injected scheduler policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        authority: NativeOpenCode2Authority,
+        notifier: ConversationCommitNotifier,
+        claim_lease: Duration,
+        poll_interval: Duration,
+        retry_backoff: Duration,
+        shutdown_budget: Duration,
+        queue_capacity: std::num::NonZeroUsize,
+        max_command_retries: std::num::NonZeroUsize,
+        prompt_delivery: impl Into<String>,
+        stream_after: u64,
+    ) -> Result<Self, NativeRunDispatcherConfigError> {
+        for duration in [claim_lease, poll_interval, retry_backoff, shutdown_budget] {
+            if duration.is_zero() {
+                return Err(NativeRunDispatcherConfigError::ZeroDuration);
+            }
+            if duration.as_millis() > i64::MAX as u128 {
+                return Err(NativeRunDispatcherConfigError::DurationOverflow);
+            }
+        }
+        let prompt_delivery = prompt_delivery.into();
+        if prompt_delivery.is_empty() || prompt_delivery.len() > PROMPT_DELIVERY_MAX_BYTES {
+            return Err(NativeRunDispatcherConfigError::InvalidPromptDelivery);
+        }
+        if prompt_delivery
+            .chars()
+            .any(|character| character.is_control() || character == '\r' || character == '\n')
+        {
+            return Err(NativeRunDispatcherConfigError::InvalidPromptDeliveryCharacter);
+        }
+        if queue_capacity.get() > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(NativeRunDispatcherConfigError::CapacityOverflow);
+        }
+        Ok(Self {
+            authority,
+            notifier,
+            claim_lease,
+            poll_interval,
+            retry_backoff,
+            shutdown_budget,
+            queue_capacity,
+            max_command_retries,
+            prompt_delivery,
+            stream_after,
+        })
+    }
+}
+
+/// The observed result of stopping the native dispatcher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeRunDispatcherShutdown {
+    /// The dispatcher and its single engine owner joined cleanly.
+    Joined,
+    /// The configured shutdown budget elapsed, but the join was still
+    /// awaited to resolve owner custody.
+    BudgetExceeded,
+    /// The dispatcher task or owner task was lost.
+    TaskLost,
+}
+
+/// One running configured first-message dispatcher.
+pub struct NativeRunDispatcher {
+    stop: Arc<CancelHandle>,
+    shutdown_budget: Duration,
+    join: Option<JoinHandle<DispatchLoopExit>>,
+    observed: Option<NativeRunDispatcherShutdown>,
+}
+
+impl std::fmt::Debug for NativeRunDispatcher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("NativeRunDispatcher { <payload-free> }")
+    }
+}
+
+impl NativeRunDispatcher {
+    /// Starts the sole background dispatcher on the caller's runtime.
+    #[must_use]
+    pub(crate) fn start(
+        repository: Repository,
+        database_path: PathBuf,
+        config: NativeRunDispatcherConfig,
+        process_cancel: Arc<CancelHandle>,
+        runtime: &Handle,
+    ) -> Self {
+        let shutdown_budget = config.shutdown_budget;
+        let stop = Arc::new(CancelHandle::new());
+        let owner = EngineOwner::start_configured(config.queue_capacity, runtime);
+        let join = runtime.spawn(dispatch_loop(
+            repository,
+            database_path,
+            config,
+            Arc::clone(&stop),
+            process_cancel,
+            owner,
+        ));
+        Self {
+            stop,
+            shutdown_budget,
+            join: Some(join),
+            observed: None,
+        }
+    }
+
+    /// Stops claims, drains admission, and awaits the owner. A budget breach
+    /// is reported after the join is nevertheless awaited so child custody is
+    /// never detached from this shutdown path.
+    pub(crate) async fn shutdown(&mut self) -> NativeRunDispatcherShutdown {
+        self.stop.cancel();
+        if let Some(observed) = self.observed {
+            return observed;
+        }
+        let Some(join) = self.join.take() else {
+            self.observed = Some(NativeRunDispatcherShutdown::Joined);
+            return NativeRunDispatcherShutdown::Joined;
+        };
+        let mut join = join;
+        let result = tokio::time::timeout(self.shutdown_budget, &mut join).await;
+        let (budget_exceeded, join_result) = match result {
+            Ok(join_result) => (false, join_result),
+            Err(_) => (true, join.await),
+        };
+        let outcome = match join_result {
+            Ok(DispatchLoopExit {
+                owner: EngineOwnerShutdown::Joined,
+            }) if !budget_exceeded => NativeRunDispatcherShutdown::Joined,
+            Ok(DispatchLoopExit {
+                owner: EngineOwnerShutdown::Joined,
+            }) => NativeRunDispatcherShutdown::BudgetExceeded,
+            Ok(DispatchLoopExit {
+                owner: EngineOwnerShutdown::Quarantined,
+            }) => NativeRunDispatcherShutdown::TaskLost,
+            Ok(DispatchLoopExit {
+                owner: EngineOwnerShutdown::TaskLost,
+            })
+            | Err(_) => NativeRunDispatcherShutdown::TaskLost,
+        };
+        self.observed = Some(outcome);
+        outcome
+    }
+}
+
+impl Drop for NativeRunDispatcher {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+struct DispatchLoopExit {
+    owner: EngineOwnerShutdown,
+}
+
+async fn dispatch_loop(
+    repository: Repository,
+    database_path: PathBuf,
+    config: NativeRunDispatcherConfig,
+    stop: Arc<CancelHandle>,
+    process_cancel: Arc<CancelHandle>,
+    mut owner: EngineOwner,
+) -> DispatchLoopExit {
+    let origin = SystemCommandOrigin;
+    loop {
+        if stop.is_cancelled() || process_cancel.is_cancelled() {
+            break;
+        }
+        let Some(claimed_at) = wall_clock(&origin) else {
+            if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
+                break;
+            }
+            continue;
+        };
+        let Some(lease_expires_at) = add_duration(claimed_at, config.claim_lease) else {
+            if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
+                break;
+            }
+            continue;
+        };
+        let Some(owner_token) = mint_dispatch_owner() else {
+            if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
+                break;
+            }
+            continue;
+        };
+        let claim = ClaimMessageDispatch {
+            owner: owner_token,
+            claimed_at,
+            lease_expires_at,
+        };
+        let claimed = match repository.claim_next_message_dispatch(claim).await {
+            Ok(Some(claimed)) => claimed,
+            Ok(None) | Err(_) => {
+                if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
+                    break;
+                }
+                continue;
+            }
+        };
+        execute_claim(
+            &repository,
+            Path::new(&database_path),
+            &config,
+            &origin,
+            &stop,
+            &process_cancel,
+            &owner,
+            claimed,
+        )
+        .await;
+    }
+
+    let owner_shutdown = loop {
+        match owner.shutdown().await {
+            EngineOwnerShutdown::Quarantined => continue,
+            outcome => break outcome,
+        }
+    };
+    DispatchLoopExit {
+        owner: owner_shutdown,
+    }
+}
+
+async fn wait_for_next_claim(
+    stop: &CancelHandle,
+    process_cancel: &CancelHandle,
+    interval: Duration,
+) -> bool {
+    tokio::select! {
+        biased;
+        () = stop.wait() => false,
+        () = process_cancel.wait() => false,
+        () = tokio::time::sleep(interval) => true,
+    }
+}
+
+fn wall_clock(origin: &SystemCommandOrigin) -> Option<UnixMillis> {
+    origin.acceptance_instant().ok()
+}
+
+fn add_duration(value: UnixMillis, duration: Duration) -> Option<UnixMillis> {
+    let milliseconds = i64::try_from(duration.as_millis()).ok()?;
+    value
+        .as_millis()
+        .checked_add(milliseconds)
+        .map(UnixMillis::from_millis)
+}
+
+fn at_or_after(origin: &SystemCommandOrigin, not_before: UnixMillis) -> Option<UnixMillis> {
+    Some(wall_clock(origin)?.max(not_before))
+}
+
+fn mint_dispatch_owner() -> Option<DispatchLeaseOwner> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(DispatchLeaseOwner::new(bytes))
+}
+
+fn mint_run_capabilities() -> Option<(RunStartKey, RunLaunchCredentials)> {
+    let mut start = [0_u8; 32];
+    let mut owner = [0_u8; 32];
+    let mut lease = [0_u8; 32];
+    let mut claim = [0_u8; 32];
+    getrandom::fill(&mut start).ok()?;
+    getrandom::fill(&mut owner).ok()?;
+    getrandom::fill(&mut lease).ok()?;
+    getrandom::fill(&mut claim).ok()?;
+    Some((
+        RunStartKey::new(start),
+        RunLaunchCredentials::new(owner, lease, claim),
+    ))
+}
+
+fn mint_run_id(origin: &SystemCommandOrigin) -> Option<RunId> {
+    RunId::parse(origin.mint_identity().ok()?).ok()
+}
+
+fn mint_turn_id(origin: &SystemCommandOrigin) -> Option<TurnId> {
+    TurnId::parse(origin.mint_identity().ok()?).ok()
+}
+
+fn mint_item_id(origin: &SystemCommandOrigin) -> Option<ItemId> {
+    ItemId::parse(origin.mint_identity().ok()?).ok()
+}
+
+fn mint_patch_id(origin: &SystemCommandOrigin) -> Option<PatchId> {
+    PatchId::parse(origin.mint_identity().ok()?).ok()
+}
+
+async fn execute_claim(
+    repository: &Repository,
+    database_path: &Path,
+    config: &NativeRunDispatcherConfig,
+    origin: &SystemCommandOrigin,
+    stop: &CancelHandle,
+    process_cancel: &CancelHandle,
+    owner: &EngineOwner,
+    claimed: ClaimedMessageDispatch,
+) {
+    if stop.is_cancelled() || process_cancel.is_cancelled() {
+        requeue_claim(repository, claimed, config, origin, "dispatcher stopping").await;
+        return;
+    }
+    let Some(payload) = read_payload(repository, &claimed).await else {
+        requeue_claim(
+            repository,
+            claimed,
+            config,
+            origin,
+            "message payload unavailable",
+        )
+        .await;
+        return;
+    };
+    let settings = match repository
+        .read_thread_engine_settings(&payload.thread_id)
+        .await
+    {
+        Ok(Some(settings)) => settings,
+        Ok(None) => {
+            requeue_claim(repository, claimed, config, origin, "engine unconfigured").await;
+            return;
+        }
+        Err(error) => {
+            if is_permanent_configuration_error(&error) {
+                fail_claim(repository, claimed, origin, "engine settings corrupt").await;
+            } else {
+                requeue_claim(
+                    repository,
+                    claimed,
+                    config,
+                    origin,
+                    "engine settings unavailable",
+                )
+                .await;
+            }
+            return;
+        }
+    };
+    let project_root = match repository
+        .read_thread_project_root(&payload.thread_id)
+        .await
+    {
+        Ok(root) => root,
+        Err(error) => {
+            if is_permanent_configuration_error(&error) {
+                fail_claim(repository, claimed, origin, "project root corrupt").await;
+            } else {
+                requeue_claim(
+                    repository,
+                    claimed,
+                    config,
+                    origin,
+                    "project root unavailable",
+                )
+                .await;
+            }
+            return;
+        }
+    };
+    let profile_id = settings.config().selection().as_opencode2().profile_id();
+    let launch = match config
+        .authority
+        .resolve_profile_launch(database_path, profile_id)
+    {
+        Ok(launch) => launch,
+        Err(_) => {
+            requeue_claim(
+                repository,
+                claimed,
+                config,
+                origin,
+                "engine profile unavailable",
+            )
+            .await;
+            return;
+        }
+    };
+    let Some(run_id) = mint_run_id(origin) else {
+        requeue_claim(
+            repository,
+            claimed,
+            config,
+            origin,
+            "run identity unavailable",
+        )
+        .await;
+        return;
+    };
+    let Some(turn_id) = mint_turn_id(origin) else {
+        requeue_claim(
+            repository,
+            claimed,
+            config,
+            origin,
+            "run identity unavailable",
+        )
+        .await;
+        return;
+    };
+    let Some(item_id) = mint_item_id(origin) else {
+        requeue_claim(
+            repository,
+            claimed,
+            config,
+            origin,
+            "run identity unavailable",
+        )
+        .await;
+        return;
+    };
+    let Some(first_patch_id) = mint_patch_id(origin) else {
+        requeue_claim(
+            repository,
+            claimed,
+            config,
+            origin,
+            "run identity unavailable",
+        )
+        .await;
+        return;
+    };
+    let Some(second_patch_id) = mint_patch_id(origin) else {
+        requeue_claim(
+            repository,
+            claimed,
+            config,
+            origin,
+            "run identity unavailable",
+        )
+        .await;
+        return;
+    };
+    let Some(operated_at) = at_or_after(origin, claimed.updated_at) else {
+        requeue_claim(repository, claimed, config, origin, "run clock unavailable").await;
+        return;
+    };
+    let Some((run_start_key, credentials)) = mint_run_capabilities() else {
+        requeue_claim(
+            repository,
+            claimed,
+            config,
+            origin,
+            "run capability unavailable",
+        )
+        .await;
+        return;
+    };
+
+    let launch_command = LaunchClaimedRun {
+        claimed: &claimed,
+        run_id: &run_id,
+        turn_id: &turn_id,
+        item_id: &item_id,
+        first_patch_id: &first_patch_id,
+        second_patch_id: &second_patch_id,
+        operated_at,
+        run_start_key: &run_start_key,
+        credentials: &credentials,
+        engine_settings: &settings,
+    };
+    let launch_result =
+        launch_with_retry(repository, launch_command, config.max_command_retries).await;
+    let launched = match launch_result {
+        Ok(LaunchClaimedRunOutcome::Started(receipt)) => receipt,
+        // `AlreadyStarted` is durable replay information, never authority to
+        // contact OpenCode. Leave the launching run for the recovery path;
+        // creating another provider session here could duplicate an unknown
+        // external effect from the original attempt.
+        Ok(LaunchClaimedRunOutcome::AlreadyStarted(_)) => return,
+        Err(_) => {
+            requeue_claim(
+                repository,
+                claimed,
+                config,
+                origin,
+                "run launch unavailable",
+            )
+            .await;
+            return;
+        }
+    };
+    let attempt_budget = Duration::from_millis(settings.config().runtime().attempt_budget().get());
+    let input = EngineTurnInput {
+        run_id: launched.run_id.clone(),
+        project_root,
+        prompt_id: payload.message_id.as_str().to_owned(),
+        prompt_text: payload.body,
+        settings: settings.clone(),
+        launch,
+        prompt_delivery: config.prompt_delivery.clone(),
+        stream_after: config.stream_after,
+        control_capacity: config.queue_capacity.get(),
+    };
+    let mut turn = match owner.admit_turn(input, attempt_budget) {
+        Ok(turn) => turn,
+        Err(_) => return,
+    };
+    let prepared = turn.prepare().await;
+    let session = match prepared {
+        Ok(session) => session,
+        Err(_) => {
+            let _ = turn.finish().await;
+            return;
+        }
+    };
+    let binding_bytes = match provider_binding_bytes(
+        settings
+            .config()
+            .selection()
+            .as_opencode2()
+            .profile_id()
+            .as_str(),
+        session.session(),
+    ) {
+        Some(bytes) => bytes,
+        None => {
+            turn.cancel();
+            let _ = drain_turn(&mut turn, stop, process_cancel).await;
+            let _ = turn.finish().await;
+            return;
+        }
+    };
+    let Some(bound_at) = at_or_after(origin, operated_at) else {
+        turn.cancel();
+        let _ = drain_turn(&mut turn, stop, process_cancel).await;
+        let _ = turn.finish().await;
+        return;
+    };
+    let bind_command = BindRunProvider {
+        claimed: &claimed,
+        receipt: &launched,
+        run_start_key: &run_start_key,
+        credentials: &credentials,
+        expected_launch_at: operated_at,
+        bound_at,
+        binding_version: PROVIDER_BINDING_VERSION,
+        binding_bytes: &binding_bytes,
+    };
+    let bind_result = bind_with_retry(repository, bind_command, config.max_command_retries).await;
+    let (bound, already_bound) = match bind_result {
+        Ok(BindRunProviderOutcome::Bound(receipt)) => (receipt, false),
+        Ok(BindRunProviderOutcome::AlreadyBound(receipt)) => (receipt, true),
+        Err(_) => {
+            turn.cancel();
+            let _ = drain_turn(&mut turn, stop, process_cancel).await;
+            let _ = turn.finish().await;
+            return;
+        }
+    };
+    if already_bound {
+        turn.cancel();
+        let _ = drain_turn(&mut turn, stop, process_cancel).await;
+        let _ = turn.finish().await;
+        return;
+    }
+    if turn.authorize().is_err() {
+        turn.cancel();
+        let _ = drain_turn(&mut turn, stop, process_cancel).await;
+        let _ = turn.finish().await;
+        return;
+    }
+    let scope = RunBatchScope {
+        claimed: &claimed,
+        launched: &launched,
+        bound: &bound,
+        run_start_key: &run_start_key,
+        credentials: &credentials,
+        expected_launch_at: operated_at,
+        expected_updated_at: bound_at,
+    };
+    consume_turn(
+        repository,
+        config,
+        origin,
+        stop,
+        process_cancel,
+        &mut turn,
+        scope,
+    )
+    .await;
+}
+
+async fn read_payload(
+    repository: &Repository,
+    claimed: &ClaimedMessageDispatch,
+) -> Option<artisan_database::MessageDispatchPayload> {
+    repository
+        .read_message_dispatch_payload(&claimed.message_id)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn requeue_claim(
+    repository: &Repository,
+    claimed: ClaimedMessageDispatch,
+    config: &NativeRunDispatcherConfig,
+    origin: &SystemCommandOrigin,
+    reason: &'static str,
+) {
+    let Some(operated_at) = wall_clock(origin) else {
+        return;
+    };
+    let Some(available_at) = add_duration(operated_at, config.retry_backoff) else {
+        return;
+    };
+    let Ok(reason) = DispatchFailureReason::parse(reason) else {
+        return;
+    };
+    let _ = repository
+        .requeue_message_dispatch(RequeueMessageDispatch {
+            message_id: claimed.message_id,
+            owner: claimed.owner,
+            operated_at,
+            available_at,
+            reason,
+        })
+        .await;
+}
+
+fn is_permanent_configuration_error(error: &artisan_database::RepositoryError) -> bool {
+    matches!(
+        error,
+        artisan_database::RepositoryError::CorruptData { .. }
+            | artisan_database::RepositoryError::Invariant { .. }
+            | artisan_database::RepositoryError::ProjectNotFound { .. }
+            | artisan_database::RepositoryError::ThreadNotFound { .. }
+    )
+}
+
+async fn fail_claim(
+    repository: &Repository,
+    claimed: ClaimedMessageDispatch,
+    origin: &SystemCommandOrigin,
+    reason: &'static str,
+) {
+    let Some(operated_at) = wall_clock(origin) else {
+        return;
+    };
+    let Ok(reason) = DispatchFailureReason::parse(reason) else {
+        return;
+    };
+    let _ = repository
+        .fail_message_dispatch(FailMessageDispatch {
+            message_id: claimed.message_id,
+            owner: claimed.owner,
+            operated_at,
+            reason,
+        })
+        .await;
+}
+
+async fn launch_with_retry<'a>(
+    repository: &Repository,
+    command: LaunchClaimedRun<'a>,
+    retries: std::num::NonZeroUsize,
+) -> Result<LaunchClaimedRunOutcome, artisan_database::RunLaunchError> {
+    let LaunchClaimedRun {
+        claimed,
+        run_id,
+        turn_id,
+        item_id,
+        first_patch_id,
+        second_patch_id,
+        operated_at,
+        run_start_key,
+        credentials,
+        engine_settings,
+    } = command;
+    let mut last_error = None;
+    for _ in 0..retries.get() {
+        match repository
+            .launch_claimed_run(LaunchClaimedRun {
+                claimed,
+                run_id,
+                turn_id,
+                item_id,
+                first_patch_id,
+                second_patch_id,
+                operated_at,
+                run_start_key,
+                credentials,
+                engine_settings,
+            })
+            .await
+        {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("positive retry count always records a result"))
+}
+
+async fn bind_with_retry<'a>(
+    repository: &Repository,
+    command: BindRunProvider<'a>,
+    retries: std::num::NonZeroUsize,
+) -> Result<BindRunProviderOutcome, artisan_database::RunBindingError> {
+    let BindRunProvider {
+        claimed,
+        receipt,
+        run_start_key,
+        credentials,
+        expected_launch_at,
+        bound_at,
+        binding_version,
+        binding_bytes,
+    } = command;
+    let mut last_error = None;
+    for _ in 0..retries.get() {
+        match repository
+            .bind_run_provider(BindRunProvider {
+                claimed,
+                receipt,
+                run_start_key,
+                credentials,
+                expected_launch_at,
+                bound_at,
+                binding_version,
+                binding_bytes,
+            })
+            .await
+        {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("positive retry count always records a result"))
+}
+
+fn provider_binding_bytes(profile_id: &str, session_id: &str) -> Option<ProviderBindingBytes> {
+    let value = serde_json::json!({
+        "engine": PROVIDER_BINDING_ENGINE,
+        "profile_id": profile_id,
+        "session_id": session_id,
+    });
+    let bytes = serde_json::to_vec(&value).ok()?;
+    ProviderBindingBytes::new(bytes).ok()
+}
+
+async fn drain_turn(
+    turn: &mut crate::engine_owner::operation::AcceptedTurn,
+    stop: &CancelHandle,
+    process_cancel: &CancelHandle,
+) -> bool {
+    if stop.is_cancelled() || process_cancel.is_cancelled() {
+        turn.cancel();
+    }
+    while turn.next_observation().await.is_some() {
+        if stop.is_cancelled() || process_cancel.is_cancelled() {
+            turn.cancel();
+        }
+    }
+    true
+}
+
+async fn commit_batch_with_retry(
+    repository: &Repository,
+    notifier: &ConversationCommitNotifier,
+    scope: &RunBatchScope<'_>,
+    batch_sequence: i64,
+    operated_at: UnixMillis,
+    activate_turn_patch_id: Option<&PatchId>,
+    changes: &[AssistantChange<'_>],
+    retries: std::num::NonZeroUsize,
+) -> bool {
+    for _ in 0..retries.get() {
+        let result = repository
+            .commit_run_batch(CommitRunBatch {
+                scope: RunBatchScope {
+                    claimed: scope.claimed,
+                    launched: scope.launched,
+                    bound: scope.bound,
+                    run_start_key: scope.run_start_key,
+                    credentials: scope.credentials,
+                    expected_launch_at: scope.expected_launch_at,
+                    expected_updated_at: scope.expected_updated_at,
+                },
+                batch_sequence,
+                operated_at,
+                activate_turn_patch_id,
+                changes,
+                checkpoint: artisan_database::CheckpointUpdate::Keep,
+            })
+            .await;
+        if matches!(
+            result,
+            Ok(CommitRunBatchOutcome::Committed(_))
+                | Ok(CommitRunBatchOutcome::AlreadyCommitted(_))
+        ) {
+            let _ = notifier.publish(&scope.launched.thread_id);
+            return true;
+        }
+    }
+    false
+}
+
+fn copy_scope<'a>(scope: &RunBatchScope<'a>) -> RunBatchScope<'a> {
+    RunBatchScope {
+        claimed: scope.claimed,
+        launched: scope.launched,
+        bound: scope.bound,
+        run_start_key: scope.run_start_key,
+        credentials: scope.credentials,
+        expected_launch_at: scope.expected_launch_at,
+        expected_updated_at: scope.expected_updated_at,
+    }
+}
+
+async fn consume_turn(
+    repository: &Repository,
+    config: &NativeRunDispatcherConfig,
+    origin: &SystemCommandOrigin,
+    stop: &CancelHandle,
+    process_cancel: &CancelHandle,
+    turn: &mut crate::engine_owner::operation::AcceptedTurn,
+    scope: RunBatchScope<'_>,
+) {
+    let mut scope = scope;
+    let mut assistant_item = None;
+    let mut assistant_revision = Revision::new(0);
+    let mut assistant_body = String::new();
+    let mut batch_sequence = 1_i64;
+    let mut forced_interrupted = false;
+    let mut progress_uncertain = false;
+    let mut terminal = None;
+
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.wait() => {
+                forced_interrupted = true;
+                turn.cancel();
+            }
+            () = process_cancel.wait() => {
+                forced_interrupted = true;
+                turn.cancel();
+            }
+            observation = turn.next_observation() => {
+                let Some(observation) = observation else { break; };
+                match observation {
+                    EngineObservation::TextDelta(delta) => {
+                        let Some(next_length) = assistant_body
+                            .len()
+                            .checked_add(delta.delta().len())
+                        else {
+                            forced_interrupted = true;
+                            progress_uncertain = true;
+                            turn.cancel();
+                            continue;
+                        };
+                        if next_length > AssistantBody::MAX_BYTES {
+                            forced_interrupted = true;
+                            progress_uncertain = true;
+                            turn.cancel();
+                            continue;
+                        }
+                        assistant_body.push_str(delta.delta());
+                        if assistant_item.is_none() {
+                            let Some(item_id) = mint_item_id(origin) else {
+                                forced_interrupted = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            let Ok(body) = AssistantBody::parse(assistant_body.clone()) else {
+                                forced_interrupted = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            let Some(patch_id) = mint_patch_id(origin) else {
+                                forced_interrupted = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            let Some(activation_patch_id) = mint_patch_id(origin) else {
+                                forced_interrupted = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            let changes = [AssistantChange::Start {
+                                item_id: &item_id,
+                                phase: AssistantMessagePhase::Unspecified,
+                                body: &body,
+                                patch_id: &patch_id,
+                            }];
+                            let Some(operated_at) = at_or_after(origin, scope.expected_updated_at) else {
+                                forced_interrupted = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            if !commit_batch_with_retry(
+                                repository,
+                                &config.notifier,
+                                &scope,
+                                batch_sequence,
+                                operated_at,
+                                Some(&activation_patch_id),
+                                &changes,
+                                config.max_command_retries,
+                            ).await {
+                                forced_interrupted = true;
+                                progress_uncertain = true;
+                                turn.cancel();
+                                continue;
+                            }
+                            assistant_item = Some(item_id);
+                            assistant_revision = Revision::new(0);
+                            scope.expected_updated_at = operated_at;
+                            let Some(next_sequence) = batch_sequence.checked_add(1) else {
+                                forced_interrupted = true;
+                                progress_uncertain = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            batch_sequence = next_sequence;
+                        } else {
+                            let Some(item_id) = assistant_item.as_ref() else {
+                                forced_interrupted = true;
+                                progress_uncertain = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            let Ok(fragment) = IncrementalText::parse(delta.delta().to_owned()) else {
+                                forced_interrupted = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            let Some(patch_id) = mint_patch_id(origin) else {
+                                forced_interrupted = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            let changes = [AssistantChange::Append {
+                                item_id,
+                                expected_revision: assistant_revision,
+                                text: &fragment,
+                                patch_id: &patch_id,
+                            }];
+                            let Some(operated_at) = at_or_after(origin, scope.expected_updated_at) else {
+                                forced_interrupted = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            if !commit_batch_with_retry(
+                                repository,
+                                &config.notifier,
+                                &scope,
+                                batch_sequence,
+                                operated_at,
+                                None,
+                                &changes,
+                                config.max_command_retries,
+                            ).await {
+                                forced_interrupted = true;
+                                progress_uncertain = true;
+                                turn.cancel();
+                                continue;
+                            }
+                            assistant_revision = match assistant_revision.checked_next() {
+                                Ok(next) => next,
+                                Err(_) => {
+                                    forced_interrupted = true;
+                                    progress_uncertain = true;
+                                    turn.cancel();
+                                    continue;
+                                }
+                            };
+                            scope.expected_updated_at = operated_at;
+                            let Some(next_sequence) = batch_sequence.checked_add(1) else {
+                                forced_interrupted = true;
+                                progress_uncertain = true;
+                                turn.cancel();
+                                continue;
+                            };
+                            batch_sequence = next_sequence;
+                        }
+                    }
+                    EngineObservation::Terminal(observation) => {
+                        terminal = Some(observation.state());
+                        if forced_interrupted {
+                            turn.cancel();
+                        }
+                    }
+                }
+            }
+        }
+        if terminal.is_some() {
+            break;
+        }
+    }
+
+    let owner_result = turn.finish().await;
+    if progress_uncertain {
+        return;
+    }
+    let terminal = if forced_interrupted {
+        TerminalState::Interrupted
+    } else if let Some(terminal) = terminal {
+        terminal
+    } else {
+        match owner_result {
+            Ok(result) => result.terminal(),
+            Err(EngineOperationError::Cancelled) => TerminalState::Cancelled,
+            Err(EngineOperationError::Shutdown | EngineOperationError::Deadline) => {
+                TerminalState::Interrupted
+            }
+            Err(
+                EngineOperationError::ReapUnresolved
+                | EngineOperationError::UnresolvedReapDuring { .. },
+            ) => return,
+            Err(_) => TerminalState::Failed,
+        }
+    };
+    if assistant_item.is_none() {
+        let Some(item_id) = mint_item_id(origin) else {
+            return;
+        };
+        let Ok(body) = AssistantBody::parse(assistant_body) else {
+            return;
+        };
+        let Some(patch_id) = mint_patch_id(origin) else {
+            return;
+        };
+        let Some(activation_patch_id) = mint_patch_id(origin) else {
+            return;
+        };
+        let changes = [AssistantChange::Start {
+            item_id: &item_id,
+            phase: AssistantMessagePhase::Unspecified,
+            body: &body,
+            patch_id: &patch_id,
+        }];
+        let Some(operated_at) = at_or_after(origin, scope.expected_updated_at) else {
+            return;
+        };
+        if !commit_batch_with_retry(
+            repository,
+            &config.notifier,
+            &scope,
+            batch_sequence,
+            operated_at,
+            Some(&activation_patch_id),
+            &changes,
+            config.max_command_retries,
+        )
+        .await
+        {
+            return;
+        }
+        assistant_item = Some(item_id);
+        assistant_revision = Revision::new(0);
+        scope.expected_updated_at = operated_at;
+    }
+    let Some(item_id) = assistant_item else {
+        return;
+    };
+    let Ok(body) = AssistantBody::parse(assistant_body) else {
+        return;
+    };
+    let Some(item_patch_id) = mint_patch_id(origin) else {
+        return;
+    };
+    let Some(turn_patch_id) = mint_patch_id(origin) else {
+        return;
+    };
+    let Some(operated_at) = at_or_after(origin, scope.expected_updated_at) else {
+        return;
+    };
+    let phase = if matches!(terminal, TerminalState::Completed) {
+        AssistantMessagePhase::Final
+    } else {
+        AssistantMessagePhase::Unspecified
+    };
+    let mut terminal_persisted = false;
+    match terminal {
+        TerminalState::Completed => {
+            for _ in 0..config.max_command_retries.get() {
+                if repository
+                    .complete_run(CompleteRun {
+                        scope: copy_scope(&scope),
+                        operated_at,
+                        item_id: &item_id,
+                        expected_revision: assistant_revision,
+                        body: &body,
+                        phase,
+                        item_patch_id: &item_patch_id,
+                        turn_patch_id: &turn_patch_id,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    terminal_persisted = true;
+                    break;
+                }
+            }
+        }
+        TerminalState::Failed => {
+            let Some(error_code) = RunErrorCode::parse(PROVIDER_FAILURE_CODE.to_owned()).ok()
+            else {
+                return;
+            };
+            let Some(error_message) =
+                RunErrorMessage::parse(PROVIDER_FAILURE_MESSAGE.to_owned()).ok()
+            else {
+                return;
+            };
+            for _ in 0..config.max_command_retries.get() {
+                if repository
+                    .fail_run(artisan_database::FailRun {
+                        scope: copy_scope(&scope),
+                        operated_at,
+                        item_id: &item_id,
+                        expected_revision: assistant_revision,
+                        body: &body,
+                        phase,
+                        item_patch_id: &item_patch_id,
+                        turn_patch_id: &turn_patch_id,
+                        error_code: &error_code,
+                        error_message: &error_message,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    terminal_persisted = true;
+                    break;
+                }
+            }
+        }
+        TerminalState::Cancelled => {
+            for _ in 0..config.max_command_retries.get() {
+                if repository
+                    .cancel_run(artisan_database::CancelRun {
+                        scope: copy_scope(&scope),
+                        operated_at,
+                        item_id: &item_id,
+                        expected_revision: assistant_revision,
+                        body: &body,
+                        phase,
+                        item_patch_id: &item_patch_id,
+                        turn_patch_id: &turn_patch_id,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    terminal_persisted = true;
+                    break;
+                }
+            }
+        }
+        TerminalState::Interrupted => {
+            let Some(error_code) = RunErrorCode::parse(INTERRUPTED_CODE.to_owned()).ok() else {
+                return;
+            };
+            let Some(error_message) = RunErrorMessage::parse(INTERRUPTED_MESSAGE.to_owned()).ok()
+            else {
+                return;
+            };
+            for _ in 0..config.max_command_retries.get() {
+                if repository
+                    .interrupt_run(InterruptRun {
+                        scope: copy_scope(&scope),
+                        operated_at,
+                        item_id: &item_id,
+                        expected_revision: assistant_revision,
+                        body: &body,
+                        phase,
+                        item_patch_id: &item_patch_id,
+                        turn_patch_id: &turn_patch_id,
+                        error_code: &error_code,
+                        error_message: &error_message,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    terminal_persisted = true;
+                    break;
+                }
+            }
+        }
+    }
+    if terminal_persisted {
+        let _ = config.notifier.publish(&scope.launched.thread_id);
+    }
+}

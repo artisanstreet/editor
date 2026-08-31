@@ -33,6 +33,8 @@ use artisan_transport::CancelHandle;
 use super::readiness::ValidatedEndpoint;
 use crate::engine_owner::EngineBounds;
 
+const SESSION_ID_MAX_BYTES: usize = 256;
+
 /// Fixture expected health version, available only for tests.
 ///
 /// Shipping code never uses this value as a default.
@@ -150,6 +152,45 @@ pub(crate) struct PromptInput<'a> {
     id: &'a str,
     resume: bool,
     text: &'a str,
+}
+
+/// Every persisted OpenCode2 selection and permission field, plus the exact
+/// project root, carried into one session-creation request.
+pub(crate) struct CreateSessionInput<'a> {
+    pub(crate) directory: &'a str,
+    pub(crate) profile_id: &'a str,
+    pub(crate) model_id: &'a str,
+    pub(crate) route_id: &'a str,
+    pub(crate) variant_id: Option<&'a str>,
+    pub(crate) permission_id: &'a str,
+    pub(crate) agent_id: &'a str,
+    pub(crate) approval: &'a str,
+    pub(crate) filesystem: &'a str,
+    pub(crate) network: &'a str,
+    pub(crate) web_search: &'a str,
+}
+
+impl fmt::Debug for CreateSessionInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CreateSessionInput { <redacted> }")
+    }
+}
+
+/// The bounded session identity returned by OpenCode2.
+pub(crate) struct CreateSessionReceipt {
+    session: String,
+}
+
+impl CreateSessionReceipt {
+    pub(crate) fn session(&self) -> &str {
+        &self.session
+    }
+}
+
+impl fmt::Debug for CreateSessionReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CreateSessionReceipt { <redacted> }")
+    }
 }
 
 impl<'a> PromptInput<'a> {
@@ -568,6 +609,7 @@ async fn abort_and_join(handle: tokio::task::JoinHandle<Result<(), hyper::Error>
 
 pub(crate) fn is_valid_session_segment(session: &str) -> bool {
     !session.is_empty()
+        && session.len() <= SESSION_ID_MAX_BYTES
         && !session.contains('/')
         && !session.contains('?')
         && !session.contains('#')
@@ -717,6 +759,163 @@ pub(crate) async fn perform_prompt(
     Ok(PromptReceipt)
 }
 
+/// Creates exactly one OpenCode2 session from the immutable persisted
+/// selection.  The response is reduced to a bounded session id before the
+/// caller may send the prompt.
+pub(crate) async fn perform_create_session(
+    endpoint: &ValidatedEndpoint,
+    secret: &HealthSecret,
+    bounds: &EngineBounds,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    shutdown: &CancelHandle,
+    input: CreateSessionInput<'_>,
+) -> Result<CreateSessionReceipt, PromptError> {
+    if shutdown.is_cancelled() {
+        return Err(PromptError::Shutdown);
+    }
+    if cancel.is_cancelled() {
+        return Err(PromptError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(PromptError::Timeout);
+    }
+    for value in [
+        input.directory,
+        input.profile_id,
+        input.model_id,
+        input.route_id,
+        input.permission_id,
+        input.agent_id,
+        input.approval,
+        input.filesystem,
+        input.network,
+        input.web_search,
+    ] {
+        if value.is_empty() || value.contains('\r') || value.contains('\n') {
+            return Err(PromptError::InvalidFile);
+        }
+    }
+    if input
+        .variant_id
+        .is_some_and(|value| value.is_empty() || value.contains('\r') || value.contains('\n'))
+    {
+        return Err(PromptError::InvalidFile);
+    }
+
+    let mut model = serde_json::json!({
+        "id": input.model_id,
+        "providerID": input.route_id,
+    });
+    if let Some(variant) = input.variant_id {
+        model["variant"] = serde_json::Value::String(variant.to_owned());
+    }
+    let body = serde_json::json!({
+        "profile": input.profile_id,
+        "agent": input.agent_id,
+        "location": { "directory": input.directory },
+        "model": model,
+        "permission": {
+            "id": input.permission_id,
+            "approval": input.approval,
+            "filesystem": input.filesystem,
+            "network": input.network,
+            "web_search": input.web_search,
+        }
+    });
+    let body_bytes = serde_json::to_vec(&body).map_err(|_| PromptError::BodyTooLarge)?;
+    if body_bytes.len() > bounds.max_json_body {
+        return Err(PromptError::BodyTooLarge);
+    }
+    let request = build_create_session_request(endpoint, secret, body_bytes)?;
+    let (mut sender, connection) =
+        connect_and_handshake_prompt(endpoint, bounds, deadline, cancel, shutdown).await?;
+    let response = match send_prompt_request(&mut sender, request, deadline, cancel, shutdown).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            abort_and_join(connection).await;
+            return Err(error);
+        }
+    };
+    if !response.status().is_success() {
+        abort_and_join(connection).await;
+        return Err(PromptError::StatusNotSuccess);
+    }
+    if let Err(error) = check_content_length_prompt(&response, bounds) {
+        abort_and_join(connection).await;
+        return Err(error);
+    }
+    let session = match collect_and_parse_session_response(
+        response, bounds, deadline, cancel, shutdown,
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            abort_and_join(connection).await;
+            return Err(error);
+        }
+    };
+    settle_driver_prompt(connection, deadline, cancel, shutdown).await?;
+    Ok(CreateSessionReceipt { session })
+}
+
+/// Sends the one cancellation interrupt after a provider session exists.
+///
+/// This operation is deliberately separate from prompt delivery: it can be
+/// issued at most once by the owner and its response is never treated as a
+/// successful terminal observation by itself.
+pub(crate) async fn perform_interrupt(
+    endpoint: &ValidatedEndpoint,
+    secret: &HealthSecret,
+    bounds: &EngineBounds,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    shutdown: &CancelHandle,
+    session: &str,
+) -> Result<PromptReceipt, PromptError> {
+    validate_session(session)?;
+    if shutdown.is_cancelled() {
+        return Err(PromptError::Shutdown);
+    }
+    if cancel.is_cancelled() {
+        return Err(PromptError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(PromptError::Timeout);
+    }
+    let request = build_interrupt_request(endpoint, secret, session)?;
+    let (mut sender, connection) =
+        connect_and_handshake_prompt(endpoint, bounds, deadline, cancel, shutdown).await?;
+    let response = match send_prompt_request(&mut sender, request, deadline, cancel, shutdown).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            abort_and_join(connection).await;
+            return Err(error);
+        }
+    };
+    if !response.status().is_success() {
+        abort_and_join(connection).await;
+        return Err(PromptError::StatusNotSuccess);
+    }
+    if response.status() != http::StatusCode::NO_CONTENT {
+        if let Err(error) = check_content_length_prompt(&response, bounds) {
+            abort_and_join(connection).await;
+            return Err(error);
+        }
+        if let Err(error) =
+            collect_and_parse_prompt_response(response, bounds, deadline, cancel, shutdown).await
+        {
+            abort_and_join(connection).await;
+            return Err(error);
+        }
+    }
+    settle_driver_prompt(connection, deadline, cancel, shutdown).await?;
+    Ok(PromptReceipt)
+}
+
 async fn connect_and_handshake_prompt(
     endpoint: &ValidatedEndpoint,
     bounds: &EngineBounds,
@@ -775,6 +974,50 @@ fn build_prompt_request(
         .header("content-length", len.to_string())
         .header("connection", "close")
         .body(Full::new(Bytes::from(body_bytes)))
+        .map_err(|_| PromptError::SendFailed)
+}
+
+fn build_create_session_request(
+    endpoint: &ValidatedEndpoint,
+    secret: &HealthSecret,
+    body_bytes: Vec<u8>,
+) -> Result<Request<Full<Bytes>>, PromptError> {
+    let host_header = match endpoint.host() {
+        std::net::IpAddr::V4(ip) => format!("{ip}:{}", endpoint.port()),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]:{}", endpoint.port()),
+    };
+    let auth_header = secret.basic_auth();
+    let length = body_bytes.len();
+    Request::builder()
+        .method("POST")
+        .uri("/api/session")
+        .header("host", host_header)
+        .header("authorization", auth_header)
+        .header("content-type", "application/json")
+        .header("content-length", length.to_string())
+        .header("connection", "close")
+        .body(Full::new(Bytes::from(body_bytes)))
+        .map_err(|_| PromptError::SendFailed)
+}
+
+fn build_interrupt_request(
+    endpoint: &ValidatedEndpoint,
+    secret: &HealthSecret,
+    session: &str,
+) -> Result<Request<Full<Bytes>>, PromptError> {
+    let host_header = match endpoint.host() {
+        std::net::IpAddr::V4(ip) => format!("{ip}:{}", endpoint.port()),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]:{}", endpoint.port()),
+    };
+    let auth_header = secret.basic_auth();
+    let uri = format!("/api/session/{session}/interrupt");
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("host", host_header)
+        .header("authorization", auth_header)
+        .header("connection", "close")
+        .body(Full::new(Bytes::new()))
         .map_err(|_| PromptError::SendFailed)
 }
 
@@ -850,6 +1093,41 @@ async fn collect_and_parse_prompt_response(
         return Err(PromptError::InvalidJson);
     }
     Ok(())
+}
+
+async fn collect_and_parse_session_response(
+    response: hyper::Response<hyper::body::Incoming>,
+    bounds: &EngineBounds,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    shutdown: &CancelHandle,
+) -> Result<String, PromptError> {
+    let body = response.into_body();
+    let limited = Limited::new(body, bounds.max_json_body);
+    let collected = tokio::select! {
+        biased;
+        () = shutdown.wait() => return Err(PromptError::Shutdown),
+        () = cancel.wait() => return Err(PromptError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => return Err(PromptError::Timeout),
+        result = limited.collect() => result.map_err(|_| PromptError::BodyReadFailed)?,
+    };
+    let bytes = collected.to_bytes();
+    if bytes.len() > bounds.max_json_body {
+        return Err(PromptError::BodyTooLarge);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| PromptError::InvalidJson)?;
+    let session = value
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|data| data.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.get("id").and_then(serde_json::Value::as_str))
+        .ok_or(PromptError::InvalidJson)?;
+    if !is_valid_session_segment(session) {
+        return Err(PromptError::InvalidSession);
+    }
+    Ok(session.to_owned())
 }
 
 async fn settle_driver_prompt(

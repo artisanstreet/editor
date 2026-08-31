@@ -35,6 +35,14 @@ pub(crate) enum EventDecodeError {
     InvalidReason,
     #[error("error reference is not valid")]
     InvalidErrorRef,
+    #[error("event run does not match the active run")]
+    RunMismatch,
+    #[error("event session does not match the active session")]
+    SessionMismatch,
+    #[error("reason exceeds the bounded diagnostic limit")]
+    ReasonTooLong,
+    #[error("error reference exceeds the bounded diagnostic limit")]
+    ErrorRefTooLong,
 }
 
 /// Decodes a single framed `SseEvent` into zero or more `EngineObservation`s.
@@ -59,6 +67,23 @@ pub(crate) enum EventDecodeError {
 pub(crate) fn decode_sse_event(
     event: &SseEvent,
 ) -> Result<Vec<EngineObservation>, EventDecodeError> {
+    decode_sse_event_for_run(event, None, None)
+}
+
+/// Decodes an authenticated stream envelope while enforcing the immutable
+/// run/session pair owned by the current turn.  The legacy wrapper above
+/// intentionally keeps the original decoder contract for the isolated owner
+/// tests; production configured turns always provide both expected values.
+pub(crate) fn decode_sse_event_for_run(
+    event: &SseEvent,
+    expected_run: Option<&RunId>,
+    expected_session: Option<&str>,
+) -> Result<Vec<EngineObservation>, EventDecodeError> {
+    // OpenCode emits this marker when the durable log has synchronized.  It
+    // carries no terminal meaning and its payload is deliberately ignored.
+    if event.event() == "log.synced" {
+        return Ok(Vec::new());
+    }
     let data = event.data();
     let value: serde_json::Value =
         serde_json::from_str(data).map_err(|_| EventDecodeError::InvalidJson)?;
@@ -69,6 +94,29 @@ pub(crate) fn decode_sse_event(
         .as_str()
         .ok_or(EventDecodeError::InvalidRunId)?;
     let run_id = RunId::parse(run_id_str).map_err(|_| EventDecodeError::InvalidRunId)?;
+    if expected_run.is_some_and(|expected| expected != &run_id) {
+        return Err(EventDecodeError::RunMismatch);
+    }
+
+    if let Some(expected_session) = expected_session {
+        let session = match (object.get("session_id"), object.get("sessionID")) {
+            (Some(left), Some(right)) => {
+                let left = left.as_str().ok_or(EventDecodeError::SessionMismatch)?;
+                let right = right.as_str().ok_or(EventDecodeError::SessionMismatch)?;
+                if left != right {
+                    return Err(EventDecodeError::SessionMismatch);
+                }
+                left
+            }
+            (Some(session), None) | (None, Some(session)) => {
+                session.as_str().ok_or(EventDecodeError::SessionMismatch)?
+            }
+            (None, None) => return Err(EventDecodeError::SessionMismatch),
+        };
+        if session != expected_session {
+            return Err(EventDecodeError::SessionMismatch);
+        }
+    }
 
     let sequence_value = object
         .get("sequence")
@@ -117,6 +165,9 @@ pub(crate) fn decode_sse_event(
         Some(value) if value.is_null() => None,
         Some(value) => {
             let text = value.as_str().ok_or(EventDecodeError::InvalidReason)?;
+            if text.len() > 1024 {
+                return Err(EventDecodeError::ReasonTooLong);
+            }
             Some(text.to_owned())
         }
     };
@@ -126,6 +177,9 @@ pub(crate) fn decode_sse_event(
         Some(value) if value.is_null() => None,
         Some(value) => {
             let text = value.as_str().ok_or(EventDecodeError::InvalidErrorRef)?;
+            if text.len() > 256 {
+                return Err(EventDecodeError::ErrorRefTooLong);
+            }
             Some(text.to_owned())
         }
     };

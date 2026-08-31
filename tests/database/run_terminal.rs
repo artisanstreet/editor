@@ -6,11 +6,12 @@ use artisan_database::entities::{
     self, AssistantRunLifecycle, ConversationPatchKind, DispatchState, EntityLifecycle, RenderPhase,
 };
 use artisan_database::{
-    AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch,
+    AssistantChange, BindRunProvider, CancelRunOutcome, CheckpointUpdate, ClaimMessageDispatch,
     ClaimedMessageDispatch, CommitRunBatch, CompleteRun, CompleteRunOutcome, FailRun,
-    FailRunOutcome, ProviderBindingBytes, QueueFirstMessageInput, Repository, RunBatchScope,
-    RunErrorCode, RunErrorMessage, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput,
-    SqliteConfig, ThreadEngineSettings, connect,
+    FailRunOutcome, InterruptRunOutcome, InterruptedRunReceipt, ProviderBindingBytes,
+    QueueFirstMessageInput, Repository, RunBatchScope, RunErrorCode, RunErrorMessage,
+    RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
+    TerminalRunReceipt, ThreadEngineSettings, connect,
 };
 use artisan_domain::{
     ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, CountLimit, EngineAgentId,
@@ -863,4 +864,36 @@ async fn failed_error_bounds_enforced() {
         .await
         .expect_err("terminal already completed should not allow fail");
     let _ = err;
+}
+
+#[test]
+fn cancellation_and_interruption_have_distinct_receipts() {
+    let run_id = artisan_domain::RunId::parse("run-terminal-test").expect("valid run id");
+    let cancelled = CancelRunOutcome::Cancelled(TerminalRunReceipt {
+        run_id: run_id.clone(),
+        generation: 1,
+        terminal_at: UnixMillis::from_millis(10),
+    });
+    let interrupted = InterruptRunOutcome::Interrupted(InterruptedRunReceipt {
+        run_id,
+        generation: 1,
+        interrupted_at: UnixMillis::from_millis(10),
+    });
+
+    assert!(matches!(cancelled, CancelRunOutcome::Cancelled(_)));
+    assert!(matches!(interrupted, InterruptRunOutcome::Interrupted(_)));
+}
+
+#[test]
+fn auxiliary_error_values_are_bounded_and_redacted_in_debug() {
+    let code = RunErrorCode::parse("provider_interrupted".to_owned()).expect("bounded code");
+    let message =
+        RunErrorMessage::parse("provider turn interrupted".to_owned()).expect("bounded message");
+
+    assert_eq!(code.as_str(), "provider_interrupted");
+    assert_eq!(message.as_str(), "provider turn interrupted");
+    assert!(!format!("{code:?}").contains("provider_interrupted"));
+    assert!(!format!("{message:?}").contains("provider turn interrupted"));
+    assert!(RunErrorCode::parse(String::new()).is_err());
+    assert!(RunErrorMessage::parse(String::new()).is_err());
 }

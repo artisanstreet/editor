@@ -9,6 +9,10 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
+#[cfg(test)]
+#[path = "../../../tests/backend/forge_configured_run.rs"]
+mod forge_configured_run;
+
 use std::{
     ffi::{OsStr, OsString},
     fmt,
@@ -40,6 +44,9 @@ use crate::{
     },
     file_identity_policy::{FileIdentity, read_file_identity, same_file_identity},
     listener::ServeUntilCancelError,
+    native_run_dispatch::{
+        NativeRunDispatcher, NativeRunDispatcherConfig, NativeRunDispatcherShutdown,
+    },
 };
 
 /// Stable process exit code for invalid configuration or credential material.
@@ -140,6 +147,7 @@ pub struct ForgeLaunchConfig {
     admission_capacity: NonZeroU32,
     requests_per_connection: NonZeroU32,
     cancel: Arc<CancelHandle>,
+    native_run: Option<NativeRunDispatcherConfig>,
 }
 
 impl fmt::Debug for ForgeLaunchConfig {
@@ -156,6 +164,10 @@ impl fmt::Debug for ForgeLaunchConfig {
             .field("admission_capacity", &self.admission_capacity)
             .field("requests_per_connection", &self.requests_per_connection)
             .field("cancel", &"caller-owned")
+            .field(
+                "native_run",
+                &self.native_run.as_ref().map(|_| "configured"),
+            )
             .finish()
     }
 }
@@ -209,7 +221,17 @@ impl ForgeLaunchConfig {
             admission_capacity,
             requests_per_connection,
             cancel,
+            native_run: None,
         })
+    }
+
+    /// Attaches the explicit configured native-run dispatcher to this Forge
+    /// launch. The dispatcher starts only after application, listener, and
+    /// readiness startup have succeeded.
+    #[must_use]
+    pub fn with_native_run_dispatcher(mut self, dispatcher: NativeRunDispatcherConfig) -> Self {
+        self.native_run = Some(dispatcher);
+        self
     }
 
     /// Parses the exact long-form Forge options and attaches the caller-owned
@@ -285,6 +307,10 @@ impl ForgeLaunchConfig {
     #[must_use]
     pub fn cancel_handle(&self) -> &Arc<CancelHandle> {
         &self.cancel
+    }
+
+    fn take_native_run_dispatcher(&mut self) -> Option<NativeRunDispatcherConfig> {
+        self.native_run.take()
     }
 }
 
@@ -636,6 +662,12 @@ pub enum ForgeRuntimeError {
     #[error("Forge directory controller shutdown failed")]
     DirectoryControllerShutdown(ShutdownReport),
 
+    /// The configured native-run dispatcher did not join cleanly during
+    /// cleanup. Its owner is awaited before this error is reported so child
+    /// custody is never detached from Forge shutdown.
+    #[error("Forge native-run dispatcher shutdown failed")]
+    NativeRunDispatcherShutdown,
+
     /// More than one failure was observed while stopping Forge.
     #[error("Forge shutdown encountered multiple failures")]
     Shutdown(#[source] ForgeCleanupError),
@@ -677,6 +709,7 @@ impl ForgeRuntimeError {
             | Self::ApplicationShutdown(_)
             | Self::ReadinessCleanup(_)
             | Self::DirectoryControllerShutdown(_)
+            | Self::NativeRunDispatcherShutdown
             | Self::Shutdown(_) => EXIT_CODE_SHUTDOWN,
             Self::PrimaryWithCleanup(composite) => composite.primary().exit_code(),
         }
@@ -827,7 +860,7 @@ pub enum ReadinessError {
 /// Returns a typed failure mapped to the stable process exit codes exposed by
 /// [`ForgeRuntimeError::exit_code`].
 #[allow(clippy::too_many_lines)]
-pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
+pub async fn run(mut config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
     let material = load_material(&config).map_err(ForgeRuntimeError::Credentials)?;
     let custody =
         ForgeProcessCustody::acquire(config.custody_path()).map_err(ForgeRuntimeError::Custody)?;
@@ -852,6 +885,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
             custody,
             None,
             None,
+            None,
             Some(ForgeRuntimeError::DirectoryControllerExecutable),
         )
         .await;
@@ -867,6 +901,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
                 app,
                 handler,
                 custody,
+                None,
                 None,
                 None,
                 Some(ForgeRuntimeError::DirectoryControllerStartup(error)),
@@ -900,6 +935,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
                 custody,
                 None,
                 None,
+                None,
                 Some(ForgeRuntimeError::ServerConfiguration(error)),
             )
             .await;
@@ -922,6 +958,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
                 custody,
                 None,
                 None,
+                None,
                 Some(ForgeRuntimeError::ListenerBind(error)),
             )
             .await;
@@ -937,6 +974,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
                 custody,
                 Some(listener),
                 None,
+                None,
                 Some(ForgeRuntimeError::Address(io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
                     format!("Forge listener address is not required loopback: {address}"),
@@ -951,6 +989,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
                 custody,
                 Some(listener),
                 None,
+                None,
                 Some(ForgeRuntimeError::Address(error)),
             )
             .await;
@@ -958,7 +997,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
     };
 
     if config.cancel_handle().is_cancelled() {
-        return finish(app, handler, custody, Some(listener), None, None).await;
+        return finish(app, handler, custody, Some(listener), None, None, None).await;
     }
 
     // The leaf is retained separately so this identity computation happens
@@ -973,11 +1012,22 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
                 custody,
                 Some(listener),
                 None,
+                None,
                 Some(ForgeRuntimeError::Readiness(error)),
             )
             .await;
         }
     };
+
+    let native_dispatcher = config.take_native_run_dispatcher().map(|native_config| {
+        NativeRunDispatcher::start(
+            app.repository().clone(),
+            config.database_path().to_path_buf(),
+            native_config,
+            Arc::clone(config.cancel_handle()),
+            &tokio::runtime::Handle::current(),
+        )
+    });
 
     let primary = match listener
         .serve_until_cancel(&handler, config.cancel_handle())
@@ -994,7 +1044,16 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
 
     // `serve_until_cancel` consumes the listener on every path. No listener
     // owner or endpoint custody remains to pass into the cleanup tail.
-    finish(app, handler, custody, None, Some(receipt), primary).await
+    finish(
+        app,
+        handler,
+        custody,
+        None,
+        Some(receipt),
+        native_dispatcher,
+        primary,
+    )
+    .await
 }
 
 /// Finishes every owner in the required order and preserves every failure.
@@ -1004,6 +1063,7 @@ async fn finish(
     custody: ForgeProcessCustody,
     listener: Option<ForgeListener>,
     receipt: Option<ReadinessReceipt>,
+    mut native_dispatcher: Option<NativeRunDispatcher>,
     primary: Option<ForgeRuntimeError>,
 ) -> Result<(), ForgeRuntimeError> {
     let mut cleanup_failures = Vec::new();
@@ -1011,6 +1071,14 @@ async fn finish(
         && let Err(error) = listener.drain().await
     {
         cleanup_failures.push(ForgeRuntimeError::ListenerShutdown(error));
+    }
+    if let Some(dispatcher) = native_dispatcher.as_mut() {
+        if !matches!(
+            dispatcher.shutdown().await,
+            NativeRunDispatcherShutdown::Joined
+        ) {
+            cleanup_failures.push(ForgeRuntimeError::NativeRunDispatcherShutdown);
+        }
     }
     if let Some(receipt) = receipt
         && let Err(error) = receipt.remove()

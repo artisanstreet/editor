@@ -14,7 +14,7 @@ mod startup_reconciliation;
 mod startup_reconciliation_disposition;
 mod thread_engine_config;
 
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::{DatabaseConnection, DbErr, EntityTrait};
 use thiserror::Error;
 
 use artisan_domain::{
@@ -41,8 +41,10 @@ pub use run_launch::{
     RunLaunchError, RunStartKey,
 };
 pub use run_observation::terminal::{
-    CompleteRun, CompleteRunError, CompleteRunOutcome, FailRun, FailRunError, FailRunOutcome,
-    RunErrorCode, RunErrorMessage, TerminalRunReceipt,
+    AuxiliaryTerminalError, CancelRun, CancelRunError, CancelRunOutcome, CompleteRun,
+    CompleteRunError, CompleteRunOutcome, FailRun, FailRunError, FailRunOutcome, InterruptRun,
+    InterruptRunError, InterruptRunOutcome, InterruptedRunReceipt, RunErrorCode, RunErrorMessage,
+    TerminalRunReceipt,
 };
 pub use run_observation::{
     AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome, EngineCheckpoint,
@@ -182,6 +184,33 @@ impl Repository {
     #[must_use]
     pub const fn new(database: DatabaseConnection) -> Self {
         Self { database }
+    }
+
+    /// Reads the persisted project root for a thread without consulting the
+    /// process working directory, source tree, or environment.  A caller
+    /// uses this only while it still owns the immutable thread/run snapshot;
+    /// the root itself is validated at the domain boundary before it leaves
+    /// the repository.
+    pub async fn read_thread_project_root(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<RootPath, RepositoryError> {
+        let thread = entities::thread::Entity::find_by_id(thread_id.as_str())
+            .one(&self.database)
+            .await
+            .map_err(|source| database_error("read thread project", source))?
+            .ok_or_else(|| RepositoryError::ThreadNotFound {
+                thread_id: thread_id.clone(),
+            })?;
+        let project_id = ProjectId::parse(thread.project_id)
+            .map_err(|error| corrupt_data("threads", "project_id", &error))?;
+        let project = entities::attached_project::Entity::find_by_id(project_id.as_str())
+            .one(&self.database)
+            .await
+            .map_err(|source| database_error("read attached project", source))?
+            .ok_or(RepositoryError::ProjectNotFound { project_id })?;
+        RootPath::parse(project.root_path)
+            .map_err(|error| corrupt_data("attached_projects", "root_path", &error))
     }
 }
 

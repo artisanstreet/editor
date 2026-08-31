@@ -18,13 +18,16 @@ use std::cell::Cell;
 #[cfg(test)]
 use std::ffi::OsString;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 #[cfg(test)]
 use base64::Engine as _;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
+
+use artisan_domain::RootPath;
+use artisan_native_engine::VerifiedOpenCode2ProfileLaunch;
 
 /// The exact executable launch the owner task performs.
 ///
@@ -110,6 +113,58 @@ pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<Ch
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    let child = command.spawn()?;
+    witness_spawned();
+    Ok(child)
+}
+
+/// Spawns the exact certified OpenCode2 profile selected for one durable run.
+///
+/// Revalidation is deliberately the last authority operation before the
+/// child is created.  The capability owns the installation fence for the
+/// entire call, so a replacement generation cannot race the command.  The
+/// environment is cleared and rebuilt only from the private profile roots,
+/// explicit project root, and per-process credential supplied by the owner.
+pub(crate) fn spawn_configured_engine(
+    launch: &VerifiedOpenCode2ProfileLaunch,
+    project_root: &RootPath,
+    secret: &str,
+) -> io::Result<Child> {
+    let profile_home = launch.profile_home();
+    let config = profile_home.join("config");
+    let cache = profile_home.join("cache");
+    let data = profile_home.join("data");
+    let state = profile_home.join("state");
+    let temp = profile_home.join("tmp");
+
+    let mut command = tokio::process::Command::new(launch.executable_path());
+    command
+        .current_dir(Path::new(project_root.as_str()))
+        .args(["serve", "--stdio", "--port", "0"])
+        .env_clear()
+        .env("OPENCODE_CONFIG_DIR", &config)
+        .env("OPENCODE_DB", data.join("opencode.db"))
+        .env("XDG_CACHE_HOME", &cache)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_DATA_HOME", &data)
+        .env("XDG_STATE_HOME", &state)
+        .env("TMP", &temp)
+        .env("TEMP", &temp)
+        .env("OPENCODE_PASSWORD", secret)
+        .env("OPENCODE_SERVER_PASSWORD", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    launch
+        .revalidate()
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "profile rejected"))?;
     let child = command.spawn()?;
     witness_spawned();
     Ok(child)

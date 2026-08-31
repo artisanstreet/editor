@@ -15,9 +15,9 @@ use artisan_transport::CancelHandle;
 use super::http::HealthSecret;
 use super::readiness::ValidatedEndpoint;
 use crate::engine_owner::EngineBounds;
-use crate::engine_owner::event::decode_sse_event;
 use crate::engine_owner::framing::{SseEvent, SseFramer};
 use crate::engine_owner::observation::{EngineObservation, TerminalState, deliver_observation};
+use artisan_domain::RunId;
 
 /// Payload-free typed failure of the bounded SSE stream follower.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
@@ -128,6 +128,22 @@ impl std::fmt::Debug for StreamInput<'_> {
 /// via `deliver_observation` sequentially. Exactly one terminal ends success;
 /// clean EOF without terminal is a typed error.
 pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceipt, StreamError> {
+    follow_stream_inner(input, None).await
+}
+
+/// Follows the stream while requiring every authenticated envelope to carry
+/// the immutable run identity owned by the current operation.
+pub(crate) async fn follow_stream_for_run(
+    input: StreamInput<'_>,
+    expected_run: &RunId,
+) -> Result<StreamReceipt, StreamError> {
+    follow_stream_inner(input, Some(expected_run)).await
+}
+
+async fn follow_stream_inner(
+    input: StreamInput<'_>,
+    expected_run: Option<&RunId>,
+) -> Result<StreamReceipt, StreamError> {
     let (request, mut framer) = prepare_stream(&input)?;
     let (mut sender, conn_handle) = connect_and_handshake_stream(
         input.endpoint,
@@ -189,7 +205,7 @@ pub(crate) async fn follow_stream(input: StreamInput<'_>) -> Result<StreamReceip
                     )
                     .await);
                 };
-                match deliver_events(&events, &input).await {
+                match deliver_events(&events, &input, expected_run).await {
                     Ok(None) => {}
                     Ok(Some(state)) => {
                         return match abort_and_join(conn_handle).await {
@@ -243,10 +259,15 @@ fn prepare_stream(
 async fn deliver_events(
     events: &[SseEvent],
     input: &StreamInput<'_>,
+    expected_run: Option<&RunId>,
 ) -> Result<Option<TerminalState>, StreamError> {
     let mut seen_terminal = false;
     for event in events {
-        let Ok(observations) = decode_sse_event(event) else {
+        let Ok(observations) = super::event::decode_sse_event_for_run(
+            event,
+            expected_run,
+            expected_run.map(|_| input.session),
+        ) else {
             return Err(StreamError::DecodeFailed);
         };
         for observation in observations {
@@ -260,7 +281,11 @@ async fn deliver_events(
     }
 
     for event in events {
-        let Ok(observations) = decode_sse_event(event) else {
+        let Ok(observations) = super::event::decode_sse_event_for_run(
+            event,
+            expected_run,
+            expected_run.map(|_| input.session),
+        ) else {
             return Err(StreamError::DecodeFailed);
         };
         for observation in observations {
