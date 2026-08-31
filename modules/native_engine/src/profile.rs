@@ -1358,6 +1358,7 @@ mod tests {
         assert_eq!(named.generation_id(), generation_id());
         assert_eq!(named.version(), "1.2.3-test");
         assert_eq!(named.executable_path(), test_executable(&paths));
+        drop(named);
         assert!(matches!(
             authority
                 .resolve_profile_launch(&database, &EngineProfileId::parse("missing").unwrap()),
@@ -1448,7 +1449,7 @@ mod tests {
             authority.resolve_profile_launch(&database, &id),
             Err(NativeOpenCode2ProfileLaunchError::ExecutableSizeMismatch)
         ));
-        fs::write(&executable, b"wrong content!").unwrap();
+        fs::write(&executable, b"wrong content!!").unwrap();
         assert!(matches!(
             authority.resolve_profile_launch(&database, &id),
             Err(NativeOpenCode2ProfileLaunchError::ExecutableHashMismatch)
