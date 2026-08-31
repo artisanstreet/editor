@@ -370,10 +370,7 @@ impl NativeRunDispatcher {
                 owner: EngineOwnerShutdown::Joined,
             }) => NativeRunDispatcherShutdown::BudgetExceeded,
             Ok(DispatchLoopExit {
-                owner: EngineOwnerShutdown::Quarantined,
-            })
-            | Ok(DispatchLoopExit {
-                owner: EngineOwnerShutdown::TaskLost,
+                owner: EngineOwnerShutdown::Quarantined | EngineOwnerShutdown::TaskLost,
             })
             | Err(_) => NativeRunDispatcherShutdown::TaskLost,
         };
@@ -626,7 +623,7 @@ async fn execute_claim(context: ClaimExecution<'_>) {
     consume_bound_claim(bound).await;
 }
 
-async fn load_claim<'a>(context: ClaimExecution<'a>) -> Option<LoadedClaim<'a>> {
+async fn load_claim(context: ClaimExecution<'_>) -> Option<LoadedClaim<'_>> {
     let Some(payload) = read_payload(context.repository, &context.claimed).await else {
         context.requeue("message payload unavailable").await;
         return None;
@@ -704,7 +701,7 @@ fn mint_claim_ids(
     })
 }
 
-async fn launch_claim<'a>(loaded: LoadedClaim<'a>, ids: ClaimIds) -> Option<LaunchedClaim<'a>> {
+async fn launch_claim(loaded: LoadedClaim<'_>, ids: ClaimIds) -> Option<LaunchedClaim<'_>> {
     let launch_result = launch_with_retry(
         loaded.context.repository,
         LaunchClaimedRun {
@@ -755,7 +752,7 @@ async fn launch_claim<'a>(loaded: LoadedClaim<'a>, ids: ClaimIds) -> Option<Laun
     })
 }
 
-async fn admit_claim<'a>(claim: LaunchedClaim<'a>) -> Option<PreparedClaim<'a>> {
+async fn admit_claim(claim: LaunchedClaim<'_>) -> Option<PreparedClaim<'_>> {
     let LaunchedClaim {
         context,
         payload,
@@ -794,7 +791,7 @@ async fn admit_claim<'a>(claim: LaunchedClaim<'a>) -> Option<PreparedClaim<'a>> 
     })
 }
 
-async fn bind_claim<'a>(claim: PreparedClaim<'a>) -> Option<BoundClaim<'a>> {
+async fn bind_claim(claim: PreparedClaim<'_>) -> Option<BoundClaim<'_>> {
     let PreparedClaim {
         context,
         ids,
@@ -1215,7 +1212,7 @@ async fn consume_turn(
     if state.progress_uncertain {
         return;
     }
-    let Some(terminal) = resolve_terminal(state.forced_interrupted, state.terminal, owner_result)
+    let Some(terminal) = resolve_terminal(state.forced_interrupted, state.terminal, &owner_result)
     else {
         return;
     };
@@ -1391,7 +1388,7 @@ async fn append_assistant_delta(
 fn resolve_terminal(
     forced_interrupted: bool,
     terminal: Option<TerminalState>,
-    owner_result: TurnResult,
+    owner_result: &TurnResult,
 ) -> Option<TerminalState> {
     if forced_interrupted {
         return Some(TerminalState::Interrupted);

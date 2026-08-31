@@ -366,7 +366,7 @@ pub(crate) async fn run_owner(
     limits: EngineLimits,
     bounds: EngineBounds,
 ) {
-    run_owner_with_allocator(
+    Box::pin(run_owner_with_allocator(
         jobs,
         shutdown,
         health,
@@ -374,7 +374,7 @@ pub(crate) async fn run_owner(
         limits,
         bounds,
         GenerationAllocator::new(),
-    )
+    ))
     .await;
 }
 
@@ -388,7 +388,7 @@ pub(crate) async fn run_owner_with_allocator(
     bounds: EngineBounds,
     mut generations: GenerationAllocator,
 ) {
-    run_owner_loop(
+    Box::pin(run_owner_loop(
         jobs,
         shutdown,
         health,
@@ -398,7 +398,7 @@ pub(crate) async fn run_owner_with_allocator(
             bounds,
         }),
         &mut generations,
-    )
+    ))
     .await;
 }
 
@@ -411,7 +411,14 @@ pub(crate) async fn run_configured_owner(
     health: watch::Sender<HealthState>,
 ) {
     let mut generations = GenerationAllocator::new();
-    run_owner_loop(jobs, shutdown, health, None, &mut generations).await;
+    Box::pin(run_owner_loop(
+        jobs,
+        shutdown,
+        health,
+        None,
+        &mut generations,
+    ))
+    .await;
 }
 
 struct LegacyOwnerConfig {
@@ -471,7 +478,7 @@ async fn run_owner_loop(
                         .await
                     }
                     job @ Job::Turn { .. } => {
-                        execute_configured_job(job, &shutdown).await
+                        Box::pin(execute_configured_job(job, &shutdown)).await
                     }
                 };
                 match execution {
@@ -764,7 +771,7 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         return request.fail(EngineOperationError::Cancelled);
     }
 
-    execute_configured_turn(request, runtime, shutdown).await
+    Box::pin(execute_configured_turn(request, runtime, shutdown)).await
 }
 
 struct ConfiguredTurnRequest {
@@ -864,7 +871,7 @@ async fn execute_configured_turn(
         Ok(process) => process,
         Err(execution) => return execution,
     };
-    execute_configured_session(process, shutdown).await
+    Box::pin(execute_configured_session(process, shutdown)).await
 }
 
 async fn prepare_configured_process(

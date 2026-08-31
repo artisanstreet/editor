@@ -1218,7 +1218,7 @@ struct ForgeListenerStartup {
 
 struct ForgeListenerStartupError {
     listener: Option<ForgeListener>,
-    error: ForgeRuntimeError,
+    error: Box<ForgeRuntimeError>,
 }
 
 fn prepare_forge_listener(
@@ -1238,7 +1238,7 @@ fn prepare_forge_listener(
         Err(error) => {
             return Err(ForgeListenerStartupError {
                 listener: None,
-                error: ForgeRuntimeError::ServerConfiguration(error),
+                error: Box::new(ForgeRuntimeError::ServerConfiguration(error)),
             });
         }
     };
@@ -1254,7 +1254,7 @@ fn prepare_forge_listener(
         Err(error) => {
             return Err(ForgeListenerStartupError {
                 listener: None,
-                error: ForgeRuntimeError::ListenerBind(error),
+                error: Box::new(ForgeRuntimeError::ListenerBind(error)),
             });
         }
     };
@@ -1263,16 +1263,16 @@ fn prepare_forge_listener(
         Ok(address) => {
             return Err(ForgeListenerStartupError {
                 listener: Some(listener),
-                error: ForgeRuntimeError::Address(io::Error::new(
+                error: Box::new(ForgeRuntimeError::Address(io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
                     format!("Forge listener address is not required loopback: {address}"),
-                )),
+                ))),
             });
         }
         Err(error) => {
             return Err(ForgeListenerStartupError {
                 listener: Some(listener),
-                error: ForgeRuntimeError::Address(error),
+                error: Box::new(ForgeRuntimeError::Address(error)),
             });
         }
     };
@@ -1318,7 +1318,7 @@ async fn run_with_handler(
                 startup_error.listener,
                 None,
                 None,
-                Some(startup_error.error),
+                Some(*startup_error.error),
             )
             .await;
         }
