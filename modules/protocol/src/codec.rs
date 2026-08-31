@@ -545,31 +545,7 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             encode_set_thread_engine_config(builder.reborrow(), command.as_ref());
         }
         ClientRequest::Conversation(ConversationRequest::Query(query)) => {
-            let mut encoded = builder.reborrow().init_conversation_query();
-            encoded.set_thread_id(query.thread_id.as_str());
-            match query.bounds {
-                ConversationQueryBounds::Window { maximum_turn_count } => {
-                    encoded
-                        .init_bounds()
-                        .init_window()
-                        .set_maximum_turn_count(maximum_turn_count.get());
-                }
-                ConversationQueryBounds::Range {
-                    before_turn_ordinal,
-                    minimum_turn_ordinal,
-                    maximum_turn_count,
-                } => {
-                    let mut range = encoded.init_bounds().init_range();
-                    range.set_before_turn_ordinal(before_turn_ordinal.get());
-                    let mut minimum = range.reborrow().init_minimum_turn_ordinal();
-                    if let Some(minimum_turn_ordinal) = minimum_turn_ordinal {
-                        minimum.set_minimum(minimum_turn_ordinal.get());
-                    } else {
-                        minimum.set_no_minimum(());
-                    }
-                    range.set_maximum_turn_count(maximum_turn_count.get());
-                }
-            }
+            encode_conversation_query_request(builder, query);
         }
         ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
             let mut encoded = builder.reborrow().init_conversation_subscribe();
@@ -608,6 +584,37 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
         }
         ClientRequest::Query(Query::ListRegisteredEngineProfiles(_)) => {
             builder.reborrow().init_list_registered_engine_profiles();
+        }
+    }
+}
+
+fn encode_conversation_query_request(
+    mut builder: artisan_capnp::request::Builder<'_>,
+    query: &ConversationQuery,
+) {
+    let mut encoded = builder.reborrow().init_conversation_query();
+    encoded.set_thread_id(query.thread_id.as_str());
+    match query.bounds {
+        ConversationQueryBounds::Window { maximum_turn_count } => {
+            encoded
+                .init_bounds()
+                .init_window()
+                .set_maximum_turn_count(maximum_turn_count.get());
+        }
+        ConversationQueryBounds::Range {
+            before_turn_ordinal,
+            minimum_turn_ordinal,
+            maximum_turn_count,
+        } => {
+            let mut range = encoded.init_bounds().init_range();
+            range.set_before_turn_ordinal(before_turn_ordinal.get());
+            let mut minimum = range.reborrow().init_minimum_turn_ordinal();
+            if let Some(minimum_turn_ordinal) = minimum_turn_ordinal {
+                minimum.set_minimum(minimum_turn_ordinal.get());
+            } else {
+                minimum.set_no_minimum(());
+            }
+            range.set_maximum_turn_count(maximum_turn_count.get());
         }
     }
 }
@@ -2046,7 +2053,7 @@ fn decode_registered_engine_profiles_result(
             }
             let mut profile_ids = Vec::with_capacity(count);
             let mut seen = std::collections::HashSet::with_capacity(count);
-            for raw in ids.iter() {
+            for raw in ids {
                 let text = read_text(raw, "response.registeredEngineProfiles.profileIds")?;
                 let id = EngineProfileId::parse(text).map_err(|_| {
                     engine_config_error(
