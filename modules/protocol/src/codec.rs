@@ -606,7 +606,14 @@ fn encode_response(
     value: &ServerResponse,
 ) -> Result<(), ProtocolEncodeError> {
     builder.set_request_id(value.request_id.as_str());
-    match &value.payload {
+    encode_response_payload(builder, &value.payload)
+}
+
+fn encode_response_payload(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    payload: &ResponsePayload,
+) -> Result<(), ProtocolEncodeError> {
+    match payload {
         ResponsePayload::DirectoryListing(listing) => {
             encode_directory_listing(builder.reborrow().init_directory_list(), listing)?;
         }
@@ -693,8 +700,18 @@ fn encode_response(
                 .init_conversation_subscription_stopped()
                 .set_thread_id(stopped.thread_id.as_str());
         }
+        _ => return encode_response_tail(builder, payload),
+    }
+    Ok(())
+}
+
+fn encode_response_tail(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    payload: &ResponsePayload,
+) -> Result<(), ProtocolEncodeError> {
+    match payload {
         ResponsePayload::DirectoryPicked(outcome) => {
-            encode_directory_picked(builder.reborrow().init_directory_picked(), outcome);
+            encode_directory_picked(builder.reborrow().init_directory_picked(), outcome)
         }
         ResponsePayload::Lifecycle(value) => {
             encode_lifecycle_response(builder.reborrow().init_lifecycle_control(), value)?;
@@ -705,6 +722,7 @@ fn encode_response(
         ResponsePayload::ThreadEngineSettings(result) => {
             encode_thread_engine_settings_result(builder.reborrow(), result);
         }
+        _ => unreachable!("encode_response_tail handles only tail variants"),
     }
     Ok(())
 }
@@ -1938,7 +1956,7 @@ fn decode_thread_engine_settings_result(
             crate::types::ThreadEngineSettingsResult::Configured {
                 thread_id,
                 revision,
-                config,
+                config: Box::new(config),
             }
         }
     };

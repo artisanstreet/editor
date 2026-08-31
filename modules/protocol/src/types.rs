@@ -719,7 +719,7 @@ pub enum ThreadEngineSettingsResult {
     Configured {
         thread_id: ThreadId,
         revision: EngineConfigRevision,
-        config: EngineRunConfig,
+        config: Box<EngineRunConfig>,
     },
 }
 

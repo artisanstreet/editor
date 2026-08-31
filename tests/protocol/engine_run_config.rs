@@ -301,7 +301,7 @@ fn read_settings_response_envelope(
             artisan_protocol::ThreadEngineSettingsResult::Configured {
                 thread_id: ThreadId::parse(thread_id).expect("thread id is valid"),
                 revision: EngineConfigRevision::new(value).expect("revision is valid"),
-                config: value_config,
+                config: Box::new(value_config),
             },
         ),
         _ => ResponsePayload::ThreadEngineSettings(
@@ -441,7 +441,7 @@ fn thread_engine_settings_configured_response_round_trip_preserves_thread_revisi
             } => {
                 assert_eq!(thread_id.as_str(), "thread-protocol");
                 assert_eq!(revision.get(), 7);
-                assert_eq!(actual_config, config(true));
+                assert_eq!(*actual_config, config(true));
             }
             other => panic!("expected configured result, got {other:?}"),
         }

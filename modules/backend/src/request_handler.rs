@@ -669,7 +669,7 @@ impl RequestHandler {
                             artisan_protocol::ThreadEngineSettingsResult::Configured {
                                 thread_id: thread_id.clone(),
                                 revision: settings.revision(),
-                                config: settings.config().clone(),
+                                config: Box::new(settings.config().clone()),
                             },
                         ),
                     )),

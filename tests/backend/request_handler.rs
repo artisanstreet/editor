@@ -3457,7 +3457,7 @@ async fn read_thread_engine_settings_for_configured_thread_returns_exact_revisio
         ) => {
             assert_eq!(thread_id.as_str(), "thread-read-configured");
             assert_eq!(revision, stored.revision());
-            assert_eq!(config, expected_config);
+            assert_eq!(*config, expected_config);
         }
         other => panic!("expected configured thread engine settings, got {other:?}"),
     }
