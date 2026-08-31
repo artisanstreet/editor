@@ -182,7 +182,7 @@ impl Repository {
             "UPDATE threads SET engine_run_config_version = 1, engine_run_config_revision = ?, engine_run_config = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE thread_id = ? AND engine_run_config_version IS ? AND engine_run_config_revision = ? AND engine_run_config IS ?",
             [
                 Value::BigInt(Some(next_revision.as_i64())),
-                Value::Bytes(Some(Box::new(encoded.clone()))),
+                Value::Bytes(Some(encoded.clone())),
                 Value::BigInt(Some(accepted_at_ms)),
                 Value::String(Some(input.thread_id.as_str().to_owned())),
                 optional_i64(previous_version),
@@ -191,7 +191,7 @@ impl Repository {
             ],
         );
         let updated = transaction
-            .execute(update)
+            .execute(&update)
             .await
             .map_err(|source| database_error("update thread engine configuration", source))?;
         if updated.rows_affected() != 1 {
@@ -471,7 +471,7 @@ fn optional_i64(value: Option<i64>) -> Value {
 }
 
 fn optional_bytes(value: Option<Vec<u8>>) -> Value {
-    Value::Bytes(value.map(Box::new))
+    Value::Bytes(value)
 }
 
 fn do_nothing_on_conflict() -> OnConflict {
