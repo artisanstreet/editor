@@ -10,7 +10,6 @@
 //! scheduler policy.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::module_name_repetitions)]
 
 use std::{
     path::{Path, PathBuf},
@@ -23,7 +22,8 @@ use artisan_database::{
     ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome, CompleteRun,
     DispatchFailureReason, DispatchLeaseOwner, FailMessageDispatch, InterruptRun, LaunchClaimedRun,
     LaunchClaimedRunOutcome, ProviderBindingBytes, Repository, RequeueMessageDispatch,
-    RunBatchScope, RunErrorCode, RunErrorMessage, RunLaunchCredentials, RunStartKey,
+    RunBatchScope, RunErrorCode, RunErrorMessage, RunLaunchCredentials, RunLaunchError,
+    RunStartKey,
 };
 use artisan_domain::{
     AssistantBody, AssistantMessagePhase, IncrementalText, ItemId, PatchId, Revision, RunId,
@@ -49,7 +49,89 @@ const PROVIDER_FAILURE_MESSAGE: &str = "OpenCode2 provider turn failed";
 const INTERRUPTED_CODE: &str = "provider_interrupted";
 const INTERRUPTED_MESSAGE: &str = "OpenCode2 provider turn interrupted";
 
+/// Decision made before any provider launch is permitted.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SettingsLoadDecision {
+    /// A validated immutable settings snapshot is ready for the launch fence.
+    Ready(artisan_database::ThreadEngineSettings),
+    /// The claim must be returned for a bounded later attempt.
+    Requeue(&'static str),
+    /// The claim contains a permanent configuration or project defect.
+    Fail(&'static str),
+}
+
+/// Classifies the persisted settings read used by the production dispatcher.
+///
+/// This decision is intentionally separated from provider code: a missing or
+/// temporarily unreadable configuration can only requeue, so no authority
+/// resolution, process spawn, or session request can happen on that branch.
+pub(crate) fn classify_settings_load(
+    result: Result<
+        Option<artisan_database::ThreadEngineSettings>,
+        artisan_database::RepositoryError,
+    >,
+) -> SettingsLoadDecision {
+    match result {
+        Ok(Some(settings)) => SettingsLoadDecision::Ready(settings),
+        Ok(None) => SettingsLoadDecision::Requeue("engine unconfigured"),
+        Err(error) if is_permanent_configuration_error(&error) => {
+            SettingsLoadDecision::Fail("engine settings corrupt")
+        }
+        Err(_) => SettingsLoadDecision::Requeue("engine settings unavailable"),
+    }
+}
+
+/// Authority classification for one snapshot-fenced launch attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LaunchAuthority {
+    /// This call durably created the assistant run and may contact a provider.
+    Started,
+    /// The durable call was replayed; no second provider effect is permitted.
+    Replay,
+    /// The snapshot fence rejected the attempt; the claim must be requeued.
+    Requeue,
+}
+
+pub(crate) fn classify_launch_result(
+    result: &Result<LaunchClaimedRunOutcome, RunLaunchError>,
+) -> LaunchAuthority {
+    match result {
+        Ok(LaunchClaimedRunOutcome::Started(_)) => LaunchAuthority::Started,
+        Ok(LaunchClaimedRunOutcome::AlreadyStarted(_)) => LaunchAuthority::Replay,
+        Err(_) => LaunchAuthority::Requeue,
+    }
+}
+
+/// Whether a durable provider bind authorizes the one prompt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromptAuthorization {
+    /// The current owner durably created the binding and may authorize once.
+    Authorize,
+    /// An unknown prior binding owns the provider session; do not prompt.
+    DoNotAuthorize,
+}
+
+pub(crate) const fn prompt_authorization_after_binding(already_bound: bool) -> PromptAuthorization {
+    if already_bound {
+        PromptAuthorization::DoNotAuthorize
+    } else {
+        PromptAuthorization::Authorize
+    }
+}
+
+/// Executes a notifier hint only after the caller has observed a committed
+/// or idempotently replayed SQLite result.
+pub(crate) fn notify_after_commit(notified_commit: bool, notify: impl FnOnce()) -> bool {
+    if notified_commit {
+        notify();
+        true
+    } else {
+        false
+    }
+}
+
 /// Validation failures for the explicit Forge native-run scheduler.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum NativeRunDispatcherConfigError {
     /// A scheduler duration was zero.
@@ -69,11 +151,53 @@ pub enum NativeRunDispatcherConfigError {
     CapacityOverflow,
 }
 
+/// Complete scheduler values supplied by the Forge composition boundary.
+///
+/// Every field is required in the input literal. Validation belongs to
+/// [`NativeRunDispatcherConfig::new`], so no caller can accidentally create a
+/// partially configured production dispatcher or introduce a hidden default.
+#[allow(clippy::module_name_repetitions)]
+pub struct NativeRunDispatcherConfigInput {
+    /// Maximum lease lifetime for one claimed message.
+    pub claim_lease: Duration,
+    /// Delay between claim attempts when no work is available.
+    pub poll_interval: Duration,
+    /// Delay before retrying a safely requeued message.
+    pub retry_backoff: Duration,
+    /// Maximum time allowed for ordered dispatcher shutdown.
+    pub shutdown_budget: Duration,
+    /// Bounded owner admission capacity.
+    pub queue_capacity: std::num::NonZeroUsize,
+    /// Maximum number of retries for one identical database command.
+    pub max_command_retries: std::num::NonZeroUsize,
+    /// Explicit provider prompt-delivery selector.
+    pub prompt_delivery: String,
+    /// Provider stream cursor used for the first bounded replay.
+    pub stream_after: u64,
+}
+
+impl std::fmt::Debug for NativeRunDispatcherConfigInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeRunDispatcherConfigInput")
+            .field("claim_lease", &self.claim_lease)
+            .field("poll_interval", &self.poll_interval)
+            .field("retry_backoff", &self.retry_backoff)
+            .field("shutdown_budget", &self.shutdown_budget)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_command_retries", &self.max_command_retries)
+            .field("prompt_delivery_bytes", &self.prompt_delivery.len())
+            .field("stream_after", &self.stream_after)
+            .finish()
+    }
+}
+
 /// Explicit scheduler and provider-composition policy for one Forge process.
 ///
 /// No field has a hidden default. The authority and notifier are both owned
 /// by the dispatcher after [`Self::new`] succeeds; the caller must retain no
 /// separate provider capability.
+#[allow(clippy::module_name_repetitions)]
 pub struct NativeRunDispatcherConfig {
     authority: NativeOpenCode2Authority,
     notifier: ConversationCommitNotifier,
@@ -107,19 +231,21 @@ impl std::fmt::Debug for NativeRunDispatcherConfig {
 
 impl NativeRunDispatcherConfig {
     /// Creates a complete injected scheduler policy.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         authority: NativeOpenCode2Authority,
         notifier: ConversationCommitNotifier,
-        claim_lease: Duration,
-        poll_interval: Duration,
-        retry_backoff: Duration,
-        shutdown_budget: Duration,
-        queue_capacity: std::num::NonZeroUsize,
-        max_command_retries: std::num::NonZeroUsize,
-        prompt_delivery: impl Into<String>,
-        stream_after: u64,
+        input: NativeRunDispatcherConfigInput,
     ) -> Result<Self, NativeRunDispatcherConfigError> {
+        let NativeRunDispatcherConfigInput {
+            claim_lease,
+            poll_interval,
+            retry_backoff,
+            shutdown_budget,
+            queue_capacity,
+            max_command_retries,
+            prompt_delivery,
+            stream_after,
+        } = input;
         for duration in [claim_lease, poll_interval, retry_backoff, shutdown_budget] {
             if duration.is_zero() {
                 return Err(NativeRunDispatcherConfigError::ZeroDuration);
@@ -128,7 +254,6 @@ impl NativeRunDispatcherConfig {
                 return Err(NativeRunDispatcherConfigError::DurationOverflow);
             }
         }
-        let prompt_delivery = prompt_delivery.into();
         if prompt_delivery.is_empty() || prompt_delivery.len() > PROMPT_DELIVERY_MAX_BYTES {
             return Err(NativeRunDispatcherConfigError::InvalidPromptDelivery);
         }
@@ -157,6 +282,7 @@ impl NativeRunDispatcherConfig {
 }
 
 /// The observed result of stopping the native dispatcher.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeRunDispatcherShutdown {
     /// The dispatcher and its single engine owner joined cleanly.
@@ -169,6 +295,7 @@ pub enum NativeRunDispatcherShutdown {
 }
 
 /// One running configured first-message dispatcher.
+#[allow(clippy::module_name_repetitions)]
 pub struct NativeRunDispatcher {
     stop: Arc<CancelHandle>,
     shutdown_budget: Duration,
@@ -419,28 +546,18 @@ async fn execute_claim(
         .await;
         return;
     };
-    let settings = match repository
-        .read_thread_engine_settings(&payload.thread_id)
-        .await
-    {
-        Ok(Some(settings)) => settings,
-        Ok(None) => {
-            requeue_claim(repository, claimed, config, origin, "engine unconfigured").await;
+    let settings = match classify_settings_load(
+        repository
+            .read_thread_engine_settings(&payload.thread_id)
+            .await,
+    ) {
+        SettingsLoadDecision::Ready(settings) => settings,
+        SettingsLoadDecision::Requeue(reason) => {
+            requeue_claim(repository, claimed, config, origin, reason).await;
             return;
         }
-        Err(error) => {
-            if is_permanent_configuration_error(&error) {
-                fail_claim(repository, claimed, origin, "engine settings corrupt").await;
-            } else {
-                requeue_claim(
-                    repository,
-                    claimed,
-                    config,
-                    origin,
-                    "engine settings unavailable",
-                )
-                .await;
-            }
+        SettingsLoadDecision::Fail(reason) => {
+            fail_claim(repository, claimed, origin, reason).await;
             return;
         }
     };
@@ -568,14 +685,17 @@ async fn execute_claim(
     };
     let launch_result =
         launch_with_retry(repository, launch_command, config.max_command_retries).await;
-    let launched = match launch_result {
-        Ok(LaunchClaimedRunOutcome::Started(receipt)) => receipt,
+    let launched = match classify_launch_result(&launch_result) {
+        LaunchAuthority::Started => match launch_result {
+            Ok(LaunchClaimedRunOutcome::Started(receipt)) => receipt,
+            _ => unreachable!("started launch authority has a started receipt"),
+        },
         // `AlreadyStarted` is durable replay information, never authority to
         // contact OpenCode. Leave the launching run for the recovery path;
         // creating another provider session here could duplicate an unknown
         // external effect from the original attempt.
-        Ok(LaunchClaimedRunOutcome::AlreadyStarted(_)) => return,
-        Err(_) => {
+        LaunchAuthority::Replay => return,
+        LaunchAuthority::Requeue => {
             requeue_claim(
                 repository,
                 claimed,
@@ -655,7 +775,10 @@ async fn execute_claim(
             return;
         }
     };
-    if already_bound {
+    if matches!(
+        prompt_authorization_after_binding(already_bound),
+        PromptAuthorization::DoNotAuthorize
+    ) {
         turn.cancel();
         let _ = drain_turn(&mut turn, stop, process_cancel).await;
         let _ = turn.finish().await;
@@ -891,12 +1014,16 @@ async fn commit_batch_with_retry(
                 checkpoint: artisan_database::CheckpointUpdate::Keep,
             })
             .await;
-        if matches!(
-            result,
-            Ok(CommitRunBatchOutcome::Committed(_))
-                | Ok(CommitRunBatchOutcome::AlreadyCommitted(_))
+        if notify_after_commit(
+            matches!(
+                result,
+                Ok(CommitRunBatchOutcome::Committed(_))
+                    | Ok(CommitRunBatchOutcome::AlreadyCommitted(_))
+            ),
+            || {
+                let _ = notifier.publish(&scope.launched.thread_id);
+            },
         ) {
-            let _ = notifier.publish(&scope.launched.thread_id);
             return true;
         }
     }

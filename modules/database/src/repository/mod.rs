@@ -22,6 +22,8 @@ use artisan_domain::{
     UnixMillis,
 };
 
+use crate::entities;
+
 pub use conversation_patch_replay::ConversationPatchReplay;
 pub use dispatch_payload::MessageDispatchPayload;
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};

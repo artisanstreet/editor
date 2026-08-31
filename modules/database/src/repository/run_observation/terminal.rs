@@ -2832,7 +2832,7 @@ fn validate_auxiliary(command: &AuxiliaryTerminal<'_>) -> Result<(), AuxiliaryTe
             value: i64::MAX,
         });
     }
-    validate_terminal_chronology(scope, command.operated_at())
+    validate_terminal_chronology(&scope, command.operated_at())
         .map_err(AuxiliaryTerminalError::Repository)
 }
 

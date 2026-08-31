@@ -81,7 +81,8 @@ pub use directory_selection::{
 };
 pub use forge_runtime::{
     CredentialMaterialError, ForgeCleanupError, ForgeConfigError, ForgeLaunchConfig,
-    ForgePrimaryCleanupError, ForgeRuntimeError, ForgeServiceError, ReadinessError,
+    ForgeLaunchConfigInput, ForgePrimaryCleanupError, ForgeRuntimeError, ForgeServiceError,
+    ReadinessError,
 };
 pub use lifecycle_control::LifecycleController;
 pub use listener::{
@@ -89,7 +90,8 @@ pub use listener::{
     RequestTermination, ServiceReport,
 };
 pub use native_run_dispatch::{
-    NativeRunDispatcherConfig, NativeRunDispatcherConfigError, NativeRunDispatcherShutdown,
+    NativeRunDispatcherConfig, NativeRunDispatcherConfigError, NativeRunDispatcherConfigInput,
+    NativeRunDispatcherShutdown,
 };
 pub use request_handler::RequestHandler;
 pub use storage::{ForgeStorage, ForgeStorageCloseError, ForgeStorageOpenError};

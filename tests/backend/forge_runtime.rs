@@ -8,7 +8,7 @@ use std::{
     ffi::OsString,
     fs,
     net::SocketAddr,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     process,
     sync::{
@@ -20,11 +20,14 @@ use std::{
 };
 
 use artisan_backend::{
-    ForgeApp, ForgeConfig, ForgeProcessCustody, ListenerLimits,
+    ForgeApp, ForgeConfig, ForgeLaunchConfigInput, ForgeProcessCustody, ListenerLimits,
+    NativeRunDispatcherConfig, NativeRunDispatcherConfigInput,
+    conversation_commit_notifier::ConversationCommitNotifier,
     forge_runtime::{self, ForgeConfigError, ForgeLaunchConfig, ForgeRuntimeError},
 };
 use artisan_database::SqliteConfig;
 use artisan_domain::UnixMillis;
+use artisan_native_engine::NativeOpenCode2Authority;
 use artisan_protocol::{
     APPLICATION_PROTOCOL_VERSION, FrameId, Hello, HelloCredential, LOCAL_CAPABILITY_BYTES,
     LocalCapability, ProtocolVersion, VersionOffer, WireEnvelope, WireEnvelopeBody,
@@ -119,23 +122,42 @@ fn limits() -> ListenerLimits {
     }
 }
 
+fn native_run() -> NativeRunDispatcherConfig {
+    NativeRunDispatcherConfig::new(
+        NativeOpenCode2Authority::new(),
+        ConversationCommitNotifier::new(),
+        NativeRunDispatcherConfigInput {
+            claim_lease: Duration::from_millis(10),
+            poll_interval: Duration::from_millis(10),
+            retry_backoff: Duration::from_millis(10),
+            shutdown_budget: Duration::from_millis(500),
+            queue_capacity: NonZeroUsize::new(1).expect("one queue slot is nonzero"),
+            max_command_retries: NonZeroUsize::new(1).expect("one retry is nonzero"),
+            prompt_delivery: "queue".to_owned(),
+            stream_after: 0,
+        },
+    )
+    .expect("native scheduler should be explicit and valid")
+}
+
 fn config(
     directory: &TemporaryDirectory,
     credentials: &Credentials,
     cancel: Arc<CancelHandle>,
 ) -> ForgeLaunchConfig {
-    ForgeLaunchConfig::new(
-        directory.path("forge.sqlite3"),
-        directory.path("forge.custody"),
-        vec![credentials.certificate_path.clone()],
-        credentials.private_key_path.clone(),
-        credentials.capability_path.clone(),
-        directory.path("forge.ready"),
-        limits(),
-        NonZeroU32::new(1).expect("one admission is nonzero"),
-        NonZeroU32::new(2).expect("two requests are nonzero"),
+    ForgeLaunchConfig::new(ForgeLaunchConfigInput {
+        database: directory.path("forge.sqlite3"),
+        custody: directory.path("forge.custody"),
+        certificate_der: vec![credentials.certificate_path.clone()],
+        private_key_der: credentials.private_key_path.clone(),
+        bootstrap_capability: credentials.capability_path.clone(),
+        ready_file: directory.path("forge.ready"),
+        limits: limits(),
+        admission_capacity: NonZeroU32::new(1).expect("one admission is nonzero"),
+        requests_per_connection: NonZeroU32::new(2).expect("two requests are nonzero"),
+        native_run: native_run(),
         cancel,
-    )
+    })
     .expect("test launch configuration should be explicit and valid")
 }
 
@@ -245,6 +267,22 @@ fn parser_arguments(directory: &TemporaryDirectory) -> Vec<OsString> {
         OsString::from("3"),
         OsString::from("--requests-per-connection"),
         OsString::from("4"),
+        OsString::from("--native-run-claim-lease-ms"),
+        OsString::from("15"),
+        OsString::from("--native-run-poll-interval-ms"),
+        OsString::from("16"),
+        OsString::from("--native-run-retry-backoff-ms"),
+        OsString::from("17"),
+        OsString::from("--native-run-shutdown-budget-ms"),
+        OsString::from("18"),
+        OsString::from("--native-run-queue-capacity"),
+        OsString::from("5"),
+        OsString::from("--native-run-max-command-retries"),
+        OsString::from("6"),
+        OsString::from("--native-run-prompt-delivery"),
+        OsString::from("queue"),
+        OsString::from("--native-run-stream-after"),
+        OsString::from("7"),
     ]);
     arguments
 }
@@ -301,6 +339,8 @@ fn exact_parser_requires_every_field_and_preserves_certificate_order() {
     assert_eq!(parsed.listener_limits().drain, Duration::from_millis(14));
     assert_eq!(parsed.admission_capacity().get(), 3);
     assert_eq!(parsed.requests_per_connection().get(), 4);
+    let debug = format!("{parsed:?}");
+    assert!(debug.contains("native_run: \"configured\""));
     assert!(Arc::ptr_eq(parsed.cancel_handle(), &cancel));
 }
 
@@ -358,6 +398,28 @@ fn parser_rejects_missing_duplicate_unknown_relative_empty_zero_and_overflow() {
         Err(ForgeConfigError::ZeroCapacity { .. })
     ));
 
+    let mut native_zero = base.clone();
+    replace_option_value(
+        &mut native_zero,
+        "--native-run-queue-capacity",
+        OsString::from("0"),
+    );
+    assert!(matches!(
+        parse(native_zero),
+        Err(ForgeConfigError::ZeroCapacity { .. })
+    ));
+
+    let mut native_duration_zero = base.clone();
+    replace_option_value(
+        &mut native_duration_zero,
+        "--native-run-claim-lease-ms",
+        OsString::from("0"),
+    );
+    assert!(matches!(
+        parse(native_duration_zero),
+        Err(ForgeConfigError::NativeRunConfiguration { .. })
+    ));
+
     let mut capacity_overflow = base.clone();
     replace_option_value(
         &mut capacity_overflow,
@@ -386,6 +448,44 @@ fn parser_rejects_missing_duplicate_unknown_relative_empty_zero_and_overflow() {
         parse(malformed),
         Err(ForgeConfigError::InvalidNumber { .. })
     ));
+
+    let mut duplicate_native = parser_arguments(&directory);
+    duplicate_native.extend([
+        OsString::from("--native-run-poll-interval-ms"),
+        OsString::from("19"),
+    ]);
+    assert!(matches!(
+        parse(duplicate_native),
+        Err(ForgeConfigError::Duplicate { .. })
+    ));
+}
+
+#[test]
+fn parser_requires_each_native_dispatcher_option() {
+    let directory = TemporaryDirectory::new("native-parser-requirements");
+    let options = [
+        "--native-run-claim-lease-ms",
+        "--native-run-poll-interval-ms",
+        "--native-run-retry-backoff-ms",
+        "--native-run-shutdown-budget-ms",
+        "--native-run-queue-capacity",
+        "--native-run-max-command-retries",
+        "--native-run-prompt-delivery",
+        "--native-run-stream-after",
+    ];
+
+    for option in options {
+        let mut missing = parser_arguments(&directory);
+        let position = missing
+            .iter()
+            .position(|argument| argument.as_os_str().to_str() == Some(option))
+            .expect("native option should exist");
+        missing.drain(position..=position + 1);
+        assert!(matches!(
+            parse(missing),
+            Err(ForgeConfigError::MissingOption { option: reported }) if reported == option
+        ));
+    }
 }
 
 #[test]
@@ -417,18 +517,19 @@ fn explicit_paths_are_the_only_configuration_and_secret_diagnostics_stay_clean()
     let invalid_capability = directory.path("invalid.cap");
     fs::write(&invalid_capability, [0xa5; LOCAL_CAPABILITY_BYTES - 1])
         .expect("invalid capability should be written");
-    let invalid_config = ForgeLaunchConfig::new(
-        directory.path("not-default.sqlite3"),
-        directory.path("not-default.custody"),
-        vec![credentials.certificate_path.clone()],
-        credentials.private_key_path.clone(),
-        invalid_capability,
-        directory.path("not-default.ready"),
-        limits(),
-        NonZeroU32::new(1).expect("one is nonzero"),
-        NonZeroU32::new(1).expect("one is nonzero"),
-        Arc::new(CancelHandle::new()),
-    )
+    let invalid_config = ForgeLaunchConfig::new(ForgeLaunchConfigInput {
+        database: directory.path("not-default.sqlite3"),
+        custody: directory.path("not-default.custody"),
+        certificate_der: vec![credentials.certificate_path.clone()],
+        private_key_der: credentials.private_key_path.clone(),
+        bootstrap_capability: invalid_capability,
+        ready_file: directory.path("not-default.ready"),
+        limits: limits(),
+        admission_capacity: NonZeroU32::new(1).expect("one is nonzero"),
+        requests_per_connection: NonZeroU32::new(1).expect("one is nonzero"),
+        native_run: native_run(),
+        cancel: Arc::new(CancelHandle::new()),
+    })
     .expect("paths should be explicit even when files are not ready");
     let error = run_config(invalid_config);
     assert_eq!(error.exit_code(), forge_runtime::EXIT_CODE_CONFIGURATION);
@@ -524,21 +625,22 @@ fn invalid_tls_and_existing_readiness_paths_return_71_after_cleanup() {
 
     let bind_directory = TemporaryDirectory::new("invalid-bind");
     let bind_credentials = credentials(&bind_directory);
-    let bind_config = ForgeLaunchConfig::new(
-        bind_directory.path("forge.sqlite3"),
-        bind_directory.path("forge.custody"),
-        vec![bind_credentials.certificate_path.clone()],
-        bind_credentials.private_key_path.clone(),
-        bind_credentials.capability_path.clone(),
-        bind_directory.path("forge.ready"),
-        ListenerLimits {
+    let bind_config = ForgeLaunchConfig::new(ForgeLaunchConfigInput {
+        database: bind_directory.path("forge.sqlite3"),
+        custody: bind_directory.path("forge.custody"),
+        certificate_der: vec![bind_credentials.certificate_path.clone()],
+        private_key_der: bind_credentials.private_key_path.clone(),
+        bootstrap_capability: bind_credentials.capability_path.clone(),
+        ready_file: bind_directory.path("forge.ready"),
+        limits: ListenerLimits {
             admission: Duration::MAX,
             ..limits()
         },
-        NonZeroU32::new(1).expect("one is nonzero"),
-        NonZeroU32::new(1).expect("one is nonzero"),
-        Arc::new(CancelHandle::new()),
-    )
+        admission_capacity: NonZeroU32::new(1).expect("one is nonzero"),
+        requests_per_connection: NonZeroU32::new(1).expect("one is nonzero"),
+        native_run: native_run(),
+        cancel: Arc::new(CancelHandle::new()),
+    })
     .expect("listener-level invalid limits are still explicit configuration");
     let bind_error = run_config(bind_config);
     assert_eq!(
@@ -710,18 +812,19 @@ fn accepted_drain_only_failure_maps_to_73() {
         drain: Duration::ZERO,
         ..limits()
     };
-    let launch = ForgeLaunchConfig::new(
-        directory.path("forge.sqlite3"),
-        directory.path("forge.custody"),
-        vec![credentials.certificate_path.clone()],
-        credentials.private_key_path.clone(),
-        credentials.capability_path.clone(),
-        directory.path("forge.ready"),
-        drain_limits,
-        NonZeroU32::new(1).expect("one admission is nonzero"),
-        NonZeroU32::new(1).expect("one request is nonzero"),
-        Arc::clone(&cancel),
-    )
+    let launch = ForgeLaunchConfig::new(ForgeLaunchConfigInput {
+        database: directory.path("forge.sqlite3"),
+        custody: directory.path("forge.custody"),
+        certificate_der: vec![credentials.certificate_path.clone()],
+        private_key_der: credentials.private_key_path.clone(),
+        bootstrap_capability: credentials.capability_path.clone(),
+        ready_file: directory.path("forge.ready"),
+        limits: drain_limits,
+        admission_capacity: NonZeroU32::new(1).expect("one admission is nonzero"),
+        requests_per_connection: NonZeroU32::new(1).expect("one request is nonzero"),
+        native_run: native_run(),
+        cancel: Arc::clone(&cancel),
+    })
     .expect("zero drain is explicit configuration");
     let mut worker = Some(spawn_runtime(launch));
     let (_, value) =

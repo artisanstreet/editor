@@ -6,11 +6,11 @@ use artisan_database::entities::{
     self, AssistantRunLifecycle, ConversationPatchKind, DispatchState, EntityLifecycle, RenderPhase,
 };
 use artisan_database::{
-    AssistantChange, BindRunProvider, CancelRunOutcome, CheckpointUpdate, ClaimMessageDispatch,
-    ClaimedMessageDispatch, CommitRunBatch, CompleteRun, CompleteRunOutcome, FailRun,
-    FailRunOutcome, InterruptRunOutcome, InterruptedRunReceipt, ProviderBindingBytes,
-    QueueFirstMessageInput, Repository, RunBatchScope, RunErrorCode, RunErrorMessage,
-    RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
+    AssistantChange, BindRunProvider, CancelRun, CancelRunOutcome, CheckpointUpdate,
+    ClaimMessageDispatch, ClaimedMessageDispatch, CommitRunBatch, CompleteRun, CompleteRunOutcome,
+    FailRun, FailRunOutcome, InterruptRun, InterruptRunOutcome, InterruptedRunReceipt,
+    ProviderBindingBytes, QueueFirstMessageInput, Repository, RunBatchScope, RunErrorCode,
+    RunErrorMessage, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
     TerminalRunReceipt, ThreadEngineSettings, connect,
 };
 use artisan_domain::{
@@ -494,6 +494,158 @@ async fn fail_pair_records_error_and_failed_state() {
         .find(|t| t.turn_id == TURN_ID)
         .expect("turn");
     assert_eq!(turn.lifecycle, EntityLifecycle::Failed);
+}
+
+#[tokio::test]
+async fn cancel_pair_is_distinct_and_idempotent() {
+    let (pair, assistant_item, _, _) = seeded_with_item().await;
+    let body = assistant_body("cancelled body");
+    let item_patch = PatchId::parse("patch-item-cancel").expect("p");
+    let turn_patch = PatchId::parse("patch-turn-cancel").expect("p");
+
+    let first = pair
+        .repository
+        .cancel_run(CancelRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+        })
+        .await
+        .expect("cancel");
+    let receipt = match first {
+        CancelRunOutcome::Cancelled(receipt) => receipt,
+        CancelRunOutcome::AlreadyCancelled(_) => panic!("should cancel"),
+    };
+    let before_replay = persisted_rows(&pair.database).await;
+    let replay = pair
+        .repository
+        .cancel_run(CancelRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+        })
+        .await
+        .expect("cancel replay");
+    assert_eq!(replay, CancelRunOutcome::AlreadyCancelled(receipt));
+    assert_eq!(before_replay, persisted_rows(&pair.database).await);
+
+    let after = persisted_rows(&pair.database).await;
+    let run = after.runs.iter().find(|r| r.run_id == RUN_ID).expect("run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Cancelled);
+    assert_eq!(run.terminal_at_ms, Some(TERMINAL_AT_MS));
+    assert!(run.error_code.is_none() && run.error_message.is_none());
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == MESSAGE_ID)
+        .expect("dispatch");
+    assert_eq!(dispatch.state, DispatchState::Failed);
+    assert_eq!(dispatch.last_error.as_deref(), Some("run cancelled"));
+    let item = after
+        .items
+        .iter()
+        .find(|i| i.item_id == "assistant-1")
+        .expect("item");
+    assert_eq!(item.lifecycle, EntityLifecycle::Cancelled);
+    assert_eq!(item.body, "cancelled body");
+    let turn = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == TURN_ID)
+        .expect("turn");
+    assert_eq!(turn.lifecycle, EntityLifecycle::Cancelled);
+}
+
+#[tokio::test]
+async fn interrupt_pair_is_distinct_and_idempotent() {
+    let (pair, assistant_item, _, _) = seeded_with_item().await;
+    let body = assistant_body("interrupted body");
+    let item_patch = PatchId::parse("patch-item-interrupt").expect("p");
+    let turn_patch = PatchId::parse("patch-turn-interrupt").expect("p");
+    let code = RunErrorCode::parse("provider_interrupted".to_owned()).expect("code");
+    let message = RunErrorMessage::parse("provider turn interrupted".to_owned()).expect("message");
+
+    let first = pair
+        .repository
+        .interrupt_run(InterruptRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+            error_code: &code,
+            error_message: &message,
+        })
+        .await
+        .expect("interrupt");
+    let receipt = match first {
+        InterruptRunOutcome::Interrupted(receipt) => receipt,
+        InterruptRunOutcome::AlreadyInterrupted(_) => panic!("should interrupt"),
+    };
+    let before_replay = persisted_rows(&pair.database).await;
+    let replay = pair
+        .repository
+        .interrupt_run(InterruptRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &body,
+            phase: AssistantMessagePhase::Unspecified,
+            item_patch_id: &item_patch,
+            turn_patch_id: &turn_patch,
+            error_code: &code,
+            error_message: &message,
+        })
+        .await
+        .expect("interrupt replay");
+    assert_eq!(replay, InterruptRunOutcome::AlreadyInterrupted(receipt));
+    assert_eq!(before_replay, persisted_rows(&pair.database).await);
+
+    let after = persisted_rows(&pair.database).await;
+    let run = after.runs.iter().find(|r| r.run_id == RUN_ID).expect("run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
+    assert_eq!(run.terminal_at_ms, None);
+    assert_eq!(run.error_code.as_deref(), Some("provider_interrupted"));
+    assert_eq!(
+        run.error_message.as_deref(),
+        Some("provider turn interrupted")
+    );
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == MESSAGE_ID)
+        .expect("dispatch");
+    assert_eq!(dispatch.state, DispatchState::Failed);
+    assert_eq!(
+        dispatch.last_error.as_deref(),
+        Some("provider turn interrupted")
+    );
+    let item = after
+        .items
+        .iter()
+        .find(|i| i.item_id == "assistant-1")
+        .expect("item");
+    assert_eq!(item.lifecycle, EntityLifecycle::Interrupted);
+    let turn = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == TURN_ID)
+        .expect("turn");
+    assert_eq!(turn.lifecycle, EntityLifecycle::Interrupted);
 }
 
 #[tokio::test]
