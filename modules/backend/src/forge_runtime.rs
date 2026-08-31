@@ -1191,7 +1191,8 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
     )
     .with_registered_engine_profiles_reader(
         crate::request_handler::NativeRegisteredEngineProfilesReader::new(database.clone()),
-    );
+    )
+    .with_conversation_commit_notifier(native_run.conversation_commit_notifier());
     run_with_handler(
         ForgeRunContext {
             app,

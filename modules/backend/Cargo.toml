@@ -64,6 +64,10 @@ name = "conversation_commit_notifier"
 path = "../../tests/backend/conversation_commit_notifier.rs"
 
 [[test]]
+name = "conversation_delivery_driver"
+path = "../../tests/backend/conversation_delivery_driver.rs"
+
+[[test]]
 name = "conversation_delivery_writer"
 path = "../../tests/backend/conversation_delivery_writer.rs"
 

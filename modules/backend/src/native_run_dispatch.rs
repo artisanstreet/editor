@@ -231,6 +231,11 @@ impl std::fmt::Debug for NativeRunDispatcherConfig {
 }
 
 impl NativeRunDispatcherConfig {
+    /// Clones the exact process-owned notifier for Forge request delivery.
+    pub(crate) fn conversation_commit_notifier(&self) -> ConversationCommitNotifier {
+        self.notifier.clone()
+    }
+
     /// Creates a complete injected scheduler policy.
     ///
     /// # Errors
