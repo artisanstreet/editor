@@ -166,12 +166,11 @@ async fn seed_project_and_thread(
         })
         .await
         .expect("engine configuration should create");
-    let settings = repository
+    repository
         .read_thread_engine_settings(&thread_id)
         .await
         .expect("engine configuration should read")
-        .expect("engine configuration should be present");
-    settings
+        .expect("engine configuration should be present")
 }
 
 fn launch_config() -> EngineRunConfig {
@@ -1669,7 +1668,7 @@ async fn wrong_targets_and_duplicate_collisions_reject() {
     assert_duplicate_patch_conflict(&pair, &body).await;
     verify_wrong_targets_sealed_and_checkpoint(&body).await;
 }
-async fn assert_user_item_target_conflict(pair: &SeededPair, body: &AssistantBody) {
+async fn assert_user_item_target_conflict(pair: &SeededPair, _body: &AssistantBody) {
     let user_item = ItemId::parse(ITEM_ID).expect("user item");
     let frag = incremental_text("frag");
     let append_patch = PatchId::parse("p-append-user").expect("p");
