@@ -553,31 +553,24 @@ fn thread_engine_settings_rejects_zero_configured_revision_invalid_id_malformed_
 #[test]
 fn thread_engine_settings_unknown_union_discriminant_is_rejected() {
     let valid = raw_thread_engine_settings_response("thread-protocol", "unconfigured", 1, 100);
-    // The second variant's discriminant toggle between 1 (unconfigured) and 2 (configured)
-    // is the only state change between encodings; diff to locate discriminant word.
     let configured = raw_thread_engine_settings_response("thread-protocol", "configured", 1, 100);
-    let mut corrupted = valid.clone();
-    // Find a word that differs between valid and configured (likely the state union tag).
-    // Flip that word to an unknown value 99 and ensure decoding fails.
     let mut found = false;
     for index in 0..valid.len().min(configured.len()) {
-        if valid[index] != configured[index] {
-            corrupted[index] = 99;
+        if valid[index] == configured[index] {
+            continue;
+        }
+        let mut corrupted = valid.clone();
+        corrupted[index] = 255;
+        if matches!(
+            decode_envelope(&corrupted),
+            Err(ProtocolDecodeError::UnknownDiscriminant { value: 255 })
+        ) {
             found = true;
             break;
         }
     }
-    if !found {
-        // Fallback: corrupt discriminant byte directly.
-        if corrupted.len() > 48 {
-            corrupted[48] = 99;
-        }
-    }
-    let error = decode_envelope(&corrupted);
     assert!(
-        matches!(error, Err(ProtocolDecodeError::UnknownDiscriminant { .. }))
-            || matches!(error, Err(ProtocolDecodeError::EngineConfig { .. }))
-            || matches!(error, Err(ProtocolDecodeError::Capnp { .. })),
-        "expected a typed discriminant failure, got {error:?}"
+        found,
+        "no differing byte produced UnknownDiscriminant {{ value: 255 }}"
     );
 }

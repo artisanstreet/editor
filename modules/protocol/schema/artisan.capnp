@@ -538,8 +538,9 @@ struct ConfiguredThreadEngineSettings {
 
 # The request arms of the native protocol: the five original workflow
 # requests, project rediscovery, the three conversation read/subscription
-# requests, explicit host interaction, lifecycle control, and durable engine
-# configuration appended last as the twelfth arm.
+# requests, explicit host interaction, lifecycle control, durable engine
+# configuration at arm @11, and the authoritative thread engine settings read
+# appended at arm @12; existing ordinals remain frozen.
 struct Request {
   union {
     listDirectories @0 :ListDirectoriesRequest;

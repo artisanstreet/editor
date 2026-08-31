@@ -1874,7 +1874,7 @@ fn decode_response(
             decode_thread_engine_config_set(result?, &request_id)?
         }
         response::Which::ThreadEngineSettings(result) => {
-            decode_thread_engine_settings_result(result?, &request_id)?
+            decode_thread_engine_settings_result(result?)?
         }
     };
     Ok(ServerResponse {
@@ -1918,7 +1918,6 @@ fn decode_thread_engine_config_set(
 
 fn decode_thread_engine_settings_result(
     value: artisan_capnp::thread_engine_settings_result::Reader<'_>,
-    _request_id: &RequestId,
 ) -> Result<ResponsePayload, ProtocolDecodeError> {
     let thread_id = parse_thread_id(
         read_text(
