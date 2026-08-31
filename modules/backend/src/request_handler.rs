@@ -329,6 +329,13 @@ pub trait RegisteredEngineProfilesReader: fmt::Debug + Send + Sync {
     /// the registry file exists and contains exactly the ordered profile ids,
     /// which may be empty. Any `Err` is treated as an internal, non-retryable,
     /// path-free failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegisteredEngineProfilesError`] when the registry cannot be
+    /// read because it is unavailable, malformed, or otherwise invalid. The
+    /// error is finite and path-free with no registry bytes or authority
+    /// details.
     fn list_profiles(&self) -> Result<Option<Vec<EngineProfileId>>, RegisteredEngineProfilesError>;
 }
 
