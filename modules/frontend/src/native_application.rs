@@ -29,9 +29,9 @@ use gpui::{
 };
 
 use crate::native_transport_service::{
-    CommandSendError, EventReceiveError, NativeTransportCommand, NativeTransportEvent,
-    NativeTransportService, ServiceFailure, ServiceFailureCategory, ServiceFailureStage,
-    ServiceStopStatus,
+    CommandSendError, EventReceiveError, NativeProjectIntakeOperation, NativeProjectIntakeStage,
+    NativeTransportCommand, NativeTransportEvent, NativeTransportService, ServiceFailure,
+    ServiceFailureCategory, ServiceFailureStage, ServiceStopStatus,
 };
 use crate::{
     conversation_delivery_machine::{ConversationDeliveryEffect, ConversationDeliveryEvent},
@@ -57,15 +57,15 @@ const SURFACE_WIDTH: f32 = 1_024.0;
 const SURFACE_HEIGHT: f32 = 720.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 
-/// Application-facing state; every branch is honest about the read-only
+/// Application-facing state; every branch is honest about the native
 /// milestone and contains no fixture catalog.
+#[derive(Clone)]
 enum NativeViewState {
     Loading,
     EmptyProjects,
     LoadingThreads,
     EmptyThreads,
     Ready,
-    Unavailable,
     Failure(ServiceFailure),
 }
 
@@ -86,6 +86,10 @@ pub struct NativeApplication {
     conversation_effects: Vec<ConversationHostEffect>,
     last_picker_action: Option<ProjectPickerAction>,
     state: NativeViewState,
+    intake_stage: Option<NativeProjectIntakeStage>,
+    intake_failure_operation: Option<NativeProjectIntakeOperation>,
+    intake_retry_available: bool,
+    intake_restore_state: Option<NativeViewState>,
     service_stopped: bool,
     poll_task: Option<Task<()>>,
 }
@@ -124,6 +128,10 @@ impl NativeApplication {
             conversation_effects: Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
             last_picker_action: None,
             state,
+            intake_stage: None,
+            intake_failure_operation: None,
+            intake_retry_available: false,
+            intake_restore_state: None,
             service_stopped: false,
             poll_task: None,
         }
@@ -202,6 +210,21 @@ impl NativeApplication {
                 listing,
             } => self.handle_threads(&project_id, &listing, cx),
             NativeTransportEvent::Snapshot(snapshot) => self.handle_snapshot(snapshot, cx),
+            NativeTransportEvent::ProjectIntakeProgress(stage) => {
+                self.handle_intake_progress(stage, cx)
+            }
+            NativeTransportEvent::ProjectIntakeCancelled => self.handle_intake_cancelled(cx),
+            NativeTransportEvent::ProjectIntakeReady {
+                projects,
+                project_id,
+                threads,
+                thread_id,
+            } => self.handle_intake_ready(projects, project_id, threads, thread_id, cx),
+            NativeTransportEvent::ProjectIntakeFailed {
+                operation,
+                failure,
+                retryable,
+            } => self.handle_intake_failed(operation, failure, retryable, cx),
             NativeTransportEvent::EmptyProjects => {
                 self.pending_thread = None;
                 self.pending_snapshot = None;
@@ -240,6 +263,84 @@ impl NativeApplication {
         }
     }
 
+    fn handle_intake_progress(&mut self, stage: NativeProjectIntakeStage, cx: &mut Context<Self>) {
+        if self.intake_restore_state.is_none() {
+            self.intake_restore_state = Some(self.state.clone());
+        }
+        self.intake_stage = Some(stage);
+        self.intake_failure_operation = None;
+        self.intake_retry_available = false;
+        self.set_picker_disabled(true, cx);
+        cx.notify();
+    }
+
+    fn handle_intake_cancelled(&mut self, cx: &mut Context<Self>) {
+        self.intake_stage = None;
+        self.intake_failure_operation = None;
+        self.intake_retry_available = false;
+        if let Some(state) = self.intake_restore_state.take() {
+            self.state = state;
+        }
+        let options = self.project_options.clone();
+        self.install_picker(options, self.selected_project.clone(), cx);
+        cx.notify();
+    }
+
+    fn handle_intake_failed(
+        &mut self,
+        operation: NativeProjectIntakeOperation,
+        failure: ServiceFailure,
+        retryable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.intake_stage = None;
+        self.intake_failure_operation = Some(operation);
+        self.intake_retry_available = retryable;
+        self.state = NativeViewState::Failure(failure);
+        self.last_picker_action = None;
+        if !retryable {
+            self.intake_restore_state = None;
+        }
+        // Recreate the public picker so the previous NewProject action
+        // cannot be observed as a second retry before the user acts.
+        let options = self.project_options.clone();
+        self.install_picker(options, self.selected_project.clone(), cx);
+        cx.notify();
+    }
+
+    fn handle_intake_ready(
+        &mut self,
+        projects: ProjectListing,
+        project_id: ProjectId,
+        threads: artisan_domain::ThreadListing,
+        thread_id: ThreadId,
+        cx: &mut Context<Self>,
+    ) {
+        if !ready_membership_is_valid(&projects, &project_id, &threads, &thread_id) {
+            self.handle_intake_failed(
+                NativeProjectIntakeOperation::RefreshThreads,
+                invalid_service_failure(),
+                false,
+                cx,
+            );
+            return;
+        }
+        let options = project_options_from_listing(&projects);
+        self.project_options = options.clone();
+        self.selected_project = Some(project_id.clone());
+        self.selected_thread = None;
+        self.pending_thread = Some(thread_id);
+        self.pending_snapshot = None;
+        self.intake_stage = None;
+        self.intake_failure_operation = None;
+        self.intake_retry_available = false;
+        self.intake_restore_state = None;
+        self.state = NativeViewState::Loading;
+        self.install_picker(options, Some(project_id), cx);
+        self.try_mount_pending_thread(cx);
+        cx.notify();
+    }
+
     fn handle_projects(&mut self, listing: &ProjectListing, cx: &mut Context<Self>) {
         let options = project_options_from_listing(listing);
         self.retire_host(cx);
@@ -247,7 +348,7 @@ impl NativeApplication {
         self.selected_project = options.first().map(|project| project.id.clone());
         self.pending_thread = None;
         self.pending_snapshot = None;
-        self.install_picker(options, cx);
+        self.install_picker(options, self.selected_project.clone(), cx);
         if self.project_options.is_empty() {
             self.state = NativeViewState::EmptyProjects;
         } else {
@@ -256,8 +357,12 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn install_picker(&mut self, options: Vec<ProjectOption>, cx: &mut Context<Self>) {
-        let current = options.first().map(|project| project.id.clone());
+    fn install_picker(
+        &mut self,
+        options: Vec<ProjectOption>,
+        current: Option<ProjectId>,
+        cx: &mut Context<Self>,
+    ) {
         let picker = cx
             .new(|picker_cx| ProjectPickerView::new(options, current, ThemeMode::Dark, picker_cx));
         let subscription = cx.observe(&picker, |application, picker, cx| {
@@ -266,6 +371,15 @@ impl NativeApplication {
         self.picker = Some(picker);
         drop(self.picker_subscription.replace(subscription));
         self.last_picker_action = None;
+    }
+
+    fn set_picker_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.clone() else {
+            return;
+        };
+        picker.update(cx, |picker, picker_cx| {
+            picker.set_disabled(disabled, picker_cx);
+        });
     }
 
     fn handle_threads(
@@ -347,11 +461,11 @@ impl NativeApplication {
         }
         self.last_picker_action = Some(action.clone());
         match picker_route(&action, &self.project_options) {
-            Ok(PickerRoute::Unavailable) => {
-                self.state = NativeViewState::Unavailable;
-                cx.notify();
-            }
             Ok(PickerRoute::Select(project_id)) => {
+                self.intake_stage = None;
+                self.intake_failure_operation = None;
+                self.intake_retry_available = false;
+                self.intake_restore_state = None;
                 self.pending_thread = None;
                 self.pending_snapshot = None;
                 self.retire_host(cx);
@@ -374,7 +488,47 @@ impl NativeApplication {
                     }
                 }
             }
+            Ok(PickerRoute::BeginProjectIntake) => {
+                self.submit_intake_command(cx);
+            }
             Err(failure) => self.set_failure(failure, cx),
+        }
+    }
+
+    fn submit_intake_command(&mut self, cx: &mut Context<Self>) {
+        let Some(service) = self.service.clone() else {
+            self.handle_intake_failed(
+                NativeProjectIntakeOperation::PickDirectory,
+                ServiceFailure {
+                    stage: ServiceFailureStage::EventBridge,
+                    category: ServiceFailureCategory::ChannelClosed,
+                },
+                false,
+                cx,
+            );
+            return;
+        };
+        let retryable = self.intake_retry_available;
+        match service.submit(intake_command(retryable)) {
+            Ok(()) => {
+                if self.intake_restore_state.is_none() {
+                    self.intake_restore_state = Some(self.state.clone());
+                }
+                self.intake_stage = Some(NativeProjectIntakeStage::PickingDirectory);
+                self.intake_failure_operation = None;
+                self.intake_retry_available = false;
+                self.state = NativeViewState::Loading;
+                self.set_picker_disabled(true, cx);
+                cx.notify();
+            }
+            Err(error) => {
+                self.handle_intake_failed(
+                    NativeProjectIntakeOperation::PickDirectory,
+                    command_failure(error),
+                    false,
+                    cx,
+                );
+            }
         }
     }
 
@@ -528,7 +682,7 @@ impl NativeApplication {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PickerRoute {
     Select(ProjectId),
-    Unavailable,
+    BeginProjectIntake,
 }
 
 fn project_options_from_listing(listing: &ProjectListing) -> Vec<ProjectOption> {
@@ -540,6 +694,34 @@ fn project_options_from_listing(listing: &ProjectListing) -> Vec<ProjectOption> 
             name: gpui::SharedString::from(project.display_name.as_str().to_owned()),
         })
         .collect()
+}
+
+fn ready_membership_is_valid(
+    projects: &ProjectListing,
+    project_id: &ProjectId,
+    threads: &artisan_domain::ThreadListing,
+    thread_id: &ThreadId,
+) -> bool {
+    projects
+        .projects()
+        .iter()
+        .any(|project| &project.project_id == project_id)
+        && threads
+            .threads()
+            .iter()
+            .all(|thread| &thread.project_id == project_id)
+        && threads
+            .threads()
+            .iter()
+            .any(|thread| &thread.thread_id == thread_id)
+}
+
+fn intake_command(retryable: bool) -> NativeTransportCommand {
+    if retryable {
+        NativeTransportCommand::RetryProjectIntake
+    } else {
+        NativeTransportCommand::BeginProjectIntake
+    }
 }
 
 fn picker_route(
@@ -554,7 +736,7 @@ fn picker_route(
                 Err(invalid_service_failure())
             }
         }
-        ProjectPickerAction::NewProject => Ok(PickerRoute::Unavailable),
+        ProjectPickerAction::NewProject => Ok(PickerRoute::BeginProjectIntake),
     }
 }
 
@@ -616,10 +798,6 @@ fn status_panel(theme: &ArtisanTheme, state: &NativeViewState) -> Div {
             "Conversation unavailable",
             "No conversation host is mounted.".to_owned(),
         ),
-        NativeViewState::Unavailable => (
-            "Project attachment unavailable",
-            "Folder attachment is not part of this read-only release.".to_owned(),
-        ),
         NativeViewState::Failure(failure) => (
             "Native connection unavailable",
             format!("Service state: {failure}"),
@@ -667,7 +845,14 @@ impl Render for NativeApplication {
             .flex()
             .items_center()
             .justify_center();
-        if matches!(&self.state, NativeViewState::Ready) {
+        if let Some(stage) = self.intake_stage {
+            body = body.child(intake_status_panel(&self.theme, stage));
+        } else if self.intake_failure_operation.is_some() {
+            body = body.child(intake_failure_panel(
+                &self.theme,
+                self.intake_retry_available,
+            ));
+        } else if matches!(&self.state, NativeViewState::Ready) {
             if let Some(host) = self.conversation_host.clone() {
                 body = body.child(host);
             } else {
@@ -702,6 +887,61 @@ impl Render for NativeApplication {
                     .child(body),
             )
     }
+}
+
+fn intake_status_panel(theme: &ArtisanTheme, stage: NativeProjectIntakeStage) -> Div {
+    let (heading, detail) = match stage {
+        NativeProjectIntakeStage::PickingDirectory => (
+            "Choose a project folder",
+            "Waiting for the native folder chooser.".to_owned(),
+        ),
+        NativeProjectIntakeStage::AttachingProject => (
+            "Attaching project",
+            "Saving the selected project in Forge.".to_owned(),
+        ),
+        NativeProjectIntakeStage::RefreshingProjects => (
+            "Refreshing projects",
+            "Reading the authoritative project catalog.".to_owned(),
+        ),
+        NativeProjectIntakeStage::CreatingThread => (
+            "Creating a new thread",
+            "Saving the new thread in Forge.".to_owned(),
+        ),
+        NativeProjectIntakeStage::RefreshingThreads => (
+            "Refreshing threads",
+            "Reading the authoritative thread catalog.".to_owned(),
+        ),
+    };
+    status_panel_with_text(theme, heading, detail)
+}
+
+fn intake_failure_panel(theme: &ArtisanTheme, retryable: bool) -> Div {
+    let detail = if retryable {
+        "The project intake could not finish. Choose the project control to retry.".to_owned()
+    } else {
+        "The project intake could not finish. Choose a new project to try again.".to_owned()
+    };
+    status_panel_with_text(theme, "Project intake unavailable", detail)
+}
+
+fn status_panel_with_text(theme: &ArtisanTheme, heading: &str, detail: String) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p(px(24.0))
+        .rounded(px(8.0))
+        .bg(theme.sidebar.sidebar.to_paint())
+        .text_color(theme.colors.foreground.to_paint())
+        .debug_selector(|| NATIVE_STATUS_SELECTOR.to_string())
+        .child(heading)
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(detail),
+        )
 }
 
 fn bind_native_actions(cx: &mut App) {
@@ -802,8 +1042,9 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        NativeApplication, NativeViewState, PickerRoute, WINDOW_TITLE, picker_route,
-        project_options_from_listing,
+        NativeApplication, NativeProjectIntakeOperation, NativeProjectIntakeStage, NativeViewState,
+        PickerRoute, ServiceFailure, WINDOW_TITLE, intake_command, picker_route,
+        project_options_from_listing, ready_membership_is_valid,
     };
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
@@ -813,7 +1054,7 @@ mod tests {
     };
     use artisan_domain::{
         ConversationCursor, ConversationSnapshot, DisplayName, ProjectId, ProjectListing,
-        ProjectSummary, RootPath, ThreadId, UnixMillis,
+        ProjectSummary, RootPath, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
     };
     use artisan_ui::theme::ThemeMode;
     use gpui::TestAppContext;
@@ -824,6 +1065,16 @@ mod tests {
             display_name: DisplayName::parse(name).expect("display name"),
             root_path: RootPath::parse(format!("/{id}")).expect("root"),
             attached_at: UnixMillis::EPOCH,
+        }
+    }
+
+    fn thread(id: &str, project_id: &str, title: &str) -> ThreadSummary {
+        ThreadSummary {
+            thread_id: ThreadId::parse(id).expect("thread"),
+            project_id: ProjectId::parse(project_id).expect("project"),
+            title: ThreadTitle::parse(title).expect("title"),
+            created_at: UnixMillis::EPOCH,
+            updated_at: UnixMillis::EPOCH,
         }
     }
 
@@ -842,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_choose_routes_the_real_project_id_and_new_is_typed_unavailable() {
+    fn picker_choose_routes_the_real_project_id_and_new_begins_intake() {
         let first = ProjectOption {
             id: ProjectId::parse("forge-p1").expect("project"),
             name: "First".into(),
@@ -854,8 +1105,338 @@ mod tests {
         );
         assert_eq!(
             picker_route(&ProjectPickerAction::NewProject, &options),
-            Ok(PickerRoute::Unavailable)
+            Ok(PickerRoute::BeginProjectIntake)
         );
+    }
+
+    #[test]
+    fn intake_actions_use_begin_then_the_single_retained_retry_command() {
+        let options = vec![ProjectOption {
+            id: ProjectId::parse("forge-p1").expect("project"),
+            name: "First".into(),
+        }];
+        assert_eq!(
+            picker_route(&ProjectPickerAction::NewProject, &options),
+            Ok(PickerRoute::BeginProjectIntake)
+        );
+        assert_eq!(
+            intake_command(false),
+            crate::native_transport_service::NativeTransportCommand::BeginProjectIntake
+        );
+        assert_eq!(
+            intake_command(true),
+            crate::native_transport_service::NativeTransportCommand::RetryProjectIntake
+        );
+    }
+
+    #[test]
+    fn intake_bridge_refusals_stay_typed_and_redacted() {
+        let busy = super::command_failure(super::CommandSendError::Busy);
+        let stopped = super::command_failure(super::CommandSendError::Stopped);
+        assert_eq!(busy.category, super::ServiceFailureCategory::Backpressure);
+        assert_eq!(
+            stopped.category,
+            super::ServiceFailureCategory::ChannelClosed
+        );
+        assert!(!busy.to_string().contains("127.0.0.1"));
+        assert!(!stopped.to_string().contains("directory"));
+    }
+
+    #[test]
+    fn ready_membership_requires_the_exact_project_and_thread_rows() {
+        let projects = ProjectListing::new(vec![
+            project("forge-p1", "First"),
+            project("forge-p2", "Second"),
+        ])
+        .expect("projects");
+        let threads = ThreadListing::new(vec![
+            thread("forge-t1", "forge-p2", "Existing"),
+            thread("forge-t2", "forge-p2", "New thread"),
+        ])
+        .expect("threads");
+        assert!(ready_membership_is_valid(
+            &projects,
+            &ProjectId::parse("forge-p2").expect("project"),
+            &threads,
+            &ThreadId::parse("forge-t2").expect("thread")
+        ));
+        assert!(!ready_membership_is_valid(
+            &projects,
+            &ProjectId::parse("missing-project").expect("project"),
+            &threads,
+            &ThreadId::parse("forge-t2").expect("thread")
+        ));
+        let cross_project_threads =
+            ThreadListing::new(vec![thread("forge-t2", "forge-p1", "New thread")])
+                .expect("threads");
+        assert!(!ready_membership_is_valid(
+            &projects,
+            &ProjectId::parse("forge-p2").expect("project"),
+            &cross_project_threads,
+            &ThreadId::parse("forge-t2").expect("thread")
+        ));
+    }
+
+    #[gpui::test]
+    fn picker_is_disabled_for_every_intake_progress_stage(cx: &mut TestAppContext) {
+        let project_id = ProjectId::parse("forge-p1").expect("project");
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.install_picker(
+                    vec![ProjectOption {
+                        id: project_id.clone(),
+                        name: "First".into(),
+                    }],
+                    Some(project_id),
+                    application_cx,
+                );
+                for stage in [
+                    NativeProjectIntakeStage::PickingDirectory,
+                    NativeProjectIntakeStage::AttachingProject,
+                    NativeProjectIntakeStage::RefreshingProjects,
+                    NativeProjectIntakeStage::CreatingThread,
+                    NativeProjectIntakeStage::RefreshingThreads,
+                ] {
+                    application.handle_intake_progress(stage, application_cx);
+                    let picker = application.picker.clone().expect("picker");
+                    assert!(picker.read(application_cx).state().is_disabled());
+                }
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn cancellation_restores_the_prior_catalog_and_host_and_clears_picker_action(
+        cx: &mut TestAppContext,
+    ) {
+        let project_id = ProjectId::parse("forge-p1").expect("project");
+        let thread_id = ThreadId::parse("forge-t1").expect("thread");
+        let options = vec![ProjectOption {
+            id: project_id.clone(),
+            name: "First".into(),
+        }];
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.project_options = options.clone();
+                application.selected_project = Some(project_id.clone());
+                application.pending_thread = Some(thread_id.clone());
+                application.try_mount_pending_thread(application_cx);
+                let host_before = application.conversation_host.clone().expect("host");
+                application.state = NativeViewState::Ready;
+                application.install_picker(
+                    options.clone(),
+                    Some(project_id.clone()),
+                    application_cx,
+                );
+                application.last_picker_action = Some(ProjectPickerAction::NewProject);
+                application.handle_intake_progress(
+                    NativeProjectIntakeStage::PickingDirectory,
+                    application_cx,
+                );
+                assert!(
+                    application
+                        .picker
+                        .as_ref()
+                        .expect("picker")
+                        .read(application_cx)
+                        .state()
+                        .is_disabled()
+                );
+
+                application.handle_intake_cancelled(application_cx);
+
+                assert!(matches!(&application.state, NativeViewState::Ready));
+                assert_eq!(application.project_options, options);
+                assert_eq!(application.selected_project.as_ref(), Some(&project_id));
+                assert_eq!(application.selected_thread.as_ref(), Some(&thread_id));
+                assert_eq!(application.conversation_host.as_ref(), Some(&host_before));
+                let picker = application
+                    .picker
+                    .as_ref()
+                    .expect("picker")
+                    .read(application_cx);
+                assert!(!picker.state().is_disabled());
+                assert_eq!(picker.last_action(), None);
+                assert_eq!(application.intake_stage, None);
+                assert_eq!(application.intake_failure_operation, None);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn retryable_intake_failure_keeps_a_picker_for_the_retry_command(cx: &mut TestAppContext) {
+        let project_id = ProjectId::parse("forge-p1").expect("project");
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.install_picker(
+                    vec![ProjectOption {
+                        id: project_id.clone(),
+                        name: "First".into(),
+                    }],
+                    Some(project_id),
+                    application_cx,
+                );
+                application.handle_intake_progress(
+                    NativeProjectIntakeStage::CreatingThread,
+                    application_cx,
+                );
+                application.handle_intake_failed(
+                    NativeProjectIntakeOperation::CreateThread,
+                    ServiceFailure {
+                        stage: super::ServiceFailureStage::Request,
+                        category: super::ServiceFailureCategory::Peer,
+                    },
+                    true,
+                    application_cx,
+                );
+                assert!(application.intake_retry_available);
+                assert_eq!(
+                    intake_command(true),
+                    super::NativeTransportCommand::RetryProjectIntake
+                );
+                assert!(
+                    !application
+                        .picker
+                        .as_ref()
+                        .expect("picker")
+                        .read(application_cx)
+                        .state()
+                        .is_disabled()
+                );
+                assert_eq!(
+                    application
+                        .picker
+                        .as_ref()
+                        .expect("picker")
+                        .read(application_cx)
+                        .last_action(),
+                    None
+                );
+                assert!(matches!(&application.state, NativeViewState::Failure(_)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn ready_mounts_the_exact_returned_project_and_thread_and_requests_its_snapshot(
+        cx: &mut TestAppContext,
+    ) {
+        let projects = ProjectListing::new(vec![
+            project("forge-p1", "First"),
+            project("forge-p2", "Second"),
+        ])
+        .expect("projects");
+        let threads = ThreadListing::new(vec![
+            thread("forge-t1", "forge-p2", "Existing"),
+            thread("forge-t2", "forge-p2", "New thread"),
+        ])
+        .expect("threads");
+        let project_id = ProjectId::parse("forge-p2").expect("project");
+        let thread_id = ThreadId::parse("forge-t2").expect("thread");
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.handle_intake_ready(
+                    projects,
+                    project_id.clone(),
+                    threads,
+                    thread_id.clone(),
+                    application_cx,
+                );
+                assert_eq!(application.selected_project.as_ref(), Some(&project_id));
+                assert_eq!(application.selected_thread.as_ref(), Some(&thread_id));
+                assert_eq!(application.project_options[0].id.as_str(), "forge-p1");
+                assert_eq!(application.project_options[1].id.as_str(), "forge-p2");
+                let host = application.conversation_host.as_ref().expect("host");
+                assert_eq!(
+                    host.read(application_cx)
+                        .controller_view()
+                        .delivery
+                        .thread_id,
+                    thread_id
+                );
+                assert!(matches!(
+                    application.conversation_effects.as_slice(),
+                    [ConversationHostEffect::Controller(
+                        ConversationStateEffect::Delivery(
+                            ConversationDeliveryEffect::RequestSnapshot {
+                                thread_id: requested,
+                                ..
+                            }
+                        )
+                    )] if requested == &thread_id
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn mismatched_ready_does_not_replace_the_real_host_or_add_rows(cx: &mut TestAppContext) {
+        let old_project_id = ProjectId::parse("forge-p1").expect("project");
+        let old_thread_id = ThreadId::parse("forge-t1").expect("thread");
+        let options = vec![ProjectOption {
+            id: old_project_id.clone(),
+            name: "First".into(),
+        }];
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.project_options = options.clone();
+                application.selected_project = Some(old_project_id.clone());
+                application.pending_thread = Some(old_thread_id.clone());
+                application.try_mount_pending_thread(application_cx);
+                let host_before = application.conversation_host.clone().expect("host");
+                application.install_picker(
+                    options.clone(),
+                    Some(old_project_id.clone()),
+                    application_cx,
+                );
+                application.last_picker_action = Some(ProjectPickerAction::NewProject);
+                let mismatched_projects =
+                    ProjectListing::new(vec![project("forge-p1", "First")]).expect("projects");
+                let mismatched_threads =
+                    ThreadListing::new(vec![thread("forge-t2", "forge-p2", "New thread")])
+                        .expect("threads");
+                application.handle_intake_ready(
+                    mismatched_projects,
+                    ProjectId::parse("forge-p2").expect("project"),
+                    mismatched_threads,
+                    ThreadId::parse("forge-t2").expect("thread"),
+                    application_cx,
+                );
+                assert_eq!(application.project_options, options);
+                assert_eq!(application.conversation_host.as_ref(), Some(&host_before));
+                assert_eq!(
+                    application
+                        .picker
+                        .as_ref()
+                        .expect("picker")
+                        .read(application_cx)
+                        .state()
+                        .projects(),
+                    options.as_slice()
+                );
+                assert_eq!(
+                    application
+                        .picker
+                        .as_ref()
+                        .expect("picker")
+                        .read(application_cx)
+                        .last_action(),
+                    None
+                );
+                assert!(matches!(&application.state, NativeViewState::Failure(_)));
+            });
+        });
     }
 
     #[gpui::test]
