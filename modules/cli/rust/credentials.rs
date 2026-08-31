@@ -2707,12 +2707,11 @@ mod client_credentials_tests {
         const CAPABILITY_CANARY: &[u8] = b"bootstrap-capability-bytes-canary";
         const CERTIFICATE_CANARY: &[u8] = b"certificate-bytes-canary";
         const KEY_CANARY: &[u8] = b"private-key-bytes-canary";
-        let capability_error = match local_capability_from_bytes(
+        let Err(capability_error) = local_capability_from_bytes(
             Zeroizing::new(CAPABILITY_CANARY.to_vec()).as_slice(),
             Path::new("capability.bin"),
-        ) {
-            Ok(_) => panic!("canary capability must fail length validation"),
-            Err(error) => error,
+        ) else {
+            panic!("canary capability must fail length validation");
         };
         let certificate_error =
             validate_cert_sans(CERTIFICATE_CANARY).expect_err("canary certificate must fail");
