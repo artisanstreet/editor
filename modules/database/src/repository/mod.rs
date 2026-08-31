@@ -193,6 +193,11 @@ impl Repository {
     /// uses this only while it still owns the immutable thread/run snapshot;
     /// the root itself is validated at the domain boundary before it leaves
     /// the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] if the thread or attached project is
+    /// missing, persisted data is corrupt, or a database query fails.
     pub async fn read_thread_project_root(
         &self,
         thread_id: &ThreadId,

@@ -2577,6 +2577,12 @@ impl Repository {
     /// Atomically settles a running bound run as cancelled. Dispatch,
     /// assistant run, item, turn, counters, and lifecycle patches commit as
     /// one transaction; an exact replay returns `AlreadyCancelled`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CancelRunError`] if validation fails, a required database
+    /// operation fails, the fenced cancellation cannot be applied, or the
+    /// transaction produces an invalid auxiliary outcome.
     pub async fn cancel_run(
         &self,
         command: CancelRun<'_>,
@@ -2623,6 +2629,12 @@ impl Repository {
     /// Atomically settles a running bound run as interrupted. The run keeps
     /// a NULL `terminal_at_ms`, while its dispatch/item/turn are moved to
     /// their distinct interrupted representations in one commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InterruptRunError`] if validation fails, a required database
+    /// operation fails, the fenced interruption cannot be applied, or the
+    /// transaction produces an invalid auxiliary outcome.
     pub async fn interrupt_run(
         &self,
         command: InterruptRun<'_>,
@@ -2911,15 +2923,15 @@ async fn fence_auxiliary_run(
     let scope = command.scope();
     let launched = scope.launched;
     let (owner, lease, _) = scope.credentials.parts();
-    let (error_code, error_message) = command
-        .error_pair()
-        .map(|(code, message)| {
-            (
-                Some(code.as_str().to_owned()),
-                Some(message.as_str().to_owned()),
-            )
-        })
-        .unwrap_or((None, None));
+    let (error_code, error_message) =
+        command
+            .error_pair()
+            .map_or((None, None), |(code, message)| {
+                (
+                    Some(code.as_str().to_owned()),
+                    Some(message.as_str().to_owned()),
+                )
+            });
     let statement = Statement::from_sql_and_values(
         DbBackend::Sqlite,
         AUX_RUN_SQL,
@@ -2961,31 +2973,79 @@ async fn classify_auxiliary_replay(
 ) -> Result<Option<AuxiliaryReceipt>, AuxiliaryTerminalError> {
     let scope = command.scope();
     let Some(dispatch) =
-        entities::message_dispatch::Entity::find_by_id(scope.claimed.message_id.as_str())
-            .one(transaction)
-            .await
-            .map_err(|source| {
-                AuxiliaryTerminalError::Repository(database_error(
-                    "classify auxiliary dispatch replay",
-                    source,
-                ))
-            })?
+        load_auxiliary_replay_dispatch(transaction, scope.claimed.message_id.as_str()).await?
     else {
         return Ok(None);
     };
-    if dispatch.state != DispatchState::Failed
-        || dispatch.correlation_id != scope.claimed.correlation_id.as_str()
-        || dispatch.attempt_count != i32::try_from(scope.claimed.attempt_count).unwrap_or(-1)
-        || dispatch.queued_at_ms != millis(scope.claimed.queued_at)
-        || dispatch.available_at_ms != millis(scope.claimed.available_at)
-        || dispatch.updated_at_ms != millis(command.operated_at())
-        || dispatch.lease_owner.is_some()
-        || dispatch.lease_expires_at_ms.is_some()
-        || dispatch.last_error.as_deref() != Some(command.dispatch_error())
-    {
+    if !auxiliary_dispatch_replay_matches(&dispatch, &scope, command) {
         return Ok(None);
     }
-    let Some(run) = entities::assistant_run::Entity::find_by_id(scope.launched.run_id.as_str())
+    let Some(run) = load_auxiliary_replay_run(transaction, scope.launched.run_id.as_str()).await?
+    else {
+        return Ok(None);
+    };
+    if !auxiliary_run_replay_matches(&run, &scope, command) {
+        return Ok(None);
+    }
+    let Some(item) = load_auxiliary_replay_item(transaction, command.item_id().as_str()).await?
+    else {
+        return Ok(None);
+    };
+    if !auxiliary_item_replay_matches(&item, &scope, command) {
+        return Ok(None);
+    }
+    let Some(turn) =
+        load_auxiliary_replay_turn(transaction, scope.launched.turn_id.as_str()).await?
+    else {
+        return Ok(None);
+    };
+    if !auxiliary_turn_replay_matches(&turn, &scope, command) {
+        return Ok(None);
+    }
+    let Some(item_patch) = load_auxiliary_replay_patch(
+        transaction,
+        command.item_patch_id().as_str(),
+        "classify auxiliary item patch replay",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(turn_patch) = load_auxiliary_replay_patch(
+        transaction,
+        command.turn_patch_id().as_str(),
+        "classify auxiliary turn patch replay",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !auxiliary_patches_replay_match(&item_patch, &turn_patch, &scope, command) {
+        return Ok(None);
+    }
+    Ok(Some(auxiliary_replay_receipt(command, &scope)))
+}
+
+async fn load_auxiliary_replay_dispatch(
+    transaction: &sea_orm::DatabaseTransaction,
+    message_id: &str,
+) -> Result<Option<entities::MessageDispatch>, AuxiliaryTerminalError> {
+    entities::message_dispatch::Entity::find_by_id(message_id)
+        .one(transaction)
+        .await
+        .map_err(|source| {
+            AuxiliaryTerminalError::Repository(database_error(
+                "classify auxiliary dispatch replay",
+                source,
+            ))
+        })
+}
+
+async fn load_auxiliary_replay_run(
+    transaction: &sea_orm::DatabaseTransaction,
+    run_id: &str,
+) -> Result<Option<entities::AssistantRun>, AuxiliaryTerminalError> {
+    entities::assistant_run::Entity::find_by_id(run_id)
         .one(transaction)
         .await
         .map_err(|source| {
@@ -2993,10 +3053,71 @@ async fn classify_auxiliary_replay(
                 "classify auxiliary run replay",
                 source,
             ))
-        })?
-    else {
-        return Ok(None);
-    };
+        })
+}
+
+async fn load_auxiliary_replay_item(
+    transaction: &sea_orm::DatabaseTransaction,
+    item_id: &str,
+) -> Result<Option<entities::ConversationItem>, AuxiliaryTerminalError> {
+    entities::conversation_item::Entity::find_by_id(item_id)
+        .one(transaction)
+        .await
+        .map_err(|source| {
+            AuxiliaryTerminalError::Repository(database_error(
+                "classify auxiliary item replay",
+                source,
+            ))
+        })
+}
+
+async fn load_auxiliary_replay_turn(
+    transaction: &sea_orm::DatabaseTransaction,
+    turn_id: &str,
+) -> Result<Option<entities::ConversationTurn>, AuxiliaryTerminalError> {
+    entities::conversation_turn::Entity::find_by_id(turn_id)
+        .one(transaction)
+        .await
+        .map_err(|source| {
+            AuxiliaryTerminalError::Repository(database_error(
+                "classify auxiliary turn replay",
+                source,
+            ))
+        })
+}
+
+async fn load_auxiliary_replay_patch(
+    transaction: &sea_orm::DatabaseTransaction,
+    patch_id: &str,
+    operation: &'static str,
+) -> Result<Option<entities::ConversationPatch>, AuxiliaryTerminalError> {
+    entities::conversation_patch::Entity::find_by_id(patch_id)
+        .one(transaction)
+        .await
+        .map_err(|source| AuxiliaryTerminalError::Repository(database_error(operation, source)))
+}
+
+fn auxiliary_dispatch_replay_matches(
+    dispatch: &entities::MessageDispatch,
+    scope: &RunBatchScope<'_>,
+    command: &AuxiliaryTerminal<'_>,
+) -> bool {
+    dispatch.state == DispatchState::Failed
+        && dispatch.correlation_id == scope.claimed.correlation_id.as_str()
+        && dispatch.attempt_count == i32::try_from(scope.claimed.attempt_count).unwrap_or(-1)
+        && dispatch.queued_at_ms == millis(scope.claimed.queued_at)
+        && dispatch.available_at_ms == millis(scope.claimed.available_at)
+        && dispatch.updated_at_ms == millis(command.operated_at())
+        && dispatch.lease_owner.is_none()
+        && dispatch.lease_expires_at_ms.is_none()
+        && dispatch.last_error.as_deref() == Some(command.dispatch_error())
+}
+
+fn auxiliary_run_replay_matches(
+    run: &entities::AssistantRun,
+    scope: &RunBatchScope<'_>,
+    command: &AuxiliaryTerminal<'_>,
+) -> bool {
     if run.lifecycle != command.run_lifecycle()
         || run.updated_at_ms != millis(command.operated_at())
         || run.thread_id != scope.launched.thread_id.as_str()
@@ -3011,110 +3132,72 @@ async fn classify_auxiliary_replay(
         || run.provider_binding.is_none()
         || run.provider_bound_at_ms != Some(millis(scope.bound.bound_at))
     {
-        return Ok(None);
+        return false;
     }
     match command.error_pair() {
         Some((code, message)) => {
-            if run.terminal_at_ms.is_some()
-                || run.error_code.as_deref() != Some(code.as_str())
-                || run.error_message.as_deref() != Some(message.as_str())
-            {
-                return Ok(None);
-            }
+            run.terminal_at_ms.is_none()
+                && run.error_code.as_deref() == Some(code.as_str())
+                && run.error_message.as_deref() == Some(message.as_str())
         }
         None => {
-            if run.terminal_at_ms != command.terminal_at().map(millis)
-                || run.error_code.is_some()
-                || run.error_message.is_some()
-            {
-                return Ok(None);
-            }
+            run.terminal_at_ms == command.terminal_at().map(millis)
+                && run.error_code.is_none()
+                && run.error_message.is_none()
         }
     }
-    let Some(item) = entities::conversation_item::Entity::find_by_id(command.item_id().as_str())
-        .one(transaction)
-        .await
-        .map_err(|source| {
-            AuxiliaryTerminalError::Repository(database_error(
-                "classify auxiliary item replay",
-                source,
-            ))
-        })?
-    else {
-        return Ok(None);
-    };
+}
+
+fn auxiliary_item_replay_matches(
+    item: &entities::ConversationItem,
+    scope: &RunBatchScope<'_>,
+    command: &AuxiliaryTerminal<'_>,
+) -> bool {
     let expected_revision = i64::try_from(command.expected_revision().get())
         .ok()
         .and_then(|revision| revision.checked_add(1));
-    if item.lifecycle != command.entity_lifecycle()
-        || item.thread_id != scope.launched.thread_id.as_str()
-        || item.turn_id != scope.launched.turn_id.as_str()
-        || item.run_id.as_deref() != Some(scope.launched.run_id.as_str())
-        || item.item_kind != ConversationItemKind::AssistantMessage
-        || item.body != command.body().as_str()
-        || item.phase.as_ref() != Some(&map_phase(command.phase()))
-        || item.revision != expected_revision.unwrap_or(-1)
-        || item.updated_at_ms != millis(command.operated_at())
-    {
-        return Ok(None);
-    }
-    let Some(turn) =
-        entities::conversation_turn::Entity::find_by_id(scope.launched.turn_id.as_str())
-            .one(transaction)
-            .await
-            .map_err(|source| {
-                AuxiliaryTerminalError::Repository(database_error(
-                    "classify auxiliary turn replay",
-                    source,
-                ))
-            })?
-    else {
-        return Ok(None);
-    };
-    if turn.lifecycle != command.entity_lifecycle()
-        || turn.thread_id != scope.launched.thread_id.as_str()
-        || turn.updated_at_ms != millis(command.operated_at())
-    {
-        return Ok(None);
-    }
-    let Some(item_patch) =
-        entities::conversation_patch::Entity::find_by_id(command.item_patch_id().as_str())
-            .one(transaction)
-            .await
-            .map_err(|source| {
-                AuxiliaryTerminalError::Repository(database_error(
-                    "classify auxiliary item patch replay",
-                    source,
-                ))
-            })?
-    else {
-        return Ok(None);
-    };
-    let Some(turn_patch) =
-        entities::conversation_patch::Entity::find_by_id(command.turn_patch_id().as_str())
-            .one(transaction)
-            .await
-            .map_err(|source| {
-                AuxiliaryTerminalError::Repository(database_error(
-                    "classify auxiliary turn patch replay",
-                    source,
-                ))
-            })?
-    else {
-        return Ok(None);
-    };
-    if item_patch.thread_id != scope.launched.thread_id.as_str()
-        || item_patch.kind != ConversationPatchKind::ItemLifecycle
-        || item_patch.item_id.as_deref() != Some(command.item_id().as_str())
-        || item_patch.lifecycle != Some(command.entity_lifecycle())
-        || turn_patch.thread_id != scope.launched.thread_id.as_str()
-        || turn_patch.kind != ConversationPatchKind::TurnLifecycle
-        || turn_patch.turn_id.as_deref() != Some(scope.launched.turn_id.as_str())
-        || turn_patch.lifecycle != Some(command.entity_lifecycle())
-    {
-        return Ok(None);
-    }
-    let receipt = match command {
+    item.lifecycle == command.entity_lifecycle()
+        && item.thread_id == scope.launched.thread_id.as_str()
+        && item.turn_id == scope.launched.turn_id.as_str()
+        && item.run_id.as_deref() == Some(scope.launched.run_id.as_str())
+        && item.item_kind == ConversationItemKind::AssistantMessage
+        && item.body == command.body().as_str()
+        && item.phase.as_ref() == Some(&map_phase(command.phase()))
+        && item.revision == expected_revision.unwrap_or(-1)
+        && item.updated_at_ms == millis(command.operated_at())
+}
+
+fn auxiliary_turn_replay_matches(
+    turn: &entities::ConversationTurn,
+    scope: &RunBatchScope<'_>,
+    command: &AuxiliaryTerminal<'_>,
+) -> bool {
+    turn.lifecycle == command.entity_lifecycle()
+        && turn.thread_id == scope.launched.thread_id.as_str()
+        && turn.updated_at_ms == millis(command.operated_at())
+}
+
+fn auxiliary_patches_replay_match(
+    item_patch: &entities::ConversationPatch,
+    turn_patch: &entities::ConversationPatch,
+    scope: &RunBatchScope<'_>,
+    command: &AuxiliaryTerminal<'_>,
+) -> bool {
+    item_patch.thread_id == scope.launched.thread_id.as_str()
+        && item_patch.kind == ConversationPatchKind::ItemLifecycle
+        && item_patch.item_id.as_deref() == Some(command.item_id().as_str())
+        && item_patch.lifecycle == Some(command.entity_lifecycle())
+        && turn_patch.thread_id == scope.launched.thread_id.as_str()
+        && turn_patch.kind == ConversationPatchKind::TurnLifecycle
+        && turn_patch.turn_id.as_deref() == Some(scope.launched.turn_id.as_str())
+        && turn_patch.lifecycle == Some(command.entity_lifecycle())
+}
+
+fn auxiliary_replay_receipt(
+    command: &AuxiliaryTerminal<'_>,
+    scope: &RunBatchScope<'_>,
+) -> AuxiliaryReceipt {
+    match command {
         AuxiliaryTerminal::Cancel(_) => AuxiliaryReceipt::Cancelled(TerminalRunReceipt {
             run_id: scope.launched.run_id.clone(),
             generation: scope.launched.generation,
@@ -3125,8 +3208,7 @@ async fn classify_auxiliary_replay(
             generation: scope.launched.generation,
             interrupted_at: command.operated_at(),
         }),
-    };
-    Ok(Some(receipt))
+    }
 }
 
 async fn classify_auxiliary_dispatch_failure(
@@ -3241,6 +3323,33 @@ async fn load_auxiliary_context(
 ) -> Result<AuxiliaryContext, AuxiliaryTerminalError> {
     let scope = command.scope();
     let thread_id = scope.launched.thread_id.as_str();
+    let state = load_auxiliary_state(transaction, command, thread_id).await?;
+
+    let turn = load_auxiliary_turn(
+        transaction,
+        command,
+        thread_id,
+        scope.launched.turn_id.as_str(),
+    )
+    .await?;
+
+    let item = load_auxiliary_item(
+        transaction,
+        command,
+        thread_id,
+        scope.launched.turn_id.as_str(),
+        scope.launched.run_id.as_str(),
+    )
+    .await?;
+    ensure_auxiliary_patches_vacant(transaction, command).await?;
+    Ok(AuxiliaryContext { state, turn, item })
+}
+
+async fn load_auxiliary_state(
+    transaction: &sea_orm::DatabaseTransaction,
+    command: &AuxiliaryTerminal<'_>,
+    thread_id: &str,
+) -> Result<projection::LoadedState, AuxiliaryTerminalError> {
     let state = projection::load_conversation_state(transaction, thread_id)
         .await
         .map_err(map_projection_error_auxiliary)?
@@ -3272,8 +3381,16 @@ async fn load_auxiliary_context(
             value: state.last_patch_sequence,
         });
     }
+    Ok(state)
+}
 
-    let turn = projection::load_turn(transaction, scope.launched.turn_id.as_str())
+async fn load_auxiliary_turn(
+    transaction: &sea_orm::DatabaseTransaction,
+    command: &AuxiliaryTerminal<'_>,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<projection::LoadedTurn, AuxiliaryTerminalError> {
+    let turn = projection::load_turn(transaction, turn_id)
         .await
         .map_err(map_projection_error_auxiliary)?
         .ok_or_else(|| {
@@ -3309,7 +3426,16 @@ async fn load_auxiliary_context(
             reason: "origin turn is sealed",
         });
     }
+    Ok(turn)
+}
 
+async fn load_auxiliary_item(
+    transaction: &sea_orm::DatabaseTransaction,
+    command: &AuxiliaryTerminal<'_>,
+    thread_id: &str,
+    turn_id: &str,
+    run_id: &str,
+) -> Result<entities::ConversationItem, AuxiliaryTerminalError> {
     let item = projection::load_item(transaction, command.item_id().as_str())
         .await
         .map_err(map_projection_error_auxiliary)?
@@ -3317,8 +3443,8 @@ async fn load_auxiliary_context(
             reason: "target item does not exist",
         })?;
     if item.thread_id != thread_id
-        || item.turn_id != scope.launched.turn_id.as_str()
-        || item.run_id.as_deref() != Some(scope.launched.run_id.as_str())
+        || item.turn_id != turn_id
+        || item.run_id.as_deref() != Some(run_id)
         || item.item_kind != ConversationItemKind::AssistantMessage
     {
         return Err(AuxiliaryTerminalError::TargetConflict {
@@ -3356,6 +3482,13 @@ async fn load_auxiliary_context(
             reason: "expected revision does not match the stored item",
         });
     }
+    Ok(item)
+}
+
+async fn ensure_auxiliary_patches_vacant(
+    transaction: &sea_orm::DatabaseTransaction,
+    command: &AuxiliaryTerminal<'_>,
+) -> Result<(), AuxiliaryTerminalError> {
     if projection::patch_exists(transaction, command.item_patch_id().as_str())
         .await
         .map_err(map_projection_error_auxiliary)?
@@ -3367,7 +3500,7 @@ async fn load_auxiliary_context(
             reason: "terminal patch identity already exists",
         });
     }
-    Ok(AuxiliaryContext { state, turn, item })
+    Ok(())
 }
 
 fn map_projection_error_auxiliary(error: super::RunObservationError) -> AuxiliaryTerminalError {
@@ -3380,11 +3513,34 @@ fn map_projection_error_auxiliary(error: super::RunObservationError) -> Auxiliar
     }
 }
 
+struct AuxiliaryPersistencePlan {
+    item_revision: i64,
+    turn_revision: i64,
+    first_sequence: i64,
+    second_sequence: i64,
+    operated_at_ms: i64,
+    lifecycle: EntityLifecycle,
+    lifecycle_label: &'static str,
+    phase: &'static str,
+}
+
 async fn persist_auxiliary(
     transaction: &sea_orm::DatabaseTransaction,
     command: &AuxiliaryTerminal<'_>,
     context: AuxiliaryContext,
 ) -> Result<(), AuxiliaryTerminalError> {
+    let plan = auxiliary_persistence_plan(command, &context)?;
+    update_auxiliary_item(transaction, command, &context, &plan).await?;
+    update_auxiliary_turn(transaction, &context, &plan).await?;
+    insert_auxiliary_patches(transaction, command, &context, &plan).await?;
+    advance_auxiliary_state(transaction, command, &context, &plan).await?;
+    Ok(())
+}
+
+fn auxiliary_persistence_plan(
+    command: &AuxiliaryTerminal<'_>,
+    context: &AuxiliaryContext,
+) -> Result<AuxiliaryPersistencePlan, AuxiliaryTerminalError> {
     let item_revision = next_revision_auxiliary("conversation_items", context.item.revision)?;
     let turn_revision = next_revision_auxiliary("conversation_turns", context.turn.revision)?;
     let first_sequence = context.state.last_patch_sequence.checked_add(1).ok_or(
@@ -3408,6 +3564,24 @@ async fn persist_auxiliary(
         _ => unreachable!("auxiliary terminal lifecycle is always terminal"),
     };
     let phase = render_phase_label(&map_phase(command.phase()));
+    Ok(AuxiliaryPersistencePlan {
+        item_revision,
+        turn_revision,
+        first_sequence,
+        second_sequence,
+        operated_at_ms,
+        lifecycle,
+        lifecycle_label,
+        phase,
+    })
+}
+
+async fn update_auxiliary_item(
+    transaction: &sea_orm::DatabaseTransaction,
+    command: &AuxiliaryTerminal<'_>,
+    context: &AuxiliaryContext,
+    plan: &AuxiliaryPersistencePlan,
+) -> Result<(), AuxiliaryTerminalError> {
     let item_updated = transaction
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
@@ -3418,11 +3592,11 @@ WHERE item_id = ? AND revision = ?
 RETURNING item_id
 ",
             [
-                lifecycle_label.into(),
+                plan.lifecycle_label.into(),
                 command.body().as_str().to_owned().into(),
-                phase.into(),
-                item_revision.into(),
-                operated_at_ms.into(),
+                plan.phase.into(),
+                plan.item_revision.into(),
+                plan.operated_at_ms.into(),
                 command.item_id().as_str().into(),
                 context.item.revision.into(),
             ],
@@ -3439,6 +3613,14 @@ RETURNING item_id
             reason: "item fence failed",
         });
     }
+    Ok(())
+}
+
+async fn update_auxiliary_turn(
+    transaction: &sea_orm::DatabaseTransaction,
+    context: &AuxiliaryContext,
+    plan: &AuxiliaryPersistencePlan,
+) -> Result<(), AuxiliaryTerminalError> {
     let turn_updated = transaction
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
@@ -3449,9 +3631,9 @@ WHERE turn_id = ? AND revision = ?
 RETURNING turn_id
 ",
             [
-                lifecycle_label.into(),
-                turn_revision.into(),
-                operated_at_ms.into(),
+                plan.lifecycle_label.into(),
+                plan.turn_revision.into(),
+                plan.operated_at_ms.into(),
                 context.turn.turn_id.clone().into(),
                 context.turn.revision.into(),
             ],
@@ -3468,18 +3650,27 @@ RETURNING turn_id
             reason: "turn fence failed",
         });
     }
+    Ok(())
+}
+
+async fn insert_auxiliary_patches(
+    transaction: &sea_orm::DatabaseTransaction,
+    command: &AuxiliaryTerminal<'_>,
+    context: &AuxiliaryContext,
+    plan: &AuxiliaryPersistencePlan,
+) -> Result<(), AuxiliaryTerminalError> {
     insert_terminal_patch(
         transaction,
         TerminalPatchInput {
             thread_id: command.scope().launched.thread_id.as_str(),
             patch_id: command.item_patch_id().as_str(),
-            sequence: first_sequence,
+            sequence: plan.first_sequence,
             kind: ConversationPatchKind::ItemLifecycle,
-            revision: item_revision,
-            recorded_at_ms: operated_at_ms,
+            revision: plan.item_revision,
+            recorded_at_ms: plan.operated_at_ms,
             item_id: Some(command.item_id().as_str()),
             turn_id: None,
-            lifecycle: Some(lifecycle.clone()),
+            lifecycle: Some(plan.lifecycle.clone()),
         },
     )
     .await
@@ -3489,17 +3680,26 @@ RETURNING turn_id
         TerminalPatchInput {
             thread_id: command.scope().launched.thread_id.as_str(),
             patch_id: command.turn_patch_id().as_str(),
-            sequence: second_sequence,
+            sequence: plan.second_sequence,
             kind: ConversationPatchKind::TurnLifecycle,
-            revision: turn_revision,
-            recorded_at_ms: operated_at_ms,
+            revision: plan.turn_revision,
+            recorded_at_ms: plan.operated_at_ms,
             item_id: None,
             turn_id: Some(context.turn.turn_id.as_str()),
-            lifecycle: Some(lifecycle),
+            lifecycle: Some(plan.lifecycle.clone()),
         },
     )
     .await
     .map_err(AuxiliaryTerminalError::Repository)?;
+    Ok(())
+}
+
+async fn advance_auxiliary_state(
+    transaction: &sea_orm::DatabaseTransaction,
+    command: &AuxiliaryTerminal<'_>,
+    context: &AuxiliaryContext,
+    plan: &AuxiliaryPersistencePlan,
+) -> Result<(), AuxiliaryTerminalError> {
     let advanced = transaction
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
@@ -3510,8 +3710,8 @@ WHERE thread_id = ? AND last_patch_sequence = ?
 RETURNING thread_id
 ",
             [
-                second_sequence.into(),
-                operated_at_ms.into(),
+                plan.second_sequence.into(),
+                plan.operated_at_ms.into(),
                 command.scope().launched.thread_id.as_str().into(),
                 context.state.last_patch_sequence.into(),
             ],
