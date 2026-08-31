@@ -274,7 +274,7 @@ fn native_run_config_rejects_zero_and_out_of_range_values() {
             shutdown_budget_ms: 1,
             queue_capacity: 1,
             max_command_retries: 1,
-            prompt_delivery: "".to_owned(),
+            prompt_delivery: String::new(),
             stream_after: 0,
         },
         NativeRunConfigInput {
