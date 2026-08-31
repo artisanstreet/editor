@@ -453,7 +453,7 @@ pub(crate) fn encode(config: &EngineRunConfig) -> Result<Vec<u8>, EngineRunConfi
         profile_id: selection.profile_id().as_str(),
         model_id: selection.model_id().as_str(),
         route_id: selection.route_id().as_str(),
-        variant_id: selection.variant_id().map(|value| value.as_str()),
+        variant_id: selection.variant_id().map(EngineVariantId::as_str),
         permission: StoredPermission {
             permission_id: permission.permission_id().as_str(),
             agent_id: permission.agent_id().as_str(),
