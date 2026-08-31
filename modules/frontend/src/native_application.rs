@@ -23,8 +23,8 @@ use artisan_domain::{ConversationSnapshot, EngineProfileId, ProjectId, ProjectLi
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
     App, AppContext as _, Application, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FocusHandle, KeyBinding, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, div,
+    FocusHandle, KeyBinding, Render, StatefulInteractiveElement, Subscription, Task,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
@@ -1445,7 +1445,7 @@ fn engine_settings_panel(
             let selector = format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-profile-{index}");
             certified_profile_choices = certified_profile_choices.child(
                 div()
-                    .id(selector.clone())
+                    .id((NATIVE_ENGINE_SETTINGS_SELECTOR, index))
                     .debug_selector(move || selector)
                     .on_click(cx.listener(move |application, event, window, cx| {
                         application.handle_select_engine_profile(
@@ -1509,7 +1509,7 @@ fn engine_settings_panel(
         format!("Bound to thread {}", id.as_str())
     });
     let copy_button = div()
-        .id(format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-copy-template"))
+        .id("artisan-native-engine-settings-copy-template")
         .debug_selector(|| format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-copy-template"))
         .on_click(cx.listener(NativeApplication::handle_copy_manual_configuration))
         .p(px(4.0))
@@ -1517,9 +1517,7 @@ fn engine_settings_panel(
         .text_color(theme.colors.foreground.to_paint())
         .child("Copy manual configuration template");
     let paste_button = div()
-        .id(format!(
-            "{NATIVE_ENGINE_SETTINGS_SELECTOR}-paste-configuration"
-        ))
+        .id("artisan-native-engine-settings-paste-configuration")
         .debug_selector(|| format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-paste-configuration"))
         .on_click(cx.listener(NativeApplication::handle_paste_manual_configuration))
         .p(px(4.0))
@@ -1527,7 +1525,7 @@ fn engine_settings_panel(
         .text_color(theme.colors.foreground.to_paint())
         .child("Paste complete manual configuration");
     let mut save_button = div()
-        .id(format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-save"))
+        .id("artisan-native-engine-settings-save")
         .debug_selector(|| format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-save"))
         .p(px(4.0))
         .text_sm()
@@ -1540,7 +1538,7 @@ fn engine_settings_panel(
         save_button = save_button.opacity(0.5);
     }
     let mut cancel_button = div()
-        .id(format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-cancel"))
+        .id("artisan-native-engine-settings-cancel")
         .debug_selector(|| format!("{NATIVE_ENGINE_SETTINGS_SELECTOR}-cancel"))
         .p(px(4.0))
         .text_sm()

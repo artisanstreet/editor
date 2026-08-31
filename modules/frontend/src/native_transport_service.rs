@@ -80,6 +80,11 @@ impl SettingsLoadGeneration {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    #[cfg(test)]
+    pub(crate) const fn from_raw_for_test(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 /// Commands accepted by the native service.
@@ -2536,10 +2541,9 @@ mod tests {
         ServiceFailureCategory, StartupError, ThreadSelectionDecision, attach_mutation,
         contains_exact_project, contains_exact_thread, create_command_values, create_mutation,
         engine_config_stable_mutation, finite_duration, make_request_frame,
-        payload_health_decision, project_request, reconnect_hello, registered_profiles_request,
-        session_needs_reconnect, snapshot_request, thread_engine_settings_request,
-        thread_selection_decision, threads_request, try_send_command, validate_readiness,
-        validate_response_family,
+        payload_health_decision, project_request, reconnect_hello, session_needs_reconnect,
+        snapshot_request, thread_engine_settings_request, thread_selection_decision,
+        threads_request, try_send_command, validate_readiness, validate_response_family,
     };
     use artisan_domain::{
         AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
@@ -3397,16 +3401,24 @@ mod tests {
             config.clone(),
         ));
         let mutation = engine_config_stable_mutation(command).expect("mutation");
-        let first_envelope = mutation.envelope(ProtocolVersion::V1).expect("envelope");
-        let second_envelope = mutation
+        let (first_envelope, first_request_id) =
+            mutation.envelope(ProtocolVersion::V1).expect("envelope");
+        let (second_envelope, second_request_id) = mutation
             .envelope(ProtocolVersion::V1)
             .expect("retry envelope");
+        assert_eq!(
+            first_envelope.protocol_version,
+            second_envelope.protocol_version
+        );
+        assert!(first_envelope.body == second_envelope.body);
+        assert_eq!(first_request_id, second_request_id);
         assert_eq!(first_envelope.frame_id, second_envelope.frame_id);
         assert_eq!(first_envelope.sent_at, second_envelope.sent_at);
         assert_eq!(
             first_envelope.frame_id.to_request_id().expect("id"),
-            request_id
+            first_request_id
         );
+        assert_eq!(first_request_id, request_id);
         // Fresh read uses fresh frame.
         let mut frames = FrameFactory::new();
         let (fresh_first, _) = make_request_frame(

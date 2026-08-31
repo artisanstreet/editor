@@ -740,15 +740,18 @@ impl EngineSettingsController {
                 category: ServiceFailureCategory::InvalidConfiguration,
             });
         }
-        let generation = self
-            .next_settings_load_generation
-            .map_or(SettingsLoadGeneration::first(), |previous| {
-                previous.checked_next()
-            })
-            .ok_or(ServiceFailure {
-                stage: ServiceFailureStage::Request,
-                category: ServiceFailureCategory::Integrity,
-            })?;
+        let generation = match self.next_settings_load_generation {
+            None => SettingsLoadGeneration::first(),
+            Some(previous) => match previous.checked_next() {
+                Some(next) => next,
+                None => {
+                    return Err(ServiceFailure {
+                        stage: ServiceFailureStage::Request,
+                        category: ServiceFailureCategory::Integrity,
+                    });
+                }
+            },
+        };
         self.next_settings_load_generation = Some(generation);
         Ok(generation)
     }
@@ -1608,7 +1611,8 @@ mod tests {
         let mut controller = EngineSettingsController::new();
         let tid = thread_id("thread-a");
         controller.select_thread(Some(tid.clone()));
-        controller.next_settings_load_generation = Some(SettingsLoadGeneration(u64::MAX));
+        controller.next_settings_load_generation =
+            Some(SettingsLoadGeneration::from_raw_for_test(u64::MAX));
         let failure = controller.prepare_settings_load().expect_err("exhausted");
         assert_eq!(failure.category, ServiceFailureCategory::Integrity);
         controller.on_settings_load_admission_failed(tid, failure);
