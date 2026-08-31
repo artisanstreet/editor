@@ -295,6 +295,144 @@ fn gap_enters_recovering_and_retains_state() {
     assert_eq!(request_after(&effects[1]), Some(ConversationCursor::new(4)));
 }
 
+#[test]
+fn exact_resumed_ack_returns_recovery_to_ready_without_effects_or_snapshot_change() {
+    let mut controller = ConversationDeliveryController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_snapshot(baseline_snapshot())
+        .expect("baseline");
+    let _ = controller.drain_effects();
+    controller
+        .on_batch(batch(6, 7, vec![append_patch(7, ITEM_USER, 1, "gap")]))
+        .expect("gap enters recovery");
+    let _ = controller.drain_effects();
+
+    let before = controller.snapshot().cloned().expect("recovery snapshot");
+    let generation = controller.generation();
+    controller
+        .on_resumed(thread_id(), ConversationCursor::new(4))
+        .expect("exact resume is accepted");
+
+    assert_eq!(controller.phase(), DeliveryPhase::Ready);
+    assert_eq!(controller.projection_status(), ProjectionStatus::Ready);
+    assert_eq!(controller.snapshot(), Some(&before));
+    assert_eq!(controller.cursor(), Some(ConversationCursor::new(4)));
+    assert_eq!(controller.generation(), generation);
+    assert!(
+        controller.drain_effects().is_empty(),
+        "resume does not invalidate or request another snapshot"
+    );
+
+    controller
+        .on_batch(batch(
+            4,
+            5,
+            vec![lifecycle_patch(
+                5,
+                ITEM_USER,
+                1,
+                ConversationLifecycle::Completed,
+            )],
+        ))
+        .expect("delivery resumes at the acknowledged cursor");
+    assert_eq!(controller.phase(), DeliveryPhase::Ready);
+    assert!(controller.drain_effects().iter().any(is_invalidate));
+}
+
+#[test]
+fn resumed_acknowledgements_respect_each_phase_and_closed_terminality() {
+    let mut controller = ConversationDeliveryController::new(thread_id());
+    let _ = controller.drain_effects();
+    let initial_generation = controller.generation();
+
+    controller
+        .on_resumed(foreign_thread_id(), ConversationCursor::new(0))
+        .expect("awaiting refusal is reported, not a controller error");
+    assert_eq!(controller.phase(), DeliveryPhase::AwaitingSnapshot);
+    assert_eq!(
+        controller.projection_status(),
+        ProjectionStatus::AwaitingSnapshot
+    );
+    assert!(controller.snapshot().is_none());
+    assert_eq!(controller.generation(), initial_generation);
+    let awaiting_effects = controller.drain_effects();
+    assert_eq!(awaiting_effects.len(), 1);
+    assert!(is_report(&awaiting_effects[0]));
+
+    controller
+        .on_snapshot(baseline_snapshot())
+        .expect("baseline");
+    let _ = controller.drain_effects();
+    let before = controller.snapshot().cloned().expect("baseline snapshot");
+    let ready_generation = controller.generation();
+    controller
+        .on_resumed(thread_id(), ConversationCursor::new(4))
+        .expect("exact ready resume is idempotent");
+    assert_eq!(controller.phase(), DeliveryPhase::Ready);
+    assert_eq!(controller.projection_status(), ProjectionStatus::Ready);
+    assert_eq!(controller.snapshot(), Some(&before));
+    assert_eq!(controller.generation(), ready_generation);
+    assert!(controller.drain_effects().is_empty());
+
+    controller
+        .on_resumed(thread_id(), ConversationCursor::new(3))
+        .expect("wrong cursor is reported");
+    controller
+        .on_resumed(foreign_thread_id(), ConversationCursor::new(4))
+        .expect("wrong thread is reported");
+    assert_eq!(controller.phase(), DeliveryPhase::Ready);
+    assert_eq!(controller.projection_status(), ProjectionStatus::Ready);
+    assert_eq!(controller.snapshot(), Some(&before));
+    assert_eq!(controller.cursor(), Some(ConversationCursor::new(4)));
+    assert_eq!(controller.generation(), ready_generation);
+    let ready_effects = controller.drain_effects();
+    assert_eq!(ready_effects.len(), 2);
+    assert!(ready_effects.iter().all(is_report));
+
+    controller
+        .on_batch(batch(6, 7, vec![append_patch(7, ITEM_USER, 1, "gap")]))
+        .expect("gap enters recovery");
+    let _ = controller.drain_effects();
+    let recovering_snapshot = controller.snapshot().cloned().expect("retained snapshot");
+    let recovering_generation = controller.generation();
+    controller
+        .on_resumed(thread_id(), ConversationCursor::new(3))
+        .expect("wrong recovery cursor is reported");
+    controller
+        .on_resumed(foreign_thread_id(), ConversationCursor::new(4))
+        .expect("wrong recovery thread is reported");
+    assert_eq!(controller.phase(), DeliveryPhase::Recovering);
+    assert_eq!(
+        controller.projection_status(),
+        ProjectionStatus::ResnapshotRequired
+    );
+    assert_eq!(controller.snapshot(), Some(&recovering_snapshot));
+    assert_eq!(controller.generation(), recovering_generation);
+    let recovering_effects = controller.drain_effects();
+    assert_eq!(recovering_effects.len(), 2);
+    assert!(recovering_effects.iter().all(is_report));
+
+    controller
+        .on_resumed(thread_id(), ConversationCursor::new(4))
+        .expect("exact recovery resume");
+    assert_eq!(controller.phase(), DeliveryPhase::Ready);
+    assert_eq!(controller.snapshot(), Some(&recovering_snapshot));
+    assert!(controller.drain_effects().is_empty());
+
+    controller.close().expect("close");
+    let _ = controller.drain_effects();
+    let closed_snapshot = controller.snapshot().cloned();
+    let closed_generation = controller.generation();
+    controller
+        .on_resumed(thread_id(), ConversationCursor::new(4))
+        .expect("late resume is ignored after close");
+    assert_eq!(controller.phase(), DeliveryPhase::Closed);
+    assert_eq!(controller.snapshot(), closed_snapshot.as_ref());
+    assert_eq!(controller.generation(), closed_generation);
+    assert!(controller.drain_effects().is_empty());
+}
+
 // 5. more batches in recovering neither mutate visible state nor storm requests
 #[test]
 fn batches_in_recovering_do_not_mutate_or_storm() {

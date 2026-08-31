@@ -318,6 +318,39 @@ impl ConversationProjection {
         Ok(SnapshotDisposition::Applied)
     }
 
+    /// Acknowledges an authoritative resumed subscription at the existing
+    /// last-good cursor.
+    ///
+    /// This is deliberately a status-only operation. It validates the
+    /// acknowledgement against this projection's fixed thread and existing
+    /// snapshot, then clears recovery without cloning, replacing, or otherwise
+    /// changing the snapshot. No baseline or cursor is fabricated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectionError::ThreadMismatch`] for a foreign thread,
+    /// [`ProjectionError::BaselineRequired`] when no snapshot has been
+    /// accepted, or [`ProjectionError::CursorMismatch`] when the acknowledgement
+    /// does not name the existing last-good cursor. Every refusal preserves the
+    /// snapshot, cursor, and prior status exactly.
+    pub fn acknowledge_resumed(
+        &mut self,
+        thread_id: &ThreadId,
+        cursor: ConversationCursor,
+    ) -> Result<(), ProjectionError> {
+        if thread_id != &self.thread_id {
+            return Err(ProjectionError::ThreadMismatch);
+        }
+        let Some(previous) = self.state.as_ref() else {
+            return Err(ProjectionError::BaselineRequired);
+        };
+        if previous.cursor() != cursor {
+            return Err(ProjectionError::CursorMismatch);
+        }
+        self.status = ProjectionStatus::Ready;
+        Ok(())
+    }
+
     /// Applies one contiguous patch batch on top of the current window.
     ///
     /// The batch must name this thread, the projection must hold a baseline,

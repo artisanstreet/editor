@@ -252,6 +252,125 @@ fn baseline_projection() -> ConversationProjection {
     projection
 }
 
+#[test]
+fn exact_resumed_ack_clears_recovery_without_replacing_complete_snapshot() {
+    let mut projection = baseline_projection();
+    let before = projection.snapshot().cloned().expect("baseline is present");
+    let before_ptr = projection
+        .snapshot()
+        .map(|snapshot| snapshot as *const ConversationSnapshot)
+        .expect("baseline pointer is present");
+
+    assert_eq!(
+        projection.apply_batch(&batch(
+            6,
+            7,
+            vec![append_patch(7, ITEM_USER, 1, "ignored", 31)],
+        )),
+        Err(ProjectionError::CursorMismatch)
+    );
+    assert_eq!(projection.status(), ProjectionStatus::ResnapshotRequired);
+    assert_eq!(projection.snapshot(), Some(&before));
+
+    assert_eq!(
+        projection.acknowledge_resumed(&thread_id(), ConversationCursor::new(4)),
+        Ok(())
+    );
+    assert_eq!(projection.status(), ProjectionStatus::Ready);
+    assert_eq!(projection.snapshot(), Some(&before));
+    assert_eq!(
+        projection
+            .snapshot()
+            .expect("snapshot remains")
+            .cursor()
+            .get(),
+        4
+    );
+    let after_ptr = projection
+        .snapshot()
+        .map(|snapshot| snapshot as *const ConversationSnapshot)
+        .expect("snapshot pointer remains");
+    assert_eq!(before_ptr, after_ptr, "resume only changes delivery health");
+}
+
+#[test]
+fn exact_resumed_ack_is_idempotent_when_projection_is_ready() {
+    let mut projection = baseline_projection();
+    let before = projection.snapshot().cloned().expect("baseline is present");
+    let before_ptr = projection
+        .snapshot()
+        .map(|snapshot| snapshot as *const ConversationSnapshot)
+        .expect("baseline pointer is present");
+
+    assert_eq!(
+        projection.acknowledge_resumed(&thread_id(), ConversationCursor::new(4)),
+        Ok(())
+    );
+    assert_eq!(projection.status(), ProjectionStatus::Ready);
+    assert_eq!(projection.snapshot(), Some(&before));
+    assert_eq!(
+        projection.snapshot().map(ConversationSnapshot::cursor),
+        Some(ConversationCursor::new(4))
+    );
+
+    assert_eq!(
+        projection.acknowledge_resumed(&thread_id(), ConversationCursor::new(4)),
+        Ok(())
+    );
+    assert_eq!(projection.status(), ProjectionStatus::Ready);
+    assert_eq!(projection.snapshot(), Some(&before));
+    let after_ptr = projection
+        .snapshot()
+        .map(|snapshot| snapshot as *const ConversationSnapshot)
+        .expect("snapshot pointer remains");
+    assert_eq!(before_ptr, after_ptr, "repeated resume remains status-only");
+}
+
+#[test]
+fn resumed_ack_refusals_preserve_zero_visible_state_and_never_fake_readiness() {
+    let mut empty = ConversationProjection::new(thread_id());
+    assert_eq!(
+        empty.acknowledge_resumed(&thread_id(), ConversationCursor::new(0)),
+        Err(ProjectionError::BaselineRequired)
+    );
+    assert_eq!(empty.status(), ProjectionStatus::AwaitingSnapshot);
+    assert!(empty.snapshot().is_none());
+
+    let mut projection = baseline_projection();
+    let before = projection.snapshot().cloned().expect("baseline is present");
+    assert_eq!(
+        projection.acknowledge_resumed(
+            &ThreadId::parse("thread_foreign").expect("foreign thread is valid"),
+            ConversationCursor::new(4),
+        ),
+        Err(ProjectionError::ThreadMismatch)
+    );
+    assert_eq!(projection.status(), ProjectionStatus::Ready);
+    assert_eq!(projection.snapshot(), Some(&before));
+
+    assert_eq!(
+        projection.acknowledge_resumed(&thread_id(), ConversationCursor::new(3)),
+        Err(ProjectionError::CursorMismatch)
+    );
+    assert_eq!(projection.status(), ProjectionStatus::Ready);
+    assert_eq!(projection.snapshot(), Some(&before));
+
+    projection
+        .apply_batch(&batch(
+            6,
+            7,
+            vec![append_patch(7, ITEM_USER, 1, "ignored", 31)],
+        ))
+        .expect_err("gap enters recovery");
+    assert_eq!(projection.status(), ProjectionStatus::ResnapshotRequired);
+    assert_eq!(
+        projection.acknowledge_resumed(&thread_id(), ConversationCursor::new(3)),
+        Err(ProjectionError::CursorMismatch)
+    );
+    assert_eq!(projection.status(), ProjectionStatus::ResnapshotRequired);
+    assert_eq!(projection.snapshot(), Some(&before));
+}
+
 /// Cursor-20 window with two turns and both item kinds, used by the
 /// common-entity immutability tests.
 fn common_entity_base() -> ConversationSnapshot {

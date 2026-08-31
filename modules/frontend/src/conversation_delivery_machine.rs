@@ -55,6 +55,13 @@ pub enum ConversationDeliveryEvent {
     SnapshotReceived(ConversationSnapshot),
     /// Authoritative patch batch received.
     BatchReceived(PatchBatch),
+    /// Authoritative resumed subscription acknowledgement received.
+    SubscriptionResumed {
+        /// Thread named by the acknowledgement.
+        thread_id: ThreadId,
+        /// Cursor acknowledged by the subscription server.
+        cursor: ConversationCursor,
+    },
     /// Explicit resnapshot retry requested by the owner.
     RetryRequested,
     /// Owner closed.
@@ -254,6 +261,15 @@ impl Delivery {
                     }
                 }
             }
+            ConversationDeliveryEvent::SubscriptionResumed { thread_id, cursor } => {
+                match self.projection.acknowledge_resumed(thread_id, *cursor) {
+                    Ok(()) => Handled,
+                    Err(error) => {
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
+                        Handled
+                    }
+                }
+            }
             ConversationDeliveryEvent::RetryRequested => {
                 self.emit_snapshot_request(context);
                 Handled
@@ -318,6 +334,15 @@ impl Delivery {
                     }
                 }
             }
+            ConversationDeliveryEvent::SubscriptionResumed { thread_id, cursor } => {
+                match self.projection.acknowledge_resumed(thread_id, *cursor) {
+                    Ok(()) => Handled,
+                    Err(error) => {
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
+                        Handled
+                    }
+                }
+            }
             ConversationDeliveryEvent::RetryRequested => Handled,
         }
     }
@@ -362,6 +387,15 @@ impl Delivery {
                         // by not emitting invalidation during recovery.
                         Handled
                     }
+                    Err(error) => {
+                        context.push(ConversationDeliveryEffect::ReportRefusal { error });
+                        Handled
+                    }
+                }
+            }
+            ConversationDeliveryEvent::SubscriptionResumed { thread_id, cursor } => {
+                match self.projection.acknowledge_resumed(thread_id, *cursor) {
+                    Ok(()) => Transition(State::ready()),
                     Err(error) => {
                         context.push(ConversationDeliveryEffect::ReportRefusal { error });
                         Handled
@@ -516,6 +550,20 @@ impl ConversationDeliveryController {
     /// through [`ConversationDeliveryEffect::ReportRefusal`] and return `Ok`.
     pub fn on_batch(&mut self, batch: PatchBatch) -> Result<(), ConversationDeliveryError> {
         self.dispatch(&ConversationDeliveryEvent::BatchReceived(batch))
+    }
+
+    /// Convenience: dispatch an authoritative resumed subscription
+    /// acknowledgement.
+    ///
+    /// The acknowledgement is validated against the fixed thread and the
+    /// projection's existing last-good cursor. It never installs a snapshot or
+    /// allocates a request generation.
+    pub fn on_resumed(
+        &mut self,
+        thread_id: ThreadId,
+        cursor: ConversationCursor,
+    ) -> Result<(), ConversationDeliveryError> {
+        self.dispatch(&ConversationDeliveryEvent::SubscriptionResumed { thread_id, cursor })
     }
 
     /// Convenience: request an explicit resnapshot retry.
