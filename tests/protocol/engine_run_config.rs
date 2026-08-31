@@ -86,7 +86,7 @@ fn raw_engine_config_frame(
     root.set_protocol_version(1);
     root.set_message_id("raw-engine-config");
     root.set_sent_at_millis(7);
-    let mut request = root.init_body().init_request();
+    let request = root.init_body().init_request();
     let mut encoded = request.init_set_thread_engine_config();
     encoded.set_thread_id("thread-protocol");
     let mut precondition = encoded.reborrow().init_precondition();
@@ -138,18 +138,17 @@ fn request_and_response_round_trip_with_explicit_variant_states() -> Result<(), 
         ),
     ] {
         let mut value = request("engine-protocol-request", precondition);
-        if let WireEnvelopeBody::Request(ProtocolClientRequest::Command(
-            artisan_domain::Command::SetThreadEngineConfig(command),
-        )) = &mut value.body
+        if with_variant
+            && let WireEnvelopeBody::Request(ProtocolClientRequest::Command(
+                artisan_domain::Command::SetThreadEngineConfig(command),
+            )) = &mut value.body
         {
-            if with_variant {
-                *command = Box::new(SetThreadEngineConfig::new(
-                    RequestId::parse("engine-protocol-request").expect("request id is valid"),
-                    ThreadId::parse("thread-protocol").expect("thread id is valid"),
-                    precondition,
-                    config(true),
-                ));
-            }
+            **command = SetThreadEngineConfig::new(
+                RequestId::parse("engine-protocol-request").expect("request id is valid"),
+                ThreadId::parse("thread-protocol").expect("thread id is valid"),
+                precondition,
+                config(true),
+            );
         }
         let encoded = encode_envelope(&value)?;
         assert!(decode_envelope(&encoded)? == value);
