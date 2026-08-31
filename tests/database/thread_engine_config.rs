@@ -131,11 +131,11 @@ async fn receipt_count(database: &sea_orm::DatabaseConnection) -> usize {
 
 async fn replace_thread_blob(database: &sea_orm::DatabaseConnection, blob: Vec<u8>) {
     database
-        .execute(Statement::from_sql_and_values(
+        .execute(&Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "UPDATE threads SET engine_run_config = ? WHERE thread_id = ?",
             [
-                Value::Bytes(Some(Box::new(blob))),
+                Value::Bytes(Some(blob)),
                 Value::String(Some("thread-engine-config".to_owned())),
             ],
         ))
@@ -291,7 +291,7 @@ async fn configuration_update_keeps_newer_current_timestamp_after_stale_read() {
     assert_eq!(stale_row.updated_at_ms, 100);
 
     database
-        .execute(Statement::from_sql_and_values(
+        .execute(&Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "UPDATE threads SET updated_at_ms = ? WHERE thread_id = ?",
             [
@@ -309,17 +309,17 @@ async fn configuration_update_keeps_newer_current_timestamp_after_stale_read() {
         "UPDATE threads SET engine_run_config_version = 1, engine_run_config_revision = ?, engine_run_config = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE thread_id = ? AND engine_run_config_version IS ? AND engine_run_config_revision = ? AND engine_run_config IS ?",
         [
             Value::BigInt(Some(accepted.revision().as_i64() + 1)),
-            Value::Bytes(Some(Box::new(previous_blob.clone()))),
+            Value::Bytes(Some(previous_blob.clone())),
             Value::BigInt(Some(100)),
             Value::String(Some(thread_id.as_str().to_owned())),
             Value::BigInt(Some(1)),
             Value::BigInt(Some(accepted.revision().as_i64())),
-            Value::Bytes(Some(Box::new(previous_blob))),
+            Value::Bytes(Some(previous_blob)),
         ],
     );
     assert_eq!(
         database
-            .execute(update)
+            .execute(&update)
             .await
             .expect("conditional update should work")
             .rows_affected(),
