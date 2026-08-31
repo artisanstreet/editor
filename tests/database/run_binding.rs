@@ -153,12 +153,11 @@ async fn seed_project_and_thread(
         })
         .await
         .expect("engine configuration should create");
-    let settings = repository
+    repository
         .read_thread_engine_settings(&thread_id)
         .await
         .expect("engine configuration should read")
-        .expect("engine configuration should be present");
-    settings
+        .expect("engine configuration should be present")
 }
 
 fn launch_config() -> EngineRunConfig {
