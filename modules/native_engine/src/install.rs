@@ -928,7 +928,7 @@ impl NativeOpenCode2Authority {
                 npm_integrity_sha512: "test-integrity",
                 npm_url: "https://example.invalid/test.tgz",
                 download_bound_bytes: 1024,
-                executable_size_bytes: 14,
+                executable_size_bytes: 15,
                 executable_sha256: [
                     0xff, 0x87, 0x15, 0xf0, 0x27, 0x07, 0x31, 0xbb, 0xdb, 0x0b, 0xb3, 0x58, 0x6a,
                     0x77, 0xd0, 0x32, 0xf5, 0xe8, 0x83, 0xb8, 0x90, 0x9d, 0xca, 0xfb, 0xf3, 0xe8,
@@ -1412,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn install_state_codec_rejects_unknown_duplicate_trailing_and_unsafe_values() {
+    fn install_state_codec_rejects_syntax_errors_and_full_validation_rejects_unsafe_values() {
         let active = r#"{"binary":"opencode2.exe","directory":"generation-a","sha256":"452794a764e1033e629c4cd40bde6433c10c6bd32433fb3be279bf03969a6edf","version":"0.0.0-beta-17778"}"#;
         let valid = format!(r#"{{"active":{active},"format_version":1}}"#);
         assert!(decode_state(valid.as_bytes()).is_ok());
@@ -1420,11 +1420,38 @@ mod tests {
             format!(r#"{{"active":{active},"format_version":1,"extra":true}}"#),
             format!(r#"{{"active":{active},"active":{active},"format_version":1}}"#),
             format!(r#"{{"active":{active},"format_version":1}} trailing"#),
-            format!(r#"{{"active":{active},"format_version":2}}"#),
-            r#"{"active":{"binary":"opencode2.exe","directory":"../escape","sha256":"452794a764e1033e629c4cd40bde6433c10c6bd32433fb3be279bf03969a6edf","version":"0.0.0-beta-17778"},"format_version":1}"#.to_owned(),
         ] {
-            assert!(decode_state(malformed.as_bytes()).is_err());
+            assert!(matches!(
+                decode_state(malformed.as_bytes()),
+                Err(NativeOpenCode2Error::StateMalformed)
+            ));
         }
+
+        let authority = NativeOpenCode2Authority::new();
+        let root = tempfile::tempdir().unwrap();
+        let engine_root = root.path().join("toolchain").join("opencode2");
+        fs::create_dir_all(&engine_root).unwrap();
+        let state_path = engine_root.join("state.json");
+
+        fs::write(
+            &state_path,
+            format!(r#"{{"active":{active},"format_version":2}}"#),
+        )
+        .unwrap();
+        assert!(matches!(
+            authority.read_install_state(&engine_root),
+            Err(NativeOpenCode2StateError::UnsupportedVersion)
+        ));
+
+        fs::write(
+            &state_path,
+            r#"{"active":{"binary":"opencode2.exe","directory":"../escape","sha256":"452794a764e1033e629c4cd40bde6433c10c6bd32433fb3be279bf03969a6edf","version":"0.0.0-beta-17778"},"format_version":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            authority.read_install_state(&engine_root),
+            Err(NativeOpenCode2StateError::UnsafePath)
+        ));
     }
 
     #[test]

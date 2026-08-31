@@ -557,7 +557,8 @@ impl NativeOpenCode2Authority {
         if !platform_supported() {
             return Err(NativeOpenCode2ProfileError::CertifiedEngineUnavailable);
         }
-        self.resolve_active(database_path)
+        let _pre_lock_generation = self
+            .resolve_active(database_path)
             .map_err(|_| NativeOpenCode2ProfileError::CertifiedEngineUnavailable)?;
         let paths = self
             .install_paths(database_path)
@@ -566,7 +567,8 @@ impl NativeOpenCode2Authority {
             .map_err(|_| NativeOpenCode2ProfileError::ProfileLockUnavailable)?;
         lock.fence(&paths)
             .map_err(|_| NativeOpenCode2ProfileError::ProfileLockUnavailable)?;
-        self.resolve_active(database_path)
+        let _post_lock_generation = self
+            .resolve_active(database_path)
             .map_err(|_| NativeOpenCode2ProfileError::CertifiedEngineUnavailable)?;
         lock.fence(&paths)
             .map_err(|_| NativeOpenCode2ProfileError::ProfileLockUnavailable)?;
@@ -1411,9 +1413,10 @@ mod tests {
         let replacement_id = "generation-fedcba9876543210fedcba9876543210";
         write_generation(&paths, replacement_id, b"test executable");
         let state = authority.new_install_state(replacement_id, None).unwrap();
-        authority
-            .write_install_state(paths.engine_root(), &state)
-            .unwrap();
+        assert_eq!(
+            authority.write_install_state(paths.engine_root(), &state),
+            Ok(AtomicReplaceOutcome::Committed)
+        );
         assert_eq!(
             launch.revalidate(),
             Err(NativeOpenCode2ProfileLaunchError::ProfileChanged)
@@ -1477,9 +1480,10 @@ mod tests {
         paths.prepare().unwrap();
         write_generation(&paths, generation_id(), b"test executable");
         let state = authority.new_install_state(generation_id(), None).unwrap();
-        authority
-            .write_install_state(paths.engine_root(), &state)
-            .unwrap();
+        assert_eq!(
+            authority.write_install_state(paths.engine_root(), &state),
+            Ok(AtomicReplaceOutcome::Committed)
+        );
         (root, database, authority, paths)
     }
 
