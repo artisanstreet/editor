@@ -226,7 +226,7 @@ impl Repository {
                 body: Set(None),
                 accepted_at_ms: Set(millis(input.accepted_at)),
                 engine_run_config_version: Set(Some(1)),
-                engine_run_config: Set(Some(OpaqueBytes::new(encoded))),
+                engine_run_config: Set(Some(OpaqueBytes::new(encoded.clone()))),
                 engine_run_config_expected_revision: Set(
                     expected_revision.map(EngineConfigRevision::as_i64)
                 ),
