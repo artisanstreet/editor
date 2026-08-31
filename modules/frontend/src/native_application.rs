@@ -34,6 +34,7 @@ use gpui::{
 };
 
 use crate::composer::{DraftDisposition, SubmissionBlocked, SubmissionToken};
+use crate::native_composer::{NativeComposer, NativeComposerEvent};
 use crate::native_transport_service::{
     CommandSendError, EventReceiveError, NativeProjectIntakeOperation, NativeProjectIntakeStage,
     NativeTransportCommand, NativeTransportEvent, NativeTransportService, ServiceFailure,
@@ -50,10 +51,6 @@ use crate::{
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
     shell::{ShellFrameStyle, shell_rail},
 };
-
-mod native_composer;
-
-use native_composer::{NativeComposer, NativeComposerEvent};
 
 actions!(native_application, [Quit, NextTabStop, PreviousTabStop]);
 
