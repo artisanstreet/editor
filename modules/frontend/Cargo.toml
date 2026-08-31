@@ -12,11 +12,15 @@ path = "src/main.rs"
 [dependencies]
 artisan-assets = { path = "../assets" }
 artisan-domain = { path = "../domain" }
+artisan-editor-cli = { path = "../cli" }
+artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
+rustls-pki-types.workspace = true
 statig.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 url.workspace = true
 
 [[test]]
