@@ -392,10 +392,10 @@ impl NativeOpenCode2InstallLock {
         loop {
             match lock.file.try_lock_exclusive() {
                 Ok(()) => break,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock && !wait => {
+                Err(error) if is_lock_contended(&error) && !wait => {
                     return Err(NativeOpenCode2InstallLockError::Busy);
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(error) if is_lock_contended(&error) => {
                     if Instant::now() >= deadline {
                         return Err(NativeOpenCode2InstallLockError::Timeout);
                     }
@@ -438,6 +438,14 @@ impl NativeOpenCode2InstallLock {
         }
         Ok(())
     }
+}
+
+fn is_lock_contended(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || matches!(
+            (error.raw_os_error(), fs2::lock_contended_error().raw_os_error()),
+            (Some(actual), Some(contended)) if actual == contended
+        )
 }
 
 fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallLockError> {
@@ -1368,6 +1376,15 @@ fn map_executable_error(error: NativeFileError) -> NativeOpenCode2Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_contention_predicate_uses_canonical_identity_and_fails_closed() {
+        assert!(is_lock_contended(&fs2::lock_contended_error()));
+        assert!(is_lock_contended(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
+        assert!(!is_lock_contended(&io::Error::from(io::ErrorKind::Other)));
+    }
 
     #[test]
     fn certified_install_spec_is_fixed_and_diagnostic_free() {
