@@ -22,7 +22,7 @@ const _: fn() = || {
         fn marker() {}
     }
     impl<T: ?Sized> Ambiguous<()> for T {}
-    impl<T: ?Sized + Default> Ambiguous<Marker> for T {}
+    impl<T: Default> Ambiguous<Marker> for T {}
     let _ = <EngineRunConfig as Ambiguous<_>>::marker;
     let _ = <EngineRuntimeControls as Ambiguous<_>>::marker;
     let _ = <EnginePermissionPolicy as Ambiguous<_>>::marker;
@@ -143,24 +143,9 @@ async fn replace_thread_blob(database: &sea_orm::DatabaseConnection, blob: Vec<u
         .expect("fixture blob replacement should work");
 }
 
-#[tokio::test]
-async fn first_write_update_replay_and_revision_conflict_are_durable() {
-    let (database, repository, thread_id) = seeded_repository().await;
-    let first_config = config("first", false);
-    let accepted = repository
-        .set_thread_engine_config(input(
-            "request-engine-first",
-            &thread_id,
-            EngineConfigUpdatePrecondition::Unconfigured,
-            first_config.clone(),
-            100,
-        ))
-        .await
-        .expect("first configuration write should succeed");
-    assert_eq!(accepted.revision().get(), 1);
-    assert_eq!(accepted.receipt().disposition, ReceiptDisposition::Accepted);
+async fn assert_first_engine_config_receipt(database: &sea_orm::DatabaseConnection) {
     let first_receipt = entities::command_receipt::Entity::find_by_id("request-engine-first")
-        .one(&database)
+        .one(database)
         .await
         .expect("engine receipt query should work")
         .expect("engine receipt should exist");
@@ -177,6 +162,25 @@ async fn first_write_update_replay_and_revision_conflict_are_durable() {
     );
     assert!(first_receipt.engine_run_config_expected_revision.is_none());
     assert_eq!(first_receipt.engine_run_config_result_revision, Some(1));
+}
+
+#[tokio::test]
+async fn first_write_update_replay_and_revision_conflict_are_durable() {
+    let (database, repository, thread_id) = seeded_repository().await;
+    let first_config = config("first", false);
+    let accepted = repository
+        .set_thread_engine_config(input(
+            "request-engine-first",
+            &thread_id,
+            EngineConfigUpdatePrecondition::Unconfigured,
+            first_config.clone(),
+            100,
+        ))
+        .await
+        .expect("first configuration write should succeed");
+    assert_eq!(accepted.revision().get(), 1);
+    assert_eq!(accepted.receipt().disposition, ReceiptDisposition::Accepted);
+    assert_first_engine_config_receipt(&database).await;
 
     let replay = repository
         .set_thread_engine_config(input(
@@ -263,6 +267,47 @@ async fn first_write_update_replay_and_revision_conflict_are_durable() {
     assert!(matches!(
         idempotency,
         RepositoryError::IdempotencyConflict { .. }
+    ));
+}
+
+async fn assert_malformed_blob_rejections(
+    database: &sea_orm::DatabaseConnection,
+    repository: &Repository,
+    thread_id: &ThreadId,
+    original_blob: &[u8],
+) {
+    let mut trailing = original_blob.to_vec();
+    trailing.push(b' ');
+    replace_thread_blob(database, trailing).await;
+    let trailing_error = repository
+        .read_thread_engine_settings(thread_id)
+        .await
+        .expect_err("trailing whitespace must be rejected");
+    assert!(matches!(
+        trailing_error,
+        RepositoryError::CorruptData { .. }
+    ));
+
+    for malformed in [
+        br#"{"version":1,"version":1,"engine":"opencode2","profile_id":"profile-canonical","model_id":"model-canonical","route_id":"route-canonical","variant_id":null,"permission":{"permission_id":"permission-canonical","agent_id":"agent-canonical","approval":"on_request","filesystem":"workspace","network":"enabled","web_search":"disabled"},"runtime":{"attempt_budget_ms":100,"readiness_budget_ms":1,"health_budget_ms":1,"prompt_budget_ms":1,"stream_budget_ms":1,"close_budget_ms":1,"max_json_body_bytes":8192,"max_sse_line_bytes":4096,"max_sse_event_bytes":8192,"max_readiness_line_bytes":4096,"max_header_count":8,"max_http_buffer_bytes":8192,"max_stderr_bytes":4096,"observation_capacity":16}}"#.to_vec(),
+        br#"{"version":1,"unknown":true,"engine":"opencode2","profile_id":"profile-canonical","model_id":"model-canonical","route_id":"route-canonical","variant_id":null,"permission":{"permission_id":"permission-canonical","agent_id":"agent-canonical","approval":"on_request","filesystem":"workspace","network":"enabled","web_search":"disabled"},"runtime":{"attempt_budget_ms":100,"readiness_budget_ms":1,"health_budget_ms":1,"prompt_budget_ms":1,"stream_budget_ms":1,"close_budget_ms":1,"max_json_body_bytes":8192,"max_sse_line_bytes":4096,"max_sse_event_bytes":8192,"max_readiness_line_bytes":4096,"max_header_count":8,"max_http_buffer_bytes":8192,"max_stderr_bytes":4096,"observation_capacity":16}}"#.to_vec(),
+        br#"{"engine":"opencode2","version":1,"profile_id":"profile-canonical","model_id":"model-canonical","route_id":"route-canonical","variant_id":null,"permission":{"permission_id":"permission-canonical","agent_id":"agent-canonical","approval":"on_request","filesystem":"workspace","network":"enabled","web_search":"disabled"},"runtime":{"attempt_budget_ms":100,"readiness_budget_ms":1,"health_budget_ms":1,"prompt_budget_ms":1,"stream_budget_ms":1,"close_budget_ms":1,"max_json_body_bytes":8192,"max_sse_line_bytes":4096,"max_sse_event_bytes":8192,"max_readiness_line_bytes":4096,"max_header_count":8,"max_http_buffer_bytes":8192,"max_stderr_bytes":4096,"observation_capacity":16}}"#.to_vec(),
+    ] {
+        replace_thread_blob(database, malformed).await;
+        assert!(matches!(
+            repository.read_thread_engine_settings(thread_id).await,
+            Err(RepositoryError::CorruptData { .. })
+        ));
+    }
+
+    let missing_variant = String::from_utf8(original_blob.to_vec())
+        .expect("canonical configuration should be UTF-8")
+        .replace("\"variant_id\":null,", "")
+        .into_bytes();
+    replace_thread_blob(database, missing_variant).await;
+    assert!(matches!(
+        repository.read_thread_engine_settings(thread_id).await,
+        Err(RepositoryError::CorruptData { .. })
     ));
 }
 
@@ -357,39 +402,7 @@ async fn strict_blob_shape_is_corruption_and_failed_update_leaves_no_receipt() {
         .expect("configured blob should exist")
         .into_vec();
 
-    let mut trailing = original_blob.clone();
-    trailing.push(b' ');
-    replace_thread_blob(&database, trailing).await;
-    let trailing_error = repository
-        .read_thread_engine_settings(&thread_id)
-        .await
-        .expect_err("trailing whitespace must be rejected");
-    assert!(matches!(
-        trailing_error,
-        RepositoryError::CorruptData { .. }
-    ));
-
-    for malformed in [
-        br#"{"version":1,"version":1,"engine":"opencode2","profile_id":"profile-canonical","model_id":"model-canonical","route_id":"route-canonical","variant_id":null,"permission":{"permission_id":"permission-canonical","agent_id":"agent-canonical","approval":"on_request","filesystem":"workspace","network":"enabled","web_search":"disabled"},"runtime":{"attempt_budget_ms":100,"readiness_budget_ms":1,"health_budget_ms":1,"prompt_budget_ms":1,"stream_budget_ms":1,"close_budget_ms":1,"max_json_body_bytes":8192,"max_sse_line_bytes":4096,"max_sse_event_bytes":8192,"max_readiness_line_bytes":4096,"max_header_count":8,"max_http_buffer_bytes":8192,"max_stderr_bytes":4096,"observation_capacity":16}}"#.to_vec(),
-        br#"{"version":1,"unknown":true,"engine":"opencode2","profile_id":"profile-canonical","model_id":"model-canonical","route_id":"route-canonical","variant_id":null,"permission":{"permission_id":"permission-canonical","agent_id":"agent-canonical","approval":"on_request","filesystem":"workspace","network":"enabled","web_search":"disabled"},"runtime":{"attempt_budget_ms":100,"readiness_budget_ms":1,"health_budget_ms":1,"prompt_budget_ms":1,"stream_budget_ms":1,"close_budget_ms":1,"max_json_body_bytes":8192,"max_sse_line_bytes":4096,"max_sse_event_bytes":8192,"max_readiness_line_bytes":4096,"max_header_count":8,"max_http_buffer_bytes":8192,"max_stderr_bytes":4096,"observation_capacity":16}}"#.to_vec(),
-        br#"{"engine":"opencode2","version":1,"profile_id":"profile-canonical","model_id":"model-canonical","route_id":"route-canonical","variant_id":null,"permission":{"permission_id":"permission-canonical","agent_id":"agent-canonical","approval":"on_request","filesystem":"workspace","network":"enabled","web_search":"disabled"},"runtime":{"attempt_budget_ms":100,"readiness_budget_ms":1,"health_budget_ms":1,"prompt_budget_ms":1,"stream_budget_ms":1,"close_budget_ms":1,"max_json_body_bytes":8192,"max_sse_line_bytes":4096,"max_sse_event_bytes":8192,"max_readiness_line_bytes":4096,"max_header_count":8,"max_http_buffer_bytes":8192,"max_stderr_bytes":4096,"observation_capacity":16}}"#.to_vec(),
-    ] {
-        replace_thread_blob(&database, malformed).await;
-        assert!(matches!(
-            repository.read_thread_engine_settings(&thread_id).await,
-            Err(RepositoryError::CorruptData { .. })
-        ));
-    }
-
-    let missing_variant = String::from_utf8(original_blob.clone())
-        .expect("canonical configuration should be UTF-8")
-        .replace("\"variant_id\":null,", "")
-        .into_bytes();
-    replace_thread_blob(&database, missing_variant).await;
-    assert!(matches!(
-        repository.read_thread_engine_settings(&thread_id).await,
-        Err(RepositoryError::CorruptData { .. })
-    ));
+    assert_malformed_blob_rejections(&database, &repository, &thread_id, &original_blob).await;
 
     replace_thread_blob(&database, original_blob).await;
     database
