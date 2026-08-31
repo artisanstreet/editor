@@ -54,13 +54,16 @@ exports_files([
     "directory_helper_fixture.rs",
     "directory_helper_unit.rs",
     "engine_owner_configuration.rs",
+    "engine_owner_configured.rs",
     "engine_owner_custody.rs",
     "engine_owner_readiness.rs",
     "engine_owner_streaming.rs",
+    "forge_configured_run.rs",
     "lifecycle_control.rs",
     "lifecycle_connection.rs",
     "lifecycle_listener.rs",
     "listener_configuration.rs",
+    "native_run_dispatch.rs",
 ])
 
 # TEST-ONLY protocol child fixture: one ordinary main, no libtest harness,
