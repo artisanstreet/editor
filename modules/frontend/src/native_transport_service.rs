@@ -644,6 +644,20 @@ enum ExpectedResponse {
     Snapshot(ThreadId),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ThreadSelectionDecision {
+    AwaitHostSnapshot(ThreadId),
+    Empty,
+}
+
+fn thread_selection_decision(listing: &ThreadListing) -> ThreadSelectionDecision {
+    listing
+        .threads()
+        .first()
+        .map(|thread| ThreadSelectionDecision::AwaitHostSnapshot(thread.thread_id.clone()))
+        .unwrap_or(ThreadSelectionDecision::Empty)
+}
+
 enum RequestAttemptError {
     Retained {
         session: ClientSession,
@@ -1076,10 +1090,7 @@ async fn select_project(
             .iter()
             .map(|thread| thread.thread_id.clone()),
     );
-    let first_thread = listing
-        .threads()
-        .first()
-        .map(|thread| thread.thread_id.clone());
+    let selection = thread_selection_decision(&listing);
     publish(
         events,
         NativeTransportEvent::Threads {
@@ -1087,11 +1098,12 @@ async fn select_project(
             listing,
         },
     )?;
-    let Some(thread_id) = first_thread else {
-        publish(events, NativeTransportEvent::EmptyThreads { project_id })?;
-        return Ok(());
-    };
-    request_snapshot(runtime, frames, events, thread_id).await
+    match selection {
+        ThreadSelectionDecision::AwaitHostSnapshot(_) => Ok(()),
+        ThreadSelectionDecision::Empty => {
+            publish(events, NativeTransportEvent::EmptyThreads { project_id })
+        }
+    }
 }
 
 async fn request_snapshot(
@@ -1135,9 +1147,9 @@ mod tests {
     use super::{
         COMMAND_CAPACITY, ExpectedResponse, FrameFactory, NativeTransportCommand,
         ReadinessValidationError, RequestAttemptError, ServiceFailure, ServiceFailureCategory,
-        StartupError, finite_duration, make_request_frame, payload_health_decision,
-        project_request, snapshot_request, threads_request, try_send_command, validate_readiness,
-        validate_response_family,
+        StartupError, ThreadSelectionDecision, finite_duration, make_request_frame,
+        payload_health_decision, project_request, snapshot_request, thread_selection_decision,
+        threads_request, try_send_command, validate_readiness, validate_response_family,
     };
     use artisan_domain::{
         CONVERSATION_QUERY_MAX_TURNS, ConversationCursor, ConversationQueryBounds,
@@ -1332,6 +1344,21 @@ mod tests {
         assert_eq!(
             threads.threads().first().expect("first").thread_id.as_str(),
             "t1"
+        );
+    }
+
+    #[test]
+    fn thread_selection_waits_for_host_snapshot_request() {
+        let empty = ThreadListing::new(Vec::new()).expect("empty threads");
+        assert_eq!(
+            thread_selection_decision(&empty),
+            ThreadSelectionDecision::Empty
+        );
+
+        let listing = ThreadListing::new(vec![thread("t1", "p1")]).expect("threads");
+        assert_eq!(
+            thread_selection_decision(&listing),
+            ThreadSelectionDecision::AwaitHostSnapshot(ThreadId::parse("t1").expect("thread"))
         );
     }
 

@@ -379,6 +379,9 @@ impl NativeApplication {
     }
 
     fn try_mount_pending_thread(&mut self, cx: &mut Context<Self>) {
+        if self.pending_thread.is_none() {
+            return;
+        }
         self.retire_host(cx);
         if self.conversation_host.is_some() {
             return;
@@ -887,6 +890,53 @@ mod tests {
                 )
             )] if requested == &thread_id
         ));
+    }
+
+    #[gpui::test]
+    fn ordinary_mount_boundary_retains_ready_host_without_replacement(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("forge-thread").expect("thread");
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let snapshot = ConversationSnapshot::new(
+            thread_id.clone(),
+            ConversationCursor::new(0),
+            Vec::new(),
+            Vec::new(),
+            UnixMillis::EPOCH,
+        )
+        .expect("empty snapshot");
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.pending_thread = Some(thread_id.clone());
+                application.try_mount_pending_thread(application_cx);
+                let host = application.conversation_host.clone().expect("mounted host");
+
+                // The test has no service thread to accept the host's initial
+                // request, so model that already-accepted command before
+                // exercising the ordinary no-replacement boundary.
+                application.conversation_effects.clear();
+                application.dispatch_snapshot(host.clone(), snapshot, application_cx);
+                assert!(matches!(&application.state, NativeViewState::Ready));
+                assert!(
+                    host.read(application_cx)
+                        .controller_view()
+                        .delivery
+                        .has_snapshot
+                );
+                assert!(application._conversation_host_subscription.is_some());
+
+                application.try_mount_pending_thread(application_cx);
+
+                assert_eq!(application.conversation_host.as_ref(), Some(&host));
+                assert_eq!(application.selected_thread.as_ref(), Some(&thread_id));
+                assert!(
+                    host.read(application_cx)
+                        .controller_view()
+                        .delivery
+                        .has_snapshot
+                );
+            });
+        });
     }
 
     #[gpui::test]
