@@ -519,6 +519,23 @@ struct SetThreadEngineConfigResult {
   disposition @3 :ReceiptDisposition;
 }
 
+struct ReadThreadEngineSettingsRequest {
+  threadId @0 :Text;
+}
+
+struct ThreadEngineSettingsResult {
+  threadId @0 :Text;
+  state :union {
+    unconfigured @1 :Void;
+    configured @2 :ConfiguredThreadEngineSettings;
+  }
+}
+
+struct ConfiguredThreadEngineSettings {
+  revision @0 :UInt64;
+  config @1 :EngineRunConfig;
+}
+
 # The request arms of the native protocol: the five original workflow
 # requests, project rediscovery, the three conversation read/subscription
 # requests, explicit host interaction, lifecycle control, and durable engine
@@ -558,6 +575,7 @@ struct Request {
   # is enforced by transport/backend packets, not by this wire-only leaf.
     lifecycleControl @10 :LifecycleRequest;
     setThreadEngineConfig @11 :SetThreadEngineConfigRequest;
+    readThreadEngineSettings @12 :ReadThreadEngineSettingsRequest;
   }
 }
 
@@ -602,6 +620,7 @@ struct Response {
     # ordinal; existing response arms remain frozen.
     lifecycleControl @11 :LifecycleResponse;
     threadEngineConfigSet @12 :SetThreadEngineConfigResult;
+    threadEngineSettings @13 :ThreadEngineSettingsResult;
   }
 }
 

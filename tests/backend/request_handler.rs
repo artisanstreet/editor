@@ -3351,3 +3351,179 @@ async fn handler_unsubscribe_and_replacement_stale_retained_publication_leases()
 
     storage.close().await.expect("storage should close");
 }
+
+fn read_thread_engine_settings_request(thread_id: &str) -> ClientRequest {
+    ClientRequest::Query(artisan_domain::Query::ReadThreadEngineSettings(
+        artisan_domain::commands::ReadThreadEngineSettings::new(
+            ThreadId::parse(thread_id).expect("valid thread id"),
+        ),
+    ))
+}
+
+#[tokio::test]
+async fn read_thread_engine_settings_for_unconfigured_thread_returns_unconfigured() {
+    let (_temporary, storage) = opened_storage("read-unconfigured").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "read-project-unconfigured",
+            "directory-read-unconfigured",
+            "project-read-unconfigured",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input(
+            "read-thread-unconfigured",
+            "project-read-unconfigured",
+            "thread-read-unconfigured",
+        ))
+        .await
+        .expect("seed thread should persist");
+    let handler = RequestHandler::new(repository.clone());
+
+    let response = handler
+        .respond(
+            &request("frame-read-unconfigured"),
+            &read_thread_engine_settings_request("thread-read-unconfigured"),
+        )
+        .await
+        .expect("unconfigured read should succeed");
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(response.request_id, request("frame-read-unconfigured"));
+    match response.payload {
+        ResponsePayload::ThreadEngineSettings(
+            artisan_protocol::ThreadEngineSettingsResult::Unconfigured { thread_id },
+        ) => {
+            assert_eq!(thread_id.as_str(), "thread-read-unconfigured");
+        }
+        other => panic!("expected unconfigured thread engine settings, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_thread_engine_settings_for_configured_thread_returns_exact_revision_and_config() {
+    let (_temporary, storage) = opened_storage("read-configured").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "read-project-configured",
+            "directory-read-configured",
+            "project-read-configured",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input(
+            "read-thread-configured",
+            "project-read-configured",
+            "thread-read-configured",
+        ))
+        .await
+        .expect("seed thread should persist");
+    let expected_config = engine_config("read-configured");
+    let stored = repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: request("request-engine-configured"),
+            thread_id: ThreadId::parse("thread-read-configured").expect("valid thread id"),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: expected_config.clone(),
+            accepted_at: UnixMillis::from_millis(400),
+        })
+        .await
+        .expect("seed engine config should persist");
+    let handler = RequestHandler::new(repository.clone());
+
+    let response = handler
+        .respond(
+            &request("frame-read-configured"),
+            &read_thread_engine_settings_request("thread-read-configured"),
+        )
+        .await
+        .expect("configured read should succeed");
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(response.request_id, request("frame-read-configured"));
+    match response.payload {
+        ResponsePayload::ThreadEngineSettings(
+            artisan_protocol::ThreadEngineSettingsResult::Configured {
+                thread_id,
+                revision,
+                config,
+            },
+        ) => {
+            assert_eq!(thread_id.as_str(), "thread-read-configured");
+            assert_eq!(revision, stored.revision());
+            assert_eq!(config, expected_config);
+        }
+        other => panic!("expected configured thread engine settings, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_thread_engine_settings_for_missing_thread_fails_thread_unknown() {
+    let (_temporary, storage) = opened_storage("read-missing").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+
+    let failure = failure_of(
+        handler
+            .respond(
+                &request("frame-read-missing"),
+                &read_thread_engine_settings_request("thread-missing"),
+            )
+            .await,
+    );
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(failure.code, ErrorCode::ThreadUnknown);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("frame-read-missing")));
+    assert!(!failure.detail.as_str().contains("thread-missing"));
+}
+
+#[tokio::test]
+async fn read_thread_engine_settings_response_request_id_equals_triggering_frame_and_no_origin_consult()
+ {
+    let (_temporary, storage) = opened_storage("read-correlation").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "read-project-correlation",
+            "directory-read-correlation",
+            "project-read-correlation",
+        ))
+        .await
+        .expect("seed attach should persist");
+    repository
+        .create_thread(create_input(
+            "read-thread-correlation",
+            "project-read-correlation",
+            "thread-read-correlation",
+        ))
+        .await
+        .expect("seed thread should persist");
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), Vec::new());
+    let handler = scripted_handler(&storage, &origin);
+
+    let response = handler
+        .respond(
+            &request("frame-read-correlation"),
+            &read_thread_engine_settings_request("thread-read-correlation"),
+        )
+        .await
+        .expect("pure read should succeed without origin");
+
+    storage.close().await.expect("storage should close");
+
+    assert_eq!(response.request_id, request("frame-read-correlation"));
+    assert_eq!(origin.identity_calls(), 0);
+    assert_eq!(origin.instant_calls(), 0);
+    assert!(matches!(
+        response.payload,
+        ResponsePayload::ThreadEngineSettings(_)
+    ));
+}
