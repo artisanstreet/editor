@@ -974,7 +974,9 @@ fn run_config(config: ForgeLaunchConfig) -> ForgeRuntimeError {
         .build()
         .expect("test runtime should build");
     runtime
-        .block_on(async { tokio::time::timeout(FUTURE_WAIT, forge_runtime::run(config)).await })
+        .block_on(async {
+            tokio::time::timeout(FUTURE_WAIT, Box::pin(forge_runtime::run(config))).await
+        })
         .expect("Forge runtime future should be bounded")
         .expect_err("test scenario should produce a typed failure")
 }
@@ -989,7 +991,7 @@ fn spawn_runtime(config: ForgeLaunchConfig) -> JoinHandle<Result<(), ForgeRuntim
                 .expect("worker runtime should build");
             runtime
                 .block_on(async {
-                    tokio::time::timeout(FUTURE_WAIT, forge_runtime::run(config)).await
+                    tokio::time::timeout(FUTURE_WAIT, Box::pin(forge_runtime::run(config))).await
                 })
                 .expect("Forge runtime future should be bounded")
         })
