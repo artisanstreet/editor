@@ -68,6 +68,14 @@ pub enum ProtocolEncodeError {
         /// Offending native length.
         length: usize,
     },
+    /// A collection contained a duplicate entry.
+    #[error("{field} contains duplicate entry {value:?}")]
+    Duplicate {
+        /// Name of the collection.
+        field: &'static str,
+        /// Duplicate value.
+        value: String,
+    },
 }
 
 /// Failure while reading and validating one external protocol frame.
@@ -792,9 +800,9 @@ fn encode_registered_engine_profiles_result(
             let mut seen = std::collections::HashSet::with_capacity(profile_ids.len());
             for id in profile_ids {
                 if !seen.insert(id.as_str()) {
-                    return Err(ProtocolEncodeError::CollectionTooLarge {
+                    return Err(ProtocolEncodeError::Duplicate {
                         field: "response.registeredEngineProfiles.profileIds",
-                        length: profile_ids.len(),
+                        value: id.as_str().to_owned(),
                     });
                 }
             }

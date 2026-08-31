@@ -12,9 +12,9 @@ use artisan_domain::{
 };
 use artisan_protocol::artisan_capnp::{envelope, request, response};
 use artisan_protocol::{
-    ClientRequest as ProtocolClientRequest, FrameId, ProtocolDecodeError, ProtocolValueError,
-    ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody, decode_envelope,
-    encode_envelope,
+    ClientRequest as ProtocolClientRequest, FrameId, ProtocolDecodeError, ProtocolEncodeError,
+    ProtocolValueError, ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody,
+    decode_envelope, encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -646,18 +646,6 @@ fn raw_registered_profiles_response(ids: Vec<&str>, state: &str) -> Vec<u8> {
     serialize::write_message_to_words(&message)
 }
 
-fn raw_registered_profiles_request() -> Vec<u8> {
-    let mut message = Builder::new(HeapAllocator::new());
-    let mut root = message.init_root::<envelope::Builder>();
-    root.set_protocol_version(1);
-    root.set_message_id("raw-list-profiles");
-    root.set_sent_at_millis(13);
-    root.init_body()
-        .init_request()
-        .init_list_registered_engine_profiles();
-    serialize::write_message_to_words(&message)
-}
-
 #[test]
 fn list_registered_profiles_request_round_trip_selects_appended_arm_13()
 -> Result<(), Box<dyn Error>> {
@@ -739,8 +727,7 @@ fn registered_profiles_missing_present_empty_and_ordered_round_trip_through_arm_
 }
 
 #[test]
-fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_trailing_and_wrong_family()
- {
+fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_and_trailing_bytes() {
     let empty_id = decode_envelope(&raw_registered_profiles_response(vec![""], "present"));
     assert!(
         matches!(empty_id, Err(ProtocolDecodeError::EngineConfig { .. })),
@@ -762,8 +749,6 @@ fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_tr
         "duplicate should be rejected: {duplicate:?}"
     );
 
-    let many: Vec<&str> = (0..65).map(|_| "alpha").collect();
-    // Use distinct ids to avoid duplicate rejection first, then test over-limit with distinct ids
     let distinct_many: Vec<String> = (0..65).map(|index| format!("profile-{index:02}")).collect();
     let distinct_many_refs: Vec<&str> = distinct_many.iter().map(|value| value.as_str()).collect();
     let over_limit = decode_envelope(&raw_registered_profiles_response(
@@ -805,19 +790,35 @@ fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_tr
         Err(ProtocolDecodeError::TrailingBytes { .. })
     ));
 
-    // Wrong family: try to decode a request frame as if it were a response is handled by envelope body discriminant,
-    // but we can prove that a valid registered profiles response decoded as request fails typed.
-    let response_bytes = encode_envelope(&registered_profiles_response_envelope(
+    let duplicate_envelope = registered_profiles_response_envelope(
         "present",
-        vec!["alpha"],
-        "server-wrong-family",
+        vec!["alpha", "alpha"],
+        "server-duplicate",
         "raw-list-profiles",
-    ))
-    .expect("response should encode");
-    // Decode as envelope succeeds, but the body is Response, not Request; attempting to interpret as wrong family via manual check
-    let decoded = decode_envelope(&response_bytes).expect("response should decode");
-    assert!(matches!(decoded.body, WireEnvelopeBody::Response(_)));
-    assert!(!matches!(decoded.body, WireEnvelopeBody::Request(_)));
+    );
+    assert!(
+        matches!(
+            encode_envelope(&duplicate_envelope),
+            Err(ProtocolEncodeError::Duplicate { .. })
+        ),
+        "duplicate present profile vector should be rejected on encode"
+    );
+
+    let distinct_over: Vec<String> = (0..65).map(|index| format!("profile-{index:02}")).collect();
+    let distinct_over_refs: Vec<&str> = distinct_over.iter().map(|value| value.as_str()).collect();
+    let over_limit_envelope = registered_profiles_response_envelope(
+        "present",
+        distinct_over_refs,
+        "server-over-limit",
+        "raw-list-profiles",
+    );
+    assert!(
+        matches!(
+            encode_envelope(&over_limit_envelope),
+            Err(ProtocolEncodeError::CollectionTooLarge { .. })
+        ),
+        "65th profile should be rejected on encode"
+    );
 }
 
 #[test]

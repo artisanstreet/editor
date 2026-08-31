@@ -3645,7 +3645,7 @@ async fn list_registered_engine_profiles_missing_and_present_empty_remain_distin
         request("frame-profiles-missing")
     );
     assert!(matches!(
-        missing_response.payload,
+        &missing_response.payload,
         ResponsePayload::RegisteredEngineProfiles(
             artisan_protocol::RegisteredEngineProfilesResult::RegistryMissing
         )
@@ -3662,7 +3662,7 @@ async fn list_registered_engine_profiles_missing_and_present_empty_remain_distin
         present_empty_response.request_id,
         request("frame-profiles-empty")
     );
-    match present_empty_response.payload {
+    match &present_empty_response.payload {
         ResponsePayload::RegisteredEngineProfiles(
             artisan_protocol::RegisteredEngineProfilesResult::RegistryPresent { profile_ids },
         ) => {
@@ -3671,7 +3671,7 @@ async fn list_registered_engine_profiles_missing_and_present_empty_remain_distin
         other => panic!("expected present empty, got {other:?}"),
     }
     assert_eq!(present_empty_reader.calls(), 1);
-    assert_ne!(missing_response.payload, present_empty_response.payload);
+    assert_ne!(&missing_response.payload, &present_empty_response.payload);
 
     storage.close().await.expect("storage should close");
 }
