@@ -131,6 +131,8 @@ pub enum CliError {
     OpenCode2Authority { reason: &'static str },
     #[error("OpenCode2 installation failed ({reason})")]
     OpenCode2Install { reason: &'static str },
+    #[error("OpenCode2 profile operation failed ({reason})")]
+    OpenCode2Profile { reason: &'static str },
     #[error("Forge control request failed: {0}")]
     Control(String),
     #[error("unsupported operation: {0}")]
@@ -157,7 +159,9 @@ impl CliError {
     pub const fn exit_code(&self) -> i32 {
         match self {
             Self::MissingInstance | Self::NotRunning => 3,
-            Self::Installation(_) | Self::OpenCode2Install { .. } => 4,
+            Self::Installation(_)
+            | Self::OpenCode2Install { .. }
+            | Self::OpenCode2Profile { .. } => 4,
             Self::ForgeBusy { .. } => 5,
             Self::ForgeActivityUnavailable => 6,
             Self::ForgeReadinessTimeout => 71,

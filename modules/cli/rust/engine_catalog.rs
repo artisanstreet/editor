@@ -495,6 +495,14 @@ impl NativeOpenCode2Authority {
         })
     }
 
+    /// Returns the validated managed root for this certified engine.
+    pub(crate) fn managed_engine_root(
+        &self,
+        instance: &NativeInstanceConfig,
+    ) -> Result<PathBuf, NativeOpenCode2Error> {
+        managed_paths(instance, self.install_spec.engine_id()).map(|paths| paths.engine_root)
+    }
+
     pub(crate) fn new_install_state(
         &self,
         generation_id: &str,

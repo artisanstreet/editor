@@ -327,7 +327,7 @@ fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
     false
 }
 
-struct InstallLock {
+pub(crate) struct InstallLock {
     path: PathBuf,
     file: File,
 }
@@ -365,6 +365,27 @@ impl InstallLock {
         }
         Ok(())
     }
+
+    pub(crate) fn fence_instance(
+        &self,
+        instance: &NativeInstanceConfig,
+    ) -> Result<(), NativeOpenCode2InstallError> {
+        let spec = NativeOpenCode2Authority::certified_install_spec();
+        let paths = InstallPaths::derive(instance, &spec)?;
+        self.fence(&paths)
+    }
+}
+
+/// Acquires the existing `OpenCode2` installation lock for another CLI module.
+///
+/// Profile registration and installation must serialize through this one
+/// guard; the profile surface does not create a parallel lock protocol.
+pub(crate) fn acquire_install_lock(
+    instance: &NativeInstanceConfig,
+) -> Result<InstallLock, NativeOpenCode2InstallError> {
+    let spec = NativeOpenCode2Authority::certified_install_spec();
+    let paths = InstallPaths::derive(instance, &spec)?;
+    InstallLock::acquire(&paths)
 }
 
 fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallError> {

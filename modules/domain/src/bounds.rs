@@ -18,6 +18,14 @@
 /// snowflakes, and UUIDs.
 pub const IDENTIFIER_MAX_BYTES: usize = 128;
 
+/// Maximum UTF-8 byte length of one managed native engine profile id.
+///
+/// Profile ids are deliberately narrower than ordinary Forge identities:
+/// they become one component of a managed home directory, so the domain
+/// accepts only the ASCII filename-safe grammar enforced by
+/// [`crate::EngineProfileId`].
+pub const ENGINE_PROFILE_ID_MAX_BYTES: usize = 64;
+
 /// Maximum UTF-8 byte length of a thread title.
 ///
 /// Legacy titles were non-empty after trimming but unbounded

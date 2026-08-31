@@ -1526,7 +1526,22 @@ fn sync_directory(_dir: &Path) -> Result<(), ForgeCredentialError> {
     Ok(())
 }
 
-fn ensure_credentials_dir(dir: &Path) -> Result<(), ForgeCredentialError> {
+/// Validates or creates a directory with the same private permissions used by
+/// Forge credential custody.
+///
+/// This seam is intentionally shared by other future credential-bearing
+/// directories. It never repairs an existing directory with unsafe
+/// permissions; callers receive the existing fail-closed error instead.
+pub(crate) fn ensure_private_directory(dir: &Path) -> Result<(), ForgeCredentialError> {
+    private_directory(dir, true)
+}
+
+/// Validates an already-existing private directory without creating it.
+pub(crate) fn validate_private_directory(dir: &Path) -> Result<(), ForgeCredentialError> {
+    private_directory(dir, false)
+}
+
+fn private_directory(dir: &Path, create_if_missing: bool) -> Result<(), ForgeCredentialError> {
     check_ancestors_all(dir, false)?;
     match fs::symlink_metadata(dir) {
         Ok(meta) if metadata_is_symlink_or_reparse(&meta) => {
@@ -1545,6 +1560,12 @@ fn ensure_credentials_dir(dir: &Path) -> Result<(), ForgeCredentialError> {
         }
         Ok(meta) if meta.is_file() => Err(ForgeCredentialError::UnsafePath(dir.to_path_buf())),
         Ok(_) => Err(ForgeCredentialError::UnsafePath(dir.to_path_buf())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create_if_missing => {
+            Err(ForgeCredentialError::Io {
+                context: "inspect credentials directory",
+                path: dir.to_path_buf(),
+            })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir_all(dir).map_err(|_| ForgeCredentialError::Io {
                 context: "create credentials directory",
@@ -1899,6 +1920,10 @@ fn generate_material() -> Result<ProvisionalMaterial, ForgeCredentialError> {
         private_key: Zeroizing::new(key_der),
         certificate: cert_der,
     })
+}
+
+fn ensure_credentials_dir(dir: &Path) -> Result<(), ForgeCredentialError> {
+    ensure_private_directory(dir)
 }
 
 fn install_atomic(

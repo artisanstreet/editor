@@ -24,6 +24,8 @@ use crate::{
     telemetry::{self, Preference},
 };
 
+pub use crate::engine_profiles::{EngineProfileCommand, EngineProfileHomeArg};
+
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_FOLLOW_BYTES: u64 = 64 * 1024;
 // A cold installed Forge can take more than 20 seconds to initialize its SEA
@@ -152,6 +154,11 @@ pub enum EngineCommand {
     },
     /// Install the certified native `OpenCode2` engine.
     Install,
+    /// Manage explicit certified `OpenCode2` profile homes.
+    Profile {
+        #[command(subcommand)]
+        command: EngineProfileCommand,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -202,11 +209,19 @@ pub fn run(cli: Cli) -> Result<()> {
             command: EngineCommand::Install,
         })
     );
+    let is_profile = matches!(
+        cli.command.as_ref(),
+        Some(Commands::Engine {
+            command: EngineCommand::Profile { .. },
+        })
+    );
     let layout = Layout::discover().map_err(|error| {
         if is_install {
             CliError::OpenCode2Install {
                 reason: "installation_invalid",
             }
+        } else if is_profile {
+            profile_surface_error()
         } else {
             error
         }
@@ -349,16 +364,34 @@ fn engine_command(layout: &Layout, command: &EngineCommand) -> Result<()> {
         };
     }
 
-    require_installation(layout)?;
-    let instance = load_native_instance(layout).map_err(|error| match error {
-        CliError::MissingInstance => CliError::MissingInstance,
-        _ => CliError::OpenCode2Authority {
-            reason: "instance_invalid",
-        },
+    let is_profile = matches!(command, EngineCommand::Profile { .. });
+    if is_profile {
+        require_installation(layout).map_err(|_| profile_surface_error())?;
+    } else {
+        require_installation(layout)?;
+    }
+    let instance = load_native_instance(layout).map_err(|error| {
+        if is_profile {
+            profile_surface_error()
+        } else {
+            match error {
+                CliError::MissingInstance => CliError::MissingInstance,
+                _ => CliError::OpenCode2Authority {
+                    reason: "instance_invalid",
+                },
+            }
+        }
     })?;
     match command {
         EngineCommand::List { json } => list_engines(&instance, *json),
         EngineCommand::Install => unreachable!("install is handled above"),
+        EngineCommand::Profile { command } => crate::engine_profiles::run(&instance, command),
+    }
+}
+
+fn profile_surface_error() -> CliError {
+    CliError::OpenCode2Profile {
+        reason: "profile_registry_invalid",
     }
 }
 
