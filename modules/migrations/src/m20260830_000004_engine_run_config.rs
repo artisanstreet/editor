@@ -226,7 +226,8 @@ async fn create_command_receipt_indexes(
         .execute_unprepared(
             "CREATE INDEX idx_command_receipts_kind_project_id ON command_receipts(command_kind, project_id)",
         )
-        .await
+        .await?;
+    Ok(())
 }
 
 async fn create_legacy_command_receipt_indexes(
@@ -246,5 +247,6 @@ async fn create_legacy_command_receipt_indexes(
         .execute_unprepared(
             "CREATE INDEX idx_command_receipts_kind_project_id ON command_receipts(command_kind, project_id)",
         )
-        .await
+        .await?;
+    Ok(())
 }
