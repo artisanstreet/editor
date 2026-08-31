@@ -49,7 +49,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::time::Duration;
 
-use artisan_domain::{RequestId, UnixMillis};
+use artisan_domain::{ConversationRequest, RequestId, ThreadId, UnixMillis};
 use artisan_protocol::{
     ClientRequest, ConnectionId, ErrorCode, ErrorDetail, FrameId, ProtocolFailure, ProtocolVersion,
     ResponsePayload, ServerResponse, Welcome, WireEnvelope, WireEnvelopeBody,
@@ -62,13 +62,17 @@ use artisan_transport::{
 use quinn::{ClosedStream, Connection, RecvStream, SendStream, VarInt};
 use thiserror::Error;
 
+use crate::conversation_delivery_driver::ConversationDeliveryDriver;
 use crate::conversation_subscription_registry::ActivateError;
 use crate::credential_authority::{
     CredentialAuthenticationError, CredentialAuthority, CredentialEntropyError,
     ReconnectRotationError,
 };
 use crate::lifecycle_control::{LifecycleControlReceipt, LifecycleController, LifecycleDispatch};
-use crate::request_handler::{RequestHandler, RequestHandlerReceipt};
+use crate::request_handler::{
+    ActivatedConversationSubscription, ConversationConnectionContext, RequestHandler,
+    RequestHandlerReceipt,
+};
 
 /// Fixed application close code used whenever this leaf releases a
 /// connection it owns.
@@ -156,6 +160,64 @@ pub enum AuthenticationStageError {
     Finish(#[from] ClosedStream),
 }
 
+/// Failure of one bounded conversation-delivery stage on an authenticated
+/// connection. Every variant is payload-free and stage-classified.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum DeliveryStageError {
+    /// The authoritative conversation replay read failed.
+    #[error("conversation delivery replay failed")]
+    Replay,
+
+    /// The serialized conversation writer failed or its state was unavailable.
+    #[error("conversation delivery writer failed")]
+    Writer,
+
+    /// The writer could not record its already-sent batch in the registry.
+    #[error("conversation delivery registry update failed")]
+    Registry,
+
+    /// The durable cursor requires a fresh snapshot.
+    #[error("conversation delivery requires a fresh snapshot")]
+    ResnapshotRequired,
+
+    /// The process-wide commit wake source closed.
+    #[error("conversation delivery notifier closed")]
+    NotifierClosed,
+
+    /// The serialized writer could not finish its output stream.
+    #[error("conversation delivery finish failed")]
+    Finish,
+}
+
+/// Result of one request after its response send side and local receipt work
+/// have completed. The delivery driver owns the activation after this point.
+#[derive(Debug)]
+pub(crate) struct RequestDispatchOutcome {
+    pub(crate) activation: Option<ActivatedConversationSubscription>,
+    pub(crate) stopped_thread: Option<ThreadId>,
+}
+
+/// Terminal result of the connection-owned service loop, retaining the local
+/// dispatch count for the listener's existing service report.
+#[derive(Debug)]
+pub(crate) struct DriveUntilEndError {
+    completed_requests: u32,
+    source: DeadlineError<RequestStageError>,
+}
+
+impl DriveUntilEndError {
+    fn new(completed_requests: u32, source: DeadlineError<RequestStageError>) -> Self {
+        Self {
+            completed_requests,
+            source,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (u32, DeadlineError<RequestStageError>) {
+        (self.completed_requests, self.source)
+    }
+}
+
 /// Failure of one bounded request-dispatch stage on an authenticated
 /// connection. Existing typed sources are preserved verbatim.
 #[derive(Debug, Error)]
@@ -179,6 +241,14 @@ pub enum RequestStageError {
     /// correlated response was written and the server send side finished.
     #[error("activating the conversation subscription failed")]
     Activate(#[from] ActivateError),
+
+    /// A fresh server frame stamp could not be acquired for an outgoing frame.
+    #[error("stamping the server frame failed")]
+    Stamp,
+
+    /// A serialized conversation delivery stage failed.
+    #[error("conversation delivery failed")]
+    Delivery(#[from] DeliveryStageError),
 }
 
 /// One admitted, authenticated Forge connection owned exclusively by its
@@ -187,8 +257,10 @@ pub enum RequestStageError {
 /// The value keeps Quinn private, retains the exclusive mutable
 /// credential-authority lease for its whole lifetime, and closes the owned
 /// connection with the fixed application reason when dropped. The caller
-/// services it sequentially with [`Self::respond_next`]; no spawning,
-/// concurrent handler tasks, or background work exist inside this leaf.
+/// services it sequentially with [`Self::drive_until_end`] for the configured
+/// delivery path or [`Self::respond_next`] for the legacy request path; no
+/// spawning, concurrent handler tasks, or background work exist inside this
+/// leaf.
 #[must_use = "an admitted connection must be serviced; dropping it closes the connection"]
 pub struct ForgeConnection<'authority, 'handler, 'cancel, 'lifecycle> {
     connection: Connection,
@@ -199,6 +271,7 @@ pub struct ForgeConnection<'authority, 'handler, 'cancel, 'lifecycle> {
     lifecycle_witness: LifecycleWitness,
     limits: ConnectionLimits,
     protocol_version: ProtocolVersion,
+    conversation_delivery: Option<ConversationDeliveryDriver>,
 }
 
 impl ForgeConnection<'_, '_, '_, '_> {
@@ -276,6 +349,16 @@ impl ForgeConnection<'_, '_, '_, '_> {
                     // The stage completed: hand both directions back for
                     // ordinary drops without cleanup actions.
                     streams.release();
+                    let conversation_delivery =
+                        handler
+                            .new_conversation_connection_context()
+                            .map(|context| {
+                                ConversationDeliveryDriver::new(
+                                    connection.clone(),
+                                    protocol_version,
+                                    context,
+                                )
+                            });
                     let admitted = ForgeConnection {
                         connection,
                         authority,
@@ -285,6 +368,7 @@ impl ForgeConnection<'_, '_, '_, '_> {
                         lifecycle_witness,
                         limits,
                         protocol_version,
+                        conversation_delivery,
                     };
                     admission.disarm();
                     Ok(admitted)
@@ -345,6 +429,7 @@ impl ForgeConnection<'_, '_, '_, '_> {
                 self.lifecycle_witness,
                 self.protocol_version,
                 stamp,
+                None,
                 &mut streams,
                 self.cancel,
             ),
@@ -352,7 +437,7 @@ impl ForgeConnection<'_, '_, '_, '_> {
         .await;
 
         match outcome {
-            Ok(()) => {
+            Ok(_) => {
                 // The stage completed: hand both directions back for
                 // ordinary drops without cleanup actions.
                 streams.release();
@@ -360,6 +445,194 @@ impl ForgeConnection<'_, '_, '_, '_> {
             }
             Err(source) => Err(source),
         }
+    }
+
+    /// Drives one authenticated connection until its request budget is
+    /// reached or a bounded request/delivery stage fails.
+    ///
+    /// A configured conversation notifier switches the owner to one
+    /// serialized accept-or-wake loop. Requests still use the established
+    /// bidirectional dispatcher, while wake scans and initial activation
+    /// replay use the same connection-owned writer. A caller cancellation
+    /// finishes that writer before registry cleanup; every other terminal
+    /// path drops it so its existing guard resets unfinished output.
+    pub(crate) async fn drive_until_end<F>(
+        mut self,
+        capacity: u32,
+        mut stamp: F,
+    ) -> Result<(Self, u32), DriveUntilEndError>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let mut completed_requests = 0_u32;
+
+        loop {
+            if completed_requests >= capacity {
+                if let Some(driver) = self.conversation_delivery.as_mut() {
+                    if let Err(error) = driver.cleanup(true).await {
+                        return Err(DriveUntilEndError::new(
+                            completed_requests,
+                            DeadlineError::Peer {
+                                operation: OperationKind::Send,
+                                error: RequestStageError::Delivery(error),
+                            },
+                        ));
+                    }
+                }
+                return Ok((self, completed_requests));
+            }
+
+            if self.conversation_delivery.is_none() {
+                let frame = match stamp() {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        return Err(DriveUntilEndError::new(
+                            completed_requests,
+                            DeadlineError::Peer {
+                                operation: OperationKind::Send,
+                                error,
+                            },
+                        ));
+                    }
+                };
+                match self.respond_next(frame).await {
+                    Ok(returned) => {
+                        self = returned;
+                        completed_requests += 1;
+                    }
+                    Err(source) => {
+                        return Err(DriveUntilEndError::new(completed_requests, source));
+                    }
+                }
+                continue;
+            }
+
+            let event = {
+                let driver = self
+                    .conversation_delivery
+                    .as_mut()
+                    .expect("configured delivery driver remains owned");
+                run_with_deadline(
+                    OperationKind::Receive,
+                    self.limits.next_request,
+                    self.cancel,
+                    wait_for_driver_event(&self.connection, driver),
+                )
+                .await
+            };
+            let event = match event {
+                Ok(event) => event,
+                Err(source) => return self.fail_connection(source, completed_requests).await,
+            };
+
+            match event {
+                DriverEvent::Wake => {
+                    let result = {
+                        let driver = self
+                            .conversation_delivery
+                            .as_mut()
+                            .expect("configured delivery driver remains owned");
+                        driver
+                            .deliver_wake(&mut stamp, self.limits.next_request, self.cancel)
+                            .await
+                    };
+                    if let Err(source) = result {
+                        return self.fail_connection(source, completed_requests).await;
+                    }
+                }
+                DriverEvent::Request { send, recv } => {
+                    let mut streams = StageStreams::new();
+                    streams.install(send, recv);
+                    let frame = match stamp() {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            drop(streams);
+                            return self
+                                .fail_connection(
+                                    DeadlineError::Peer {
+                                        operation: OperationKind::Send,
+                                        error,
+                                    },
+                                    completed_requests,
+                                )
+                                .await;
+                        }
+                    };
+                    let outcome = {
+                        let driver = self
+                            .conversation_delivery
+                            .as_ref()
+                            .expect("configured delivery driver remains owned");
+                        run_with_deadline(
+                            OperationKind::Receive,
+                            self.limits.next_request,
+                            self.cancel,
+                            drive_request_stream(
+                                self.handler,
+                                self.lifecycle,
+                                self.lifecycle_witness,
+                                self.protocol_version,
+                                frame,
+                                Some(driver.context()),
+                                &mut streams,
+                                self.cancel,
+                            ),
+                        )
+                        .await
+                    };
+                    let outcome = match outcome {
+                        Ok(outcome) => {
+                            streams.release();
+                            outcome
+                        }
+                        Err(source) => {
+                            return self.fail_connection(source, completed_requests).await;
+                        }
+                    };
+
+                    let result = {
+                        let driver = self
+                            .conversation_delivery
+                            .as_mut()
+                            .expect("configured delivery driver remains owned");
+                        driver
+                            .handle_request(
+                                outcome,
+                                &mut stamp,
+                                self.limits.next_request,
+                                self.cancel,
+                            )
+                            .await
+                    };
+                    if let Err(source) = result {
+                        return self.fail_connection(source, completed_requests).await;
+                    }
+                    completed_requests += 1;
+                }
+            }
+        }
+    }
+
+    async fn fail_connection(
+        mut self,
+        source: DeadlineError<RequestStageError>,
+        completed_requests: u32,
+    ) -> Result<(Self, u32), DriveUntilEndError> {
+        let graceful = matches!(&source, DeadlineError::Cancelled { .. });
+        if let Some(driver) = self.conversation_delivery.as_mut() {
+            if let Err(error) = driver.cleanup(graceful).await {
+                if graceful {
+                    return Err(DriveUntilEndError::new(
+                        completed_requests,
+                        DeadlineError::Peer {
+                            operation: OperationKind::Send,
+                            error: RequestStageError::Delivery(error),
+                        },
+                    ));
+                }
+            }
+        }
+        Err(DriveUntilEndError::new(completed_requests, source))
     }
 }
 
@@ -453,14 +726,51 @@ async fn drive_request(
     lifecycle_witness: LifecycleWitness,
     protocol_version: ProtocolVersion,
     stamp: ServerFrameStamp,
+    context: Option<&ConversationConnectionContext>,
     streams: &mut StageStreams,
     cancel: &CancelHandle,
-) -> Result<(), RequestStageError> {
+) -> Result<RequestDispatchOutcome, RequestStageError> {
     let (send, recv) = connection
         .accept_bi()
         .await
         .map_err(|source| RequestStageError::Accept { source })?;
-    let (send, recv) = streams.install(send, recv);
+    streams.install(send, recv);
+    drive_request_stream(
+        handler,
+        lifecycle,
+        lifecycle_witness,
+        protocol_version,
+        stamp,
+        context,
+        streams,
+        cancel,
+    )
+    .await
+}
+
+/// Dispatches a request on a stream pair already accepted by the connection
+/// driver.
+#[allow(clippy::too_many_arguments)]
+async fn drive_request_stream(
+    handler: &RequestHandler,
+    lifecycle: &LifecycleController,
+    lifecycle_witness: LifecycleWitness,
+    protocol_version: ProtocolVersion,
+    stamp: ServerFrameStamp,
+    context: Option<&ConversationConnectionContext>,
+    streams: &mut StageStreams,
+    cancel: &CancelHandle,
+) -> Result<RequestDispatchOutcome, RequestStageError> {
+    let send = streams
+        .send
+        .as_mut()
+        .expect("request send stream is installed before dispatch");
+    let recv = streams
+        .recv
+        .as_mut()
+        .expect("request receive stream is installed before dispatch");
+    let dispatch_context = context;
+    let dispatch_handler = handler;
 
     // The incoming frame-derived request id stays authoritative. Lifecycle
     // requests are intercepted before the ordinary handler, while every
@@ -470,6 +780,12 @@ async fn drive_request(
     let receipt = dispatch_server_request_with_receipt(send, recv, |incoming| async move {
         let request_id = incoming.request_id;
         let request = incoming.request;
+        let stopped_thread = match &request {
+            ClientRequest::Conversation(ConversationRequest::Unsubscribe(unsubscribe)) => {
+                Some(unsubscribe.thread_id.clone())
+            }
+            _ => None,
+        };
         let (answered, receipt) = match request {
             ClientRequest::Lifecycle(_request) if !lifecycle_witness.supported => (
                 Err(unsupported_feature_failure(&request_id)),
@@ -491,11 +807,23 @@ async fn drive_request(
                 }
             }
             request => {
-                let (answered, receipt) = handler
-                    .respond_with_receipt(&request_id, &request)
-                    .await
-                    .into_parts();
-                (answered, PostResponseReceipt::Handler(receipt))
+                let (answered, receipt) = match dispatch_context {
+                    Some(context) => dispatch_handler
+                        .respond_with_receipt_in_context(context, &request_id, &request)
+                        .await
+                        .into_parts(),
+                    None => dispatch_handler
+                        .respond_with_receipt(&request_id, &request)
+                        .await
+                        .into_parts(),
+                };
+                (
+                    answered,
+                    PostResponseReceipt::Handler {
+                        receipt,
+                        stopped_thread,
+                    },
+                )
             }
         };
         let body = match answered {
@@ -519,12 +847,31 @@ async fn drive_request(
     // finished send side, even when activation later fails or is cancelled.
     streams.mark_send_finished();
     match receipt {
-        PostResponseReceipt::Handler(receipt) => {
-            let _activation = handler.activate_after_response(receipt).await?;
+        PostResponseReceipt::Handler {
+            receipt,
+            stopped_thread,
+        } => {
+            let activation = match context {
+                Some(context) => {
+                    handler
+                        .activate_after_response_in_context(context, receipt)
+                        .await?
+                }
+                None => handler.activate_after_response(receipt).await?,
+            };
+            Ok(RequestDispatchOutcome {
+                activation,
+                stopped_thread,
+            })
         }
-        PostResponseReceipt::Lifecycle(receipt) => receipt.commit_after_response(cancel),
+        PostResponseReceipt::Lifecycle(receipt) => {
+            receipt.commit_after_response(cancel);
+            Ok(RequestDispatchOutcome {
+                activation: None,
+                stopped_thread: None,
+            })
+        }
     }
-    Ok(())
 }
 
 /// A correlated, bounded failure for a lifecycle request sent without the
@@ -540,8 +887,30 @@ fn unsupported_feature_failure(request_id: &RequestId) -> ProtocolFailure {
 }
 
 enum PostResponseReceipt {
-    Handler(RequestHandlerReceipt),
+    Handler {
+        receipt: RequestHandlerReceipt,
+        stopped_thread: Option<ThreadId>,
+    },
     Lifecycle(LifecycleControlReceipt),
+}
+
+enum DriverEvent {
+    Request { send: SendStream, recv: RecvStream },
+    Wake,
+}
+
+async fn wait_for_driver_event(
+    connection: &Connection,
+    driver: &mut ConversationDeliveryDriver,
+) -> Result<DriverEvent, RequestStageError> {
+    tokio::select! {
+        accepted = connection.accept_bi() => accepted
+            .map(|(send, recv)| DriverEvent::Request { send, recv })
+            .map_err(|source| RequestStageError::Accept { source }),
+        wake = driver.wait_for_wake() => wake
+            .map(|()| DriverEvent::Wake)
+            .map_err(RequestStageError::Delivery),
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -25,10 +25,10 @@
 //! Bounded [`artisan_domain::ConversationQuery`] reads are answered directly
 //! from the durable projection reader
 //! [`Repository::read_conversation_snapshot`]; subscription start and stop
-//! stay unbacked through [`RequestHandler::respond`] while the opt-in
-//! [`RequestHandler::respond_with_receipt`] path owns one connection-local
-//! registrar. That path prepares subscriptions as `Pending` and leaves their
-//! activation to its caller after the response has been written.
+//! stay unbacked through [`RequestHandler::respond`]. The receipt paths
+//! prepare subscriptions as `Pending` and leave activation to their caller
+//! after the response has been written; the authenticated delivery path
+//! supplies a fresh connection-owned registrar context for that work.
 
 use std::{
     fmt,
@@ -57,6 +57,7 @@ use tokio::sync::Mutex;
 use crate::command_admission::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, SystemCommandOrigin,
 };
+use crate::conversation_commit_notifier::ConversationCommitNotifier;
 use crate::conversation_subscription_preparation::{
     PrepareSubscriptionError, prepare_conversation_subscription, stop_conversation_subscription,
 };
@@ -134,11 +135,45 @@ impl ConversationSubscriptionRegistrar {
         let mut registry = self.registry.lock().await;
         registry.publish_batch(lease, batch)
     }
+
+    /// Clears every entry owned by this connection's registrar.
+    pub(crate) async fn clear_all(&self) {
+        self.registry.lock().await.clear_all();
+    }
 }
 
 /// Private, non-zero-sized allocation identity for one handler-owned
 /// subscription registrar.
 type SubscriptionRegistrarIdentity = u8;
+
+/// Fresh connection-owned request state for native conversation delivery.
+///
+/// The production handler retains only process-wide configuration. Each
+/// authenticated connection receives a new registrar, identity fence, and
+/// repository handle while sharing the injected process-wide commit notifier.
+/// The context is intentionally not cloneable: the connection driver is its
+/// sole owner of the active subscription state.
+#[derive(Debug)]
+pub(crate) struct ConversationConnectionContext {
+    repository: Repository,
+    registrar: ConversationSubscriptionRegistrar,
+    identity: Arc<SubscriptionRegistrarIdentity>,
+    notifier: ConversationCommitNotifier,
+}
+
+impl ConversationConnectionContext {
+    pub(crate) fn repository(&self) -> &Repository {
+        &self.repository
+    }
+
+    pub(crate) fn registrar(&self) -> &ConversationSubscriptionRegistrar {
+        &self.registrar
+    }
+
+    pub(crate) fn notifier(&self) -> &ConversationCommitNotifier {
+        &self.notifier
+    }
+}
 
 /// One private activation capability carried by a local request receipt.
 #[derive(Debug)]
@@ -247,6 +282,12 @@ impl ActivatedConversationSubscription {
     pub fn into_parts(self) -> (SubscriptionLease, ConversationCursor) {
         (self.lease, self.cursor)
     }
+
+    /// Advances the local delivery cursor to the exact cursor returned by a
+    /// successful authoritative replay publication.
+    pub(crate) fn advance_to(&mut self, cursor: ConversationCursor) {
+        self.cursor = cursor;
+    }
 }
 
 struct DirectoryPicker {
@@ -261,6 +302,7 @@ pub struct RequestHandler {
     origin: AdmissionOrigin,
     subscriptions: Option<ConversationSubscriptionRegistrar>,
     subscription_identity: Option<Arc<SubscriptionRegistrarIdentity>>,
+    conversation_commit_notifier: Option<ConversationCommitNotifier>,
     directory_picker: Option<DirectoryPicker>,
     registered_engine_profiles: Option<Box<dyn RegisteredEngineProfilesReader>>,
 }
@@ -388,6 +430,7 @@ impl RequestHandler {
             origin: AdmissionOrigin::system(),
             subscriptions: None,
             subscription_identity: None,
+            conversation_commit_notifier: None,
             directory_picker: None,
             registered_engine_profiles: None,
         }
@@ -408,6 +451,7 @@ impl RequestHandler {
             origin: AdmissionOrigin::Injected(origin),
             subscriptions: None,
             subscription_identity: None,
+            conversation_commit_notifier: None,
             directory_picker: None,
             registered_engine_profiles: None,
         }
@@ -429,6 +473,7 @@ impl RequestHandler {
             origin: AdmissionOrigin::system(),
             subscriptions: Some(registrar),
             subscription_identity: Some(subscription_identity),
+            conversation_commit_notifier: None,
             directory_picker: None,
             registered_engine_profiles: None,
         }
@@ -442,6 +487,32 @@ impl RequestHandler {
     #[must_use]
     pub fn with_subscriptions(repository: Repository) -> Self {
         Self::with_subscription_registrar(repository, ConversationSubscriptionRegistrar::new())
+    }
+
+    /// Attaches the process-wide notifier used to create fresh connection
+    /// subscription contexts.
+    #[must_use]
+    pub fn with_conversation_commit_notifier(
+        mut self,
+        notifier: ConversationCommitNotifier,
+    ) -> Self {
+        self.conversation_commit_notifier = Some(notifier);
+        self
+    }
+
+    /// Creates the private subscription context for one authenticated
+    /// connection. A missing notifier leaves the legacy unbacked handler
+    /// path unchanged; production composition must inject one to enable
+    /// conversation delivery.
+    pub(crate) fn new_conversation_connection_context(
+        &self,
+    ) -> Option<ConversationConnectionContext> {
+        Some(ConversationConnectionContext {
+            repository: self.repository.clone(),
+            registrar: ConversationSubscriptionRegistrar::new(),
+            identity: Arc::new(0_u8),
+            notifier: self.conversation_commit_notifier.clone()?,
+        })
     }
 
     /// Creates a handler with the process-owned native directory picker and
@@ -563,6 +634,27 @@ impl RequestHandler {
         }
     }
 
+    /// Resolves one request against a fresh connection-owned subscription
+    /// context. Non-subscription requests retain the ordinary handler path.
+    pub(crate) async fn respond_with_receipt_in_context(
+        &self,
+        context: &ConversationConnectionContext,
+        request_id: &RequestId,
+        request: &ClientRequest,
+    ) -> RequestHandlerResponse {
+        match request {
+            ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
+                self.subscribe_with_receipt_in_context(context, request_id, subscribe)
+                    .await
+            }
+            ClientRequest::Conversation(ConversationRequest::Unsubscribe(unsubscribe)) => {
+                self.unsubscribe_with_receipt_in_context(context, request_id, unsubscribe)
+                    .await
+            }
+            _ => RequestHandlerResponse::without_receipt(self.respond(request_id, request).await),
+        }
+    }
+
     /// Activates a real subscription receipt after the caller proves its
     /// response write and send-side finish.
     ///
@@ -582,16 +674,39 @@ impl RequestHandler {
         &self,
         receipt: RequestHandlerReceipt,
     ) -> Result<Option<ActivatedConversationSubscription>, ActivateError> {
+        Self::activate_receipt(
+            receipt,
+            self.subscription_identity.as_ref(),
+            self.subscriptions.as_ref(),
+        )
+        .await
+    }
+
+    /// Activates a receipt against the supplied connection-owned context
+    /// after its correlated response has crossed the wire and finished.
+    pub(crate) async fn activate_after_response_in_context(
+        &self,
+        context: &ConversationConnectionContext,
+        receipt: RequestHandlerReceipt,
+    ) -> Result<Option<ActivatedConversationSubscription>, ActivateError> {
+        Self::activate_receipt(receipt, Some(&context.identity), Some(context.registrar())).await
+    }
+
+    async fn activate_receipt(
+        receipt: RequestHandlerReceipt,
+        subscription_identity: Option<&Arc<SubscriptionRegistrarIdentity>>,
+        subscriptions: Option<&ConversationSubscriptionRegistrar>,
+    ) -> Result<Option<ActivatedConversationSubscription>, ActivateError> {
         let Some(activation) = receipt.activation else {
             return Ok(None);
         };
-        let Some(subscription_identity) = self.subscription_identity.as_ref() else {
+        let Some(subscription_identity) = subscription_identity else {
             return Err(ActivateError::StaleLease);
         };
         if !Arc::ptr_eq(subscription_identity, &activation.registrar) {
             return Err(ActivateError::StaleLease);
         }
-        let Some(registrar) = self.subscriptions.as_ref() else {
+        let Some(registrar) = subscriptions else {
             return Err(ActivateError::StaleLease);
         };
         let mut registry = registrar.registry.lock().await;
@@ -710,6 +825,46 @@ impl RequestHandler {
             );
         };
         let mut registry = registrar.registry.lock().await;
+        let (stopped, _outcome) =
+            stop_conversation_subscription(&mut registry, unsubscribe).into_parts();
+        RequestHandlerResponse::without_receipt(Ok(outcome(
+            request_id,
+            ResponsePayload::ConversationSubscriptionStopped(stopped),
+        )))
+    }
+
+    async fn subscribe_with_receipt_in_context(
+        &self,
+        context: &ConversationConnectionContext,
+        request_id: &RequestId,
+        subscribe: &ConversationSubscribe,
+    ) -> RequestHandlerResponse {
+        let mut registry = context.registrar.registry.lock().await;
+        match prepare_conversation_subscription(&context.repository, &mut registry, subscribe).await
+        {
+            Ok(prepared) => {
+                let (started, lease) = prepared.into_parts();
+                RequestHandlerResponse::with_receipt(
+                    Ok(outcome(
+                        request_id,
+                        ResponsePayload::ConversationSubscriptionStarted(started),
+                    )),
+                    RequestHandlerReceipt::activate(context.identity.clone(), lease),
+                )
+            }
+            Err(error) => {
+                RequestHandlerResponse::without_receipt(Err(preparation_failure(error, request_id)))
+            }
+        }
+    }
+
+    async fn unsubscribe_with_receipt_in_context(
+        &self,
+        context: &ConversationConnectionContext,
+        request_id: &RequestId,
+        unsubscribe: &ConversationUnsubscribe,
+    ) -> RequestHandlerResponse {
+        let mut registry = context.registrar.registry.lock().await;
         let (stopped, _outcome) =
             stop_conversation_subscription(&mut registry, unsubscribe).into_parts();
         RequestHandlerResponse::without_receipt(Ok(outcome(

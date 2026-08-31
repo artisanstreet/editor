@@ -692,7 +692,7 @@ impl ForgeListener {
             handshake: self.limits.handshake,
             next_request: self.limits.next_request,
         };
-        let mut connection = match ForgeConnection::authenticate(
+        let connection = match ForgeConnection::authenticate(
             connection,
             &mut self.authority,
             handler,
@@ -708,27 +708,35 @@ impl ForgeListener {
         };
 
         let capacity = self.requests_per_connection.get();
-        let mut completed_requests: u32 = 0;
-        let termination = loop {
-            if completed_requests >= capacity {
-                drop(connection);
-                break RequestTermination::BudgetReached;
-            }
-            let stamp = frame_stamp(self.origin.as_ref())
-                .map_err(|source| ListenerError::Metadata { source })?;
-            match connection.respond_next(stamp).await {
-                Ok(returned) => {
-                    connection = returned;
-                    completed_requests += 1;
+        let mut metadata_error = None;
+        match connection
+            .drive_until_end(capacity, || match frame_stamp(self.origin.as_ref()) {
+                Ok(stamp) => Ok(stamp),
+                Err(source) => {
+                    metadata_error = Some(source);
+                    Err(RequestStageError::Stamp)
                 }
-                Err(source) => break RequestTermination::Failed { source },
+            })
+            .await
+        {
+            Ok((connection, completed_requests)) => {
+                drop(connection);
+                Ok(ServiceReport {
+                    completed_requests,
+                    termination: RequestTermination::BudgetReached,
+                })
             }
-        };
-
-        Ok(ServiceReport {
-            completed_requests,
-            termination,
-        })
+            Err(failure) => {
+                let (completed_requests, source) = failure.into_parts();
+                if let Some(source) = metadata_error {
+                    return Err(ListenerError::Metadata { source });
+                }
+                Ok(ServiceReport {
+                    completed_requests,
+                    termination: RequestTermination::Failed { source },
+                })
+            }
+        }
     }
 
     /// Consuming teardown: closes every connection and waits until the owned
