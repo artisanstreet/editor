@@ -14,10 +14,10 @@ use artisan_ui::{
     theme::{ArtisanTheme, ThemeMode},
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, Element, ElementId,
-    ElementInputHandler, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, Pixels, Point, Render,
-    SharedString, StyledText, UTF16Selection, Window, actions, div, point,
+    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler,
+    Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
+    KeyBinding, LayoutId, MouseButton, Pixels, Point, Render, SharedString, StyledText,
+    UTF16Selection, Window, actions, div, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -525,7 +525,8 @@ impl Render for NativeComposer {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut));
 
-        let editor = NativeComposerInputElement::new(editor.into_any_element(), entity, focus);
+        let editor =
+            NativeComposerInputElement::new(editor.into_any_element(), entity.clone(), focus);
         let send_ready = self.send_ready();
         let sending = self.is_submitting();
         let send_entity = entity.clone();
