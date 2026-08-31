@@ -37,6 +37,7 @@ use crate::{
     conversation_delivery_machine::{ConversationDeliveryEffect, ConversationDeliveryEvent},
     conversation_host::{CONVERSATION_HOST_MAX_EFFECTS, ConversationHost, ConversationHostEffect},
     conversation_state_machine::{ConversationStateEffect, ConversationStateEvent},
+    engine_settings::{EngineSettingsController, EngineSettingsStatus, RegistryView},
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
     shell::{ShellFrameStyle, shell_rail},
 };
@@ -51,6 +52,9 @@ pub(crate) const NATIVE_ROOT_SELECTOR: &str = "artisan-native-application";
 
 /// Stable selector for the state panel.
 pub(crate) const NATIVE_STATUS_SELECTOR: &str = "artisan-native-status";
+
+/// Stable selector for the engine-settings section.
+pub(crate) const NATIVE_ENGINE_SETTINGS_SELECTOR: &str = "artisan-native-engine-settings";
 
 const NATIVE_KEY_CONTEXT: &str = "artisan-native-application";
 const SURFACE_WIDTH: f32 = 1_024.0;
@@ -92,6 +96,7 @@ pub struct NativeApplication {
     intake_restore_state: Option<NativeViewState>,
     service_stopped: bool,
     poll_task: Option<Task<()>>,
+    engine_settings: EngineSettingsController,
 }
 
 impl NativeApplication {
@@ -134,6 +139,7 @@ impl NativeApplication {
             intake_restore_state: None,
             service_stopped: false,
             poll_task: None,
+            engine_settings: EngineSettingsController::new(),
         }
     }
 
@@ -244,6 +250,21 @@ impl NativeApplication {
                 cx.notify();
             }
             NativeTransportEvent::Failed(failure) => self.set_failure(failure, cx),
+            NativeTransportEvent::ThreadEngineSettings(result) => {
+                self.handle_engine_settings(result, cx);
+            }
+            NativeTransportEvent::RegisteredProfiles(result) => {
+                self.handle_registered_profiles(result, cx);
+            }
+            NativeTransportEvent::ThreadEngineConfigSet(result, retained) => {
+                self.handle_engine_config_set(result, *retained, cx);
+            }
+            NativeTransportEvent::ThreadEngineConfigConflict { thread_id } => {
+                self.handle_engine_conflict(thread_id, cx);
+            }
+            NativeTransportEvent::ThreadEngineConfigFailed { thread_id, failure } => {
+                self.handle_engine_failed(thread_id, failure, cx);
+            }
             NativeTransportEvent::Stopped(status) => {
                 self.service_stopped = true;
                 if matches!(status, ServiceStopStatus::Failed)
@@ -544,6 +565,8 @@ impl NativeApplication {
             return;
         };
         self.selected_thread = Some(thread_id.clone());
+        self.engine_settings.select_thread(Some(thread_id.clone()));
+        self.request_engine_settings_for_selected(cx);
         let Ok(host) = ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx) else {
             self.set_failure(invalid_service_failure(), cx);
             return;
@@ -570,6 +593,8 @@ impl NativeApplication {
     fn retire_host(&mut self, cx: &mut Context<Self>) {
         let Some(host) = self.conversation_host.clone() else {
             self.selected_thread = None;
+            self.engine_settings.select_thread(None);
+            cx.notify();
             return;
         };
         self.pump_host_boundary(&host, cx);
@@ -577,6 +602,8 @@ impl NativeApplication {
             self.conversation_host = None;
             drop(self.conversation_host_subscription.take());
             self.selected_thread = None;
+            self.engine_settings.select_thread(None);
+            cx.notify();
         }
     }
 
@@ -677,6 +704,135 @@ impl NativeApplication {
         self.state = NativeViewState::Failure(failure);
         cx.notify();
     }
+
+    fn request_engine_settings_for_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let Some(service) = self.service.clone() else {
+            return;
+        };
+        if self.engine_settings.needs_registry_load() {
+            let _ = service.submit(NativeTransportCommand::ListRegisteredProfiles);
+            self.engine_settings.clear_registry_load_flag();
+        }
+        let _ = service.submit(NativeTransportCommand::LoadThreadEngineSettings(thread_id));
+        cx.notify();
+    }
+
+    fn handle_engine_settings(
+        &mut self,
+        result: artisan_protocol::ThreadEngineSettingsResult,
+        cx: &mut Context<Self>,
+    ) {
+        self.engine_settings.on_settings_loaded(result);
+        cx.notify();
+    }
+
+    fn handle_registered_profiles(
+        &mut self,
+        result: artisan_protocol::RegisteredEngineProfilesResult,
+        cx: &mut Context<Self>,
+    ) {
+        self.engine_settings.on_registry_loaded(result);
+        cx.notify();
+    }
+
+    fn handle_engine_config_set(
+        &mut self,
+        result: artisan_protocol::SetThreadEngineConfigResult,
+        retained: artisan_domain::EngineRunConfig,
+        cx: &mut Context<Self>,
+    ) {
+        self.engine_settings.on_save_succeeded(result, retained);
+        cx.notify();
+    }
+
+    fn handle_engine_conflict(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+        self.engine_settings.on_conflict(thread_id.clone());
+        if let Some(reload) = self.engine_settings.take_reload_thread() {
+            if let Some(service) = self.service.clone() {
+                let _ = service.submit(NativeTransportCommand::LoadThreadEngineSettings(reload));
+            }
+        }
+        cx.notify();
+    }
+
+    fn handle_engine_failed(
+        &mut self,
+        thread_id: ThreadId,
+        failure: ServiceFailure,
+        cx: &mut Context<Self>,
+    ) {
+        // Distinguish load vs save failure by whether a save was pending.
+        // If saving, treat as save failure; otherwise as load failure.
+        let was_saving = matches!(self.engine_settings.status(), EngineSettingsStatus::Saving);
+        if was_saving {
+            self.engine_settings.on_save_failed(thread_id, failure);
+        } else {
+            self.engine_settings.on_load_failed(thread_id, failure);
+        }
+        cx.notify();
+    }
+
+    /// Attempts to save the current draft when valid and visible.
+    pub fn save_engine_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        if !self.engine_settings.can_save() {
+            return;
+        }
+        let request_id = match create_save_request_id() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let Some(command) = self.engine_settings.build_save_command(request_id) else {
+            return;
+        };
+        let retained_config = command.config().clone();
+        self.engine_settings
+            .begin_saving(thread_id.clone(), retained_config.clone());
+        if let Some(service) = self.service.clone() {
+            let _ = service.submit(NativeTransportCommand::SetThreadEngineConfig(Box::new(
+                command,
+            )));
+        }
+        cx.notify();
+    }
+
+    /// Cancels local edits without emitting a save.
+    pub fn cancel_engine_settings(&mut self, cx: &mut Context<Self>) {
+        self.engine_settings.cancel();
+        cx.notify();
+    }
+
+    /// Returns the engine-settings controller for inspection.
+    #[must_use]
+    pub fn engine_settings(&self) -> &EngineSettingsController {
+        &self.engine_settings
+    }
+
+    /// Returns a mutable reference to the engine-settings controller.
+    pub fn engine_settings_mut(&mut self) -> &mut EngineSettingsController {
+        &mut self.engine_settings
+    }
+}
+
+static SAVE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn create_save_request_id() -> Result<artisan_domain::RequestId, ServiceFailure> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(1);
+    let counter = SAVE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let value = format!("engine-save-{}-{}", millis, counter);
+    artisan_domain::RequestId::parse(value).map_err(|_| ServiceFailure {
+        stage: ServiceFailureStage::Request,
+        category: ServiceFailureCategory::Integrity,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -862,6 +1018,11 @@ impl Render for NativeApplication {
             body = body.child(status_panel(&self.theme, &self.state));
         }
 
+        let engine_panel = engine_settings_panel(
+            &self.theme,
+            &self.engine_settings,
+            self.selected_thread.as_ref(),
+        );
         div()
             .track_focus(&self.focus_handle)
             .key_context(NATIVE_KEY_CONTEXT)
@@ -884,7 +1045,8 @@ impl Render for NativeApplication {
                     .flex()
                     .flex_col()
                     .child(header)
-                    .child(body),
+                    .child(body)
+                    .child(engine_panel),
             )
     }
 }
@@ -941,6 +1103,190 @@ fn status_panel_with_text(theme: &ArtisanTheme, heading: &'static str, detail: S
                 .text_sm()
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child(detail),
+        )
+}
+
+fn engine_settings_panel(
+    theme: &ArtisanTheme,
+    controller: &EngineSettingsController,
+    selected_thread: Option<&ThreadId>,
+) -> Div {
+    let status = controller.status();
+    let registry_view = controller.registry_view();
+    let (heading, detail) = match status {
+        EngineSettingsStatus::Unselected => (
+            "Engine settings — no thread selected",
+            "Select a real thread to load engine settings.".to_owned(),
+        ),
+        EngineSettingsStatus::Loading => (
+            "Engine settings — loading",
+            selected_thread.map_or("Loading authoritative settings.".to_owned(), |id| {
+                format!("Loading settings for thread {}.", id.as_str())
+            }),
+        ),
+        EngineSettingsStatus::RegistryMissing => (
+            "Engine settings — registry missing",
+            "No engine registry found. No certified profile is available.".to_owned(),
+        ),
+        EngineSettingsStatus::RegistryPresentEmpty => (
+            "Engine settings — registry present (empty)",
+            "Registry exists but contains no certified profile IDs.".to_owned(),
+        ),
+        EngineSettingsStatus::Unconfigured => (
+            "Engine settings — unconfigured",
+            selected_thread.map_or("Thread has no engine configuration.".to_owned(), |id| {
+                format!("Thread {} has no engine configuration.", id.as_str())
+            }),
+        ),
+        EngineSettingsStatus::Ready => {
+            let rev = controller
+                .revision()
+                .map_or("unknown revision".to_owned(), |r| {
+                    format!("rev {}", r.get())
+                });
+            (
+                "Engine settings — configured",
+                format!(
+                    "Thread {} is configured ({rev}).",
+                    selected_thread.map_or("unknown", |id| id.as_str())
+                ),
+            )
+        }
+        EngineSettingsStatus::Dirty => (
+            "Engine settings — dirty",
+            "Local edits differ from authoritative. Save is required.".to_owned(),
+        ),
+        EngineSettingsStatus::Saving => (
+            "Engine settings — saving",
+            "Persisting complete EngineRunConfig.".to_owned(),
+        ),
+        EngineSettingsStatus::ConflictRefreshing => (
+            "Engine settings — conflict, refreshing",
+            "Save conflicted. Reloading authoritative settings before edits can resume.".to_owned(),
+        ),
+        EngineSettingsStatus::Failure => (
+            "Engine settings — unavailable",
+            "Engine settings could not be loaded.".to_owned(),
+        ),
+    };
+    let certified_profiles = match &registry_view {
+        RegistryView::Present(ids) => {
+            if ids.is_empty() {
+                "Certified profiles: none (registry empty)".to_owned()
+            } else {
+                let list = ids
+                    .iter()
+                    .map(|id| id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Certified profiles: {list}")
+            }
+        }
+        RegistryView::Missing => "Certified profiles: registry missing".to_owned(),
+        RegistryView::PresentEmpty => "Certified profiles: none".to_owned(),
+        RegistryView::Loading => "Certified profiles: loading".to_owned(),
+    };
+    let draft = controller.draft();
+    let save_enabled = controller.can_save() && selected_thread.is_some();
+    let save_label = if save_enabled {
+        "Save — enabled (complete valid EngineRunConfig)"
+    } else {
+        "Save — disabled (requires complete valid EngineRunConfig and thread)"
+    };
+    // Manual fields are unverified until A6.
+    let manual_fields = format!(
+        "Manual/unverified — model: '{}', route: '{}', variant: '{}', permission: '{}', agent: '{}', approval: '{}', fs: '{}', net: '{}', web-search: '{}'",
+        draft.model_id,
+        draft.route_id,
+        if draft.variant_id.is_empty() {
+            "(none)"
+        } else {
+            &draft.variant_id
+        },
+        draft.permission_id,
+        draft.agent_id,
+        draft.approval,
+        draft.filesystem,
+        draft.network,
+        draft.web_search
+    );
+    let runtime_fields = format!(
+        "Runtime — attempt: '{}', readiness: '{}', health: '{}', prompt: '{}', stream: '{}', close: '{}', json: '{}', sse_line: '{}', sse_event: '{}', readiness_line: '{}', headers: '{}', http_buf: '{}', stderr: '{}', observations: '{}' — all manual/unverified until A6",
+        draft.attempt_budget,
+        draft.readiness_budget,
+        draft.health_budget,
+        draft.prompt_budget,
+        draft.stream_budget,
+        draft.close_budget,
+        draft.max_json_body_bytes,
+        draft.max_sse_line_bytes,
+        draft.max_sse_event_bytes,
+        draft.max_readiness_line_bytes,
+        draft.max_header_count,
+        draft.max_http_buffer_bytes,
+        draft.max_stderr_bytes,
+        draft.observation_capacity
+    );
+    let thread_bound = selected_thread.map_or("No thread bound".to_owned(), |id| {
+        format!("Bound to thread {}", id.as_str())
+    });
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p(px(16.0))
+        .mt(px(12.0))
+        .rounded(px(8.0))
+        .bg(theme.sidebar.sidebar.to_paint())
+        .text_color(theme.colors.foreground.to_paint())
+        .debug_selector(|| NATIVE_ENGINE_SETTINGS_SELECTOR.to_string())
+        .child(heading)
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(detail),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(thread_bound),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(certified_profiles),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(manual_fields),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child(runtime_fields),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(if save_enabled {
+                    theme.colors.foreground.to_paint()
+                } else {
+                    theme.colors.muted_foreground.to_paint()
+                })
+                .child(save_label),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child("Cancel/close persists nothing; Save requires complete valid config."),
         )
 }
 
