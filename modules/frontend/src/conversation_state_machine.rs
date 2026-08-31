@@ -1331,8 +1331,9 @@ impl ConversationStateController {
             ConversationDeliveryEvent::BatchReceived(batch) => {
                 self.validate_batch_for_scene(batch)?;
             }
-            ConversationDeliveryEvent::SubscriptionResumed { .. } => {}
-            ConversationDeliveryEvent::RetryRequested | ConversationDeliveryEvent::Closed => {}
+            ConversationDeliveryEvent::SubscriptionResumed { .. }
+            | ConversationDeliveryEvent::RetryRequested
+            | ConversationDeliveryEvent::Closed => {}
         }
         self.ensure_effect_capacity(MAX_DELIVERY_EFFECTS_PER_EVENT)?;
         let result = self.delivery.dispatch(event);
