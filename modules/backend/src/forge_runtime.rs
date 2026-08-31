@@ -1226,7 +1226,7 @@ fn prepare_forge_listener(
     limits: ListenerLimits,
     admission_capacity: NonZeroU32,
     requests_per_connection: NonZeroU32,
-) -> Result<ForgeListenerStartup, ForgeListenerStartupError> {
+) -> Result<ForgeListenerStartup, Box<ForgeListenerStartupError>> {
     let LoadedMaterial {
         certificate_chain,
         private_key,
@@ -1236,10 +1236,10 @@ fn prepare_forge_listener(
     let server = match server_config(certificate_chain, private_key) {
         Ok(server) => server,
         Err(error) => {
-            return Err(ForgeListenerStartupError {
+            return Err(Box::new(ForgeListenerStartupError {
                 listener: None,
                 error: Box::new(ForgeRuntimeError::ServerConfiguration(error)),
-            });
+            }));
         }
     };
     let listener = match ForgeListener::bind(
@@ -1252,28 +1252,28 @@ fn prepare_forge_listener(
     ) {
         Ok(listener) => listener,
         Err(error) => {
-            return Err(ForgeListenerStartupError {
+            return Err(Box::new(ForgeListenerStartupError {
                 listener: None,
                 error: Box::new(ForgeRuntimeError::ListenerBind(error)),
-            });
+            }));
         }
     };
     let address = match listener.local_addr() {
         Ok(address) if is_required_loopback(address) => address,
         Ok(address) => {
-            return Err(ForgeListenerStartupError {
+            return Err(Box::new(ForgeListenerStartupError {
                 listener: Some(listener),
                 error: Box::new(ForgeRuntimeError::Address(io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
                     format!("Forge listener address is not required loopback: {address}"),
                 ))),
-            });
+            }));
         }
         Err(error) => {
-            return Err(ForgeListenerStartupError {
+            return Err(Box::new(ForgeListenerStartupError {
                 listener: Some(listener),
                 error: Box::new(ForgeRuntimeError::Address(error)),
-            });
+            }));
         }
     };
     Ok(ForgeListenerStartup {
@@ -1311,16 +1311,8 @@ async fn run_with_handler(
     ) {
         Ok(startup) => startup,
         Err(startup_error) => {
-            return finish(
-                app,
-                handler,
-                custody,
-                startup_error.listener,
-                None,
-                None,
-                Some(*startup_error.error),
-            )
-            .await;
+            let ForgeListenerStartupError { listener, error } = *startup_error;
+            return finish(app, handler, custody, listener, None, None, Some(*error)).await;
         }
     };
     if cancel.is_cancelled() {
