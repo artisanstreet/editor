@@ -2299,7 +2299,7 @@ fn local_capability_from_bytes(
 ) -> Result<artisan_protocol::LocalCapability, ForgeCredentialError> {
     classify_capability_length(bytes.len(), path)?;
     let mut exact = Zeroizing::new([0_u8; MAX_CAPABILITY_BYTES]);
-    exact[..].copy_from_slice(bytes.as_slice());
+    exact[..].copy_from_slice(bytes);
     Ok(artisan_protocol::LocalCapability::from_bytes(*exact))
 }
 
