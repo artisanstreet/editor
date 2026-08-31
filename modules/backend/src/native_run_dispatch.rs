@@ -34,11 +34,12 @@ use artisan_transport::CancelHandle;
 use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{
-    CommandOrigin, EngineOwner, EngineOwnerShutdown, SystemCommandOrigin,
+    CommandOrigin, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
     engine_owner::EngineTurnInput,
     engine_owner::observation::{EngineObservation, TerminalState},
     engine_owner::operation::EngineOperationError,
+    engine_owner::{EngineOwner, EngineOwnerShutdown},
 };
 
 const PROMPT_DELIVERY_MAX_BYTES: usize = 256;
@@ -805,7 +806,7 @@ async fn execute_claim(
         origin,
         stop,
         process_cancel,
-        &mut turn,
+        turn,
         scope,
     )
     .await;
@@ -1048,7 +1049,7 @@ async fn consume_turn(
     origin: &SystemCommandOrigin,
     stop: &CancelHandle,
     process_cancel: &CancelHandle,
-    turn: &mut crate::engine_owner::operation::AcceptedTurn,
+    mut turn: crate::engine_owner::operation::AcceptedTurn,
     scope: RunBatchScope<'_>,
 ) {
     let mut scope = scope;
@@ -1250,7 +1251,7 @@ async fn consume_turn(
         let Some(item_id) = mint_item_id(origin) else {
             return;
         };
-        let Ok(body) = AssistantBody::parse(assistant_body) else {
+        let Ok(body) = AssistantBody::parse(assistant_body.clone()) else {
             return;
         };
         let Some(patch_id) = mint_patch_id(origin) else {

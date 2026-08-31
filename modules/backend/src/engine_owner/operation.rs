@@ -285,7 +285,7 @@ pub(crate) struct AcceptedTurn {
     prepared: oneshot::Receiver<Result<PreparedSession, EngineOperationError>>,
     authorize_sender: Option<oneshot::Sender<()>>,
     observations: mpsc::Receiver<EngineObservation>,
-    receiver: oneshot::Receiver<TurnResult>,
+    receiver: Option<oneshot::Receiver<TurnResult>>,
     control: Arc<CancelHandle>,
 }
 
@@ -301,7 +301,7 @@ impl AcceptedTurn {
             prepared,
             authorize_sender: Some(authorize_sender),
             observations,
-            receiver,
+            receiver: Some(receiver),
             control,
         }
     }
@@ -325,8 +325,11 @@ impl AcceptedTurn {
         self.observations.recv().await
     }
 
-    pub(crate) async fn finish(self) -> TurnResult {
-        match self.receiver.await {
+    pub(crate) async fn finish(mut self) -> TurnResult {
+        let Some(receiver) = self.receiver.take() else {
+            return Err(EngineOperationError::ReapUnresolved);
+        };
+        match receiver.await {
             Ok(result) => result,
             Err(_) => Err(EngineOperationError::ReapUnresolved),
         }
@@ -468,7 +471,7 @@ async fn run_owner_loop(
                         .await
                     }
                     job @ Job::Turn { .. } => {
-                        execute_configured_job(generation, job, &shutdown).await
+                        execute_configured_job(job, &shutdown).await
                     }
                 };
                 match execution {
@@ -722,11 +725,7 @@ async fn execute_legacy_job(
 /// Executes one configured OpenCode2 turn.  The profile capability and the
 /// settings snapshot are moved into this owner call and are never reread from
 /// durable state or ambient process configuration.
-async fn execute_configured_job(
-    generation: u64,
-    job: Job,
-    shutdown: &Arc<CancelHandle>,
-) -> Execution {
+async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execution {
     let Job::Turn {
         input,
         deadline,
@@ -1204,6 +1203,8 @@ async fn finish_turn_result(
     if let Ok(status) = first_wait {
         #[cfg(test)]
         super::process::note_observed_reap_for_tests(status);
+        #[cfg(not(test))]
+        drop(status);
         drop(stderr_counter);
         drop(lifeline);
         let _ = respond.send(result);
@@ -1221,6 +1222,8 @@ async fn finish_turn_result(
         | CleanupObservation::ReapedAfterKill(status) => {
             #[cfg(test)]
             super::process::note_observed_reap_for_tests(status);
+            #[cfg(not(test))]
+            drop(status);
             let _ = respond.send(result);
             Execution::Completed
         }
