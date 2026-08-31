@@ -164,11 +164,6 @@ async fn seed_project_and_thread(database: &DatabaseConnection, repository: &Rep
         })
         .await
         .expect("fixture thread should create");
-}
-
-async fn seeded_repository() -> (DatabaseConnection, Repository) {
-    let (database, repository) = memory_database().await;
-    seed_project_and_thread(&database, &repository).await;
     let thread_id = ThreadId::parse(THREAD_ID).expect("fixture thread id");
     repository
         .set_thread_engine_config(SetThreadEngineConfigInput {
@@ -186,6 +181,11 @@ async fn seeded_repository() -> (DatabaseConnection, Repository) {
         .expect("fixture engine configuration should read")
         .expect("fixture engine configuration should be present");
     let _ = ENGINE_SETTINGS.set(settings);
+}
+
+async fn seeded_repository() -> (DatabaseConnection, Repository) {
+    let (database, repository) = memory_database().await;
+    seed_project_and_thread(&database, &repository).await;
     (database, repository)
 }
 
@@ -1605,6 +1605,14 @@ async fn reopen_persists_running_and_claim_stays_excluded() {
 
     let reopened = open_migrated_file_database(temp.database()).await;
     let repository = Repository::new(reopened.clone());
+    let reopened_settings = repository
+        .read_thread_engine_settings(
+            &ThreadId::parse(THREAD_ID).expect("fixture thread id after reopen"),
+        )
+        .await
+        .expect("fixture engine configuration should read after reopen")
+        .expect("fixture engine configuration should persist after reopen");
+    assert_eq!(&reopened_settings, launch_engine_settings());
 
     let run = entities::assistant_run::Entity::find_by_id(RUN_ID)
         .one(&reopened)
