@@ -254,7 +254,9 @@ struct SeededThread {
     run: SeededRun,
 }
 
-async fn seed_thread(repository: &Repository) -> Result<SeededThread, Box<dyn Error>> {
+async fn seed_project_thread_and_message(
+    repository: &Repository,
+) -> Result<ThreadId, Box<dyn Error>> {
     repository
         .attach_project(AttachProjectInput {
             request_id: RequestId::parse("delivery-project-request")?,
@@ -294,6 +296,11 @@ async fn seed_thread(repository: &Repository) -> Result<SeededThread, Box<dyn Er
             accepted_at: UnixMillis::from_millis(300),
         })
         .await?;
+    Ok(thread_id)
+}
+
+async fn seed_thread(repository: &Repository) -> Result<SeededThread, Box<dyn Error>> {
+    let thread_id = seed_project_thread_and_message(repository).await?;
 
     let claimed = repository
         .claim_next_message_dispatch(ClaimMessageDispatch {
@@ -524,6 +531,115 @@ async fn subscribed_client(
     Ok((connection, delivery_stream))
 }
 
+async fn serve_resumed_delivery(
+    listener: ForgeListener,
+    handler: &RequestHandler,
+    cancel: &CancelHandle,
+) -> Result<(), Box<dyn Error>> {
+    let (listener, report) = listener.serve_one(handler, cancel).await?;
+    assert_eq!(report.completed_requests, 2);
+    assert!(matches!(
+        report.termination,
+        RequestTermination::Failed {
+            source: DeadlineError::Cancelled {
+                operation: OperationKind::Receive
+            }
+        }
+    ));
+    listener.drain().await?;
+    Ok(())
+}
+
+async fn resumed_delivery_client(
+    endpoint: &Endpoint,
+    address: SocketAddr,
+    seeded: &SeededThread,
+    first_cursor: ConversationCursor,
+    repository: &Repository,
+    notifier: &ConversationCommitNotifier,
+    cancel: &CancelHandle,
+) -> Result<(WireEnvelope, WireEnvelope, WireEnvelope, WireEnvelope), Box<dyn Error>> {
+    let thread_id = &seeded.thread_id;
+    let connection = connect_client(endpoint, address).await?;
+    let (mut control_send, mut control_recv) = connection.open_bi().await?;
+    let _welcome =
+        artisan_transport::client_handshake(&mut control_send, &mut control_recv, hello_envelope())
+            .await?;
+    let (mut request_send, mut request_recv) = connection.open_bi().await?;
+    artisan_transport::send_envelope(&mut request_send, &resume_request(thread_id.clone())).await?;
+    drop(request_send);
+    let response = tokio::time::timeout(
+        TEST_DEADLINE,
+        artisan_transport::receive_envelope(&mut request_recv),
+    )
+    .await??;
+    let mut delivery_stream =
+        tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
+    let delivery = tokio::time::timeout(
+        TEST_DEADLINE,
+        artisan_transport::receive_envelope(&mut delivery_stream),
+    )
+    .await??;
+    commit_assistant_start(repository, &seeded.run).await?;
+    let expected_second = match repository
+        .read_conversation_patch_replay(thread_id, first_cursor)
+        .await?
+    {
+        ConversationPatchReplay::Batch(batch) => batch,
+        other => return Err(format!("expected a contiguous wake batch, got {other:?}").into()),
+    };
+    assert_eq!(expected_second.from_cursor(), first_cursor);
+    let _ = notifier.publish(thread_id);
+    let second_delivery = tokio::time::timeout(
+        TEST_DEADLINE,
+        artisan_transport::receive_envelope(&mut delivery_stream),
+    )
+    .await??;
+    match &second_delivery.body {
+        WireEnvelopeBody::PatchBatch(actual) => assert_eq!(actual, &expected_second),
+        _ => return Err("expected the wake patch batch on the same delivery stream".into()),
+    }
+    let _ = notifier.publish(thread_id);
+    let _ = notifier.publish(thread_id);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            artisan_transport::receive_envelope(&mut delivery_stream),
+        )
+        .await
+        .is_err()
+    );
+
+    let (mut unsubscribe_send, mut unsubscribe_recv) = connection.open_bi().await?;
+    artisan_transport::send_envelope(
+        &mut unsubscribe_send,
+        &unsubscribe_request(thread_id.clone()),
+    )
+    .await?;
+    drop(unsubscribe_send);
+    let stopped = tokio::time::timeout(
+        TEST_DEADLINE,
+        artisan_transport::receive_envelope(&mut unsubscribe_recv),
+    )
+    .await??;
+    cancel.cancel();
+    let eof = tokio::time::timeout(
+        TEST_DEADLINE,
+        artisan_transport::receive_envelope(&mut delivery_stream),
+    )
+    .await?;
+    assert!(
+        eof.is_err(),
+        "finished delivery stream should contain no frame"
+    );
+    drop(control_send);
+    drop(control_recv);
+    drop(request_recv);
+    drop(unsubscribe_recv);
+    drop(connection);
+    Ok((response, delivery, stopped, second_delivery))
+}
+
 #[tokio::test]
 async fn resumed_activation_sends_exact_replay_on_real_forge_delivery_stream()
 -> Result<(), Box<dyn Error>> {
@@ -557,111 +673,16 @@ async fn resumed_activation_sends_exact_replay_on_real_forge_delivery_stream()
     let address = listener.local_addr()?;
     let cancel = CancelHandle::new();
 
-    let server = async {
-        let (listener, report) = listener.serve_one(&handler, &cancel).await?;
-        assert_eq!(report.completed_requests, 2);
-        assert!(matches!(
-            report.termination,
-            RequestTermination::Failed {
-                source: DeadlineError::Cancelled {
-                    operation: OperationKind::Receive
-                }
-            }
-        ));
-        listener.drain().await?;
-        Ok::<(), Box<dyn Error>>(())
-    };
-    let client = async {
-        let connection = connect_client(&endpoint, address).await?;
-        let (mut control_send, mut control_recv) = connection.open_bi().await?;
-        let _welcome = artisan_transport::client_handshake(
-            &mut control_send,
-            &mut control_recv,
-            hello_envelope(),
-        )
-        .await?;
-        let (mut request_send, mut request_recv) = connection.open_bi().await?;
-        artisan_transport::send_envelope(&mut request_send, &resume_request(thread_id.clone()))
-            .await?;
-        drop(request_send);
-        let response = tokio::time::timeout(
-            TEST_DEADLINE,
-            artisan_transport::receive_envelope(&mut request_recv),
-        )
-        .await??;
-        let mut delivery_stream =
-            tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
-        let delivery = tokio::time::timeout(
-            TEST_DEADLINE,
-            artisan_transport::receive_envelope(&mut delivery_stream),
-        )
-        .await??;
-        commit_assistant_start(&repository, &seeded.run).await?;
-        let expected_second = match repository
-            .read_conversation_patch_replay(&thread_id, first_cursor)
-            .await?
-        {
-            ConversationPatchReplay::Batch(batch) => batch,
-            other => {
-                return Err(format!("expected a contiguous wake batch, got {other:?}").into());
-            }
-        };
-        assert_eq!(expected_second.from_cursor(), first_cursor);
-        let _ = notifier.publish(&thread_id);
-        let second_delivery = tokio::time::timeout(
-            TEST_DEADLINE,
-            artisan_transport::receive_envelope(&mut delivery_stream),
-        )
-        .await??;
-        match &second_delivery.body {
-            WireEnvelopeBody::PatchBatch(actual) => assert_eq!(actual, &expected_second),
-            _ => return Err("expected the wake patch batch on the same delivery stream".into()),
-        }
-        let _ = notifier.publish(&thread_id);
-        let _ = notifier.publish(&thread_id);
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                artisan_transport::receive_envelope(&mut delivery_stream),
-            )
-            .await
-            .is_err()
-        );
-
-        let (mut unsubscribe_send, mut unsubscribe_recv) = connection.open_bi().await?;
-        artisan_transport::send_envelope(
-            &mut unsubscribe_send,
-            &unsubscribe_request(thread_id.clone()),
-        )
-        .await?;
-        drop(unsubscribe_send);
-        let stopped = tokio::time::timeout(
-            TEST_DEADLINE,
-            artisan_transport::receive_envelope(&mut unsubscribe_recv),
-        )
-        .await??;
-        cancel.cancel();
-        let eof = tokio::time::timeout(
-            TEST_DEADLINE,
-            artisan_transport::receive_envelope(&mut delivery_stream),
-        )
-        .await?;
-        assert!(
-            eof.is_err(),
-            "finished delivery stream should contain no frame"
-        );
-        drop(control_send);
-        drop(control_recv);
-        drop(request_recv);
-        drop(unsubscribe_recv);
-        drop(connection);
-        Ok::<(WireEnvelope, WireEnvelope, WireEnvelope, WireEnvelope), Box<dyn Error>>((
-            response,
-            delivery,
-            stopped,
-            second_delivery,
-        ))
-    };
+    let server = serve_resumed_delivery(listener, &handler, &cancel);
+    let client = resumed_delivery_client(
+        &endpoint,
+        address,
+        &seeded,
+        first_cursor,
+        &repository,
+        &notifier,
+        &cancel,
+    );
 
     let (server_result, client_result) = tokio::join!(server, client);
     server_result?;
