@@ -618,21 +618,7 @@ fn encode_response_payload(
             encode_directory_listing(builder.reborrow().init_directory_list(), listing)?;
         }
         ResponsePayload::ProjectListing(listing) => {
-            let mut projects = builder
-                .reborrow()
-                .init_project_list()
-                .init_projects(list_length(
-                    "response.projectList.projects",
-                    listing.projects().len(),
-                )?);
-            for (index, project) in listing.projects().iter().enumerate() {
-                encode_project(
-                    projects
-                        .reborrow()
-                        .get(list_index("response.projectList.projects", index)?),
-                    project,
-                );
-            }
+            encode_project_listing_response(builder.reborrow(), listing)?;
         }
         ResponsePayload::AttachedProject {
             project,
@@ -700,18 +686,8 @@ fn encode_response_payload(
                 .init_conversation_subscription_stopped()
                 .set_thread_id(stopped.thread_id.as_str());
         }
-        _ => return encode_response_tail(builder, payload),
-    }
-    Ok(())
-}
-
-fn encode_response_tail(
-    mut builder: artisan_capnp::response::Builder<'_>,
-    payload: &ResponsePayload,
-) -> Result<(), ProtocolEncodeError> {
-    match payload {
         ResponsePayload::DirectoryPicked(outcome) => {
-            encode_directory_picked(builder.reborrow().init_directory_picked(), outcome)
+            encode_directory_picked(builder.reborrow().init_directory_picked(), outcome);
         }
         ResponsePayload::Lifecycle(value) => {
             encode_lifecycle_response(builder.reborrow().init_lifecycle_control(), value)?;
@@ -722,7 +698,25 @@ fn encode_response_tail(
         ResponsePayload::ThreadEngineSettings(result) => {
             encode_thread_engine_settings_result(builder.reborrow(), result);
         }
-        _ => unreachable!("encode_response_tail handles only tail variants"),
+    }
+    Ok(())
+}
+
+fn encode_project_listing_response(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    listing: &ProjectListing,
+) -> Result<(), ProtocolEncodeError> {
+    let mut projects = builder.init_project_list().init_projects(list_length(
+        "response.projectList.projects",
+        listing.projects().len(),
+    )?);
+    for (index, project) in listing.projects().iter().enumerate() {
+        encode_project(
+            projects
+                .reborrow()
+                .get(list_index("response.projectList.projects", index)?),
+            project,
+        );
     }
     Ok(())
 }
