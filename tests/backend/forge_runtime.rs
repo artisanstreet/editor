@@ -41,7 +41,7 @@ use artisan_domain::{
     EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ItemId,
     MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PatchId, PermissionId, ProjectId,
-    RequestId, RootPath, RunId, ThreadId, ThreadTitle, TurnId, WebSearchAccess,
+    RequestId, RootPath, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_native_engine::NativeOpenCode2Authority;
 use artisan_protocol::{
@@ -235,11 +235,7 @@ fn reconciliation_message_id(seed: ReconciliationSeed) -> String {
     format!("reconcile-message-{}", seed.label)
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the public repository seed keeps the complete launch-to-running fixture auditable"
-)]
-async fn seed_reconciliation_candidate(repository: &Repository, seed: ReconciliationSeed) {
+async fn seed_reconciliation_thread(repository: &Repository, seed: ReconciliationSeed) -> ThreadId {
     let project_id = ProjectId::parse(format!("reconcile-project-{}", seed.label))
         .expect("project id should parse");
     let thread_id =
@@ -283,7 +279,14 @@ async fn seed_reconciliation_candidate(repository: &Repository, seed: Reconcilia
         })
         .await
         .expect("engine configuration should be persisted");
+    thread_id
+}
 
+async fn seed_reconciliation_dispatch(
+    repository: &Repository,
+    seed: ReconciliationSeed,
+    thread_id: &ThreadId,
+) -> artisan_database::ClaimedMessageDispatch {
     let message_id =
         MessageId::parse(reconciliation_message_id(seed)).expect("message id should parse");
     repository
@@ -307,7 +310,24 @@ async fn seed_reconciliation_candidate(repository: &Repository, seed: Reconcilia
         .await
         .expect("dispatch should be claimed")
         .expect("seeded dispatch should exist");
+    claimed
+}
 
+struct SeededRunningRun {
+    claimed: artisan_database::ClaimedMessageDispatch,
+    launched: artisan_database::LaunchedRunReceipt,
+    bound: artisan_database::BoundRunReceipt,
+    run_start_key: RunStartKey,
+    credentials: RunLaunchCredentials,
+    item_id: ItemId,
+}
+
+async fn seed_reconciliation_running_run(
+    repository: &Repository,
+    seed: ReconciliationSeed,
+    thread_id: &ThreadId,
+    claimed: artisan_database::ClaimedMessageDispatch,
+) -> SeededRunningRun {
     let run_id = RunId::parse(seed.run_id).expect("run id should parse");
     let turn_id =
         TurnId::parse(format!("reconcile-turn-{}", seed.label)).expect("turn id should parse");
@@ -323,7 +343,7 @@ async fn seed_reconciliation_candidate(repository: &Repository, seed: Reconcilia
         [seed.owner_byte.wrapping_add(0x30); 32],
     );
     let engine_settings = repository
-        .read_thread_engine_settings(&thread_id)
+        .read_thread_engine_settings(thread_id)
         .await
         .expect("engine settings should read")
         .expect("engine settings should be present");
@@ -366,6 +386,21 @@ async fn seed_reconciliation_candidate(repository: &Repository, seed: Reconcilia
         }
     };
 
+    SeededRunningRun {
+        claimed,
+        launched,
+        bound,
+        run_start_key,
+        credentials,
+        item_id,
+    }
+}
+
+async fn seed_reconciliation_batch(
+    repository: &Repository,
+    seed: ReconciliationSeed,
+    running: &SeededRunningRun,
+) {
     let body =
         AssistantBody::parse("seeded assistant output").expect("assistant body should parse");
     let turn_lifecycle_patch = PatchId::parse(format!("reconcile-batch-turn-{}", seed.label))
@@ -373,7 +408,7 @@ async fn seed_reconciliation_candidate(repository: &Repository, seed: Reconcilia
     let item_upsert_patch = PatchId::parse(format!("reconcile-batch-item-{}", seed.label))
         .expect("batch item patch should parse");
     let changes = [AssistantChange::Start {
-        item_id: &item_id,
+        item_id: &running.item_id,
         phase: AssistantMessagePhase::Final,
         body: &body,
         patch_id: &item_upsert_patch,
@@ -381,11 +416,11 @@ async fn seed_reconciliation_candidate(repository: &Repository, seed: Reconcilia
     repository
         .commit_run_batch(artisan_database::CommitRunBatch {
             scope: RunBatchScope {
-                claimed: &claimed,
-                launched: &launched,
-                bound: &bound,
-                run_start_key: &run_start_key,
-                credentials: &credentials,
+                claimed: &running.claimed,
+                launched: &running.launched,
+                bound: &running.bound,
+                run_start_key: &running.run_start_key,
+                credentials: &running.credentials,
                 expected_launch_at: UnixMillis::from_millis(5),
                 expected_updated_at: UnixMillis::from_millis(6),
             },
@@ -397,6 +432,13 @@ async fn seed_reconciliation_candidate(repository: &Repository, seed: Reconcilia
         })
         .await
         .expect("assistant output should be committed as a nonterminal batch");
+}
+
+async fn seed_reconciliation_candidate(repository: &Repository, seed: ReconciliationSeed) {
+    let thread_id = seed_reconciliation_thread(repository, seed).await;
+    let claimed = seed_reconciliation_dispatch(repository, seed, &thread_id).await;
+    let running = seed_reconciliation_running_run(repository, seed, &thread_id, claimed).await;
+    seed_reconciliation_batch(repository, seed, &running).await;
 }
 
 fn seed_reconciliation_database(directory: &TemporaryDirectory, seeds: &[ReconciliationSeed]) {
@@ -1013,11 +1055,79 @@ fn startup_reconciliation_failures_map_to_application_startup() {
     assert_eq!(sweep.to_string(), "Forge startup reconciliation failed");
 }
 
+fn run_reconciliation_start_and_snapshot(
+    directory: &TemporaryDirectory,
+    credentials: &Credentials,
+    seed: ReconciliationSeed,
+    worker_owned_message: &str,
+    shutdown_message: &str,
+    readiness_message: Option<&str>,
+) -> ReconciliationSnapshot {
+    let cancel = Arc::new(CancelHandle::new());
+    let mut worker = Some(spawn_runtime(config(
+        directory,
+        credentials,
+        Arc::clone(&cancel),
+    )));
+    let _ = wait_for_readiness_or_stop(&directory.path("forge.ready"), &cancel, &mut worker);
+    cancel.cancel();
+    assert!(
+        join_within(worker.take().expect(worker_owned_message), SHUTDOWN_WAIT,).is_ok(),
+        "{shutdown_message}"
+    );
+    if let Some(readiness_message) = readiness_message {
+        assert!(
+            !directory.path("forge.ready").exists(),
+            "{readiness_message}"
+        );
+    } else {
+        assert!(!directory.path("forge.ready").exists());
+    }
+    run_snapshot(directory, seed)
+}
+
+fn assert_reconciled_snapshot(snapshot: &ReconciliationSnapshot, seed: ReconciliationSeed) {
+    assert_eq!(snapshot.dispatch_state, DispatchState::Failed);
+    assert_eq!(snapshot.dispatch_lease_expires_at_ms, None);
+    assert!(!snapshot.dispatch_lease_owner_present);
+    assert_eq!(
+        snapshot.dispatch_last_error.as_deref(),
+        Some("startup reconciliation: unknown outcome after lease expiry")
+    );
+    assert_eq!(snapshot.run_lifecycle, AssistantRunLifecycle::Interrupted);
+    assert!(!snapshot.run_owner_present);
+    assert!(!snapshot.run_lease_present);
+    assert!(snapshot.run_provider_binding_present);
+    assert_eq!(
+        snapshot.run_error_code.as_deref(),
+        Some("startup_reconciliation_unknown_outcome")
+    );
+    assert_eq!(
+        snapshot.run_error_message.as_deref(),
+        Some(
+            "startup reconciliation interrupted with unknown outcome; provider state may have progressed"
+        )
+    );
+    assert_eq!(snapshot.turn_lifecycle, EntityLifecycle::Interrupted);
+    assert_eq!(snapshot.item_lifecycle, EntityLifecycle::Interrupted);
+    assert_eq!(snapshot.dispatch_updated_at_ms, snapshot.run_updated_at_ms);
+    assert_eq!(snapshot.run_updated_at_ms, snapshot.turn_updated_at_ms);
+    assert_eq!(snapshot.turn_updated_at_ms, snapshot.item_updated_at_ms);
+    assert!(snapshot.lifecycle_patches.iter().any(|patch| {
+        patch.patch_id == seed.run_id
+            && patch.kind == ConversationPatchKind::TurnLifecycle
+            && patch.lifecycle.as_ref() == Some(&EntityLifecycle::Interrupted)
+            && patch.recorded_at_ms == snapshot.run_updated_at_ms
+    }));
+    assert!(snapshot.lifecycle_patches.iter().any(|patch| {
+        patch.patch_id == seed.item_id
+            && patch.kind == ConversationPatchKind::ItemLifecycle
+            && patch.lifecycle.as_ref() == Some(&EntityLifecycle::Interrupted)
+            && patch.recorded_at_ms == snapshot.run_updated_at_ms
+    }));
+}
+
 #[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the composition test keeps the first start, persisted evidence, and restart proof together"
-)]
 fn startup_reconciliation_runs_before_readiness_and_second_start_is_idempotent() {
     let directory = TemporaryDirectory::new("startup-reconciliation");
     let credentials = credentials(&directory);
@@ -1030,104 +1140,27 @@ fn startup_reconciliation_runs_before_readiness_and_second_start_is_idempotent()
     };
     seed_reconciliation_database(&directory, &[seed]);
 
-    let first_cancel = Arc::new(CancelHandle::new());
-    let mut first = Some(spawn_runtime(config(
+    let first_snapshot = run_reconciliation_start_and_snapshot(
         &directory,
         &credentials,
-        Arc::clone(&first_cancel),
-    )));
-    let _ = wait_for_readiness_or_stop(&directory.path("forge.ready"), &first_cancel, &mut first);
-    first_cancel.cancel();
-    assert!(
-        join_within(
-            first
-                .take()
-                .expect("first reconciliation worker should still be owned"),
-            SHUTDOWN_WAIT,
-        )
-        .is_ok(),
-        "first Forge shutdown should be clean"
+        seed,
+        "first reconciliation worker should still be owned",
+        "first Forge shutdown should be clean",
+        Some("clean shutdown should remove the readiness receipt"),
     );
-    assert!(
-        !directory.path("forge.ready").exists(),
-        "clean shutdown should remove the readiness receipt"
-    );
-
-    let first_snapshot = run_snapshot(&directory, seed);
-    assert_eq!(first_snapshot.dispatch_state, DispatchState::Failed);
-    assert_eq!(first_snapshot.dispatch_lease_expires_at_ms, None);
-    assert!(!first_snapshot.dispatch_lease_owner_present);
-    assert_eq!(
-        first_snapshot.dispatch_last_error.as_deref(),
-        Some("startup reconciliation: unknown outcome after lease expiry")
-    );
-    assert_eq!(
-        first_snapshot.run_lifecycle,
-        AssistantRunLifecycle::Interrupted
-    );
-    assert!(!first_snapshot.run_owner_present);
-    assert!(!first_snapshot.run_lease_present);
-    assert!(first_snapshot.run_provider_binding_present);
-    assert_eq!(
-        first_snapshot.run_error_code.as_deref(),
-        Some("startup_reconciliation_unknown_outcome")
-    );
-    assert_eq!(
-        first_snapshot.run_error_message.as_deref(),
-        Some(
-            "startup reconciliation interrupted with unknown outcome; provider state may have progressed"
-        )
-    );
-    assert_eq!(first_snapshot.turn_lifecycle, EntityLifecycle::Interrupted);
-    assert_eq!(first_snapshot.item_lifecycle, EntityLifecycle::Interrupted);
-    assert_eq!(
-        first_snapshot.dispatch_updated_at_ms,
-        first_snapshot.run_updated_at_ms
-    );
-    assert_eq!(
-        first_snapshot.run_updated_at_ms,
-        first_snapshot.turn_updated_at_ms
-    );
-    assert_eq!(
-        first_snapshot.turn_updated_at_ms,
-        first_snapshot.item_updated_at_ms
-    );
-    assert!(first_snapshot.lifecycle_patches.iter().any(|patch| {
-        patch.patch_id == seed.run_id
-            && patch.kind == ConversationPatchKind::TurnLifecycle
-            && patch.lifecycle.as_ref() == Some(&EntityLifecycle::Interrupted)
-            && patch.recorded_at_ms == first_snapshot.run_updated_at_ms
-    }));
-    assert!(first_snapshot.lifecycle_patches.iter().any(|patch| {
-        patch.patch_id == seed.item_id
-            && patch.kind == ConversationPatchKind::ItemLifecycle
-            && patch.lifecycle.as_ref() == Some(&EntityLifecycle::Interrupted)
-            && patch.recorded_at_ms == first_snapshot.run_updated_at_ms
-    }));
+    assert_reconciled_snapshot(&first_snapshot, seed);
     assert_eq!(startup_candidate_count_blocking(&directory), 0);
 
-    let second_cancel = Arc::new(CancelHandle::new());
-    let mut second = Some(spawn_runtime(config(
+    let second_snapshot = run_reconciliation_start_and_snapshot(
         &directory,
         &credentials,
-        Arc::clone(&second_cancel),
-    )));
-    let _ = wait_for_readiness_or_stop(&directory.path("forge.ready"), &second_cancel, &mut second);
-    second_cancel.cancel();
-    assert!(
-        join_within(
-            second
-                .take()
-                .expect("second reconciliation worker should still be owned"),
-            SHUTDOWN_WAIT,
-        )
-        .is_ok(),
-        "second Forge shutdown should be clean"
+        seed,
+        "second reconciliation worker should still be owned",
+        "second Forge shutdown should be clean",
+        None,
     );
-    assert!(!directory.path("forge.ready").exists());
     assert_eq!(
-        run_snapshot(&directory, seed),
-        first_snapshot,
+        second_snapshot, first_snapshot,
         "a clean second startup should not duplicate lifecycle effects"
     );
     assert_eq!(startup_candidate_count_blocking(&directory), 0);
