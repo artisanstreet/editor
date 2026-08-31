@@ -852,7 +852,7 @@ fn engine_config_stable_mutation(
 }
 
 fn first_message_stable_mutation(
-    command: Box<QueueFirstMessage>,
+    command: QueueFirstMessage,
 ) -> Result<StableMutation, ServiceFailure> {
     let request_id = command.request_id.clone();
     let frame_id = FrameId::parse(request_id.as_str().to_owned())
@@ -868,7 +868,7 @@ fn first_message_stable_mutation(
     Ok(StableMutation {
         frame_id,
         sent_at,
-        command: Command::QueueFirstMessage(*command),
+        command: Command::QueueFirstMessage(command),
     })
 }
 
@@ -1794,7 +1794,7 @@ async fn command_loop(
                 set_thread_engine_config(runtime, frames, events, command).await?;
             }
             Ok(NativeTransportCommand::QueueFirstMessage(command)) => {
-                queue_first_message(runtime, frames, events, command).await?;
+                queue_first_message(runtime, frames, events, *command).await?;
             }
         }
     }
@@ -2470,7 +2470,7 @@ async fn queue_first_message(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
-    command: Box<QueueFirstMessage>,
+    command: QueueFirstMessage,
 ) -> Result<(), ServiceFailure> {
     let thread_id = command.thread_id.clone();
     let request_id = command.request_id.clone();
@@ -3019,11 +3019,11 @@ mod tests {
         let request_id = RequestId::parse("native-message-stable").expect("request");
         let thread_id = ThreadId::parse("thread-a").expect("thread");
         let body = MessageBody::parse("  hello\n世界  ").expect("body");
-        let mutation = first_message_stable_mutation(Box::new(QueueFirstMessage {
+        let mutation = first_message_stable_mutation(QueueFirstMessage {
             request_id: request_id.clone(),
             thread_id: thread_id.clone(),
             body: body.clone(),
-        }))
+        })
         .expect("stable mutation");
         let (first, first_id) = mutation
             .envelope(ProtocolVersion::V1)
@@ -3306,7 +3306,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_save_retry_allows_only_local_loss_or_retryable_peer() {
+    fn durable_save_retry_allows_local_loss_or_retryable_peer() {
         let local_loss = RequestFailure {
             failure: ServiceFailure::local_session(),
             peer: None,
@@ -3334,7 +3334,10 @@ mod tests {
             super::DurableSaveRetryClassification::RetryablePeer
         );
         assert!(retryable_peer.durable_save_retry_allowed());
+    }
 
+    #[test]
+    fn durable_save_retry_rejects_invalid_conflicting_or_unsupported_peer() {
         let invalid_input = RequestFailure {
             failure: ServiceFailure::new(
                 super::ServiceFailureStage::Request,
@@ -3379,7 +3382,10 @@ mod tests {
             retryable_local_session_loss: false,
         };
         assert!(!conflict.durable_save_retry_allowed());
+    }
 
+    #[test]
+    fn durable_save_retry_rejects_nonretryable_and_terminal_failures() {
         let nonretryable_peer = RequestFailure {
             failure: ServiceFailure::new(
                 super::ServiceFailureStage::Request,

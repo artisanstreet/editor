@@ -86,10 +86,12 @@ impl NativeComposer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn draft(&self) -> &str {
         self.state.draft()
     }
 
+    #[cfg(test)]
     pub(crate) fn set_draft(&mut self, draft: impl Into<String>) {
         self.state.set_draft(draft);
         self.layout = None;
@@ -546,7 +548,7 @@ impl Render for NativeComposer {
             .child(if sending { "Sending…" } else { "Send" });
         if send_ready {
             send = send.on_click(move |_, _, cx| {
-                send_entity.update(cx, |composer, cx| composer.request_send(cx));
+                send_entity.update(cx, NativeComposer::request_send);
             });
         } else {
             send = send.opacity(style.disabled_opacity);

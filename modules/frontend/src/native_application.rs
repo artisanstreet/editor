@@ -91,7 +91,7 @@ enum NativeViewState {
 struct NativeMessageFlight {
     thread_id: ThreadId,
     request_id: RequestId,
-    body: MessageBody,
+    _body: MessageBody,
     token: SubmissionToken,
 }
 
@@ -106,7 +106,7 @@ pub struct NativeApplication {
     focus_handle: FocusHandle,
     service: Option<Arc<NativeTransportService>>,
     composer: Entity<NativeComposer>,
-    composer_subscription: Subscription,
+    _composer_subscription: Subscription,
     message_flight: Option<NativeMessageFlight>,
     message_receipt: Option<FirstMessageReceipt>,
     message_failure: Option<NativeMessageFailure>,
@@ -159,7 +159,7 @@ impl NativeApplication {
             focus_handle,
             service,
             composer,
-            composer_subscription,
+            _composer_subscription: composer_subscription,
             message_flight: None,
             message_receipt: None,
             message_failure: None,
@@ -290,7 +290,7 @@ impl NativeApplication {
                 self.message_flight = Some(NativeMessageFlight {
                     thread_id,
                     request_id,
-                    body,
+                    _body: body,
                     token,
                 });
             }
@@ -369,15 +369,15 @@ impl NativeApplication {
 
     fn handle_first_message_failure(
         &mut self,
-        thread_id: ThreadId,
-        request_id: RequestId,
+        thread_id: &ThreadId,
+        request_id: &RequestId,
         failure: ServiceFailure,
         cx: &mut Context<Self>,
     ) {
         let matches_active = self.message_flight.as_ref().is_some_and(|flight| {
-            flight.thread_id == thread_id
-                && flight.request_id == request_id
-                && self.selected_thread.as_ref() == Some(&thread_id)
+            &flight.thread_id == thread_id
+                && &flight.request_id == request_id
+                && self.selected_thread.as_ref() == Some(thread_id)
         });
         if !matches_active {
             return;
@@ -524,26 +524,28 @@ impl NativeApplication {
                 request_id,
                 failure,
             } => {
-                self.handle_first_message_failure(thread_id, request_id, failure, cx);
+                self.handle_first_message_failure(&thread_id, &request_id, failure, cx);
             }
-            NativeTransportEvent::Stopped(status) => {
-                self.retain_message_flight(cx);
-                self.service_stopped = true;
-                if matches!(status, ServiceStopStatus::Failed)
-                    && !matches!(&self.state, NativeViewState::Failure(_))
-                {
-                    self.set_failure(
-                        ServiceFailure {
-                            stage: ServiceFailureStage::Cleanup,
-                            category: ServiceFailureCategory::Cleanup,
-                        },
-                        cx,
-                    );
-                } else {
-                    self.sync_composer_availability(cx);
-                    cx.notify();
-                }
-            }
+            NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
+        }
+    }
+
+    fn handle_service_stopped(&mut self, status: ServiceStopStatus, cx: &mut Context<Self>) {
+        self.retain_message_flight(cx);
+        self.service_stopped = true;
+        if matches!(status, ServiceStopStatus::Failed)
+            && !matches!(&self.state, NativeViewState::Failure(_))
+        {
+            self.set_failure(
+                ServiceFailure {
+                    stage: ServiceFailureStage::Cleanup,
+                    category: ServiceFailureCategory::Cleanup,
+                },
+                cx,
+            );
+        } else {
+            self.sync_composer_availability(cx);
+            cx.notify();
         }
     }
 
@@ -1373,10 +1375,7 @@ fn create_save_request_id() -> Result<artisan_domain::RequestId, ServiceFailure>
 }
 
 fn create_message_request_id() -> Result<RequestId, ServiceFailure> {
-    let process_id = u64::try_from(std::process::id()).map_err(|_| ServiceFailure {
-        stage: ServiceFailureStage::Request,
-        category: ServiceFailureCategory::Integrity,
-    })?;
+    let process_id = u64::from(std::process::id());
     let millis = u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1578,13 +1577,12 @@ fn message_status_panel(
             "Message {disposition}; Forge message id {}.",
             receipt.message_id.as_str()
         )
-    } else if let Some(failure) = failure {
+    } else {
+        let failure = failure?;
         format!(
             "Send failed: {} ({}).",
             failure.failure.stage, failure.failure.category
         )
-    } else {
-        return None;
     };
     Some(
         div()
@@ -2136,7 +2134,7 @@ fn prepare_application_shutdown(
 ) {
     let view = view.borrow().clone();
     if let Some(view) = view {
-        let _ = view.update(cx, |application, cx| application.prepare_shutdown(cx));
+        view.update(cx, NativeApplication::prepare_shutdown);
     }
 }
 
@@ -2816,7 +2814,7 @@ mod tests {
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-first").expect("request"),
-                    body,
+                    _body: body,
                     token,
                 });
                 application.handle_service_event(
@@ -2850,7 +2848,7 @@ mod tests {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-second")
                         .expect("request"),
-                    body,
+                    _body: body,
                     token,
                 });
                 application.composer.update(application_cx, |composer, _| {
@@ -2901,7 +2899,7 @@ mod tests {
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-newer").expect("request"),
-                    body,
+                    _body: body,
                     token,
                 });
                 application.handle_service_event(
@@ -2943,7 +2941,7 @@ mod tests {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-failure")
                         .expect("request"),
-                    body,
+                    _body: body,
                     token,
                 });
                 application.handle_service_event(
@@ -2976,7 +2974,7 @@ mod tests {
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-stop").expect("request"),
-                    body,
+                    _body: body,
                     token,
                 });
                 application.handle_service_event(
@@ -3015,7 +3013,7 @@ mod tests {
                     thread_id: old_thread.clone(),
                     request_id: artisan_domain::RequestId::parse("request-transition")
                         .expect("request"),
-                    body,
+                    _body: body,
                     token,
                 });
                 application.message_receipt = Some(first_receipt(
@@ -3054,7 +3052,7 @@ mod tests {
                     thread_id: old_thread,
                     request_id: artisan_domain::RequestId::parse("request-shutdown")
                         .expect("request"),
-                    body,
+                    _body: body,
                     token,
                 });
                 application.prepare_shutdown(application_cx);
