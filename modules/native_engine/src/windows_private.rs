@@ -54,9 +54,7 @@ fn validate_directory_output(
         return Err(NativeFileError::PrivatePermissions);
     }
     let text = String::from_utf8(output.stdout).map_err(|_| NativeFileError::PrivatePermissions)?;
-    let is_directory = std::fs::symlink_metadata(path)
-        .map(|metadata| metadata.is_dir())
-        .unwrap_or(false);
+    let is_directory = std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
     validate_acl(&text, path_text, identity, is_directory)
 }
 
@@ -244,7 +242,7 @@ fn collect_ace_lines(output: &str, queried_path: &str) -> Result<Vec<String>, Na
                 first_line = false;
                 continue;
             }
-            candidate = remainder.to_owned();
+            remainder.clone_into(&mut candidate);
         } else if first_line && trimmed.contains(":\\") && !trimmed.contains('(') {
             first_line = false;
             continue;

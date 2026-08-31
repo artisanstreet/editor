@@ -163,7 +163,6 @@ fn check_ancestors_all(path: &Path, must_exist: bool) -> Result<(), NativeFileEr
 ///
 /// Returns a bounded [`NativeFileError`] when the path is missing, unsafe, or
 /// cannot be inspected.
-#[must_use]
 pub fn verify_directory(path: &Path) -> Result<(), NativeFileError> {
     check_ancestors_all(path, true)?;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
@@ -186,7 +185,6 @@ pub fn verify_directory(path: &Path) -> Result<(), NativeFileError> {
 ///
 /// Returns a bounded [`NativeFileError`] when the path or any ancestor is
 /// unsafe, unavailable, or cannot be created.
-#[must_use]
 pub fn ensure_directory(path: &Path) -> Result<(), NativeFileError> {
     check_absolute(path)?;
     let parent = path.parent().ok_or(NativeFileError::UnsafePath)?;
@@ -242,7 +240,7 @@ fn native_file_id_from_file(file: &File) -> Result<NativeFileIdentity, NativeFil
         if volume == 0 && index == 0 {
             return Err(NativeFileError::Io);
         }
-        return Ok(NativeFileIdentity { volume, index });
+        Ok(NativeFileIdentity { volume, index })
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -281,7 +279,6 @@ pub(crate) fn verify_regular_file(path: &Path) -> Result<(), NativeFileError> {
 ///
 /// Returns a bounded [`NativeFileError`] when the file is unsafe, missing,
 /// exceeds `maximum_bytes`, changes during the read, or cannot be read.
-#[must_use]
 pub fn read_bounded(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, NativeFileError> {
     open_and_read_bounded(path, maximum_bytes)
 }
@@ -340,7 +337,6 @@ fn open_and_read_bounded(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, N
 ///
 /// Returns a bounded [`NativeFileError`] when the file is unsafe, unavailable,
 /// changes during verification, or does not match the expected size or hash.
-#[must_use]
 pub fn verify_file(
     path: &Path,
     expected_size: u64,
@@ -520,7 +516,6 @@ fn sync_directory(directory: &Path) -> Result<(), NativeFileError> {
 ///
 /// Returns a bounded [`NativeFileError`] when the destination is unsafe, the
 /// temporary file cannot be published, or an I/O operation fails.
-#[must_use]
 pub fn replace_file(path: &Path, bytes: &[u8]) -> Result<AtomicReplaceOutcome, NativeFileError> {
     let directory = path.parent().ok_or(NativeFileError::UnsafePath)?;
     check_ancestors_all(path, true)?;
@@ -580,7 +575,6 @@ fn verify_temporary(path: &Path, expected: NativeFileIdentity) -> Result<(), Nat
 ///
 /// Returns a bounded [`NativeFileError`] when the directory or its ancestors
 /// are unsafe, unavailable, or do not have the required private permissions.
-#[must_use]
 pub fn ensure_private_directory(path: &Path) -> Result<(), NativeFileError> {
     check_absolute(path)?;
     check_ancestors_all(path, false)?;
@@ -614,7 +608,6 @@ pub fn ensure_private_directory(path: &Path) -> Result<(), NativeFileError> {
 ///
 /// Returns a bounded [`NativeFileError`] when the directory is unsafe,
 /// unavailable, or does not have the required private permissions.
-#[must_use]
 pub fn validate_private_directory(path: &Path) -> Result<(), NativeFileError> {
     check_ancestors_all(path, true)?;
     let metadata = fs::symlink_metadata(path).map_err(|_| NativeFileError::Io)?;

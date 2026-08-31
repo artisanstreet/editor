@@ -340,7 +340,6 @@ impl VerifiedOpenCode2ProfileLaunch {
     }
 
     /// Returns the opaque filesystem identity captured during verification.
-    #[must_use]
     pub const fn executable_identity(&self) -> VerifiedFileIdentity {
         self.executable_identity
     }
@@ -354,7 +353,6 @@ impl VerifiedOpenCode2ProfileLaunch {
     /// Returns [`NativeOpenCode2ProfileLaunchError::ProfileChanged`] or a
     /// bounded launch error when the retained lock, registry, home,
     /// generation, executable identity, size, or hash no longer matches.
-    #[must_use]
     pub fn revalidate(&self) -> Result<(), NativeOpenCode2ProfileLaunchError> {
         self.install_lock
             .fence(&self.paths)
@@ -511,7 +509,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2ProfileError`] when the database path is
     /// unsafe or the certified installation root is unavailable.
-    #[must_use]
     pub fn profile_registry_path(
         &self,
         database_path: &Path,
@@ -527,7 +524,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2ProfileError`] when the database path or the
     /// derived profile home is unsafe or unavailable.
-    #[must_use]
     pub fn profile_home_path(
         &self,
         database_path: &Path,
@@ -547,7 +543,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2ProfileError`] when the certified installation,
     /// registry, profile home, lock, or atomic publication is invalid.
-    #[must_use]
     pub fn register_profile(
         &self,
         database_path: &Path,
@@ -607,7 +602,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2ProfileError`] when the registry path or
     /// bounded registry document is invalid or unavailable.
-    #[must_use]
     pub fn list_profiles(
         &self,
         database_path: &Path,
@@ -634,7 +628,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2ProfileError`] when the registry is invalid or
     /// the exact requested profile is absent.
-    #[must_use]
     pub fn read_profile(
         &self,
         database_path: &Path,
@@ -654,7 +647,6 @@ impl NativeOpenCode2Authority {
     /// Returns [`NativeOpenCode2ProfileLaunchError`] when the exact profile,
     /// private home, retained generation, executable identity, size, hash, or
     /// install fence cannot be certified.
-    #[must_use]
     pub fn resolve_profile_launch(
         &self,
         database_path: &Path,
@@ -994,7 +986,8 @@ fn map_launch_profile_error(
         NativeOpenCode2ProfileError::ProfileRegistryTooLarge => {
             NativeOpenCode2ProfileLaunchError::ProfileRegistryTooLarge
         }
-        NativeOpenCode2ProfileError::ProfileRegistryMalformed => {
+        NativeOpenCode2ProfileError::ProfileRegistryMalformed
+        | NativeOpenCode2ProfileError::ProfileLimit => {
             NativeOpenCode2ProfileLaunchError::ProfileRegistryMalformed
         }
         NativeOpenCode2ProfileError::ProfileRegistryUnsupportedVersion => {
@@ -1006,7 +999,12 @@ fn map_launch_profile_error(
         NativeOpenCode2ProfileError::ProfileRegistryUnsafe => {
             NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsafe
         }
-        NativeOpenCode2ProfileError::ProfileRegistryUnavailable => {
+        NativeOpenCode2ProfileError::ProfileRegistryUnavailable
+        | NativeOpenCode2ProfileError::ProfileConflict
+        | NativeOpenCode2ProfileError::PrimaryAlreadyRegistered
+        | NativeOpenCode2ProfileError::ProfileAtomicPublishFailed
+        | NativeOpenCode2ProfileError::ProfileLockUnavailable
+        | NativeOpenCode2ProfileError::CertifiedEngineUnavailable => {
             NativeOpenCode2ProfileLaunchError::ProfileRegistryUnavailable
         }
         NativeOpenCode2ProfileError::DuplicateProfile => {
@@ -1023,16 +1021,6 @@ fn map_launch_profile_error(
         }
         NativeOpenCode2ProfileError::ProfileHomeUnavailable => {
             NativeOpenCode2ProfileLaunchError::ProfileHomeUnavailable
-        }
-        NativeOpenCode2ProfileError::ProfileConflict
-        | NativeOpenCode2ProfileError::PrimaryAlreadyRegistered
-        | NativeOpenCode2ProfileError::ProfileAtomicPublishFailed
-        | NativeOpenCode2ProfileError::ProfileLockUnavailable
-        | NativeOpenCode2ProfileError::CertifiedEngineUnavailable => {
-            NativeOpenCode2ProfileLaunchError::ProfileRegistryUnavailable
-        }
-        NativeOpenCode2ProfileError::ProfileLimit => {
-            NativeOpenCode2ProfileLaunchError::ProfileRegistryMalformed
         }
     }
 }

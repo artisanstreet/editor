@@ -43,7 +43,7 @@ const MAX_VERSION_BYTES: usize = 128;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCK_POLL: Duration = Duration::from_millis(50);
 
-/// The exact certified OpenCode2 artifact identity shared by installation and
+/// The exact certified `OpenCode2` artifact identity shared by installation and
 /// launch resolution.
 #[derive(Clone, Copy)]
 pub struct NativeOpenCode2InstallSpec {
@@ -211,7 +211,6 @@ impl NativeOpenCode2InstallPaths {
     ///
     /// Returns [`NativeOpenCode2InstallPathError::InvalidRoot`] for an unsafe
     /// or structurally invalid database path.
-    #[must_use]
     pub fn derive(
         database_path: &Path,
         spec: &NativeOpenCode2InstallSpec,
@@ -253,7 +252,6 @@ impl NativeOpenCode2InstallPaths {
     ///
     /// Returns [`NativeOpenCode2InstallPathError`] when a directory is unsafe,
     /// unavailable, or cannot be created.
-    #[must_use]
     pub fn prepare(&self) -> Result<(), NativeOpenCode2InstallPathError> {
         native_files::ensure_directory(&self.toolchain_root).map_err(map_path_file_error)?;
         native_files::ensure_directory(&self.engine_root).map_err(map_path_file_error)?;
@@ -267,7 +265,6 @@ impl NativeOpenCode2InstallPaths {
     ///
     /// Returns [`NativeOpenCode2InstallPathError`] when a directory is unsafe
     /// or unavailable.
-    #[must_use]
     pub fn verify(&self) -> Result<(), NativeOpenCode2InstallPathError> {
         native_files::verify_directory(&self.database_parent).map_err(map_path_file_error)?;
         native_files::verify_directory(&self.toolchain_root).map_err(map_path_file_error)?;
@@ -354,7 +351,6 @@ impl NativeOpenCode2InstallLock {
     ///
     /// Returns [`NativeOpenCode2InstallLockError`] when the lock path is
     /// unsafe, unavailable, changed, or cannot be acquired before the timeout.
-    #[must_use]
     pub fn acquire(
         paths: &NativeOpenCode2InstallPaths,
     ) -> Result<Self, NativeOpenCode2InstallLockError> {
@@ -369,7 +365,6 @@ impl NativeOpenCode2InstallLock {
     /// Returns [`NativeOpenCode2InstallLockError::Busy`] when another
     /// operation owns the lock, or another variant when the lock is unsafe,
     /// unavailable, or changed.
-    #[must_use]
     pub fn try_acquire(
         paths: &NativeOpenCode2InstallPaths,
     ) -> Result<Self, NativeOpenCode2InstallLockError> {
@@ -415,7 +410,6 @@ impl NativeOpenCode2InstallLock {
     ///
     /// Returns [`NativeOpenCode2InstallLockError`] when the lock or its path
     /// is unavailable, unsafe, or has changed.
-    #[must_use]
     pub fn fence(
         &self,
         paths: &NativeOpenCode2InstallPaths,
@@ -486,7 +480,7 @@ fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallLockError> {
     Ok(file)
 }
 
-/// Bounded, path-free failures from certified OpenCode2 inspection.
+/// Bounded, path-free failures from certified `OpenCode2` inspection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeOpenCode2Error {
     UnsupportedPlatform,
@@ -579,7 +573,7 @@ impl fmt::Display for NativeOpenCode2StateError {
 
 impl std::error::Error for NativeOpenCode2StateError {}
 
-/// The result of inspecting the certified OpenCode2 installation.
+/// The result of inspecting the certified `OpenCode2` installation.
 #[must_use = "inspection results contain the certified generation decision"]
 #[derive(Debug)]
 pub enum OpenCode2Inspection {
@@ -651,7 +645,7 @@ impl ResolvedOpenCode2Generation {
     }
 }
 
-/// A validated, non-serializable view of the managed OpenCode2 install state.
+/// A validated, non-serializable view of the managed `OpenCode2` install state.
 #[must_use = "retain validated install state for the operation it authorizes"]
 pub struct NativeOpenCode2State {
     inner: ManagedToolchainStateV1,
@@ -665,7 +659,7 @@ impl fmt::Debug for NativeOpenCode2State {
     }
 }
 
-/// Shared authority for the certified OpenCode2 specification, install state,
+/// Shared authority for the certified `OpenCode2` specification, install state,
 /// and filesystem verification.
 #[must_use = "use the authority for certified OpenCode2 operations"]
 pub struct NativeOpenCode2Authority {
@@ -681,8 +675,7 @@ impl fmt::Debug for NativeOpenCode2Authority {
 }
 
 impl NativeOpenCode2Authority {
-    /// Constructs the explicit certified OpenCode2 authority.
-    #[must_use]
+    /// Constructs the explicit certified `OpenCode2` authority.
     // This compatibility-preserved constructor deliberately has no `Default`:
     // callers must opt into the certified authority explicitly rather than
     // implying ambient or inferred launch configuration.
@@ -697,7 +690,7 @@ impl NativeOpenCode2Authority {
         Self { install_spec }
     }
 
-    /// Returns the immutable certified OpenCode2 artifact specification.
+    /// Returns the immutable certified `OpenCode2` artifact specification.
     #[must_use]
     pub const fn certified_install_spec() -> NativeOpenCode2InstallSpec {
         NativeOpenCode2InstallSpec {
@@ -724,7 +717,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2InstallPathError`] when the database path is
     /// unsafe or the derived installation root is unavailable.
-    #[must_use]
     pub fn install_paths(
         &self,
         database_path: &Path,
@@ -738,7 +730,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2InstallLockError`] when the installation root
     /// or lock is unsafe, unavailable, changed, or busy beyond the timeout.
-    #[must_use]
     pub fn acquire_install_lock(
         &self,
         database_path: &Path,
@@ -756,7 +747,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2Error`] when managed state or its active
     /// executable fails certified validation.
-    #[must_use]
     pub fn inspect(
         &self,
         database_path: &Path,
@@ -777,7 +767,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2Error`] when the platform, managed state,
     /// generation, executable path, identity, size, or hash is invalid.
-    #[must_use]
     pub fn resolve_active(
         &self,
         database_path: &Path,
@@ -820,7 +809,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2Error`] when the database path is unsafe or
     /// the derived installation root is unavailable.
-    #[must_use]
     pub fn managed_engine_root(
         &self,
         database_path: &Path,
@@ -836,7 +824,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2StateError`] when the generation or optional
     /// previous state does not satisfy the certified state specification.
-    #[must_use]
     pub fn new_install_state(
         &self,
         generation_id: &str,
@@ -864,7 +851,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2StateError`] when the state path, bytes, or
     /// decoded state fails certified validation.
-    #[must_use]
     pub fn read_install_state(
         &self,
         engine_root: &Path,
@@ -886,7 +872,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2StateError`] when the state is invalid, cannot
     /// be encoded, or exceeds the bounded representation.
-    #[must_use]
     pub fn encode_install_state(
         &self,
         state: &NativeOpenCode2State,
@@ -906,7 +891,6 @@ impl NativeOpenCode2Authority {
     ///
     /// Returns [`NativeOpenCode2StateError`] when the state, destination, or
     /// atomic publication fails certified validation.
-    #[must_use]
     pub fn write_install_state(
         &self,
         engine_root: &Path,
@@ -1092,7 +1076,7 @@ impl<'de> Deserialize<'de> for ManagedToolchainStateV1 {
     }
 }
 
-/// Returns whether the certified OpenCode2 executable is supported here.
+/// Returns whether the certified `OpenCode2` executable is supported here.
 #[must_use]
 pub const fn platform_supported() -> bool {
     cfg!(all(target_os = "windows", target_arch = "x86_64"))
@@ -1314,8 +1298,8 @@ fn map_state_validation_error(error: NativeOpenCode2Error) -> NativeOpenCode2Sta
             NativeOpenCode2StateError::ActiveGenerationUntrusted
         }
         NativeOpenCode2Error::StateTooLarge => NativeOpenCode2StateError::TooLarge,
-        NativeOpenCode2Error::StateMalformed => NativeOpenCode2StateError::Malformed,
-        NativeOpenCode2Error::UnsupportedPlatform
+        NativeOpenCode2Error::StateMalformed
+        | NativeOpenCode2Error::UnsupportedPlatform
         | NativeOpenCode2Error::StateMissing
         | NativeOpenCode2Error::ExecutableUnavailable
         | NativeOpenCode2Error::ExecutableChanged
