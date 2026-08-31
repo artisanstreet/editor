@@ -328,18 +328,18 @@ mod tests {
     #[test]
     fn exact_directory_acl_is_accepted_and_everything_else_is_rejected() {
         let identity = identity();
-        let accepted = r#"C:\\private ARTISAN\runner:(OI)(CI)(F)
-Successfully processed 1 files; Failed processing 0 files."#;
-        assert!(validate_acl(accepted, r#"C:\\private"#, &identity, true).is_ok());
+        let accepted = r"C:\\private ARTISAN\runner:(OI)(CI)(F)
+Successfully processed 1 files; Failed processing 0 files.";
+        assert!(validate_acl(accepted, r"C:\\private", &identity, true).is_ok());
         for invalid in [
-            r#"C:\\private Everyone:(OI)(CI)(F)
-Successfully processed 1 files; Failed processing 0 files."#,
-            r#"C:\\private ARTISAN\runner:(OI)(CI)(F)(I)
-Successfully processed 1 files; Failed processing 0 files."#,
-            r#"C:\\private ARTISAN\runner:(F)
-Successfully processed 1 files; Failed processing 0 files."#,
+            r"C:\\private Everyone:(OI)(CI)(F)
+Successfully processed 1 files; Failed processing 0 files.",
+            r"C:\\private ARTISAN\runner:(OI)(CI)(F)(I)
+Successfully processed 1 files; Failed processing 0 files.",
+            r"C:\\private ARTISAN\runner:(F)
+Successfully processed 1 files; Failed processing 0 files.",
         ] {
-            assert!(validate_acl(invalid, r#"C:\\private"#, &identity, true).is_err());
+            assert!(validate_acl(invalid, r"C:\\private", &identity, true).is_err());
         }
     }
 }
