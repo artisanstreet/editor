@@ -558,6 +558,14 @@ impl ConversationDeliveryController {
     /// The acknowledgement is validated against the fixed thread and the
     /// projection's existing last-good cursor. It never installs a snapshot or
     /// allocates a request generation.
+    ///
+    /// # Errors
+    ///
+    /// Resumed acknowledgement handling does not allocate a request
+    /// generation, so this method does not return
+    /// [`ConversationDeliveryError::GenerationExhausted`]. Projection refusals
+    /// are reported through [`ConversationDeliveryEffect::ReportRefusal`]
+    /// instead.
     pub fn on_resumed(
         &mut self,
         thread_id: ThreadId,

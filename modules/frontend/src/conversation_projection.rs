@@ -103,9 +103,9 @@ pub enum ProjectionError {
     BaselineRequired,
     /// A batch arrived while recovery was already required.
     RecoveryRequired,
-    /// A batch did not start exactly at the current cursor. Subsumed tails,
-    /// duplicates, overlaps, and forward gaps all land here because zero
-    /// retained history cannot prove payload equivalence.
+    /// A delivery operation did not match the current cursor: a patch batch
+    /// failed exact continuation, or a resumed acknowledgement named a
+    /// different cursor.
     CursorMismatch,
     /// A snapshot lowered the cursor or watermark, conflicted at an equal
     /// cursor, or violated a common-entity rule against the current window.
@@ -149,7 +149,7 @@ impl std::fmt::Display for ProjectionError {
                 formatter.write_str("projection requires a fresh snapshot before further batches")
             }
             Self::CursorMismatch => {
-                formatter.write_str("batch does not continue the current cursor")
+                formatter.write_str("delivery does not continue the current cursor")
             }
             Self::SnapshotConflict => {
                 formatter.write_str("snapshot conflicts with the materialized window")
