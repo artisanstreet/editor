@@ -619,7 +619,7 @@ fn registered_profiles_response_envelope(
     }
 }
 
-fn raw_registered_profiles_response(ids: Vec<&str>, state: &str) -> Vec<u8> {
+fn raw_registered_profiles_response(ids: &[&str], state: &str) -> Vec<u8> {
     let mut message = Builder::new(HeapAllocator::new());
     let mut root = message.init_root::<envelope::Builder>();
     root.set_protocol_version(1);
@@ -636,9 +636,14 @@ fn raw_registered_profiles_response(ids: Vec<&str>, state: &str) -> Vec<u8> {
             let mut list = result
                 .init_state()
                 .init_registry_present()
-                .init_profile_ids(ids.len() as u32);
+                .init_profile_ids(
+                    u32::try_from(ids.len()).expect("fixture profile list fits in u32"),
+                );
             for (index, value) in ids.iter().enumerate() {
-                list.set(index as u32, value);
+                list.set(
+                    u32::try_from(index).expect("fixture index fits in u32"),
+                    value,
+                );
             }
         }
         other => panic!("unknown state {other}"),
@@ -716,7 +721,7 @@ fn registered_profiles_missing_present_empty_and_ordered_round_trip_through_arm_
         assert_eq!(
             profile_ids
                 .iter()
-                .map(|value| value.as_str())
+                .map(EngineProfileId::as_str)
                 .collect::<Vec<_>>(),
             vec!["zeta", "alpha", "work.profile"]
         );
@@ -728,20 +733,20 @@ fn registered_profiles_missing_present_empty_and_ordered_round_trip_through_arm_
 
 #[test]
 fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_and_trailing_bytes() {
-    let empty_id = decode_envelope(&raw_registered_profiles_response(vec![""], "present"));
+    let empty_id = decode_envelope(&raw_registered_profiles_response(&[""], "present"));
     assert!(
         matches!(empty_id, Err(ProtocolDecodeError::EngineConfig { .. })),
         "empty profile id should be rejected"
     );
 
-    let malformed = decode_envelope(&raw_registered_profiles_response(vec!["a/b"], "present"));
+    let malformed = decode_envelope(&raw_registered_profiles_response(&["a/b"], "present"));
     assert!(
         matches!(malformed, Err(ProtocolDecodeError::EngineConfig { .. })),
         "malformed profile id should be rejected"
     );
 
     let duplicate = decode_envelope(&raw_registered_profiles_response(
-        vec!["alpha", "alpha"],
+        &["alpha", "alpha"],
         "present",
     ));
     assert!(
@@ -750,9 +755,9 @@ fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_an
     );
 
     let distinct_many: Vec<String> = (0..65).map(|index| format!("profile-{index:02}")).collect();
-    let distinct_many_refs: Vec<&str> = distinct_many.iter().map(|value| value.as_str()).collect();
+    let distinct_many_refs: Vec<&str> = distinct_many.iter().map(String::as_str).collect();
     let over_limit = decode_envelope(&raw_registered_profiles_response(
-        distinct_many_refs,
+        &distinct_many_refs,
         "present",
     ));
     assert!(
@@ -760,8 +765,8 @@ fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_an
         "65th profile id should be rejected"
     );
 
-    let valid = raw_registered_profiles_response(vec![], "present");
-    let missing = raw_registered_profiles_response(vec![], "missing");
+    let valid = raw_registered_profiles_response(&[], "present");
+    let missing = raw_registered_profiles_response(&[], "missing");
     let mut found_unknown = false;
     for index in 0..valid.len().min(missing.len()) {
         if valid[index] == missing[index] {
@@ -805,7 +810,7 @@ fn registered_profiles_rejects_invalid_empty_duplicate_65th_malformed_unknown_an
     );
 
     let distinct_over: Vec<String> = (0..65).map(|index| format!("profile-{index:02}")).collect();
-    let distinct_over_refs: Vec<&str> = distinct_over.iter().map(|value| value.as_str()).collect();
+    let distinct_over_refs: Vec<&str> = distinct_over.iter().map(String::as_str).collect();
     let over_limit_envelope = registered_profiles_response_envelope(
         "present",
         distinct_over_refs,
