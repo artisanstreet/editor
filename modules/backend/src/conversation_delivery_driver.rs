@@ -163,7 +163,7 @@ impl ConversationDeliveryDriver {
                 read_activated_conversation_replay(self.context.repository(), subscription),
             )
             .await
-            .map_err(|error| map_deadline(error, DeliveryStageError::Replay))?;
+            .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
 
             let stamp = stamp().map_err(|error| DeadlineError::Peer {
                 operation: OperationKind::Send,
@@ -180,7 +180,7 @@ impl ConversationDeliveryDriver {
                 writer.deliver(stamp, replay),
             )
             .await
-            .map_err(|error| map_writer_deadline(error))?;
+            .map_err(map_writer_deadline)?;
             let (writer, delivered) = delivered;
             self.writer = Some(writer);
 
@@ -234,14 +234,21 @@ fn delivery_failure(
 }
 
 fn map_deadline<T>(
-    error: DeadlineError<T>,
+    error: &DeadlineError<T>,
     delivery_error: DeliveryStageError,
 ) -> DeadlineError<RequestStageError> {
     match error {
-        DeadlineError::Timeout { operation, limit } => DeadlineError::Timeout { operation, limit },
-        DeadlineError::Cancelled { operation } => DeadlineError::Cancelled { operation },
-        DeadlineError::InvalidLimit { operation } => DeadlineError::InvalidLimit { operation },
-        DeadlineError::Peer { operation, .. } => delivery_failure(operation, delivery_error),
+        DeadlineError::Timeout { operation, limit } => DeadlineError::Timeout {
+            operation: *operation,
+            limit: *limit,
+        },
+        DeadlineError::Cancelled { operation } => DeadlineError::Cancelled {
+            operation: *operation,
+        },
+        DeadlineError::InvalidLimit { operation } => DeadlineError::InvalidLimit {
+            operation: *operation,
+        },
+        DeadlineError::Peer { operation, .. } => delivery_failure(*operation, delivery_error),
     }
 }
 

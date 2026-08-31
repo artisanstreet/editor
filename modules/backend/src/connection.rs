@@ -468,75 +468,26 @@ impl ForgeConnection<'_, '_, '_, '_> {
 
         loop {
             if completed_requests >= capacity {
-                if let Some(driver) = self.conversation_delivery.as_mut() {
-                    if let Err(error) = driver.cleanup(true).await {
-                        return Err(DriveUntilEndError::new(
-                            completed_requests,
-                            DeadlineError::Peer {
-                                operation: OperationKind::Send,
-                                error: RequestStageError::Delivery(error),
-                            },
-                        ));
-                    }
-                }
-                return Ok((self, completed_requests));
+                return self.finish_at_capacity(completed_requests).await;
             }
 
             if self.conversation_delivery.is_none() {
-                let frame = match stamp() {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        return Err(DriveUntilEndError::new(
-                            completed_requests,
-                            DeadlineError::Peer {
-                                operation: OperationKind::Send,
-                                error,
-                            },
-                        ));
-                    }
-                };
-                match self.respond_next(frame).await {
-                    Ok(returned) => {
-                        self = returned;
-                        completed_requests += 1;
-                    }
-                    Err(source) => {
-                        return Err(DriveUntilEndError::new(completed_requests, source));
-                    }
-                }
+                let (returned, count) = self
+                    .drive_legacy_request(&mut stamp, completed_requests)
+                    .await?;
+                self = returned;
+                completed_requests = count;
                 continue;
             }
 
-            let event = {
-                let driver = self
-                    .conversation_delivery
-                    .as_mut()
-                    .expect("configured delivery driver remains owned");
-                run_with_deadline(
-                    OperationKind::Receive,
-                    self.limits.next_request,
-                    self.cancel,
-                    wait_for_driver_event(&self.connection, driver),
-                )
-                .await
-            };
-            let event = match event {
+            let event = match self.next_driver_event().await {
                 Ok(event) => event,
                 Err(source) => return self.fail_connection(source, completed_requests).await,
             };
 
             match event {
                 DriverEvent::Wake => {
-                    let result = {
-                        let driver = self
-                            .conversation_delivery
-                            .as_mut()
-                            .expect("configured delivery driver remains owned");
-                        driver
-                            .deliver_wake(&mut stamp, self.limits.next_request, self.cancel)
-                            .await
-                    };
-                    if let Err(source) = result {
+                    if let Err(source) = self.deliver_driver_wake(&mut stamp).await {
                         return self.fail_connection(source, completed_requests).await;
                     }
                 }
@@ -545,42 +496,20 @@ impl ForgeConnection<'_, '_, '_, '_> {
                     streams.install(send, recv);
                     let frame = match stamp() {
                         Ok(frame) => frame,
-                        Err(error) => {
+                        Err(source) => {
                             drop(streams);
                             return self
                                 .fail_connection(
                                     DeadlineError::Peer {
                                         operation: OperationKind::Send,
-                                        error,
+                                        error: source,
                                     },
                                     completed_requests,
                                 )
                                 .await;
                         }
                     };
-                    let outcome = {
-                        let driver = self
-                            .conversation_delivery
-                            .as_ref()
-                            .expect("configured delivery driver remains owned");
-                        run_with_deadline(
-                            OperationKind::Receive,
-                            self.limits.next_request,
-                            self.cancel,
-                            drive_request_stream(
-                                self.handler,
-                                self.lifecycle,
-                                self.lifecycle_witness,
-                                self.protocol_version,
-                                frame,
-                                Some(driver.context()),
-                                &mut streams,
-                                self.cancel,
-                            ),
-                        )
-                        .await
-                    };
-                    let outcome = match outcome {
+                    let outcome = match self.dispatch_driver_request(frame, &mut streams).await {
                         Ok(outcome) => {
                             streams.release();
                             outcome
@@ -591,26 +520,122 @@ impl ForgeConnection<'_, '_, '_, '_> {
                     };
                     completed_requests += 1;
 
-                    let result = {
-                        let driver = self
-                            .conversation_delivery
-                            .as_mut()
-                            .expect("configured delivery driver remains owned");
-                        driver
-                            .handle_request(
-                                outcome,
-                                &mut stamp,
-                                self.limits.next_request,
-                                self.cancel,
-                            )
-                            .await
-                    };
-                    if let Err(source) = result {
+                    if let Err(source) = self.deliver_driver_request(outcome, &mut stamp).await {
                         return self.fail_connection(source, completed_requests).await;
                     }
                 }
             }
         }
+    }
+
+    async fn finish_at_capacity(
+        mut self,
+        completed_requests: u32,
+    ) -> Result<(Self, u32), DriveUntilEndError> {
+        if let Some(driver) = self.conversation_delivery.as_mut() {
+            driver.cleanup(true).await.map_err(|error| {
+                DriveUntilEndError::new(completed_requests, delivery_cleanup_source(error))
+            })?;
+        }
+        Ok((self, completed_requests))
+    }
+
+    async fn drive_legacy_request<F>(
+        self,
+        stamp: &mut F,
+        completed_requests: u32,
+    ) -> Result<(Self, u32), DriveUntilEndError>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let frame = stamp().map_err(|error| {
+            DriveUntilEndError::new(
+                completed_requests,
+                DeadlineError::Peer {
+                    operation: OperationKind::Send,
+                    error,
+                },
+            )
+        })?;
+        let returned = self
+            .respond_next(frame)
+            .await
+            .map_err(|source| DriveUntilEndError::new(completed_requests, source))?;
+        Ok((returned, completed_requests + 1))
+    }
+
+    async fn next_driver_event(&mut self) -> Result<DriverEvent, DeadlineError<RequestStageError>> {
+        let driver = self
+            .conversation_delivery
+            .as_mut()
+            .expect("configured delivery driver remains owned");
+        run_with_deadline(
+            OperationKind::Receive,
+            self.limits.next_request,
+            self.cancel,
+            wait_for_driver_event(&self.connection, driver),
+        )
+        .await
+    }
+
+    async fn dispatch_driver_request(
+        &self,
+        frame: ServerFrameStamp,
+        streams: &mut StageStreams,
+    ) -> Result<RequestDispatchOutcome, DeadlineError<RequestStageError>> {
+        let driver = self
+            .conversation_delivery
+            .as_ref()
+            .expect("configured delivery driver remains owned");
+        run_with_deadline(
+            OperationKind::Receive,
+            self.limits.next_request,
+            self.cancel,
+            drive_request_stream(
+                self.handler,
+                self.lifecycle,
+                self.lifecycle_witness,
+                self.protocol_version,
+                frame,
+                Some(driver.context()),
+                streams,
+                self.cancel,
+            ),
+        )
+        .await
+    }
+
+    async fn deliver_driver_wake<F>(
+        &mut self,
+        stamp: &mut F,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let driver = self
+            .conversation_delivery
+            .as_mut()
+            .expect("configured delivery driver remains owned");
+        driver
+            .deliver_wake(stamp, self.limits.next_request, self.cancel)
+            .await
+    }
+
+    async fn deliver_driver_request<F>(
+        &mut self,
+        outcome: RequestDispatchOutcome,
+        stamp: &mut F,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let driver = self
+            .conversation_delivery
+            .as_mut()
+            .expect("configured delivery driver remains owned");
+        driver
+            .handle_request(outcome, stamp, self.limits.next_request, self.cancel)
+            .await
     }
 
     async fn fail_connection(
@@ -619,20 +644,21 @@ impl ForgeConnection<'_, '_, '_, '_> {
         completed_requests: u32,
     ) -> Result<(Self, u32), DriveUntilEndError> {
         let graceful = matches!(&source, DeadlineError::Cancelled { .. });
-        if let Some(driver) = self.conversation_delivery.as_mut() {
-            if let Err(error) = driver.cleanup(graceful).await {
-                if graceful {
-                    return Err(DriveUntilEndError::new(
-                        completed_requests,
-                        DeadlineError::Peer {
-                            operation: OperationKind::Send,
-                            error: RequestStageError::Delivery(error),
-                        },
-                    ));
-                }
-            }
+        match (self.conversation_delivery.as_mut(), graceful) {
+            (Some(driver), true) => driver.cleanup(true).await.map_err(|error| {
+                DriveUntilEndError::new(completed_requests, delivery_cleanup_source(error))
+            })?,
+            (Some(driver), false) => drop(driver.cleanup(false).await),
+            (None, _) => {}
         }
         Err(DriveUntilEndError::new(completed_requests, source))
+    }
+}
+
+fn delivery_cleanup_source(error: DeliveryStageError) -> DeadlineError<RequestStageError> {
+    DeadlineError::Peer {
+        operation: OperationKind::Send,
+        error: RequestStageError::Delivery(error),
     }
 }
 
@@ -842,6 +868,16 @@ async fn drive_request_stream(
     })
     .await?;
 
+    complete_request_receipt(handler, context, streams, receipt, cancel).await
+}
+
+async fn complete_request_receipt(
+    handler: &RequestHandler,
+    context: Option<&ConversationConnectionContext>,
+    streams: &mut StageStreams,
+    receipt: PostResponseReceipt,
+    cancel: &CancelHandle,
+) -> Result<RequestDispatchOutcome, RequestStageError> {
     // The dispatcher finishes the server send side only on success, so this
     // record must happen before the local activation await. Never reset a
     // finished send side, even when activation later fails or is cancelled.
