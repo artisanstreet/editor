@@ -18,8 +18,59 @@ use artisan_protocol::{
 };
 
 use crate::native_transport_service::{
-    ServiceFailure, ServiceFailureCategory, ServiceFailureStage,
+    ServiceFailure, ServiceFailureCategory, ServiceFailureStage, SettingsLoadGeneration,
 };
+
+/// Stable field order for the explicit clipboard document.
+///
+/// The template deliberately leaves every value empty. In particular, no
+/// profile, model, route, policy, or runtime value is inferred by the
+/// clipboard interaction.
+pub const MANUAL_CONFIGURATION_KEYS: [&str; 24] = [
+    "profile_id",
+    "model_id",
+    "route_id",
+    "variant_id",
+    "permission_id",
+    "agent_id",
+    "approval",
+    "filesystem",
+    "network",
+    "web_search",
+    "attempt_budget",
+    "readiness_budget",
+    "health_budget",
+    "prompt_budget",
+    "stream_budget",
+    "close_budget",
+    "max_json_body_bytes",
+    "max_sse_line_bytes",
+    "max_sse_event_bytes",
+    "max_readiness_line_bytes",
+    "max_header_count",
+    "max_http_buffer_bytes",
+    "max_stderr_bytes",
+    "observation_capacity",
+];
+
+/// Finite byte bound for one clipboard configuration document.
+pub const MAX_MANUAL_CONFIGURATION_BYTES: usize = 16 * 1024;
+
+/// Finite line bound for one clipboard configuration document.
+pub const MAX_MANUAL_CONFIGURATION_LINES: usize = MANUAL_CONFIGURATION_KEYS.len();
+
+/// Operation whose redacted failure is currently visible in the settings UI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EngineSettingsFailureOperation {
+    /// The certified profile catalogue could not be admitted or read.
+    Registry,
+    /// The selected thread's authoritative settings could not be read.
+    SettingsRead,
+    /// The selected thread's durable save failed.
+    Save,
+    /// A clipboard document or local draft value was rejected.
+    Input,
+}
 
 /// Visible lifecycle for the engine-settings section.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,6 +177,122 @@ impl Default for EngineSettingsDraft {
     }
 }
 
+fn manual_configuration_error(
+    field: &'static str,
+    reason: EngineConfigReason,
+) -> EngineConfigError {
+    EngineConfigError::new(field, reason)
+}
+
+fn manual_field_index(key: &str) -> Option<usize> {
+    MANUAL_CONFIGURATION_KEYS
+        .iter()
+        .position(|known| *known == key)
+}
+
+/// Returns the stable empty-value clipboard document used by the settings
+/// surface. The document contains one exact `key=` line for every field and
+/// never copies a value from the current or authoritative configuration.
+#[must_use]
+pub fn manual_configuration_template() -> String {
+    MANUAL_CONFIGURATION_KEYS
+        .iter()
+        .map(|key| format!("{key}=\n"))
+        .collect()
+}
+
+/// Parses one complete manual settings document without retaining the source
+/// text in either success or failure state.
+///
+/// # Errors
+///
+/// Returns a bounded [`EngineConfigError`] for an oversized document, a
+/// malformed/unknown/duplicate line, or a missing required field. The error
+/// contains only a stable field label and finite reason category.
+pub fn parse_manual_configuration(
+    document: &str,
+) -> Result<EngineSettingsDraft, EngineConfigError> {
+    if document.len() > MAX_MANUAL_CONFIGURATION_BYTES {
+        return Err(manual_configuration_error(
+            "document",
+            EngineConfigReason::OutOfRange,
+        ));
+    }
+
+    let mut draft = EngineSettingsDraft::default();
+    let mut seen = [false; MANUAL_CONFIGURATION_KEYS.len()];
+    let mut line_count = 0usize;
+    for line in document.lines() {
+        line_count = line_count.saturating_add(1);
+        if line_count > MAX_MANUAL_CONFIGURATION_LINES {
+            return Err(manual_configuration_error(
+                "document",
+                EngineConfigReason::OutOfRange,
+            ));
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(manual_configuration_error(
+                "configuration",
+                EngineConfigReason::InvalidIdentifier,
+            ));
+        };
+        let Some(index) = manual_field_index(key) else {
+            return Err(manual_configuration_error(
+                "configuration",
+                EngineConfigReason::Unsupported,
+            ));
+        };
+        if seen[index] {
+            return Err(manual_configuration_error(
+                MANUAL_CONFIGURATION_KEYS[index],
+                EngineConfigReason::Inconsistent,
+            ));
+        }
+        if value.contains('=') {
+            return Err(manual_configuration_error(
+                MANUAL_CONFIGURATION_KEYS[index],
+                EngineConfigReason::InvalidIdentifier,
+            ));
+        }
+        seen[index] = true;
+        match key {
+            "profile_id" => draft.profile_id = value.to_owned(),
+            "model_id" => draft.model_id = value.to_owned(),
+            "route_id" => draft.route_id = value.to_owned(),
+            "variant_id" => draft.variant_id = value.to_owned(),
+            "permission_id" => draft.permission_id = value.to_owned(),
+            "agent_id" => draft.agent_id = value.to_owned(),
+            "approval" => draft.approval = value.to_owned(),
+            "filesystem" => draft.filesystem = value.to_owned(),
+            "network" => draft.network = value.to_owned(),
+            "web_search" => draft.web_search = value.to_owned(),
+            "attempt_budget" => draft.attempt_budget = value.to_owned(),
+            "readiness_budget" => draft.readiness_budget = value.to_owned(),
+            "health_budget" => draft.health_budget = value.to_owned(),
+            "prompt_budget" => draft.prompt_budget = value.to_owned(),
+            "stream_budget" => draft.stream_budget = value.to_owned(),
+            "close_budget" => draft.close_budget = value.to_owned(),
+            "max_json_body_bytes" => draft.max_json_body_bytes = value.to_owned(),
+            "max_sse_line_bytes" => draft.max_sse_line_bytes = value.to_owned(),
+            "max_sse_event_bytes" => draft.max_sse_event_bytes = value.to_owned(),
+            "max_readiness_line_bytes" => draft.max_readiness_line_bytes = value.to_owned(),
+            "max_header_count" => draft.max_header_count = value.to_owned(),
+            "max_http_buffer_bytes" => draft.max_http_buffer_bytes = value.to_owned(),
+            "max_stderr_bytes" => draft.max_stderr_bytes = value.to_owned(),
+            "observation_capacity" => draft.observation_capacity = value.to_owned(),
+            _ => unreachable!("manual field index and assignment table diverged"),
+        }
+    }
+
+    if let Some((index, _)) = seen.iter().enumerate().find(|(_, present)| !**present) {
+        return Err(manual_configuration_error(
+            MANUAL_CONFIGURATION_KEYS[index],
+            EngineConfigReason::InvalidIdentifier,
+        ));
+    }
+    Ok(draft)
+}
+
 impl EngineSettingsDraft {
     /// Builds a draft reflecting an authoritative config.
     #[must_use]
@@ -176,20 +343,16 @@ impl EngineSettingsDraft {
         let profile_id = EngineProfileId::parse(self.profile_id.clone()).map_err(|_| {
             EngineConfigError::new("profile_id", EngineConfigReason::InvalidIdentifier)
         })?;
-        if let Some(RegisteredEngineProfilesResult::RegistryPresent { profile_ids }) = registry {
-            if !profile_ids
-                .iter()
-                .any(|id| id.as_str() == profile_id.as_str())
-            {
-                return Err(EngineConfigError::new(
-                    "profile_id",
-                    EngineConfigReason::InvalidIdentifier,
-                ));
-            }
-        } else if matches!(
-            registry,
-            Some(RegisteredEngineProfilesResult::RegistryMissing)
-        ) {
+        let Some(RegisteredEngineProfilesResult::RegistryPresent { profile_ids }) = registry else {
+            return Err(EngineConfigError::new(
+                "profile_id",
+                EngineConfigReason::InvalidIdentifier,
+            ));
+        };
+        if !profile_ids
+            .iter()
+            .any(|id| id.as_str() == profile_id.as_str())
+        {
             return Err(EngineConfigError::new(
                 "profile_id",
                 EngineConfigReason::InvalidIdentifier,
@@ -201,7 +364,7 @@ impl EngineSettingsDraft {
         let route_id = EngineRouteId::parse(self.route_id.clone()).map_err(|_| {
             EngineConfigError::new("route_id", EngineConfigReason::InvalidIdentifier)
         })?;
-        let variant_id = if self.variant_id.trim().is_empty() {
+        let variant_id = if self.variant_id.is_empty() {
             None
         } else {
             Some(
@@ -320,20 +483,30 @@ impl EngineSettingsDraft {
 }
 
 /// Application-owned controller for thread-bound engine settings.
+struct PendingSave {
+    thread_id: ThreadId,
+    request_id: artisan_domain::RequestId,
+    retained: EngineRunConfig,
+}
+
 pub struct EngineSettingsController {
     selected_thread: Option<ThreadId>,
     registry: Option<RegisteredEngineProfilesResult>,
     registry_loading: bool,
     settings: Option<ThreadEngineSettingsResult>,
     loading_thread: Option<ThreadId>,
+    active_settings_generation: Option<SettingsLoadGeneration>,
+    next_settings_load_generation: Option<SettingsLoadGeneration>,
+    needs_settings_load: bool,
     draft: EngineSettingsDraft,
     authoritative_revision: Option<EngineConfigRevision>,
     authoritative_config: Option<EngineRunConfig>,
-    is_saving: bool,
-    pending_thread: Option<ThreadId>,
-    pending_retained: Option<EngineRunConfig>,
+    pending_save: Option<PendingSave>,
     conflict_refreshing: bool,
-    failure: Option<ServiceFailure>,
+    registry_failure: Option<ServiceFailure>,
+    settings_failure: Option<ServiceFailure>,
+    save_failure: Option<ServiceFailure>,
+    input_error: Option<EngineConfigError>,
     needs_registry_load: bool,
     needs_settings_reload: Option<ThreadId>,
 }
@@ -348,14 +521,18 @@ impl EngineSettingsController {
             registry_loading: false,
             settings: None,
             loading_thread: None,
+            active_settings_generation: None,
+            next_settings_load_generation: None,
+            needs_settings_load: false,
             draft: EngineSettingsDraft::default(),
             authoritative_revision: None,
             authoritative_config: None,
-            is_saving: false,
-            pending_thread: None,
-            pending_retained: None,
+            pending_save: None,
             conflict_refreshing: false,
-            failure: None,
+            registry_failure: None,
+            settings_failure: None,
+            save_failure: None,
+            input_error: None,
             needs_registry_load: false,
             needs_settings_reload: None,
         }
@@ -404,38 +581,72 @@ impl EngineSettingsController {
         self.settings.as_ref()
     }
 
+    /// Returns the exact generation accepted for the active settings load.
+    #[must_use]
+    pub const fn active_settings_generation(&self) -> Option<SettingsLoadGeneration> {
+        self.active_settings_generation
+    }
+
+    /// Returns the exact request identity admitted for the pending save.
+    #[must_use]
+    pub fn pending_save_request_id(&self) -> Option<&artisan_domain::RequestId> {
+        self.pending_save
+            .as_ref()
+            .map(|pending| &pending.request_id)
+    }
+
+    /// Returns the operation represented by the visible redacted failure.
+    #[must_use]
+    pub fn failure_operation(&self) -> Option<EngineSettingsFailureOperation> {
+        if self.input_error.is_some() {
+            Some(EngineSettingsFailureOperation::Input)
+        } else if self.save_failure.is_some() {
+            Some(EngineSettingsFailureOperation::Save)
+        } else if self.settings_failure.is_some() {
+            Some(EngineSettingsFailureOperation::SettingsRead)
+        } else if self.registry_failure.is_some() {
+            Some(EngineSettingsFailureOperation::Registry)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the finite service failure, if one is visible.
+    #[must_use]
+    pub fn service_failure(&self) -> Option<ServiceFailure> {
+        self.save_failure
+            .or(self.settings_failure)
+            .or(self.registry_failure)
+    }
+
+    /// Returns the finite input error, if one is visible.
+    #[must_use]
+    pub const fn input_error(&self) -> Option<EngineConfigError> {
+        self.input_error
+    }
+
     /// Returns the current visible status.
     #[must_use]
     pub fn status(&self) -> EngineSettingsStatus {
         if self.selected_thread.is_none() {
             return EngineSettingsStatus::Unselected;
         }
-        if self.failure.is_some()
-            && !self.conflict_refreshing
-            && !self.is_saving
-            && self.loading_thread.is_none()
-        {
-            return EngineSettingsStatus::Failure;
-        }
         if self.conflict_refreshing {
             return EngineSettingsStatus::ConflictRefreshing;
         }
-        if self.is_saving {
+        if self.pending_save.is_some() {
             return EngineSettingsStatus::Saving;
         }
-        if self.loading_thread.is_some() || self.registry_loading {
-            return EngineSettingsStatus::Loading;
+        if self.failure_operation().is_some() {
+            return EngineSettingsStatus::Failure;
         }
         match self.registry_view() {
             RegistryView::Missing => return EngineSettingsStatus::RegistryMissing,
-            RegistryView::PresentEmpty => {
-                // Still need to distinguish unconfigured/ready but UI shows present-empty.
-                // Surface as present-empty when no failure and not loading.
-                // For status we keep underlying readiness but expose view separately.
-                // To satisfy required distinct observation, return this variant when registry empty.
-                return EngineSettingsStatus::RegistryPresentEmpty;
-            }
+            RegistryView::PresentEmpty => return EngineSettingsStatus::RegistryPresentEmpty,
             _ => {}
+        }
+        if self.loading_thread.is_some() || self.registry_loading || self.needs_settings_load {
+            return EngineSettingsStatus::Loading;
         }
         if self.is_dirty_internal() {
             return EngineSettingsStatus::Dirty;
@@ -452,17 +663,24 @@ impl EngineSettingsController {
     /// Returns whether Save is enabled for the current draft.
     #[must_use]
     pub fn can_save(&self) -> bool {
-        if self.selected_thread.is_none()
-            || self.is_saving
-            || self.conflict_refreshing
-            || self.loading_thread.is_some()
-        {
+        if !self.is_editable() || !self.is_dirty_internal() || self.input_error.is_some() {
             return false;
         }
-        if self.failure.is_some() {
+        let Some(RegisteredEngineProfilesResult::RegistryPresent { .. }) = self.registry.as_ref()
+        else {
             return false;
-        }
+        };
         self.draft.build_config(self.registry.as_ref()).is_ok()
+    }
+
+    /// Returns whether Cancel may discard the local draft.
+    #[must_use]
+    pub fn can_cancel(&self) -> bool {
+        self.selected_thread.is_some()
+            && self.is_dirty_internal()
+            && self.pending_save.is_none()
+            && !self.conflict_refreshing
+            && self.loading_thread.is_none()
     }
 
     /// Returns the authoritative revision when configured.
@@ -483,16 +701,105 @@ impl EngineSettingsController {
         self.needs_registry_load
     }
 
-    /// Clears the one-shot registry load flag after the caller submits it.
-    pub fn clear_registry_load_flag(&mut self) {
-        self.needs_registry_load = false;
-        self.registry_loading = true;
+    /// Returns whether an authoritative settings load still needs admission.
+    #[must_use]
+    pub const fn needs_settings_load(&self) -> bool {
+        self.needs_settings_load
     }
 
-    /// Returns a pending authoritative reload when conflict occurred.
+    /// Returns whether a conflict refresh is waiting for command admission.
     #[must_use]
-    pub fn take_reload_thread(&mut self) -> Option<ThreadId> {
-        self.needs_settings_reload.take()
+    pub fn pending_reload_thread(&self) -> Option<&ThreadId> {
+        self.needs_settings_reload.as_ref()
+    }
+
+    /// Marks the catalogue command admitted by the bounded bridge.
+    pub fn mark_registry_load_admitted(&mut self) {
+        self.needs_registry_load = false;
+        self.registry_loading = true;
+        self.registry_failure = None;
+    }
+
+    /// Retains the catalogue need after a Busy/Stopped admission refusal.
+    pub fn on_registry_load_admission_failed(&mut self, failure: ServiceFailure) {
+        self.registry_loading = false;
+        self.needs_registry_load = self.selected_thread.is_some();
+        self.registry_failure = Some(failure);
+    }
+
+    /// Mints the next application-owned settings-load generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted request failure when no thread is selected, a load
+    /// is already active, or the monotonic generation is exhausted.
+    pub fn prepare_settings_load(&mut self) -> Result<SettingsLoadGeneration, ServiceFailure> {
+        if self.selected_thread.is_none() || self.active_settings_generation.is_some() {
+            return Err(ServiceFailure {
+                stage: ServiceFailureStage::Request,
+                category: ServiceFailureCategory::InvalidConfiguration,
+            });
+        }
+        let generation = self
+            .next_settings_load_generation
+            .map_or(SettingsLoadGeneration::first(), |previous| {
+                previous.checked_next()
+            })
+            .ok_or(ServiceFailure {
+                stage: ServiceFailureStage::Request,
+                category: ServiceFailureCategory::Integrity,
+            })?;
+        self.next_settings_load_generation = Some(generation);
+        Ok(generation)
+    }
+
+    /// Commits settings-load state only after its command was admitted.
+    #[must_use]
+    pub fn mark_settings_load_admitted(
+        &mut self,
+        thread_id: ThreadId,
+        generation: SettingsLoadGeneration,
+    ) -> bool {
+        if self.selected_thread.as_ref() != Some(&thread_id)
+            || self.active_settings_generation.is_some()
+            || self.next_settings_load_generation != Some(generation)
+            || (self.needs_settings_reload.as_ref() != Some(&thread_id)
+                && !self.needs_settings_load)
+        {
+            return false;
+        }
+        self.active_settings_generation = Some(generation);
+        self.loading_thread = Some(thread_id.clone());
+        self.needs_settings_load = false;
+        if self.needs_settings_reload.as_ref() == Some(&thread_id) {
+            self.needs_settings_reload = None;
+        }
+        self.settings_failure = None;
+        true
+    }
+
+    /// Re-arms a settings read after its command was refused by the bridge.
+    pub fn on_settings_load_admission_failed(
+        &mut self,
+        thread_id: ThreadId,
+        failure: ServiceFailure,
+    ) {
+        if self.selected_thread.as_ref() != Some(&thread_id) {
+            return;
+        }
+        self.active_settings_generation = None;
+        self.loading_thread = None;
+        if failure.category == ServiceFailureCategory::Integrity {
+            // Generation exhaustion is terminal: no later command may reuse
+            // an identity or pretend that an authoritative refresh is safe.
+            self.needs_settings_load = false;
+            self.needs_settings_reload = None;
+        } else if self.conflict_refreshing {
+            self.needs_settings_reload = Some(thread_id);
+        } else {
+            self.needs_settings_load = true;
+        }
+        self.settings_failure = Some(failure);
     }
 
     /// Selects a real thread, clearing prior draft and stale state.
@@ -504,58 +811,63 @@ impl EngineSettingsController {
         self.settings = None;
         self.authoritative_revision = None;
         self.authoritative_config = None;
-        self.loading_thread = thread_id.clone();
+        self.loading_thread = None;
+        self.active_settings_generation = None;
+        self.needs_settings_load = thread_id.is_some();
         self.draft = EngineSettingsDraft::default();
-        self.is_saving = false;
-        self.pending_thread = None;
-        self.pending_retained = None;
+        self.pending_save = None;
         self.conflict_refreshing = false;
-        self.failure = None;
+        self.settings_failure = None;
+        self.save_failure = None;
+        self.input_error = None;
         self.needs_settings_reload = None;
-        if self.registry.is_none() && thread_id.is_some() {
+        if self.registry.is_none() && !self.registry_loading && thread_id.is_some() {
             self.needs_registry_load = true;
-            self.registry_loading = false;
-        } else {
+        } else if self.registry.is_some() {
             self.needs_registry_load = false;
         }
     }
 
     /// Handles a successful registry result, preserving it for the application lifetime.
     pub fn on_registry_loaded(&mut self, result: RegisteredEngineProfilesResult) {
-        // Registry is global, not per-thread; keep first successful result unless missing vs present distinction needs update.
-        // But spec allows caching; we preserve exact returned value.
         self.registry = Some(result);
         self.registry_loading = false;
         self.needs_registry_load = false;
+        self.registry_failure = None;
     }
 
     /// Handles a registry failure as redacted.
     pub fn on_registry_failed(&mut self, failure: ServiceFailure) {
         self.registry_loading = false;
-        self.failure = Some(failure);
+        self.needs_registry_load = self.selected_thread.is_some();
+        self.registry_failure = Some(failure);
     }
 
-    /// Handles an authoritative settings result, discarding stale thread responses.
-    pub fn on_settings_loaded(&mut self, result: ThreadEngineSettingsResult) {
+    /// Handles an authoritative settings result only for its exact active
+    /// thread and application-minted generation.
+    pub fn on_settings_loaded(
+        &mut self,
+        generation: SettingsLoadGeneration,
+        result: ThreadEngineSettingsResult,
+    ) {
         let Some(selected) = self.selected_thread.clone() else {
             return;
         };
-        if result.thread_id() != &selected {
+        if self.active_settings_generation != Some(generation)
+            || self.loading_thread.as_ref() != Some(&selected)
+            || result.thread_id() != &selected
+        {
             return;
         }
-        if self.loading_thread.as_ref() != Some(&selected) && !self.conflict_refreshing {
-            // Late response after thread switch; still discard if thread mismatch already handled.
-            // Allow loading_thread None when reload after conflict: then accept if selected matches.
-            if self.loading_thread.is_none() && !self.conflict_refreshing {
-                // Stale after switch cleared loading; still accept if thread equals selected but loading cleared due to switch? Actually switch clears loading to new thread; old thread would mismatch and already returned.
-            }
-        }
+        self.active_settings_generation = None;
+        self.loading_thread = None;
+        self.needs_settings_load = false;
         if self.conflict_refreshing {
             self.conflict_refreshing = false;
             self.needs_settings_reload = None;
         }
-        self.loading_thread = None;
-        self.failure = None;
+        self.settings_failure = None;
+        self.input_error = None;
         match &result {
             ThreadEngineSettingsResult::Unconfigured { .. } => {
                 self.authoritative_revision = None;
@@ -571,17 +883,38 @@ impl EngineSettingsController {
             }
         }
         self.settings = Some(result);
-        self.is_saving = false;
-        self.pending_thread = None;
-        self.pending_retained = None;
     }
 
-    /// Marks that a save is in flight, retaining the exact immutable config.
-    pub fn begin_saving(&mut self, pending_thread: ThreadId, retained: EngineRunConfig) {
-        self.is_saving = true;
-        self.pending_thread = Some(pending_thread);
-        self.pending_retained = Some(retained);
-        self.failure = None;
+    /// Marks a save in flight only after the exact command was admitted.
+    #[must_use]
+    pub fn begin_saving(
+        &mut self,
+        pending_thread: ThreadId,
+        request_id: artisan_domain::RequestId,
+        retained: EngineRunConfig,
+    ) -> bool {
+        if self.selected_thread.as_ref() != Some(&pending_thread)
+            || self.pending_save.is_some()
+            || !self.can_save()
+        {
+            return false;
+        }
+        self.pending_save = Some(PendingSave {
+            thread_id: pending_thread,
+            request_id,
+            retained,
+        });
+        self.save_failure = None;
+        self.input_error = None;
+        true
+    }
+
+    /// Records a Busy/Stopped save admission refusal without losing the draft.
+    pub fn on_save_admission_failed(&mut self, failure: ServiceFailure) {
+        self.pending_save = None;
+        if self.selected_thread.is_some() {
+            self.save_failure = Some(failure);
+        }
     }
 
     /// Handles a successful save, storing returned revision plus retained config.
@@ -593,14 +926,14 @@ impl EngineSettingsController {
         let Some(selected) = self.selected_thread.clone() else {
             return;
         };
-        let Some(pending) = self.pending_thread.clone() else {
+        let Some(pending) = self.pending_save.as_ref() else {
             return;
         };
-        if &result.thread_id != &selected || &result.thread_id != &pending {
-            return;
-        }
-        if self.pending_retained.as_ref() != Some(&retained) {
-            // Stale save with different retained config; ignore.
+        if &result.thread_id != &selected
+            || &result.thread_id != &pending.thread_id
+            || &result.request_id != &pending.request_id
+            || &pending.retained != &retained
+        {
             return;
         }
         self.authoritative_revision = Some(result.revision);
@@ -611,75 +944,94 @@ impl EngineSettingsController {
             revision: result.revision,
             config: Box::new(retained),
         });
-        self.is_saving = false;
-        self.pending_thread = None;
-        self.pending_retained = None;
-        self.failure = None;
+        self.pending_save = None;
+        self.save_failure = None;
+        self.input_error = None;
         self.conflict_refreshing = false;
+        self.needs_settings_reload = None;
     }
 
-    /// Handles a conflict event, discarding pending save and requiring one reload.
-    pub fn on_conflict(&mut self, thread_id: ThreadId) {
+    /// Handles a conflict event only for the exact pending save request.
+    pub fn on_conflict(&mut self, thread_id: ThreadId, request_id: artisan_domain::RequestId) {
         let Some(selected) = self.selected_thread.clone() else {
             return;
         };
         if thread_id != selected {
             return;
         }
-        if self.pending_thread.as_ref() != Some(&thread_id) {
+        if self.pending_save.as_ref().is_none_or(|pending| {
+            pending.thread_id != thread_id || pending.request_id != request_id
+        }) {
             return;
         }
-        self.is_saving = false;
-        self.pending_thread = None;
-        self.pending_retained = None;
-        self.conflict_refreshing = true;
-        self.loading_thread = Some(thread_id.clone());
-        self.needs_settings_reload = Some(thread_id);
-    }
-
-    /// Handles a redacted save failure.
-    pub fn on_save_failed(&mut self, thread_id: ThreadId, failure: ServiceFailure) {
-        let Some(selected) = self.selected_thread.clone() else {
-            return;
-        };
-        if thread_id != selected {
-            return;
-        }
-        if self.pending_thread.as_ref() != Some(&thread_id) {
-            return;
-        }
-        self.is_saving = false;
-        self.pending_thread = None;
-        self.pending_retained = None;
-        self.failure = Some(failure);
-    }
-
-    /// Handles a generic load failure.
-    pub fn on_load_failed(&mut self, thread_id: ThreadId, failure: ServiceFailure) {
-        let Some(selected) = self.selected_thread.clone() else {
-            return;
-        };
-        if thread_id != selected {
-            return;
-        }
-        if self.loading_thread.as_ref() != Some(&thread_id) {
-            return;
-        }
+        self.pending_save = None;
+        self.active_settings_generation = None;
         self.loading_thread = None;
-        self.failure = Some(failure);
+        self.conflict_refreshing = true;
+        self.needs_settings_reload = Some(thread_id);
+        self.save_failure = None;
+    }
+
+    /// Handles a redacted save failure for the exact pending request.
+    pub fn on_save_failed(
+        &mut self,
+        thread_id: ThreadId,
+        request_id: artisan_domain::RequestId,
+        failure: ServiceFailure,
+    ) {
+        let Some(selected) = self.selected_thread.clone() else {
+            return;
+        };
+        if thread_id != selected {
+            return;
+        }
+        if self.pending_save.as_ref().is_none_or(|pending| {
+            pending.thread_id != thread_id || pending.request_id != request_id
+        }) {
+            return;
+        }
+        self.pending_save = None;
+        self.save_failure = Some(failure);
+    }
+
+    /// Handles a settings-read failure for the exact active generation.
+    pub fn on_settings_load_failed(
+        &mut self,
+        thread_id: ThreadId,
+        generation: SettingsLoadGeneration,
+        failure: ServiceFailure,
+    ) {
+        let Some(selected) = self.selected_thread.clone() else {
+            return;
+        };
+        if thread_id != selected
+            || self.active_settings_generation != Some(generation)
+            || self.loading_thread.as_ref() != Some(&thread_id)
+        {
+            return;
+        }
+        self.active_settings_generation = None;
+        self.loading_thread = None;
+        if self.conflict_refreshing {
+            self.needs_settings_reload = Some(thread_id);
+        } else {
+            self.needs_settings_load = false;
+        }
+        self.settings_failure = Some(failure);
     }
 
     /// Cancels local edits without emitting a save.
     pub fn cancel(&mut self) {
+        if !self.can_cancel() {
+            return;
+        }
         if let Some(config) = self.authoritative_config.clone() {
             self.draft = EngineSettingsDraft::from_config(&config);
         } else {
             self.draft = EngineSettingsDraft::default();
         }
-        self.is_saving = false;
-        self.pending_thread = None;
-        self.pending_retained = None;
-        // Keep failure/conflict as is; cancel does not clear failure.
+        self.input_error = None;
+        self.save_failure = None;
     }
 
     fn is_dirty_internal(&self) -> bool {
@@ -695,6 +1047,60 @@ impl EngineSettingsController {
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         self.is_dirty_internal()
+    }
+
+    fn is_editable(&self) -> bool {
+        self.selected_thread.is_some()
+            && self.settings.is_some()
+            && self.loading_thread.is_none()
+            && self.active_settings_generation.is_none()
+            && self.pending_save.is_none()
+            && !self.conflict_refreshing
+    }
+
+    /// Selects one profile only when it came from the authoritative registry.
+    #[must_use]
+    pub fn select_profile(&mut self, profile_id: EngineProfileId) -> bool {
+        let present = matches!(
+            self.registry.as_ref(),
+            Some(RegisteredEngineProfilesResult::RegistryPresent { profile_ids })
+                if profile_ids.iter().any(|id| id == &profile_id)
+        );
+        if !present || !self.is_editable() {
+            self.input_error = Some(EngineConfigError::new(
+                "profile_id",
+                EngineConfigReason::InvalidIdentifier,
+            ));
+            return false;
+        }
+        self.draft.profile_id = profile_id.as_str().to_owned();
+        self.input_error = None;
+        true
+    }
+
+    /// Applies a complete, strictly structured clipboard configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns only a redacted field/reason pair; the source document is
+    /// never stored or formatted.
+    pub fn apply_manual_configuration(&mut self, document: &str) -> Result<(), EngineConfigError> {
+        if !self.is_editable() {
+            let error = EngineConfigError::new("configuration", EngineConfigReason::Unsupported);
+            self.input_error = Some(error);
+            return Err(error);
+        }
+        let parsed = match parse_manual_configuration(document) {
+            Ok(draft) => draft,
+            Err(error) => {
+                self.input_error = Some(error);
+                return Err(error);
+            }
+        };
+        self.draft = parsed;
+        self.input_error = None;
+        self.save_failure = None;
+        Ok(())
     }
 
     /// Builds the pending `SetThreadEngineConfig` when Save is enabled.
@@ -756,8 +1162,8 @@ mod tests {
         EngineConfigRevision::new(value).expect("revision")
     }
 
-    fn sample_config(profile: &str) -> EngineRunConfig {
-        let draft = EngineSettingsDraft {
+    fn sample_draft(profile: &str) -> EngineSettingsDraft {
+        EngineSettingsDraft {
             profile_id: profile.to_owned(),
             model_id: "model-test".to_owned(),
             route_id: "route-test".to_owned(),
@@ -782,7 +1188,11 @@ mod tests {
             max_http_buffer_bytes: "1".to_owned(),
             max_stderr_bytes: "1".to_owned(),
             observation_capacity: "1".to_owned(),
-        };
+        }
+    }
+
+    fn sample_config(profile: &str) -> EngineRunConfig {
+        let draft = sample_draft(profile);
         let registry = RegisteredEngineProfilesResult::RegistryPresent {
             profile_ids: vec![profile_id(profile)],
         };
@@ -795,6 +1205,110 @@ mod tests {
         }
     }
 
+    fn admit_settings_load(
+        controller: &mut EngineSettingsController,
+        thread_id: &ThreadId,
+    ) -> SettingsLoadGeneration {
+        let generation = controller.prepare_settings_load().expect("generation");
+        assert!(controller.mark_settings_load_admitted(thread_id.clone(), generation));
+        generation
+    }
+
+    fn load_unconfigured(controller: &mut EngineSettingsController, thread_id: &ThreadId) {
+        let generation = admit_settings_load(controller, thread_id);
+        controller.on_settings_loaded(
+            generation,
+            ThreadEngineSettingsResult::Unconfigured {
+                thread_id: thread_id.clone(),
+            },
+        );
+    }
+
+    fn load_configured(
+        controller: &mut EngineSettingsController,
+        thread_id: &ThreadId,
+        revision_value: u64,
+        config: EngineRunConfig,
+    ) {
+        let generation = admit_settings_load(controller, thread_id);
+        controller.on_settings_loaded(
+            generation,
+            ThreadEngineSettingsResult::Configured {
+                thread_id: thread_id.clone(),
+                revision: revision(revision_value),
+                config: Box::new(config),
+            },
+        );
+    }
+
+    fn ready_controller() -> (EngineSettingsController, ThreadId, EngineRunConfig) {
+        let mut controller = EngineSettingsController::new();
+        let thread = thread_id("thread-a");
+        controller.select_thread(Some(thread.clone()));
+        controller.on_registry_loaded(registered_present(&["default"]));
+        let config = sample_config("default");
+        load_configured(&mut controller, &thread, 7, config.clone());
+        (controller, thread, config)
+    }
+
+    fn make_dirty_config(controller: &mut EngineSettingsController) -> EngineRunConfig {
+        controller.draft_mut().model_id = "model-next".to_owned();
+        controller
+            .draft()
+            .build_config(Some(&registered_present(&["default"])))
+            .expect("dirty config")
+    }
+
+    fn manual_document(draft: &EngineSettingsDraft) -> String {
+        MANUAL_CONFIGURATION_KEYS
+            .iter()
+            .map(|key| {
+                let value = match *key {
+                    "profile_id" => &draft.profile_id,
+                    "model_id" => &draft.model_id,
+                    "route_id" => &draft.route_id,
+                    "variant_id" => &draft.variant_id,
+                    "permission_id" => &draft.permission_id,
+                    "agent_id" => &draft.agent_id,
+                    "approval" => &draft.approval,
+                    "filesystem" => &draft.filesystem,
+                    "network" => &draft.network,
+                    "web_search" => &draft.web_search,
+                    "attempt_budget" => &draft.attempt_budget,
+                    "readiness_budget" => &draft.readiness_budget,
+                    "health_budget" => &draft.health_budget,
+                    "prompt_budget" => &draft.prompt_budget,
+                    "stream_budget" => &draft.stream_budget,
+                    "close_budget" => &draft.close_budget,
+                    "max_json_body_bytes" => &draft.max_json_body_bytes,
+                    "max_sse_line_bytes" => &draft.max_sse_line_bytes,
+                    "max_sse_event_bytes" => &draft.max_sse_event_bytes,
+                    "max_readiness_line_bytes" => &draft.max_readiness_line_bytes,
+                    "max_header_count" => &draft.max_header_count,
+                    "max_http_buffer_bytes" => &draft.max_http_buffer_bytes,
+                    "max_stderr_bytes" => &draft.max_stderr_bytes,
+                    "observation_capacity" => &draft.observation_capacity,
+                    _ => unreachable!("manual field table diverged"),
+                };
+                format!("{key}={value}\n")
+            })
+            .collect()
+    }
+
+    fn bridge_busy() -> ServiceFailure {
+        ServiceFailure {
+            stage: ServiceFailureStage::EventBridge,
+            category: ServiceFailureCategory::Backpressure,
+        }
+    }
+
+    fn bridge_stopped() -> ServiceFailure {
+        ServiceFailure {
+            stage: ServiceFailureStage::EventBridge,
+            category: ServiceFailureCategory::ChannelClosed,
+        }
+    }
+
     #[test]
     fn configured_load_becomes_ready_with_authoritative_config() {
         let mut controller = EngineSettingsController::new();
@@ -802,16 +1316,13 @@ mod tests {
         controller.select_thread(Some(tid.clone()));
         controller.on_registry_loaded(registered_present(&["default", "work"]));
         let config = sample_config("default");
-        let result = ThreadEngineSettingsResult::Configured {
-            thread_id: tid.clone(),
-            revision: revision(7),
-            config: Box::new(config.clone()),
-        };
-        controller.on_settings_loaded(result);
+        load_configured(&mut controller, &tid, 7, config.clone());
         assert_eq!(controller.status(), EngineSettingsStatus::Ready);
         assert_eq!(controller.revision(), Some(revision(7)));
         assert_eq!(controller.authoritative_config(), Some(&config));
         assert!(!controller.is_dirty());
+        assert!(!controller.can_save());
+        controller.draft_mut().model_id = "model-next".to_owned();
         assert!(controller.can_save());
     }
 
@@ -821,9 +1332,7 @@ mod tests {
         let tid = thread_id("thread-a");
         controller.select_thread(Some(tid.clone()));
         controller.on_registry_loaded(registered_present(&["default"]));
-        controller.on_settings_loaded(ThreadEngineSettingsResult::Unconfigured {
-            thread_id: tid.clone(),
-        });
+        load_unconfigured(&mut controller, &tid);
         assert_eq!(controller.status(), EngineSettingsStatus::Unconfigured);
         assert_eq!(controller.revision(), None);
         assert!(!controller.can_save());
@@ -850,6 +1359,7 @@ mod tests {
 
         controller.on_registry_loaded(registered_present(&["alpha", "beta"]));
         assert!(matches!(controller.registry_view(), RegistryView::Present(ids) if ids.len()==2));
+        load_unconfigured(&mut controller, &thread_id("thread-a"));
         assert_eq!(controller.status(), EngineSettingsStatus::Unconfigured);
         // Valid profile must be one of returned ids.
         controller.draft_mut().profile_id = "gamma".to_owned();
@@ -875,9 +1385,7 @@ mod tests {
         let tid = thread_id("thread-a");
         controller.select_thread(Some(tid.clone()));
         controller.on_registry_loaded(registered_present(&["default"]));
-        controller.on_settings_loaded(ThreadEngineSettingsResult::Unconfigured {
-            thread_id: tid.clone(),
-        });
+        load_unconfigured(&mut controller, &tid);
         controller.draft_mut().profile_id = "default".to_owned();
         controller.draft_mut().model_id = "model-test".to_owned();
         // Not yet complete, still dirty but cannot save.
@@ -895,9 +1403,7 @@ mod tests {
         let tid = thread_id("thread-a");
         controller.select_thread(Some(tid.clone()));
         controller.on_registry_loaded(registered_present(&["default"]));
-        controller.on_settings_loaded(ThreadEngineSettingsResult::Unconfigured {
-            thread_id: tid.clone(),
-        });
+        load_unconfigured(&mut controller, &tid);
         assert_eq!(controller.draft().profile_id, "");
         assert!(!controller.can_save());
         // Fill every required field explicitly.
@@ -917,21 +1423,13 @@ mod tests {
 
     #[test]
     fn save_success_applies_returned_revision_plus_retained_config() {
-        let mut controller = EngineSettingsController::new();
-        let tid = thread_id("thread-a");
-        controller.select_thread(Some(tid.clone()));
-        controller.on_registry_loaded(registered_present(&["default"]));
-        controller.on_settings_loaded(ThreadEngineSettingsResult::Unconfigured {
-            thread_id: tid.clone(),
-        });
-        let config = sample_config("default");
-        controller
-            .draft_mut()
-            .clone_from(&EngineSettingsDraft::from_config(&config));
-        controller.begin_saving(tid.clone(), config.clone());
+        let (mut controller, tid, _) = ready_controller();
+        let config = make_dirty_config(&mut controller);
+        let request = request_id("request-a");
+        assert!(controller.begin_saving(tid.clone(), request.clone(), config.clone()));
         assert_eq!(controller.status(), EngineSettingsStatus::Saving);
         let result = SetThreadEngineConfigResult {
-            request_id: request_id("request-a"),
+            request_id: request,
             thread_id: tid.clone(),
             revision: revision(1),
             disposition: artisan_domain::ReceiptDisposition::Accepted,
@@ -950,59 +1448,241 @@ mod tests {
         controller.select_thread(Some(tid.clone()));
         controller.on_registry_loaded(registered_present(&["default"]));
         let config = sample_config("default");
-        controller.on_settings_loaded(ThreadEngineSettingsResult::Configured {
-            thread_id: tid.clone(),
-            revision: revision(3),
-            config: Box::new(config.clone()),
-        });
-        let new_config = sample_config("default");
-        controller
-            .draft_mut()
-            .clone_from(&EngineSettingsDraft::from_config(&new_config));
-        controller.begin_saving(tid.clone(), new_config.clone());
-        controller.on_conflict(tid.clone());
+        load_configured(&mut controller, &tid, 3, config);
+        let new_config = make_dirty_config(&mut controller);
+        let request = request_id("request-a");
+        assert!(controller.begin_saving(tid.clone(), request.clone(), new_config));
+        controller.on_conflict(tid.clone(), request);
         assert_eq!(
             controller.status(),
             EngineSettingsStatus::ConflictRefreshing
         );
-        assert_eq!(controller.take_reload_thread(), Some(tid.clone()));
-        assert!(controller.take_reload_thread().is_none());
+        assert_eq!(controller.pending_reload_thread(), Some(&tid));
+        let generation = admit_settings_load(&mut controller, &tid);
+        assert!(controller.pending_reload_thread().is_none());
+        controller.on_settings_loaded(
+            generation,
+            ThreadEngineSettingsResult::Unconfigured {
+                thread_id: tid.clone(),
+            },
+        );
+        assert_eq!(controller.status(), EngineSettingsStatus::Unconfigured);
         // Second conflict without pending should be ignored.
-        controller.on_conflict(tid.clone());
-        assert_eq!(
-            controller.status(),
-            EngineSettingsStatus::ConflictRefreshing
-        );
+        controller.on_conflict(tid, request_id("request-a"));
+        assert_eq!(controller.status(), EngineSettingsStatus::Unconfigured);
     }
 
     #[test]
-    fn stale_load_and_save_responses_are_ignored_after_thread_switch() {
+    fn stale_load_responses_are_fenced_by_thread_and_generation() {
         let mut controller = EngineSettingsController::new();
         let first = thread_id("thread-a");
         let second = thread_id("thread-b");
         controller.select_thread(Some(first.clone()));
         controller.on_registry_loaded(registered_present(&["default"]));
-        // Switch before first load arrives.
+        let first_generation = admit_settings_load(&mut controller, &first);
         controller.select_thread(Some(second.clone()));
-        let config = sample_config("default");
-        let stale = ThreadEngineSettingsResult::Configured {
+        let second_generation = admit_settings_load(&mut controller, &second);
+        controller.select_thread(Some(first.clone()));
+        let current_generation = admit_settings_load(&mut controller, &first);
+        let stale_first = ThreadEngineSettingsResult::Configured {
             thread_id: first.clone(),
             revision: revision(5),
-            config: Box::new(config.clone()),
+            config: Box::new(sample_config("default")),
         };
-        controller.on_settings_loaded(stale);
-        assert_eq!(controller.selected_thread(), Some(&second));
-        assert_eq!(controller.settings, None);
-        // Stale save should also be discarded.
-        controller.begin_saving(second.clone(), config.clone());
-        let stale_result = SetThreadEngineConfigResult {
-            request_id: request_id("request-a"),
-            thread_id: first.clone(),
-            revision: revision(9),
-            disposition: artisan_domain::ReceiptDisposition::Accepted,
-        };
-        controller.on_save_succeeded(stale_result, config.clone());
-        assert_eq!(controller.revision(), None);
+        controller.on_settings_loaded(first_generation, stale_first);
+        controller.on_settings_load_failed(first.clone(), first_generation, bridge_busy());
+        controller.on_settings_load_failed(second.clone(), second_generation, bridge_busy());
+        controller.on_settings_loaded(
+            second_generation,
+            ThreadEngineSettingsResult::Unconfigured { thread_id: second },
+        );
+        assert!(controller.authoritative_settings().is_none());
+        controller.on_settings_loaded(
+            current_generation,
+            ThreadEngineSettingsResult::Unconfigured { thread_id: first },
+        );
+        assert!(matches!(
+            controller.authoritative_settings(),
+            Some(ThreadEngineSettingsResult::Unconfigured { .. })
+        ));
+    }
+
+    #[test]
+    fn stale_save_responses_are_fenced_by_exact_request_identity() {
+        let (mut controller, tid, _) = ready_controller();
+        let retained = make_dirty_config(&mut controller);
+        let request = request_id("request-a");
+        assert!(controller.begin_saving(tid.clone(), request.clone(), retained.clone()));
+        let stale_request = request_id("request-b");
+        controller.on_save_failed(tid.clone(), stale_request.clone(), bridge_busy());
+        controller.on_conflict(tid.clone(), stale_request.clone());
+        controller.on_save_succeeded(
+            SetThreadEngineConfigResult {
+                request_id: stale_request,
+                thread_id: tid.clone(),
+                revision: revision(9),
+                disposition: artisan_domain::ReceiptDisposition::Accepted,
+            },
+            retained.clone(),
+        );
+        assert_eq!(controller.status(), EngineSettingsStatus::Saving);
+        assert_eq!(controller.pending_save_request_id(), Some(&request));
+        controller.on_save_succeeded(
+            SetThreadEngineConfigResult {
+                request_id: request,
+                thread_id: tid,
+                revision: revision(9),
+                disposition: artisan_domain::ReceiptDisposition::Accepted,
+            },
+            retained,
+        );
+        assert_eq!(controller.status(), EngineSettingsStatus::Ready);
+    }
+
+    #[test]
+    fn cancel_is_noop_while_an_admitted_save_is_pending() {
+        let (mut controller, tid, _) = ready_controller();
+        let retained = make_dirty_config(&mut controller);
+        let draft_before = controller.draft().clone();
+        assert!(controller.begin_saving(tid, request_id("request-a"), retained,));
+        assert!(!controller.can_cancel());
+        controller.cancel();
+        assert_eq!(controller.draft(), &draft_before);
+        assert_eq!(controller.status(), EngineSettingsStatus::Saving);
+    }
+
+    #[test]
+    fn bridge_admission_refusals_rearm_without_losing_draft_or_claiming_progress() {
+        let mut controller = EngineSettingsController::new();
+        let tid = thread_id("thread-a");
+        controller.select_thread(Some(tid.clone()));
+        controller.on_registry_load_admission_failed(bridge_busy());
+        assert!(controller.needs_registry_load());
+        assert_eq!(
+            controller.failure_operation(),
+            Some(EngineSettingsFailureOperation::Registry)
+        );
+
+        controller.on_registry_loaded(registered_present(&["default"]));
+        controller.on_settings_load_admission_failed(tid.clone(), bridge_stopped());
+        assert!(controller.needs_settings_load());
+        assert!(controller.active_settings_generation().is_none());
+        assert_eq!(
+            controller.failure_operation(),
+            Some(EngineSettingsFailureOperation::SettingsRead)
+        );
+
+        load_unconfigured(&mut controller, &tid);
+        let retained = sample_config("default");
+        controller
+            .draft_mut()
+            .clone_from(&EngineSettingsDraft::from_config(&retained));
+        controller.draft_mut().model_id = "model-next".to_owned();
+        let draft_before = controller.draft().clone();
+        controller.on_save_admission_failed(bridge_stopped());
+        assert!(controller.pending_save_request_id().is_none());
+        assert_eq!(controller.draft(), &draft_before);
+        assert_eq!(
+            controller.failure_operation(),
+            Some(EngineSettingsFailureOperation::Save)
+        );
+    }
+
+    #[test]
+    fn save_admission_failure_clears_defensive_pending_state() {
+        let (mut controller, tid, _) = ready_controller();
+        let retained = make_dirty_config(&mut controller);
+        let draft_before = controller.draft().clone();
+        assert!(controller.begin_saving(tid, request_id("request-a"), retained));
+        controller.on_save_admission_failed(bridge_busy());
+        assert!(controller.pending_save_request_id().is_none());
+        assert_eq!(controller.draft(), &draft_before);
+        assert_eq!(
+            controller.failure_operation(),
+            Some(EngineSettingsFailureOperation::Save)
+        );
+    }
+
+    #[test]
+    fn generation_exhaustion_fails_closed_without_rearming_the_read() {
+        let mut controller = EngineSettingsController::new();
+        let tid = thread_id("thread-a");
+        controller.select_thread(Some(tid.clone()));
+        controller.next_settings_load_generation = Some(SettingsLoadGeneration(u64::MAX));
+        let failure = controller.prepare_settings_load().expect_err("exhausted");
+        assert_eq!(failure.category, ServiceFailureCategory::Integrity);
+        controller.on_settings_load_admission_failed(tid, failure);
+        assert!(!controller.needs_settings_load());
+        assert!(controller.active_settings_generation().is_none());
+    }
+
+    #[test]
+    fn certified_profile_selection_is_checked_against_the_authoritative_registry() {
+        let mut controller = EngineSettingsController::new();
+        let tid = thread_id("thread-a");
+        controller.select_thread(Some(tid.clone()));
+        controller.on_registry_loaded(registered_present(&["default"]));
+        load_unconfigured(&mut controller, &tid);
+        assert!(!controller.select_profile(profile_id("unregistered")));
+        assert_eq!(controller.draft().profile_id, "");
+        assert!(controller.select_profile(profile_id("default")));
+        assert_eq!(controller.draft().profile_id, "default");
+    }
+
+    #[test]
+    fn manual_configuration_is_complete_bounded_and_does_not_retain_rejected_text() {
+        let template = manual_configuration_template();
+        assert_eq!(template.lines().count(), MANUAL_CONFIGURATION_KEYS.len());
+        assert_eq!(
+            parse_manual_configuration(&template),
+            Ok(EngineSettingsDraft::default())
+        );
+
+        let expected = sample_draft("default");
+        let document = manual_document(&expected);
+        assert_eq!(parse_manual_configuration(&document), Ok(expected.clone()));
+
+        let unknown = template.replacen("profile_id=", "unknown=", 1);
+        let unknown_error = parse_manual_configuration(&unknown).expect_err("unknown key");
+        assert_eq!(unknown_error.field(), "configuration");
+        assert!(parse_manual_configuration("profile_id=\nprofile_id=\n").is_err());
+        assert!(parse_manual_configuration("profile_id=has=extra\n").is_err());
+        let missing = template
+            .lines()
+            .take(MANUAL_CONFIGURATION_KEYS.len() - 1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(parse_manual_configuration(&missing).is_err());
+        assert!(
+            parse_manual_configuration(&"x".repeat(MAX_MANUAL_CONFIGURATION_BYTES + 1)).is_err()
+        );
+
+        let mut controller = EngineSettingsController::new();
+        let tid = thread_id("thread-a");
+        controller.select_thread(Some(tid.clone()));
+        controller.on_registry_loaded(registered_present(&["default"]));
+        load_unconfigured(&mut controller, &tid);
+        let rejected = "profile_id=secret-profile\n";
+        assert!(controller.apply_manual_configuration(rejected).is_err());
+        assert!(!format!("{:?}", controller.input_error()).contains("secret-profile"));
+        assert_eq!(controller.draft(), &EngineSettingsDraft::default());
+        assert!(!controller.can_save());
+    }
+
+    #[test]
+    fn empty_variant_is_the_only_explicit_absence() {
+        let mut draft = sample_draft("default");
+        assert!(
+            draft
+                .build_config(Some(&registered_present(&["default"])))
+                .is_ok()
+        );
+        draft.variant_id = " ".to_owned();
+        assert!(
+            draft
+                .build_config(Some(&registered_present(&["default"])))
+                .is_err()
+        );
     }
 
     #[test]
