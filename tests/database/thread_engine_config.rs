@@ -266,6 +266,75 @@ async fn first_write_update_replay_and_revision_conflict_are_durable() {
 }
 
 #[tokio::test]
+async fn configuration_update_keeps_newer_current_timestamp_after_stale_read() {
+    let (database, repository, thread_id) = seeded_repository().await;
+    let accepted = repository
+        .set_thread_engine_config(input(
+            "request-engine-timestamp-base",
+            &thread_id,
+            EngineConfigUpdatePrecondition::Unconfigured,
+            config("timestamp", false),
+            100,
+        ))
+        .await
+        .expect("configuration write should succeed");
+    let stale_row = entities::thread::Entity::find_by_id(thread_id.as_str())
+        .one(&database)
+        .await
+        .expect("thread query should work")
+        .expect("thread should exist");
+    let previous_blob = stale_row
+        .engine_run_config
+        .expect("configured blob should exist")
+        .into_vec();
+    assert_eq!(stale_row.updated_at_ms, 100);
+
+    database
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE threads SET updated_at_ms = ? WHERE thread_id = ?",
+            [
+                Value::BigInt(Some(900)),
+                Value::String(Some(thread_id.as_str().to_owned())),
+            ],
+        ))
+        .await
+        .expect("concurrent timestamp advance should persist");
+
+    // Execute the same conditional update shape with the captured row values,
+    // modelling a writer that read the row before the timestamp advanced.
+    let update = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE threads SET engine_run_config_version = 1, engine_run_config_revision = ?, engine_run_config = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE thread_id = ? AND engine_run_config_version IS ? AND engine_run_config_revision = ? AND engine_run_config IS ?",
+        [
+            Value::BigInt(Some(accepted.revision().as_i64() + 1)),
+            Value::Bytes(Some(Box::new(previous_blob.clone()))),
+            Value::BigInt(Some(100)),
+            Value::String(Some(thread_id.as_str().to_owned())),
+            Value::BigInt(Some(1)),
+            Value::BigInt(Some(accepted.revision().as_i64())),
+            Value::Bytes(Some(Box::new(previous_blob))),
+        ],
+    );
+    assert_eq!(
+        database
+            .execute(update)
+            .await
+            .expect("conditional update should work")
+            .rows_affected(),
+        1
+    );
+
+    let current = entities::thread::Entity::find_by_id(thread_id.as_str())
+        .one(&database)
+        .await
+        .expect("thread query should work")
+        .expect("thread should exist");
+    assert_eq!(current.updated_at_ms, 900);
+    assert_eq!(current.engine_run_config_revision, 2);
+}
+
+#[tokio::test]
 async fn strict_blob_shape_is_corruption_and_failed_update_leaves_no_receipt() {
     let (database, repository, thread_id) = seeded_repository().await;
     let accepted = repository

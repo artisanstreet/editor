@@ -999,7 +999,7 @@ fn set_thread_engine_config_response(
     outcome(
         request_id,
         ResponsePayload::ThreadEngineConfigSet(SetThreadEngineConfigResult {
-            request_id: request_id.clone(),
+            request_id: result.receipt().request_id.clone(),
             thread_id: result.thread_id().clone(),
             revision: result.revision(),
             disposition: result.receipt().disposition,

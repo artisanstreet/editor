@@ -36,13 +36,18 @@ use artisan_backend::{
 use artisan_database::{
     AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
-    ProviderBindingBytes, QueueFirstMessageInput, RunLaunchCredentials, RunStartKey, SqliteConfig,
+    ProviderBindingBytes, QueueFirstMessageInput, RunLaunchCredentials, RunStartKey,
+    SetThreadEngineConfigInput, SqliteConfig,
 };
 use artisan_domain::{
-    AttachProject, Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
-    ConversationUnsubscribe, DirectoryId, DisplayName, ItemId, ListAttachedProjects,
-    ListDirectories, MessageBody, MessageId, PatchId, ProjectId, Query, QueueFirstMessage,
-    ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadTitle, TurnId, UnixMillis,
+    ApprovalMode, AttachProject, ByteLimit, Command, ConversationCursor, ConversationRequest,
+    ConversationSubscribe, ConversationUnsubscribe, CountLimit, DirectoryId, DisplayName,
+    EngineAgentId, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
+    EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineSelection,
+    FilesystemAccess, FiniteMillis, ItemId, ListAttachedProjects, ListDirectories, MessageBody,
+    MessageId, NetworkAccess, OpenCode2Selection, PatchId, PermissionId, ProjectId, Query,
+    QueueFirstMessage, ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadTitle, TurnId,
+    UnixMillis, WebSearchAccess,
 };
 use artisan_protocol::{
     APPLICATION_PROTOCOL_VERSION, ClientRequest, ConnectionId, ConversationSubscriptionStarted,
@@ -475,10 +480,59 @@ fn unsubscribe_request(frame: &str, thread_id: ThreadId) -> WireEnvelope {
     )
 }
 
+fn fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(
+        FiniteMillis::new(100).expect("attempt budget is valid"),
+        one,
+        one,
+        one,
+        one,
+        one,
+        ByteLimit::new(8_192).expect("json body limit is valid"),
+        ByteLimit::new(4_096).expect("sse line limit is valid"),
+        ByteLimit::new(8_192).expect("sse event limit is valid"),
+        ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        CountLimit::new(8).expect("header count is valid"),
+        ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        ByteLimit::new(4_096).expect("stderr limit is valid"),
+        CountLimit::new(16).expect("observation capacity is valid"),
+    )
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-connection").expect("permission id is valid"),
+        EngineAgentId::parse("agent-connection").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-connection").expect("profile id is valid"),
+            EngineModelId::parse("model-connection").expect("model id is valid"),
+            EngineRouteId::parse("route-connection").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
+}
+
 async fn seed_subscription_thread(app: &ForgeApp) -> Result<ThreadId, Box<dyn Error>> {
     let repository = app.repository();
     repository.attach_project(attach_input()).await?;
     repository.create_thread(create_thread_input()).await?;
+    let thread_id = ThreadId::parse("thread-1")?;
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("request-engine-connection")?,
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(200),
+        })
+        .await?;
     repository.queue_first_message(queue_input()).await?;
 
     // Finish the same public repository workflow that creates durable
@@ -500,6 +554,10 @@ async fn seed_subscription_thread(app: &ForgeApp) -> Result<ThreadId, Box<dyn Er
     let second_patch_id = PatchId::parse("patch-1-second")?;
     let run_start_key = RunStartKey::new([0x44; 32]);
     let credentials = RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]);
+    let engine_settings = repository
+        .read_thread_engine_settings(&thread_id)
+        .await?
+        .ok_or("seed engine settings should be present")?;
     let launched = repository
         .launch_claimed_run(LaunchClaimedRun {
             claimed: &claimed,
@@ -511,6 +569,7 @@ async fn seed_subscription_thread(app: &ForgeApp) -> Result<ThreadId, Box<dyn Er
             operated_at: UnixMillis::from_millis(500),
             run_start_key: &run_start_key,
             credentials: &credentials,
+            engine_settings: &engine_settings,
         })
         .await?;
     let launched = match launched {

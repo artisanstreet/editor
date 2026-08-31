@@ -29,17 +29,19 @@ use artisan_database::{
 use artisan_domain::{
     ApprovalMode, ByteLimit, Command, ConversationCursor, ConversationPatch, ConversationQuery,
     ConversationQueryBounds, ConversationRequest, ConversationSubscribe, ConversationUnsubscribe,
-    CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigUpdatePrecondition,
-    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
-    EngineRuntimeControls, EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText,
-    ItemId, ListAttachedProjects, ListDirectories, ListProjectThreads, MessageBody, MessageId,
-    NetworkAccess, OpenCode2Selection, PatchBatch, PatchId, PatchSequence, PermissionId, ProjectId,
-    Query, QueryTurnCount, ReceiptDisposition, RequestId, Revision, RootPath,
-    SetThreadEngineConfig, ThreadId, ThreadSummary, ThreadTitle, UnixMillis, WebSearchAccess,
+    CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigRevision,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineSelection, FilesystemAccess,
+    FiniteMillis, IncrementalText, ItemId, ListAttachedProjects, ListDirectories,
+    ListProjectThreads, MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PatchBatch,
+    PatchId, PatchSequence, PermissionId, ProjectId, Query, QueryTurnCount, ReceiptDisposition,
+    RequestId, Revision, RootPath, SetThreadEngineConfig, ThreadId, ThreadSummary, ThreadTitle,
+    UnixMillis, WebSearchAccess,
 };
 use artisan_protocol::{
-    ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt,
-    LifecycleRequest, ProtocolFailure, ResponsePayload, ServerResponse,
+    ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt, FrameId,
+    LifecycleRequest, ProtocolFailure, ProtocolValueError, ProtocolVersion, ResponsePayload,
+    ServerResponse, SetThreadEngineConfigResult, WireEnvelope, WireEnvelopeBody,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -800,6 +802,36 @@ async fn mismatched_command_correlation_fails_as_invalid_input() {
     assert_eq!(failure.code, ErrorCode::InvalidInput);
     assert!(!failure.retryable);
     assert_eq!(failure.request_id, Some(request("frame-other")));
+}
+
+#[test]
+fn engine_config_response_correlation_observes_nested_request_mismatch() {
+    fn envelope(nested_request_id: &str) -> WireEnvelope {
+        WireEnvelope {
+            protocol_version: ProtocolVersion::V1,
+            frame_id: FrameId::parse("request-engine-correlation").expect("valid frame id"),
+            sent_at: UnixMillis::from_millis(1),
+            body: WireEnvelopeBody::Response(ServerResponse {
+                request_id: request("request-engine-correlation"),
+                payload: ResponsePayload::ThreadEngineConfigSet(SetThreadEngineConfigResult {
+                    request_id: request(nested_request_id),
+                    thread_id: ThreadId::parse("thread-engine-correlation")
+                        .expect("valid thread id"),
+                    revision: EngineConfigRevision::new(1).expect("valid revision"),
+                    disposition: ReceiptDisposition::Accepted,
+                }),
+            }),
+        }
+    }
+
+    assert_eq!(
+        envelope("request-engine-correlation").validate_correlation(),
+        Ok(())
+    );
+    assert_eq!(
+        envelope("request-engine-other").validate_correlation(),
+        Err(ProtocolValueError::ResponseCorrelationMismatch)
+    );
 }
 
 #[tokio::test]

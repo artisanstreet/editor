@@ -2,11 +2,15 @@ use artisan_database::entities::{self, AssistantRunLifecycle};
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch, CreateThreadInput,
     ProviderBindingBytes, QueueFirstMessageInput, Repository, RepositoryError,
-    RunLaunchCredentials, RunStartKey, SqliteConfig, connect,
+    RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig, connect,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, ItemId, MessageBody, MessageId, PatchId, ProjectId,
-    RequestId, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis,
+    ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, CountLimit, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineSelection, FilesystemAccess,
+    FiniteMillis, ItemId, MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PatchId,
+    PermissionId, ProjectId, RequestId, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis,
+    WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
@@ -40,6 +44,45 @@ async fn memory_database() -> (DatabaseConnection, Repository) {
     (database.clone(), Repository::new(database))
 }
 
+fn fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(
+        FiniteMillis::new(100).expect("attempt budget is valid"),
+        one,
+        one,
+        one,
+        one,
+        one,
+        ByteLimit::new(8_192).expect("json body limit is valid"),
+        ByteLimit::new(4_096).expect("sse line limit is valid"),
+        ByteLimit::new(8_192).expect("sse event limit is valid"),
+        ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        CountLimit::new(8).expect("header count is valid"),
+        ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        ByteLimit::new(4_096).expect("stderr limit is valid"),
+        CountLimit::new(16).expect("observation capacity is valid"),
+    )
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-reconcile").expect("permission id is valid"),
+        EngineAgentId::parse("agent-reconcile").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-reconcile").expect("profile id is valid"),
+            EngineModelId::parse("model-reconcile").expect("model id is valid"),
+            EngineRouteId::parse("route-reconcile").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
+}
+
 async fn seed_project_and_thread(
     database: &DatabaseConnection,
     repository: &Repository,
@@ -66,6 +109,24 @@ async fn seed_project_and_thread(
             updated_at: UnixMillis::from_millis(THREAD_CREATED_AT_MS),
         })
         .await;
+    let thread = ThreadId::parse(thread_id).expect("tid");
+    if repository
+        .read_thread_engine_settings(&thread)
+        .await
+        .expect("engine configuration should read")
+        .is_none()
+    {
+        repository
+            .set_thread_engine_config(SetThreadEngineConfigInput {
+                request_id: RequestId::parse(format!("engine-{thread_id}")).expect("request id"),
+                thread_id: thread,
+                precondition: EngineConfigUpdatePrecondition::Unconfigured,
+                config: fixture_engine_config(),
+                accepted_at: UnixMillis::from_millis(THREAD_CREATED_AT_MS),
+            })
+            .await
+            .expect("engine configuration should create");
+    }
 }
 
 async fn queue_claim_launch(
@@ -114,6 +175,11 @@ async fn queue_claim_launch(
         RunStartKey::new(bytes)
     };
     let creds = RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES);
+    let engine_settings = repository
+        .read_thread_engine_settings(&ThreadId::parse(thread_id).expect("tid"))
+        .await
+        .expect("engine configuration should read")
+        .expect("engine configuration should be present");
     let outcome = repository
         .launch_claimed_run(artisan_database::LaunchClaimedRun {
             claimed: &claimed,
@@ -125,6 +191,7 @@ async fn queue_claim_launch(
             operated_at: UnixMillis::from_millis(OPERATED_AT_MS),
             run_start_key: &start_key,
             credentials: &creds,
+            engine_settings: &engine_settings,
         })
         .await
         .expect("launch");

@@ -176,14 +176,14 @@ impl Repository {
             .engine_run_config
             .as_ref()
             .map(|blob| blob.as_slice().to_vec());
-        let updated_at_ms = thread.updated_at_ms.max(millis(input.accepted_at));
+        let accepted_at_ms = millis(input.accepted_at);
         let update = Statement::from_sql_and_values(
             DbBackend::Sqlite,
-            "UPDATE threads SET engine_run_config_version = 1, engine_run_config_revision = ?, engine_run_config = ?, updated_at_ms = ? WHERE thread_id = ? AND engine_run_config_version IS ? AND engine_run_config_revision = ? AND engine_run_config IS ?",
+            "UPDATE threads SET engine_run_config_version = 1, engine_run_config_revision = ?, engine_run_config = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE thread_id = ? AND engine_run_config_version IS ? AND engine_run_config_revision = ? AND engine_run_config IS ?",
             [
                 Value::BigInt(Some(next_revision.as_i64())),
                 Value::Bytes(Some(Box::new(encoded.clone()))),
-                Value::BigInt(Some(updated_at_ms)),
+                Value::BigInt(Some(accepted_at_ms)),
                 Value::String(Some(input.thread_id.as_str().to_owned())),
                 optional_i64(previous_version),
                 Value::BigInt(Some(previous_revision)),

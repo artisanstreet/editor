@@ -4,8 +4,8 @@
 //! tuple guards, and rebuilds the receipt table so the new command kind does
 //! not weaken the existing payload-shape checks.
 
+use sea_orm_migration::SchemaManagerConnection;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::sea_orm::DatabaseConnection;
 
 const THREAD_CONFIG_SHAPE: &str = "((engine_run_config_version IS NULL AND engine_run_config_revision = 0 AND engine_run_config IS NULL) OR (typeof(engine_run_config_version) = 'integer' AND engine_run_config_version = 1 AND typeof(engine_run_config_revision) = 'integer' AND engine_run_config_revision BETWEEN 1 AND 9223372036854775807 AND typeof(engine_run_config) = 'blob' AND length(engine_run_config) BETWEEN 1 AND 65536))";
 const CONFIGURED_SNAPSHOT_SHAPE: &str = "(typeof(engine_run_config_version) = 'integer' AND engine_run_config_version = 1 AND typeof(engine_run_config_revision) = 'integer' AND engine_run_config_revision BETWEEN 1 AND 9223372036854775807 AND typeof(engine_run_config) = 'blob' AND length(engine_run_config) BETWEEN 1 AND 65536)";
@@ -110,7 +110,7 @@ impl MigrationTrait for Migration {
     }
 }
 
-async fn rebuild_command_receipts(connection: &DatabaseConnection) -> Result<(), DbErr> {
+async fn rebuild_command_receipts(connection: &SchemaManagerConnection<'_>) -> Result<(), DbErr> {
     connection
         .execute_unprepared("DROP INDEX IF EXISTS uq_command_receipts_kind_thread_id")
         .await?;
@@ -162,7 +162,7 @@ async fn rebuild_command_receipts(connection: &DatabaseConnection) -> Result<(),
     create_command_receipt_indexes(connection).await
 }
 
-async fn restore_command_receipts(connection: &DatabaseConnection) -> Result<(), DbErr> {
+async fn restore_command_receipts(connection: &SchemaManagerConnection<'_>) -> Result<(), DbErr> {
     connection
         .execute_unprepared("DROP INDEX IF EXISTS uq_command_receipts_kind_thread_id")
         .await?;
@@ -209,7 +209,9 @@ async fn restore_command_receipts(connection: &DatabaseConnection) -> Result<(),
     create_legacy_command_receipt_indexes(connection).await
 }
 
-async fn create_command_receipt_indexes(connection: &DatabaseConnection) -> Result<(), DbErr> {
+async fn create_command_receipt_indexes(
+    connection: &SchemaManagerConnection<'_>,
+) -> Result<(), DbErr> {
     connection
         .execute_unprepared(
             "CREATE UNIQUE INDEX uq_command_receipts_kind_thread_id ON command_receipts(command_kind, thread_id) WHERE command_kind <> 'set_thread_engine_config'",
@@ -228,7 +230,7 @@ async fn create_command_receipt_indexes(connection: &DatabaseConnection) -> Resu
 }
 
 async fn create_legacy_command_receipt_indexes(
-    connection: &DatabaseConnection,
+    connection: &SchemaManagerConnection<'_>,
 ) -> Result<(), DbErr> {
     connection
         .execute_unprepared(

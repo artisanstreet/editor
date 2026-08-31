@@ -4,11 +4,16 @@ use artisan_database::{
     AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     ConversationPatchReplay, CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun,
     LaunchClaimedRunOutcome, ProviderBindingBytes, QueueFirstMessageInput, Repository,
-    RepositoryError, RunLaunchCredentials, RunStartKey, SqliteConfig, connect,
+    RepositoryError, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
+    connect,
 };
 use artisan_domain::{
-    ConversationCursor, ConversationRequest, ConversationSubscribe, DirectoryId, DisplayName,
-    MessageBody, MessageId, ProjectId, RequestId, RootPath, ThreadId, ThreadTitle, UnixMillis,
+    ApprovalMode, ByteLimit, ConversationCursor, ConversationRequest, ConversationSubscribe,
+    CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigUpdatePrecondition,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
+    EngineRuntimeControls, EngineSelection, FilesystemAccess, FiniteMillis, MessageBody, MessageId,
+    NetworkAccess, OpenCode2Selection, PermissionId, ProjectId, RequestId, RootPath, ThreadId,
+    ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_protocol::{ClientRequest, ConversationSubscriptionStarted, ResponsePayload};
@@ -27,6 +32,45 @@ async fn memory_repository() -> (DatabaseConnection, Repository) {
         .await
         .expect("database should migrate");
     (database.clone(), Repository::new(database))
+}
+
+fn fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(
+        FiniteMillis::new(100).expect("attempt budget is valid"),
+        one,
+        one,
+        one,
+        one,
+        one,
+        ByteLimit::new(8_192).expect("json body limit is valid"),
+        ByteLimit::new(4_096).expect("sse line limit is valid"),
+        ByteLimit::new(8_192).expect("sse event limit is valid"),
+        ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        CountLimit::new(8).expect("header count is valid"),
+        ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        ByteLimit::new(4_096).expect("stderr limit is valid"),
+        CountLimit::new(16).expect("observation capacity is valid"),
+    )
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-replay").expect("permission id is valid"),
+        EngineAgentId::parse("agent-replay").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-replay").expect("profile id is valid"),
+            EngineModelId::parse("model-replay").expect("model id is valid"),
+            EngineRouteId::parse("route-replay").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
 }
 
 async fn seed_thread(repository: &Repository, thread_id: &str, label: &str) -> ThreadId {
@@ -60,6 +104,17 @@ async fn seed_thread(repository: &Repository, thread_id: &str, label: &str) -> T
         })
         .await
         .expect("thread should create");
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse(format!("request-engine-{label}"))
+                .expect("request id should parse"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: fixture_engine_config(),
+            accepted_at: UnixMillis::from_millis(20),
+        })
+        .await
+        .expect("thread engine configuration should create");
     thread_id
 }
 
@@ -97,6 +152,11 @@ async fn commit_two_patches(repository: &Repository, thread_id: &ThreadId, label
         .expect("patch id should parse");
     let run_start_key = RunStartKey::new([0x44; 32]);
     let credentials = RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]);
+    let engine_settings = repository
+        .read_thread_engine_settings(thread_id)
+        .await
+        .expect("thread engine settings should read")
+        .expect("thread engine settings should be present");
     let launched = repository
         .launch_claimed_run(LaunchClaimedRun {
             claimed: &claimed,
@@ -108,6 +168,7 @@ async fn commit_two_patches(repository: &Repository, thread_id: &ThreadId, label
             operated_at: UnixMillis::from_millis(50),
             run_start_key: &run_start_key,
             credentials: &credentials,
+            engine_settings: &engine_settings,
         })
         .await
         .expect("run should launch");
@@ -271,6 +332,10 @@ async fn repository_not_found_after_valid_activation_is_preserved() {
         .exec(&database)
         .await
         .expect("thread receipt should be deletable in fixture");
+    artisan_database::entities::command_receipt::Entity::delete_by_id("request-engine-deleted")
+        .exec(&database)
+        .await
+        .expect("engine configuration receipt should be deletable in fixture");
     artisan_database::entities::thread::Entity::delete_by_id(thread_id.as_str())
         .exec(&database)
         .await
