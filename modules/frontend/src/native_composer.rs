@@ -62,6 +62,7 @@ pub(crate) struct NativeComposer {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     layout: Option<gpui::TextLayout>,
+    painted_bounds: Option<Bounds<Pixels>>,
 }
 
 impl EventEmitter<NativeComposerEvent> for NativeComposer {}
@@ -81,6 +82,7 @@ impl NativeComposer {
             selection_reversed: false,
             marked_range: None,
             layout: None,
+            painted_bounds: None,
         }
     }
 
@@ -90,6 +92,8 @@ impl NativeComposer {
 
     pub(crate) fn set_draft(&mut self, draft: impl Into<String>) {
         self.state.set_draft(draft);
+        self.layout = None;
+        self.painted_bounds = None;
         let end = self.state.draft().len();
         self.selection = end..end;
         self.selection_reversed = false;
@@ -127,6 +131,8 @@ impl NativeComposer {
         let was_submitting = self.state.is_submitting();
         self.state.finish_submission(token, disposition);
         if was_submitting && !self.state.is_submitting() {
+            self.layout = None;
+            self.painted_bounds = None;
             let end = self.selection.end.min(self.state.draft().len());
             self.selection = end..end;
             self.selection_reversed = false;
@@ -171,6 +177,8 @@ impl NativeComposer {
             None => None,
         };
         self.state.set_draft(next);
+        self.layout = None;
+        self.painted_bounds = None;
         let replacement_end = range.start.saturating_add(replacement.len());
         if let Some((start, end)) = selected_offsets {
             self.selection = range.start + start..range.start + end;
@@ -210,11 +218,8 @@ impl NativeComposer {
         extend: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(layout) = self.layout.as_ref() else {
+        let Some(byte_index) = self.byte_index_for_global_point(point) else {
             return;
-        };
-        let byte_index = match layout.index_for_position(point) {
-            Ok(index) | Err(index) => previous_char_boundary(self.state.draft(), index),
         };
         if extend {
             self.select_to(byte_index);
@@ -459,6 +464,7 @@ impl Render for NativeComposer {
         let style = InputStyle::resolve(theme, false);
         let draft = self.state.draft().to_owned();
         let styled_text = StyledText::new(SharedString::from(draft));
+        self.painted_bounds = None;
         self.layout = Some(styled_text.layout().clone());
 
         let focus = self.focus_handle.clone();
@@ -611,6 +617,9 @@ impl Element for NativeComposerInputElement {
             cx,
         );
         self.child.paint(window, cx);
+        self.view.update(cx, |composer, _| {
+            composer.painted_bounds = valid_bounds(&bounds).then_some(bounds);
+        });
     }
 }
 
@@ -701,17 +710,16 @@ impl gpui::EntityInputHandler for NativeComposer {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        let painted_bounds = self.painted_bounds.as_ref()?;
+        if painted_bounds != &element_bounds || !valid_bounds(painted_bounds) {
+            return None;
+        }
         let draft = self.state.draft();
         let range = utf16_range_to_utf8(draft, range_utf16)?;
-        let Some(layout) = self.layout.as_ref() else {
-            return Some(element_bounds);
-        };
-        let Some(start) = layout.position_for_index(range.start) else {
-            return Some(element_bounds);
-        };
-        let end = layout.position_for_index(range.end).unwrap_or(start);
-        let width = (end.x - start.x).max(px(1.0));
-        Some(Bounds::new(start, size(width, layout.line_height())))
+        let layout = self.layout.as_ref()?;
+        let start = layout.position_for_index(range.start)?;
+        let end = layout.position_for_index(range.end)?;
+        offset_layout_bounds(painted_bounds, start, end, layout.line_height())
     }
 
     fn character_index_for_point(
@@ -721,17 +729,74 @@ impl gpui::EntityInputHandler for NativeComposer {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let draft = self.state.draft();
-        let byte_index = self
-            .layout
-            .as_ref()
-            .map(|layout| match layout.index_for_position(point) {
-                Ok(index) | Err(index) => previous_char_boundary(draft, index),
-            })
-            .unwrap_or(self.selection.start)
-            .min(draft.len());
-        let byte_index = previous_char_boundary(draft, byte_index);
+        let byte_index = self.byte_index_for_global_point(point)?;
         utf8_offset_to_utf16(draft, byte_index)
     }
+
+    fn byte_index_for_global_point(&self, point: Point<Pixels>) -> Option<usize> {
+        let bounds = self.painted_bounds.as_ref()?;
+        let point = localize_painted_point(bounds, point)?;
+        let layout = self.layout.as_ref()?;
+        let index = match layout.index_for_position(point) {
+            Ok(index) | Err(index) => index,
+        };
+        (index <= self.state.draft().len())
+            .then(|| previous_char_boundary(self.state.draft(), index))
+    }
+}
+
+fn valid_pixels(value: Pixels) -> bool {
+    f32::from(value).is_finite()
+}
+
+fn valid_bounds(bounds: &Bounds<Pixels>) -> bool {
+    !bounds.is_empty()
+        && valid_pixels(bounds.origin.x)
+        && valid_pixels(bounds.origin.y)
+        && valid_pixels(bounds.size.width)
+        && valid_pixels(bounds.size.height)
+        && valid_pixels(bounds.right())
+        && valid_pixels(bounds.bottom())
+}
+
+fn valid_point(point: Point<Pixels>) -> bool {
+    valid_pixels(point.x) && valid_pixels(point.y)
+}
+
+fn localize_painted_point(
+    painted_bounds: &Bounds<Pixels>,
+    global_point: Point<Pixels>,
+) -> Option<Point<Pixels>> {
+    valid_bounds(painted_bounds)
+        .then_some(())
+        .and_then(|()| valid_point(global_point).then_some(()))?;
+    painted_bounds.localize(&global_point)
+}
+
+fn offset_layout_bounds(
+    element_bounds: &Bounds<Pixels>,
+    local_start: Point<Pixels>,
+    local_end: Point<Pixels>,
+    line_height: Pixels,
+) -> Option<Bounds<Pixels>> {
+    if !valid_bounds(element_bounds)
+        || !valid_point(local_start)
+        || !valid_point(local_end)
+        || !valid_pixels(line_height)
+        || line_height <= Pixels::ZERO
+    {
+        return None;
+    }
+
+    let width = (local_end.x - local_start.x).max(px(1.0));
+    let bounds = Bounds::new(
+        point(
+            element_bounds.left() + local_start.x,
+            element_bounds.top() + local_start.y,
+        ),
+        size(width, line_height),
+    );
+    valid_bounds(&bounds).then_some(bounds)
 }
 
 fn replace_text_preserving_raw(
@@ -826,9 +891,46 @@ fn next_character_boundary(text: &str, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        replace_text_preserving_raw, utf8_offset_to_utf16, utf16_offset_to_utf8,
-        utf16_range_to_utf8,
+        localize_painted_point, offset_layout_bounds, replace_text_preserving_raw,
+        utf8_offset_to_utf16, utf16_offset_to_utf8, utf16_range_to_utf8,
     };
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn painted_geometry_translates_global_points_and_layout_bounds() {
+        let painted_bounds = Bounds::new(point(px(120.0), px(48.0)), size(px(300.0), px(96.0)));
+        assert_eq!(
+            localize_painted_point(&painted_bounds, point(px(137.0), px(79.0))),
+            Some(point(px(17.0), px(31.0)))
+        );
+        assert!(localize_painted_point(&painted_bounds, point(px(119.0), px(79.0))).is_none());
+        assert!(localize_painted_point(&painted_bounds, point(px(137.0), px(145.0))).is_none());
+
+        let text_bounds = offset_layout_bounds(
+            &painted_bounds,
+            point(px(8.0), px(14.0)),
+            point(px(88.0), px(14.0)),
+            px(18.0),
+        )
+        .expect("valid painted geometry");
+        assert_eq!(text_bounds.origin, point(px(128.0), px(62.0)));
+        assert_eq!(text_bounds.size, size(px(80.0), px(18.0)));
+    }
+
+    #[test]
+    fn invalid_painted_geometry_fails_closed() {
+        let empty_bounds = Bounds::new(point(px(120.0), px(48.0)), size(px(0.0), px(96.0)));
+        assert!(localize_painted_point(&empty_bounds, point(px(120.0), px(48.0))).is_none());
+        assert!(
+            offset_layout_bounds(
+                &empty_bounds,
+                point(px(0.0), px(0.0)),
+                point(px(4.0), px(0.0)),
+                px(18.0),
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn raw_editing_preserves_whitespace_newlines_and_unicode() {
@@ -846,5 +948,7 @@ mod tests {
         assert_eq!(utf16_offset_to_utf8(text, 2), None);
         assert_eq!(utf16_offset_to_utf8(text, 3), Some(5));
         assert_eq!(utf8_offset_to_utf16(text, 5), Some(3));
+        assert!(utf16_range_to_utf8(text, 2..3).is_none());
+        assert!(replace_text_preserving_raw(text, 2..2, "x").is_none());
     }
 }
