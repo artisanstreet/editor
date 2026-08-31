@@ -11,9 +11,9 @@ use thiserror::Error;
 use artisan_domain::{
     ApprovalMode, ByteLimit, CountLimit, ENGINE_CONFIG_MAX_ENCODED_BYTES, EngineAgentId,
     EngineConfigError, EngineId, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineSelection, EngineVariantId,
-    FilesystemAccess, FiniteMillis, NetworkAccess, OpenCode2Selection, PermissionId,
-    WebSearchAccess,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis, NetworkAccess,
+    OpenCode2Selection, PermissionId, WebSearchAccess,
 };
 
 #[derive(Debug, Error)]
@@ -407,25 +407,31 @@ fn into_domain(raw: RawConfig) -> Result<EngineRunConfig, EngineRunConfigCodecEr
         parse_web_search(&raw.permission.web_search)?,
     );
 
-    let runtime = EngineRuntimeControls::new(
-        parse_millis(raw.runtime.attempt_budget_ms, "attempt_budget_ms")?,
-        parse_millis(raw.runtime.readiness_budget_ms, "readiness_budget_ms")?,
-        parse_millis(raw.runtime.health_budget_ms, "health_budget_ms")?,
-        parse_millis(raw.runtime.prompt_budget_ms, "prompt_budget_ms")?,
-        parse_millis(raw.runtime.stream_budget_ms, "stream_budget_ms")?,
-        parse_millis(raw.runtime.close_budget_ms, "close_budget_ms")?,
-        parse_bytes(raw.runtime.max_json_body_bytes, "max_json_body_bytes")?,
-        parse_bytes(raw.runtime.max_sse_line_bytes, "max_sse_line_bytes")?,
-        parse_bytes(raw.runtime.max_sse_event_bytes, "max_sse_event_bytes")?,
-        parse_bytes(
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: parse_millis(raw.runtime.attempt_budget_ms, "attempt_budget_ms")?,
+        readiness_budget: parse_millis(raw.runtime.readiness_budget_ms, "readiness_budget_ms")?,
+        health_budget: parse_millis(raw.runtime.health_budget_ms, "health_budget_ms")?,
+        prompt_budget: parse_millis(raw.runtime.prompt_budget_ms, "prompt_budget_ms")?,
+        stream_budget: parse_millis(raw.runtime.stream_budget_ms, "stream_budget_ms")?,
+        close_budget: parse_millis(raw.runtime.close_budget_ms, "close_budget_ms")?,
+        max_json_body_bytes: parse_bytes(raw.runtime.max_json_body_bytes, "max_json_body_bytes")?,
+        max_sse_line_bytes: parse_bytes(raw.runtime.max_sse_line_bytes, "max_sse_line_bytes")?,
+        max_sse_event_bytes: parse_bytes(raw.runtime.max_sse_event_bytes, "max_sse_event_bytes")?,
+        max_readiness_line_bytes: parse_bytes(
             raw.runtime.max_readiness_line_bytes,
             "max_readiness_line_bytes",
         )?,
-        parse_count(raw.runtime.max_header_count, "max_header_count")?,
-        parse_bytes(raw.runtime.max_http_buffer_bytes, "max_http_buffer_bytes")?,
-        parse_bytes(raw.runtime.max_stderr_bytes, "max_stderr_bytes")?,
-        parse_count(raw.runtime.observation_capacity, "observation_capacity")?,
-    )
+        max_header_count: parse_count(raw.runtime.max_header_count, "max_header_count")?,
+        max_http_buffer_bytes: parse_bytes(
+            raw.runtime.max_http_buffer_bytes,
+            "max_http_buffer_bytes",
+        )?,
+        max_stderr_bytes: parse_bytes(raw.runtime.max_stderr_bytes, "max_stderr_bytes")?,
+        observation_capacity: parse_count(
+            raw.runtime.observation_capacity,
+            "observation_capacity",
+        )?,
+    })
     .map_err(domain_error)?;
 
     Ok(EngineRunConfig::new(

@@ -79,6 +79,11 @@ pub struct FiniteMillis(u64);
 
 impl FiniteMillis {
     /// Creates a duration in the inclusive `1..=86_400_000` range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineConfigError`] when `value` is zero or exceeds
+    /// [`ENGINE_RUNTIME_MAX_MILLIS`].
     pub const fn new(value: u64) -> Result<Self, EngineConfigError> {
         if value == 0 || value > ENGINE_RUNTIME_MAX_MILLIS {
             Err(EngineConfigError::new(
@@ -103,6 +108,11 @@ pub struct ByteLimit(u64);
 
 impl ByteLimit {
     /// Creates a limit in the inclusive `1..=8_388_608` range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineConfigError`] when `value` is zero or exceeds
+    /// [`ENGINE_RUNTIME_MAX_BODY_BYTES`].
     pub const fn new(value: u64) -> Result<Self, EngineConfigError> {
         if value == 0 || value > ENGINE_RUNTIME_MAX_BODY_BYTES {
             Err(EngineConfigError::new(
@@ -127,6 +137,11 @@ pub struct CountLimit(u64);
 
 impl CountLimit {
     /// Creates a limit in the inclusive `1..=4_096` range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineConfigError`] when `value` is zero or exceeds
+    /// [`ENGINE_RUNTIME_MAX_OBSERVATIONS`].
     pub const fn new(value: u64) -> Result<Self, EngineConfigError> {
         if value == 0 || value > ENGINE_RUNTIME_MAX_OBSERVATIONS {
             Err(EngineConfigError::new(
@@ -165,7 +180,7 @@ impl EngineId {
 /// Engine-specific selection values.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum EngineSelection {
-    /// OpenCode 2 selection.
+    /// `OpenCode` 2 selection.
     OpenCode2(OpenCode2Selection),
 }
 
@@ -178,7 +193,7 @@ impl EngineSelection {
         }
     }
 
-    /// Borrows the OpenCode 2 selection.
+    /// Borrows the `OpenCode` 2 selection.
     #[must_use]
     pub const fn as_opencode2(&self) -> &OpenCode2Selection {
         match self {
@@ -187,7 +202,7 @@ impl EngineSelection {
     }
 }
 
-/// Complete selection for the OpenCode 2 engine.
+/// Complete selection for the `OpenCode` 2 engine.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct OpenCode2Selection {
     profile_id: EngineProfileId,
@@ -403,6 +418,40 @@ impl WebSearchAccess {
     }
 }
 
+/// Caller-supplied bounded budgets and transport capacities for one engine
+/// attempt.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct EngineRuntimeControlsInput {
+    /// Complete budget for one engine attempt.
+    pub attempt_budget: FiniteMillis,
+    /// Budget for engine readiness.
+    pub readiness_budget: FiniteMillis,
+    /// Budget for engine health checking.
+    pub health_budget: FiniteMillis,
+    /// Budget for sending the prompt.
+    pub prompt_budget: FiniteMillis,
+    /// Budget for receiving the engine stream.
+    pub stream_budget: FiniteMillis,
+    /// Budget for closing the engine connection.
+    pub close_budget: FiniteMillis,
+    /// Maximum JSON request or response body size.
+    pub max_json_body_bytes: ByteLimit,
+    /// Maximum size of one SSE line.
+    pub max_sse_line_bytes: ByteLimit,
+    /// Maximum size of one SSE event.
+    pub max_sse_event_bytes: ByteLimit,
+    /// Maximum size of one readiness response line.
+    pub max_readiness_line_bytes: ByteLimit,
+    /// Maximum number of HTTP headers.
+    pub max_header_count: CountLimit,
+    /// Maximum HTTP buffer size.
+    pub max_http_buffer_bytes: ByteLimit,
+    /// Maximum captured stderr size.
+    pub max_stderr_bytes: ByteLimit,
+    /// Maximum retained observation count.
+    pub observation_capacity: CountLimit,
+}
+
 /// Bounded budgets and transport capacities for one engine attempt.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct EngineRuntimeControls {
@@ -425,22 +474,29 @@ pub struct EngineRuntimeControls {
 impl EngineRuntimeControls {
     /// Constructs complete runtime controls after checking phase and buffer
     /// relationships.
-    pub fn new(
-        attempt_budget: FiniteMillis,
-        readiness_budget: FiniteMillis,
-        health_budget: FiniteMillis,
-        prompt_budget: FiniteMillis,
-        stream_budget: FiniteMillis,
-        close_budget: FiniteMillis,
-        max_json_body_bytes: ByteLimit,
-        max_sse_line_bytes: ByteLimit,
-        max_sse_event_bytes: ByteLimit,
-        max_readiness_line_bytes: ByteLimit,
-        max_header_count: CountLimit,
-        max_http_buffer_bytes: ByteLimit,
-        max_stderr_bytes: ByteLimit,
-        observation_capacity: CountLimit,
-    ) -> Result<Self, EngineConfigError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineConfigError`] when phase budgets overflow or exceed
+    /// the attempt budget, buffers violate their containment relationships, or
+    /// a transport limit exceeds its documented bound.
+    pub fn new(input: EngineRuntimeControlsInput) -> Result<Self, EngineConfigError> {
+        let EngineRuntimeControlsInput {
+            attempt_budget,
+            readiness_budget,
+            health_budget,
+            prompt_budget,
+            stream_budget,
+            close_budget,
+            max_json_body_bytes,
+            max_sse_line_bytes,
+            max_sse_event_bytes,
+            max_readiness_line_bytes,
+            max_header_count,
+            max_http_buffer_bytes,
+            max_stderr_bytes,
+            observation_capacity,
+        } = input;
         let phase_sum = readiness_budget
             .get()
             .checked_add(health_budget.get())
@@ -631,6 +687,11 @@ pub struct EngineConfigRevision(NonZeroU64);
 
 impl EngineConfigRevision {
     /// Creates a revision in the inclusive `1..=i64::MAX` range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineConfigError`] when `value` is zero or exceeds
+    /// `i64::MAX`, the largest value representable by the SQLite column.
     pub const fn new(value: u64) -> Result<Self, EngineConfigError> {
         if value == 0 || value > i64::MAX as u64 {
             return Err(EngineConfigError::new(
@@ -656,10 +717,15 @@ impl EngineConfigRevision {
     /// Returns the revision in the SQLite signed integer representation.
     #[must_use]
     pub const fn as_i64(self) -> i64 {
-        self.get() as i64
+        self.get().cast_signed()
     }
 
     /// Advances a revision without crossing the SQLite signed boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineConfigError`] when the next revision would exceed
+    /// `i64::MAX`, the largest value representable by the SQLite column.
     pub const fn checked_next(self) -> Result<Self, EngineConfigError> {
         match self.get().checked_add(1) {
             Some(next) => Self::new(next),
@@ -697,22 +763,22 @@ mod tests {
 
     fn runtime(attempt: u64) -> Result<EngineRuntimeControls, EngineConfigError> {
         let one = FiniteMillis::new(1)?;
-        EngineRuntimeControls::new(
-            FiniteMillis::new(attempt)?,
-            one,
-            one,
-            one,
-            one,
-            one,
-            ByteLimit::new(1)?,
-            ByteLimit::new(1)?,
-            ByteLimit::new(1)?,
-            ByteLimit::new(1)?,
-            CountLimit::new(1)?,
-            ByteLimit::new(1)?,
-            ByteLimit::new(1)?,
-            CountLimit::new(1)?,
-        )
+        EngineRuntimeControls::new(EngineRuntimeControlsInput {
+            attempt_budget: FiniteMillis::new(attempt)?,
+            readiness_budget: one,
+            health_budget: one,
+            prompt_budget: one,
+            stream_budget: one,
+            close_budget: one,
+            max_json_body_bytes: ByteLimit::new(1)?,
+            max_sse_line_bytes: ByteLimit::new(1)?,
+            max_sse_event_bytes: ByteLimit::new(1)?,
+            max_readiness_line_bytes: ByteLimit::new(1)?,
+            max_header_count: CountLimit::new(1)?,
+            max_http_buffer_bytes: ByteLimit::new(1)?,
+            max_stderr_bytes: ByteLimit::new(1)?,
+            observation_capacity: CountLimit::new(1)?,
+        })
     }
 
     fn complete_config(profile: &str) -> EngineRunConfig {
@@ -750,46 +816,54 @@ mod tests {
     }
 
     #[test]
+    fn revision_sqlite_conversion_preserves_boundary_and_checked_overflow() {
+        let maximum =
+            EngineConfigRevision::new(i64::MAX as u64).expect("SQLite maximum is a valid revision");
+        assert_eq!(maximum.as_i64(), i64::MAX);
+        assert!(maximum.checked_next().is_err());
+    }
+
+    #[test]
     fn phase_and_containing_buffer_relationships_are_checked() {
         let one = FiniteMillis::new(1).expect("one millisecond is valid");
         let bytes = |value| ByteLimit::new(value).expect("byte limit is valid");
         let count = |value| CountLimit::new(value).expect("count limit is valid");
         assert!(
-            EngineRuntimeControls::new(
-                FiniteMillis::new(4).expect("attempt budget is valid"),
-                one,
-                one,
-                one,
-                one,
-                one,
-                bytes(1),
-                bytes(2),
-                bytes(1),
-                bytes(1),
-                count(1),
-                bytes(1),
-                bytes(1),
-                count(1),
-            )
+            EngineRuntimeControls::new(EngineRuntimeControlsInput {
+                attempt_budget: FiniteMillis::new(4).expect("attempt budget is valid"),
+                readiness_budget: one,
+                health_budget: one,
+                prompt_budget: one,
+                stream_budget: one,
+                close_budget: one,
+                max_json_body_bytes: bytes(1),
+                max_sse_line_bytes: bytes(2),
+                max_sse_event_bytes: bytes(1),
+                max_readiness_line_bytes: bytes(1),
+                max_header_count: count(1),
+                max_http_buffer_bytes: bytes(1),
+                max_stderr_bytes: bytes(1),
+                observation_capacity: count(1),
+            })
             .is_err()
         );
         assert!(
-            EngineRuntimeControls::new(
-                FiniteMillis::new(5).expect("attempt budget is valid"),
-                one,
-                one,
-                one,
-                one,
-                one,
-                bytes(1),
-                bytes(2),
-                bytes(1),
-                bytes(1),
-                count(1),
-                bytes(1),
-                bytes(1),
-                count(1),
-            )
+            EngineRuntimeControls::new(EngineRuntimeControlsInput {
+                attempt_budget: FiniteMillis::new(5).expect("attempt budget is valid"),
+                readiness_budget: one,
+                health_budget: one,
+                prompt_budget: one,
+                stream_budget: one,
+                close_budget: one,
+                max_json_body_bytes: bytes(1),
+                max_sse_line_bytes: bytes(2),
+                max_sse_event_bytes: bytes(1),
+                max_readiness_line_bytes: bytes(1),
+                max_header_count: count(1),
+                max_http_buffer_bytes: bytes(1),
+                max_stderr_bytes: bytes(1),
+                observation_capacity: count(1),
+            })
             .is_err()
         );
     }

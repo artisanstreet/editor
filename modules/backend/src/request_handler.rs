@@ -742,7 +742,7 @@ impl RequestHandler {
                 self.queue_first_message_outcome(request_id, queue).await
             }
             Command::SetThreadEngineConfig(config) => {
-                self.set_thread_engine_config_outcome(request_id, config)
+                self.set_thread_engine_config_outcome(request_id, config.as_ref())
                     .await
             }
         }

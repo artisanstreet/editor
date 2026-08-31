@@ -31,12 +31,12 @@ use artisan_domain::{
     ConversationQueryBounds, ConversationRequest, ConversationSubscribe, ConversationUnsubscribe,
     CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigRevision,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineSelection, FilesystemAccess,
-    FiniteMillis, IncrementalText, ItemId, ListAttachedProjects, ListDirectories,
-    ListProjectThreads, MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PatchBatch,
-    PatchId, PatchSequence, PermissionId, ProjectId, Query, QueryTurnCount, ReceiptDisposition,
-    RequestId, Revision, RootPath, SetThreadEngineConfig, ThreadId, ThreadSummary, ThreadTitle,
-    UnixMillis, WebSearchAccess,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText, ItemId, ListAttachedProjects,
+    ListDirectories, ListProjectThreads, MessageBody, MessageId, NetworkAccess, OpenCode2Selection,
+    PatchBatch, PatchId, PatchSequence, PermissionId, ProjectId, Query, QueryTurnCount,
+    ReceiptDisposition, RequestId, Revision, RootPath, SetThreadEngineConfig, ThreadId,
+    ThreadSummary, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt, FrameId,
@@ -286,11 +286,13 @@ fn engine_config_command(
     precondition: EngineConfigUpdatePrecondition,
     label: &str,
 ) -> ClientRequest {
-    ClientRequest::Command(Command::SetThreadEngineConfig(SetThreadEngineConfig::new(
-        request(request_id),
-        ThreadId::parse(thread_id).expect("valid thread id"),
-        precondition,
-        engine_config(label),
+    ClientRequest::Command(Command::SetThreadEngineConfig(Box::new(
+        SetThreadEngineConfig::new(
+            request(request_id),
+            ThreadId::parse(thread_id).expect("valid thread id"),
+            precondition,
+            engine_config(label),
+        ),
     )))
 }
 
@@ -316,22 +318,22 @@ fn queued_receipt_of(response: ServerResponse) -> FirstMessageReceipt {
 
 fn engine_config(label: &str) -> EngineRunConfig {
     let one = FiniteMillis::new(1).expect("one millisecond is valid");
-    let runtime = EngineRuntimeControls::new(
-        FiniteMillis::new(100).expect("attempt budget is valid"),
-        one,
-        one,
-        one,
-        one,
-        one,
-        ByteLimit::new(8_192).expect("json body limit is valid"),
-        ByteLimit::new(4_096).expect("sse line limit is valid"),
-        ByteLimit::new(8_192).expect("sse event limit is valid"),
-        ByteLimit::new(4_096).expect("readiness line limit is valid"),
-        CountLimit::new(8).expect("header count is valid"),
-        ByteLimit::new(8_192).expect("http buffer limit is valid"),
-        ByteLimit::new(4_096).expect("stderr limit is valid"),
-        CountLimit::new(16).expect("observation capacity is valid"),
-    )
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
     .expect("runtime relationships are valid");
     let permission = EnginePermissionPolicy::new(
         PermissionId::parse(format!("permission-{label}")).expect("permission id is valid"),

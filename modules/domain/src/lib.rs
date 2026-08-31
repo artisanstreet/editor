@@ -64,8 +64,8 @@ pub use conversation::{
 pub use engine_config::{
     ApprovalMode, ByteLimit, CountLimit, EngineConfigError, EngineConfigReason,
     EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EnginePermissionPolicy,
-    EngineRunConfig, EngineRuntimeControls, EngineSelection, FilesystemAccess, FiniteMillis,
-    NetworkAccess, OpenCode2Selection, WebSearchAccess,
+    EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection,
+    FilesystemAccess, FiniteMillis, NetworkAccess, OpenCode2Selection, WebSearchAccess,
 };
 pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
 pub use identifiers::{

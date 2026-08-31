@@ -5,9 +5,10 @@ use std::error::Error;
 use artisan_domain::{
     ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigRevision,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineSelection, EngineVariantId,
-    FilesystemAccess, FiniteMillis, NetworkAccess, OpenCode2Selection, PermissionId,
-    ReceiptDisposition, RequestId, SetThreadEngineConfig, ThreadId, UnixMillis, WebSearchAccess,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis, NetworkAccess,
+    OpenCode2Selection, PermissionId, ReceiptDisposition, RequestId, SetThreadEngineConfig,
+    ThreadId, UnixMillis, WebSearchAccess,
 };
 use artisan_protocol::artisan_capnp::{envelope, request, response};
 use artisan_protocol::{
@@ -20,22 +21,22 @@ use capnp::serialize;
 
 fn config(with_variant: bool) -> EngineRunConfig {
     let one = FiniteMillis::new(1).expect("one millisecond is valid");
-    let runtime = EngineRuntimeControls::new(
-        FiniteMillis::new(100).expect("attempt budget is valid"),
-        one,
-        one,
-        one,
-        one,
-        one,
-        ByteLimit::new(8_192).expect("json body limit is valid"),
-        ByteLimit::new(4_096).expect("sse line limit is valid"),
-        ByteLimit::new(8_192).expect("sse event limit is valid"),
-        ByteLimit::new(4_096).expect("readiness line limit is valid"),
-        CountLimit::new(8).expect("header count is valid"),
-        ByteLimit::new(8_192).expect("http buffer limit is valid"),
-        ByteLimit::new(4_096).expect("stderr limit is valid"),
-        CountLimit::new(16).expect("observation capacity is valid"),
-    )
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
     .expect("runtime relationships are valid");
     let permission = EnginePermissionPolicy::new(
         PermissionId::parse("permission-protocol").expect("permission id is valid"),
@@ -65,12 +66,12 @@ fn request(frame_id: &str, precondition: EngineConfigUpdatePrecondition) -> Wire
         frame_id: FrameId::parse(frame_id).expect("frame id is valid"),
         sent_at: UnixMillis::from_millis(7),
         body: WireEnvelopeBody::Request(ProtocolClientRequest::Command(
-            artisan_domain::Command::SetThreadEngineConfig(SetThreadEngineConfig::new(
+            artisan_domain::Command::SetThreadEngineConfig(Box::new(SetThreadEngineConfig::new(
                 request_id,
                 ThreadId::parse("thread-protocol").expect("thread id is valid"),
                 precondition,
                 config(false),
-            )),
+            ))),
         )),
     }
 }
@@ -142,12 +143,12 @@ fn request_and_response_round_trip_with_explicit_variant_states() -> Result<(), 
         )) = &mut value.body
         {
             if with_variant {
-                *command = SetThreadEngineConfig::new(
+                *command = Box::new(SetThreadEngineConfig::new(
                     RequestId::parse("engine-protocol-request").expect("request id is valid"),
                     ThreadId::parse("thread-protocol").expect("thread id is valid"),
                     precondition,
                     config(true),
-                );
+                ));
             }
         }
         let encoded = encode_envelope(&value)?;

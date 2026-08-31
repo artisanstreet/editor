@@ -117,7 +117,7 @@ pub enum Command {
     /// See [`QueueFirstMessage`].
     QueueFirstMessage(QueueFirstMessage),
     /// See [`SetThreadEngineConfig`].
-    SetThreadEngineConfig(SetThreadEngineConfig),
+    SetThreadEngineConfig(Box<SetThreadEngineConfig>),
 }
 
 impl Command {
@@ -128,7 +128,7 @@ impl Command {
             Self::AttachProject(command) => &command.request_id,
             Self::CreateThread(command) => &command.request_id,
             Self::QueueFirstMessage(command) => &command.request_id,
-            Self::SetThreadEngineConfig(command) => &command.request_id,
+            Self::SetThreadEngineConfig(command) => command.request_id(),
         }
     }
 }

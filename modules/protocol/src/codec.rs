@@ -11,17 +11,17 @@ use artisan_domain::{
     DirectoryKind, DirectoryListing, DirectoryListingError, DirectoryPlace, DisplayName,
     DisplayNameError, EngineAgentId, EngineConfigError, EngineConfigReason, EngineConfigRevision,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineSelection, EngineVariantId, Event,
-    FilesystemAccess, FiniteMillis, FirstMessageQueued, IdentifierError, IncrementalText,
-    IncrementalTextError, ItemId, ItemOrdinal, ListAttachedProjects, ListDirectories,
-    ListProjectThreads, MessageBody, MessageBodyError, MessageId, NetworkAccess,
-    OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS, PatchBatch, PatchBatchError, PatchId,
-    PatchSequence, PermissionId, PlaceKind, ProjectAttached, ProjectId, ProjectListing,
-    ProjectListingError, ProjectSummary, Query, QueryTurnCount, QueryTurnCountError,
-    QueueFirstMessage, QueuedMessage, ReceiptDisposition, RequestId, Revision, RootPath,
-    RootPathError, RunId, SetThreadEngineConfig, THREAD_LISTING_MAX_THREADS, ThreadCreated,
-    ThreadId, ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError,
-    TurnId, TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, EngineVariantId, Event, FilesystemAccess, FiniteMillis, FirstMessageQueued,
+    IdentifierError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
+    ListAttachedProjects, ListDirectories, ListProjectThreads, MessageBody, MessageBodyError,
+    MessageId, NetworkAccess, OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS, PatchBatch,
+    PatchBatchError, PatchId, PatchSequence, PermissionId, PlaceKind, ProjectAttached, ProjectId,
+    ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
+    QueryTurnCountError, QueueFirstMessage, QueuedMessage, ReceiptDisposition, RequestId, Revision,
+    RootPath, RootPathError, RunId, SetThreadEngineConfig, THREAD_LISTING_MAX_THREADS,
+    ThreadCreated, ThreadId, ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle,
+    ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -535,6 +535,7 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             queue.set_body(command.body.as_str());
         }
         ClientRequest::Command(Command::SetThreadEngineConfig(command)) => {
+            let command = command.as_ref();
             let mut encoded = builder.reborrow().init_set_thread_engine_config();
             encoded.set_thread_id(command.thread_id().as_str());
             encode_engine_config_precondition(
@@ -1350,7 +1351,12 @@ fn decode_set_thread_engine_config(
     let precondition = decode_engine_config_precondition(command.get_precondition()?)?;
     let config = decode_engine_run_config(command.get_config()?)?;
     Ok(ClientRequest::Command(Command::SetThreadEngineConfig(
-        SetThreadEngineConfig::new(request_id, thread_id, precondition, config),
+        Box::new(SetThreadEngineConfig::new(
+            request_id,
+            thread_id,
+            precondition,
+            config,
+        )),
     )))
 }
 
@@ -1586,64 +1592,64 @@ fn decode_engine_runtime(
         CountLimit::new(value)
             .map_err(|_| engine_config_error(field, EngineConfigReason::OutOfRange))
     };
-    Ok(EngineRuntimeControls::new(
-        millis(
+    Ok(EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: millis(
             value.get_attempt_budget_ms(),
             "request.setThreadEngineConfig.config.runtime.attemptBudgetMs",
         )?,
-        millis(
+        readiness_budget: millis(
             value.get_readiness_budget_ms(),
             "request.setThreadEngineConfig.config.runtime.readinessBudgetMs",
         )?,
-        millis(
+        health_budget: millis(
             value.get_health_budget_ms(),
             "request.setThreadEngineConfig.config.runtime.healthBudgetMs",
         )?,
-        millis(
+        prompt_budget: millis(
             value.get_prompt_budget_ms(),
             "request.setThreadEngineConfig.config.runtime.promptBudgetMs",
         )?,
-        millis(
+        stream_budget: millis(
             value.get_stream_budget_ms(),
             "request.setThreadEngineConfig.config.runtime.streamBudgetMs",
         )?,
-        millis(
+        close_budget: millis(
             value.get_close_budget_ms(),
             "request.setThreadEngineConfig.config.runtime.closeBudgetMs",
         )?,
-        bytes(
+        max_json_body_bytes: bytes(
             value.get_max_json_body_bytes(),
             "request.setThreadEngineConfig.config.runtime.maxJsonBodyBytes",
         )?,
-        bytes(
+        max_sse_line_bytes: bytes(
             value.get_max_sse_line_bytes(),
             "request.setThreadEngineConfig.config.runtime.maxSseLineBytes",
         )?,
-        bytes(
+        max_sse_event_bytes: bytes(
             value.get_max_sse_event_bytes(),
             "request.setThreadEngineConfig.config.runtime.maxSseEventBytes",
         )?,
-        bytes(
+        max_readiness_line_bytes: bytes(
             value.get_max_readiness_line_bytes(),
             "request.setThreadEngineConfig.config.runtime.maxReadinessLineBytes",
         )?,
-        count(
+        max_header_count: count(
             value.get_max_header_count(),
             "request.setThreadEngineConfig.config.runtime.maxHeaderCount",
         )?,
-        bytes(
+        max_http_buffer_bytes: bytes(
             value.get_max_http_buffer_bytes(),
             "request.setThreadEngineConfig.config.runtime.maxHttpBufferBytes",
         )?,
-        bytes(
+        max_stderr_bytes: bytes(
             value.get_max_stderr_bytes(),
             "request.setThreadEngineConfig.config.runtime.maxStderrBytes",
         )?,
-        count(
+        observation_capacity: count(
             value.get_observation_capacity(),
             "request.setThreadEngineConfig.config.runtime.observationCapacity",
         )?,
-    )?)
+    })?)
 }
 
 fn decode_conversation_query_request(

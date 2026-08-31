@@ -11,9 +11,9 @@ use artisan_domain::{
     ApprovalMode, ByteLimit, ConversationCursor, ConversationRequest, ConversationSubscribe,
     CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigUpdatePrecondition,
     EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
-    EngineRuntimeControls, EngineSelection, FilesystemAccess, FiniteMillis, MessageBody, MessageId,
-    NetworkAccess, OpenCode2Selection, PermissionId, ProjectId, RequestId, RootPath, ThreadId,
-    ThreadTitle, UnixMillis, WebSearchAccess,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
+    FiniteMillis, MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PermissionId,
+    ProjectId, RequestId, RootPath, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use artisan_protocol::{ClientRequest, ConversationSubscriptionStarted, ResponsePayload};
@@ -36,22 +36,22 @@ async fn memory_repository() -> (DatabaseConnection, Repository) {
 
 fn fixture_engine_config() -> EngineRunConfig {
     let one = FiniteMillis::new(1).expect("one millisecond is valid");
-    let runtime = EngineRuntimeControls::new(
-        FiniteMillis::new(100).expect("attempt budget is valid"),
-        one,
-        one,
-        one,
-        one,
-        one,
-        ByteLimit::new(8_192).expect("json body limit is valid"),
-        ByteLimit::new(4_096).expect("sse line limit is valid"),
-        ByteLimit::new(8_192).expect("sse event limit is valid"),
-        ByteLimit::new(4_096).expect("readiness line limit is valid"),
-        CountLimit::new(8).expect("header count is valid"),
-        ByteLimit::new(8_192).expect("http buffer limit is valid"),
-        ByteLimit::new(4_096).expect("stderr limit is valid"),
-        CountLimit::new(16).expect("observation capacity is valid"),
-    )
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
     .expect("runtime relationships are valid");
     let permission = EnginePermissionPolicy::new(
         PermissionId::parse("permission-replay").expect("permission id is valid"),
