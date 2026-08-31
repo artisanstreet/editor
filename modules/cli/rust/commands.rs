@@ -398,7 +398,7 @@ fn profile_surface_error() -> CliError {
 fn list_engines(instance: &NativeInstanceConfig, json: bool) -> Result<()> {
     let authority = NativeOpenCode2Authority::new();
     let spec = NativeOpenCode2Authority::certified_install_spec();
-    let inspection = authority.inspect(instance);
+    let inspection = authority.inspect(instance.database_path());
     match inspection {
         Ok(OpenCode2Inspection::UnsupportedPlatform) => {
             if json {

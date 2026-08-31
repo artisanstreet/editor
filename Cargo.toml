@@ -8,6 +8,7 @@ members = [
     "modules/frontend",
     "modules/installer",
     "modules/migrations",
+    "modules/native_engine",
     "modules/protocol",
     "modules/transport",
     "modules/ui",

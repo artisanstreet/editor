@@ -1,0 +1,20 @@
+[package]
+name = "artisan-native-engine"
+description = "Certified native engine installation and profile authority"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+artisan-domain = { path = "../domain" }
+fs2.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tempfile = "3"
+winapi-util.workspace = true
+
+[lints]
+workspace = true

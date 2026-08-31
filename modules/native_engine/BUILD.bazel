@@ -1,0 +1,35 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "native_engine",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "artisan_native_engine",
+    deps = [
+        "//modules/domain:domain",
+        "@crates//:fs2",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2-0.11.0",
+        "@crates//:tempfile",
+        "@crates//:winapi-util",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "native_engine_unit_test",
+    crate = ":native_engine",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "tests",
+    tests = [":native_engine_unit_test"],
+)

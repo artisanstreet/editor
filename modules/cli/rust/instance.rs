@@ -1,13 +1,12 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{CliError, Result, error::io, paths::Layout};
 
@@ -334,12 +333,6 @@ impl std::error::Error for NativeInstanceError {}
 
 type NativeResult<T> = std::result::Result<T, NativeInstanceError>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeAtomicReplaceOutcome {
-    Committed,
-    CommittedButUnverified,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeInstanceFile {
@@ -475,312 +468,30 @@ fn check_ancestors_all(path: &Path, must_exist: bool) -> NativeResult<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NativeFileId {
-    dev: u64,
-    ino: u64,
-}
-
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NativeFileId {
-    volume: u64,
-    index: u64,
-}
-
-#[cfg(unix)]
-fn native_file_id(path: &Path) -> NativeResult<NativeFileId> {
-    let file = fs::File::open(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            NativeInstanceError::NotFound
-        } else {
-            NativeInstanceError::Io {
-                context: "inspect file id",
-                path: path.to_path_buf(),
-            }
-        }
-    })?;
-    native_file_id_from_file(&file)
-}
-
-#[cfg(windows)]
-fn native_file_id(path: &Path) -> NativeResult<NativeFileId> {
-    let file = fs::File::open(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            NativeInstanceError::NotFound
-        } else {
-            NativeInstanceError::Io {
-                context: "inspect file id",
-                path: path.to_path_buf(),
-            }
-        }
-    })?;
-    native_file_id_from_file(&file)
-}
-
-#[cfg(not(any(unix, windows)))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NativeFileId;
-
-#[cfg(not(any(unix, windows)))]
-fn native_file_id(_path: &Path) -> NativeResult<NativeFileId> {
-    Err(NativeInstanceError::Io {
-        context: "inspect file id",
-        path: PathBuf::from("<unsupported>"),
-    })
-}
-
-fn native_file_id_from_file(file: &fs::File) -> NativeResult<NativeFileId> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let meta = file.metadata().map_err(|_| NativeInstanceError::Io {
-            context: "inspect file id",
-            path: PathBuf::from("<handle>"),
-        })?;
-        Ok(NativeFileId {
-            dev: meta.dev(),
-            ino: meta.ino(),
-        })
-    }
-    #[cfg(windows)]
-    {
-        let info = winapi_util::file::information(winapi_util::HandleRef::from_file(file))
-            .map_err(|_| NativeInstanceError::Io {
-                context: "inspect file id",
-                path: PathBuf::from("<handle>"),
-            })?;
-        let volume = info.volume_serial_number();
-        let index = info.file_index();
-        if volume == 0 && index == 0 {
-            return Err(NativeInstanceError::Io {
-                context: "inspect file id",
-                path: PathBuf::from("<handle>"),
-            });
-        }
-        Ok(NativeFileId { volume, index })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = file;
-        Err(NativeInstanceError::Io {
-            context: "inspect file id",
-            path: PathBuf::from("<unsupported>"),
-        })
-    }
-}
+const MAX_NATIVE_INSTANCE_BYTES: usize = 64 * 1024;
 
 fn open_and_read_native(path: &Path) -> NativeResult<Vec<u8>> {
-    open_and_read_native_inner(path, None, false)
-}
-
-pub(crate) fn read_bounded_native_file(
-    path: &Path,
-    maximum_bytes: usize,
-) -> std::result::Result<Vec<u8>, NativeInstanceError> {
-    open_and_read_native_inner(path, Some(maximum_bytes), true)
-}
-
-fn open_and_read_native_inner(
-    path: &Path,
-    maximum_bytes: Option<usize>,
-    classify_missing: bool,
-) -> NativeResult<Vec<u8>> {
-    check_ancestors_all(path, false)?;
-    let pre_meta = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if classify_missing && error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(NativeInstanceError::NotFound);
-        }
-        Err(_) => {
-            return Err(NativeInstanceError::Io {
-                context: "inspect instance file",
-                path: path.to_path_buf(),
-            });
-        }
-    };
-    if metadata_is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    check_ancestors_all(path, true)?;
-    let pre_id = native_file_id(path)?;
-    let mut file =
-        OpenOptions::new()
-            .read(true)
-            .open(path)
-            .map_err(|_| NativeInstanceError::Io {
-                context: "open instance file",
-                path: path.to_path_buf(),
-            })?;
-    let handle_meta = file.metadata().map_err(|_| NativeInstanceError::Io {
-        context: "inspect handle",
-        path: path.to_path_buf(),
-    })?;
-    if metadata_is_symlink_or_reparse(&handle_meta) || !handle_meta.is_file() {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    let handle_id = native_file_id_from_file(&file)?;
-    if handle_id != pre_id {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    let mut bytes = Vec::new();
-    match maximum_bytes {
-        Some(maximum_bytes) => {
-            let read_limit = maximum_bytes.saturating_add(1);
-            std::io::Read::by_ref(&mut file)
-                .take(u64::try_from(read_limit).unwrap_or(u64::MAX))
-                .read_to_end(&mut bytes)
-                .map_err(|_| NativeInstanceError::Io {
-                    context: "read instance file",
-                    path: path.to_path_buf(),
-                })?;
-        }
-        None => {
-            file.read_to_end(&mut bytes)
-                .map_err(|_| NativeInstanceError::Io {
-                    context: "read instance file",
-                    path: path.to_path_buf(),
-                })?;
-        }
-    }
-    check_ancestors_all(path, true)?;
-    let post_meta = fs::symlink_metadata(path).map_err(|_| NativeInstanceError::Io {
-        context: "inspect instance file",
-        path: path.to_path_buf(),
-    })?;
-    if metadata_is_symlink_or_reparse(&post_meta) || !post_meta.is_file() {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    let post_id = native_file_id(path)?;
-    if post_id != pre_id || post_id != handle_id {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    if maximum_bytes.is_some_and(|maximum| bytes.len() > maximum) {
-        return Err(NativeInstanceError::TooLarge);
-    }
-    Ok(bytes)
-}
-
-pub(crate) fn verify_native_file(
-    path: &Path,
-    expected_size: u64,
-    expected_sha256: &[u8; 32],
-) -> std::result::Result<NativeFileId, NativeInstanceError> {
-    check_ancestors_all(path, false)?;
-    let pre_meta = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(NativeInstanceError::NotFound);
-        }
-        Err(_) => {
-            return Err(NativeInstanceError::Io {
-                context: "inspect native executable",
-                path: path.to_path_buf(),
-            });
-        }
-    };
-    if metadata_is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    if pre_meta.len() != expected_size {
-        return Err(NativeInstanceError::FileSizeMismatch);
-    }
-    check_ancestors_all(path, true)?;
-    let pre_id = native_file_id(path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|_| NativeInstanceError::FileChanged)?;
-    let handle_meta = file
-        .metadata()
-        .map_err(|_| NativeInstanceError::FileChanged)?;
-    if metadata_is_symlink_or_reparse(&handle_meta) || !handle_meta.is_file() {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    if handle_meta.len() != expected_size {
-        return Err(NativeInstanceError::FileSizeMismatch);
-    }
-    let handle_id = native_file_id_from_file(&file)?;
-    if handle_id != pre_id {
-        return Err(NativeInstanceError::FileChanged);
-    }
-
-    let stream_result = stream_and_verify(&mut file, expected_size, expected_sha256);
-
-    let post_handle_meta = file
-        .metadata()
-        .map_err(|_| NativeInstanceError::FileChanged)?;
-    if metadata_is_symlink_or_reparse(&post_handle_meta) || !post_handle_meta.is_file() {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    if post_handle_meta.len() != expected_size {
-        return Err(NativeInstanceError::FileSizeMismatch);
-    }
-    let post_handle_id = native_file_id_from_file(&file)?;
-    if post_handle_id != pre_id {
-        return Err(NativeInstanceError::FileChanged);
-    }
-
-    check_ancestors_all(path, true)?;
-    let post_meta = fs::symlink_metadata(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            NativeInstanceError::FileChanged
-        } else {
-            NativeInstanceError::Io {
-                context: "inspect native executable",
-                path: path.to_path_buf(),
+    artisan_native_engine::read_bounded(path, MAX_NATIVE_INSTANCE_BYTES).map_err(
+        |error| match error {
+            artisan_native_engine::NativeFileError::NotFound => NativeInstanceError::NotFound,
+            artisan_native_engine::NativeFileError::TooLarge => NativeInstanceError::TooLarge,
+            artisan_native_engine::NativeFileError::FileChanged => NativeInstanceError::FileChanged,
+            artisan_native_engine::NativeFileError::FileSizeMismatch => {
+                NativeInstanceError::FileSizeMismatch
             }
-        }
-    })?;
-    if metadata_is_symlink_or_reparse(&post_meta) || !post_meta.is_file() {
-        return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
-    }
-    if post_meta.len() != expected_size {
-        return Err(NativeInstanceError::FileSizeMismatch);
-    }
-    let post_id = native_file_id(path)?;
-    if post_id != pre_id {
-        return Err(NativeInstanceError::FileChanged);
-    }
-    stream_result?;
-    Ok(pre_id)
-}
-
-pub(crate) fn stream_and_verify<R: Read>(
-    reader: &mut R,
-    expected_size: u64,
-    expected_sha256: &[u8; 32],
-) -> NativeResult<()> {
-    let mut hasher = Sha256::new();
-    let mut total = 0_u64;
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|_| NativeInstanceError::Io {
-                context: "read native executable",
-                path: PathBuf::from("<handle>"),
-            })?;
-        if read == 0 {
-            break;
-        }
-        total = total
-            .checked_add(read as u64)
-            .ok_or(NativeInstanceError::FileSizeMismatch)?;
-        if total > expected_size {
-            return Err(NativeInstanceError::FileSizeMismatch);
-        }
-        hasher.update(&buffer[..read]);
-    }
-    if total != expected_size {
-        return Err(NativeInstanceError::FileSizeMismatch);
-    }
-    let digest = hasher.finalize();
-    if digest[..] != expected_sha256[..] {
-        return Err(NativeInstanceError::FileHashMismatch);
-    }
-    Ok(())
+            artisan_native_engine::NativeFileError::FileHashMismatch => {
+                NativeInstanceError::FileHashMismatch
+            }
+            artisan_native_engine::NativeFileError::UnsafePath
+            | artisan_native_engine::NativeFileError::PrivatePermissions => {
+                NativeInstanceError::UnsafePath(path.to_path_buf())
+            }
+            artisan_native_engine::NativeFileError::Io => NativeInstanceError::Io {
+                context: "read instance file",
+                path: path.to_path_buf(),
+            },
+        },
+    )
 }
 
 impl NativeInstanceConfig {
@@ -914,93 +625,6 @@ pub fn write_native_config(path: &Path, config: &NativeInstanceConfig) -> Native
     config.write(path)
 }
 
-fn inspect_native_destination(path: &Path) -> NativeResult<Option<NativeFileId>> {
-    check_ancestors_all(path, false)?;
-    match fs::symlink_metadata(path) {
-        Ok(meta) if metadata_is_symlink_or_reparse(&meta) || meta.is_dir() => {
-            Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
-        }
-        Ok(meta) if meta.is_file() => native_file_id(path).map(Some),
-        Ok(_) => Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(NativeInstanceError::Io {
-            context: "inspect instance destination",
-            path: path.to_path_buf(),
-        }),
-    }
-}
-
-fn verify_native_destination(
-    path: &Path,
-    pre_existing_id: Option<NativeFileId>,
-) -> NativeResult<()> {
-    check_ancestors_all(path, false)?;
-    match fs::symlink_metadata(path) {
-        Ok(meta) if metadata_is_symlink_or_reparse(&meta) || meta.is_dir() => {
-            Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
-        }
-        Ok(meta) if meta.is_file() => {
-            if let Some(expected) = pre_existing_id {
-                let current = native_file_id(path)?;
-                if current == expected {
-                    Ok(())
-                } else {
-                    Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
-                }
-            } else {
-                Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
-            }
-        }
-        Ok(_) => Err(NativeInstanceError::UnsafePath(path.to_path_buf())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if pre_existing_id.is_some() {
-                Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
-            } else {
-                Ok(())
-            }
-        }
-        Err(_) => Err(NativeInstanceError::Io {
-            context: "inspect instance destination",
-            path: path.to_path_buf(),
-        }),
-    }
-}
-
-fn sync_native_directory(directory: &Path) -> NativeResult<()> {
-    #[cfg(unix)]
-    {
-        fs::File::open(directory)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|_| NativeInstanceError::Io {
-                context: "sync directory",
-                path: directory.to_path_buf(),
-            })?;
-    }
-    #[cfg(windows)]
-    {
-        // The temporary file is flushed before atomic activation. Keep the
-        // post-publication path/reparse check without claiming a directory
-        // flush that the safe Windows file API cannot provide here.
-        let metadata = fs::symlink_metadata(directory).map_err(|_| NativeInstanceError::Io {
-            context: "inspect directory",
-            path: directory.to_path_buf(),
-        })?;
-        if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
-            return Err(NativeInstanceError::UnsafePath(directory.to_path_buf()));
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        fs::File::open(directory)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|_| NativeInstanceError::Io {
-                context: "sync directory",
-                path: directory.to_path_buf(),
-            })?;
-    }
-    Ok(())
-}
-
 fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
     let directory = path
         .parent()
@@ -1009,86 +633,32 @@ fn write_native_atomic(path: &Path, bytes: &[u8]) -> NativeResult<()> {
         context: "create directory",
         path: directory.to_path_buf(),
     })?;
-    match replace_native_file(path, bytes)? {
-        NativeAtomicReplaceOutcome::Committed => Ok(()),
-        NativeAtomicReplaceOutcome::CommittedButUnverified => Err(NativeInstanceError::Io {
-            context: "verify activated instance file",
-            path: path.to_path_buf(),
-        }),
-    }
-}
-
-pub(crate) fn replace_native_file(
-    path: &Path,
-    bytes: &[u8],
-) -> std::result::Result<NativeAtomicReplaceOutcome, NativeInstanceError> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| NativeInstanceError::InvalidPath(path.to_path_buf()))?;
-    check_ancestors_all(path, true)?;
-    let pre_existing_id = inspect_native_destination(path)?;
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".artisan-native-")
-        .suffix(".tmp")
-        .tempfile_in(directory)
-        .map_err(|_| NativeInstanceError::Io {
-            context: "create temporary native file",
-            path: directory.to_path_buf(),
-        })?;
-    if temporary.path().parent() != Some(directory) {
-        return Err(NativeInstanceError::UnsafePath(
-            temporary.path().to_path_buf(),
-        ));
-    }
-    temporary
-        .as_file_mut()
-        .write_all(bytes)
-        .map_err(|_| NativeInstanceError::Io {
-            context: "write temporary native file",
-            path: directory.to_path_buf(),
-        })?;
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(|_| NativeInstanceError::Io {
-            context: "sync temporary native file",
-            path: directory.to_path_buf(),
-        })?;
-    let temporary_id = native_file_id_from_file(temporary.as_file())?;
-    verify_native_temporary(temporary.path(), temporary_id)?;
-    check_ancestors_all(path, true)?;
-    verify_native_destination(path, pre_existing_id)?;
-    verify_native_temporary(temporary.path(), temporary_id)?;
-    let Ok(persisted) = temporary.persist(path) else {
-        return Err(NativeInstanceError::Io {
+    match artisan_native_engine::replace_file(path, bytes).map_err(|error| match error {
+        artisan_native_engine::NativeFileError::NotFound => NativeInstanceError::NotFound,
+        artisan_native_engine::NativeFileError::TooLarge => NativeInstanceError::TooLarge,
+        artisan_native_engine::NativeFileError::FileChanged => NativeInstanceError::FileChanged,
+        artisan_native_engine::NativeFileError::FileSizeMismatch => {
+            NativeInstanceError::FileSizeMismatch
+        }
+        artisan_native_engine::NativeFileError::FileHashMismatch => {
+            NativeInstanceError::FileHashMismatch
+        }
+        artisan_native_engine::NativeFileError::UnsafePath
+        | artisan_native_engine::NativeFileError::PrivatePermissions => {
+            NativeInstanceError::UnsafePath(path.to_path_buf())
+        }
+        artisan_native_engine::NativeFileError::Io => NativeInstanceError::Io {
             context: "activate native file",
             path: path.to_path_buf(),
-        });
-    };
-    drop(persisted);
-
-    let verified = (|| {
-        check_ancestors_all(path, true)?;
-        let destination_id =
-            inspect_native_destination(path)?.ok_or(NativeInstanceError::NotFound)?;
-        if destination_id != temporary_id {
-            return Err(NativeInstanceError::UnsafePath(path.to_path_buf()));
+        },
+    })? {
+        artisan_native_engine::AtomicReplaceOutcome::Committed => Ok(()),
+        artisan_native_engine::AtomicReplaceOutcome::CommittedButUnverified => {
+            Err(NativeInstanceError::Io {
+                context: "verify activated instance file",
+                path: path.to_path_buf(),
+            })
         }
-        sync_native_directory(directory)
-    })();
-    if verified.is_ok() {
-        Ok(NativeAtomicReplaceOutcome::Committed)
-    } else {
-        Ok(NativeAtomicReplaceOutcome::CommittedButUnverified)
-    }
-}
-
-fn verify_native_temporary(path: &Path, expected_id: NativeFileId) -> NativeResult<()> {
-    let actual_id = inspect_native_destination(path)?.ok_or(NativeInstanceError::NotFound)?;
-    if actual_id == expected_id {
-        Ok(())
-    } else {
-        Err(NativeInstanceError::UnsafePath(path.to_path_buf()))
     }
 }
 
@@ -1117,117 +687,6 @@ mod tests {
         )
         .expect("legacy instance config");
         assert!(!config.serve_frontend);
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn native_file_replacement_is_same_directory_atomic_and_identity_fenced() {
-        let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("state.json");
-        let original = b"original state";
-        let replacement = b"replacement state";
-        fs::write(&destination, original).unwrap();
-        let original_id = native_file_id(&destination).unwrap();
-
-        assert!(matches!(
-            replace_native_file(&destination, replacement),
-            Ok(NativeAtomicReplaceOutcome::Committed)
-        ));
-        assert_eq!(fs::read(&destination).unwrap(), replacement);
-        assert_ne!(native_file_id(&destination).unwrap(), original_id);
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn native_file_replacement_rejects_temporary_path_substitution_while_handle_is_open() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut temporary = tempfile::Builder::new()
-            .prefix(".artisan-native-")
-            .tempfile_in(directory.path())
-            .unwrap();
-        temporary.as_file_mut().write_all(b"staged bytes").unwrap();
-        temporary.as_file().sync_all().unwrap();
-        let handle_id = native_file_id_from_file(temporary.as_file()).unwrap();
-        let substituted_path = temporary.path().to_path_buf();
-        let original_path = directory.path().join("original.tmp");
-
-        fs::rename(&substituted_path, &original_path).unwrap();
-        fs::write(&substituted_path, b"substituted bytes").unwrap();
-
-        assert!(verify_native_temporary(&substituted_path, handle_id).is_err());
-        assert_eq!(fs::read(&original_path).unwrap(), b"staged bytes");
-        assert_eq!(fs::read(&substituted_path).unwrap(), b"substituted bytes");
-        fs::remove_file(original_path).unwrap();
-        fs::remove_file(substituted_path).unwrap();
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn native_file_replacement_rejects_unsafe_destination_without_changing_target() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("target.json");
-        let destination = directory.path().join("state.json");
-        fs::write(&target, b"untouched").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &destination).unwrap();
-        #[cfg(windows)]
-        if std::os::windows::fs::symlink_file(&target, &destination).is_err() {
-            return;
-        }
-
-        assert!(replace_native_file(&destination, b"attacker bytes").is_err());
-        assert_eq!(fs::read(&target).unwrap(), b"untouched");
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn native_file_replacement_preserves_destination_when_delete_sharing_is_denied() {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        const FILE_SHARE_READ: u32 = 0x0000_0001;
-        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
-
-        let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("state.json");
-        let original = b"original state";
-        fs::write(&destination, original).unwrap();
-        let holder = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .open(&destination)
-            .unwrap();
-
-        assert!(replace_native_file(&destination, b"replacement state").is_err());
-        assert_eq!(fs::read(&destination).unwrap(), original);
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
-        drop(holder);
-    }
-
-    #[test]
-    fn native_file_replacement_requires_an_existing_parent() {
-        let directory = tempfile::tempdir().unwrap();
-        let parent = directory.path().join("missing");
-        let destination = parent.join("state.json");
-
-        assert!(replace_native_file(&destination, b"state").is_err());
-        assert!(!parent.exists());
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn native_file_destination_identity_fence_rejects_a_replaced_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("state.json");
-        fs::write(&destination, b"original").unwrap();
-        let original_id = native_file_id(&destination).unwrap();
-        let backup = directory.path().join("state.old");
-        fs::rename(&destination, &backup).unwrap();
-        fs::write(&destination, b"replacement").unwrap();
-
-        assert!(verify_native_destination(&destination, Some(original_id)).is_err());
-        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
     }
 
     #[test]

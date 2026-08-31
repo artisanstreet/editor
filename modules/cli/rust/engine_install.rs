@@ -2,25 +2,27 @@ use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    path::{Component, Path, PathBuf},
-    thread,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    time::Duration,
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use flate2::bufread::GzDecoder;
-use fs2::FileExt;
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha512};
 use tempfile::{Builder, NamedTempFile};
 
-use crate::{
-    engine_catalog::{NativeOpenCode2Authority, NativeOpenCode2InstallSpec},
-    instance::{self, NativeFileId, NativeInstanceConfig, NativeInstanceError},
+use artisan_native_engine::{
+    AtomicReplaceOutcome, NativeFileError, NativeOpenCode2InstallLock,
+    NativeOpenCode2InstallLockError, NativeOpenCode2InstallPathError, NativeOpenCode2InstallPaths,
+    VerifiedFileIdentity, platform_supported,
 };
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-const LOCK_POLL: Duration = Duration::from_millis(50);
+use crate::{
+    engine_catalog::{NativeOpenCode2Authority, NativeOpenCode2InstallSpec},
+    instance::NativeInstanceConfig,
+};
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const EXPANDED_ARCHIVE_BOUND: u64 = 512 * 1024 * 1024;
@@ -28,6 +30,9 @@ const MAX_ARCHIVE_ENTRIES: usize = 16_384;
 const MAX_MEMBER_NAME_BYTES: usize = 255;
 const STAGING_PREFIX: &str = "staging-";
 const GENERATION_PREFIX: &str = "generation-";
+
+type InstallPaths = NativeOpenCode2InstallPaths;
+type InstallLock = NativeOpenCode2InstallLock;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InstallOutcome {
@@ -121,88 +126,27 @@ impl NativeOpenCode2InstallError {
     }
 }
 
-#[derive(Debug)]
-struct InstallPaths {
-    database_parent: PathBuf,
-    toolchain_root: PathBuf,
-    engine_root: PathBuf,
-    versions_root: PathBuf,
-    lock_path: PathBuf,
-}
-
-impl InstallPaths {
-    fn derive(
-        instance: &NativeInstanceConfig,
-        spec: &NativeOpenCode2InstallSpec,
-    ) -> Result<Self, NativeOpenCode2InstallError> {
-        let database = instance.database_path();
-        if !database.is_absolute()
-            || database
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(NativeOpenCode2InstallError::InvalidRoot);
-        }
-        let database_parent = database
-            .parent()
-            .filter(|parent| parent.is_absolute() && !parent.as_os_str().is_empty())
-            .ok_or(NativeOpenCode2InstallError::InvalidRoot)?;
-        verify_directory(database_parent)?;
-
-        let toolchain_root = database_parent.join("toolchain");
-        let engine_root = toolchain_root.join(spec.engine_id());
-        let versions_root = engine_root.join("versions");
-        let lock_path = engine_root.join("install.lock");
-        if !engine_root.is_absolute()
-            || engine_root
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(NativeOpenCode2InstallError::InvalidRoot);
-        }
-        Ok(Self {
-            database_parent: database_parent.to_path_buf(),
-            toolchain_root,
-            engine_root,
-            versions_root,
-            lock_path,
-        })
-    }
-
-    fn prepare(&self) -> Result<(), NativeOpenCode2InstallError> {
-        ensure_directory(&self.toolchain_root)?;
-        ensure_directory(&self.engine_root)?;
-        ensure_directory(&self.versions_root)?;
-        self.verify()
-    }
-
-    fn verify(&self) -> Result<(), NativeOpenCode2InstallError> {
-        verify_directory(&self.database_parent)?;
-        verify_directory(&self.toolchain_root)?;
-        verify_directory(&self.engine_root)?;
-        verify_directory(&self.versions_root)
-    }
-}
-
 pub(crate) fn install(
     instance: &NativeInstanceConfig,
 ) -> Result<InstallOutcome, NativeOpenCode2InstallError> {
-    if !is_supported_platform() {
+    if !platform_supported() {
         return Err(NativeOpenCode2InstallError::UnsupportedPlatform);
     }
 
     let authority = NativeOpenCode2Authority::new();
     let spec = NativeOpenCode2Authority::certified_install_spec();
-    let paths = InstallPaths::derive(instance, &spec)?;
-    paths.prepare()?;
-    let lock = InstallLock::acquire(&paths)?;
-    lock.fence(&paths)?;
+    let paths = authority
+        .install_paths(instance.database_path())
+        .map_err(map_install_path_error)?;
+    paths.prepare().map_err(map_install_path_error)?;
+    let lock = InstallLock::acquire(&paths).map_err(map_install_lock_error)?;
+    fence(&lock, &paths)?;
     let state = authority
-        .read_install_state(&paths.engine_root)
+        .read_install_state(paths.engine_root())
         .map_err(|_| NativeOpenCode2InstallError::StateInvalid)?;
     let already_installed = if state.is_some() {
         authority
-            .resolve_active(instance)
+            .resolve_active(instance.database_path())
             .map_err(|_| NativeOpenCode2InstallError::StateInvalid)?;
         true
     } else {
@@ -216,7 +160,7 @@ pub(crate) fn install(
     let staging = StagingDirectory::create(&paths, &lock)?;
     let mut archive = download_archive(&paths, &lock, &spec)?;
     extract_archive(&mut archive, &staging.path, &paths, &lock, &spec)?;
-    lock.fence(&paths)?;
+    fence(&lock, &paths)?;
     let staged_executable = staging.path.join(spec.binary());
     let staged_id = verify_executable(&staged_executable, &spec)?;
 
@@ -227,7 +171,7 @@ pub(crate) fn install(
         return Err(NativeOpenCode2InstallError::CleanupFailed);
     }
 
-    lock.fence(&paths)?;
+    fence(&lock, &paths)?;
     verify_directory(&staging.path)?;
     let prepublish_id = verify_executable(&staged_executable, &spec)?;
     if prepublish_id != staged_id {
@@ -236,7 +180,7 @@ pub(crate) fn install(
     let generation_id = new_generation_id()?;
     let published = staging.publish(&paths, &lock, &generation_id)?;
     let generation_executable = published.path.join(spec.binary());
-    lock.fence(&paths)?;
+    fence(&lock, &paths)?;
     let published_id = verify_executable(&generation_executable, &spec)?;
     if published_id != staged_id {
         return Err(NativeOpenCode2InstallError::ExecutableInvalid);
@@ -245,12 +189,12 @@ pub(crate) fn install(
     let state = authority
         .new_install_state(&generation_id, None)
         .map_err(|_| NativeOpenCode2InstallError::StateConstructionFailed)?;
-    lock.fence(&paths)?;
+    fence(&lock, &paths)?;
     let publication = authority
-        .write_install_state(&paths.engine_root, &state)
+        .write_install_state(paths.engine_root(), &state)
         .map_err(|_| NativeOpenCode2InstallError::StatePublicationFailed)?;
     match publication {
-        instance::NativeAtomicReplaceOutcome::Committed => {
+        AtomicReplaceOutcome::Committed => {
             verify_activation(
                 &authority,
                 instance,
@@ -260,7 +204,7 @@ pub(crate) fn install(
                 false,
             )?;
         }
-        instance::NativeAtomicReplaceOutcome::CommittedButUnverified => {
+        AtomicReplaceOutcome::CommittedButUnverified => {
             verify_activation(
                 &authority,
                 instance,
@@ -271,44 +215,52 @@ pub(crate) fn install(
             )?;
         }
     }
-    lock.fence(&paths)?;
+    fence(&lock, &paths)?;
     Ok(InstallOutcome::Installed)
 }
 
-fn is_supported_platform() -> bool {
-    cfg!(all(target_os = "windows", target_arch = "x86_64"))
-}
-
 fn verify_directory(path: &Path) -> Result<(), NativeOpenCode2InstallError> {
-    for ancestor in path.ancestors() {
-        let metadata = fs::symlink_metadata(ancestor)
-            .map_err(|_| NativeOpenCode2InstallError::RootUnavailable)?;
-        if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
-            return Err(NativeOpenCode2InstallError::InvalidRoot);
-        }
-    }
-    Ok(())
+    artisan_native_engine::verify_directory(path).map_err(map_install_file_error)
 }
 
-fn ensure_directory(path: &Path) -> Result<(), NativeOpenCode2InstallError> {
-    let parent = path
-        .parent()
-        .ok_or(NativeOpenCode2InstallError::InvalidRoot)?;
-    verify_directory(parent)?;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
-                return Err(NativeOpenCode2InstallError::InvalidRoot);
-            }
+fn map_install_file_error(error: NativeFileError) -> NativeOpenCode2InstallError {
+    match error {
+        NativeFileError::UnsafePath | NativeFileError::PrivatePermissions => {
+            NativeOpenCode2InstallError::InvalidRoot
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::create_dir(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(NativeOpenCode2InstallError::RootUnavailable),
-        },
-        Err(_) => return Err(NativeOpenCode2InstallError::RootUnavailable),
+        NativeFileError::NotFound
+        | NativeFileError::TooLarge
+        | NativeFileError::FileChanged
+        | NativeFileError::FileSizeMismatch
+        | NativeFileError::FileHashMismatch
+        | NativeFileError::Io => NativeOpenCode2InstallError::RootUnavailable,
     }
-    verify_directory(path)
+}
+
+fn map_install_path_error(error: NativeOpenCode2InstallPathError) -> NativeOpenCode2InstallError {
+    match error {
+        NativeOpenCode2InstallPathError::InvalidRoot => NativeOpenCode2InstallError::InvalidRoot,
+        NativeOpenCode2InstallPathError::Unavailable => {
+            NativeOpenCode2InstallError::RootUnavailable
+        }
+    }
+}
+
+fn map_install_lock_error(error: NativeOpenCode2InstallLockError) -> NativeOpenCode2InstallError {
+    match error {
+        NativeOpenCode2InstallLockError::InvalidRoot => NativeOpenCode2InstallError::InvalidRoot,
+        NativeOpenCode2InstallLockError::Unavailable | NativeOpenCode2InstallLockError::Busy => {
+            NativeOpenCode2InstallError::LockUnavailable
+        }
+        NativeOpenCode2InstallLockError::Timeout => NativeOpenCode2InstallError::LockTimeout,
+        NativeOpenCode2InstallLockError::IdentityChanged => {
+            NativeOpenCode2InstallError::LockIdentityChanged
+        }
+    }
+}
+
+fn fence(lock: &InstallLock, paths: &InstallPaths) -> Result<(), NativeOpenCode2InstallError> {
+    lock.fence(paths).map_err(map_install_lock_error)
 }
 
 fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
@@ -327,98 +279,11 @@ fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
     false
 }
 
-pub(crate) struct InstallLock {
-    path: PathBuf,
-    file: File,
-}
-
-impl InstallLock {
-    fn acquire(paths: &InstallPaths) -> Result<Self, NativeOpenCode2InstallError> {
-        paths.verify()?;
-        let file = open_lock(&paths.lock_path)?;
-        let lock = Self {
-            path: paths.lock_path.clone(),
-            file,
-        };
-        let deadline = Instant::now() + LOCK_TIMEOUT;
-        loop {
-            match lock.file.try_lock_exclusive() {
-                Ok(()) => break,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err(NativeOpenCode2InstallError::LockTimeout);
-                    }
-                    thread::sleep(LOCK_POLL);
-                }
-                Err(_) => return Err(NativeOpenCode2InstallError::LockUnavailable),
-            }
-        }
-        lock.fence(paths)?;
-        Ok(lock)
-    }
-
-    fn fence(&self, paths: &InstallPaths) -> Result<(), NativeOpenCode2InstallError> {
-        paths.verify()?;
-        verify_regular_file(&self.path)?;
-        if file_identity(&self.file)? != path_identity(&self.path)? {
-            return Err(NativeOpenCode2InstallError::LockIdentityChanged);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn fence_instance(
-        &self,
-        instance: &NativeInstanceConfig,
-    ) -> Result<(), NativeOpenCode2InstallError> {
-        let spec = NativeOpenCode2Authority::certified_install_spec();
-        let paths = InstallPaths::derive(instance, &spec)?;
-        self.fence(&paths)
-    }
-}
-
-/// Acquires the existing `OpenCode2` installation lock for another CLI module.
-///
-/// Profile registration and installation must serialize through this one
-/// guard; the profile surface does not create a parallel lock protocol.
-pub(crate) fn acquire_install_lock(
-    instance: &NativeInstanceConfig,
-) -> Result<InstallLock, NativeOpenCode2InstallError> {
-    let spec = NativeOpenCode2Authority::certified_install_spec();
-    let paths = InstallPaths::derive(instance, &spec)?;
-    InstallLock::acquire(&paths)
-}
-
-fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallError> {
-    if let Ok(metadata) = fs::symlink_metadata(path)
-        && (is_reparse_or_symlink(&metadata) || !metadata.is_file())
-    {
-        return Err(NativeOpenCode2InstallError::LockUnavailable);
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|_| NativeOpenCode2InstallError::LockUnavailable)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| NativeOpenCode2InstallError::LockUnavailable)?;
+fn verify_archive_regular_file(path: &Path) -> Result<(), NativeOpenCode2InstallError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| NativeOpenCode2InstallError::ArchiveIdentityChanged)?;
     if is_reparse_or_symlink(&metadata) || !metadata.is_file() {
-        return Err(NativeOpenCode2InstallError::LockUnavailable);
-    }
-    verify_regular_file(path)?;
-    if file_identity(&file)? != path_identity(path)? {
-        return Err(NativeOpenCode2InstallError::LockIdentityChanged);
-    }
-    Ok(file)
-}
-
-fn verify_regular_file(path: &Path) -> Result<(), NativeOpenCode2InstallError> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|_| NativeOpenCode2InstallError::LockUnavailable)?;
-    if is_reparse_or_symlink(&metadata) || !metadata.is_file() {
-        return Err(NativeOpenCode2InstallError::LockIdentityChanged);
+        return Err(NativeOpenCode2InstallError::ArchiveIdentityChanged);
     }
     Ok(())
 }
@@ -467,7 +332,7 @@ fn file_identity(file: &File) -> Result<FileIdentity, NativeOpenCode2InstallErro
 }
 
 fn path_identity(path: &Path) -> Result<FileIdentity, NativeOpenCode2InstallError> {
-    let file = File::open(path).map_err(|_| NativeOpenCode2InstallError::LockUnavailable)?;
+    let file = File::open(path).map_err(|_| NativeOpenCode2InstallError::ArchiveIdentityChanged)?;
     file_identity(&file)
 }
 
@@ -475,8 +340,8 @@ fn cleanup_staging(
     paths: &InstallPaths,
     lock: &InstallLock,
 ) -> Result<(), NativeOpenCode2InstallError> {
-    lock.fence(paths)?;
-    let entries = fs::read_dir(&paths.versions_root)
+    fence(lock, paths)?;
+    let entries = fs::read_dir(paths.versions_root())
         .map_err(|_| NativeOpenCode2InstallError::CleanupFailed)?;
     for entry in entries {
         let entry = entry.map_err(|_| NativeOpenCode2InstallError::CleanupFailed)?;
@@ -489,14 +354,14 @@ fn cleanup_staging(
         }
         let candidate = entry.path();
         verify_directory(&candidate)?;
-        lock.fence(paths)?;
+        fence(lock, paths)?;
         verify_directory(&candidate)?;
         fs::remove_dir_all(&candidate).map_err(|_| NativeOpenCode2InstallError::CleanupFailed)?;
         if fs::symlink_metadata(&candidate).is_ok() {
             return Err(NativeOpenCode2InstallError::CleanupFailed);
         }
     }
-    lock.fence(paths)
+    fence(lock, paths)
 }
 
 fn is_staging_name(name: &str) -> bool {
@@ -529,16 +394,16 @@ impl StagingDirectory {
         lock: &InstallLock,
     ) -> Result<Self, NativeOpenCode2InstallError> {
         for _ in 0..8 {
-            lock.fence(paths)?;
-            let path = paths.versions_root.join(random_name(STAGING_PREFIX)?);
+            fence(lock, paths)?;
+            let path = paths.versions_root().join(random_name(STAGING_PREFIX)?);
             match fs::create_dir(&path) {
                 Ok(()) => {
                     verify_directory(&path)?;
-                    lock.fence(paths)?;
+                    fence(lock, paths)?;
                     verify_directory(&path)?;
                     return Ok(Self {
                         path,
-                        versions_root: paths.versions_root.clone(),
+                        versions_root: paths.versions_root().to_path_buf(),
                         published: false,
                     });
                 }
@@ -559,9 +424,9 @@ impl StagingDirectory {
             return Err(NativeOpenCode2InstallError::GenerationUnavailable);
         }
         verify_directory(&self.path)?;
-        lock.fence(paths)?;
+        fence(lock, paths)?;
         verify_directory(&self.path)?;
-        let destination = paths.versions_root.join(generation_id);
+        let destination = paths.versions_root().join(generation_id);
         if fs::symlink_metadata(&destination).is_ok() {
             return Err(NativeOpenCode2InstallError::GenerationCollision);
         }
@@ -576,7 +441,7 @@ impl StagingDirectory {
         staging.published = true;
         drop(staging);
         verify_directory(&destination)?;
-        lock.fence(paths)?;
+        fence(lock, paths)?;
         Ok(PublishedGeneration { path: destination })
     }
 }
@@ -637,13 +502,13 @@ fn download_archive(
     lock: &InstallLock,
     spec: &NativeOpenCode2InstallSpec,
 ) -> Result<NamedTempFile, NativeOpenCode2InstallError> {
-    lock.fence(paths)?;
+    fence(lock, paths)?;
     let mut archive = Builder::new()
         .prefix(".opencode2-download-")
         .suffix(".tgz")
-        .tempfile_in(&paths.versions_root)
+        .tempfile_in(paths.versions_root())
         .map_err(|_| NativeOpenCode2InstallError::DownloadFailed)?;
-    if archive.path().parent() != Some(paths.versions_root.as_path()) {
+    if archive.path().parent() != Some(paths.versions_root()) {
         return Err(NativeOpenCode2InstallError::DownloadFailed);
     }
     verify_archive_custody(&archive)?;
@@ -673,7 +538,7 @@ fn download_archive(
     )?;
     verify_compressed_integrity(&digest, &expected)?;
     verify_archive_custody(&archive)?;
-    lock.fence(paths)?;
+    fence(lock, paths)?;
     archive
         .as_file_mut()
         .flush()
@@ -683,12 +548,12 @@ fn download_archive(
         .sync_all()
         .map_err(|_| NativeOpenCode2InstallError::DownloadFailed)?;
     verify_archive_custody(&archive)?;
-    lock.fence(paths)?;
+    fence(lock, paths)?;
     Ok(archive)
 }
 
 fn verify_archive_custody(archive: &NamedTempFile) -> Result<(), NativeOpenCode2InstallError> {
-    verify_regular_file(archive.path())
+    verify_archive_regular_file(archive.path())
         .map_err(|_| NativeOpenCode2InstallError::ArchiveIdentityChanged)?;
     let handle_id = file_identity(archive.as_file())
         .map_err(|_| NativeOpenCode2InstallError::ArchiveIdentityChanged)?;
@@ -770,7 +635,7 @@ fn extract_archive(
 ) -> Result<(), NativeOpenCode2InstallError> {
     verify_directory(staging_path)?;
     verify_archive_custody(archive)?;
-    lock.fence(paths)?;
+    fence(lock, paths)?;
     verify_directory(staging_path)?;
     verify_archive_custody(archive)?;
     archive
@@ -788,7 +653,7 @@ fn extract_archive(
     )?;
     ensure_gzip_end(gzip)?;
     verify_archive_custody(archive)?;
-    lock.fence(paths)?;
+    fence(lock, paths)?;
     Ok(())
 }
 
@@ -1096,23 +961,9 @@ fn discard_padding<R: Read>(reader: &mut R, size: u64) -> Result<(), NativeOpenC
 fn verify_executable(
     path: &Path,
     spec: &NativeOpenCode2InstallSpec,
-) -> Result<NativeFileId, NativeOpenCode2InstallError> {
-    instance::verify_native_file(path, spec.executable_size_bytes(), spec.executable_sha256())
-        .map_err(|error| map_executable_error(&error))
-}
-
-fn map_executable_error(error: &NativeInstanceError) -> NativeOpenCode2InstallError {
-    match error {
-        NativeInstanceError::NotFound
-        | NativeInstanceError::TooLarge
-        | NativeInstanceError::FileSizeMismatch
-        | NativeInstanceError::FileHashMismatch
-        | NativeInstanceError::FileChanged
-        | NativeInstanceError::InvalidPath(_)
-        | NativeInstanceError::Io { .. }
-        | NativeInstanceError::InvalidManifest
-        | NativeInstanceError::UnsafePath(_) => NativeOpenCode2InstallError::ExecutableInvalid,
-    }
+) -> Result<VerifiedFileIdentity, NativeOpenCode2InstallError> {
+    artisan_native_engine::verify_file(path, spec.executable_size_bytes(), spec.executable_sha256())
+        .map_err(|_| NativeOpenCode2InstallError::ExecutableInvalid)
 }
 
 fn verify_activation(
@@ -1120,7 +971,7 @@ fn verify_activation(
     instance: &NativeInstanceConfig,
     paths: &InstallPaths,
     generation_id: &str,
-    staged_id: NativeFileId,
+    staged_id: VerifiedFileIdentity,
     uncertain: bool,
 ) -> Result<(), NativeOpenCode2InstallError> {
     let failure = if uncertain {
@@ -1129,18 +980,23 @@ fn verify_activation(
         NativeOpenCode2InstallError::ActivationUnverified
     };
     if authority
-        .read_install_state(&paths.engine_root)
+        .read_install_state(paths.engine_root())
         .map_err(|_| failure)?
         .is_none()
     {
         return Err(failure);
     }
-    let resolved = authority.resolve_active(instance).map_err(|_| failure)?;
+    let resolved = authority
+        .resolve_active(instance.database_path())
+        .map_err(|_| failure)?;
     if resolved.generation_id() != generation_id {
         return Err(failure);
     }
     let spec = NativeOpenCode2Authority::certified_install_spec();
-    let executable = paths.versions_root.join(generation_id).join(spec.binary());
+    let executable = paths
+        .versions_root()
+        .join(generation_id)
+        .join(spec.binary());
     let published_id = verify_executable(&executable, &spec).map_err(|_| failure)?;
     if published_id != staged_id {
         return Err(failure);
@@ -1406,13 +1262,12 @@ mod tests {
 
     #[test]
     fn executable_size_and_hash_mismatches_map_to_one_path_free_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing");
+        let spec = NativeOpenCode2Authority::certified_install_spec();
         assert_eq!(
-            map_executable_error(&NativeInstanceError::FileSizeMismatch),
-            NativeOpenCode2InstallError::ExecutableInvalid
-        );
-        assert_eq!(
-            map_executable_error(&NativeInstanceError::FileHashMismatch),
-            NativeOpenCode2InstallError::ExecutableInvalid
+            verify_executable(&path, &spec),
+            Err(NativeOpenCode2InstallError::ExecutableInvalid)
         );
     }
 
@@ -1443,16 +1298,16 @@ mod tests {
     fn cleanup_removes_only_owned_staging_directories() {
         let (_root, paths, lock) = prepared_paths();
         let staging_path = paths
-            .versions_root
+            .versions_root()
             .join("staging-0123456789abcdef0123456789abcdef");
         fs::create_dir(&staging_path).unwrap();
         fs::write(staging_path.join("partial"), b"partial").unwrap();
         let generation_path = paths
-            .versions_root
+            .versions_root()
             .join("generation-0123456789abcdef0123456789abcdef");
         fs::create_dir(&generation_path).unwrap();
         fs::write(generation_path.join("sentinel"), b"keep").unwrap();
-        let unrelated_path = paths.versions_root.join("staging-not-owned");
+        let unrelated_path = paths.versions_root().join("staging-not-owned");
         fs::create_dir(&unrelated_path).unwrap();
 
         cleanup_staging(&paths, &lock).unwrap();
@@ -1466,17 +1321,17 @@ mod tests {
     fn generation_collision_never_overwrites_existing_directory() {
         let (_root, paths, lock) = prepared_paths();
         let generation_id = "generation-0123456789abcdef0123456789abcdef";
-        let destination = paths.versions_root.join(generation_id);
+        let destination = paths.versions_root().join(generation_id);
         fs::create_dir(&destination).unwrap();
         fs::write(destination.join("sentinel"), b"keep").unwrap();
         let staging_path = paths
-            .versions_root
+            .versions_root()
             .join("staging-fedcba9876543210fedcba9876543210");
         fs::create_dir(&staging_path).unwrap();
         fs::write(staging_path.join("opencode2.exe"), b"new").unwrap();
         let staging = StagingDirectory {
             path: staging_path.clone(),
-            versions_root: paths.versions_root.clone(),
+            versions_root: paths.versions_root().to_path_buf(),
             published: false,
         };
 
@@ -1492,25 +1347,25 @@ mod tests {
     fn lock_rejects_a_directory_and_never_replaces_it() {
         let (_root, paths, lock) = prepared_paths();
         drop(lock);
-        fs::remove_file(&paths.lock_path).unwrap();
-        fs::create_dir(&paths.lock_path).unwrap();
+        fs::remove_file(paths.lock_path()).unwrap();
+        fs::create_dir(paths.lock_path()).unwrap();
         assert!(matches!(
             InstallLock::acquire(&paths),
-            Err(NativeOpenCode2InstallError::LockUnavailable)
+            Err(NativeOpenCode2InstallLockError::Unavailable)
         ));
-        assert!(paths.lock_path.is_dir());
+        assert!(paths.lock_path().is_dir());
     }
 
     #[cfg(unix)]
     #[test]
     fn lock_fence_rejects_path_identity_substitution() {
         let (_root, paths, lock) = prepared_paths();
-        let replacement = paths.engine_root.join("replacement.lock");
+        let replacement = paths.engine_root().join("replacement.lock");
         fs::write(&replacement, b"replacement").unwrap();
-        fs::rename(&replacement, &paths.lock_path).unwrap();
+        fs::rename(&replacement, paths.lock_path()).unwrap();
         assert_eq!(
             lock.fence(&paths),
-            Err(NativeOpenCode2InstallError::LockIdentityChanged)
+            Err(NativeOpenCode2InstallLockError::IdentityChanged)
         );
     }
 
@@ -1587,20 +1442,15 @@ mod tests {
 
     fn prepared_paths() -> (tempfile::TempDir, InstallPaths, InstallLock) {
         let root = tempfile::tempdir().unwrap();
-        let database_parent = root.path().to_path_buf();
-        let toolchain_root = database_parent.join("toolchain");
+        let database = root.path().join("artisan.sqlite");
+        let toolchain_root = root.path().join("toolchain");
         let engine_root = toolchain_root.join("opencode2");
         let versions_root = engine_root.join("versions");
         fs::create_dir(&toolchain_root).unwrap();
         fs::create_dir(&engine_root).unwrap();
         fs::create_dir(&versions_root).unwrap();
-        let paths = InstallPaths {
-            database_parent,
-            toolchain_root,
-            engine_root: engine_root.clone(),
-            versions_root,
-            lock_path: engine_root.join("install.lock"),
-        };
+        let spec = NativeOpenCode2Authority::certified_install_spec();
+        let paths = InstallPaths::derive(&database, &spec).unwrap();
         let lock = InstallLock::acquire(&paths).unwrap();
         (root, paths, lock)
     }
