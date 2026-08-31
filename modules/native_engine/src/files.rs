@@ -41,6 +41,11 @@ impl std::fmt::Display for NativeFileError {
 
 impl std::error::Error for NativeFileError {}
 
+/// The filesystem identity captured while a certified file was verified.
+///
+/// The identity is intentionally opaque so callers can retain it for a
+/// custody check without exposing operating-system identifiers.
+#[must_use = "retain the verified identity for the custody check"]
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct VerifiedFileIdentity {
     inner: NativeFileIdentity,
@@ -96,6 +101,9 @@ impl std::fmt::Debug for NativeFileIdentity {
     }
 }
 
+/// The result of publishing bytes through the native authority's atomic file
+/// replacement protocol.
+#[must_use = "inspect whether the atomic replacement was fully verified"]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtomicReplaceOutcome {
     Committed,
@@ -149,6 +157,13 @@ fn check_ancestors_all(path: &Path, must_exist: bool) -> Result<(), NativeFileEr
     Ok(())
 }
 
+/// Verifies that an absolute directory and its ancestor chain are safe.
+///
+/// # Errors
+///
+/// Returns a bounded [`NativeFileError`] when the path is missing, unsafe, or
+/// cannot be inspected.
+#[must_use]
 pub fn verify_directory(path: &Path) -> Result<(), NativeFileError> {
     check_ancestors_all(path, true)?;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
@@ -164,6 +179,14 @@ pub fn verify_directory(path: &Path) -> Result<(), NativeFileError> {
     Ok(())
 }
 
+/// Ensures that one absolute directory exists and passes the directory safety
+/// checks.
+///
+/// # Errors
+///
+/// Returns a bounded [`NativeFileError`] when the path or any ancestor is
+/// unsafe, unavailable, or cannot be created.
+#[must_use]
 pub fn ensure_directory(path: &Path) -> Result<(), NativeFileError> {
     check_absolute(path)?;
     let parent = path.parent().ok_or(NativeFileError::UnsafePath)?;
@@ -251,6 +274,14 @@ pub(crate) fn verify_regular_file(path: &Path) -> Result<(), NativeFileError> {
     Ok(())
 }
 
+/// Reads one regular file while enforcing a byte bound and stable file
+/// identity across the read.
+///
+/// # Errors
+///
+/// Returns a bounded [`NativeFileError`] when the file is unsafe, missing,
+/// exceeds `maximum_bytes`, changes during the read, or cannot be read.
+#[must_use]
 pub fn read_bounded(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, NativeFileError> {
     open_and_read_bounded(path, maximum_bytes)
 }
@@ -302,6 +333,14 @@ fn open_and_read_bounded(path: &Path, maximum_bytes: usize) -> Result<Vec<u8>, N
     Ok(bytes)
 }
 
+/// Verifies one regular file's exact size, SHA-256, and stable filesystem
+/// identity.
+///
+/// # Errors
+///
+/// Returns a bounded [`NativeFileError`] when the file is unsafe, unavailable,
+/// changes during verification, or does not match the expected size or hash.
+#[must_use]
 pub fn verify_file(
     path: &Path,
     expected_size: u64,
@@ -474,6 +513,14 @@ fn sync_directory(directory: &Path) -> Result<(), NativeFileError> {
     Ok(())
 }
 
+/// Atomically publishes bounded caller-provided bytes after validating the
+/// destination and temporary file identities.
+///
+/// # Errors
+///
+/// Returns a bounded [`NativeFileError`] when the destination is unsafe, the
+/// temporary file cannot be published, or an I/O operation fails.
+#[must_use]
 pub fn replace_file(path: &Path, bytes: &[u8]) -> Result<AtomicReplaceOutcome, NativeFileError> {
     let directory = path.parent().ok_or(NativeFileError::UnsafePath)?;
     check_ancestors_all(path, true)?;
@@ -527,6 +574,13 @@ fn verify_temporary(path: &Path, expected: NativeFileIdentity) -> Result<(), Nat
     }
 }
 
+/// Ensures that a directory exists with the platform's private permissions.
+///
+/// # Errors
+///
+/// Returns a bounded [`NativeFileError`] when the directory or its ancestors
+/// are unsafe, unavailable, or do not have the required private permissions.
+#[must_use]
 pub fn ensure_private_directory(path: &Path) -> Result<(), NativeFileError> {
     check_absolute(path)?;
     check_ancestors_all(path, false)?;
@@ -554,6 +608,13 @@ pub fn ensure_private_directory(path: &Path) -> Result<(), NativeFileError> {
     }
 }
 
+/// Validates an existing directory's path safety and private permissions.
+///
+/// # Errors
+///
+/// Returns a bounded [`NativeFileError`] when the directory is unsafe,
+/// unavailable, or does not have the required private permissions.
+#[must_use]
 pub fn validate_private_directory(path: &Path) -> Result<(), NativeFileError> {
     check_ancestors_all(path, true)?;
     let metadata = fs::symlink_metadata(path).map_err(|_| NativeFileError::Io)?;

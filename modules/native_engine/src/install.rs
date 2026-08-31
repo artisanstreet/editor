@@ -13,7 +13,8 @@ use serde::{
     de::{self, Deserializer, MapAccess, Visitor},
 };
 
-use crate::files::{self, AtomicReplaceOutcome, NativeFileError, VerifiedFileIdentity};
+use crate::io as native_files;
+use crate::io::{AtomicReplaceOutcome, NativeFileError, VerifiedFileIdentity};
 
 const CERTIFIED_ENGINE_ID: &str = "opencode2";
 const CERTIFIED_VERSION: &str = "0.0.0-beta-17778";
@@ -71,58 +72,86 @@ impl fmt::Debug for NativeOpenCode2InstallSpec {
 }
 
 impl NativeOpenCode2InstallSpec {
+    /// Returns the certified engine identifier.
+    #[must_use]
     pub const fn engine_id(&self) -> &'static str {
         self.engine_id
     }
 
+    /// Returns the certified artifact version.
+    #[must_use]
     pub const fn version(&self) -> &'static str {
         self.version
     }
 
+    /// Returns the certified upstream source commit.
+    #[must_use]
     pub const fn upstream_commit(&self) -> &'static str {
         self.upstream_commit
     }
 
+    /// Returns the certified target platform.
+    #[must_use]
     pub const fn platform(&self) -> &'static str {
         self.platform
     }
 
+    /// Returns the certified target architecture.
+    #[must_use]
     pub const fn architecture(&self) -> &'static str {
         self.architecture
     }
 
+    /// Returns the certified artifact kind.
+    #[must_use]
     pub const fn artifact_kind(&self) -> &'static str {
         self.artifact_kind
     }
 
+    /// Returns the exact archive member containing the executable.
+    #[must_use]
     pub const fn archive_member(&self) -> &'static str {
         self.archive_member
     }
 
+    /// Returns the certified executable file name.
+    #[must_use]
     pub const fn binary(&self) -> &'static str {
         self.binary
     }
 
+    /// Returns the certified npm package integrity value.
+    #[must_use]
     pub const fn npm_integrity_sha512(&self) -> &'static str {
         self.npm_integrity_sha512
     }
 
+    /// Returns the certified npm package URL.
+    #[must_use]
     pub const fn npm_url(&self) -> &'static str {
         self.npm_url
     }
 
+    /// Returns the maximum permitted download size in bytes.
+    #[must_use]
     pub const fn download_bound_bytes(&self) -> u64 {
         self.download_bound_bytes
     }
 
+    /// Returns the certified executable size in bytes.
+    #[must_use]
     pub const fn executable_size_bytes(&self) -> u64 {
         self.executable_size_bytes
     }
 
+    /// Returns the certified executable SHA-256 digest.
+    #[must_use]
     pub const fn executable_sha256(&self) -> &[u8; 32] {
         &self.executable_sha256
     }
 
+    /// Returns the certified executable SHA-256 digest in hexadecimal form.
+    #[must_use]
     pub const fn executable_sha256_hex(&self) -> &'static str {
         self.executable_sha256_hex
     }
@@ -137,6 +166,7 @@ impl NativeOpenCode2InstallSpec {
     }
 }
 
+/// Failure while deriving or preparing the certified installation paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeOpenCode2InstallPathError {
     InvalidRoot,
@@ -154,6 +184,8 @@ impl fmt::Display for NativeOpenCode2InstallPathError {
 
 impl std::error::Error for NativeOpenCode2InstallPathError {}
 
+/// The validated filesystem locations used by the certified installation.
+#[must_use = "retain the validated paths for the operation they authorize"]
 #[derive(Clone)]
 pub struct NativeOpenCode2InstallPaths {
     database_parent: PathBuf,
@@ -172,6 +204,14 @@ impl fmt::Debug for NativeOpenCode2InstallPaths {
 }
 
 impl NativeOpenCode2InstallPaths {
+    /// Derives the certified installation locations from an absolute database
+    /// path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2InstallPathError::InvalidRoot`] for an unsafe
+    /// or structurally invalid database path.
+    #[must_use]
     pub fn derive(
         database_path: &Path,
         spec: &NativeOpenCode2InstallSpec,
@@ -207,41 +247,66 @@ impl NativeOpenCode2InstallPaths {
         })
     }
 
+    /// Creates the certified installation directories and verifies them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2InstallPathError`] when a directory is unsafe,
+    /// unavailable, or cannot be created.
+    #[must_use]
     pub fn prepare(&self) -> Result<(), NativeOpenCode2InstallPathError> {
-        files::ensure_directory(&self.toolchain_root).map_err(map_path_file_error)?;
-        files::ensure_directory(&self.engine_root).map_err(map_path_file_error)?;
-        files::ensure_directory(&self.versions_root).map_err(map_path_file_error)?;
+        native_files::ensure_directory(&self.toolchain_root).map_err(map_path_file_error)?;
+        native_files::ensure_directory(&self.engine_root).map_err(map_path_file_error)?;
+        native_files::ensure_directory(&self.versions_root).map_err(map_path_file_error)?;
         self.verify()
     }
 
+    /// Verifies the certified installation directories and ancestor chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2InstallPathError`] when a directory is unsafe
+    /// or unavailable.
+    #[must_use]
     pub fn verify(&self) -> Result<(), NativeOpenCode2InstallPathError> {
-        files::verify_directory(&self.database_parent).map_err(map_path_file_error)?;
-        files::verify_directory(&self.toolchain_root).map_err(map_path_file_error)?;
-        files::verify_directory(&self.engine_root).map_err(map_path_file_error)?;
-        files::verify_directory(&self.versions_root).map_err(map_path_file_error)
+        native_files::verify_directory(&self.database_parent).map_err(map_path_file_error)?;
+        native_files::verify_directory(&self.toolchain_root).map_err(map_path_file_error)?;
+        native_files::verify_directory(&self.engine_root).map_err(map_path_file_error)?;
+        native_files::verify_directory(&self.versions_root).map_err(map_path_file_error)
     }
 
+    /// Returns the validated directory containing the database.
+    #[must_use]
     pub fn database_parent(&self) -> &Path {
         &self.database_parent
     }
 
+    /// Returns the validated toolchain root.
+    #[must_use]
     pub fn toolchain_root(&self) -> &Path {
         &self.toolchain_root
     }
 
+    /// Returns the validated certified engine root.
+    #[must_use]
     pub fn engine_root(&self) -> &Path {
         &self.engine_root
     }
 
+    /// Returns the validated generation root.
+    #[must_use]
     pub fn versions_root(&self) -> &Path {
         &self.versions_root
     }
 
+    /// Returns the path of the exclusive installation lock.
+    #[must_use]
     pub fn lock_path(&self) -> &Path {
         &self.lock_path
     }
 }
 
+/// Failure while acquiring or fencing the certified installation lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeOpenCode2InstallLockError {
     InvalidRoot,
@@ -267,6 +332,7 @@ impl std::error::Error for NativeOpenCode2InstallLockError {}
 
 /// RAII custody of the exclusive lock shared by installation, registration,
 /// and profile launch resolution.
+#[must_use = "the lock must remain live for the protected operation"]
 pub struct NativeOpenCode2InstallLock {
     path: PathBuf,
     file: File,
@@ -281,6 +347,14 @@ impl fmt::Debug for NativeOpenCode2InstallLock {
 }
 
 impl NativeOpenCode2InstallLock {
+    /// Acquires and fences the exclusive installation lock, waiting briefly if
+    /// another cooperating operation currently owns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2InstallLockError`] when the lock path is
+    /// unsafe, unavailable, changed, or cannot be acquired before the timeout.
+    #[must_use]
     pub fn acquire(
         paths: &NativeOpenCode2InstallPaths,
     ) -> Result<Self, NativeOpenCode2InstallLockError> {
@@ -289,6 +363,13 @@ impl NativeOpenCode2InstallLock {
 
     /// Attempts one non-blocking acquisition. It gives tests and callers a
     /// typed way to prove that a live launch capability retains the fence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2InstallLockError::Busy`] when another
+    /// operation owns the lock, or another variant when the lock is unsafe,
+    /// unavailable, or changed.
+    #[must_use]
     pub fn try_acquire(
         paths: &NativeOpenCode2InstallPaths,
     ) -> Result<Self, NativeOpenCode2InstallLockError> {
@@ -327,12 +408,20 @@ impl NativeOpenCode2InstallLock {
         Ok(lock)
     }
 
+    /// Revalidates the lock file's path and identity against the open lock
+    /// handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2InstallLockError`] when the lock or its path
+    /// is unavailable, unsafe, or has changed.
+    #[must_use]
     pub fn fence(
         &self,
         paths: &NativeOpenCode2InstallPaths,
     ) -> Result<(), NativeOpenCode2InstallLockError> {
         paths.verify().map_err(map_path_lock_error)?;
-        files::verify_regular_file(&self.path).map_err(|error| match error {
+        native_files::verify_regular_file(&self.path).map_err(|error| match error {
             NativeFileError::UnsafePath
             | NativeFileError::FileChanged
             | NativeFileError::NotFound => NativeOpenCode2InstallLockError::IdentityChanged,
@@ -342,8 +431,8 @@ impl NativeOpenCode2InstallLock {
             | NativeFileError::Io
             | NativeFileError::PrivatePermissions => NativeOpenCode2InstallLockError::Unavailable,
         })?;
-        let open_id = files::file_identity(&self.file).map_err(map_file_lock_error)?;
-        let path_id = files::path_identity(&self.path).map_err(map_file_lock_error)?;
+        let open_id = native_files::file_identity(&self.file).map_err(map_file_lock_error)?;
+        let path_id = native_files::path_identity(&self.path).map_err(map_file_lock_error)?;
         if open_id != path_id {
             return Err(NativeOpenCode2InstallLockError::IdentityChanged);
         }
@@ -353,7 +442,7 @@ impl NativeOpenCode2InstallLock {
 
 fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallLockError> {
     if let Ok(metadata) = fs::symlink_metadata(path)
-        && (files::metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file())
+        && (native_files::metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file())
     {
         return Err(NativeOpenCode2InstallLockError::Unavailable);
     }
@@ -367,10 +456,10 @@ fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallLockError> {
     let metadata = file
         .metadata()
         .map_err(|_| NativeOpenCode2InstallLockError::Unavailable)?;
-    if files::metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
+    if native_files::metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
         return Err(NativeOpenCode2InstallLockError::Unavailable);
     }
-    files::verify_regular_file(path).map_err(|error| match error {
+    native_files::verify_regular_file(path).map_err(|error| match error {
         NativeFileError::UnsafePath | NativeFileError::FileChanged => {
             NativeOpenCode2InstallLockError::IdentityChanged
         }
@@ -381,14 +470,15 @@ fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallLockError> {
         | NativeFileError::Io
         | NativeFileError::PrivatePermissions => NativeOpenCode2InstallLockError::Unavailable,
     })?;
-    let open_id = files::file_identity(&file).map_err(map_file_lock_error)?;
-    let path_id = files::path_identity(path).map_err(map_file_lock_error)?;
+    let open_id = native_files::file_identity(&file).map_err(map_file_lock_error)?;
+    let path_id = native_files::path_identity(path).map_err(map_file_lock_error)?;
     if open_id != path_id {
         return Err(NativeOpenCode2InstallLockError::IdentityChanged);
     }
     Ok(file)
 }
 
+/// Bounded, path-free failures from certified OpenCode2 inspection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeOpenCode2Error {
     UnsupportedPlatform,
@@ -406,6 +496,8 @@ pub enum NativeOpenCode2Error {
 }
 
 impl NativeOpenCode2Error {
+    /// Returns the stable CLI classification for this failure.
+    #[must_use]
     pub const fn cli_reason(self) -> &'static str {
         match self {
             Self::UnsupportedPlatform => "unsupported_platform",
@@ -445,6 +537,7 @@ impl fmt::Display for NativeOpenCode2Error {
 
 impl std::error::Error for NativeOpenCode2Error {}
 
+/// Bounded, path-free failures from certified install-state codec operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeOpenCode2StateError {
     InvalidRoot,
@@ -478,6 +571,8 @@ impl fmt::Display for NativeOpenCode2StateError {
 
 impl std::error::Error for NativeOpenCode2StateError {}
 
+/// The result of inspecting the certified OpenCode2 installation.
+#[must_use = "inspection results contain the certified generation decision"]
 #[derive(Debug)]
 pub enum OpenCode2Inspection {
     UnsupportedPlatform,
@@ -485,6 +580,9 @@ pub enum OpenCode2Inspection {
     Ready(ResolvedOpenCode2Generation),
 }
 
+/// A certified active generation whose executable identity, size, and hash
+/// were verified together.
+#[must_use = "retain the verified generation for the protected launch"]
 pub struct ResolvedOpenCode2Generation {
     executable: PathBuf,
     generation_id: String,
@@ -504,26 +602,38 @@ impl fmt::Debug for ResolvedOpenCode2Generation {
 }
 
 impl ResolvedOpenCode2Generation {
+    /// Returns the certified executable path.
+    #[must_use]
     pub fn executable_path(&self) -> &Path {
         &self.executable
     }
 
+    /// Returns the certified generation identifier.
+    #[must_use]
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }
 
+    /// Returns the certified artifact version.
+    #[must_use]
     pub fn version(&self) -> &'static str {
         self.version
     }
 
+    /// Returns the certified upstream source commit.
+    #[must_use]
     pub fn upstream_commit(&self) -> &'static str {
         self.upstream_commit
     }
 
+    /// Returns the certified executable size in bytes.
+    #[must_use]
     pub fn executable_size_bytes(&self) -> u64 {
         self.executable_size_bytes
     }
 
+    /// Returns the certified executable SHA-256 digest.
+    #[must_use]
     pub fn executable_sha256(&self) -> &[u8; 32] {
         &self.executable_sha256
     }
@@ -533,6 +643,8 @@ impl ResolvedOpenCode2Generation {
     }
 }
 
+/// A validated, non-serializable view of the managed OpenCode2 install state.
+#[must_use = "retain validated install state for the operation it authorizes"]
 pub struct NativeOpenCode2State {
     inner: ManagedToolchainStateV1,
 }
@@ -545,6 +657,9 @@ impl fmt::Debug for NativeOpenCode2State {
     }
 }
 
+/// Shared authority for the certified OpenCode2 specification, install state,
+/// and filesystem verification.
+#[must_use = "use the authority for certified OpenCode2 operations"]
 pub struct NativeOpenCode2Authority {
     install_spec: NativeOpenCode2InstallSpec,
 }
@@ -558,6 +673,11 @@ impl fmt::Debug for NativeOpenCode2Authority {
 }
 
 impl NativeOpenCode2Authority {
+    /// Constructs the explicit certified OpenCode2 authority.
+    #[must_use]
+    // This compatibility-preserved constructor deliberately has no `Default`:
+    // callers must opt into the certified authority explicitly rather than
+    // implying ambient or inferred launch configuration.
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
@@ -569,6 +689,8 @@ impl NativeOpenCode2Authority {
         Self { install_spec }
     }
 
+    /// Returns the immutable certified OpenCode2 artifact specification.
+    #[must_use]
     pub const fn certified_install_spec() -> NativeOpenCode2InstallSpec {
         NativeOpenCode2InstallSpec {
             engine_id: CERTIFIED_ENGINE_ID,
@@ -588,6 +710,13 @@ impl NativeOpenCode2Authority {
         }
     }
 
+    /// Derives the certified installation paths for an absolute database path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2InstallPathError`] when the database path is
+    /// unsafe or the derived installation root is unavailable.
+    #[must_use]
     pub fn install_paths(
         &self,
         database_path: &Path,
@@ -595,6 +724,13 @@ impl NativeOpenCode2Authority {
         NativeOpenCode2InstallPaths::derive(database_path, &self.install_spec)
     }
 
+    /// Acquires and fences the shared exclusive installation lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2InstallLockError`] when the installation root
+    /// or lock is unsafe, unavailable, changed, or busy beyond the timeout.
+    #[must_use]
     pub fn acquire_install_lock(
         &self,
         database_path: &Path,
@@ -605,6 +741,14 @@ impl NativeOpenCode2Authority {
         NativeOpenCode2InstallLock::acquire(&paths)
     }
 
+    /// Inspects the certified installation without discovering or selecting a
+    /// profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2Error`] when managed state or its active
+    /// executable fails certified validation.
+    #[must_use]
     pub fn inspect(
         &self,
         database_path: &Path,
@@ -619,6 +763,13 @@ impl NativeOpenCode2Authority {
         }
     }
 
+    /// Resolves and verifies the certified active generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2Error`] when the platform, managed state,
+    /// generation, executable path, identity, size, or hash is invalid.
+    #[must_use]
     pub fn resolve_active(
         &self,
         database_path: &Path,
@@ -638,7 +789,7 @@ impl NativeOpenCode2Authority {
             .versions_root()
             .join(&active.directory)
             .join(&active.binary);
-        let verified_file_id = files::verify_file(
+        let verified_file_id = native_files::verify_file(
             &executable,
             self.install_spec.executable_size_bytes(),
             self.install_spec.executable_sha256(),
@@ -655,6 +806,13 @@ impl NativeOpenCode2Authority {
         })
     }
 
+    /// Returns the certified engine root for an absolute database path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2Error`] when the database path is unsafe or
+    /// the derived installation root is unavailable.
+    #[must_use]
     pub fn managed_engine_root(
         &self,
         database_path: &Path,
@@ -664,6 +822,13 @@ impl NativeOpenCode2Authority {
             .map_err(map_path_authority_error)
     }
 
+    /// Builds a validated install-state value for one exact generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2StateError`] when the generation or optional
+    /// previous state does not satisfy the certified state specification.
+    #[must_use]
     pub fn new_install_state(
         &self,
         generation_id: &str,
@@ -683,12 +848,21 @@ impl NativeOpenCode2Authority {
         Ok(state)
     }
 
+    /// Reads and validates the bounded install-state document.
+    ///
+    /// A missing state file is returned as `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2StateError`] when the state path, bytes, or
+    /// decoded state fails certified validation.
+    #[must_use]
     pub fn read_install_state(
         &self,
         engine_root: &Path,
     ) -> Result<Option<NativeOpenCode2State>, NativeOpenCode2StateError> {
         let state_path = state_path_for_root(engine_root, self.install_spec.engine_id())?;
-        let bytes = match files::read_bounded(&state_path, MAX_STATE_BYTES) {
+        let bytes = match native_files::read_bounded(&state_path, MAX_STATE_BYTES) {
             Ok(bytes) => bytes,
             Err(NativeFileError::NotFound) => return Ok(None),
             Err(error) => return Err(map_state_file_error(error)),
@@ -698,6 +872,13 @@ impl NativeOpenCode2Authority {
         Ok(Some(NativeOpenCode2State { inner }))
     }
 
+    /// Encodes a validated install-state value with the shared state codec.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2StateError`] when the state is invalid, cannot
+    /// be encoded, or exceeds the bounded representation.
+    #[must_use]
     pub fn encode_install_state(
         &self,
         state: &NativeOpenCode2State,
@@ -711,6 +892,13 @@ impl NativeOpenCode2Authority {
         Ok(bytes)
     }
 
+    /// Atomically publishes a validated install-state document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2StateError`] when the state, destination, or
+    /// atomic publication fails certified validation.
+    #[must_use]
     pub fn write_install_state(
         &self,
         engine_root: &Path,
@@ -718,7 +906,7 @@ impl NativeOpenCode2Authority {
     ) -> Result<AtomicReplaceOutcome, NativeOpenCode2StateError> {
         let state_path = state_path_for_root(engine_root, self.install_spec.engine_id())?;
         let bytes = self.encode_install_state(state)?;
-        files::replace_file(&state_path, &bytes).map_err(map_state_replace_error)
+        native_files::replace_file(&state_path, &bytes).map_err(map_state_replace_error)
     }
 
     pub(crate) fn spec(&self) -> &NativeOpenCode2InstallSpec {
@@ -896,6 +1084,8 @@ impl<'de> Deserialize<'de> for ManagedToolchainStateV1 {
     }
 }
 
+/// Returns whether the certified OpenCode2 executable is supported here.
+#[must_use]
 pub const fn platform_supported() -> bool {
     cfg!(all(target_os = "windows", target_arch = "x86_64"))
 }
@@ -1485,7 +1675,8 @@ mod tests {
         let path = root.path().join("opencode2.exe");
         let bytes = b"debug fixture";
         fs::write(&path, bytes).unwrap();
-        let identity = files::verify_file(&path, bytes.len() as u64, &digest_array(bytes)).unwrap();
+        let identity =
+            native_files::verify_file(&path, bytes.len() as u64, &digest_array(bytes)).unwrap();
         let generation = ResolvedOpenCode2Generation {
             executable: PathBuf::from("C:\\secret\\opencode2.exe"),
             generation_id: "generation-a".into(),
@@ -1591,17 +1782,18 @@ mod tests {
         assert_eq!(original.len(), replacement.len());
         fs::write(&path, original).unwrap();
         let original_hash = digest_array(original);
-        let original_id = files::verify_file(&path, original.len() as u64, &original_hash).unwrap();
+        let original_id =
+            native_files::verify_file(&path, original.len() as u64, &original_hash).unwrap();
 
         let backup = root.path().join("opencode2.old");
         fs::rename(&path, &backup).unwrap();
         fs::write(&path, replacement).unwrap();
         let replacement_hash = digest_array(replacement);
         let replacement_id =
-            files::verify_file(&path, replacement.len() as u64, &replacement_hash).unwrap();
+            native_files::verify_file(&path, replacement.len() as u64, &replacement_hash).unwrap();
         assert_ne!(original_id, replacement_id);
         assert_eq!(
-            files::verify_file(&path, original.len() as u64, &original_hash),
+            native_files::verify_file(&path, original.len() as u64, &original_hash),
             Err(NativeFileError::FileHashMismatch)
         );
     }
@@ -1642,7 +1834,7 @@ mod tests {
         symlink(&executable, &link).unwrap();
         let expected = digest_array(b"native");
         assert!(matches!(
-            files::verify_file(&link, 6, &expected),
+            native_files::verify_file(&link, 6, &expected),
             Err(NativeFileError::UnsafePath)
         ));
     }
@@ -1696,12 +1888,12 @@ mod tests {
         let bytes = b"native executable fixture";
         fs::write(&path, bytes).unwrap();
         let expected = digest_array(bytes);
-        assert!(files::verify_file(&path, (bytes.len() + 1) as u64, &expected).is_err());
+        assert!(native_files::verify_file(&path, (bytes.len() + 1) as u64, &expected).is_err());
         assert_eq!(
-            files::verify_file(&path, bytes.len() as u64, &[0; 32]),
+            native_files::verify_file(&path, bytes.len() as u64, &[0; 32]),
             Err(NativeFileError::FileHashMismatch)
         );
-        assert!(files::verify_file(&path, bytes.len() as u64, &expected).is_ok());
+        assert!(native_files::verify_file(&path, bytes.len() as u64, &expected).is_ok());
     }
 
     #[test]

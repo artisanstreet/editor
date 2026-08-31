@@ -11,14 +11,16 @@ use serde::{
 };
 
 use crate::{
-    files::{self, AtomicReplaceOutcome, NativeFileError, VerifiedFileIdentity},
-    install::{
+    engine_core::{
         NativeOpenCode2Authority, NativeOpenCode2Error, NativeOpenCode2InstallLock,
         NativeOpenCode2InstallLockError, NativeOpenCode2InstallPathError,
         NativeOpenCode2InstallPaths, NativeOpenCode2InstallSpec, ResolvedOpenCode2Generation,
         platform_supported,
     },
+    io::{AtomicReplaceOutcome, NativeFileError, VerifiedFileIdentity},
 };
+
+use crate::io as files;
 
 const MAX_PROFILE_REGISTRY_BYTES: usize = 16 * 1024;
 const MAX_PROFILES: usize = 64;
@@ -35,6 +37,8 @@ pub enum ProfileHomeKind {
 }
 
 impl ProfileHomeKind {
+    /// Returns the stable registry spelling for this home kind.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Primary => "primary",
@@ -45,6 +49,7 @@ impl ProfileHomeKind {
 
 /// A validated profile registry entry. It contains no filesystem path or
 /// mutable launch authority.
+#[must_use = "retain the validated profile entry for the requested operation"]
 #[derive(Clone, Eq, PartialEq)]
 pub struct OpenCode2Profile {
     profile_id: EngineProfileId,
@@ -60,10 +65,14 @@ impl fmt::Debug for OpenCode2Profile {
 }
 
 impl OpenCode2Profile {
+    /// Returns the exact registered profile identifier.
+    #[must_use]
     pub fn profile_id(&self) -> &EngineProfileId {
         &self.profile_id
     }
 
+    /// Returns whether this profile uses the primary or a named home.
+    #[must_use]
     pub const fn home(&self) -> ProfileHomeKind {
         self.home
     }
@@ -93,6 +102,7 @@ impl ProfileRegistry {
     }
 }
 
+/// Bounded, path-free failures from profile registry and home operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeOpenCode2ProfileError {
     ProfileRegistryTooLarge,
@@ -115,6 +125,8 @@ pub enum NativeOpenCode2ProfileError {
 }
 
 impl NativeOpenCode2ProfileError {
+    /// Returns the stable CLI classification for this failure.
+    #[must_use]
     pub const fn cli_reason(self) -> &'static str {
         match self {
             Self::ProfileNotFound => "profile_not_found",
@@ -170,6 +182,7 @@ impl fmt::Display for NativeOpenCode2ProfileError {
 
 impl std::error::Error for NativeOpenCode2ProfileError {}
 
+/// Result of registering an exact profile mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileRegistrationOutcome {
     Registered,
@@ -246,6 +259,7 @@ impl std::error::Error for NativeOpenCode2ProfileLaunchError {}
 /// generation. It is intentionally neither serializable nor cloneable. The
 /// retained install lock prevents cooperating installation or registration
 /// from replacing the certified generation while this value is live.
+#[must_use = "retain the capability until the protected launch is complete"]
 pub struct VerifiedOpenCode2ProfileLaunch {
     database_path: PathBuf,
     paths: NativeOpenCode2InstallPaths,
@@ -277,38 +291,56 @@ impl fmt::Display for VerifiedOpenCode2ProfileLaunch {
 }
 
 impl VerifiedOpenCode2ProfileLaunch {
+    /// Returns the exact profile identifier selected by the registry.
+    #[must_use]
     pub fn profile_id(&self) -> &EngineProfileId {
         &self.profile_id
     }
 
+    /// Returns whether the profile uses the primary or a named home.
+    #[must_use]
     pub const fn home(&self) -> ProfileHomeKind {
         self.home
     }
 
+    /// Returns the exact validated private profile home.
+    #[must_use]
     pub fn profile_home(&self) -> &Path {
         &self.profile_home
     }
 
+    /// Returns the exact certified executable path.
+    #[must_use]
     pub fn executable_path(&self) -> &Path {
         &self.executable
     }
 
+    /// Returns the exact certified active generation identifier.
+    #[must_use]
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }
 
+    /// Returns the certified executable version.
+    #[must_use]
     pub const fn version(&self) -> &'static str {
         self.version
     }
 
+    /// Returns the certified executable size in bytes.
+    #[must_use]
     pub const fn executable_size_bytes(&self) -> u64 {
         self.executable_size_bytes
     }
 
+    /// Returns the certified executable SHA-256 digest.
+    #[must_use]
     pub const fn executable_sha256(&self) -> &[u8; 32] {
         &self.executable_sha256
     }
 
+    /// Returns the opaque filesystem identity captured during verification.
+    #[must_use]
     pub const fn executable_identity(&self) -> VerifiedFileIdentity {
         self.executable_identity
     }
@@ -316,6 +348,13 @@ impl VerifiedOpenCode2ProfileLaunch {
     /// Rechecks the same exact profile home, active generation, executable
     /// identity, size, and hash while retaining this capability's lock.
     /// No discovery or fallback is performed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2ProfileLaunchError::ProfileChanged`] or a
+    /// bounded launch error when the retained lock, registry, home,
+    /// generation, executable identity, size, or hash no longer matches.
+    #[must_use]
     pub fn revalidate(&self) -> Result<(), NativeOpenCode2ProfileLaunchError> {
         self.install_lock
             .fence(&self.paths)
@@ -467,6 +506,12 @@ impl<'de> Deserialize<'de> for ProfileRegistryDocument {
 
 impl NativeOpenCode2Authority {
     /// Returns the profile registry location under the certified engine root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2ProfileError`] when the database path is
+    /// unsafe or the certified installation root is unavailable.
+    #[must_use]
     pub fn profile_registry_path(
         &self,
         database_path: &Path,
@@ -477,6 +522,12 @@ impl NativeOpenCode2Authority {
     }
 
     /// Returns the exact private home selected by one registry entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2ProfileError`] when the database path or the
+    /// derived profile home is unsafe or unavailable.
+    #[must_use]
     pub fn profile_home_path(
         &self,
         database_path: &Path,
@@ -491,6 +542,12 @@ impl NativeOpenCode2Authority {
 
     /// Registers one exact profile mapping using the shared registry codec and
     /// the same install lock retained by launch capabilities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2ProfileError`] when the certified installation,
+    /// registry, profile home, lock, or atomic publication is invalid.
+    #[must_use]
     pub fn register_profile(
         &self,
         database_path: &Path,
@@ -543,6 +600,12 @@ impl NativeOpenCode2Authority {
 
     /// Lists the validated registry entries. A missing registry is distinct
     /// from an empty, valid registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2ProfileError`] when the registry path or
+    /// bounded registry document is invalid or unavailable.
+    #[must_use]
     pub fn list_profiles(
         &self,
         database_path: &Path,
@@ -564,6 +627,12 @@ impl NativeOpenCode2Authority {
     }
 
     /// Reads one exact profile id. There is no primary or `default` fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2ProfileError`] when the registry is invalid or
+    /// the exact requested profile is absent.
+    #[must_use]
     pub fn read_profile(
         &self,
         database_path: &Path,
@@ -577,6 +646,13 @@ impl NativeOpenCode2Authority {
     /// capability. The registry, active state, generation, executable
     /// identity, size, and hash are read again while the exclusive install
     /// fence is held immediately before this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeOpenCode2ProfileLaunchError`] when the exact profile,
+    /// private home, retained generation, executable identity, size, hash, or
+    /// install fence cannot be certified.
+    #[must_use]
     pub fn resolve_profile_launch(
         &self,
         database_path: &Path,

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::files::NativeFileError;
+use crate::io::NativeFileError;
 
 const ACL_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ACL_OUTPUT_BYTES: usize = 64 * 1024;
