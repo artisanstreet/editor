@@ -559,7 +559,7 @@ async fn resumed_activation_sends_exact_replay_on_real_forge_delivery_stream()
 
     let server = async {
         let (listener, report) = listener.serve_one(&handler, &cancel).await?;
-        assert_eq!(report.completed_requests, 1);
+        assert_eq!(report.completed_requests, 2);
         assert!(matches!(
             report.termination,
             RequestTermination::BudgetReached
