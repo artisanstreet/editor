@@ -1204,7 +1204,7 @@ async fn finish_turn_result(
         #[cfg(test)]
         super::process::note_observed_reap_for_tests(status);
         #[cfg(not(test))]
-        drop(status);
+        let _ = status;
         drop(stderr_counter);
         drop(lifeline);
         let _ = respond.send(result);
@@ -1223,7 +1223,7 @@ async fn finish_turn_result(
             #[cfg(test)]
             super::process::note_observed_reap_for_tests(status);
             #[cfg(not(test))]
-            drop(status);
+            let _ = status;
             let _ = respond.send(result);
             Execution::Completed
         }
