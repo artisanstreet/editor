@@ -838,15 +838,15 @@ struct CommandRenderParts {
 }
 
 fn render_input(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     style: CommandStyle,
     query: SharedString,
-    placeholder: Option<SharedString>,
+    placeholder: Option<&SharedString>,
     selector: String,
 ) -> impl IntoElement + 'static {
     let query_is_empty = query.is_empty();
     let input_value = if query_is_empty {
-        placeholder.clone().unwrap_or_default()
+        placeholder.cloned().unwrap_or_default()
     } else {
         query
     };
@@ -882,7 +882,7 @@ fn render_input(
         .overflow_hidden()
         .child(
             render_icon(IconStyle::resolve(
-                theme,
+                *theme,
                 AssetId::TABLER_SEARCH,
                 IconSize::Default,
                 IconTint::Muted,
@@ -1205,10 +1205,10 @@ fn render_palette(parts: CommandRenderParts) -> impl IntoElement + 'static {
         .overflow_hidden()
         .track_focus(&focus)
         .child(render_input(
-            theme,
+            &theme,
             style,
             query,
-            placeholder,
+            placeholder.as_ref(),
             input_selector,
         ));
 
