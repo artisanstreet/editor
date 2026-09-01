@@ -115,12 +115,12 @@ impl InstallerLock {
 
         let lock_path = self.root.join(INSTALLER_LOCK_NAME);
         let current_lock = ordinary_path_identity(&lock_path, EntryKind::File)
-            .map_err(|_| InstallerError::InvalidInstallerLock)?;
+            .map_err(|()| InstallerError::InvalidInstallerLock)?;
         if current_lock != self.lock_identity {
             return Err(InstallerError::InstallationRootChanged);
         }
         let handle_identity = identity_from_file(&self.file, EntryKind::File)
-            .map_err(|_| InstallerError::InvalidInstallerLock)?;
+            .map_err(|()| InstallerError::InvalidInstallerLock)?;
         if handle_identity != self.lock_identity {
             return Err(InstallerError::InstallationRootChanged);
         }
@@ -192,7 +192,7 @@ impl PendingMarker {
             return Err(InstallerError::InvalidInstallerMarker);
         }
         let identity = ordinary_path_identity(&path, EntryKind::Directory)
-            .map_err(|_| InstallerError::InvalidInstallerMarker)?;
+            .map_err(|()| InstallerError::InvalidInstallerMarker)?;
         ensure_no_pending_markers_except(&lock.root, &path)?;
         lock.owned_marker.replace(Some(MarkerFence {
             path: path.clone(),
@@ -209,7 +209,7 @@ impl PendingMarker {
             return Err(InstallerError::InvalidInstallerMarker);
         }
         let identity = ordinary_path_identity(&self.path, EntryKind::Directory)
-            .map_err(|_| InstallerError::InvalidInstallerMarker)?;
+            .map_err(|()| InstallerError::InvalidInstallerMarker)?;
         if identity != self.identity {
             return Err(InstallerError::InstallationRootChanged);
         }
@@ -227,7 +227,7 @@ fn ensure_owned_marker(lock: &InstallerLock, marker: &MarkerFence) -> Result<boo
         return Err(InstallerError::InvalidInstallerMarker);
     }
     let identity = ordinary_path_identity(&marker.path, EntryKind::Directory)
-        .map_err(|_| InstallerError::InvalidInstallerMarker)?;
+        .map_err(|()| InstallerError::InvalidInstallerMarker)?;
     if identity != marker.identity {
         return Err(InstallerError::InstallationRootChanged);
     }
@@ -269,7 +269,7 @@ fn ensure_root(root: &Path, mode: RootMode) -> Result<FileIdentity> {
                     Err(_) => return Err(InstallerError::UnsafeInstallationRoot),
                 }
                 let metadata = std::fs::symlink_metadata(&ancestor)
-                    .map_err(|_| InstallerError::UnsafeInstallationRoot)?;
+                    .map_err(|()| InstallerError::UnsafeInstallationRoot)?;
                 if !ordinary_metadata(&metadata, EntryKind::Directory) {
                     return Err(InstallerError::UnsafeInstallationRoot);
                 }
@@ -279,18 +279,17 @@ fn ensure_root(root: &Path, mode: RootMode) -> Result<FileIdentity> {
     }
 
     ordinary_path_identity(root, EntryKind::Directory)
-        .map_err(|_| InstallerError::UnsafeInstallationRoot)
+        .map_err(|()| InstallerError::UnsafeInstallationRoot)
 }
 
 fn open_lock_file(path: &Path) -> Result<(File, FileIdentity)> {
     let preexisting_identity = match std::fs::symlink_metadata(path) {
         Ok(metadata) if ordinary_metadata(&metadata, EntryKind::File) => Some(
             ordinary_path_identity(path, EntryKind::File)
-                .map_err(|_| InstallerError::InvalidInstallerLock)?,
+                .map_err(|()| InstallerError::InvalidInstallerLock)?,
         ),
-        Ok(_) => return Err(InstallerError::InvalidInstallerLock),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(InstallerError::InvalidInstallerLock),
+        Ok(_) | Err(_) => return Err(InstallerError::InvalidInstallerLock),
     };
 
     let mut options = OpenOptions::new();
@@ -316,8 +315,7 @@ fn open_lock_file(path: &Path) -> Result<(File, FileIdentity)> {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 match std::fs::symlink_metadata(path) {
                     Ok(metadata) if ordinary_metadata(&metadata, EntryKind::File) => {}
-                    Ok(_) => return Err(InstallerError::InvalidInstallerLock),
-                    Err(_) => return Err(InstallerError::InvalidInstallerLock),
+                    Ok(_) | Err(_) => return Err(InstallerError::InvalidInstallerLock),
                 }
                 let mut existing = OpenOptions::new();
                 existing.read(true).write(true);
@@ -331,7 +329,7 @@ fn open_lock_file(path: &Path) -> Result<(File, FileIdentity)> {
     };
 
     let identity = identity_from_file(&file, EntryKind::File)
-        .map_err(|_| InstallerError::InvalidInstallerLock)?;
+        .map_err(|()| InstallerError::InvalidInstallerLock)?;
     if preexisting_identity.is_some_and(|expected| expected != identity) {
         return Err(InstallerError::InstallationRootChanged);
     }
@@ -347,7 +345,7 @@ fn open_lock_file(path: &Path) -> Result<(File, FileIdentity)> {
         }
     })?;
     let path_identity = ordinary_path_identity(path, EntryKind::File)
-        .map_err(|_| InstallerError::InvalidInstallerLock)?;
+        .map_err(|()| InstallerError::InvalidInstallerLock)?;
     if path_identity != identity {
         return Err(InstallerError::InstallationRootChanged);
     }
@@ -361,9 +359,8 @@ fn ensure_no_pending_markers(root: &Path) -> Result<()> {
             Ok(metadata) if ordinary_metadata(&metadata, EntryKind::Directory) => {
                 return Err(InstallerError::InstallationRootPending);
             }
-            Ok(_) => return Err(InstallerError::InvalidInstallerMarker),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(InstallerError::InvalidInstallerMarker),
+            Ok(_) | Err(_) => return Err(InstallerError::InvalidInstallerMarker),
         }
     }
     Ok(())
@@ -378,9 +375,8 @@ fn ensure_no_pending_markers_except(root: &Path, own_marker: &Path) -> Result<()
             Ok(metadata) if ordinary_metadata(&metadata, EntryKind::Directory) => {
                 return Err(InstallerError::InstallationRootPending);
             }
-            Ok(_) => return Err(InstallerError::InvalidInstallerMarker),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(InstallerError::InvalidInstallerMarker),
+            Ok(_) | Err(_) => return Err(InstallerError::InvalidInstallerMarker),
         }
     }
     Ok(())
@@ -529,14 +525,13 @@ fn configure_ordinary_open(_: &mut OpenOptions, _: EntryKind) {}
 fn ensure_owned_directory(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if ordinary_metadata(&metadata, EntryKind::Directory) => {}
-        Ok(_) => return Err(InstallerError::UnsafeOwnedPath),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir(path).map_err(|_| InstallerError::UnsafeOwnedPath)?;
         }
-        Err(_) => return Err(InstallerError::UnsafeOwnedPath),
+        Ok(_) | Err(_) => return Err(InstallerError::UnsafeOwnedPath),
     }
     ordinary_path_identity(path, EntryKind::Directory)
-        .map_err(|_| InstallerError::UnsafeOwnedPath)?;
+        .map_err(|()| InstallerError::UnsafeOwnedPath)?;
     Ok(())
 }
 
@@ -545,11 +540,10 @@ fn owned_file_identity(path: &Path) -> Result<Option<FileIdentity>> {
         Ok(metadata) if ordinary_metadata(&metadata, EntryKind::File) => {
             ordinary_path_identity(path, EntryKind::File)
                 .map(Some)
-                .map_err(|_| InstallerError::UnsafeOwnedPath)
+                .map_err(|()| InstallerError::UnsafeOwnedPath)
         }
-        Ok(_) => Err(InstallerError::UnsafeOwnedPath),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(InstallerError::UnsafeOwnedPath),
+        Ok(_) | Err(_) => Err(InstallerError::UnsafeOwnedPath),
     }
 }
 
@@ -562,32 +556,30 @@ fn ordinary_directory_exists(path: &Path) -> Result<bool> {
         Ok(metadata) if ordinary_metadata(&metadata, EntryKind::Directory) => {
             ordinary_path_identity(path, EntryKind::Directory)
                 .map(|_| true)
-                .map_err(|_| InstallerError::UnsafeOwnedPath)
+                .map_err(|()| InstallerError::UnsafeOwnedPath)
         }
-        Ok(_) => Err(InstallerError::UnsafeOwnedPath),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(InstallerError::UnsafeOwnedPath),
+        Ok(_) | Err(_) => Err(InstallerError::UnsafeOwnedPath),
     }
 }
 
 fn create_owned_file(path: &Path) -> Result<File> {
     let expected = owned_file_identity(path)?;
-    let file = match expected {
-        Some(_) => open_for_update(path).map_err(|_| InstallerError::UnsafeOwnedPath)?,
-        None => {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create_new(true);
-            configure_ordinary_open(&mut options, EntryKind::File);
-            options
-                .open(path)
-                .map_err(|_| InstallerError::UnsafeOwnedPath)?
-        }
+    let file = if let Some(_) = expected {
+        open_for_update(path).map_err(|_| InstallerError::UnsafeOwnedPath)?
+    } else {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        configure_ordinary_open(&mut options, EntryKind::File);
+        options
+            .open(path)
+            .map_err(|_| InstallerError::UnsafeOwnedPath)?
     };
     let identity =
-        identity_from_file(&file, EntryKind::File).map_err(|_| InstallerError::UnsafeOwnedPath)?;
+        identity_from_file(&file, EntryKind::File).map_err(|()| InstallerError::UnsafeOwnedPath)?;
     if expected.is_some_and(|expected| expected != identity)
         || ordinary_path_identity(path, EntryKind::File)
-            .map_err(|_| InstallerError::UnsafeOwnedPath)?
+            .map_err(|()| InstallerError::UnsafeOwnedPath)?
             != identity
     {
         return Err(InstallerError::UnsafeOwnedPath);
@@ -599,10 +591,10 @@ fn create_owned_file(path: &Path) -> Result<File> {
 
 fn copy_owned_file(source: &Path, destination: &Path) -> Result<FileIdentity> {
     let source_identity = ordinary_path_identity(source, EntryKind::File)
-        .map_err(|_| InstallerError::UnsafeOwnedPath)?;
+        .map_err(|()| InstallerError::UnsafeOwnedPath)?;
     let mut source_file = open_for_read(source, EntryKind::File).map_err(io(source))?;
     if identity_from_file(&source_file, EntryKind::File)
-        .map_err(|_| InstallerError::UnsafeOwnedPath)?
+        .map_err(|()| InstallerError::UnsafeOwnedPath)?
         != source_identity
     {
         return Err(InstallerError::UnsafeOwnedPath);
@@ -615,11 +607,12 @@ fn copy_owned_file(source: &Path, destination: &Path) -> Result<FileIdentity> {
         .map_err(io(destination))?;
     destination_file.sync_all().map_err(io(destination))?;
     identity_from_file(&destination_file, EntryKind::File)
-        .map_err(|_| InstallerError::UnsafeOwnedPath)
+        .map_err(|()| InstallerError::UnsafeOwnedPath)
 }
 
 fn require_identity(path: &Path, kind: EntryKind, expected: FileIdentity) -> Result<()> {
-    let actual = ordinary_path_identity(path, kind).map_err(|_| InstallerError::UnsafeOwnedPath)?;
+    let actual =
+        ordinary_path_identity(path, kind).map_err(|()| InstallerError::UnsafeOwnedPath)?;
     if actual != expected {
         return Err(InstallerError::UnsafeOwnedPath);
     }
@@ -628,7 +621,7 @@ fn require_identity(path: &Path, kind: EntryKind, expected: FileIdentity) -> Res
 
 fn sync_owned_file(path: &Path, file: &File) -> Result<FileIdentity> {
     let identity =
-        identity_from_file(file, EntryKind::File).map_err(|_| InstallerError::UnsafeOwnedPath)?;
+        identity_from_file(file, EntryKind::File).map_err(|()| InstallerError::UnsafeOwnedPath)?;
     require_identity(path, EntryKind::File, identity)?;
     file.sync_all().map_err(io(path))?;
     require_identity(path, EntryKind::File, identity)?;
@@ -639,7 +632,8 @@ fn remove_owned_file(path: &Path) -> Result<()> {
     let Some(expected) = owned_file_identity(path)? else {
         return Ok(());
     };
-    if ordinary_path_identity(path, EntryKind::File).map_err(|_| InstallerError::UnsafeOwnedPath)?
+    if ordinary_path_identity(path, EntryKind::File)
+        .map_err(|()| InstallerError::UnsafeOwnedPath)?
         != expected
     {
         return Err(InstallerError::UnsafeOwnedPath);
@@ -834,12 +828,11 @@ pub async fn install(options: InstallOptions) -> Result<()> {
     let existing_release = match std::fs::symlink_metadata(&existing_release) {
         Ok(metadata) if ordinary_metadata(&metadata, EntryKind::Directory) => {
             ordinary_path_identity(&existing_release, EntryKind::Directory)
-                .map_err(|_| InstallerError::UnsafeOwnedPath)?;
+                .map_err(|()| InstallerError::UnsafeOwnedPath)?;
             Some(existing_release)
         }
-        Ok(_) => return Err(InstallerError::UnsafeOwnedPath),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(InstallerError::UnsafeOwnedPath),
+        Ok(_) | Err(_) => return Err(InstallerError::UnsafeOwnedPath),
     };
     if let Some(existing_release) = existing_release {
         let lifecycle_ae = release_cli(&existing_release)?;
@@ -858,15 +851,18 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         };
         let launchers = planned_shortcuts(&options, &stable_ae, &existing_release);
         root_lock.fence()?;
+        let activation_launchers = shortcut_records(&launchers)?;
         activate(
             &root_lock,
             &options.install_root,
             &existing_release,
             &manifest,
             &options,
-            &stable_ae,
-            protocol.as_ref(),
-            &shortcut_records(&launchers)?,
+            ActivationIntegrations {
+                stable_ae: &stable_ae,
+                protocol: protocol.as_ref(),
+                launchers: &activation_launchers,
+            },
         )?;
         root_lock.fence()?;
         if options.integrations.register_protocol {
@@ -938,15 +934,18 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         };
         let launchers = planned_shortcuts(&options, &stable_ae, &release);
         root_lock.fence()?;
+        let activation_launchers = shortcut_records(&launchers)?;
         activate(
             &root_lock,
             &options.install_root,
             &release,
             &manifest,
             &options,
-            &stable_ae,
-            protocol.as_ref(),
-            &shortcut_records(&launchers)?,
+            ActivationIntegrations {
+                stable_ae: &stable_ae,
+                protocol: protocol.as_ref(),
+                launchers: &activation_launchers,
+            },
         )?;
         root_lock.fence()?;
         if options.integrations.register_protocol {
@@ -1120,24 +1119,28 @@ fn should_restore_retired_forge(run_setup: bool, retirement: Retirement) -> bool
     !run_setup && retirement.forges_stopped > 0
 }
 
+struct ActivationIntegrations<'a> {
+    stable_ae: &'a Path,
+    protocol: Option<&'a OwnedIntegration>,
+    launchers: &'a [OwnedIntegration],
+}
+
 fn activate(
     lock: &InstallerLock,
     root: &Path,
     release: &Path,
     manifest: &crate::manifest::ReleaseManifest,
     options: &InstallOptions,
-    stable_ae: &Path,
-    protocol: Option<&OwnedIntegration>,
-    launchers: &[OwnedIntegration],
+    integrations: ActivationIntegrations<'_>,
 ) -> Result<()> {
     lock.fence()?;
     let next = root.join(".installation.json.tmp");
     let current = root.join("installation.json");
     let now = Utc::now().to_rfc3339();
-    let mut integrations = serde_json::Map::from_iter([(
+    let mut integration_records = serde_json::Map::from_iter([(
         "ae_path".to_owned(),
         serde_json::to_value(OwnedIntegration {
-            path: stable_ae.display().to_string(),
+            path: integrations.stable_ae.display().to_string(),
             fingerprint: hash_file(&release.join("bin").join(if cfg!(windows) {
                 "ae.exe"
             } else {
@@ -1146,16 +1149,16 @@ fn activate(
         })
         .map_err(InstallerError::InvalidPayload)?,
     )]);
-    if let Some(protocol) = protocol {
-        integrations.insert(
+    if let Some(protocol) = integrations.protocol {
+        integration_records.insert(
             "protocol".to_owned(),
             serde_json::to_value(protocol).map_err(InstallerError::InvalidPayload)?,
         );
     }
-    if !launchers.is_empty() {
-        integrations.insert(
+    if !integrations.launchers.is_empty() {
+        integration_records.insert(
             "shortcuts".to_owned(),
-            serde_json::to_value(launchers).map_err(InstallerError::InvalidPayload)?,
+            serde_json::to_value(integrations.launchers).map_err(InstallerError::InvalidPayload)?,
         );
     }
     let contents = serde_json::json!({
@@ -1165,13 +1168,13 @@ fn activate(
         "architecture": options.platform.arch,
         "channel": manifest.channel.as_str(),
         "components": installed_components(),
-        "integrations": integrations,
+        "integrations": integration_records,
         "installed_at": now,
         "updated_at": now,
         "activation_state": "active",
         "finalization_state": "complete",
         "active_version": manifest.product_version.as_str(),
-        "permanent_ae_path": stable_ae,
+        "permanent_ae_path": integrations.stable_ae,
         "artifact": {
             "artifact_id": manifest.artifacts.iter()
                 .find(|artifact| artifact.platform == options.platform.os
@@ -1199,9 +1202,8 @@ fn activate(
         std::fs::rename(&current, &previous).map_err(io(&current))?;
     }
     match std::fs::symlink_metadata(&current) {
-        Ok(_) => return Err(InstallerError::UnsafeOwnedPath),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(InstallerError::UnsafeOwnedPath),
+        Ok(_) | Err(_) => return Err(InstallerError::UnsafeOwnedPath),
     }
     if let Err(source) = std::fs::rename(&next, &current) {
         if let Some(previous_identity) = owned_file_identity(&previous)? {
@@ -1228,7 +1230,7 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
                 return Err(InstallerError::UnsafeOwnedPath);
             }
             let stable_identity = ordinary_path_identity(&stable, EntryKind::File)
-                .map_err(|_| InstallerError::UnsafeOwnedPath)?;
+                .map_err(|()| InstallerError::UnsafeOwnedPath)?;
             lock.fence()?;
             require_identity(&stable, EntryKind::File, stable_identity)?;
             if hash_file(&stable)? == hash_file(&source)? {
@@ -1265,9 +1267,8 @@ fn install_stable_cli(lock: &InstallerLock, root: &Path, release: &Path) -> Resu
     lock.fence()?;
     require_identity(&temporary, EntryKind::File, temporary_identity)?;
     match std::fs::symlink_metadata(&stable) {
-        Ok(_) => return Err(InstallerError::UnsafeOwnedPath),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(InstallerError::UnsafeOwnedPath),
+        Ok(_) | Err(_) => return Err(InstallerError::UnsafeOwnedPath),
     }
     std::fs::rename(&temporary, &stable).map_err(io(&stable))?;
     lock.fence()?;
@@ -1308,9 +1309,8 @@ fn schedule_stable_cli_replacement(
     require_identity(source, EntryKind::File, source_identity)?;
     match std::fs::symlink_metadata(destination) {
         Ok(metadata) if ordinary_metadata(&metadata, EntryKind::File) => {}
-        Ok(_) => return Err(InstallerError::UnsafeOwnedPath),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(InstallerError::UnsafeOwnedPath),
+        Ok(_) | Err(_) => return Err(InstallerError::UnsafeOwnedPath),
     }
     require_identity(destination, EntryKind::File, destination_identity)?;
     lock.fence()?;
@@ -1819,7 +1819,7 @@ fn remove_path_in_root(root: &Path, path: &Path) -> Result<()> {
     }
     if metadata.is_dir() {
         let expected = ordinary_path_identity(path, EntryKind::Directory)
-            .map_err(|_| InstallerError::UnsafeOwnedPath)?;
+            .map_err(|()| InstallerError::UnsafeOwnedPath)?;
         validate_owned_tree(path)?;
         require_identity(path, EntryKind::Directory, expected)?;
         match std::fs::remove_dir_all(path) {
@@ -1829,7 +1829,7 @@ fn remove_path_in_root(root: &Path, path: &Path) -> Result<()> {
         }
     } else {
         let expected = ordinary_path_identity(path, EntryKind::File)
-            .map_err(|_| InstallerError::UnsafeOwnedPath)?;
+            .map_err(|()| InstallerError::UnsafeOwnedPath)?;
         require_identity(path, EntryKind::File, expected)?;
         match std::fs::remove_file(path) {
             Ok(()) => {}
@@ -1846,7 +1846,7 @@ fn validate_owned_tree(path: &Path) -> Result<()> {
         return Err(InstallerError::UnsafeOwnedPath);
     }
     let identity = ordinary_path_identity(path, EntryKind::Directory)
-        .map_err(|_| InstallerError::UnsafeOwnedPath)?;
+        .map_err(|()| InstallerError::UnsafeOwnedPath)?;
     for entry in std::fs::read_dir(path).map_err(|_| InstallerError::UnsafeOwnedPath)? {
         let entry = entry.map_err(|_| InstallerError::UnsafeOwnedPath)?;
         let child = entry.path();
@@ -1858,7 +1858,7 @@ fn validate_owned_tree(path: &Path) -> Result<()> {
             return Err(InstallerError::UnsafeOwnedPath);
         } else {
             ordinary_path_identity(&child, EntryKind::File)
-                .map_err(|_| InstallerError::UnsafeOwnedPath)?;
+                .map_err(|()| InstallerError::UnsafeOwnedPath)?;
         }
     }
     require_identity(path, EntryKind::Directory, identity)?;
