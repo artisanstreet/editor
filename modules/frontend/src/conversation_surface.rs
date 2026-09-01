@@ -6,9 +6,11 @@
 //! display text; this module only paints those already-decided values and
 //! reports typed interaction observations back to its controller.
 //!
-//! No durable state, domain records, network work, clock reads, Markdown
-//! parsing, or local disclosure state belongs here. A replacement scene is the
-//! only source of truth after a disclosure request has been emitted.
+//! No durable state, domain records, network work, or clock reads belong here.
+//! Message-body Markdown parsing is delegated to the shared renderer, and
+//! local disclosure state never becomes a second source of truth. A
+//! replacement scene is the only source of truth after a disclosure request
+//! has been emitted.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -17,6 +19,7 @@ use artisan_ui::alert::{Alert, AlertVariant};
 use artisan_ui::badge::{BadgeStyle, outline_badge};
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
+use artisan_ui::markdown_renderer::MarkdownRenderer;
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
@@ -341,6 +344,7 @@ pub const fn file_change_status_label(status: FileChangeStatus) -> &'static str 
 pub struct ConversationSurface {
     scene: ConversationScene,
     theme_mode: ThemeMode,
+    markdown_renderer: MarkdownRenderer,
     scroll_handle: ScrollHandle,
     transcript_focus: FocusHandle,
     disclosure_focus: FocusHandle,
@@ -370,6 +374,7 @@ impl ConversationSurface {
         Self {
             scene,
             theme_mode,
+            markdown_renderer: MarkdownRenderer::new(),
             scroll_handle: ScrollHandle::new(),
             transcript_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             disclosure_focus: cx.focus_handle().tab_index(1).tab_stop(true),
@@ -567,7 +572,7 @@ impl ConversationSurface {
         entity: Entity<Self>,
         theme: &ArtisanTheme,
     ) -> AnyElement {
-        self.render_text_block(
+        self.render_markdown_text_block(
             TextBlockRender {
                 id: &block.id,
                 disclosure: block.disclosure,
@@ -587,7 +592,7 @@ impl ConversationSurface {
         entity: Entity<Self>,
         theme: &ArtisanTheme,
     ) -> AnyElement {
-        self.render_text_block(
+        self.render_markdown_text_block(
             TextBlockRender {
                 id: &block.id,
                 disclosure: block.disclosure,
@@ -623,6 +628,36 @@ impl ConversationSurface {
             },
             compact_card_content(style).child(card_heading(title, theme)),
             compact_card_content(style).child(body_text(body, theme)),
+            entity,
+        )
+    }
+
+    fn render_markdown_text_block(
+        &self,
+        params: TextBlockRender<'_>,
+        entity: Entity<Self>,
+        theme: &ArtisanTheme,
+    ) -> AnyElement {
+        let TextBlockRender {
+            id,
+            disclosure,
+            selector,
+            title,
+            body,
+        } = params;
+        let style = CardStyle::resolve(*theme);
+        let rendered_body = self
+            .markdown_renderer
+            .render_source(body, *theme, selector.clone());
+        self.render_controlled_card(
+            ControlledCardOptions {
+                id: id.clone(),
+                disclosure,
+                selector,
+                style,
+            },
+            compact_card_content(style).child(card_heading(title, theme)),
+            compact_card_content(style).child(rendered_body),
             entity,
         )
     }
