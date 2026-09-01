@@ -301,7 +301,7 @@ async fn seed_reconciliation_dispatch(
         })
         .await
         .expect("message should be queued through the public repository");
-    let claimed = repository
+    repository
         .claim_next_message_dispatch(ClaimMessageDispatch {
             owner: DispatchLeaseOwner::new([seed.owner_byte; 32]),
             claimed_at: UnixMillis::from_millis(4),
@@ -309,8 +309,7 @@ async fn seed_reconciliation_dispatch(
         })
         .await
         .expect("dispatch should be claimed")
-        .expect("seeded dispatch should exist");
-    claimed
+        .expect("seeded dispatch should exist")
 }
 
 struct SeededRunningRun {
@@ -471,18 +470,33 @@ struct LifecyclePatchSnapshot {
     recorded_at_ms: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconciliationPresence {
+    Absent,
+    Present,
+}
+
+impl ReconciliationPresence {
+    fn from_option<T>(value: Option<&T>) -> Self {
+        match value {
+            Some(_) => Self::Present,
+            None => Self::Absent,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReconciliationSnapshot {
     dispatch_state: DispatchState,
     dispatch_updated_at_ms: i64,
-    dispatch_lease_owner_present: bool,
+    dispatch_lease_owner: ReconciliationPresence,
     dispatch_lease_expires_at_ms: Option<i64>,
     dispatch_last_error: Option<String>,
     run_lifecycle: AssistantRunLifecycle,
     run_updated_at_ms: i64,
-    run_owner_present: bool,
-    run_lease_present: bool,
-    run_provider_binding_present: bool,
+    run_owner: ReconciliationPresence,
+    run_lease: ReconciliationPresence,
+    run_provider_binding: ReconciliationPresence,
     run_error_code: Option<String>,
     run_error_message: Option<String>,
     turn_lifecycle: EntityLifecycle,
@@ -546,14 +560,14 @@ async fn reconciliation_snapshot(path: &Path, seed: ReconciliationSeed) -> Recon
     let snapshot = ReconciliationSnapshot {
         dispatch_state: dispatch.state,
         dispatch_updated_at_ms: dispatch.updated_at_ms,
-        dispatch_lease_owner_present: dispatch.lease_owner.is_some(),
+        dispatch_lease_owner: ReconciliationPresence::from_option(dispatch.lease_owner.as_ref()),
         dispatch_lease_expires_at_ms: dispatch.lease_expires_at_ms,
         dispatch_last_error: dispatch.last_error,
         run_lifecycle: run.lifecycle,
         run_updated_at_ms: run.updated_at_ms,
-        run_owner_present: run.owner.is_some(),
-        run_lease_present: run.lease.is_some(),
-        run_provider_binding_present: run.provider_binding.is_some(),
+        run_owner: ReconciliationPresence::from_option(run.owner.as_ref()),
+        run_lease: ReconciliationPresence::from_option(run.lease.as_ref()),
+        run_provider_binding: ReconciliationPresence::from_option(run.provider_binding.as_ref()),
         run_error_code: run.error_code,
         run_error_message: run.error_message,
         turn_lifecycle: turn.lifecycle,
@@ -1046,10 +1060,9 @@ fn startup_reconciliation_failures_map_to_application_startup() {
         "Forge startup reconciliation clock failed"
     );
 
-    let sweep =
-        ForgeRuntimeError::StartupReconciliation(StartupReconciliationSweepError::InvalidLimit {
-            limit: 0,
-        });
+    let sweep = ForgeRuntimeError::StartupReconciliation(Box::new(
+        StartupReconciliationSweepError::InvalidLimit { limit: 0 },
+    ));
     assert_eq!(
         sweep.exit_code(),
         forge_runtime::EXIT_CODE_APPLICATION_STARTUP
@@ -1091,15 +1104,21 @@ fn run_reconciliation_start_and_snapshot(
 fn assert_reconciled_snapshot(snapshot: &ReconciliationSnapshot, seed: ReconciliationSeed) {
     assert_eq!(snapshot.dispatch_state, DispatchState::Failed);
     assert_eq!(snapshot.dispatch_lease_expires_at_ms, None);
-    assert!(!snapshot.dispatch_lease_owner_present);
+    assert_eq!(
+        snapshot.dispatch_lease_owner,
+        ReconciliationPresence::Absent
+    );
     assert_eq!(
         snapshot.dispatch_last_error.as_deref(),
         Some("startup reconciliation: unknown outcome after lease expiry")
     );
     assert_eq!(snapshot.run_lifecycle, AssistantRunLifecycle::Interrupted);
-    assert!(!snapshot.run_owner_present);
-    assert!(!snapshot.run_lease_present);
-    assert!(snapshot.run_provider_binding_present);
+    assert_eq!(snapshot.run_owner, ReconciliationPresence::Absent);
+    assert_eq!(snapshot.run_lease, ReconciliationPresence::Absent);
+    assert_eq!(
+        snapshot.run_provider_binding,
+        ReconciliationPresence::Present
+    );
     assert_eq!(
         snapshot.run_error_code.as_deref(),
         Some("startup_reconciliation_unknown_outcome")
@@ -1205,12 +1224,16 @@ fn startup_reconciliation_failure_keeps_primary_and_committed_prefix() {
     );
     let primary = error.primary_failure().unwrap_or(&error);
     match primary {
-        ForgeRuntimeError::StartupReconciliation(StartupReconciliationSweepError::PatchShape {
-            report,
-            failing_index,
-            failing_run_id,
-            reason,
-        }) => {
+        ForgeRuntimeError::StartupReconciliation(error) => {
+            let StartupReconciliationSweepError::PatchShape {
+                report,
+                failing_index,
+                failing_run_id,
+                reason,
+            } = error.as_ref()
+            else {
+                panic!("expected typed startup sweep failure, got {error:?}");
+            };
             assert_eq!(report.discovered, 2);
             assert_eq!(report.attempted, 1);
             assert_eq!(report.interrupted, 1);
@@ -1236,7 +1259,10 @@ fn startup_reconciliation_failure_keeps_primary_and_committed_prefix() {
     );
     assert_eq!(valid_after.turn_lifecycle, EntityLifecycle::Interrupted);
     assert_eq!(valid_after.item_lifecycle, EntityLifecycle::Interrupted);
-    assert!(valid_after.run_provider_binding_present);
+    assert_eq!(
+        valid_after.run_provider_binding,
+        ReconciliationPresence::Present
+    );
     assert_eq!(
         valid_after.lifecycle_patches.len(),
         valid_before.lifecycle_patches.len() + 2,

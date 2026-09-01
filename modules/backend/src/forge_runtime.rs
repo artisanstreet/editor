@@ -840,7 +840,7 @@ pub enum ForgeRuntimeError {
 
     /// The bounded startup reconciliation pass failed.
     #[error("Forge startup reconciliation failed")]
-    StartupReconciliation(#[source] StartupReconciliationSweepError),
+    StartupReconciliation(#[source] Box<StartupReconciliationSweepError>),
 
     /// The running Forge executable could not be resolved for the native
     /// directory controller.
@@ -1191,7 +1191,7 @@ async fn reconcile_startup(app: &ForgeApp) -> Result<(), ForgeRuntimeError> {
     sweep_startup_reconciliation(app.repository(), input, &mut patch_source)
         .await
         .map(|_| ())
-        .map_err(ForgeRuntimeError::StartupReconciliation)
+        .map_err(|error| ForgeRuntimeError::StartupReconciliation(Box::new(error)))
 }
 
 async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeError> {
