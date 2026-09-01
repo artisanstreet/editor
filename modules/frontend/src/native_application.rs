@@ -611,9 +611,35 @@ impl NativeApplication {
     }
 
     fn handle_subscription_stopped(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
-        if self.selected_thread.as_ref() == Some(&thread_id) {
-            self.retire_host(cx);
+        // Stop ack must never create an unsubscribe loop. If this thread is not the active
+        // selected thread, it is a stale ack and is ignored. If it is active, finish the
+        // already-started local retirement without sending another Unsubscribe.
+        if self.selected_thread.as_ref() != Some(&thread_id) {
+            return;
         }
+        // Finish retirement without sending Unsubscribe again
+        self.retain_message_flight(cx);
+        self.clear_message_presentation();
+        if let Some(host) = self.conversation_host.clone() {
+            self.pump_host_boundary(&host, cx);
+            if self.conversation_effects.is_empty()
+                && host.read(cx).total_pending_effect_count() == 0
+            {
+                self.conversation_host = None;
+                drop(self.conversation_host_subscription.take());
+                self.selected_thread = None;
+                self.engine_settings.select_thread(None);
+                self.sync_composer_availability(cx);
+                cx.notify();
+                return;
+            }
+        } else {
+            self.selected_thread = None;
+            self.engine_settings.select_thread(None);
+            self.sync_composer_availability(cx);
+            cx.notify();
+        }
+        // If host still has pending effects, keep selected_thread until drained; do not loop
         cx.notify();
     }
 
@@ -644,6 +670,46 @@ impl NativeApplication {
     }
 
     fn handle_delivery_lost(&mut self, failure: ServiceFailure, cx: &mut Context<Self>) {
+        // Use mounted host's last-good cursor and existing recovery policy to resubscribe
+        if let Some(thread_id) = self.selected_thread.clone() {
+            if let Some(host) = self.conversation_host.clone() {
+                let cursor = host.read(cx).controller_view().delivery.cursor;
+                if let Some(service) = self.service.clone() {
+                    // Explicit retry via Subscribe with last-good cursor; Busy/Stopped remain explicit
+                    let result = service.submit(NativeTransportCommand::Subscribe {
+                        thread_id: thread_id.clone(),
+                        after: cursor,
+                    });
+                    match result {
+                        Ok(()) => {
+                            // keep current view, await Started/Patch; do not fabricate snapshot
+                            cx.notify();
+                            return;
+                        }
+                        Err(CommandSendError::Busy) => {
+                            self.set_failure(
+                                ServiceFailure {
+                                    stage: ServiceFailureStage::EventBridge,
+                                    category: ServiceFailureCategory::Backpressure,
+                                },
+                                cx,
+                            );
+                            return;
+                        }
+                        Err(CommandSendError::Stopped) => {
+                            self.set_failure(
+                                ServiceFailure {
+                                    stage: ServiceFailureStage::EventBridge,
+                                    category: ServiceFailureCategory::ChannelClosed,
+                                },
+                                cx,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         self.set_failure(failure, cx);
     }
 
