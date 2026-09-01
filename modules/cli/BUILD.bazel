@@ -32,6 +32,7 @@ rust_library(
         "//modules/domain:domain",
         "//modules/native_engine:native_engine",
         "//modules/protocol:protocol",
+        "//modules/transport:transport",
         "@crates//:base64",
         "@crates//:clap",
         "@crates//:flate2",
