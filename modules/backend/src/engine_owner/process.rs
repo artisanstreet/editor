@@ -75,6 +75,10 @@ pub(crate) struct EngineChild {
     inner: command_group::AsyncGroupChild,
     #[cfg(not(windows))]
     inner: Child,
+    /// Configured Windows launches must terminate the whole Job Object before
+    /// an abort wait, because a leader exit can otherwise precede its
+    /// descendant's completion notification.
+    terminate_group_before_abort_wait: bool,
     /// The child stdin pipe, until the owner moves it into `LifelineWriter`.
     pub(crate) stdin: Option<ChildStdin>,
     /// The child stdout pipe, until the owner takes its readiness stream.
@@ -86,7 +90,10 @@ pub(crate) struct EngineChild {
 impl EngineChild {
     /// Spawns an engine with whole-job custody on Windows and direct-child
     /// custody elsewhere.
-    fn spawn(mut command: tokio::process::Command) -> io::Result<Self> {
+    fn spawn(
+        mut command: tokio::process::Command,
+        terminate_group_before_abort_wait: bool,
+    ) -> io::Result<Self> {
         #[cfg(windows)]
         {
             let grouped = command
@@ -94,7 +101,7 @@ impl EngineChild {
                 .kill_on_drop(true)
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()?;
-            let child = Self::from_grouped(grouped);
+            let child = Self::from_grouped(grouped, terminate_group_before_abort_wait);
             witness_spawned();
             Ok(child)
         }
@@ -102,20 +109,24 @@ impl EngineChild {
         #[cfg(not(windows))]
         {
             command.kill_on_drop(true);
-            let child = Self::from_direct(command.spawn()?);
+            let child = Self::from_direct(command.spawn()?, terminate_group_before_abort_wait);
             witness_spawned();
             Ok(child)
         }
     }
 
     #[cfg(windows)]
-    fn from_grouped(mut inner: command_group::AsyncGroupChild) -> Self {
+    fn from_grouped(
+        mut inner: command_group::AsyncGroupChild,
+        terminate_group_before_abort_wait: bool,
+    ) -> Self {
         let (stdin, stdout, stderr) = {
             let child = inner.inner();
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         };
         Self {
             inner,
+            terminate_group_before_abort_wait,
             stdin,
             stdout,
             stderr,
@@ -123,12 +134,13 @@ impl EngineChild {
     }
 
     #[cfg(not(windows))]
-    fn from_direct(mut inner: Child) -> Self {
+    fn from_direct(mut inner: Child, terminate_group_before_abort_wait: bool) -> Self {
         let stdin = inner.stdin.take();
         let stdout = inner.stdout.take();
         let stderr = inner.stderr.take();
         Self {
             inner,
+            terminate_group_before_abort_wait,
             stdin,
             stdout,
             stderr,
@@ -143,6 +155,28 @@ impl EngineChild {
     /// Requests termination of the process or whole process group.
     pub(crate) fn start_kill(&mut self) -> io::Result<()> {
         self.inner.start_kill()
+    }
+
+    /// Requests configured Windows group termination before an abort wait.
+    ///
+    /// The caller must close the lifeline first. Non-Windows and legacy
+    /// launches intentionally keep the existing wait-first cleanup sequence.
+    fn request_group_termination_before_abort_wait(&mut self) -> bool {
+        if !self.terminate_group_before_abort_wait {
+            return false;
+        }
+
+        #[cfg(windows)]
+        {
+            witness_kill_requested();
+            let _termination_error = self.start_kill();
+            true
+        }
+
+        #[cfg(not(windows))]
+        {
+            false
+        }
     }
 
     /// Returns the leader process identifier while it remains available.
@@ -236,7 +270,7 @@ pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<En
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    EngineChild::spawn(command)
+    EngineChild::spawn(command, false)
 }
 
 /// Test-only launch seam for the configured fixture.
@@ -273,7 +307,7 @@ pub(crate) fn spawn_configured_fixture_engine(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    EngineChild::spawn(command)
+    EngineChild::spawn(command, true)
 }
 
 const CONFIGURED_PROFILE_DIRECTORIES: [&str; 5] = ["config", "cache", "data", "state", "tmp"];
@@ -459,7 +493,7 @@ pub(crate) fn spawn_configured_engine(
     launch
         .revalidate()
         .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "profile rejected"))?;
-    EngineChild::spawn(command)
+    EngineChild::spawn(command, true)
 }
 
 /// The taken sole stdin writer kept open for the whole operation.
@@ -612,12 +646,14 @@ pub(crate) struct ChildParts {
 
 /// Runs the fixed, uncancellable cleanup sequence for one unresolved child.
 ///
-/// Order is contractual: close the sole lifeline writer first, then wait up
-/// to the caller-supplied `close_budget`, request termination with
-/// `start_kill` if no exit was observed, then wait for the remaining budget
-/// (or once without waiting when the budget is already expired). Pipe
-/// resources are released only together with a successful observed reap or
-/// moved whole into [`RetainedEngine`].
+/// Order is contractual: close the sole lifeline writer first. Configured
+/// Windows groups request whole-job termination at that point, before their
+/// bounded wait; other launches wait up to the caller-supplied `close_budget`
+/// and request termination with `start_kill` only if no exit was observed.
+/// The remaining budget is then used for one more wait (or one immediate poll
+/// when the budget is already expired). Pipe resources are released only
+/// together with a successful observed reap or moved whole into
+/// [`RetainedEngine`].
 pub(crate) async fn cleanup_after_abort(
     parts: ChildParts,
     close_budget: Duration,
@@ -632,6 +668,7 @@ pub(crate) async fn cleanup_after_abort(
     lifeline.close();
     let start = tokio::time::Instant::now();
     let deadline = start.checked_add(close_budget);
+    let kill_requested = child.request_group_termination_before_abort_wait();
 
     // First wait: bounded by close_budget (or immediate poll when ZERO).
     let first_wait = match deadline {
@@ -645,11 +682,17 @@ pub(crate) async fn cleanup_after_abort(
         witness_reaped(status);
         drop(stderr_counter);
         drop(lifeline);
-        return CleanupObservation::ReapedWithoutKill(status);
+        return if kill_requested {
+            CleanupObservation::ReapedAfterKill(status)
+        } else {
+            CleanupObservation::ReapedWithoutKill(status)
+        };
     }
 
-    witness_kill_requested();
-    let _termination_error = child.start_kill();
+    if !kill_requested {
+        witness_kill_requested();
+        let _termination_error = child.start_kill();
+    }
     // Second wait: remaining budget, or one immediate poll when ZERO/expired.
     let remaining = deadline
         .and_then(|d| d.checked_duration_since(tokio::time::Instant::now()))
