@@ -21,6 +21,7 @@ rust_library(
         "src/builtin_tool_capabilities_policy.rs",
         "src/connection.rs",
         "src/conversation_commit_notifier.rs",
+        "src/conversation_delivery_driver.rs",
         "src/conversation_delivery_writer.rs",
         "src/conversation_subscription_preparation.rs",
         "src/conversation_subscription_registry.rs",

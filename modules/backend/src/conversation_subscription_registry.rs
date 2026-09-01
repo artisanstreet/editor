@@ -241,6 +241,15 @@ impl ConversationSubscriptionRegistry {
         self.entries.len()
     }
 
+    /// Removes every connection-local entry.
+    ///
+    /// This is used only by the owning connection teardown path. Generation
+    /// history is retained so a later accidental use of the same registry
+    /// cannot mint a lease that was already issued.
+    pub(crate) fn clear_all(&mut self) {
+        self.entries.clear();
+    }
+
     /// Returns a read-only snapshot view for `thread_id`, if any.
     #[must_use]
     pub fn view(&self, thread_id: &ThreadId) -> Option<SubscriptionView> {

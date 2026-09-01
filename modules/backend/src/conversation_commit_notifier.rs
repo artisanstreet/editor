@@ -19,12 +19,15 @@ use tokio::sync::watch;
 #[derive(Debug)]
 struct Registry {
     state: Mutex<RegistryState>,
+    any_sender: watch::Sender<()>,
 }
 
 impl Registry {
     fn new() -> Self {
+        let (any_sender, _receiver) = watch::channel(());
         Self {
             state: Mutex::new(RegistryState::new()),
+            any_sender,
         }
     }
 }
@@ -73,6 +76,18 @@ pub struct ConversationCommitSubscription {
     registry: Weak<Registry>,
     thread_id: ThreadId,
     generation: NonZeroU64,
+    receiver: watch::Receiver<()>,
+}
+
+/// A bounded process-wide wake subscription.
+///
+/// Unlike [`ConversationCommitSubscription`], this value does not carry a
+/// thread identity. It is used by one connection-owned delivery driver to
+/// coalesce all successful conversation commits into one cancellation-bound
+/// scan wake.
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct ConversationCommitAnySubscription {
     receiver: watch::Receiver<()>,
 }
 
@@ -184,21 +199,44 @@ impl ConversationCommitNotifier {
     pub fn publish(&self, thread_id: &ThreadId) -> ConversationCommitPublish {
         let state = match self.registry.state.try_lock() {
             Ok(state) => state,
-            Err(TryLockError::WouldBlock) => return ConversationCommitPublish::Coalesced,
+            Err(TryLockError::WouldBlock) => {
+                let _ = self.registry.any_sender.send(());
+                return ConversationCommitPublish::Coalesced;
+            }
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         };
 
-        let Some(entry) = state.entries.get(thread_id) else {
-            return ConversationCommitPublish::Unobserved;
+        let result = match state.entries.get(thread_id) {
+            Some(entry) if entry.sender.send(()).is_ok() => ConversationCommitPublish::Notified,
+            Some(_) | None => ConversationCommitPublish::Unobserved,
         };
+        let _ = self.registry.any_sender.send(());
+        result
+    }
 
-        if entry.sender.send(()).is_ok() {
-            ConversationCommitPublish::Notified
-        } else {
-            // The entry invariant normally makes this unreachable: its
-            // sender is retained while every subscription receiver is live.
-            ConversationCommitPublish::Unobserved
+    /// Registers one bounded wake for any published conversation commit.
+    ///
+    /// The receiver retains only the latest watch generation, so the caller
+    /// can scan its bounded active set once after a burst of commits without
+    /// allocating a per-commit queue.
+    pub(crate) fn subscribe_any(&self) -> ConversationCommitAnySubscription {
+        ConversationCommitAnySubscription {
+            receiver: self.registry.any_sender.subscribe(),
         }
+    }
+}
+
+impl ConversationCommitAnySubscription {
+    /// Waits for the next coalesced process-wide commit wake.
+    ///
+    /// Tokio watch change detection is cancellation safe, and the receiver
+    /// therefore remains usable when the bounded wait is cancelled by the
+    /// caller's outer operation.
+    pub(crate) async fn wait(&mut self) -> Result<(), ConversationCommitWaitError> {
+        self.receiver
+            .changed()
+            .await
+            .map_err(|_| ConversationCommitWaitError::Closed)
     }
 }
 

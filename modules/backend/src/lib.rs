@@ -13,6 +13,7 @@ pub mod builtin_tool_capabilities_policy;
 pub mod command_admission;
 pub mod connection;
 pub mod conversation_commit_notifier;
+pub(crate) mod conversation_delivery_driver;
 pub mod conversation_delivery_writer;
 pub mod conversation_subscription_preparation;
 pub mod conversation_subscription_registry;
@@ -61,8 +62,8 @@ pub use command_admission::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, SystemCommandOrigin,
 };
 pub use connection::{
-    AuthenticationStageError, ConnectionLimits, ForgeConnection, RequestStageError,
-    ServerFrameStamp, WelcomeMetadata,
+    AuthenticationStageError, ConnectionLimits, DeliveryStageError, ForgeConnection,
+    RequestStageError, ServerFrameStamp, WelcomeMetadata,
 };
 pub use credential_authority::{
     AuthenticatedCredential, CredentialAuthenticationError, CredentialAuthority,
