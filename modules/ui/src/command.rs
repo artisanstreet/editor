@@ -1066,9 +1066,10 @@ impl RenderOnce for CommandPalette {
             root = root.child(list);
         }
 
-        let key_groups = groups.clone();
+        let key_groups = groups;
         let key_state = highlighted_state.clone();
         let key_highlight_handler = on_highlight_change.clone();
+        let activation_handler = on_activate;
         root = root.on_key_down(move |event, window, cx| {
             let current = key_state.borrow().clone();
             if let Some(next) = navigation_target(
@@ -1080,21 +1081,16 @@ impl RenderOnce for CommandPalette {
                 window.prevent_default();
                 emit_highlight_change(&key_state, next, &key_highlight_handler, window, cx);
                 cx.stop_propagation();
+                return;
             }
-        });
 
-        let activation_groups = groups;
-        let activation_state = highlighted_state;
-        let activation_handler = on_activate;
-        root = root.on_key_up(move |event, window, cx| {
             let key = event.keystroke.key.as_str();
-            if !event.keystroke.modifiers.modified() && matches!(key, "enter" | "space") {
+            if !event.keystroke.modifiers.modified() && matches!(key, "enter" | "return" | "space")
+            {
                 window.prevent_default();
                 if let Some(handler) = &activation_handler {
-                    let current = activation_state.borrow().clone();
-                    if let Some(activation) =
-                        activation_for_id(&activation_groups, current.as_ref())
-                    {
+                    let current = key_state.borrow().clone();
+                    if let Some(activation) = activation_for_id(&key_groups, current.as_ref()) {
                         handler(activation, window, cx);
                     }
                 }
