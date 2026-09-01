@@ -61,7 +61,7 @@ use artisan_transport::{
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
-use quinn::{Connection, ConnectionError, ReadError, VarInt};
+use quinn::{Connection, ConnectionError, ReadError, StoppedError, VarInt};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 /// Fixed rotated-capability bytes carried by every scripted Welcome;
@@ -792,15 +792,89 @@ enum ResponseStreamScript {
     TrailingData,
 }
 
+/// Typed peer-side observation of the response send stream's terminal state.
+///
+/// `CleanFinish` is the only successful dedicated-mode completion. The two
+/// abandonment variants are both valid only for terminal-error fixtures:
+/// either Quinn surfaced the stream STOP code, or the session's typed
+/// application abandonment close won the race first.
+#[derive(Debug, Eq, PartialEq)]
+enum ResponseStreamDisposition {
+    /// `SendStream::stopped()` returned `Ok(None)` after clean FIN.
+    CleanFinish,
+    /// `SendStream::stopped()` returned a peer STOP code.
+    StreamStopped(VarInt),
+    /// The client closed the session with the exact private abandon code.
+    SessionAbandoned,
+}
+
+/// Classifies the pinned Quinn stop witness without weakening terminal
+/// evidence. Arbitrary connection loss, transport closure, zero-RTT
+/// rejection, and a watchdog timeout remain fixture failures.
+fn classify_response_stream_disposition(
+    stopped: Result<Option<VarInt>, StoppedError>,
+) -> Result<ResponseStreamDisposition, Box<dyn Error>> {
+    match stopped {
+        Ok(None) => Ok(ResponseStreamDisposition::CleanFinish),
+        Ok(Some(code)) => Ok(ResponseStreamDisposition::StreamStopped(code)),
+        Err(StoppedError::ConnectionLost(ConnectionError::ApplicationClosed(close)))
+            if u64::from(close.error_code) == LEAF_ABANDON_CODE =>
+        {
+            Ok(ResponseStreamDisposition::SessionAbandoned)
+        }
+        Err(StoppedError::ConnectionLost(ConnectionError::ApplicationClosed(_))) => {
+            Err("the response stream observed an unexpected application close".into())
+        }
+        Err(StoppedError::ConnectionLost(_)) => {
+            Err("the response stream stop witness lost its connection".into())
+        }
+        Err(StoppedError::ZeroRttRejected) => {
+            Err("the response stream stop witness rejected 0-RTT".into())
+        }
+    }
+}
+
+/// Requires the exact private stream STOP for an ordinary request whose
+/// session remains alive while the witness is collected.
+fn assert_response_stream_stopped(disposition: ResponseStreamDisposition) {
+    let ResponseStreamDisposition::StreamStopped(code) = disposition else {
+        panic!("ordinary response did not report its private stream STOP");
+    };
+    assert_eq!(
+        code,
+        VarInt::from_u32(LEAF_STREAM_STOP_CODE),
+        "ordinary response must report the exact private stream STOP"
+    );
+}
+
+/// Accepts only the two exact terminal-error observations: the private stream
+/// STOP code or the session's typed application abandonment close. Clean FIN
+/// is never terminal-error evidence.
+fn assert_response_stream_abandoned(disposition: ResponseStreamDisposition) {
+    match disposition {
+        ResponseStreamDisposition::StreamStopped(code) => assert_eq!(
+            code,
+            VarInt::from_u32(LEAF_STREAM_STOP_CODE),
+            "a terminal response must report the exact private stream STOP"
+        ),
+        ResponseStreamDisposition::SessionAbandoned => {}
+        ResponseStreamDisposition::CleanFinish => {
+            panic!("a terminal response must not report clean FIN acknowledgement")
+        }
+    }
+}
+
 /// Serves one request response and witnesses the peer's stream disposition.
 ///
 /// The server waits on [`quinn::SendStream::stopped`] while retaining its
-/// connection. A cleanly finished response must report `None`; every held-open
-/// invalid or ordinary response must report the leaf's private STOP code.
+/// connection. A cleanly finished response must report `None`; an ordinary
+/// held-open response must report the leaf's private STOP code; terminal
+/// dedicated-mode errors may report that same STOP or the exact typed session
+/// abandonment close when connection teardown wins the race.
 async fn serve_response_stream(
     mut connections: tokio::sync::mpsc::Receiver<Connection>,
     script: ResponseStreamScript,
-    stopped_witness: tokio::sync::oneshot::Sender<Option<VarInt>>,
+    stopped_witness: tokio::sync::oneshot::Sender<ResponseStreamDisposition>,
     response_written: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Result<Connection, Box<dyn Error>> {
     let connection = next_connection(&mut connections).await?;
@@ -868,10 +942,10 @@ async fn serve_response_stream(
 
     let stopped = tokio::time::timeout(TEST_DEADLINE, send.stopped())
         .await
-        .map_err(|_| "the response stream stop witness timed out")?
-        .map_err(|_| "the response stream stop witness failed")?;
+        .map_err(|_| "the response stream stop witness timed out")?;
+    let disposition = classify_response_stream_disposition(stopped)?;
     stopped_witness
-        .send(stopped)
+        .send(disposition)
         .map_err(|_| "the response stream witness receiver was dropped")?;
     Ok(connection)
 }
@@ -942,11 +1016,7 @@ async fn acknowledging_response_rejection(
             .await
             .map_err(|_| "rejected response STOP witness timed out")?
             .map_err(|_| "rejected response STOP witness was dropped")?;
-        assert_eq!(
-            stopped,
-            Some(VarInt::from_u32(LEAF_STREAM_STOP_CODE)),
-            "a rejected response must stop rather than cleanly acknowledge the stream"
-        );
+        assert_response_stream_abandoned(stopped);
         Ok::<_, Box<dyn Error>>(())
     };
 
@@ -1033,11 +1103,7 @@ async fn acknowledging_response_fin_abandonment(
             .await
             .map_err(|_| "abandoned response STOP witness timed out")?
             .map_err(|_| "abandoned response STOP witness was dropped")?;
-        assert_eq!(
-            stopped,
-            Some(VarInt::from_u32(LEAF_STREAM_STOP_CODE)),
-            "response-FIN abandonment must use the private stream STOP"
-        );
+        assert_response_stream_abandoned(stopped);
         Ok::<_, Box<dyn Error>>(())
     };
 
@@ -1668,11 +1734,7 @@ async fn ordinary_request_stops_after_one_correlated_response() -> Result<(), Bo
             .await
             .map_err(|_| "ordinary response STOP witness timed out")?
             .map_err(|_| "ordinary response STOP witness was dropped")?;
-        assert_eq!(
-            stopped,
-            Some(VarInt::from_u32(LEAF_STREAM_STOP_CODE)),
-            "ordinary request completion must stop the still-open response stream"
-        );
+        assert_response_stream_stopped(stopped);
         session.shutdown(&cancel).await?;
         Ok::<_, Box<dyn Error>>(())
     };
@@ -1725,7 +1787,8 @@ async fn acknowledging_response_waits_for_clean_response_fin() -> Result<(), Box
             .map_err(|_| "clean response FIN witness timed out")?
             .map_err(|_| "clean response FIN witness was dropped")?;
         assert_eq!(
-            stopped, None,
+            stopped,
+            ResponseStreamDisposition::CleanFinish,
             "a valid settled response followed by FIN must be cleanly acknowledged"
         );
         session.shutdown(&cancel).await?;
