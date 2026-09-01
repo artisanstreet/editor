@@ -735,7 +735,7 @@ impl ReconnectCapabilityStore {
                     current.file_id,
                     current.metadata.state,
                     current.metadata.generation,
-                    current.metadata.owner_nonce.as_ref(),
+                    &*current.metadata.owner_nonce,
                     current.metadata.binding,
                     &desired,
                 )?;
