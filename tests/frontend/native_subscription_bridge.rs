@@ -519,7 +519,7 @@ fn delivery_loss_is_bounded_path_free_via_production_event() {
         category: ServiceFailureCategory::Integrity,
     };
     let ev = NativeTransportEvent::DeliveryLost(failure);
-    let s = format!("{:?}", ev);
+    let s = format!("{ev:?}");
     assert!(!s.contains('/'));
     assert!(!s.contains('\\'));
     assert!(s.contains("DeliveryLost") || s.contains("Delivery"));
