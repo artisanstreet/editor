@@ -28,7 +28,7 @@ use crate::conversation_steering_machine::SteeringEffect;
 use crate::conversation_surface::{
     ConversationSurface, ConversationSurfaceAction, ConversationSurfaceTarget,
 };
-use crate::conversation_view_machine::ViewportEffect;
+use crate::conversation_view_machine::{ViewportEffect, ViewportEvent};
 
 /// Maximum number of effects exported by one host before adapter backpressure
 /// stops further direct export.
@@ -104,6 +104,7 @@ pub struct ConversationHost {
     /// to route through the controller boundary.
     _surface_subscription: Subscription,
     effects: Vec<ConversationHostEffect>,
+    pending_extent_changes: usize,
 }
 
 impl ConversationHost {
@@ -167,6 +168,7 @@ impl ConversationHost {
             surface,
             _surface_subscription: surface_subscription,
             effects: Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
+            pending_extent_changes: 0,
         };
         host.flush_controller_effects();
         host
@@ -225,6 +227,7 @@ impl ConversationHost {
         self.effects
             .len()
             .saturating_add(self.controller.pending_effect_count())
+            .saturating_add(self.pending_extent_changes)
     }
 
     /// Drains the currently exported host-effect prefix.
@@ -241,6 +244,8 @@ impl ConversationHost {
             Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
         );
         self.flush_controller_effects();
+        let _ = self.dispatch_pending_extent_changes();
+        self.flush_controller_effects();
         effects
     }
 
@@ -251,7 +256,12 @@ impl ConversationHost {
     /// explicit retry is the bounded backpressure seam for an adapter that
     /// drained effects without causing a new surface notification.
     pub fn process_pending_actions(&mut self, cx: &mut Context<Self>) {
+        let _ = self.dispatch_pending_extent_changes();
+        self.flush_controller_effects();
         let surface = self.surface.clone();
+        surface.update(cx, |surface, surface_cx| {
+            surface.retry_pending_viewport_observation(surface_cx);
+        });
         self.route_surface_actions(&surface, cx);
     }
 
@@ -273,9 +283,24 @@ impl ConversationHost {
         cx: &mut Context<Self>,
     ) -> Result<(), ConversationHostError> {
         self.flush_controller_effects();
+        if let Err(error) = self.dispatch_pending_extent_changes() {
+            self.flush_controller_effects();
+            return Err(
+                if matches!(&error, ConversationStateError::CapacityExhausted { .. }) {
+                    ConversationHostError::EffectOutboxFull {
+                        count: self.total_pending_effect_count(),
+                        maximum: CONVERSATION_HOST_MAX_EFFECTS,
+                    }
+                } else {
+                    ConversationHostError::Controller(error)
+                },
+            );
+        }
+        self.flush_controller_effects();
         let before = self.controller.pending_effect_count();
         match self.controller.dispatch(event) {
             Ok(()) => {
+                let requires_extent_change = self.controller_effects_require_extent_change(before);
                 if self.controller_effects_invalidate_render(before) {
                     let scene = match self.controller.scene() {
                         Ok(scene) => scene,
@@ -288,6 +313,11 @@ impl ConversationHost {
                     self.surface.update(cx, |surface, surface_cx| {
                         surface.replace_scene(scene, surface_cx);
                     });
+                }
+                if requires_extent_change {
+                    self.pending_extent_changes = self.pending_extent_changes.saturating_add(1);
+                    self.flush_controller_effects();
+                    let _ = self.dispatch_pending_extent_changes();
                 }
                 self.flush_controller_effects();
                 cx.notify();
@@ -315,6 +345,11 @@ impl ConversationHost {
         cx: &mut Context<Self>,
     ) {
         self.flush_controller_effects();
+        let _ = self.dispatch_pending_extent_changes();
+        self.flush_controller_effects();
+        surface.update(cx, |surface, surface_cx| {
+            surface.retry_pending_viewport_observation(surface_cx);
+        });
         while let Some(action) = surface.read(cx).next_action().cloned() {
             let decision = match action {
                 ConversationSurfaceAction::DisclosureToggleRequested { id, requested_open } => self
@@ -331,13 +366,15 @@ impl ConversationHost {
                     ),
                 ConversationSurfaceAction::ViewportObserved(observation) => self
                     .route_controller_event(
-                        ConversationStateEvent::Viewport(
-                            crate::conversation_view_machine::ViewportEvent::UserScrolled {
-                                at_bottom: observation.at_bottom,
-                            },
-                        ),
+                        ConversationStateEvent::Viewport(ViewportEvent::UserScrolled {
+                            at_bottom: observation.at_bottom,
+                        }),
                         cx,
                     ),
+                ConversationSurfaceAction::JumpToLatestRequested => self.route_controller_event(
+                    ConversationStateEvent::Viewport(ViewportEvent::JumpToBottomRequested),
+                    cx,
+                ),
                 ConversationSurfaceAction::ScrollIntent { target } => {
                     self.route_scroll_intent(target, cx)
                 }
@@ -352,6 +389,10 @@ impl ConversationHost {
                 SurfaceRouteDecision::Backpressured => break,
             }
         }
+        surface.update(cx, |surface, surface_cx| {
+            surface.retry_pending_viewport_observation(surface_cx);
+        });
+        let _ = self.dispatch_pending_extent_changes();
         self.flush_controller_effects();
     }
 
@@ -397,6 +438,30 @@ impl ConversationHost {
             .is_some_and(|effects| effects.iter().any(effect_invalidates_render))
     }
 
+    fn controller_effects_require_extent_change(&self, before: usize) -> bool {
+        self.controller
+            .pending_effects()
+            .get(before..)
+            .is_some_and(|effects| effects.iter().any(effect_requires_extent_change))
+    }
+
+    fn dispatch_pending_extent_changes(&mut self) -> Result<(), ConversationStateError> {
+        while self.pending_extent_changes > 0 {
+            match self.controller.dispatch(ConversationStateEvent::Viewport(
+                ViewportEvent::ExtentChanged,
+            )) {
+                Ok(()) => self.pending_extent_changes -= 1,
+                Err(error) => {
+                    if !matches!(&error, ConversationStateError::CapacityExhausted { .. }) {
+                        self.pending_extent_changes -= 1;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn retain_refusal(&mut self, error: ConversationStateError) -> bool {
         self.flush_controller_effects();
         if self.controller.pending_effect_count() > 0
@@ -435,6 +500,18 @@ fn effect_invalidates_render(effect: &ConversationStateEffect) -> bool {
                 ..
             }
             | ConversationStateEffect::Viewport(ViewportEffect::InvalidateRender)
+    )
+}
+
+fn effect_requires_extent_change(effect: &ConversationStateEffect) -> bool {
+    matches!(
+        effect,
+        ConversationStateEffect::SceneInvalidated
+            | ConversationStateEffect::Delivery(ConversationDeliveryEffect::Invalidate)
+            | ConversationStateEffect::Steering {
+                effect: SteeringEffect::RenderInvalidation { .. },
+                ..
+            }
     )
 }
 

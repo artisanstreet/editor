@@ -17,9 +17,11 @@
 use artisan_domain::{ItemId, TurnId};
 use artisan_ui::alert::{Alert, AlertVariant};
 use artisan_ui::badge::{BadgeStyle, outline_badge};
+use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
 use artisan_ui::markdown_renderer::MarkdownRenderer;
+use artisan_ui::motion::MotionPolicy;
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
@@ -27,6 +29,7 @@ use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, FontWeight, IntoElement, Render, ScrollHandle,
     SharedString, Window, div,
     prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
+    px,
 };
 
 use crate::conversation_scene::{
@@ -35,12 +38,16 @@ use crate::conversation_scene::{
     SceneFileChange, SceneId, SteeringBlock, TurnBlock, TurnFooterBlock, TurnNarration, TurnScene,
     UsageInterruptionBlock, UserMessageBlock, WorkGroupBlock, WorkItem,
 };
+use crate::conversation_scroll_position::conversation_is_following;
 
 /// Stable debug selector for the conversation surface root.
 pub const CONVERSATION_SURFACE_SELECTOR: &str = "artisan-conversation-surface";
 
 /// Stable debug selector derived by [`ScrollArea`] for the transcript viewport.
 pub const CONVERSATION_VIEWPORT_SELECTOR: &str = "artisan-conversation-surface-viewport";
+
+/// Stable debug selector for the detached-reader jump control.
+pub const JUMP_TO_LATEST_SELECTOR: &str = "artisan-conversation-surface-jump-to-latest";
 
 /// Alias for callers that use the shorter root-selector vocabulary.
 pub const ROOT_SELECTOR: &str = CONVERSATION_SURFACE_SELECTOR;
@@ -97,6 +104,8 @@ pub enum ConversationSurfaceAction {
     },
     /// Report the visible identity bounds of the transcript viewport.
     ViewportObserved(ViewportObservation),
+    /// Ask the viewport controller to return to the latest transcript content.
+    JumpToLatestRequested,
     /// Ask the surrounding controller to move the viewport to a stable target.
     ScrollIntent {
         /// Stable scene or item target.
@@ -348,7 +357,21 @@ pub struct ConversationSurface {
     scroll_handle: ScrollHandle,
     transcript_focus: FocusHandle,
     disclosure_focus: FocusHandle,
+    jump_to_latest_focus: FocusHandle,
+    jump_to_latest_visible: bool,
+    last_viewport_observation: Option<ViewportObservation>,
+    pending_viewport_observation: Option<ViewportObservation>,
+    last_viewport_geometry: Option<ViewportGeometry>,
+    viewport_observation_scheduled: bool,
+    viewport_next_frame_scheduled: bool,
     actions: Vec<ConversationSurfaceAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewportGeometry {
+    scroll_top: f64,
+    viewport_height: f64,
+    scroll_height: f64,
 }
 
 struct TextBlockRender<'a> {
@@ -378,6 +401,17 @@ impl ConversationSurface {
             scroll_handle: ScrollHandle::new(),
             transcript_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             disclosure_focus: cx.focus_handle().tab_index(1).tab_stop(true),
+            jump_to_latest_focus: cx.focus_handle().tab_index(2).tab_stop(true),
+            jump_to_latest_visible: false,
+            last_viewport_observation: Some(ViewportObservation {
+                first_visible: None,
+                last_visible: None,
+                at_bottom: true,
+            }),
+            pending_viewport_observation: None,
+            last_viewport_geometry: None,
+            viewport_observation_scheduled: false,
+            viewport_next_frame_scheduled: false,
             actions: Vec::new(),
         }
     }
@@ -410,6 +444,26 @@ impl ConversationSurface {
     #[must_use]
     pub fn disclosure_focus_handle(&self) -> &FocusHandle {
         &self.disclosure_focus
+    }
+
+    /// Mirrors the controller's detached-reader affordance into rendering.
+    ///
+    /// The viewport controller remains the sole authority for whether the
+    /// button should be visible; this flag is only a paint-time mirror.
+    pub fn set_jump_to_latest_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.jump_to_latest_visible != visible {
+            self.jump_to_latest_visible = visible;
+            cx.notify();
+        }
+    }
+
+    /// Requests the existing GPUI scroll handle to move to the transcript end.
+    ///
+    /// Completion is intentionally not synthesized here. The next physical
+    /// viewport observation is the controller's completion signal.
+    pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.scroll_handle.scroll_to_bottom();
+        cx.notify();
     }
 
     /// Replaces the accepted scene. Disclosure state is not changed locally;
@@ -467,11 +521,28 @@ impl ConversationSurface {
         observation: ViewportObservation,
         cx: &mut Context<Self>,
     ) -> bool {
-        let queued = self.enqueue_action(ConversationSurfaceAction::ViewportObserved(observation));
-        if queued {
-            cx.notify();
+        self.retry_pending_viewport_observation(cx);
+
+        if self.last_viewport_observation.as_ref() == Some(&observation) {
+            return false;
         }
-        queued
+        if self.pending_viewport_observation.as_ref() == Some(&observation) {
+            return false;
+        }
+        if self.pending_viewport_observation.is_some() {
+            return false;
+        }
+
+        if self.enqueue_action(ConversationSurfaceAction::ViewportObserved(
+            observation.clone(),
+        )) {
+            self.last_viewport_observation = Some(observation);
+            cx.notify();
+            true
+        } else {
+            self.pending_viewport_observation = Some(observation);
+            false
+        }
     }
 
     /// Queues a scroll intent without mutating the GPUI handle or scene.
@@ -480,11 +551,36 @@ impl ConversationSurface {
         target: ConversationSurfaceTarget,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.retry_pending_viewport_observation(cx);
+        if self.pending_viewport_observation.is_some() {
+            return false;
+        }
         let queued = self.enqueue_action(ConversationSurfaceAction::ScrollIntent { target });
         if queued {
             cx.notify();
         }
         queued
+    }
+
+    /// Retries one geometry observation retained when the action queue was
+    /// full. This is `pub(crate)` so the host can retry after draining its
+    /// downstream effect queue without inventing another surface action.
+    pub(crate) fn retry_pending_viewport_observation(&mut self, cx: &mut Context<Self>) {
+        let Some(observation) = self.pending_viewport_observation.take() else {
+            return;
+        };
+
+        if self.last_viewport_observation.as_ref() == Some(&observation) {
+            return;
+        }
+        if self.enqueue_action(ConversationSurfaceAction::ViewportObserved(
+            observation.clone(),
+        )) {
+            self.last_viewport_observation = Some(observation);
+            cx.notify();
+        } else {
+            self.pending_viewport_observation = Some(observation);
+        }
     }
 
     fn enqueue_action(&mut self, action: ConversationSurfaceAction) -> bool {
@@ -493,6 +589,61 @@ impl ConversationSurface {
         }
         self.actions.push(action);
         true
+    }
+
+    fn observe_current_viewport(&mut self, cx: &mut Context<Self>) {
+        self.retry_pending_viewport_observation(cx);
+
+        let offset = self.scroll_handle.offset();
+        let bounds = self.scroll_handle.bounds();
+        let max_offset = self.scroll_handle.max_offset();
+        let scroll_top = -f64::from(offset.y);
+        let viewport_height = f64::from(bounds.size.height);
+        let scroll_height = viewport_height + f64::from(max_offset.height);
+        let geometry = ViewportGeometry {
+            scroll_top,
+            viewport_height,
+            scroll_height,
+        };
+        if self.last_viewport_geometry == Some(geometry) {
+            return;
+        }
+
+        self.last_viewport_geometry = Some(geometry);
+        let observation = ViewportObservation {
+            first_visible: None,
+            last_visible: None,
+            at_bottom: conversation_is_following(scroll_top, scroll_height, viewport_height),
+        };
+        let _ = self.observe_viewport(observation, cx);
+    }
+
+    fn schedule_viewport_observation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.viewport_observation_scheduled {
+            self.viewport_observation_scheduled = true;
+            let entity = cx.entity().downgrade();
+            // Read after GPUI has painted the current layout so the initial
+            // geometry is observable even when an otherwise idle platform
+            // does not deliver a later frame callback.
+            window.defer(cx, move |_, app| {
+                let _ = entity.update(app, |surface, cx| {
+                    surface.viewport_observation_scheduled = false;
+                    surface.observe_current_viewport(cx);
+                });
+            });
+        }
+
+        if self.viewport_next_frame_scheduled {
+            return;
+        }
+        self.viewport_next_frame_scheduled = true;
+        let entity = cx.entity().downgrade();
+        window.on_next_frame(move |_, app| {
+            let _ = entity.update(app, |surface, cx| {
+                surface.viewport_next_frame_scheduled = false;
+                surface.observe_current_viewport(cx);
+            });
+        });
     }
 
     fn render_turn(
@@ -1060,7 +1211,7 @@ impl ConversationSurface {
 }
 
 impl Render for ConversationSurface {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ArtisanTheme::for_mode(self.theme_mode);
         let entity = cx.entity();
         let mut transcript = div()
@@ -1076,12 +1227,46 @@ impl Render for ConversationSurface {
         // the scene contract. Their aggregate owner supplies placement later;
         // rendering only turn blocks keeps this surface an exhaustive view of
         // the accepted ordered block tree.
-        ScrollArea::new(self.scroll_handle.clone(), theme)
+        self.schedule_viewport_observation(window, cx);
+
+        let scroll_area = ScrollArea::new(self.scroll_handle.clone(), theme)
             .focus_handle(self.transcript_focus.clone())
             .debug_selector(CONVERSATION_SURFACE_SELECTOR)
             .size_full()
             .bg(theme.colors.background.to_paint())
-            .child(transcript)
+            .child(transcript);
+
+        let mut root = div().relative().size_full().child(scroll_area);
+        if self.jump_to_latest_visible {
+            let surface = entity.downgrade();
+            let button = Button::new(
+                JUMP_TO_LATEST_SELECTOR,
+                self.jump_to_latest_focus.clone(),
+                theme,
+                MotionPolicy::Reduced,
+                ButtonVariant::Ghost,
+                ButtonSize::Small,
+                ButtonContent::text("Jump to latest"),
+            )
+            .expect("static jump-to-latest button configuration is valid")
+            .focus_visibility(FocusVisibility::Visible)
+            .debug_selector(JUMP_TO_LATEST_SELECTOR)
+            .on_activate(move |_, _, app| {
+                let _ = surface.update(app, |surface, cx| {
+                    if surface.enqueue_action(ConversationSurfaceAction::JumpToLatestRequested) {
+                        cx.notify();
+                    }
+                });
+            });
+            root = root.child(
+                div()
+                    .absolute()
+                    .right(px(16.0))
+                    .bottom(px(16.0))
+                    .child(button),
+            );
+        }
+        root
     }
 }
 
