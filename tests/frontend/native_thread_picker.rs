@@ -146,7 +146,7 @@ fn pointer_activation_and_same_thread_activation_are_distinct() {
 
 #[test]
 fn keyboard_edges_groups_enter_and_ime_delegate_to_existing_selection() {
-    let mut state = NativeThreadPickerState::new(listing(0..6), Some(thread_id(0)));
+    let mut state = NativeThreadPickerState::new(listing(0..6), Some(thread_id(1)));
     state.press_trigger();
 
     state.handle_key(ListKey::ArrowUp);
