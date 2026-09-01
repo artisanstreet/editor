@@ -4146,17 +4146,18 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let thread_id = ThreadId::parse("viewport-pump-thread").expect("thread");
-        let host = cx
-            .update(|app| ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host"));
-        let generation = cx.update(|app| host.read(app).controller_view().viewport_generation);
+        let host = cx.update(|_, app| {
+            ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host")
+        });
+        let generation = cx.update(|_, app| host.read(app).controller_view().viewport_generation);
         let stale_generation = ViewportGeneration::new(generation.value().saturating_add(1));
-        cx.update(|app| {
+        cx.update(|_, app| {
             host.update(app, |host, _| {
                 let _ = host.drain_effects();
             });
         });
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.state = NativeViewState::Ready;
                 application.conversation_host = Some(host.clone());
