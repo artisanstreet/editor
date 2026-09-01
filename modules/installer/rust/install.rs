@@ -31,6 +31,99 @@ const NATIVE_PAYLOAD_LABEL: &str = "native payload";
 /// explicit autostart task remains independently owned by `ae setup --autostart`.
 const FIRST_RUN_CONFIGURATION_COMMANDS: [&[&str]; 3] = [&["setup"], &["doctor"], &["status"]];
 
+/// Owns exactly one stage directory after its atomic creation succeeds.
+/// Cleanup is explicit because its failure must be reported to the caller.
+#[derive(Debug)]
+struct StageLease {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StageLease {
+    fn acquire(path: PathBuf, release_version: &str) -> Result<Self> {
+        match std::fs::create_dir(&path) {
+            Ok(()) => Ok(Self { path, armed: true }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(InstallerError::ExistingRelease(release_version.to_owned()))
+            }
+            Err(error) => Err(io(&path)(error)),
+        }
+    }
+
+    fn transfer_to(&mut self, release: &Path) -> Result<()> {
+        std::fs::rename(&self.path, release).map_err(io(release))?;
+        self.armed = false;
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
+        match remove_owned_stage(&self.path) {
+            Ok(()) => {
+                self.armed = false;
+                Ok(())
+            }
+            Err(_) => Err(InstallerError::StageCleanupIncomplete),
+        }
+    }
+
+    fn finish(&self) -> Result<()> {
+        if self.armed {
+            Err(InstallerError::StageCleanupIncomplete)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn complete_install(stage: &mut StageLease, result: Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => stage.finish(),
+        Err(original) => match stage.cleanup() {
+            Ok(()) => Err(original),
+            Err(cleanup) => Err(cleanup),
+        },
+    }
+}
+
+fn remove_owned_stage(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "owned stage is not an ordinary directory",
+        ));
+    }
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 pub struct InstallIntegrationOptions {
     /// Whether this install may own the `artisan://` handler. A secondary
     /// install beside an existing installation must leave the handler with
@@ -144,10 +237,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         manifest.product_version,
         std::process::id()
     ));
-    if stage.exists() {
-        return Err(InstallerError::ExistingRelease(manifest.product_version));
-    }
-    std::fs::create_dir(&stage).map_err(io(&stage))?;
+    let mut stage_lease = StageLease::acquire(stage.clone(), &manifest.product_version)?;
 
     let result = async {
         let artifact = manifest
@@ -183,7 +273,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if let Some(parent) = release.parent() {
             std::fs::create_dir_all(parent).map_err(io(parent))?;
         }
-        std::fs::rename(&stage, &release).map_err(io(&release))?;
+        stage_lease.transfer_to(&release)?;
         let lifecycle_ae = release_cli(&release)?;
         let existing_protocol = read_existing_protocol(&options.install_root)?;
         let bootstrap = versioned_installer_path(&release);
@@ -219,10 +309,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         Ok(())
     }
     .await;
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&stage);
-    }
-    result
+    complete_install(&mut stage_lease, result)
 }
 
 async fn install_artifact(
@@ -958,11 +1045,25 @@ fn invoke_ae(release: &Path, arguments: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
+    use super::{InstallerError, StageLease, complete_install};
+
     #[cfg(windows)]
     use super::prepend_windows_path_entry;
+
+    #[cfg(unix)]
+    fn create_directory_link(target: &std::path::Path, link: &std::path::Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(target: &std::path::Path, link: &std::path::Path) -> bool {
+        std::os::windows::fs::symlink_dir(target, link).is_ok()
+    }
 
     #[test]
     fn sha256_representation_matches_release_contract() {
@@ -1034,6 +1135,146 @@ mod tests {
         assert_eq!(
             serde_json::to_value(super::installed_components()).expect("component projection"),
             serde_json::json!({"editor": true, "forge": true})
+        );
+    }
+
+    #[test]
+    fn failed_install_removes_only_its_owned_stage() {
+        let root = tempdir().expect("temp");
+        let stage = root.path().join(".stage-1.2.3-owned");
+        let sibling = root.path().join(".stage-1.2.3-sibling");
+        let mut lease = StageLease::acquire(stage.clone(), "1.2.3").expect("stage lease");
+        fs::create_dir(&sibling).expect("sibling stage");
+        fs::write(stage.join("partial"), b"partial payload").expect("partial payload");
+
+        let result = complete_install(
+            &mut lease,
+            Err(InstallerError::Archive(
+                "post-acquisition failure".to_owned(),
+            )),
+        );
+
+        assert!(matches!(
+            result,
+            Err(InstallerError::Archive(message)) if message == "post-acquisition failure"
+        ));
+        assert!(!stage.exists());
+        assert!(sibling.is_dir());
+    }
+
+    #[test]
+    fn pre_existing_stage_collision_is_rejected_and_untouched() {
+        let root = tempdir().expect("temp");
+        let stage = root.path().join(".stage-1.2.3-owned");
+        fs::create_dir(&stage).expect("pre-existing stage");
+        let marker = stage.join("marker");
+        fs::write(&marker, b"keep").expect("collision marker");
+
+        let result = StageLease::acquire(stage.clone(), "1.2.3");
+
+        assert!(matches!(
+            result,
+            Err(InstallerError::ExistingRelease(version)) if version == "1.2.3"
+        ));
+        assert!(stage.is_dir());
+        assert_eq!(fs::read(marker).expect("collision marker"), b"keep");
+    }
+
+    #[test]
+    fn missing_owned_stage_cleanup_is_idempotent() {
+        let root = tempdir().expect("temp");
+        let stage = root.path().join(".stage-1.2.3-owned");
+        let mut lease = StageLease::acquire(stage.clone(), "1.2.3").expect("stage lease");
+        fs::remove_dir(&stage).expect("remove stage before cleanup");
+
+        assert!(lease.cleanup().is_ok());
+        assert!(!lease.armed);
+        assert!(lease.cleanup().is_ok());
+    }
+
+    #[test]
+    fn cleanup_refuses_a_regular_file_target() {
+        let root = tempdir().expect("temp");
+        let stage = root.path().join(".stage-1.2.3-owned");
+        let mut lease = StageLease::acquire(stage.clone(), "1.2.3").expect("stage lease");
+        fs::remove_dir(&stage).expect("remove stage before replacement");
+        fs::write(&stage, b"do not remove").expect("file replacement");
+
+        let result = lease.cleanup();
+
+        assert!(matches!(
+            result,
+            Err(InstallerError::StageCleanupIncomplete)
+        ));
+        assert_eq!(fs::read(stage).expect("file target"), b"do not remove");
+    }
+
+    #[test]
+    fn cleanup_refuses_a_link_or_reparse_target() {
+        let root = tempdir().expect("temp");
+        let target = root.path().join("target");
+        fs::create_dir(&target).expect("link target");
+        let stage = root.path().join(".stage-1.2.3-owned");
+        let mut lease = StageLease::acquire(stage.clone(), "1.2.3").expect("stage lease");
+        fs::remove_dir(&stage).expect("remove stage before replacement");
+        if !create_directory_link(&target, &stage) {
+            eprintln!("SKIP: directory links are not supported on this host");
+            return;
+        }
+
+        let result = lease.cleanup();
+
+        assert!(matches!(
+            result,
+            Err(InstallerError::StageCleanupIncomplete)
+        ));
+        assert!(stage.symlink_metadata().is_ok());
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn cleanup_failure_takes_precedence_and_is_path_free() {
+        let root = tempdir().expect("temp");
+        let stage = root.path().join(".stage-1.2.3-owned");
+        let mut lease = StageLease::acquire(stage.clone(), "1.2.3").expect("stage lease");
+        fs::remove_dir(&stage).expect("remove stage before replacement");
+        fs::write(&stage, b"preserve").expect("file replacement");
+        let original = format!("original failure at {}", stage.display());
+
+        let error = complete_install(&mut lease, Err(InstallerError::Archive(original)))
+            .expect_err("cleanup failure");
+
+        assert!(matches!(error, InstallerError::StageCleanupIncomplete));
+        assert_eq!(error.to_string(), "staging cleanup could not be completed");
+        assert!(!error.to_string().contains(&stage.display().to_string()));
+        assert_eq!(fs::read(stage).expect("file target"), b"preserve");
+    }
+
+    #[test]
+    fn successful_transfer_disarms_lease_before_later_failure() {
+        let root = tempdir().expect("temp");
+        let stage = root.path().join(".stage-1.2.3-owned");
+        let release_parent = root.path().join("versions");
+        let release = release_parent.join("1.2.3");
+        fs::create_dir(&release_parent).expect("release parent");
+        let mut lease = StageLease::acquire(stage.clone(), "1.2.3").expect("stage lease");
+        fs::write(stage.join("payload"), b"release payload").expect("payload");
+
+        lease.transfer_to(&release).expect("stage transfer");
+        let result = complete_install(
+            &mut lease,
+            Err(InstallerError::Archive("activation failure".to_owned())),
+        );
+
+        assert!(matches!(
+            result,
+            Err(InstallerError::Archive(message)) if message == "activation failure"
+        ));
+        assert!(!lease.armed);
+        assert!(!stage.exists());
+        assert_eq!(
+            fs::read(release.join("payload")).expect("release payload"),
+            b"release payload"
         );
     }
 

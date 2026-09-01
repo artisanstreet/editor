@@ -47,6 +47,8 @@ pub enum InstallerError {
         #[source]
         source: std::io::Error,
     },
+    #[error("staging cleanup could not be completed")]
+    StageCleanupIncomplete,
     #[error("installation already exists for release {0}")]
     ExistingRelease(String),
     #[error("permanent ae executable is missing at {0}")]
