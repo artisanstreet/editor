@@ -1956,9 +1956,9 @@ fn assert_fixture_single_engine_pass() {
     assert_eq!(counts.reaps_observed, 1);
     assert_eq!(counts.kills_requested, 0);
     assert_eq!(counts.watchdog_failures_seen, 0);
-    // The configured fixture has one successful health driver and one
-    // successful prompt driver. A reconnect never reaches the engine owner.
-    assert_eq!(counts.control_driver_joined, 2);
+    // The configured fixture has one successful health driver, one successful
+    // session-creation driver, and one successful prompt driver. A reconnect never reaches the engine owner.
+    assert_eq!(counts.control_driver_joined, 3);
 }
 
 #[tokio::test(flavor = "current_thread")]
