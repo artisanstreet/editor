@@ -772,6 +772,283 @@ async fn serve_full_with_lifecycle(
     Ok(connection)
 }
 
+/// Controls the response stream's end behavior for the response-FIN
+/// acknowledgement tests. Non-finish variants deliberately keep the server
+/// send side open so the client's private STOP is the only possible stream
+/// terminal signal.
+#[derive(Clone, Copy)]
+enum ResponseStreamScript {
+    /// Send one correlated response and keep the stream open.
+    CorrelatedResponseHeldOpen,
+    /// Send one correlated response and cleanly FIN the stream.
+    CorrelatedResponseFinished,
+    /// Send a response correlated to a different request and keep open.
+    WrongCorrelation,
+    /// Send a bounded but undecodable response and keep open.
+    MalformedResponse,
+    /// Send a payload-free wrong-family reply and keep open.
+    WrongFamily,
+    /// Send one valid response followed by a complete trailing frame.
+    TrailingData,
+}
+
+/// Serves one request response and witnesses the peer's stream disposition.
+///
+/// The server waits on [`quinn::SendStream::stopped`] while retaining its
+/// connection. A cleanly finished response must report `None`; every held-open
+/// invalid or ordinary response must report the leaf's private STOP code.
+async fn serve_response_stream(
+    mut connections: tokio::sync::mpsc::Receiver<Connection>,
+    script: ResponseStreamScript,
+    stopped_witness: tokio::sync::oneshot::Sender<Option<VarInt>>,
+    response_written: Option<tokio::sync::oneshot::Sender<()>>,
+) -> Result<Connection, Box<dyn Error>> {
+    let connection = next_connection(&mut connections).await?;
+    let welcome = welcome_envelope()?;
+    let (_hello, _handshake_send, _handshake_receive) =
+        drive_handshake(&connection, &welcome).await?;
+
+    let (mut send, mut receive) = tokio::time::timeout(TEST_DEADLINE, connection.accept_bi())
+        .await
+        .map_err(|_| "response request stream timed out")??;
+    let request = tokio::time::timeout(TEST_DEADLINE, transport::receive_envelope(&mut receive))
+        .await
+        .map_err(|_| "response request read timed out")??;
+    let request_id = request.frame_id.to_request_id()?;
+
+    match script {
+        ResponseStreamScript::CorrelatedResponseHeldOpen
+        | ResponseStreamScript::CorrelatedResponseFinished => {
+            let reply = correlated_response(&request_id)?;
+            tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                .await
+                .map_err(|_| "correlated response send timed out")??;
+        }
+        ResponseStreamScript::WrongCorrelation => {
+            let reply = correlated_response(&RequestId::parse("different-response")?)?;
+            tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                .await
+                .map_err(|_| "wrong-correlation response send timed out")??;
+        }
+        ResponseStreamScript::MalformedResponse => {
+            let malformed = raw_unsupported_version_bytes();
+            tokio::time::timeout(TEST_DEADLINE, transport::write_frame(&mut send, &malformed))
+                .await
+                .map_err(|_| "malformed response send timed out")??;
+        }
+        ResponseStreamScript::WrongFamily => {
+            let reply = event_reply()?;
+            tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                .await
+                .map_err(|_| "wrong-family response send timed out")??;
+        }
+        ResponseStreamScript::TrailingData => {
+            let reply = correlated_response(&request_id)?;
+            tokio::time::timeout(TEST_DEADLINE, transport::send_envelope(&mut send, &reply))
+                .await
+                .map_err(|_| "trailing-data response send timed out")??;
+            let trailing = event_reply()?;
+            tokio::time::timeout(
+                TEST_DEADLINE,
+                transport::send_envelope(&mut send, &trailing),
+            )
+            .await
+            .map_err(|_| "trailing response frame send timed out")??;
+        }
+    }
+
+    if let Some(response_written) = response_written {
+        response_written
+            .send(())
+            .map_err(|()| "the response-written witness receiver was dropped")?;
+    }
+    if matches!(script, ResponseStreamScript::CorrelatedResponseFinished) {
+        send.finish()?;
+    }
+
+    let stopped = tokio::time::timeout(TEST_DEADLINE, send.stopped())
+        .await
+        .map_err(|_| "the response stream stop witness timed out")?
+        .map_err(|_| "the response stream stop witness failed")?;
+    stopped_witness
+        .send(stopped)
+        .map_err(|_| "the response stream witness receiver was dropped")?;
+    Ok(connection)
+}
+
+/// Proves that an acknowledging response rejection never reaches clean FIN
+/// acknowledgement and instead causes the private stream STOP.
+async fn acknowledging_response_rejection(
+    script: ResponseStreamScript,
+) -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_response_stream(server.take_connections(), script, stopped_tx, None);
+    let client = async {
+        let cancel = CancelHandle::new();
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("ack-rejection-hello")?,
+            component_limits(1),
+            &cancel,
+        )
+        .await?;
+        let rejected = tokio::time::timeout(
+            TEST_DEADLINE,
+            session.request_acknowledging_response(
+                request_envelope("ack-rejection-request")?,
+                &cancel,
+            ),
+        )
+        .await
+        .map_err(|_| "acknowledging response rejection timed out")?;
+
+        match script {
+            ResponseStreamScript::WrongCorrelation => assert!(matches!(
+                rejected,
+                Err(ClientRequestError::Reply(
+                    ReplyRejection::DifferentCorrelation
+                ))
+            )),
+            ResponseStreamScript::MalformedResponse => assert!(matches!(
+                rejected,
+                Err(ClientRequestError::Exchange(DeadlineError::Peer {
+                    operation: OperationKind::Receive,
+                    error: ExchangeError::Receive(EnvelopeReceiveError::Decode(_)),
+                }))
+            )),
+            ResponseStreamScript::WrongFamily => assert!(matches!(
+                rejected,
+                Err(ClientRequestError::Reply(
+                    ReplyRejection::UnexpectedFamily {
+                        received: HandshakeMessageKind::Event
+                    }
+                ))
+            )),
+            ResponseStreamScript::TrailingData => assert!(matches!(
+                rejected,
+                Err(ClientRequestError::Exchange(DeadlineError::Peer {
+                    operation: OperationKind::Receive,
+                    error: ExchangeError::TrailingResponse,
+                }))
+            )),
+            _ => panic!("the rejection fixture must produce a rejected response"),
+        }
+
+        let stopped = tokio::time::timeout(TEST_DEADLINE, stopped_rx)
+            .await
+            .map_err(|_| "rejected response STOP witness timed out")?
+            .map_err(|_| "rejected response STOP witness was dropped")?;
+        assert_eq!(
+            stopped,
+            Some(VarInt::from_u32(LEAF_STREAM_STOP_CODE)),
+            "a rejected response must stop rather than cleanly acknowledge the stream"
+        );
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// Proves cancellation and the whole request timeout both stop a response
+/// stream whose valid reply has arrived but whose FIN is deliberately held.
+async fn acknowledging_response_fin_abandonment(
+    cancel_mid_wait: bool,
+) -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let (response_written_tx, response_written_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_response_stream(
+        server.take_connections(),
+        ResponseStreamScript::CorrelatedResponseHeldOpen,
+        stopped_tx,
+        Some(response_written_tx),
+    );
+    let client = async {
+        let cancel = CancelHandle::new();
+        let mut limits = component_limits(1);
+        if !cancel_mid_wait {
+            limits.request = Duration::from_millis(250);
+        }
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("ack-abandonment-hello")?,
+            limits,
+            &cancel,
+        )
+        .await?;
+        let mut request =
+            Box::pin(session.request_acknowledging_response(
+                request_envelope("ack-abandonment-request")?,
+                &cancel,
+            ));
+
+        tokio::select! {
+            biased;
+            outcome = &mut request => {
+                panic!("a held response FIN cannot let the acknowledging request settle: {outcome:?}");
+            }
+            written = tokio::time::timeout(TEST_DEADLINE, response_written_rx) => {
+                written
+                    .map_err(|_| "response-written witness timed out")?
+                    .map_err(|_| "response-written witness was dropped")?;
+            }
+        }
+
+        if cancel_mid_wait {
+            cancel.cancel();
+        }
+        let outcome = tokio::time::timeout(TEST_DEADLINE, &mut request)
+            .await
+            .map_err(|_| "response-FIN abandonment was not bounded")?;
+        if cancel_mid_wait {
+            assert!(matches!(
+                outcome,
+                Err(ClientRequestError::Exchange(DeadlineError::Cancelled {
+                    operation: OperationKind::Receive
+                }))
+            ));
+        } else {
+            assert!(matches!(
+                outcome,
+                Err(ClientRequestError::Exchange(DeadlineError::Timeout {
+                    operation: OperationKind::Receive,
+                    ..
+                }))
+            ));
+        }
+
+        let stopped = tokio::time::timeout(TEST_DEADLINE, stopped_rx)
+            .await
+            .map_err(|_| "abandoned response STOP witness timed out")?
+            .map_err(|_| "abandoned response STOP witness was dropped")?;
+        assert_eq!(
+            stopped,
+            Some(VarInt::from_u32(LEAF_STREAM_STOP_CODE)),
+            "response-FIN abandonment must use the private stream STOP"
+        );
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
 /// Shared spawned-task scenario for absence witnesses: handshakes with
 /// the deliberate STOP, then waits for a stream that must never come.
 /// The acceptance resolving through the leaf's typed application close —
@@ -1355,6 +1632,153 @@ async fn pinned_handshake_hands_the_welcome_to_the_caller() -> Result<(), Box<dy
     session.shutdown(&cancel).await?;
     drop(server);
     Ok(())
+}
+
+/// Ordinary requests still stop the response stream after settling exactly
+/// one correlated reply; they do not wait for the peer's FIN.
+#[tokio::test]
+async fn ordinary_request_stops_after_one_correlated_response() -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_response_stream(
+        server.take_connections(),
+        ResponseStreamScript::CorrelatedResponseHeldOpen,
+        stopped_tx,
+        None,
+    );
+    let client = async {
+        let cancel = CancelHandle::new();
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("ordinary-response-hello")?,
+            component_limits(1),
+            &cancel,
+        )
+        .await?;
+        let (session, resolved) = session
+            .request(request_envelope("ordinary-response-request")?, &cancel)
+            .await?;
+        assert_eq!(resolved.request_id().as_str(), "ordinary-response-request");
+        assert!(matches!(resolved.outcome(), RequestOutcome::Response(_)));
+
+        let stopped = tokio::time::timeout(TEST_DEADLINE, stopped_rx)
+            .await
+            .map_err(|_| "ordinary response STOP witness timed out")?
+            .map_err(|_| "ordinary response STOP witness was dropped")?;
+        assert_eq!(
+            stopped,
+            Some(VarInt::from_u32(LEAF_STREAM_STOP_CODE)),
+            "ordinary request completion must stop the still-open response stream"
+        );
+        session.shutdown(&cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// The dedicated mode returns the same correlated response owner only after
+/// the server has FINed the response and observed clean acknowledgement.
+#[tokio::test]
+async fn acknowledging_response_waits_for_clean_response_fin() -> Result<(), Box<dyn Error>> {
+    let (certificate, private_key, pin) = ephemeral_identity();
+    let mut server = TestServer::start(fixture_server_config(certificate.clone(), private_key));
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+    let server_side = serve_response_stream(
+        server.take_connections(),
+        ResponseStreamScript::CorrelatedResponseFinished,
+        stopped_tx,
+        None,
+    );
+    let client = async {
+        let cancel = CancelHandle::new();
+        let (session, _) = ClientSession::connect(
+            target(server.addr),
+            certificate,
+            pin,
+            hello_envelope("ack-response-hello")?,
+            component_limits(2),
+            &cancel,
+        )
+        .await?;
+        let (session, resolved) = session
+            .request_acknowledging_response(request_envelope("ack-response-request")?, &cancel)
+            .await?;
+        assert_eq!(resolved.request_id().as_str(), "ack-response-request");
+        let RequestOutcome::Response(response) = resolved.outcome() else {
+            panic!("the acknowledging response must settle successfully");
+        };
+        assert_eq!(response.request_id.as_str(), "ack-response-request");
+        assert_eq!(session.admitted(), 1);
+        assert_eq!(session.connection_id().as_str(), CONNECTION_TAG);
+
+        let stopped = tokio::time::timeout(TEST_DEADLINE, stopped_rx)
+            .await
+            .map_err(|_| "clean response FIN witness timed out")?
+            .map_err(|_| "clean response FIN witness was dropped")?;
+        assert_eq!(
+            stopped, None,
+            "a valid settled response followed by FIN must be cleanly acknowledged"
+        );
+        session.shutdown(&cancel).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+
+    let (client_result, server_result) = tokio::join!(client, server_side);
+    let retained_connection = server_result?;
+    client_result?;
+    drop(retained_connection);
+    drop(server);
+    Ok(())
+}
+
+/// A wrong-correlation reply cannot be settled or cleanly acknowledged.
+#[tokio::test]
+async fn acknowledging_response_wrong_correlation_stops_stream() -> Result<(), Box<dyn Error>> {
+    acknowledging_response_rejection(ResponseStreamScript::WrongCorrelation).await
+}
+
+/// A bounded but undecodable reply cannot be cleanly acknowledged.
+#[tokio::test]
+async fn acknowledging_response_malformed_reply_stops_stream() -> Result<(), Box<dyn Error>> {
+    acknowledging_response_rejection(ResponseStreamScript::MalformedResponse).await
+}
+
+/// A wrong-family reply cannot be settled or cleanly acknowledged.
+#[tokio::test]
+async fn acknowledging_response_wrong_family_stops_stream() -> Result<(), Box<dyn Error>> {
+    acknowledging_response_rejection(ResponseStreamScript::WrongFamily).await
+}
+
+/// A complete trailing frame after the one correlated reply is an exchange
+/// error, not clean response completion, and the peer observes private STOP.
+#[tokio::test]
+async fn acknowledging_response_trailing_data_stops_stream() -> Result<(), Box<dyn Error>> {
+    acknowledging_response_rejection(ResponseStreamScript::TrailingData).await
+}
+
+/// Cancellation while the peer withholds response FIN is bounded and
+/// terminal, and the guarded stream emits the private STOP.
+#[tokio::test]
+async fn acknowledging_response_cancellation_while_waiting_for_fin_is_terminal()
+-> Result<(), Box<dyn Error>> {
+    acknowledging_response_fin_abandonment(true).await
+}
+
+/// Timeout while the peer withholds response FIN uses the original request
+/// budget and emits the private STOP before the consumed session is dropped.
+#[tokio::test]
+async fn acknowledging_response_timeout_while_waiting_for_fin_is_terminal()
+-> Result<(), Box<dyn Error>> {
+    acknowledging_response_fin_abandonment(false).await
 }
 
 /// A lifecycle request on a session whose Welcome did not negotiate the
