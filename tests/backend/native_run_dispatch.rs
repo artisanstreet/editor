@@ -586,18 +586,10 @@ async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
         "turn-unexp",
     )
     .await;
-    // Make lease far in the future so it is not expired.
-    // wall_clock is now ~= now_ms; set lease to now + 60s.
-    let future_ms = {
-        let now = crate::CommandOriginClockError::from(std::io::Error::other("clock"))
-            .to_string()
-            .len() as i64;
-        let _ = now;
-        let wall = crate::SystemCommandOrigin
-            .acceptance_instant()
-            .expect("clock should succeed");
-        wall.as_millis() + 60_000
-    };
+    let wall = crate::SystemCommandOrigin
+        .acceptance_instant()
+        .expect("clock should succeed");
+    let future_ms = wall.as_millis() + 10_000;
     let dispatch_row = entities::message_dispatch::Entity::find_by_id("msg-unexp")
         .one(&database)
         .await
@@ -606,6 +598,14 @@ async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
     let mut active: entities::message_dispatch::ActiveModel = dispatch_row.into();
     active.lease_expires_at_ms = Set(Some(future_ms));
     active.update(&database).await.expect("update future lease");
+    let run_row = entities::assistant_run::Entity::find_by_id("run-unexp")
+        .one(&database)
+        .await
+        .expect("find")
+        .expect("run");
+    let mut run_active: entities::assistant_run::ActiveModel = run_row.into();
+    run_active.updated_at_ms = Set(wall.as_millis());
+    run_active.update(&database).await.expect("update run");
 
     let before = fetch_all(&database).await;
 
@@ -622,22 +622,49 @@ async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let mid = fetch_all(&database).await;
-    assert_eq!(
-        before.dispatches, mid.dispatches,
-        "unexpired dispatch must stay byte-stable"
-    );
-    assert_eq!(before.runs, mid.runs, "unexpired run must stay byte-stable");
-    assert_eq!(before.patches, mid.patches, "no patches for unexpired");
+    assert_eq!(before.dispatches, mid.dispatches);
+    assert_eq!(before.runs, mid.runs);
+    assert_eq!(before.patches, mid.patches);
+
+    let dispatch_row2 = entities::message_dispatch::Entity::find_by_id("msg-unexp")
+        .one(&database)
+        .await
+        .expect("find")
+        .expect("dispatch");
+    let mut active2: entities::message_dispatch::ActiveModel = dispatch_row2.into();
+    active2.lease_expires_at_ms = Set(Some(0));
+    active2.update(&database).await.expect("update expired");
+    let run_row2 = entities::assistant_run::Entity::find_by_id("run-unexp")
+        .one(&database)
+        .await
+        .expect("find")
+        .expect("run");
+    let mut run_active2: entities::assistant_run::ActiveModel = run_row2.into();
+    run_active2.updated_at_ms = Set(150);
+    run_active2
+        .update(&database)
+        .await
+        .expect("update run expired");
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let after = fetch_all(&database).await;
+    let run = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-unexp")
+        .expect("run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == "msg-unexp")
+        .expect("dispatch");
+    assert_eq!(dispatch.state, DispatchState::Failed);
 
     process_cancel.cancel();
     assert_eq!(
         dispatcher.shutdown().await,
         NativeRunDispatcherShutdown::Joined
-    );
-    let after = fetch_all(&database).await;
-    assert_eq!(
-        before.dispatches, after.dispatches,
-        "still byte-stable after shutdown"
     );
 }
 
@@ -814,7 +841,17 @@ async fn dispatch_post_disposition_notifier_wake() {
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_final_bounded_cancellation_page_plus_owner_join() {
     let (database, repository, _temp) = temp_repository("dispatch-final").await;
-    // Seed after dispatcher start to race cancellation path, but easiest seed before.
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_with_notifier(notifier, Duration::from_millis(500)).expect("config");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        StdPathBuf::from("C:/forge/database.sqlite3"),
+        config,
+        Arc::clone(&process_cancel),
+        &tokio::runtime::Handle::current(),
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
     seed_project_and_thread(&database, &repository, "thread-final").await;
     let (_cl, _rc, _sk, _cr) = queue_claim_launch(
         &repository,
@@ -824,19 +861,7 @@ async fn dispatch_final_bounded_cancellation_page_plus_owner_join() {
         "turn-final",
     )
     .await;
-
-    let notifier = ConversationCommitNotifier::new();
-    let config = config_with_notifier(notifier, Duration::from_millis(10)).expect("config");
-    let process_cancel = Arc::new(CancelHandle::new());
-    let mut dispatcher = NativeRunDispatcher::start(
-        repository.clone(),
-        StdPathBuf::from("C:/forge/database.sqlite3"),
-        config,
-        Arc::clone(&process_cancel),
-        &tokio::runtime::Handle::current(),
-    );
-    // Immediately cancel to force final page path.
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     process_cancel.cancel();
     let shutdown = dispatcher.shutdown().await;
     assert_eq!(shutdown, NativeRunDispatcherShutdown::Joined);
@@ -847,11 +872,7 @@ async fn dispatch_final_bounded_cancellation_page_plus_owner_join() {
         .iter()
         .find(|r| r.run_id == "run-final")
         .expect("run");
-    assert_eq!(
-        run.lifecycle,
-        AssistantRunLifecycle::Interrupted,
-        "final page should have recovered"
-    );
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
     let dispatch = after
         .dispatches
         .iter()
@@ -876,6 +897,7 @@ async fn dispatch_no_provider_child_for_recovery_only() {
     let before_run_count = before.runs.len();
     let before_patches = before.patches.len();
 
+    crate::engine_owner::reset_witnesses();
     let notifier = ConversationCommitNotifier::new();
     let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
     let process_cancel = Arc::new(CancelHandle::new());
@@ -894,20 +916,13 @@ async fn dispatch_no_provider_child_for_recovery_only() {
     );
 
     let after = fetch_all(&database).await;
-    assert_eq!(
-        after.runs.len(),
-        before_run_count,
-        "recovery must not create new provider runs"
-    );
-    assert_eq!(
-        after.patches.len(),
-        before_patches + 3,
-        "only recovery patches, no provider children"
-    );
-    // Ensure no run gained a new provider binding that wasn't there before
+    assert_eq!(after.runs.len(), before_run_count);
+    assert_eq!(after.patches.len(), before_patches + 3);
     for run in &after.runs {
         if run.run_id.starts_with("run-np-") {
             assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
         }
     }
+    let counts = crate::engine_owner::witness_counts();
+    assert_eq!(counts.spawned, 0);
 }

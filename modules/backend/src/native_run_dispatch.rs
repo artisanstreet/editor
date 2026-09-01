@@ -427,11 +427,10 @@ async fn perform_live_recovery_page(
     crate::startup_reconciliation_sweep::StartupReconciliationSweepReport,
     crate::startup_reconciliation_sweep::StartupReconciliationSweepError,
 > {
-    let input = StartupReconciliationSweepInput::new(operated_at, 64)
-        .expect("startup reconciliation live recovery limit is within bound");
+    let input = StartupReconciliationSweepInput::new(operated_at, 64)?;
     let mut source = LiveRecoveryPatchSource;
     let notifier = config.conversation_commit_notifier();
-    crate::startup_reconciliation_sweep::sweep_startup_reconciliation_with_observer(
+    crate::startup_reconciliation_sweep::sweep_startup_reconciliation_observed(
         repository,
         input,
         &mut source,

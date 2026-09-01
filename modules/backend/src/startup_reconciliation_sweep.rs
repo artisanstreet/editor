@@ -227,243 +227,20 @@ pub enum StartupReconciliationSweepError {
 }
 
 // ---------------------------------------------------------------------------
-// Coordinator (observer)
-// ---------------------------------------------------------------------------
-
-/// Bounded single-pass sweep that observes each durable disposition.
-///
-/// The observer is invoked only after a durable `Interrupted` or
-/// `AlreadyInterrupted` outcome has been committed (or proven replayed). It is
-/// never invoked for `SkippedMoved`, patch-source failures, or disposition
-/// errors. The observer must be synchronous and must not perform I/O, mint
-/// randomness, or retain provider material. The function shares all validation,
-/// ordering, and error-prefix semantics with [`sweep_startup_reconciliation`].
-#[allow(clippy::result_large_err)]
-#[allow(clippy::too_many_lines)]
-pub async fn sweep_startup_reconciliation_with_observer<S, F>(
-    repository: &Repository,
-    input: StartupReconciliationSweepInput,
-    patch_source: &mut S,
-    mut observer: F,
-) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
-where
-    S: StartupReconciliationPatchSource,
-    F: FnMut(&StartupReconciliationCandidate),
-{
-    if !(1..=64).contains(&input.limit) {
-        return Err(StartupReconciliationSweepError::InvalidLimit { limit: input.limit });
-    }
-
-    let query = StartupReconciliationQuery::new(input.operated_at, input.limit).map_err(
-        |error| match error {
-            StartupReconciliationError::InvalidLimit { limit } => {
-                StartupReconciliationSweepError::InvalidLimit { limit }
-            }
-            err @ StartupReconciliationError::Repository(_) => {
-                StartupReconciliationSweepError::Discovery { source: err }
-            }
-        },
-    )?;
-
-    let candidates = repository
-        .list_startup_reconciliation_candidates(query)
-        .await
-        .map_err(|source| StartupReconciliationSweepError::Discovery { source })?;
-
-    let discovered = candidates.len();
-    let mut report = StartupReconciliationSweepReport {
-        discovered,
-        attempted: 0,
-        interrupted: 0,
-        already_interrupted: 0,
-        skipped_moved: 0,
-    };
-
-    if discovered == 0 {
-        return Ok(report);
-    }
-
-    let candidates_vec = candidates.into_vec();
-
-    for (index, candidate) in candidates_vec.iter().enumerate() {
-        let patches = match patch_source.patch_ids_for(candidate) {
-            Ok(value) => value,
-            Err(source) => {
-                return Err(StartupReconciliationSweepError::PatchSource {
-                    report,
-                    failing_index: index,
-                    failing_run_id: candidate.run_id.clone(),
-                    source,
-                });
-            }
-        };
-
-        let has_item = candidate.assistant_item_id.is_some();
-        let has_patch = patches.item_patch_id.is_some();
-        if has_item != has_patch {
-            return Err(StartupReconciliationSweepError::PatchShape {
-                report,
-                failing_index: index,
-                failing_run_id: candidate.run_id.clone(),
-                reason: if has_item {
-                    "candidate has an assistant item but no item patch was supplied"
-                } else {
-                    "candidate has no assistant item but an item patch was supplied"
-                },
-            });
-        }
-        if let Some(item_patch) = &patches.item_patch_id
-            && item_patch.as_str() == patches.turn_patch_id.as_str()
-        {
-            return Err(StartupReconciliationSweepError::PatchShape {
-                report,
-                failing_index: index,
-                failing_run_id: candidate.run_id.clone(),
-                reason: "turn and item patch identities collide",
-            });
-        }
-
-        let outcome = repository
-            .dispose_expired_startup_candidate(StartupReconciliationDisposition {
-                candidate,
-                operated_at: input.operated_at,
-                turn_patch_id: &patches.turn_patch_id,
-                item_patch_id: patches.item_patch_id.as_ref(),
-            })
-            .await;
-
-        match outcome {
-            Ok(value) => match value {
-                artisan_database::StartupReconciliationDispositionOutcome::Interrupted(_) => {
-                    report.attempted = report.attempted.checked_add(1).ok_or(
-                        StartupReconciliationSweepError::CounterOverflow {
-                            report: report.clone(),
-                            failing_index: index,
-                            failing_run_id: candidate.run_id.clone(),
-                            counter: "attempted",
-                            value: report.attempted,
-                        },
-                    )?;
-                    report.interrupted = report.interrupted.checked_add(1).ok_or(
-                        StartupReconciliationSweepError::CounterOverflow {
-                            report: report.clone(),
-                            failing_index: index,
-                            failing_run_id: candidate.run_id.clone(),
-                            counter: "interrupted",
-                            value: report.interrupted,
-                        },
-                    )?;
-                    observer(candidate);
-                }
-                artisan_database::StartupReconciliationDispositionOutcome::AlreadyInterrupted(
-                    _,
-                ) => {
-                    report.attempted = report.attempted.checked_add(1).ok_or(
-                        StartupReconciliationSweepError::CounterOverflow {
-                            report: report.clone(),
-                            failing_index: index,
-                            failing_run_id: candidate.run_id.clone(),
-                            counter: "attempted",
-                            value: report.attempted,
-                        },
-                    )?;
-                    report.already_interrupted = report.already_interrupted.checked_add(1).ok_or(
-                        StartupReconciliationSweepError::CounterOverflow {
-                            report: report.clone(),
-                            failing_index: index,
-                            failing_run_id: candidate.run_id.clone(),
-                            counter: "already_interrupted",
-                            value: report.already_interrupted,
-                        },
-                    )?;
-                    observer(candidate);
-                }
-                artisan_database::StartupReconciliationDispositionOutcome::SkippedMoved => {
-                    report.attempted = report.attempted.checked_add(1).ok_or(
-                        StartupReconciliationSweepError::CounterOverflow {
-                            report: report.clone(),
-                            failing_index: index,
-                            failing_run_id: candidate.run_id.clone(),
-                            counter: "attempted",
-                            value: report.attempted,
-                        },
-                    )?;
-                    report.skipped_moved = report.skipped_moved.checked_add(1).ok_or(
-                        StartupReconciliationSweepError::CounterOverflow {
-                            report: report.clone(),
-                            failing_index: index,
-                            failing_run_id: candidate.run_id.clone(),
-                            counter: "skipped_moved",
-                            value: report.skipped_moved,
-                        },
-                    )?;
-                }
-            },
-            Err(source) => {
-                return Err(StartupReconciliationSweepError::Disposition {
-                    report,
-                    failing_index: index,
-                    failing_run_id: candidate.run_id.clone(),
-                    source,
-                });
-            }
-        }
-    }
-
-    Ok(report)
-}
-
-/// Internal alias for the observer path with crate visibility.
-#[allow(clippy::result_large_err)]
-pub(crate) async fn sweep_startup_reconciliation_observed<S, F>(
-    repository: &Repository,
-    input: StartupReconciliationSweepInput,
-    patch_source: &mut S,
-    observer: F,
-) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
-where
-    S: StartupReconciliationPatchSource,
-    F: FnMut(&StartupReconciliationCandidate),
-{
-    sweep_startup_reconciliation_with_observer(repository, input, patch_source, observer).await
-}
-
-// ---------------------------------------------------------------------------
 // Coordinator
 // ---------------------------------------------------------------------------
 
-/// Bounded single-pass sweep over an injected repository.
-///
-/// The function calls discovery once, then disposes candidates sequentially in
-/// discovery order. An empty discovery is success and never consults the patch
-/// source. Source or patch-shape failure for candidate `N` occurs before any
-/// mutation of `N`. A moved candidate is counted as `skipped_moved` and the
-/// pass continues. An identical durable replay is counted as
-/// `already_interrupted` and continues. The first source or disposition error
-/// stops the pass and returns the already-committed prefix report with the
-/// failing candidate's index and run identity; earlier per-candidate
-/// transactions may already be durable and are never claimed rolled back.
-///
-/// One pass never loops, sleeps, schedules a timer, opens storage, acquires
-/// custody, contacts a provider, requeues, retries a prompt, or wires
-/// `ForgeApp::start`.
-///
-/// # Errors
-///
-/// Returns [`StartupReconciliationSweepError`] for invalid limits, discovery
-/// failures, patch-source or patch-shape failures, counter overflow, and
-/// disposition failures. Each error that carries a `report` has committed only
-/// its prefix.
 #[allow(clippy::result_large_err)]
 // The coordinator is intrinsically sequential and bounded: it must handle
 // discovery, patch-source validation, and three disposition outcomes in one
 // pass without changing behavior or public API. Splitting would obscure the
 // single-pass invariant.
 #[allow(clippy::too_many_lines)]
-pub async fn sweep_startup_reconciliation<S>(
+async fn sweep_impl<S>(
     repository: &Repository,
     input: StartupReconciliationSweepInput,
     patch_source: &mut S,
+    observer: &mut dyn FnMut(&StartupReconciliationCandidate),
 ) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
 where
     S: StartupReconciliationPatchSource,
@@ -572,6 +349,7 @@ where
                             value: report.interrupted,
                         },
                     )?;
+                    observer(candidate);
                 }
                 artisan_database::StartupReconciliationDispositionOutcome::AlreadyInterrupted(
                     _,
@@ -594,6 +372,7 @@ where
                             value: report.already_interrupted,
                         },
                     )?;
+                    observer(candidate);
                 }
                 artisan_database::StartupReconciliationDispositionOutcome::SkippedMoved => {
                     report.attempted = report.attempted.checked_add(1).ok_or(
@@ -628,4 +407,51 @@ where
     }
 
     Ok(report)
+}
+
+/// Bounded single-pass sweep over an injected repository.
+///
+/// The function calls discovery once, then disposes candidates sequentially in
+/// discovery order. An empty discovery is success and never consults the patch
+/// source. Source or patch-shape failure for candidate `N` occurs before any
+/// mutation of `N`. A moved candidate is counted as `skipped_moved` and the
+/// pass continues. An identical durable replay is counted as
+/// `already_interrupted` and continues. The first source or disposition error
+/// stops the pass and returns the already-committed prefix report with the
+/// failing candidate's index and run identity; earlier per-candidate
+/// transactions may already be durable and are never claimed rolled back.
+///
+/// One pass never loops, sleeps, schedules a timer, opens storage, acquires
+/// custody, contacts a provider, requeues, retries a prompt, or wires
+/// `ForgeApp::start`.
+///
+/// # Errors
+///
+/// Returns [`StartupReconciliationSweepError`] for invalid limits, discovery
+/// failures, patch-source or patch-shape failures, counter overflow, and
+/// disposition failures. Each error that carries a `report` has committed only
+/// its prefix.
+pub async fn sweep_startup_reconciliation<S>(
+    repository: &Repository,
+    input: StartupReconciliationSweepInput,
+    patch_source: &mut S,
+) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
+where
+    S: StartupReconciliationPatchSource,
+{
+    let mut noop = |_: &StartupReconciliationCandidate| {};
+    sweep_impl(repository, input, patch_source, &mut noop).await
+}
+
+pub(crate) async fn sweep_startup_reconciliation_observed<S, F>(
+    repository: &Repository,
+    input: StartupReconciliationSweepInput,
+    patch_source: &mut S,
+    mut observer: F,
+) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
+where
+    S: StartupReconciliationPatchSource,
+    F: FnMut(&StartupReconciliationCandidate),
+{
+    sweep_impl(repository, input, patch_source, &mut observer).await
 }
