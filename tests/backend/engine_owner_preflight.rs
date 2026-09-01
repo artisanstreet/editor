@@ -404,8 +404,7 @@ async fn close_deadline_uses_existing_kill_and_custody_sequence() {
         .expect("close sequence should settle the response");
     assert!(matches!(
         result,
-        Err(EngineOperationError::Deadline)
-            | Err(EngineOperationError::UnresolvedReapDuring { .. })
+        Err(EngineOperationError::Deadline | EngineOperationError::UnresolvedReapDuring { .. })
     ));
     let first_shutdown = owner.shutdown().await;
     if first_shutdown == EngineOwnerShutdown::Quarantined {

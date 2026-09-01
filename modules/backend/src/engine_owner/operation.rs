@@ -759,6 +759,91 @@ impl PreflightRequest {
     }
 }
 
+struct PreflightContext {
+    profile_id: String,
+    expected_version: String,
+    bounds: EngineBounds,
+    deadlines: super::PreflightDeadlines,
+    control: Arc<CancelHandle>,
+    respond: oneshot::Sender<PreflightResult>,
+    secret: HealthSecret,
+    parts: ChildParts,
+    stdout: Option<tokio::process::ChildStdout>,
+}
+
+fn preflight_admission_error(
+    request: &PreflightRequest,
+    shutdown: &Arc<CancelHandle>,
+) -> Option<EngineOperationError> {
+    if shutdown.is_cancelled() {
+        return Some(EngineOperationError::Shutdown);
+    }
+    if request.control.is_cancelled() {
+        return Some(EngineOperationError::Cancelled);
+    }
+    if Instant::now() >= request.input.deadlines.admission {
+        return Some(EngineOperationError::Deadline);
+    }
+    if !preflight_bounds_are_valid(&request.input.bounds) {
+        return Some(EngineOperationError::Configuration);
+    }
+    None
+}
+
+fn prepare_preflight_context(request: PreflightRequest) -> Result<PreflightContext, Execution> {
+    let PreflightRequest {
+        input,
+        control,
+        respond,
+    } = request;
+    let profile_id = input.launch.profile_id().to_owned();
+    let expected_version = input.launch.version().to_owned();
+    let bounds = input.bounds;
+    let deadlines = input.deadlines;
+    let secret = match HealthSecret::generate() {
+        Ok(secret) => secret,
+        Err(HealthError::EntropyFailed) => {
+            let _ = respond.send(Err(EngineOperationError::EntropyFailed));
+            return Err(Execution::Completed);
+        }
+        Err(_) => unreachable!("health secret generation has one failure mode"),
+    };
+    let child_result = match &input.launch {
+        super::InternalLaunch::Verified(verified) => {
+            spawn_configured_engine(verified.as_ref(), &input.project_root, secret.as_str())
+        }
+        #[cfg(test)]
+        super::InternalLaunch::Fixture(fixture) => super::process::spawn_configured_fixture_engine(
+            &fixture.program,
+            fixture.scenario,
+            secret.as_str(),
+        ),
+    };
+    let Ok(mut child) = child_result else {
+        let _ = respond.send(Err(EngineOperationError::SpawnFailed));
+        return Err(Execution::Completed);
+    };
+    let lifeline = LifelineWriter::take(&mut child);
+    let stdout = child.stdout.take();
+    let stderr_counter = StderrCounter::new(child.stderr.take(), bounds.stderr_cap_bytes);
+    Ok(PreflightContext {
+        profile_id,
+        expected_version,
+        bounds,
+        deadlines,
+        control,
+        respond,
+        secret,
+        parts: ChildParts {
+            child,
+            lifeline,
+            stdout: None,
+            stderr_counter,
+        },
+        stdout,
+    })
+}
+
 /// Executes the bounded configured-engine preflight. This branch deliberately
 /// stops after authenticated version health and observed child cleanup; the
 /// configured-turn session, prompt, and stream executors are not reachable.
@@ -776,61 +861,33 @@ async fn execute_preflight_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execut
         control,
         respond,
     };
-    if shutdown.is_cancelled() {
-        return request.fail(EngineOperationError::Shutdown);
+    if let Some(error) = preflight_admission_error(&request, shutdown) {
+        return request.fail(error);
     }
-    if request.control.is_cancelled() {
-        return request.fail(EngineOperationError::Cancelled);
-    }
-    if Instant::now() >= request.input.deadlines.admission {
-        return request.fail(EngineOperationError::Deadline);
-    }
-    if !preflight_bounds_are_valid(&request.input.bounds) {
-        return request.fail(EngineOperationError::Configuration);
-    }
+    let context = match prepare_preflight_context(request) {
+        Ok(context) => context,
+        Err(execution) => return execution,
+    };
+    execute_preflight_context(context, shutdown).await
+}
 
-    let PreflightRequest {
-        input,
+async fn execute_preflight_context(
+    context: PreflightContext,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let PreflightContext {
+        profile_id,
+        expected_version,
+        bounds,
+        deadlines,
         control,
         respond,
-    } = request;
-    let profile_id = input.launch.profile_id().to_owned();
-    let version = input.launch.version().to_owned();
-    let bounds = input.bounds;
-    let deadlines = input.deadlines;
-    let secret = match HealthSecret::generate() {
-        Ok(secret) => secret,
-        Err(HealthError::EntropyFailed) => {
-            let _ = respond.send(Err(EngineOperationError::EntropyFailed));
-            return Execution::Completed;
-        }
-        Err(_) => unreachable!("health secret generation has one failure mode"),
-    };
-    let child_result = match &input.launch {
-        super::InternalLaunch::Verified(verified) => {
-            spawn_configured_engine(verified.as_ref(), &input.project_root, secret.as_str())
-        }
-        #[cfg(test)]
-        super::InternalLaunch::Fixture(fixture) => super::process::spawn_configured_fixture_engine(
-            &fixture.program,
-            fixture.scenario,
-            secret.as_str(),
-        ),
-    };
-    let Ok(mut child) = child_result else {
-        return finish_preflight_without_child(respond, EngineOperationError::SpawnFailed);
-    };
-    let lifeline = LifelineWriter::take(&mut child);
-    let maybe_stdout = child.stdout.take();
-    let stderr_counter = StderrCounter::new(child.stderr.take(), bounds.stderr_cap_bytes);
-    let Some(mut stdout) = maybe_stdout else {
+        secret,
+        mut parts,
+        stdout,
+    } = context;
+    let Some(mut stdout) = stdout else {
         drop(secret);
-        let parts = ChildParts {
-            child,
-            lifeline,
-            stdout: None,
-            stderr_counter,
-        };
         return finish_preflight_failure(
             parts,
             EngineOperationError::ReadinessFailed(ReadinessError::Io),
@@ -838,12 +895,6 @@ async fn execute_preflight_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execut
             deadlines.close,
         )
         .await;
-    };
-    let mut parts = ChildParts {
-        child,
-        lifeline,
-        stdout: None,
-        stderr_counter,
     };
     let endpoint = match drive_readiness(
         &mut stdout,
@@ -876,7 +927,7 @@ async fn execute_preflight_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execut
         deadlines.health.min(deadlines.admission),
         &control,
         shutdown,
-        Some(&version),
+        Some(&expected_version),
     )
     .await
     {
@@ -908,14 +959,6 @@ fn remaining_until(deadline: Instant) -> Duration {
     deadline
         .checked_duration_since(Instant::now())
         .unwrap_or(Duration::ZERO)
-}
-
-fn finish_preflight_without_child(
-    respond: oneshot::Sender<PreflightResult>,
-    error: EngineOperationError,
-) -> Execution {
-    let _ = respond.send(Err(error));
-    Execution::Completed
 }
 
 async fn finish_preflight_failure(
