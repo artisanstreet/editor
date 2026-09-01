@@ -689,6 +689,7 @@ async fn lifecycle_request(
     connection: &Connection,
     frame: &str,
     request: LifecycleRequest,
+    expect_peer_fin: bool,
 ) -> WireEnvelope {
     let (mut send, mut receive) = connection
         .open_bi()
@@ -700,22 +701,29 @@ async fn lifecycle_request(
         sent_at: UnixMillis::from_millis(2),
         body: WireEnvelopeBody::Request(ClientRequest::Lifecycle(request)),
     };
-    tokio::time::timeout(FUTURE_WAIT, send_envelope(&mut send, &envelope))
-        .await
-        .expect("lifecycle request send should settle")
-        .expect("lifecycle request should be written");
-    send.finish().expect("lifecycle request FIN should succeed");
-    let response = tokio::time::timeout(FUTURE_WAIT, receive_envelope(&mut receive))
-        .await
+    // Keep the peer receive pending before the server can finish an accepted
+    // stop. Its local send FIN is the receipt boundary, while the subsequent
+    // connection close can race peer observation of that stream.
+    let response = tokio::time::timeout(FUTURE_WAIT, receive_envelope(&mut receive));
+    let (response, ()) = tokio::join!(response, async {
+        tokio::time::timeout(FUTURE_WAIT, send_envelope(&mut send, &envelope))
+            .await
+            .expect("lifecycle request send should settle")
+            .expect("lifecycle request should be written");
+        send.finish().expect("lifecycle request FIN should succeed");
+    },);
+    let response = response
         .expect("lifecycle response should settle")
         .expect("lifecycle response should be readable");
-    let end_of_stream = tokio::time::timeout(FUTURE_WAIT, receive_envelope(&mut receive))
-        .await
-        .expect("lifecycle response FIN should settle");
-    assert!(matches!(
-        end_of_stream,
-        Err(EnvelopeReceiveError::Frame(FrameError::Truncated { .. }))
-    ));
+    if expect_peer_fin {
+        let end_of_stream = tokio::time::timeout(FUTURE_WAIT, receive_envelope(&mut receive))
+            .await
+            .expect("lifecycle response FIN should settle");
+        assert!(matches!(
+            end_of_stream,
+            Err(EnvelopeReceiveError::Frame(FrameError::Truncated { .. }))
+        ));
+    }
     response
 }
 
@@ -1536,6 +1544,7 @@ fn lifecycle_offer_reports_idle_status_and_stops_after_correlated_finished_reply
         &connection,
         "runtime-status",
         LifecycleRequest::Status,
+        true,
     ));
     let WireEnvelopeBody::Response(ServerResponse {
         request_id,
@@ -1559,6 +1568,7 @@ fn lifecycle_offer_reports_idle_status_and_stops_after_correlated_finished_reply
         &connection,
         "runtime-stop",
         LifecycleRequest::Stop { require_idle: true },
+        false,
     ));
     let WireEnvelopeBody::Response(ServerResponse {
         request_id,
