@@ -58,6 +58,20 @@ fn scene(items: Vec<SceneItem>, narration_value: TurnNarration) -> ConversationS
     .expect("conversation scene is valid")
 }
 
+struct SurfaceWindowHost {
+    surface: gpui::Entity<ConversationSurface>,
+}
+
+impl gpui::Render for SurfaceWindowHost {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        self.surface.clone()
+    }
+}
+
 #[test]
 fn status_copy_is_exhaustive_and_suppression_has_no_row() {
     let cases = [
@@ -750,6 +764,11 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(cx.debug_bounds(OLD_MARKDOWN).is_some());
 
+    let (_, replacement_cx) = cx.cx.add_window_view(|_, _| SurfaceWindowHost {
+        surface: surface.clone(),
+    });
+    assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_some());
+
     cx.update(|_, app| {
         surface.update(app, |surface, surface_cx| {
             surface.replace_scene(replacement, surface_cx);
@@ -757,8 +776,17 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     });
     cx.run_until_parked();
 
-    assert!(cx.debug_bounds(OLD_MARKDOWN).is_none());
     assert!(cx.debug_bounds(NEW_MARKDOWN).is_some());
+
+    // Pinned GPUI 0.2.2's `Frame::clear` does not clear `debug_bounds`, while
+    // `VisualTestContext::debug_bounds` reads the rendered frame's map. After
+    // the original window has painted the old scene in both alternating frame
+    // maps, its old key is historical rather than current-frame geometry. The
+    // fresh test window painted the old scene once before replacement, so its
+    // clean alternate frame is an honest current-frame retirement probe for
+    // the same authoritative surface entity.
+    assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_none());
+    assert!(replacement_cx.debug_bounds(NEW_MARKDOWN).is_some());
 
     let trigger = cx
         .debug_bounds(DISCLOSURE_TRIGGER)
