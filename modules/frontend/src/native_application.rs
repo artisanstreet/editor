@@ -4088,6 +4088,10 @@ mod tests {
                 assert!(!application.add_project_action_is_admissible());
                 application.shutdown_prepared = false;
 
+                application.service_stopped = true;
+                assert!(!application.add_project_action_is_admissible());
+                application.service_stopped = false;
+
                 application.intake_stage = Some(NativeProjectIntakeStage::PickingDirectory);
                 assert!(!application.add_project_action_is_admissible());
                 application.intake_stage = None;
