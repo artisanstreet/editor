@@ -652,6 +652,30 @@ impl RequestHandler {
                 Some(parent) => Err(unknown_directory_failure(request_id, parent)),
                 None => Err(unbacked_failure(request_id, "directory browsing")),
             },
+            Query::ReadThreadEngineSettings(read) => {
+                let thread_id = read.thread_id();
+                match self.repository.read_thread_engine_settings(thread_id).await {
+                    Ok(None) => Ok(outcome(
+                        request_id,
+                        ResponsePayload::ThreadEngineSettings(
+                            artisan_protocol::ThreadEngineSettingsResult::Unconfigured {
+                                thread_id: thread_id.clone(),
+                            },
+                        ),
+                    )),
+                    Ok(Some(settings)) => Ok(outcome(
+                        request_id,
+                        ResponsePayload::ThreadEngineSettings(
+                            artisan_protocol::ThreadEngineSettingsResult::Configured {
+                                thread_id: thread_id.clone(),
+                                revision: settings.revision(),
+                                config: Box::new(settings.config().clone()),
+                            },
+                        ),
+                    )),
+                    Err(error) => Err(repository_failure(&error, request_id)),
+                }
+            }
         }
     }
 

@@ -592,6 +592,12 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
                 .init_stop()
                 .set_require_idle(*require_idle);
         }
+        ClientRequest::Query(Query::ReadThreadEngineSettings(query)) => {
+            builder
+                .reborrow()
+                .init_read_thread_engine_settings()
+                .set_thread_id(query.thread_id().as_str());
+        }
     }
 }
 
@@ -600,26 +606,19 @@ fn encode_response(
     value: &ServerResponse,
 ) -> Result<(), ProtocolEncodeError> {
     builder.set_request_id(value.request_id.as_str());
-    match &value.payload {
+    encode_response_payload(builder, &value.payload)
+}
+
+fn encode_response_payload(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    payload: &ResponsePayload,
+) -> Result<(), ProtocolEncodeError> {
+    match payload {
         ResponsePayload::DirectoryListing(listing) => {
             encode_directory_listing(builder.reborrow().init_directory_list(), listing)?;
         }
         ResponsePayload::ProjectListing(listing) => {
-            let mut projects = builder
-                .reborrow()
-                .init_project_list()
-                .init_projects(list_length(
-                    "response.projectList.projects",
-                    listing.projects().len(),
-                )?);
-            for (index, project) in listing.projects().iter().enumerate() {
-                encode_project(
-                    projects
-                        .reborrow()
-                        .get(list_index("response.projectList.projects", index)?),
-                    project,
-                );
-            }
+            encode_project_listing_response(builder.reborrow(), listing)?;
         }
         ResponsePayload::AttachedProject {
             project,
@@ -696,6 +695,28 @@ fn encode_response(
         ResponsePayload::ThreadEngineConfigSet(result) => {
             encode_thread_engine_config_result(builder.reborrow(), result);
         }
+        ResponsePayload::ThreadEngineSettings(result) => {
+            encode_thread_engine_settings_result(builder.reborrow(), result);
+        }
+    }
+    Ok(())
+}
+
+fn encode_project_listing_response(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    listing: &ProjectListing,
+) -> Result<(), ProtocolEncodeError> {
+    let mut projects = builder.init_project_list().init_projects(list_length(
+        "response.projectList.projects",
+        listing.projects().len(),
+    )?);
+    for (index, project) in listing.projects().iter().enumerate() {
+        encode_project(
+            projects
+                .reborrow()
+                .get(list_index("response.projectList.projects", index)?),
+            project,
+        );
     }
     Ok(())
 }
@@ -722,6 +743,26 @@ fn encode_thread_engine_config_result(
     encoded.set_thread_id(result.thread_id.as_str());
     encoded.set_revision(result.revision.get());
     encoded.set_disposition(encode_disposition(result.disposition));
+}
+
+fn encode_thread_engine_settings_result(
+    mut builder: artisan_capnp::response::Builder<'_>,
+    value: &crate::types::ThreadEngineSettingsResult,
+) {
+    let mut encoded = builder.reborrow().init_thread_engine_settings();
+    encoded.set_thread_id(value.thread_id().as_str());
+    match value {
+        crate::types::ThreadEngineSettingsResult::Unconfigured { .. } => {
+            encoded.init_state().set_unconfigured(());
+        }
+        crate::types::ThreadEngineSettingsResult::Configured {
+            revision, config, ..
+        } => {
+            let mut configured = encoded.init_state().init_configured();
+            configured.set_revision(revision.get());
+            encode_engine_run_config(configured.init_config(), config);
+        }
+    }
 }
 
 fn encode_engine_config_precondition(
@@ -1308,6 +1349,9 @@ fn decode_request(
         }
         request::Which::PickDirectory(()) => Ok(ClientRequest::PickDirectory),
         request::Which::LifecycleControl(lifecycle) => decode_lifecycle_request(lifecycle?),
+        request::Which::ReadThreadEngineSettings(query) => {
+            decode_read_thread_engine_settings(query?)
+        }
     }
 }
 
@@ -1370,6 +1414,23 @@ fn decode_set_thread_engine_config(
             config,
         )),
     )))
+}
+
+fn decode_read_thread_engine_settings(
+    query: artisan_capnp::read_thread_engine_settings_request::Reader<'_>,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(
+            query.get_thread_id(),
+            "request.readThreadEngineSettings.threadId",
+        )?,
+        "request.readThreadEngineSettings.threadId",
+    )?;
+    Ok(ClientRequest::Query(
+        artisan_domain::Query::ReadThreadEngineSettings(
+            artisan_domain::commands::ReadThreadEngineSettings::new(thread_id),
+        ),
+    ))
 }
 
 fn engine_config_error(field: &'static str, reason: EngineConfigReason) -> ProtocolDecodeError {
@@ -1824,6 +1885,9 @@ fn decode_response(
         response::Which::ThreadEngineConfigSet(result) => {
             decode_thread_engine_config_set(result?, &request_id)?
         }
+        response::Which::ThreadEngineSettings(result) => {
+            decode_thread_engine_settings_result(result?)?
+        }
     };
     Ok(ServerResponse {
         request_id,
@@ -1862,6 +1926,35 @@ fn decode_thread_engine_config_set(
             disposition: decode_disposition(value.get_disposition()?),
         },
     ))
+}
+
+fn decode_thread_engine_settings_result(
+    value: artisan_capnp::thread_engine_settings_result::Reader<'_>,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(
+            value.get_thread_id(),
+            "response.threadEngineSettings.threadId",
+        )?,
+        "response.threadEngineSettings.threadId",
+    )?;
+    let result = match value.get_state().which()? {
+        artisan_capnp::thread_engine_settings_result::state::Which::Unconfigured(()) => {
+            crate::types::ThreadEngineSettingsResult::Unconfigured { thread_id }
+        }
+        artisan_capnp::thread_engine_settings_result::state::Which::Configured(configured) => {
+            let configured = configured?;
+            let revision = EngineConfigRevision::new(configured.get_revision())
+                .map_err(|source| ProtocolDecodeError::EngineConfig { source })?;
+            let config = decode_engine_run_config(configured.get_config()?)?;
+            crate::types::ThreadEngineSettingsResult::Configured {
+                thread_id,
+                revision,
+                config: Box::new(config),
+            }
+        }
+    };
+    Ok(ResponsePayload::ThreadEngineSettings(result))
 }
 
 fn decode_lifecycle_response(

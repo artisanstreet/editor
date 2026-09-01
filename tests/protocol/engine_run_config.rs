@@ -273,3 +273,306 @@ fn appended_response_arm_is_visible_through_generated_union_bindings() -> capnp:
     ));
     Ok(())
 }
+
+fn read_settings_request_envelope(thread_id: &str, frame_id: &str) -> WireEnvelope {
+    WireEnvelope {
+        protocol_version: artisan_protocol::ProtocolVersion::V1,
+        frame_id: FrameId::parse(frame_id).expect("frame id is valid"),
+        sent_at: UnixMillis::from_millis(11),
+        body: WireEnvelopeBody::Request(ProtocolClientRequest::Query(
+            artisan_domain::Query::ReadThreadEngineSettings(
+                artisan_domain::commands::ReadThreadEngineSettings::new(
+                    ThreadId::parse(thread_id).expect("thread id is valid"),
+                ),
+            ),
+        )),
+    }
+}
+
+fn read_settings_response_envelope(
+    thread_id: &str,
+    revision: Option<u64>,
+    config: Option<EngineRunConfig>,
+    frame_id: &str,
+    request_id: &str,
+) -> WireEnvelope {
+    let payload = match (revision, config) {
+        (Some(value), Some(value_config)) => ResponsePayload::ThreadEngineSettings(
+            artisan_protocol::ThreadEngineSettingsResult::Configured {
+                thread_id: ThreadId::parse(thread_id).expect("thread id is valid"),
+                revision: EngineConfigRevision::new(value).expect("revision is valid"),
+                config: Box::new(value_config),
+            },
+        ),
+        _ => ResponsePayload::ThreadEngineSettings(
+            artisan_protocol::ThreadEngineSettingsResult::Unconfigured {
+                thread_id: ThreadId::parse(thread_id).expect("thread id is valid"),
+            },
+        ),
+    };
+    WireEnvelope {
+        protocol_version: artisan_protocol::ProtocolVersion::V1,
+        frame_id: FrameId::parse(frame_id).expect("frame id is valid"),
+        sent_at: UnixMillis::from_millis(12),
+        body: WireEnvelopeBody::Response(ServerResponse {
+            request_id: RequestId::parse(request_id).expect("request id is valid"),
+            payload,
+        }),
+    }
+}
+
+fn raw_read_settings_request_frame(thread_id: &str) -> Vec<u8> {
+    let mut message = Builder::new(HeapAllocator::new());
+    let mut root = message.init_root::<envelope::Builder>();
+    root.set_protocol_version(1);
+    root.set_message_id("raw-read-settings-request");
+    root.set_sent_at_millis(11);
+    root.init_body()
+        .init_request()
+        .init_read_thread_engine_settings()
+        .set_thread_id(thread_id);
+    serialize::write_message_to_words(&message)
+}
+
+fn raw_thread_engine_settings_response(
+    thread_id: &str,
+    state: &str,
+    revision: u64,
+    config_attempt: u64,
+) -> Vec<u8> {
+    let mut message = Builder::new(HeapAllocator::new());
+    let mut root = message.init_root::<envelope::Builder>();
+    root.set_protocol_version(1);
+    root.set_message_id("raw-thread-engine-settings-response");
+    root.set_sent_at_millis(12);
+    let mut response = root.init_body().init_response();
+    response.set_request_id("raw-read-settings-request");
+    let mut settings = response.init_thread_engine_settings();
+    settings.set_thread_id(thread_id);
+    let mut state_builder = settings.init_state();
+    match state {
+        "unconfigured" => {
+            state_builder.set_unconfigured(());
+        }
+        "configured" => {
+            let mut configured = state_builder.init_configured();
+            configured.set_revision(revision);
+            let mut config = configured.init_config();
+            config.set_schema_version(1);
+            config.set_engine("opencode2");
+            config.set_profile_id("profile-protocol");
+            config.set_model_id("model-protocol");
+            config.set_route_id("route-protocol");
+            let mut variant = config.reborrow().init_variant();
+            variant.set_kind("none");
+            variant.set_id("");
+            let mut permission = config.reborrow().init_permission();
+            permission.set_permission_id("permission-protocol");
+            permission.set_agent_id("agent-protocol");
+            permission.set_approval("on_request");
+            permission.set_filesystem("workspace");
+            permission.set_network("enabled");
+            permission.set_web_search("disabled");
+            let mut runtime = config.init_runtime();
+            runtime.set_attempt_budget_ms(config_attempt);
+            runtime.set_readiness_budget_ms(1);
+            runtime.set_health_budget_ms(1);
+            runtime.set_prompt_budget_ms(1);
+            runtime.set_stream_budget_ms(1);
+            runtime.set_close_budget_ms(1);
+            runtime.set_max_json_body_bytes(8_192);
+            runtime.set_max_sse_line_bytes(4_096);
+            runtime.set_max_sse_event_bytes(8_192);
+            runtime.set_max_readiness_line_bytes(4_096);
+            runtime.set_max_header_count(8);
+            runtime.set_max_http_buffer_bytes(8_192);
+            runtime.set_max_stderr_bytes(4_096);
+            runtime.set_observation_capacity(16);
+        }
+        other => panic!("unknown state {other}"),
+    }
+    serialize::write_message_to_words(&message)
+}
+
+#[test]
+fn read_thread_engine_settings_request_round_trip_carries_exact_thread_id_at_arm_12()
+-> Result<(), Box<dyn Error>> {
+    let value = read_settings_request_envelope("thread-protocol", "read-frame-1");
+    let encoded = encode_envelope(&value)?;
+    let decoded = decode_envelope(&encoded)?;
+    assert!(decoded == value);
+    let mut encoded_slice = encoded.as_slice();
+    let message =
+        serialize::read_message_from_flat_slice(&mut encoded_slice, ReaderOptions::new())?;
+    let root: envelope::Reader = message.get_root()?;
+    let envelope::body::Which::Request(req) = root.get_body().which()? else {
+        panic!("expected request body");
+    };
+    assert!(matches!(
+        req?.which()?,
+        request::Which::ReadThreadEngineSettings(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn thread_engine_settings_configured_response_round_trip_preserves_thread_revision_and_complete_config()
+-> Result<(), Box<dyn Error>> {
+    let value = read_settings_response_envelope(
+        "thread-protocol",
+        Some(7),
+        Some(config(true)),
+        "server-read-settings",
+        "read-frame-1",
+    );
+    let encoded = encode_envelope(&value)?;
+    let decoded = decode_envelope(&encoded)?;
+    assert!(decoded == value);
+    if let WireEnvelopeBody::Response(ServerResponse {
+        payload: ResponsePayload::ThreadEngineSettings(result),
+        ..
+    }) = decoded.body
+    {
+        match result {
+            artisan_protocol::ThreadEngineSettingsResult::Configured {
+                thread_id,
+                revision,
+                config: actual_config,
+            } => {
+                assert_eq!(thread_id.as_str(), "thread-protocol");
+                assert_eq!(revision.get(), 7);
+                assert_eq!(*actual_config, config(true));
+            }
+            other @ artisan_protocol::ThreadEngineSettingsResult::Unconfigured { .. } => {
+                panic!("expected configured result, got {other:?}")
+            }
+        }
+    } else {
+        panic!("expected thread engine settings response");
+    }
+    Ok(())
+}
+
+#[test]
+fn thread_engine_settings_unconfigured_response_remains_distinct() -> Result<(), Box<dyn Error>> {
+    let configured = read_settings_response_envelope(
+        "thread-protocol",
+        Some(3),
+        Some(config(false)),
+        "server-configured",
+        "read-frame-1",
+    );
+    let unconfigured = read_settings_response_envelope(
+        "thread-protocol",
+        None,
+        None,
+        "server-unconfigured",
+        "read-frame-2",
+    );
+    let encoded_configured = encode_envelope(&configured)?;
+    let encoded_unconfigured = encode_envelope(&unconfigured)?;
+    let decoded_configured = decode_envelope(&encoded_configured)?;
+    let decoded_unconfigured = decode_envelope(&encoded_unconfigured)?;
+    assert!(decoded_configured != decoded_unconfigured);
+    assert!(matches!(
+        decoded_unconfigured.body,
+        WireEnvelopeBody::Response(ServerResponse {
+            payload: ResponsePayload::ThreadEngineSettings(
+                artisan_protocol::ThreadEngineSettingsResult::Unconfigured { .. },
+            ),
+            ..
+        })
+    ));
+    // Ordinals: request @12, response @13 remain frozen
+    let mut slice = encoded_configured.as_slice();
+    let message = serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new())?;
+    let root: envelope::Reader = message.get_root()?;
+    let envelope::body::Which::Response(resp) = root.get_body().which()? else {
+        panic!("expected response");
+    };
+    assert!(matches!(
+        resp?.which()?,
+        response::Which::ThreadEngineSettings(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn thread_engine_settings_rejects_zero_configured_revision_invalid_id_malformed_config_and_trailing_bytes()
+ {
+    let zero_revision = decode_envelope(&raw_thread_engine_settings_response(
+        "thread-protocol",
+        "configured",
+        0,
+        100,
+    ));
+    assert!(matches!(
+        zero_revision,
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+
+    let out_of_domain = decode_envelope(&raw_thread_engine_settings_response(
+        "thread-protocol",
+        "configured",
+        i64::MAX as u64 + 1,
+        100,
+    ));
+    assert!(matches!(
+        out_of_domain,
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+
+    let invalid_thread = decode_envelope(&raw_read_settings_request_frame(""));
+    assert!(matches!(
+        invalid_thread,
+        Err(ProtocolDecodeError::Identifier { .. })
+    ));
+
+    let malformed_config = decode_envelope(&raw_thread_engine_settings_response(
+        "thread-protocol",
+        "configured",
+        1,
+        0,
+    ));
+    assert!(matches!(
+        malformed_config,
+        Err(ProtocolDecodeError::EngineConfig { .. })
+    ));
+
+    let mut trailing = encode_envelope(&read_settings_request_envelope(
+        "thread-protocol",
+        "read-frame-trailing",
+    ))
+    .expect("request should encode");
+    trailing.push(0xFF);
+    let trailing_error = decode_envelope(&trailing);
+    assert!(matches!(
+        trailing_error,
+        Err(ProtocolDecodeError::TrailingBytes { .. })
+    ));
+}
+
+#[test]
+fn thread_engine_settings_unknown_union_discriminant_is_rejected() {
+    let valid = raw_thread_engine_settings_response("thread-protocol", "unconfigured", 1, 100);
+    let configured = raw_thread_engine_settings_response("thread-protocol", "configured", 1, 100);
+    let mut found = false;
+    for index in 0..valid.len().min(configured.len()) {
+        if valid[index] == configured[index] {
+            continue;
+        }
+        let mut corrupted = valid.clone();
+        corrupted[index] = 255;
+        if matches!(
+            decode_envelope(&corrupted),
+            Err(ProtocolDecodeError::UnknownDiscriminant { value: 255 })
+        ) {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "no differing byte produced UnknownDiscriminant {{ value: 255 }}"
+    );
+}

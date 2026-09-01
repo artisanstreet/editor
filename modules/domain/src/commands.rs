@@ -156,6 +156,26 @@ pub struct ListProjectThreads {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ListAttachedProjects;
 
+/// Reads the persisted engine configuration for one existing thread.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ReadThreadEngineSettings {
+    thread_id: ThreadId,
+}
+
+impl ReadThreadEngineSettings {
+    /// Constructs a pure read naming exactly one existing thread.
+    #[must_use]
+    pub fn new(thread_id: ThreadId) -> Self {
+        Self { thread_id }
+    }
+
+    /// Returns the target thread identity.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+}
+
 /// Every query of the first native workflow.
 ///
 /// Queries carry no [`RequestId`]: they are pure reads with no durable effect
@@ -168,4 +188,6 @@ pub enum Query {
     ListProjectThreads(ListProjectThreads),
     /// See [`ListAttachedProjects`].
     ListAttachedProjects(ListAttachedProjects),
+    /// See [`ReadThreadEngineSettings`].
+    ReadThreadEngineSettings(ReadThreadEngineSettings),
 }

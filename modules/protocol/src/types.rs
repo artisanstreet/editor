@@ -9,9 +9,9 @@ use std::fmt;
 
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
-    ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision, Event,
-    IdentifierError, MessageId, PatchBatch, ProjectListing, ProjectSummary, Query,
-    ReceiptDisposition, RequestId, ThreadId, ThreadListing, ThreadSummary, UnixMillis,
+    ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision,
+    EngineRunConfig, Event, IdentifierError, MessageId, PatchBatch, ProjectListing, ProjectSummary,
+    Query, ReceiptDisposition, RequestId, ThreadId, ThreadListing, ThreadSummary, UnixMillis,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -710,6 +710,47 @@ pub enum DirectoryPickOutcome {
     Cancelled,
 }
 
+/// Authoritative persisted thread engine settings read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThreadEngineSettingsResult {
+    /// No engine configuration has been stored for this thread.
+    Unconfigured { thread_id: ThreadId },
+    /// Complete persisted configuration with its one-based revision.
+    Configured {
+        thread_id: ThreadId,
+        revision: EngineConfigRevision,
+        config: Box<EngineRunConfig>,
+    },
+}
+
+impl ThreadEngineSettingsResult {
+    /// Returns the thread owning these settings.
+    #[must_use]
+    pub fn thread_id(&self) -> &ThreadId {
+        match self {
+            Self::Unconfigured { thread_id } | Self::Configured { thread_id, .. } => thread_id,
+        }
+    }
+
+    /// Returns the stored revision when configured.
+    #[must_use]
+    pub fn revision(&self) -> Option<EngineConfigRevision> {
+        match self {
+            Self::Unconfigured { .. } => None,
+            Self::Configured { revision, .. } => Some(*revision),
+        }
+    }
+
+    /// Returns the stored configuration when configured.
+    #[must_use]
+    pub fn config(&self) -> Option<&EngineRunConfig> {
+        match self {
+            Self::Unconfigured { .. } => None,
+            Self::Configured { config, .. } => Some(config),
+        }
+    }
+}
+
 /// Successful first-workflow response payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResponsePayload {
@@ -747,6 +788,8 @@ pub enum ResponsePayload {
     Lifecycle(LifecycleResponse),
     /// Durable thread engine-configuration result.
     ThreadEngineConfigSet(SetThreadEngineConfigResult),
+    /// Authoritative persisted thread engine settings.
+    ThreadEngineSettings(ThreadEngineSettingsResult),
 }
 
 /// Successful response correlated to a client request frame.
