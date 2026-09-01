@@ -145,7 +145,7 @@ impl std::fmt::Debug for FixtureTurnInput {
 /// all builds; the `Fixture` variant is `#[cfg(test)]` only and never
 /// constructible in non-test builds. Never `Clone`.
 pub(crate) enum InternalLaunch {
-    Verified(VerifiedOpenCode2ProfileLaunch),
+    Verified(Box<VerifiedOpenCode2ProfileLaunch>),
     #[cfg(test)]
     Fixture(FixtureConfiguredLaunch),
 }
@@ -159,7 +159,7 @@ impl std::fmt::Debug for InternalLaunch {
 impl InternalLaunch {
     pub(crate) fn profile_id(&self) -> &str {
         match self {
-            Self::Verified(verified) => verified.profile_id().as_str(),
+            Self::Verified(verified) => verified.as_ref().profile_id().as_str(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.profile_id.as_str(),
         }
@@ -167,7 +167,7 @@ impl InternalLaunch {
 
     pub(crate) fn version(&self) -> &str {
         match self {
-            Self::Verified(verified) => verified.version(),
+            Self::Verified(verified) => verified.as_ref().version(),
             #[cfg(test)]
             Self::Fixture(fixture) => fixture.version,
         }
@@ -605,7 +605,7 @@ impl EngineOwner {
             prompt_id: input.prompt_id,
             prompt_text: input.prompt_text,
             settings: input.settings,
-            launch: InternalLaunch::Verified(input.launch),
+            launch: InternalLaunch::Verified(Box::new(input.launch)),
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,

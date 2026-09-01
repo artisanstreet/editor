@@ -884,9 +884,11 @@ async fn prepare_configured_process(
         return Err(request.fail(EngineOperationError::EntropyFailed));
     };
     let Ok(mut child) = (match &request.input.launch {
-        crate::engine_owner::InternalLaunch::Verified(verified) => {
-            spawn_configured_engine(verified, &request.input.project_root, secret.as_str())
-        }
+        crate::engine_owner::InternalLaunch::Verified(verified) => spawn_configured_engine(
+            verified.as_ref(),
+            &request.input.project_root,
+            secret.as_str(),
+        ),
         #[cfg(test)]
         crate::engine_owner::InternalLaunch::Fixture(fixture) => {
             crate::engine_owner::process::spawn_configured_fixture_engine(

@@ -11,7 +11,7 @@ use super::{
     reset_witnesses, witness_counts,
 };
 use crate::engine_owner::observation::{EngineObservation, TerminalState};
-use crate::engine_owner::operation::EngineOperationError;
+use crate::engine_owner::operation::{AcceptedTurn, EngineOperationError};
 use artisan_database::{
     AttachProjectInput, CreateThreadInput, SetThreadEngineConfigInput, SqliteConfig, connect,
 };
@@ -31,25 +31,22 @@ use artisan_migrations::migrate_to_current;
 
 fn fixture_program_path() -> PathBuf {
     if let Ok(mapping) = std::env::var("ARTISAN_ENGINE_OWNER_FIXTURE") {
-        let direct = PathBuf::from(&mapping);
-        if direct.is_file() {
-            return direct;
-        }
-        if let Ok(test_srcdir) = std::env::var("TEST_SRCDIR") {
-            let candidate = Path::new(&test_srcdir).join(&mapping);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-        if let Ok(runfiles_dir) = std::env::var("RUNFILES_DIR") {
-            let candidate = Path::new(&runfiles_dir).join(&mapping);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-        if direct.exists() {
-            return direct;
-        }
+        let runfiles =
+            runfiles::Runfiles::create().expect("official runfiles discovery should succeed");
+        let path = runfiles::rlocation!(runfiles, mapping.as_str())
+            .unwrap_or_else(|| panic!("declared fixture artifact must resolve: {mapping}"));
+        assert!(
+            path.is_file(),
+            "declared fixture artifact must be regular file: {}",
+            path.display()
+        );
+        return path;
+    }
+    if std::env::var_os("TEST_SRCDIR").is_some()
+        || std::env::var_os("RUNFILES_DIR").is_some()
+        || std::env::var_os("RUNFILES_MANIFEST_FILE").is_some()
+    {
+        panic!("ARTISAN_ENGINE_OWNER_FIXTURE must be set via rlocationpath");
     }
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_engine_owner_fixture") {
         let p = PathBuf::from(path);
@@ -65,8 +62,6 @@ fn fixture_program_path() -> PathBuf {
         manifest.join("../target/debug/engine_owner_fixture.exe"),
         PathBuf::from("target/debug/engine_owner_fixture"),
         PathBuf::from("target/debug/engine_owner_fixture.exe"),
-        PathBuf::from("bazel-bin/tests/backend/engine_owner_fixture"),
-        PathBuf::from("bazel-bin/tests/backend/engine_owner_fixture.exe"),
     ] {
         if candidate.is_file() {
             return candidate;
@@ -104,6 +99,23 @@ impl TempRoot {
     fn root_path(&self) -> RootPath {
         let s = self.path.to_str().expect("temp path utf8");
         RootPath::parse(s).expect("temp root is valid RootPath")
+    }
+}
+
+fn assert_fixture_program_is_regular_file(fixture: &Path) {
+    assert!(
+        fixture.is_file(),
+        "fixture must be regular file: {}",
+        fixture.display()
+    );
+    #[cfg(unix)]
+    {
+        let meta = std::fs::symlink_metadata(fixture).expect("metadata");
+        assert!(
+            !meta.is_symlink(),
+            "fixture must be regular file, not symlink"
+        );
+        assert!(meta.is_file(), "fixture must be regular file");
     }
 }
 
@@ -239,108 +251,7 @@ async fn settings_for_profile(
         .expect("settings present")
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "current_thread")]
-async fn configured_owner_starts_active_and_drains_without_child() {
-    let mut owner = EngineOwner::start_configured(
-        NonZeroUsize::new(1).expect("one slot is nonzero"),
-        &tokio::runtime::Handle::current(),
-    );
-
-    assert_eq!(owner.health(), EngineOwnerHealth::Active);
-    assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn configured_fixture_happy_path_delivers_observation_and_reaps() {
-    reset_witnesses();
-    let fixture = fixture_program_path();
-    assert!(
-        fixture.is_file(),
-        "fixture must be regular file: {}",
-        fixture.display()
-    );
-    #[cfg(unix)]
-    {
-        let meta = std::fs::symlink_metadata(&fixture).expect("metadata");
-        assert!(
-            !meta.is_symlink(),
-            "fixture must be regular file, not symlink"
-        );
-        assert!(meta.is_file(), "fixture must be regular file");
-    }
-
-    let temp_root = TempRoot::new("happy");
-    let root = temp_root.root_path();
-    let settings = settings_for_profile("fixture-test", &root).await;
-
-    let mut owner = EngineOwner::start_configured(
-        NonZeroUsize::new(1).expect("one slot"),
-        &tokio::runtime::Handle::current(),
-    );
-    assert_eq!(owner.health(), EngineOwnerHealth::Active);
-
-    let input = FixtureTurnInput {
-        run_id: RunId::parse("fixture-run").expect("run id"),
-        project_root: root.clone(),
-        prompt_id: "prompt-1".to_owned(),
-        prompt_text: MessageBody::parse("hello world").expect("body"),
-        settings: settings.clone(),
-        fixture: FixtureConfiguredLaunch {
-            program: fixture.clone(),
-            version: "0.0.0-fixture",
-            profile_id: "fixture-test".to_owned(),
-            scenario: "prompt_text_then_terminal",
-        },
-        prompt_delivery: "immediate".to_owned(),
-        stream_after: 0,
-        control_capacity: 1,
-    };
-
-    let debug = format!("{:?}", input);
-    assert!(
-        debug.contains("<redacted>"),
-        "FixtureTurnInput Debug must be redacted"
-    );
-    assert!(
-        !debug.contains("hello world"),
-        "prompt text must not leak in Debug"
-    );
-    assert!(
-        !debug.contains("fixture-test"),
-        "profile id must not leak via Debug redaction"
-    );
-    assert!(
-        !debug.contains(fixture.to_str().unwrap_or("")),
-        "fixture path must not leak in Debug"
-    );
-
-    {
-        let secret = crate::engine_owner::http::HealthSecret::generate().expect("secret");
-        let secret_debug = format!("{:?}", secret);
-        assert!(secret_debug.contains("<redacted>"));
-        assert!(!secret_debug.contains(secret.as_str()));
-    }
-
-    let mut turn = owner
-        .admit_fixture_turn(input, Duration::from_secs(10))
-        .expect("admit should succeed");
-
-    let prepared = tokio::time::timeout(Duration::from_secs(8), turn.prepare())
-        .await
-        .expect("prepare timeout")
-        .expect("prepared should be Ok");
-    assert_eq!(prepared.session(), "test-session");
-
-    turn.authorize().expect("authorize should succeed");
-    assert!(
-        turn.authorize().is_err(),
-        "second authorize must fail (no duplicated prompt)"
-    );
-
+async fn collect_happy_path_observations(turn: &mut AcceptedTurn) -> (bool, bool, Vec<String>) {
     let mut saw_text = false;
     let mut saw_terminal = false;
     let mut text_deltas: Vec<String> = Vec::new();
@@ -379,17 +290,10 @@ async fn configured_fixture_happy_path_delivers_observation_and_reaps() {
         }
     }
 
-    assert!(saw_text, "should have seen text delta");
-    assert!(saw_terminal, "should have seen terminal event");
-    assert_eq!(text_deltas.len(), 1);
-    assert_eq!(text_deltas[0], "hello world");
+    (saw_text, saw_terminal, text_deltas)
+}
 
-    let result = tokio::time::timeout(Duration::from_secs(5), turn.finish())
-        .await
-        .expect("finish timeout")
-        .expect("finish should be Ok");
-    assert_eq!(result.terminal(), TerminalState::Completed);
-
+async fn assert_happy_path_child_reaped(owner: &mut EngineOwner) {
     let counts = witness_counts();
     assert_eq!(
         counts.spawned, 1,
@@ -404,6 +308,111 @@ async fn configured_fixture_happy_path_delivers_observation_and_reaps() {
     let shutdown = owner.shutdown().await;
     assert_eq!(shutdown, EngineOwnerShutdown::Joined);
     assert_eq!(owner.health(), EngineOwnerHealth::Active);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn configured_owner_starts_active_and_drains_without_child() {
+    let mut owner = EngineOwner::start_configured(
+        NonZeroUsize::new(1).expect("one slot is nonzero"),
+        &tokio::runtime::Handle::current(),
+    );
+
+    assert_eq!(owner.health(), EngineOwnerHealth::Active);
+    assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn configured_fixture_happy_path_delivers_observation_and_reaps() {
+    reset_witnesses();
+    let fixture = fixture_program_path();
+    assert_fixture_program_is_regular_file(&fixture);
+
+    let temp_root = TempRoot::new("happy");
+    let root = temp_root.root_path();
+    let settings = settings_for_profile("fixture-test", &root).await;
+
+    let mut owner = EngineOwner::start_configured(
+        NonZeroUsize::new(1).expect("one slot"),
+        &tokio::runtime::Handle::current(),
+    );
+    assert_eq!(owner.health(), EngineOwnerHealth::Active);
+
+    let input = FixtureTurnInput {
+        run_id: RunId::parse("fixture-run").expect("run id"),
+        project_root: root.clone(),
+        prompt_id: "prompt-1".to_owned(),
+        prompt_text: MessageBody::parse("hello world").expect("body"),
+        settings: settings.clone(),
+        fixture: FixtureConfiguredLaunch {
+            program: fixture.clone(),
+            version: "0.0.0-fixture",
+            profile_id: "fixture-test".to_owned(),
+            scenario: "prompt_text_then_terminal",
+        },
+        prompt_delivery: "immediate".to_owned(),
+        stream_after: 0,
+        control_capacity: 1,
+    };
+
+    let debug = format!("{input:?}");
+    assert!(
+        debug.contains("<redacted>"),
+        "FixtureTurnInput Debug must be redacted"
+    );
+    assert!(
+        !debug.contains("hello world"),
+        "prompt text must not leak in Debug"
+    );
+    assert!(
+        !debug.contains("fixture-test"),
+        "profile id must not leak via Debug redaction"
+    );
+    assert!(
+        !debug.contains(fixture.to_str().unwrap_or("")),
+        "fixture path must not leak in Debug"
+    );
+
+    {
+        let secret = crate::engine_owner::http::HealthSecret::generate().expect("secret");
+        let secret_debug = format!("{secret:?}");
+        assert!(secret_debug.contains("<redacted>"));
+        assert!(!secret_debug.contains(secret.as_str()));
+    }
+
+    let mut turn = owner
+        .admit_fixture_turn(input, Duration::from_secs(10))
+        .expect("admit should succeed");
+
+    let prepared = tokio::time::timeout(Duration::from_secs(8), turn.prepare())
+        .await
+        .expect("prepare timeout")
+        .expect("prepared should be Ok");
+    assert_eq!(prepared.session(), "test-session");
+
+    turn.authorize().expect("authorize should succeed");
+    assert!(
+        turn.authorize().is_err(),
+        "second authorize must fail (no duplicated prompt)"
+    );
+
+    let (saw_text, saw_terminal, text_deltas) = collect_happy_path_observations(&mut turn).await;
+
+    assert!(saw_text, "should have seen text delta");
+    assert!(saw_terminal, "should have seen terminal event");
+    assert_eq!(text_deltas.len(), 1);
+    assert_eq!(text_deltas[0], "hello world");
+
+    let result = tokio::time::timeout(Duration::from_secs(5), turn.finish())
+        .await
+        .expect("finish timeout")
+        .expect("finish should be Ok");
+    assert_eq!(result.terminal(), TerminalState::Completed);
+
+    assert_happy_path_child_reaped(&mut owner).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -465,7 +474,7 @@ async fn configured_fixture_run_mismatch_fails_without_leak() {
         "mismatched run_id should cause StreamFailed error"
     );
     let err = result.unwrap_err();
-    let err_debug = format!("{:?}", err);
+    let err_debug = format!("{err:?}");
     assert!(
         !err_debug.contains("hello"),
         "error must not leak prompt text"
@@ -551,7 +560,7 @@ async fn configured_fixture_cancellation_before_authorize_aborts() {
         ),
         "cancellation should map to typed error, got {err:?}"
     );
-    let err_debug = format!("{:?}", err);
+    let err_debug = format!("{err:?}");
     assert!(!err_debug.contains("hello"));
 
     let counts = witness_counts();
@@ -603,7 +612,7 @@ async fn configured_fixture_abrupt_exit_is_handled_and_bounded() {
         "abrupt exit should cause prepare to fail"
     );
     let err = prepare_res.unwrap_err();
-    let err_debug = format!("{:?}", err);
+    let err_debug = format!("{err:?}");
     assert!(!err_debug.contains("hello"));
 
     let finish_res = tokio::time::timeout(Duration::from_secs(5), turn.finish())
