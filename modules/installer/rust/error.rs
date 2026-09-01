@@ -87,6 +87,8 @@ pub enum InstallerError {
     InvalidInstallerMarker,
     #[error("installer lock sentinel is invalid")]
     InvalidInstallerLock,
+    #[error("installation activation transaction is ambiguous; no files were changed")]
+    InstallationActivationTransactionAmbiguous,
     #[error("installer lifecycle helper could not be started")]
     LifecycleHelper,
     #[error("owned installation path is unsafe")]
