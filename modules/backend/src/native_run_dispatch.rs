@@ -42,6 +42,7 @@ use crate::{
     engine_owner::observation::{EngineObservation, TerminalState, TextDelta},
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
     engine_owner::{EngineOwner, EngineOwnerShutdown},
+    lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
     startup_reconciliation_sweep::{
         PatchSourceError, StartupReconciliationPatchSource, StartupReconciliationPatches,
         StartupReconciliationSweepInput,
@@ -375,6 +376,7 @@ impl NativeRunDispatcher {
         database_path: PathBuf,
         config: NativeRunDispatcherConfig,
         process_cancel: Arc<CancelHandle>,
+        activity: ActivityGateImpl,
         runtime: &Handle,
     ) -> Self {
         Self::start_with_mode(
@@ -382,6 +384,7 @@ impl NativeRunDispatcher {
             database_path,
             config,
             process_cancel,
+            activity,
             runtime,
             DispatchLaunchMode::Configured,
         )
@@ -396,6 +399,7 @@ impl NativeRunDispatcher {
         database_path: PathBuf,
         config: NativeRunDispatcherConfig,
         process_cancel: Arc<CancelHandle>,
+        activity: ActivityGateImpl,
         runtime: &Handle,
         fixture_program: PathBuf,
     ) -> Self {
@@ -404,6 +408,7 @@ impl NativeRunDispatcher {
             database_path,
             config,
             process_cancel,
+            activity,
             runtime,
             DispatchLaunchMode::Fixture(Some(FixtureConfiguredLaunch {
                 program: fixture_program,
@@ -419,21 +424,23 @@ impl NativeRunDispatcher {
         database_path: PathBuf,
         config: NativeRunDispatcherConfig,
         process_cancel: Arc<CancelHandle>,
+        activity: ActivityGateImpl,
         runtime: &Handle,
         launch_mode: DispatchLaunchMode,
     ) -> Self {
         let shutdown_budget = config.shutdown_budget;
         let stop = Arc::new(CancelHandle::new());
         let owner = EngineOwner::start_configured(config.queue_capacity, runtime);
-        let join = runtime.spawn(dispatch_loop(
+        let join = runtime.spawn(dispatch_loop(DispatchLoopContext {
             repository,
             database_path,
             config,
-            Arc::clone(&stop),
+            stop: Arc::clone(&stop),
             process_cancel,
             owner,
+            activity,
             launch_mode,
-        ));
+        }));
         Self {
             stop,
             shutdown_budget,
@@ -485,6 +492,17 @@ impl Drop for NativeRunDispatcher {
 
 struct DispatchLoopExit {
     owner: EngineOwnerShutdown,
+}
+
+struct DispatchLoopContext {
+    repository: Repository,
+    database_path: PathBuf,
+    config: NativeRunDispatcherConfig,
+    stop: Arc<CancelHandle>,
+    process_cancel: Arc<CancelHandle>,
+    owner: EngineOwner,
+    activity: ActivityGateImpl,
+    launch_mode: DispatchLaunchMode,
 }
 
 struct LiveRecoveryPatchSource {
@@ -582,16 +600,31 @@ async fn run_final_recovery_page(
     let _ = perform_live_recovery_page(repository, config, operated_at).await;
 }
 
-async fn dispatch_loop(
-    repository: Repository,
-    database_path: PathBuf,
-    config: NativeRunDispatcherConfig,
-    stop: Arc<CancelHandle>,
-    process_cancel: Arc<CancelHandle>,
-    mut owner: EngineOwner,
-    mut launch_mode: DispatchLaunchMode,
-) -> DispatchLoopExit {
+async fn shutdown_owner_until_settled(owner: &mut EngineOwner) -> EngineOwnerShutdown {
+    loop {
+        let outcome = owner.shutdown().await;
+        if !matches!(outcome, EngineOwnerShutdown::Quarantined) {
+            return outcome;
+        }
+    }
+}
+
+async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
+    let DispatchLoopContext {
+        repository,
+        database_path,
+        config,
+        stop,
+        process_cancel,
+        mut owner,
+        activity,
+        mut launch_mode,
+    } = context;
     let origin = SystemCommandOrigin;
+    // `AcceptedTurn::finish` can report an unresolved reap while the owner
+    // quarantines a retained child. Keep its activity lease until owner
+    // shutdown proves that custody has resolved.
+    let mut retained_activity = Vec::new();
     loop {
         if stop.is_cancelled() || process_cancel.is_cancelled() {
             break;
@@ -604,25 +637,40 @@ async fn dispatch_loop(
         if !proceed {
             continue;
         }
-        // Consuming the fixture capability before this claim makes its fixed
-        // run identity one-shot: a later loop cannot claim or admit it again.
+        let activity_lease = match activity.acquire() {
+            Ok(lease) => lease,
+            Err(ActivityGateError::Unavailable | ActivityGateError::CountOutOfRange) => {
+                if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
+                    break;
+                }
+                continue;
+            }
+        };
+        // Consuming the fixture capability after activity admission makes its
+        // fixed run identity one-shot without opening a stop race.
         let launch_mode = match launch_mode.claim_for_next() {
             ClaimLaunchAvailability::Available(launch_mode) => launch_mode,
-            ClaimLaunchAvailability::Exhausted => break,
+            ClaimLaunchAvailability::Exhausted => {
+                drop(activity_lease);
+                break;
+            }
         };
         let Some(claimed_at) = wall_clock(&origin) else {
+            drop(activity_lease);
             if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
                 break;
             }
             continue;
         };
         let Some(lease_expires_at) = add_duration(claimed_at, config.claim_lease) else {
+            drop(activity_lease);
             if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
                 break;
             }
             continue;
         };
         let Some(owner_token) = mint_dispatch_owner() else {
+            drop(activity_lease);
             if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
                 break;
             }
@@ -634,12 +682,13 @@ async fn dispatch_loop(
             lease_expires_at,
         };
         let Ok(Some(claimed)) = repository.claim_next_message_dispatch(claim).await else {
+            drop(activity_lease);
             if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
                 break;
             }
             continue;
         };
-        execute_claim(
+        if let Some(lease) = execute_claim(
             ClaimExecution {
                 repository: &repository,
                 database_path: Path::new(&database_path),
@@ -651,18 +700,20 @@ async fn dispatch_loop(
                 claimed,
             },
             launch_mode,
+            activity_lease,
         )
-        .await;
+        .await
+        {
+            retained_activity.push(lease);
+        }
     }
 
     run_final_recovery_page(&repository, &config, &origin).await;
 
-    let owner_shutdown = loop {
-        let outcome = owner.shutdown().await;
-        if !matches!(outcome, EngineOwnerShutdown::Quarantined) {
-            break outcome;
-        }
-    };
+    let owner_shutdown = shutdown_owner_until_settled(&mut owner).await;
+    // The owner shutdown loop above does not complete while unresolved child
+    // custody remains, so releasing these leases is safe at this boundary.
+    drop(retained_activity);
     DispatchLoopExit {
         owner: owner_shutdown,
     }
@@ -809,14 +860,22 @@ struct BoundClaim<'a> {
     turn: AcceptedTurn,
 }
 
-async fn execute_claim(context: ClaimExecution<'_>, launch_mode: ClaimLaunchMode) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimCustody {
+    Released,
+    Retained,
+}
+
+async fn execute_claim(
+    context: ClaimExecution<'_>,
+    launch_mode: ClaimLaunchMode,
+    activity_lease: ActivityLease,
+) -> Option<ActivityLease> {
     if context.stop.is_cancelled() || context.process_cancel.is_cancelled() {
         context.requeue("dispatcher stopping").await;
-        return;
+        return None;
     }
-    let Some(loaded) = load_claim(context, launch_mode).await else {
-        return;
-    };
+    let loaded = load_claim(context, launch_mode).await?;
     let ids = match mint_claim_ids(
         loaded.context.origin,
         loaded.context.claimed.updated_at,
@@ -825,19 +884,28 @@ async fn execute_claim(context: ClaimExecution<'_>, launch_mode: ClaimLaunchMode
         Ok(ids) => ids,
         Err(reason) => {
             loaded.context.requeue(reason).await;
-            return;
+            return None;
         }
     };
-    let Some(launched) = launch_claim(loaded, ids).await else {
-        return;
+    let launched = launch_claim(loaded, ids).await?;
+    let (prepared, custody) = admit_claim(launched).await;
+    let Some(prepared) = prepared else {
+        return match custody {
+            ClaimCustody::Released => None,
+            ClaimCustody::Retained => Some(activity_lease),
+        };
     };
-    let Some(prepared) = admit_claim(launched).await else {
-        return;
+    let (bound, custody) = bind_claim(prepared).await;
+    let Some(bound) = bound else {
+        return match custody {
+            ClaimCustody::Released => None,
+            ClaimCustody::Retained => Some(activity_lease),
+        };
     };
-    let Some(bound) = bind_claim(prepared).await else {
-        return;
-    };
-    consume_bound_claim(bound).await;
+    match consume_bound_claim(bound).await {
+        ClaimCustody::Released => None,
+        ClaimCustody::Retained => Some(activity_lease),
+    }
 }
 
 async fn load_claim(
@@ -1004,7 +1072,7 @@ async fn launch_claim(loaded: LoadedClaim<'_>, ids: ClaimIds) -> Option<Launched
     })
 }
 
-async fn admit_claim(claim: LaunchedClaim<'_>) -> Option<PreparedClaim<'_>> {
+async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, ClaimCustody) {
     let LaunchedClaim {
         context,
         payload,
@@ -1052,23 +1120,30 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> Option<PreparedClaim<'_>> {
         ),
     };
     let Ok(mut turn) = turn_result else {
-        return None;
+        return (None, ClaimCustody::Released);
     };
     let Ok(session) = turn.prepare().await else {
-        let _ = turn.finish().await;
-        return None;
+        let custody = if is_unresolved_reap(&turn.finish().await) {
+            ClaimCustody::Retained
+        } else {
+            ClaimCustody::Released
+        };
+        return (None, custody);
     };
-    Some(PreparedClaim {
-        context,
-        ids,
-        receipt,
-        settings,
-        turn,
-        session,
-    })
+    (
+        Some(PreparedClaim {
+            context,
+            ids,
+            receipt,
+            settings,
+            turn,
+            session,
+        }),
+        ClaimCustody::Released,
+    )
 }
 
-async fn bind_claim(claim: PreparedClaim<'_>) -> Option<BoundClaim<'_>> {
+async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimCustody) {
     let PreparedClaim {
         context,
         ids,
@@ -1086,12 +1161,26 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> Option<BoundClaim<'_>> {
             .as_str(),
         session.session(),
     ) else {
-        abandon_turn(turn, context.stop, context.process_cancel).await;
-        return None;
+        let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+        return (
+            None,
+            if custody {
+                ClaimCustody::Retained
+            } else {
+                ClaimCustody::Released
+            },
+        );
     };
     let Some(bound_at) = at_or_after(context.origin, ids.operated_at) else {
-        abandon_turn(turn, context.stop, context.process_cancel).await;
-        return None;
+        let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+        return (
+            None,
+            if custody {
+                ClaimCustody::Retained
+            } else {
+                ClaimCustody::Released
+            },
+        );
     };
     let bind_result = bind_with_retry(
         context.repository,
@@ -1112,8 +1201,15 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> Option<BoundClaim<'_>> {
         Ok(BindRunProviderOutcome::Bound(receipt)) => (receipt, false),
         Ok(BindRunProviderOutcome::AlreadyBound(receipt)) => (receipt, true),
         Err(_) => {
-            abandon_turn(turn, context.stop, context.process_cancel).await;
-            return None;
+            let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+            return (
+                None,
+                if custody {
+                    ClaimCustody::Retained
+                } else {
+                    ClaimCustody::Released
+                },
+            );
         }
     };
     if matches!(
@@ -1121,20 +1217,30 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> Option<BoundClaim<'_>> {
         PromptAuthorization::DoNotAuthorize
     ) || turn.authorize().is_err()
     {
-        abandon_turn(turn, context.stop, context.process_cancel).await;
-        return None;
+        let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+        return (
+            None,
+            if custody {
+                ClaimCustody::Retained
+            } else {
+                ClaimCustody::Released
+            },
+        );
     }
-    Some(BoundClaim {
-        context,
-        ids,
-        receipt,
-        bound,
-        bound_at,
-        turn,
-    })
+    (
+        Some(BoundClaim {
+            context,
+            ids,
+            receipt,
+            bound,
+            bound_at,
+            turn,
+        }),
+        ClaimCustody::Released,
+    )
 }
 
-async fn consume_bound_claim(bound: BoundClaim<'_>) {
+async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
     let BoundClaim {
         context,
         ids,
@@ -1152,7 +1258,7 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) {
         expected_launch_at: ids.operated_at,
         expected_updated_at: bound_at,
     };
-    consume_turn(
+    let custody_unresolved = consume_turn(
         context.repository,
         context.config,
         context.origin,
@@ -1162,6 +1268,11 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) {
         scope,
     )
     .await;
+    if custody_unresolved {
+        ClaimCustody::Retained
+    } else {
+        ClaimCustody::Released
+    }
 }
 
 async fn read_payload(
@@ -1322,10 +1433,14 @@ fn provider_binding_bytes(profile_id: &str, session_id: &str) -> Option<Provider
     ProviderBindingBytes::new(bytes).ok()
 }
 
-async fn abandon_turn(mut turn: AcceptedTurn, stop: &CancelHandle, process_cancel: &CancelHandle) {
+async fn abandon_turn(
+    mut turn: AcceptedTurn,
+    stop: &CancelHandle,
+    process_cancel: &CancelHandle,
+) -> bool {
     turn.cancel();
     let _ = drain_turn(&mut turn, stop, process_cancel).await;
-    let _ = turn.finish().await;
+    is_unresolved_reap(&turn.finish().await)
 }
 
 async fn drain_turn(
@@ -1455,7 +1570,7 @@ async fn consume_turn(
     process_cancel: &CancelHandle,
     mut turn: crate::engine_owner::operation::AcceptedTurn,
     scope: RunBatchScope<'_>,
-) {
+) -> bool {
     let context = TurnConsumptionContext {
         repository,
         config,
@@ -1486,17 +1601,21 @@ async fn consume_turn(
         }
     }
     let owner_result = turn.finish().await;
+    if is_unresolved_reap(&owner_result) {
+        return true;
+    }
     if state.progress_uncertain {
-        return;
+        return false;
     }
     let Some(terminal) = resolve_terminal(state.forced_interrupted, state.terminal, &owner_result)
     else {
-        return;
+        return false;
     };
     if !ensure_assistant_item(&context, &mut state).await {
-        return;
+        return false;
     }
     settle_terminal(&context, state, terminal).await;
+    false
 }
 
 fn mark_interrupted(
@@ -1685,6 +1804,14 @@ fn resolve_terminal(
         ) => None,
         Err(_) => Some(TerminalState::Failed),
     }
+}
+
+fn is_unresolved_reap(result: &TurnResult) -> bool {
+    matches!(
+        result,
+        Err(EngineOperationError::ReapUnresolved
+            | EngineOperationError::UnresolvedReapDuring { .. })
+    )
 }
 
 async fn ensure_assistant_item(

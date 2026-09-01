@@ -12,11 +12,14 @@ use super::{
     NativeRunDispatcherConfig, NativeRunDispatcherConfigError, NativeRunDispatcherConfigInput,
     conversation_commit_notifier::ConversationCommitNotifier,
 };
-use crate::CommandOrigin;
 use crate::native_run_dispatch::{
     LaunchAuthority, NativeRunDispatcher, NativeRunDispatcherShutdown, PromptAuthorization,
     SettingsLoadDecision, classify_launch_result, classify_settings_load, notify_after_commit,
     prompt_authorization_after_binding,
+};
+use crate::{
+    CommandOrigin,
+    lifecycle_control::{ActivityGate, ActivityGateImpl},
 };
 
 fn config(
@@ -189,6 +192,7 @@ async fn dispatcher_shutdown_joins_owner_custody() {
         PathBuf::from("C:/forge/database.sqlite3"),
         config_for_shutdown_custody().expect("complete dispatcher custody policy"),
         Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
         &tokio::runtime::Handle::current(),
     );
 
@@ -208,7 +212,7 @@ async fn dispatcher_shutdown_joins_owner_custody() {
 // ---------------------------------------------------------------------------
 
 use std::path::{Path, PathBuf as StdPathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use artisan_database::entities::{
     self, AssistantRunLifecycle, ConversationItemKind, ConversationPatchKind, DispatchState,
@@ -719,6 +723,7 @@ async fn dispatch_recovers_65_expired_across_bounded_pages() {
         StdPathBuf::from("C:/forge/database.sqlite3"),
         config,
         Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
         &tokio::runtime::Handle::current(),
     );
 
@@ -790,11 +795,13 @@ async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
     let notifier = ConversationCommitNotifier::new();
     let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
     let process_cancel = Arc::new(CancelHandle::new());
+    let activity = ActivityGateImpl::new();
     let mut dispatcher = NativeRunDispatcher::start(
         repository.clone(),
         StdPathBuf::from("C:/forge/database.sqlite3"),
         config,
         Arc::clone(&process_cancel),
+        activity.clone(),
         &tokio::runtime::Handle::current(),
     );
 
@@ -803,6 +810,13 @@ async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
     assert_eq!(before.dispatches, mid.dispatches);
     assert_eq!(before.runs, mid.runs);
     assert_eq!(before.patches, mid.patches);
+    assert_eq!(
+        activity
+            .snapshot()
+            .expect("no-claim activity should remain readable")
+            .active_work_count(),
+        0
+    );
 
     let dispatch_row2 = entities::message_dispatch::Entity::find_by_id("msg-unexp")
         .one(&database)
@@ -854,11 +868,13 @@ async fn dispatch_failed_dispatch_interrupted_run_binding_retained() {
     let notifier = ConversationCommitNotifier::new();
     let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
     let process_cancel = Arc::new(CancelHandle::new());
+    let activity = ActivityGateImpl::new();
     let mut dispatcher = NativeRunDispatcher::start(
         repository.clone(),
         StdPathBuf::from("C:/forge/database.sqlite3"),
         config,
         Arc::clone(&process_cancel),
+        activity.clone(),
         &tokio::runtime::Handle::current(),
     );
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -869,6 +885,13 @@ async fn dispatch_failed_dispatch_interrupted_run_binding_retained() {
     );
     let after = fetch_all(&database).await;
     assert_binding_lifecycle(&after, before_binding.as_ref());
+    assert_eq!(
+        activity
+            .snapshot()
+            .expect("failed dispatch activity should remain readable")
+            .active_work_count(),
+        0
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -895,6 +918,7 @@ async fn dispatch_post_disposition_notifier_wake() {
         StdPathBuf::from("C:/forge/database.sqlite3"),
         config,
         Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
         &tokio::runtime::Handle::current(),
     );
 
@@ -930,6 +954,7 @@ async fn dispatch_final_bounded_cancellation_page_plus_owner_join() {
         StdPathBuf::from("C:/forge/database.sqlite3"),
         config,
         Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
         &tokio::runtime::Handle::current(),
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -987,6 +1012,7 @@ async fn dispatch_no_provider_child_for_recovery_only() {
         StdPathBuf::from("C:/forge/database.sqlite3"),
         config,
         Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
         &tokio::runtime::Handle::current(),
     );
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -1165,6 +1191,28 @@ fn assert_fixture_custody() {
     assert_eq!(counts.kills_requested, 0);
 }
 
+async fn sample_fixture_activity(
+    activity: ActivityGateImpl,
+    observed_active: Arc<AtomicBool>,
+    sample_cancel: Arc<CancelHandle>,
+) {
+    loop {
+        if activity
+            .snapshot()
+            .expect("fixture activity should remain readable")
+            .active_work_count()
+            != 0
+        {
+            observed_active.store(true, Ordering::Relaxed);
+        }
+        tokio::select! {
+            biased;
+            () = sample_cancel.wait() => break,
+            () = tokio::task::yield_now() => {},
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_fixture_composes_claim_through_durable_settlement() {
     let fixture = registered_fixture_program();
@@ -1200,11 +1248,20 @@ async fn dispatch_fixture_composes_claim_through_durable_settlement() {
     let config = config_for_fixture_dispatch(notifier).expect("fixture dispatch policy");
     crate::engine_owner::reset_witnesses();
     let process_cancel = Arc::new(CancelHandle::new());
+    let activity = ActivityGateImpl::new();
+    let observed_active = Arc::new(AtomicBool::new(false));
+    let sample_cancel = Arc::new(CancelHandle::new());
+    let sampler = tokio::spawn(sample_fixture_activity(
+        activity.clone(),
+        Arc::clone(&observed_active),
+        Arc::clone(&sample_cancel),
+    ));
     let mut dispatcher = NativeRunDispatcher::start_with_fixture_for_tests(
         repository.clone(),
         temp.path().to_owned(),
         config,
         Arc::clone(&process_cancel),
+        activity.clone(),
         &tokio::runtime::Handle::current(),
         fixture,
     );
@@ -1234,6 +1291,19 @@ async fn dispatch_fixture_composes_claim_through_durable_settlement() {
     assert_eq!(
         dispatcher.shutdown().await,
         NativeRunDispatcherShutdown::Joined
+    );
+    sample_cancel.cancel();
+    sampler.await.expect("activity sampler should finish");
+    assert!(
+        observed_active.load(Ordering::Relaxed),
+        "a claimed fixture dispatch should hold activity custody"
+    );
+    assert_eq!(
+        activity
+            .snapshot()
+            .expect("settled fixture activity should remain readable")
+            .active_work_count(),
+        0
     );
     assert_eq!(
         dispatcher.shutdown().await,

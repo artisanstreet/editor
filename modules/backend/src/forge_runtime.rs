@@ -45,6 +45,7 @@ use crate::{
         ControllerStartError, DirectoryController, DirectoryControllerConfig, ShutdownReport,
     },
     file_identity_policy::{FileIdentity, read_file_identity, same_file_identity},
+    lifecycle_control::{ActivityGateImpl, LifecycleController},
     listener::ServeUntilCancelError,
     native_run_dispatch::{
         NativeRunDispatcher, NativeRunDispatcherConfig, NativeRunDispatcherConfigError,
@@ -1288,6 +1289,7 @@ fn prepare_forge_listener(
     limits: ListenerLimits,
     admission_capacity: NonZeroU32,
     requests_per_connection: NonZeroU32,
+    lifecycle: LifecycleController,
 ) -> Result<ForgeListenerStartup, Box<ForgeListenerStartupError>> {
     let LoadedMaterial {
         certificate_chain,
@@ -1304,13 +1306,14 @@ fn prepare_forge_listener(
             }));
         }
     };
-    let listener = match ForgeListener::bind(
+    let listener = match ForgeListener::bind_with_lifecycle(
         server,
         bootstrap,
         Box::new(SystemCommandOrigin),
         limits,
         admission_capacity,
         requests_per_connection,
+        lifecycle,
     ) {
         Ok(listener) => listener,
         Err(error) => {
@@ -1361,6 +1364,8 @@ async fn run_with_handler(
         cancel,
         native_run,
     } = context;
+    let activity = ActivityGateImpl::new();
+    let lifecycle = LifecycleController::with_activity_gate(Arc::new(activity.clone()));
     let ForgeListenerStartup {
         listener,
         address,
@@ -1370,6 +1375,7 @@ async fn run_with_handler(
         limits,
         admission_capacity,
         requests_per_connection,
+        lifecycle,
     ) {
         Ok(startup) => startup,
         Err(startup_error) => {
@@ -1403,6 +1409,7 @@ async fn run_with_handler(
         database,
         native_run,
         Arc::clone(&cancel),
+        activity,
         &tokio::runtime::Handle::current(),
     );
     let primary = match listener.serve_until_cancel(&handler, &cancel).await {
