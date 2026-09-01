@@ -483,11 +483,15 @@ version = "0.0.0"
 dependencies = [
  "artisan-assets",
  "artisan-domain",
+ "artisan-editor-cli",
+ "artisan-protocol",
  "artisan-transport",
  "artisan-ui",
  "gpui",
+ "rustls-pki-types",
  "statig",
  "thiserror 2.0.20",
+ "tokio",
  "url",
 ]
 

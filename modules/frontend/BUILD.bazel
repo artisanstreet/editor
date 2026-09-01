@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
 
@@ -84,6 +84,8 @@ rust_library(
         "src/model_policy_controls_presentation.rs",
         "src/model_selection_presentation.rs",
         "src/motion_spring.rs",
+        "src/native_application.rs",
+        "src/native_transport_service.rs",
         "src/new_thread_draft.rs",
         "src/new_thread_interaction.rs",
         "src/new_thread_sentence_policy.rs",
@@ -149,18 +151,32 @@ rust_library(
     crate_name = "artisan_frontend",
     deps = [
         "//modules/assets:assets",
+        "//modules/cli:cli",
         "//modules/domain:domain",
         "//modules/protocol:protocol",
         "//modules/transport:transport",
         "//modules/ui:ui",
         "@crates//:gpui",
+        "@crates//:rustls-pki-types",
         "@crates//:statig",
         "@crates//:thiserror",
+        "@crates//:tokio",
         "@crates//:url",
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
     visibility = ["//visibility:public"],
+)
+
+# White-box unit tests compile the frontend library in test mode so the native
+# application and transport modules can exercise their private invariants.
+rust_test(
+    name = "frontend_unit_test",
+    crate = ":frontend",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
 )
 
 rust_binary(

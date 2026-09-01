@@ -1,11 +1,11 @@
 //! Native Artisan Editor application assembly boundary.
 //!
-//! The binary launches the minimal GPUI proof window, now embedding the
-//! product-specific [`project_picker`] leaf. Complete product assembly,
-//! navigation, and screens remain later work. Beyond that window, the
-//! library hosts narrow product-state models without
-//! rendering them: [`attention`], [`composer`], [`transcript`], and
-//! [`thread_list_selection`].
+//! The binary launches the shipping GPUI application, which owns the native
+//! window and application entities while its transport service starts a
+//! newly owned Forge and loads real project, thread, and bounded conversation
+//! state. The remaining modules continue to provide the narrow product
+//! policies and conversation composition used by later read-only and
+//! interactive workflow slices.
 
 pub mod active_thread_light_policy;
 pub mod activity_status_labels;
@@ -85,6 +85,8 @@ pub mod model_policy_controller;
 pub mod model_policy_controls_presentation;
 pub mod model_selection_presentation;
 pub mod motion_spring;
+pub mod native_application;
+pub mod native_transport_service;
 pub mod new_thread_draft;
 pub mod new_thread_interaction;
 pub mod new_thread_sentence_policy;
@@ -147,10 +149,8 @@ pub mod vcs_labels;
 pub mod workspace_header_presentation;
 pub mod workspace_tab_state;
 
-use std::process::ExitCode;
-
 /// Runs the currently implemented native editor boundary.
 #[must_use]
-pub fn run() -> ExitCode {
-    proof::run()
+pub fn run() -> std::process::ExitCode {
+    native_application::run()
 }
