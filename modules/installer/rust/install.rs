@@ -336,7 +336,11 @@ fn open_lock_file(path: &Path) -> Result<(File, FileIdentity)> {
         return Err(InstallerError::InstallationRootChanged);
     }
     file.try_lock_exclusive().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
+        let is_contended = error.kind() == std::io::ErrorKind::WouldBlock
+            || error.raw_os_error().is_some_and(|raw_os_error| {
+                Some(raw_os_error) == fs2::lock_contended_error().raw_os_error()
+            });
+        if is_contended {
             InstallerError::InstallationRootBusy
         } else {
             InstallerError::InvalidInstallerLock
