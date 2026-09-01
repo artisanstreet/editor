@@ -23,7 +23,7 @@ use conversation_scene::{
 };
 use conversation_state_machine::{
     CapacityResource, ConversationStateController, ConversationStateEffect, ConversationStateError,
-    MAX_PENDING_EFFECTS, SceneFact, SceneFactKind,
+    ConversationStateEvent, MAX_PENDING_EFFECTS, SceneFact, SceneFactKind,
 };
 use conversation_steering_machine::{
     SourceReference, SteeringEffect, SteeringEvent, SteeringLabelKind, SteeringPlacement,
@@ -289,6 +289,61 @@ fn delivery_gap_keeps_last_good_scene_and_requests_one_resnapshot() {
         1
     );
     assert_eq!(effects.len(), 2);
+}
+
+#[test]
+fn resumed_delivery_event_debug_equality_and_routing_preserve_scene_boundary() {
+    let event = ConversationStateEvent::Delivery(ConversationDeliveryEvent::SubscriptionResumed {
+        thread_id: thread_id(),
+        cursor: ConversationCursor::new(1),
+    });
+    let equal_event =
+        ConversationStateEvent::Delivery(ConversationDeliveryEvent::SubscriptionResumed {
+            thread_id: thread_id(),
+            cursor: ConversationCursor::new(1),
+        });
+    let wrong_cursor =
+        ConversationStateEvent::Delivery(ConversationDeliveryEvent::SubscriptionResumed {
+            thread_id: thread_id(),
+            cursor: ConversationCursor::new(2),
+        });
+
+    assert_eq!(event, equal_event);
+    assert_ne!(event, wrong_cursor);
+    let debug = format!("{event:?}");
+    assert!(debug.contains("DeliverySubscriptionResumed"));
+    assert!(debug.contains(THREAD));
+    assert!(debug.contains("cursor"));
+
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(
+            baseline_snapshot(),
+        ))
+        .expect("baseline delivery");
+    let _ = controller.drain_effects();
+    let before_scene = controller.scene().expect("baseline scene");
+
+    controller
+        .on_delivery(ConversationDeliveryEvent::BatchReceived(gap_batch()))
+        .expect("gap enters recovery");
+    let _ = controller.drain_effects();
+    assert_eq!(controller.delivery_view().phase, DeliveryPhase::Recovering);
+
+    controller
+        .dispatch(event)
+        .expect("resume routes to delivery child");
+    assert_eq!(controller.delivery_view().phase, DeliveryPhase::Ready);
+    assert_eq!(
+        controller.delivery_view().cursor,
+        Some(ConversationCursor::new(1))
+    );
+    assert_eq!(controller.scene().expect("recovered scene"), before_scene);
+    assert!(
+        controller.drain_effects().is_empty(),
+        "status-only delivery does not cross the scene/effect boundary"
+    );
 }
 
 #[test]

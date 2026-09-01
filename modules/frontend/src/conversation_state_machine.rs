@@ -343,6 +343,14 @@ impl fmt::Debug for ConversationStateEvent {
                 .field("to_cursor", &batch.to_cursor())
                 .field("patch_count", &batch.patches().len())
                 .finish(),
+            Self::Delivery(ConversationDeliveryEvent::SubscriptionResumed {
+                thread_id,
+                cursor,
+            }) => formatter
+                .debug_struct("DeliverySubscriptionResumed")
+                .field("thread_id", thread_id)
+                .field("cursor", cursor)
+                .finish(),
             Self::Delivery(ConversationDeliveryEvent::RetryRequested) => {
                 formatter.write_str("DeliveryRetryRequested")
             }
@@ -473,6 +481,16 @@ fn delivery_event_eq(left: &ConversationDeliveryEvent, right: &ConversationDeliv
             ConversationDeliveryEvent::BatchReceived(left),
             ConversationDeliveryEvent::BatchReceived(right),
         ) => left == right,
+        (
+            ConversationDeliveryEvent::SubscriptionResumed {
+                thread_id: left_thread,
+                cursor: left_cursor,
+            },
+            ConversationDeliveryEvent::SubscriptionResumed {
+                thread_id: right_thread,
+                cursor: right_cursor,
+            },
+        ) => left_thread == right_thread && left_cursor == right_cursor,
         (ConversationDeliveryEvent::RetryRequested, ConversationDeliveryEvent::RetryRequested)
         | (ConversationDeliveryEvent::Closed, ConversationDeliveryEvent::Closed) => true,
         _ => false,
@@ -1313,7 +1331,9 @@ impl ConversationStateController {
             ConversationDeliveryEvent::BatchReceived(batch) => {
                 self.validate_batch_for_scene(batch)?;
             }
-            ConversationDeliveryEvent::RetryRequested | ConversationDeliveryEvent::Closed => {}
+            ConversationDeliveryEvent::SubscriptionResumed { .. }
+            | ConversationDeliveryEvent::RetryRequested
+            | ConversationDeliveryEvent::Closed => {}
         }
         self.ensure_effect_capacity(MAX_DELIVERY_EFFECTS_PER_EVENT)?;
         let result = self.delivery.dispatch(event);
