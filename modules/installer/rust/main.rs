@@ -13,10 +13,12 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use error::{InstallerError, Result};
-use install::{InstallIntegrationOptions, InstallOptions, diagnose, install, repair, uninstall};
+use install::{
+    InstallIntegrationOptions, InstallOptions, diagnose, install, prepare_update, repair, uninstall,
+};
 use manifest::TrustKey;
 use platform::Platform;
-use processes::{RetirementPolicy, retire_superseded};
+use processes::RetirementPolicy;
 use url::Url;
 
 const DEFAULT_MANIFEST: &str = "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release-manifest.json";
@@ -139,7 +141,12 @@ async fn run() -> Result<()> {
     if let Some(operation) = arguments.operation.as_ref() {
         match operation {
             Operation::Diagnose => diagnose(&root)?,
-            Operation::PrepareUpdate => prepare_update(&arguments, &root)?,
+            Operation::PrepareUpdate => prepare_update(
+                &root,
+                (!arguments.activation.skip_retire).then_some(RetirementPolicy {
+                    force: arguments.activation.force,
+                }),
+            )?,
             Operation::Update => {
                 let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
                 install(make_install_options(
@@ -176,34 +183,6 @@ async fn run() -> Result<()> {
 
     if arguments.automation.self_cleanup {
         schedule_self_cleanup()?;
-    }
-    Ok(())
-}
-
-fn prepare_update(arguments: &Arguments, root: &std::path::Path) -> Result<()> {
-    if arguments.activation.skip_retire {
-        return Ok(());
-    }
-    let lifecycle_ae = root
-        .join("bin")
-        .join(if cfg!(windows) { "ae.exe" } else { "ae" });
-    if !lifecycle_ae.is_file() {
-        return Err(InstallerError::MissingCli(lifecycle_ae));
-    }
-    let incoming_release = root.join(".incoming-release");
-    let retirement = retire_superseded(
-        root,
-        &incoming_release,
-        &lifecycle_ae,
-        RetirementPolicy {
-            force: arguments.activation.force,
-        },
-    )?;
-    if !retirement.is_empty() {
-        println!(
-            "prepared update: closed {} editor, stopped {} forge",
-            retirement.editors_closed, retirement.forges_stopped
-        );
     }
     Ok(())
 }
