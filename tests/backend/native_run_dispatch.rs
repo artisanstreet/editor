@@ -1802,16 +1802,16 @@ fn assert_fixture_terminal_patches(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FixtureIdentitySnapshot {
-    project_id: String,
-    thread_id: String,
-    request_id: String,
-    message_id: String,
-    run_id: String,
-    turn_id: String,
-    assistant_item_id: String,
+    project: String,
+    thread: String,
+    request: String,
+    message: String,
+    run: String,
+    turn: String,
+    assistant_item: String,
 }
 
-async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIdentitySnapshot {
+async fn fixture_project_identity(database: &DatabaseConnection) -> String {
     let projects = entities::attached_project::Entity::find()
         .all(database)
         .await
@@ -1822,7 +1822,10 @@ async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIden
         project.project_id == "project-1",
         "the one attached project identity must remain stable"
     );
+    project.project_id
+}
 
+async fn fixture_thread_identity(database: &DatabaseConnection) -> String {
     let threads = entities::thread::Entity::find()
         .all(database)
         .await
@@ -1833,7 +1836,10 @@ async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIden
         thread.thread_id == "fixture-thread" && thread.project_id == "project-1",
         "the one thread must retain its project identity"
     );
+    thread.thread_id
+}
 
+async fn fixture_request_identity(database: &DatabaseConnection) -> String {
     let request = entities::command_receipt::Entity::find_by_id("fixture-request")
         .one(database)
         .await
@@ -1846,7 +1852,10 @@ async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIden
             && request.body.as_deref() == Some("hello world"),
         "the queued request must retain its durable message identity"
     );
+    request.request_id
+}
 
+async fn fixture_message_identity(database: &DatabaseConnection) -> String {
     let messages = entities::message::Entity::find()
         .all(database)
         .await
@@ -1859,7 +1868,10 @@ async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIden
             && message.body == "hello world",
         "the one durable prompt message must retain its identity"
     );
+    message.message_id
+}
 
+async fn assert_fixture_dispatch_identity(database: &DatabaseConnection) {
     let dispatches = entities::message_dispatch::Entity::find()
         .all(database)
         .await
@@ -1870,7 +1882,9 @@ async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIden
         dispatch.message_id == "fixture-message" && dispatch.correlation_id == "fixture-request",
         "the one dispatch must retain request and message correlation"
     );
+}
 
+async fn fixture_run_identity(database: &DatabaseConnection) -> String {
     let runs = entities::assistant_run::Entity::find()
         .all(database)
         .await
@@ -1885,7 +1899,10 @@ async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIden
             && run.generation == 1,
         "the one run must retain its durable prompt and generation"
     );
+    run.run_id
+}
 
+async fn fixture_turn_identity(database: &DatabaseConnection) -> String {
     let turns = entities::conversation_turn::Entity::find()
         .all(database)
         .await
@@ -1896,7 +1913,10 @@ async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIden
         turn.turn_id == "fixture-turn" && turn.thread_id == "fixture-thread",
         "the one turn must retain its thread identity"
     );
+    turn.turn_id
+}
 
+async fn fixture_assistant_item_identity(database: &DatabaseConnection) -> String {
     let items = entities::conversation_item::Entity::find()
         .all(database)
         .await
@@ -1923,15 +1943,26 @@ async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIden
             && assistant.run_id.as_deref() == Some("fixture-run"),
         "the one assistant item must retain its run and turn identity"
     );
+    assistant.item_id.clone()
+}
 
+async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIdentitySnapshot {
+    let project = fixture_project_identity(database).await;
+    let thread = fixture_thread_identity(database).await;
+    let request = fixture_request_identity(database).await;
+    let message = fixture_message_identity(database).await;
+    assert_fixture_dispatch_identity(database).await;
+    let run = fixture_run_identity(database).await;
+    let turn = fixture_turn_identity(database).await;
+    let assistant_item = fixture_assistant_item_identity(database).await;
     FixtureIdentitySnapshot {
-        project_id: project.project_id,
-        thread_id: thread.thread_id,
-        request_id: request.request_id,
-        message_id: message.message_id,
-        run_id: run.run_id,
-        turn_id: turn.turn_id,
-        assistant_item_id: assistant.item_id.clone(),
+        project,
+        thread,
+        request,
+        message,
+        run,
+        turn,
+        assistant_item,
     }
 }
 
@@ -1961,36 +1992,44 @@ fn assert_fixture_single_engine_pass() {
     assert_eq!(counts.control_driver_joined, 3);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart() {
-    let fixture = registered_fixture_program();
-    let (database, repository, temp) = temp_repository("dispatch-forge-restart").await;
-    let thread_id = ThreadId::parse("fixture-thread").expect("thread id");
-    let message_id = MessageId::parse("fixture-message").expect("message id");
-    seed_project_and_thread_with_profile(
-        &database,
-        &repository,
-        thread_id.as_str(),
-        "fixture-test",
-        30_000,
-        5_000,
-        2_000,
-    )
-    .await;
-    repository
-        .queue_first_message(QueueFirstMessageInput {
-            request_id: RequestId::parse("fixture-request").expect("request id"),
-            message_id: message_id.clone(),
-            thread_id: thread_id.clone(),
-            body: MessageBody::parse("hello world").expect("message body"),
-            accepted_at: UnixMillis::from_millis(50),
-        })
-        .await
-        .expect("one fixture message should queue");
+struct FixtureDispatchState {
+    pki: FixtureForgePki,
+    notifier: ConversationCommitNotifier,
+    commit_subscription: ConversationCommitSubscription,
+    process_cancel: Arc<CancelHandle>,
+    dispatcher: NativeRunDispatcher,
+    listener_cancel: Arc<CancelHandle>,
+    listener_task: tokio::task::JoinHandle<()>,
+    first_client: FixtureForgeClient,
+    delivery_stream: quinn::RecvStream,
+}
 
+struct FixtureRestartContext {
+    pki: FixtureForgePki,
+    notifier: ConversationCommitNotifier,
+    commit_subscription: ConversationCommitSubscription,
+}
+
+struct FixtureRestartProof {
+    context: FixtureRestartContext,
+    database_path: PathBuf,
+    thread_id: ThreadId,
+    message_id: MessageId,
+    stream: FixtureStreamObservation,
+    final_cursor: ConversationCursor,
+    before_restart: AllRows,
+    identity_before: FixtureIdentitySnapshot,
+}
+
+async fn start_fixture_dispatch(
+    repository: &Repository,
+    database_path: &Path,
+    thread_id: &ThreadId,
+    fixture: PathBuf,
+) -> FixtureDispatchState {
     let pki = fixture_forge_pki();
     let notifier = ConversationCommitNotifier::new();
-    let mut commit_subscription = notifier
+    let commit_subscription = notifier
         .subscribe(thread_id.clone())
         .expect("fixture commit subscription");
     let (listener, handler, listener_cancel, listener_address) =
@@ -2007,24 +2046,42 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
         ConversationCursor::default(),
     )
     .await;
-    assert_fixture_resumed_subscription(started, &thread_id, ConversationCursor::default());
+    assert_fixture_resumed_subscription(started, thread_id, ConversationCursor::default());
 
     crate::engine_owner::reset_witnesses();
     let config = config_for_fixture_dispatch(notifier.clone()).expect("fixture dispatch policy");
     let process_cancel = Arc::new(CancelHandle::new());
-    let mut dispatcher = NativeRunDispatcher::start_with_fixture_for_tests(
+    let dispatcher = NativeRunDispatcher::start_with_fixture_for_tests(
         repository.clone(),
-        temp.path().to_owned(),
+        database_path.to_owned(),
         config,
         Arc::clone(&process_cancel),
         ActivityGateImpl::new(),
         &tokio::runtime::Handle::current(),
         fixture,
     );
+    let delivery_stream = accept_fixture_delivery(&first_client.connection).await;
 
-    let mut delivery_stream = accept_fixture_delivery(&first_client.connection).await;
+    FixtureDispatchState {
+        pki,
+        notifier,
+        commit_subscription,
+        process_cancel,
+        dispatcher,
+        listener_cancel,
+        listener_task,
+        first_client,
+        delivery_stream,
+    }
+}
+
+async fn collect_fixture_initial_delivery(
+    repository: &Repository,
+    thread_id: &ThreadId,
+    state: &mut FixtureDispatchState,
+) -> (ConversationCursor, FixtureStreamObservation) {
     let final_replay =
-        wait_for_fixture_final_replay(&repository, &thread_id, &mut commit_subscription).await;
+        wait_for_fixture_final_replay(repository, thread_id, &mut state.commit_subscription).await;
     let final_cursor = final_replay.to_cursor();
     assert!(
         final_cursor > ConversationCursor::default(),
@@ -2034,12 +2091,12 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
     let mut next_cursor = ConversationCursor::default();
     let mut delivered_patches = Vec::new();
     while next_cursor < final_cursor {
-        let batch = receive_fixture_patch_batch(&mut delivery_stream).await;
+        let batch = receive_fixture_patch_batch(&mut state.delivery_stream).await;
         let expected_from = next_cursor;
         assert_fixture_delivery_batch(&batch, expected_from, final_cursor, &mut next_cursor);
         let expected = fixture_durable_replay_prefix(
-            &repository,
-            &thread_id,
+            repository,
+            thread_id,
             batch.from_cursor(),
             batch.to_cursor(),
         )
@@ -2058,6 +2115,27 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
     );
     let stream = fixture_stream_observation(&delivered_patches);
     assert_fixture_terminal_patches(&delivered_patches, &stream, final_cursor);
+    (final_cursor, stream)
+}
+
+async fn shutdown_fixture_initial_dispatch(
+    state: FixtureDispatchState,
+    repository: &Repository,
+    database: &DatabaseConnection,
+    thread_id: &ThreadId,
+    message_id: &MessageId,
+) -> (FixtureRestartContext, AllRows, FixtureIdentitySnapshot) {
+    let FixtureDispatchState {
+        pki,
+        notifier,
+        commit_subscription,
+        process_cancel,
+        mut dispatcher,
+        listener_cancel,
+        listener_task,
+        first_client,
+        delivery_stream,
+    } = state;
 
     process_cancel.cancel();
     assert_eq!(
@@ -2072,20 +2150,40 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
     drop(delivery_stream);
     shutdown_fixture_forge_client(first_client, b"fixture delivery client complete").await;
 
-    let before_restart = fetch_all(&database).await;
-    assert_fixture_dispatch(&before_restart, &message_id);
+    let before_restart = fetch_all(database).await;
+    assert_fixture_dispatch(&before_restart, message_id);
     assert_fixture_run(&before_restart);
-    assert_fixture_transcript(&before_restart, &thread_id);
-    assert_fixture_batch_durability(&database).await;
-    let identity_before = fixture_identity_snapshot(&database).await;
+    assert_fixture_transcript(&before_restart, thread_id);
+    assert_fixture_batch_durability(database).await;
+    let identity_before = fixture_identity_snapshot(database).await;
+    (
+        FixtureRestartContext {
+            pki,
+            notifier,
+            commit_subscription,
+        },
+        before_restart,
+        identity_before,
+    )
+}
 
-    drop(repository);
-    database
-        .close()
-        .await
-        .expect("original repository should close before restart");
-
-    let (reopened_database, reopened_repository) = reopen_fixture_repository(temp.path()).await;
+async fn restart_fixture_delivery(proof: FixtureRestartProof) {
+    let FixtureRestartProof {
+        context,
+        database_path,
+        thread_id,
+        message_id,
+        stream,
+        final_cursor,
+        before_restart,
+        identity_before,
+    } = proof;
+    let FixtureRestartContext {
+        pki,
+        notifier,
+        commit_subscription: _commit_subscription,
+    } = context;
+    let (reopened_database, reopened_repository) = reopen_fixture_repository(&database_path).await;
     let (restarted_listener, restarted_handler, restarted_cancel, restarted_address) =
         bind_fixture_forge_listener(reopened_repository.clone(), notifier, &pki);
     let restarted_listener_task = tokio::spawn(serve_fixture_forge_listener(
@@ -2141,4 +2239,62 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
         .await
         .expect("restarted repository should close cleanly");
     assert_fixture_single_engine_pass();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart() {
+    let fixture = registered_fixture_program();
+    let (database, repository, temp) = temp_repository("dispatch-forge-restart").await;
+    let thread_id = ThreadId::parse("fixture-thread").expect("thread id");
+    let message_id = MessageId::parse("fixture-message").expect("message id");
+    seed_project_and_thread_with_profile(
+        &database,
+        &repository,
+        thread_id.as_str(),
+        "fixture-test",
+        30_000,
+        5_000,
+        2_000,
+    )
+    .await;
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("fixture-request").expect("request id"),
+            message_id: message_id.clone(),
+            thread_id: thread_id.clone(),
+            body: MessageBody::parse("hello world").expect("message body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("one fixture message should queue");
+
+    let mut dispatch_state =
+        start_fixture_dispatch(&repository, temp.path(), &thread_id, fixture).await;
+    let (final_cursor, stream) =
+        collect_fixture_initial_delivery(&repository, &thread_id, &mut dispatch_state).await;
+    let (restart_context, before_restart, identity_before) = shutdown_fixture_initial_dispatch(
+        dispatch_state,
+        &repository,
+        &database,
+        &thread_id,
+        &message_id,
+    )
+    .await;
+    drop(repository);
+    database
+        .close()
+        .await
+        .expect("original repository should close before restart");
+
+    restart_fixture_delivery(FixtureRestartProof {
+        context: restart_context,
+        database_path: temp.path().to_owned(),
+        thread_id,
+        message_id,
+        stream,
+        final_cursor,
+        before_restart,
+        identity_before,
+    })
+    .await;
 }
