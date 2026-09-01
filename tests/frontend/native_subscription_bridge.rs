@@ -91,11 +91,77 @@ fn resumed_baseline_acceptance_uses_host_cursor_not_empty_projection() {
         cursor: host_cursor,
     };
     assert!(validate_started_correlation(&thread, &resumed).is_ok());
-    // Production custody keeps the subscribe baseline until explicit host ack.
+    custody.on_started(&resumed).expect("server resumed cursor");
+    // Production custody keeps the server-confirmed baseline until explicit host ack.
     assert_eq!(custody.pending_after(), Some(host_cursor));
     custody.on_acknowledge(&thread, host_cursor).expect("ack");
     assert_eq!(custody.last_accepted_cursor(), Some(host_cursor));
     assert_eq!(custody.pending_after(), None);
+}
+
+#[test]
+fn fresh_started_records_pending_cursor_before_application_ack() {
+    let mut custody = SubscriptionCustody::new();
+    let thread = thread_id("thread-fresh-start");
+    custody.on_subscribe(thread.clone(), None);
+    let snapshot_cursor = cursor(41);
+    let fresh = ConversationSubscriptionStarted::Fresh(ConversationSubscriptionStart::new(
+        snapshot_for(&thread, snapshot_cursor),
+    ));
+
+    assert!(validate_started_correlation(&thread, &fresh).is_ok());
+    custody.on_started(&fresh).expect("server fresh cursor");
+    assert_eq!(custody.pending_after(), Some(snapshot_cursor));
+    assert_eq!(custody.last_accepted_cursor(), None);
+
+    // A patch can arrive before GPUI acknowledges Started; the server cursor
+    // is already a valid continuity baseline.
+    let immediate = batch(thread.clone(), 41, 42, patch_id("patch-fresh-start"));
+    assert_eq!(
+        immediate.from_cursor(),
+        custody.pending_after().expect("pending fresh cursor")
+    );
+
+    custody
+        .on_acknowledge(&thread, snapshot_cursor)
+        .expect("fresh snapshot ack");
+    assert_eq!(custody.last_accepted_cursor(), Some(snapshot_cursor));
+    assert_eq!(custody.pending_after(), None);
+}
+
+#[test]
+fn started_cursor_rejects_stale_thread_and_backwards_cursor_without_mutation() {
+    let mut custody = SubscriptionCustody::new();
+    let thread = thread_id("thread-started-active");
+    let stale_thread = thread_id("thread-started-stale");
+    let accepted = cursor(20);
+    let pending = cursor(25);
+    custody.on_subscribe(thread.clone(), Some(accepted));
+    custody
+        .on_acknowledge(&thread, accepted)
+        .expect("accepted cursor");
+    custody.on_subscribe(thread.clone(), Some(pending));
+
+    let stale_started = ConversationSubscriptionStarted::Fresh(ConversationSubscriptionStart::new(
+        snapshot_for(&stale_thread, cursor(30)),
+    ));
+    let before_stale = custody.clone();
+    let stale_error = custody
+        .on_started(&stale_started)
+        .expect_err("stale Started thread must fail closed");
+    assert_eq!(stale_error.category, ServiceFailureCategory::Integrity);
+    assert_eq!(custody, before_stale);
+
+    let backwards_started = ConversationSubscriptionStarted::Resumed {
+        thread_id: thread.clone(),
+        cursor: cursor(19),
+    };
+    let before_backwards = custody.clone();
+    let backwards_error = custody
+        .on_started(&backwards_started)
+        .expect_err("backwards Started cursor must fail closed");
+    assert_eq!(backwards_error.category, ServiceFailureCategory::Integrity);
+    assert_eq!(custody, before_backwards);
 }
 
 #[test]
@@ -110,6 +176,8 @@ fn acknowledgement_is_exact_and_rejects_stale_or_backwards_cursors() {
     let snap = snapshot_for(&thread, snapshot_cursor);
     let fresh = ConversationSubscriptionStarted::Fresh(ConversationSubscriptionStart::new(snap));
     assert!(validate_started_correlation(&thread, &fresh).is_ok());
+    custody.on_started(&fresh).expect("server fresh cursor");
+    assert_eq!(custody.pending_after(), Some(snapshot_cursor));
     assert_eq!(custody.last_accepted_cursor(), None);
     let stale = custody
         .on_acknowledge(&stale_thread, snapshot_cursor)

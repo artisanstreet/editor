@@ -1517,6 +1517,32 @@ impl SubscriptionCustody {
         self.pending_after = after;
     }
 
+    /// Derives and records a Fresh or Resumed server cursor without advancing
+    /// application custody.
+    pub fn on_started(
+        &mut self,
+        started: &ConversationSubscriptionStarted,
+    ) -> Result<(), ServiceFailure> {
+        let (thread_id, cursor) = match started {
+            ConversationSubscriptionStarted::Fresh(start) => {
+                (start.snapshot().thread_id(), start.snapshot().cursor())
+            }
+            ConversationSubscriptionStarted::Resumed { thread_id, cursor } => (thread_id, *cursor),
+        };
+        if self.active_thread.as_ref() != Some(thread_id)
+            || self
+                .last_accepted_cursor
+                .is_some_and(|last| cursor.get() < last.get())
+        {
+            return Err(ServiceFailure::new(
+                ServiceFailureStage::Request,
+                ServiceFailureCategory::Integrity,
+            ));
+        }
+        self.pending_after = Some(cursor);
+        Ok(())
+    }
+
     /// Advances cursor only after explicit application acknowledgement.
     pub fn on_acknowledge(
         &mut self,
@@ -1704,6 +1730,7 @@ impl ServiceRuntime {
                         ServiceFailureCategory::Integrity,
                     ));
                 }
+                self.custody.on_started(&started)?;
                 Ok(())
             }
             Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
@@ -2245,6 +2272,10 @@ async fn handle_subscribe(
                 );
                 return Err(RequestFailure::terminal(failure));
             }
+            runtime
+                .custody
+                .on_started(&started)
+                .map_err(RequestFailure::terminal)?;
             // Do not install into a second projection; emit directly.
             // Cursor will be advanced only after explicit AcknowledgePatch from application.
             publish(
