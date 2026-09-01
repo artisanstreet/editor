@@ -125,8 +125,20 @@ pub enum CliError {
     ForgeReadinessTimeout,
     #[error("Forge terminated during startup: {termination}")]
     ForgeTerminated { termination: ForgeTermination },
-    #[error("native Forge lifecycle control is unavailable until L1")]
+    #[error("native Forge lifecycle control is unsupported by this Forge")]
     UnsupportedLifecycleControl,
+    #[error("native Forge lifecycle credential state is unavailable ({reason})")]
+    LifecycleCredentialState { reason: &'static str },
+    #[error("native Forge lifecycle capability custody failed ({reason})")]
+    LifecycleCustody { reason: &'static str },
+    #[error("invalid or stale native Forge readiness ({reason})")]
+    LifecycleReadiness { reason: &'static str },
+    #[error("native Forge lifecycle service failed ({reason})")]
+    LifecycleService { reason: &'static str },
+    #[error("Forge is busy; refusing idle-only shutdown")]
+    LifecycleBusy,
+    #[error("native Forge lifecycle outcome is ambiguous")]
+    LifecycleAmbiguous,
     #[error("OpenCode2 authority check failed ({reason})")]
     OpenCode2Authority { reason: &'static str },
     #[error("OpenCode2 installation failed ({reason})")]
@@ -162,9 +174,14 @@ impl CliError {
             Self::Installation(_)
             | Self::OpenCode2Install { .. }
             | Self::OpenCode2Profile { .. } => 4,
-            Self::ForgeBusy { .. } => 5,
+            Self::ForgeBusy { .. } | Self::LifecycleBusy => 5,
             Self::ForgeActivityUnavailable => 6,
-            Self::ForgeReadinessTimeout => 71,
+            Self::ForgeReadinessTimeout
+            | Self::InvalidForgeReadiness { .. }
+            | Self::LifecycleReadiness { .. } => 71,
+            Self::LifecycleCredentialState { .. } => 64,
+            Self::LifecycleService { .. } => 72,
+            Self::LifecycleCustody { .. } | Self::LifecycleAmbiguous => 75,
             Self::ForgeTerminated { termination } => match termination.exit_code() {
                 Some(code) if code > 0 => code,
                 _ => 1,
@@ -241,5 +258,23 @@ mod tests {
     fn readiness_timeout_uses_the_frozen_server_readiness_exit_code() {
         assert_eq!(CliError::ForgeReadinessTimeout.exit_code(), 71);
         assert_eq!(CliError::UnsupportedLifecycleControl.exit_code(), 1);
+        assert_eq!(
+            CliError::LifecycleCredentialState { reason: "test" }.exit_code(),
+            64
+        );
+        assert_eq!(
+            CliError::LifecycleReadiness { reason: "test" }.exit_code(),
+            71
+        );
+        assert_eq!(CliError::LifecycleBusy.exit_code(), 5);
+        assert_eq!(
+            CliError::LifecycleService { reason: "test" }.exit_code(),
+            72
+        );
+        assert_eq!(
+            CliError::LifecycleCustody { reason: "test" }.exit_code(),
+            75
+        );
+        assert_eq!(CliError::LifecycleAmbiguous.exit_code(), 75);
     }
 }
