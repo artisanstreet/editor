@@ -2383,7 +2383,7 @@ mod tests {
     fn activation_recovery_rejects_identity_substituted_residue() {
         let directory = tempdir().expect("temp");
         let root = directory.path().join("Artisan");
-        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let _lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
         let temporary = root.join(".installation.json.tmp");
         let replacement = root.join("replacement");
         fs::write(&temporary, activation_bytes(&root, "1.2.3")).expect("temporary pointer");
