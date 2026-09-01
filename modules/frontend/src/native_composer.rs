@@ -930,8 +930,8 @@ mod tests {
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
     use gpui::{
-        point, px, size, AppContext as _, Bounds, Entity, EntityInputHandler as _, KeyUpEvent,
-        Keystroke, Modifiers, Subscription, TestAppContext, VisualTestContext,
+        point, px, size, Bounds, Entity, EntityInputHandler as _, KeyUpEvent, Keystroke, Modifiers,
+        Subscription, TestAppContext, VisualTestContext,
     };
 
     fn set_draft(cx: &mut VisualTestContext, view: &Entity<NativeComposer>, draft: &str) {
@@ -963,10 +963,12 @@ mod tests {
     ) -> (Rc<Cell<usize>>, Subscription) {
         let requests = Rc::new(Cell::new(0));
         let observed_requests = requests.clone();
-        let subscription = cx.subscribe(view, move |_, event: &NativeComposerEvent, _| {
-            if *event == NativeComposerEvent::SendRequested {
-                observed_requests.set(observed_requests.get() + 1);
-            }
+        let subscription = cx.update(|_, app| {
+            app.subscribe(view, move |_, event: &NativeComposerEvent, _| {
+                if *event == NativeComposerEvent::SendRequested {
+                    observed_requests.set(observed_requests.get() + 1);
+                }
+            })
         });
         cx.run_until_parked();
         (requests, subscription)
