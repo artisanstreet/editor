@@ -400,6 +400,32 @@ fn prompt_success_body() -> String {
     r#"{"ok":true}"#.to_owned()
 }
 
+fn create_session_route() -> String {
+    "/api/session".to_owned()
+}
+
+fn create_session_success_body() -> String {
+    r#"{"id":"test-session"}"#.to_owned()
+}
+
+fn create_session_http_response() -> Vec<u8> {
+    let body = create_session_success_body();
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut out = Vec::with_capacity(header.len() + body.len());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
+fn send_create_session_ok(stream: &mut TcpStream) {
+    let bytes = create_session_http_response();
+    let _ = stream.write_all(&bytes);
+    let _ = stream.flush();
+}
+
 fn sse_body_bytes() -> Vec<u8> {
     // Deterministic SSE stream:
     // : keepalive (comment)
@@ -408,14 +434,18 @@ fn sse_body_bytes() -> Vec<u8> {
     // blank
     // terminal succeeded event (sequence 2)
     // blank
-    // The two data lines join with \n to valid JSON with run_id fixture-run.
+    // The two data lines join with \n to valid JSON with run_id fixture-run
+    // and session_id test-session (required by configured turn's
+    // decode_sse_event_for_run which enforces both identities).
     let mut s = String::new();
     s.push_str(": keepalive\n");
     s.push('\n');
-    s.push_str("data: {\"run_id\":\"fixture-run\",\"sequence\":1,\n");
+    s.push_str(
+        "data: {\"run_id\":\"fixture-run\",\"session_id\":\"test-session\",\"sequence\":1,\n",
+    );
     s.push_str("data: \"delta\":\"hello world\"}\n");
     s.push('\n');
-    s.push_str("data: {\"run_id\":\"fixture-run\",\"sequence\":2,\"state\":\"succeeded\"}\n");
+    s.push_str("data: {\"run_id\":\"fixture-run\",\"session_id\":\"test-session\",\"sequence\":2,\"state\":\"succeeded\"}\n");
     s.push('\n');
     s.into_bytes()
 }
@@ -550,6 +580,44 @@ fn validate_prompt_request(raw: &[u8], expected_auth: &str) -> Result<usize, u16
     Ok(n)
 }
 
+fn validate_create_session_request(raw: &[u8], expected_auth: &str) -> Result<usize, u16> {
+    let headers = parse_common_headers(raw, expected_auth)?;
+    if headers.method != "POST" {
+        return Err(405);
+    }
+    if headers.path != create_session_route() {
+        return Err(404);
+    }
+    if headers.version != "HTTP/1.1" {
+        return Err(400);
+    }
+    let Some(n) = headers.content_length else {
+        return Err(400);
+    };
+    if n > PROMPT_BODY_CAP {
+        return Err(400);
+    }
+    if n == 0 {
+        return Err(400);
+    }
+    Ok(n)
+}
+
+fn validate_create_session_json(body: &[u8]) -> Result<(), u16> {
+    if body.len() > PROMPT_BODY_CAP {
+        return Err(400);
+    }
+    let v: serde_json::Value = serde_json::from_slice(body).map_err(|_| 400_u16)?;
+    let obj = v.as_object().ok_or(400_u16)?;
+    // Minimal check: must contain profile/model/permission like the real owner.
+    // Accept any that is a valid JSON object with at least one key; strict
+    // shape is not needed for the fixture seam but we ensure it's not empty.
+    if obj.is_empty() {
+        return Err(400);
+    }
+    Ok(())
+}
+
 fn validate_log_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
     let headers = parse_common_headers(raw, expected_auth)?;
     if headers.method != "GET" {
@@ -585,37 +653,104 @@ fn p4_server_loop(listener: &TcpListener, expected_auth: &str) {
         }
     }
     drop(stream);
-    // Step 2: POST /api/session/test-session/prompt
+
+    // Step 2 is flexible: either POST /api/session (configured create) or
+    // POST /api/session/test-session/prompt (smoke direct). The smoke harness
+    // historically sent prompt immediately after health, so we accept either to
+    // keep the fixture backward compatible.
     let Ok((mut stream2, _)) = listener.accept() else {
         return;
     };
     let _ = stream2.set_read_timeout(Some(Duration::from_secs(5)));
-    let Ok((raw2, body_prefix)) = read_bounded_headers_with_remainder(&mut stream2) else {
+    let Ok((raw2, body_prefix2)) = read_bounded_headers_with_remainder(&mut stream2) else {
         send_error(&mut stream2, 400);
         return;
     };
-    let declared = match validate_prompt_request(&raw2, expected_auth) {
-        Ok(n) => n,
-        Err(code) => {
-            send_error(&mut stream2, code);
-            return;
-        }
-    };
-    let body =
-        match read_exact_body_with_prefix(&mut stream2, declared, PROMPT_BODY_CAP, body_prefix) {
+
+    // Try create-session first.
+    if let Ok(declared_create) = validate_create_session_request(&raw2, expected_auth) {
+        let body_create = match read_exact_body_with_prefix(
+            &mut stream2,
+            declared_create,
+            PROMPT_BODY_CAP,
+            body_prefix2,
+        ) {
             Ok(b) => b,
             Err(code) => {
                 send_error(&mut stream2, code);
                 return;
             }
         };
-    if validate_prompt_json(&body).is_err() {
+        if validate_create_session_json(&body_create).is_err() {
+            send_error(&mut stream2, 400);
+            return;
+        }
+        send_create_session_ok(&mut stream2);
+        drop(stream2);
+
+        // Step 3: POST /api/session/test-session/prompt (after create)
+        let Ok((mut stream_prompt, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream_prompt.set_read_timeout(Some(Duration::from_secs(5)));
+        let Ok((raw_prompt, body_prefix_prompt)) =
+            read_bounded_headers_with_remainder(&mut stream_prompt)
+        else {
+            send_error(&mut stream_prompt, 400);
+            return;
+        };
+        let declared_prompt = match validate_prompt_request(&raw_prompt, expected_auth) {
+            Ok(n) => n,
+            Err(code) => {
+                send_error(&mut stream_prompt, code);
+                return;
+            }
+        };
+        let body_prompt = match read_exact_body_with_prefix(
+            &mut stream_prompt,
+            declared_prompt,
+            PROMPT_BODY_CAP,
+            body_prefix_prompt,
+        ) {
+            Ok(b) => b,
+            Err(code) => {
+                send_error(&mut stream_prompt, code);
+                return;
+            }
+        };
+        if validate_prompt_json(&body_prompt).is_err() {
+            send_error(&mut stream_prompt, 400);
+            return;
+        }
+        send_prompt_ok(&mut stream_prompt);
+        drop(stream_prompt);
+    } else if let Ok(declared_prompt) = validate_prompt_request(&raw2, expected_auth) {
+        // Smoke path: prompt directly without prior create.
+        let body_prompt = match read_exact_body_with_prefix(
+            &mut stream2,
+            declared_prompt,
+            PROMPT_BODY_CAP,
+            body_prefix2,
+        ) {
+            Ok(b) => b,
+            Err(code) => {
+                send_error(&mut stream2, code);
+                return;
+            }
+        };
+        if validate_prompt_json(&body_prompt).is_err() {
+            send_error(&mut stream2, 400);
+            return;
+        }
+        send_prompt_ok(&mut stream2);
+        drop(stream2);
+    } else {
+        // Neither create nor prompt matches.
         send_error(&mut stream2, 400);
         return;
     }
-    send_prompt_ok(&mut stream2);
-    drop(stream2);
-    // Step 3: GET /api/experimental/session/test-session/log?after=0&follow=true
+
+    // Next: GET /api/experimental/session/test-session/log?after=0&follow=true
     let Ok((mut stream3, _)) = listener.accept() else {
         return;
     };

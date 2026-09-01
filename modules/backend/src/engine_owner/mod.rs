@@ -75,6 +75,7 @@ use process::LaunchRecipe;
 /// The dispatcher constructs this only after reading the durable settings and
 /// resolving the exact registered profile.  The owner never rereads the
 /// thread, registry, or environment while this value is live.
+#[cfg(not(test))]
 pub(crate) struct EngineTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) project_root: RootPath,
@@ -87,6 +88,83 @@ pub(crate) struct EngineTurnInput {
     pub(crate) control_capacity: usize,
 }
 
+#[cfg(not(test))]
+impl std::fmt::Debug for EngineTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineTurnInput { <redacted> }")
+    }
+}
+
+/// Test-only launch seam for the configured fixture.
+///
+/// Production `VerifiedOpenCode2ProfileLaunch` remains non-constructible and
+/// non-cloneable; this seam is `#[cfg(test)]` only and never appears in a
+/// normal production build or in any manufactured install/profile/product
+/// receipt. The fixture executable is an explicitly supplied regular file path
+/// and the scenario is a frozen fixture string.
+#[cfg(test)]
+pub(crate) struct FixtureConfiguredLaunch {
+    pub(crate) program: PathBuf,
+    pub(crate) version: &'static str,
+    pub(crate) profile_id: String,
+    pub(crate) scenario: &'static str,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for FixtureConfiguredLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FixtureConfiguredLaunch { <redacted> }")
+    }
+}
+
+#[cfg(test)]
+pub(crate) enum ConfiguredLaunch {
+    Verified(VerifiedOpenCode2ProfileLaunch),
+    Fixture(FixtureConfiguredLaunch),
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for ConfiguredLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ConfiguredLaunch { <redacted> }")
+    }
+}
+
+#[cfg(test)]
+impl ConfiguredLaunch {
+    pub(crate) fn profile_id(&self) -> &str {
+        match self {
+            Self::Verified(verified) => verified.profile_id().as_str(),
+            Self::Fixture(fixture) => fixture.profile_id.as_str(),
+        }
+    }
+
+    pub(crate) fn version(&self) -> &str {
+        match self {
+            Self::Verified(verified) => verified.version(),
+            Self::Fixture(fixture) => fixture.version,
+        }
+    }
+
+    pub(crate) fn is_fixture(&self) -> bool {
+        matches!(self, Self::Fixture(_))
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct EngineTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt_text: MessageBody,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: ConfiguredLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+#[cfg(test)]
 impl std::fmt::Debug for EngineTurnInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("EngineTurnInput { <redacted> }")

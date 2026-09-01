@@ -761,8 +761,17 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         Err(error) => return request.fail(error),
     };
     let selection = request.input.settings.config().selection().as_opencode2();
-    if request.input.launch.profile_id() != selection.profile_id() {
-        return request.fail(EngineOperationError::Configuration);
+    #[cfg(not(test))]
+    {
+        if request.input.launch.profile_id() != selection.profile_id() {
+            return request.fail(EngineOperationError::Configuration);
+        }
+    }
+    #[cfg(test)]
+    {
+        if request.input.launch.profile_id() != selection.profile_id().as_str() {
+            return request.fail(EngineOperationError::Configuration);
+        }
     }
     if shutdown.is_cancelled() {
         return request.fail(EngineOperationError::Shutdown);
@@ -882,11 +891,30 @@ async fn prepare_configured_process(
     let Ok(secret) = HealthSecret::generate() else {
         return Err(request.fail(EngineOperationError::EntropyFailed));
     };
+    #[cfg(not(test))]
     let Ok(mut child) = spawn_configured_engine(
         &request.input.launch,
         &request.input.project_root,
         secret.as_str(),
     ) else {
+        return Err(request.fail(EngineOperationError::SpawnFailed));
+    };
+    #[cfg(test)]
+    let Ok(mut child) = ({
+        let launch = &request.input.launch;
+        match launch {
+            crate::engine_owner::ConfiguredLaunch::Verified(verified) => {
+                spawn_configured_engine(verified, &request.input.project_root, secret.as_str())
+            }
+            crate::engine_owner::ConfiguredLaunch::Fixture(fixture) => {
+                crate::engine_owner::process::spawn_configured_fixture_engine(
+                    &fixture.program,
+                    fixture.scenario,
+                    secret.as_str(),
+                )
+            }
+        }
+    }) else {
         return Err(request.fail(EngineOperationError::SpawnFailed));
     };
     let lifeline = LifelineWriter::take(&mut child);
