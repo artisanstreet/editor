@@ -53,7 +53,7 @@ use artisan_transport::{
 };
 use quinn::{Connection, Endpoint, VarInt};
 use rustls_pki_types::CertificateDer;
-use sea_orm::{ConnectionTrait, EntityTrait};
+use sea_orm::EntityTrait;
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
