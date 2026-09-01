@@ -1339,6 +1339,8 @@ async fn dispatch_fixture_composes_claim_through_durable_settlement() {
 
 const FORGE_RESTART_CAPABILITY: [u8; 32] = [0x6e; 32];
 
+const FORGE_REPLAY_PROOF_DEADLINE: Duration = Duration::from_secs(5);
+
 struct FixtureForgePki {
     certificate: CertificateDer<'static>,
     private_key: PrivatePkcs8KeyDer<'static>,
@@ -1457,7 +1459,7 @@ async fn connect_fixture_forge_client(
     let connecting = endpoint
         .connect(address, LOOPBACK_SERVER_NAME)
         .expect("Forge client should connect");
-    let connection = tokio::time::timeout(TEST_DEADLINE, connecting)
+    let connection = tokio::time::timeout(FORGE_REPLAY_PROOF_DEADLINE, connecting)
         .await
         .unwrap_or_else(|_| panic!("Forge client connection exceeded the test deadline"))
         .unwrap_or_else(|_| panic!("Forge client connection failed"));
@@ -1466,7 +1468,7 @@ async fn connect_fixture_forge_client(
         .await
         .expect("Forge control stream should open");
     let _welcome = tokio::time::timeout(
-        TEST_DEADLINE,
+        FORGE_REPLAY_PROOF_DEADLINE,
         client_handshake(
             &mut control_send,
             &mut control_recv,
@@ -1500,10 +1502,13 @@ async fn subscribe_fixture_forge_client(
     .await
     .expect("Forge subscription request should cross the wire");
     drop(request_send);
-    let response = tokio::time::timeout(TEST_DEADLINE, receive_envelope(&mut request_recv))
-        .await
-        .unwrap_or_else(|_| panic!("Forge subscription response exceeded the test deadline"))
-        .unwrap_or_else(|_| panic!("Forge subscription response could not be received"));
+    let response = tokio::time::timeout(
+        FORGE_REPLAY_PROOF_DEADLINE,
+        receive_envelope(&mut request_recv),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("Forge subscription response exceeded the test deadline"))
+    .unwrap_or_else(|_| panic!("Forge subscription response could not be received"));
     drop(request_recv);
     let WireEnvelopeBody::Response(response) = response.body else {
         panic!("Forge subscription should receive a response");
@@ -1534,14 +1539,14 @@ fn assert_fixture_resumed_subscription(
 }
 
 async fn accept_fixture_delivery(connection: &Connection) -> quinn::RecvStream {
-    tokio::time::timeout(TEST_DEADLINE, connection.accept_uni())
+    tokio::time::timeout(FORGE_REPLAY_PROOF_DEADLINE, connection.accept_uni())
         .await
         .unwrap_or_else(|_| panic!("Forge delivery stream did not open before the deadline"))
         .unwrap_or_else(|_| panic!("Forge delivery stream could not be accepted"))
 }
 
 async fn receive_fixture_patch_batch(stream: &mut quinn::RecvStream) -> PatchBatch {
-    let envelope = tokio::time::timeout(TEST_DEADLINE, receive_envelope(stream))
+    let envelope = tokio::time::timeout(FORGE_REPLAY_PROOF_DEADLINE, receive_envelope(stream))
         .await
         .unwrap_or_else(|_| panic!("Forge delivery batch exceeded the test deadline"))
         .unwrap_or_else(|_| panic!("Forge delivery batch could not be received"));
@@ -1557,9 +1562,14 @@ async fn shutdown_fixture_forge_client(client: FixtureForgeClient, reason: &'sta
         connection,
     } = client;
     drop(connection);
-    artisan_transport::shutdown(&endpoint, quinn::VarInt::from_u32(0), reason, TEST_DEADLINE)
-        .await
-        .expect("Forge client endpoint should shut down");
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        reason,
+        FORGE_REPLAY_PROOF_DEADLINE,
+    )
+    .await
+    .expect("Forge client endpoint should shut down");
     drop(endpoint);
 }
 
