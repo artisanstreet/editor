@@ -453,7 +453,8 @@ fn stale_binding_generation_file_id_and_owner_nonce_writers_fail_closed() {
         } else {
             match kind {
                 0 => current[OWNER_NONCE_OFFSET] ^= 0x55,
-                1 => current[GENERATION_OFFSET] ^= 0x01,
+                1 => current[GENERATION_OFFSET..GENERATION_OFFSET + 8]
+                    .copy_from_slice(&2_u64.to_le_bytes()),
                 2 => current[INSTANCE_OFFSET] ^= 0x01,
                 3 => current[PORT_OFFSET] ^= 0x01,
                 4 => current[CERTIFICATE_OFFSET] ^= 0x01,
