@@ -335,6 +335,11 @@ enum ClaimLaunchMode {
     Fixture(FixtureConfiguredLaunch),
 }
 
+enum ClaimLaunchAvailability {
+    Available(ClaimLaunchMode),
+    Exhausted,
+}
+
 enum ResolvedLaunch {
     Configured(Box<VerifiedOpenCode2ProfileLaunch>),
     #[cfg(test)]
@@ -342,11 +347,16 @@ enum ResolvedLaunch {
 }
 
 impl DispatchLaunchMode {
-    fn take_for_claim(&mut self) -> Option<ClaimLaunchMode> {
+    fn claim_for_next(&mut self) -> ClaimLaunchAvailability {
         match self {
-            Self::Configured => Some(ClaimLaunchMode::Configured),
+            Self::Configured => ClaimLaunchAvailability::Available(ClaimLaunchMode::Configured),
             #[cfg(test)]
-            Self::Fixture(launch) => launch.take().map(ClaimLaunchMode::Fixture),
+            Self::Fixture(launch) => match launch.take() {
+                Some(launch) => {
+                    ClaimLaunchAvailability::Available(ClaimLaunchMode::Fixture(launch))
+                }
+                None => ClaimLaunchAvailability::Exhausted,
+            },
         }
     }
 }
@@ -596,8 +606,9 @@ async fn dispatch_loop(
         }
         // Consuming the fixture capability before this claim makes its fixed
         // run identity one-shot: a later loop cannot claim or admit it again.
-        let Some(launch_mode) = launch_mode.take_for_claim() else {
-            break;
+        let launch_mode = match launch_mode.claim_for_next() {
+            ClaimLaunchAvailability::Available(launch_mode) => launch_mode,
+            ClaimLaunchAvailability::Exhausted => break,
         };
         let Some(claimed_at) = wall_clock(&origin) else {
             if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
