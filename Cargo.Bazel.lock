@@ -1,5 +1,5 @@
 {
-  "checksum": "5ba126ef1f9616251a9775ea244af22b57eb1d8dcbc9e04b591b17abf531f07e",
+  "checksum": "a40745c2e2f467aae4a9a781a4ccc56dd7929b78b7f0d0e6ddf50f6fbdfba838",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2587,12 +2587,20 @@
               "target": "gpui"
             },
             {
+              "id": "rustls-pki-types 1.15.1",
+              "target": "rustls_pki_types"
+            },
+            {
               "id": "statig 0.4.1",
               "target": "statig"
             },
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
+            },
+            {
+              "id": "tokio 1.53.1",
+              "target": "tokio"
             },
             {
               "id": "url 2.5.8",
@@ -2652,6 +2660,68 @@
             {
               "id": "tokio 1.53.1",
               "target": "tokio"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.0.0"
+      },
+      "license": "BSD-3-Clause",
+      "license_ids": [
+        "BSD-3-Clause"
+      ],
+      "license_file": null
+    },
+    "artisan-native-engine 0.0.0": {
+      "name": "artisan-native-engine",
+      "version": "0.0.0",
+      "package_url": "https://github.com/sandersonstabo/artisan-editor",
+      "repository": null,
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "artisan_native_engine",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "artisan_native_engine",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "fs2 0.4.3",
+              "target": "fs2"
+            },
+            {
+              "id": "serde 1.0.229",
+              "target": "serde"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
+            },
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
+            },
+            {
+              "id": "tempfile 3.27.0",
+              "target": "tempfile"
+            },
+            {
+              "id": "winapi-util 0.1.11",
+              "target": "winapi_util"
             }
           ],
           "selects": {}
@@ -59721,6 +59791,7 @@
     "artisan-editor-cli 0.0.0": "modules/cli",
     "artisan-frontend 0.0.0": "modules/frontend",
     "artisan-migrations 0.0.0": "modules/migrations",
+    "artisan-native-engine 0.0.0": "modules/native_engine",
     "artisan-protocol 0.0.0": "modules/protocol",
     "artisan-transport 0.0.0": "modules/transport",
     "artisan-ui 0.0.0": "modules/ui"

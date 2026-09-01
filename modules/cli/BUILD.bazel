@@ -30,6 +30,7 @@ rust_library(
     crate_name = "artisan_editor_cli",
     deps = [
         "//modules/domain:domain",
+        "//modules/native_engine:native_engine",
         "//modules/protocol:protocol",
         "@crates//:base64",
         "@crates//:clap",

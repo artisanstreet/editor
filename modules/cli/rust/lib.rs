@@ -14,5 +14,6 @@ pub mod payload;
 pub mod process;
 pub mod telemetry;
 
+pub use artisan_native_engine as native_engine;
 pub use commands::{Cli, run};
 pub use error::{CliError, Result};
