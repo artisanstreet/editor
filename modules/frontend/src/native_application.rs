@@ -20,8 +20,8 @@ use std::{
 };
 
 use artisan_domain::{
-    ConversationCursor, ConversationSnapshot, EngineProfileId, MessageBody, PatchBatch, ProjectId,
-    ProjectListing, RequestId, ThreadId,
+    ConversationSnapshot, EngineProfileId, MessageBody, PatchBatch, ProjectId, ProjectListing,
+    RequestId, ThreadId,
 };
 use artisan_protocol::{ConversationSubscriptionStarted, FirstMessageReceipt};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
@@ -2446,7 +2446,7 @@ mod tests {
         ProjectSummary, ReceiptDisposition, RootPath, ThreadId, ThreadListing, ThreadSummary,
         ThreadTitle, UnixMillis,
     };
-    use artisan_protocol::{ConversationSubscriptionStarted, FirstMessageReceipt};
+    use artisan_protocol::FirstMessageReceipt;
     use artisan_ui::theme::ThemeMode;
     use gpui::TestAppContext;
 

@@ -15,7 +15,7 @@ use std::{
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
-        mpsc::{SyncSender, TryRecvError, sync_channel},
+        mpsc::{Receiver, SyncSender, TryRecvError, sync_channel},
     },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1620,7 +1620,7 @@ struct ServiceRuntime {
     known_threads: HashSet<ThreadId>,
     intake: IntakeState,
     custody: SubscriptionCustody,
-    delivery_cancel: Option<CancelHandle>,
+    delivery_cancel: Option<Arc<CancelHandle>>,
     delivery_join: Option<tokio::task::JoinHandle<()>>,
     delivery_tx: Option<tokio::sync::mpsc::Sender<PrivateDelivery>>,
 }
@@ -1678,13 +1678,18 @@ impl ServiceRuntime {
         let Some(tx) = self.delivery_tx.clone() else {
             return Err(ServiceFailure::local_session());
         };
-        let cancel = CancelHandle::new();
+        let cancel = Arc::new(CancelHandle::new());
         let version = self
             .session
             .as_ref()
             .map(ClientSession::protocol_version)
             .ok_or(ServiceFailure::local_session())?;
-        let join = tokio::spawn(delivery_task_loop(receiver, tx, cancel.clone(), version));
+        let join = tokio::spawn(delivery_task_loop(
+            receiver,
+            tx,
+            Arc::clone(&cancel),
+            version,
+        ));
         self.delivery_cancel = Some(cancel);
         self.delivery_join = Some(join);
         if restore_subscription {
@@ -2121,11 +2126,11 @@ pub fn validate_stopped_correlation(
 pub async fn delivery_task_loop(
     mut receiver: DeliveryReceiver,
     tx: tokio::sync::mpsc::Sender<PrivateDelivery>,
-    cancel: CancelHandle,
+    cancel: Arc<CancelHandle>,
     expected_version: ProtocolVersion,
 ) {
     loop {
-        match receiver.recv(&cancel).await {
+        match receiver.recv(cancel.as_ref()).await {
             Ok((next_receiver, envelope)) => {
                 receiver = next_receiver;
                 let result = match validate_uni_envelope(&envelope, expected_version) {
@@ -2170,7 +2175,7 @@ async fn service_main(
                     Some(session) => match session.take_delivery() {
                         Ok((session, receiver)) => {
                             runtime.session = Some(session);
-                            let cancel = CancelHandle::new();
+                            let cancel = Arc::new(CancelHandle::new());
                             let version = runtime
                                 .session
                                 .as_ref()
@@ -2179,7 +2184,7 @@ async fn service_main(
                             let join = tokio::spawn(delivery_task_loop(
                                 receiver,
                                 delivery_tx.clone(),
-                                cancel.clone(),
+                                Arc::clone(&cancel),
                                 version,
                             ));
                             runtime.delivery_cancel = Some(cancel);
@@ -3444,7 +3449,7 @@ mod tests {
         ClientRequestError, DeadlineError, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
         FrameError, OperationKind,
     };
-    use std::{sync::mpsc::sync_channel, time::Duration};
+    use std::time::Duration;
 
     fn project(value: &str, name: &str) -> ProjectSummary {
         ProjectSummary {
@@ -3979,7 +3984,7 @@ mod tests {
 
     #[test]
     fn bounded_command_admission_reports_full_and_closed() {
-        let (sender, receiver) = sync_channel(COMMAND_CAPACITY.min(1));
+        let (sender, receiver) = tokio::sync::mpsc::channel(COMMAND_CAPACITY.min(1));
         try_send_command(&sender, NativeTransportCommand::Shutdown).expect("first admission");
         assert_eq!(
             try_send_command(&sender, NativeTransportCommand::Shutdown),
