@@ -87,6 +87,7 @@ pub mod model_policy_controls_presentation;
 pub mod model_selection_presentation;
 pub mod motion_spring;
 pub mod native_application;
+mod native_composer;
 pub mod native_transport_service;
 pub mod new_thread_draft;
 pub mod new_thread_interaction;
