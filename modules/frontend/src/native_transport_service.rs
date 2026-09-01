@@ -1696,26 +1696,20 @@ impl ServiceRuntime {
             &self.cancel,
         )
         .await;
-        let (session, welcome) = match connected {
-            Ok(connected) => connected,
-            Err(_) => {
-                let _ = attempt.quarantine();
-                return Err(ServiceFailure::new(
-                    ServiceFailureStage::Handshake,
-                    ServiceFailureCategory::Authentication,
-                ));
-            }
+        let Ok((session, welcome)) = connected else {
+            let _ = attempt.quarantine();
+            return Err(ServiceFailure::new(
+                ServiceFailureStage::Handshake,
+                ServiceFailureCategory::Authentication,
+            ));
         };
         let reconnect_lease = attempt
             .publish_next(self.reconnect_binding, welcome.welcome.reconnect_capability)
             .map_err(|_| reconnect_custody_failure())?;
         // take_delivery exactly once
-        let (session, receiver) = match session.take_delivery() {
-            Ok(parts) => parts,
-            Err(_) => {
-                let _ = reconnect_lease.quarantine();
-                return Err(ServiceFailure::local_session());
-            }
+        let Ok((session, receiver)) = session.take_delivery() else {
+            let _ = reconnect_lease.quarantine();
+            return Err(ServiceFailure::local_session());
         };
         let Some(tx) = self.delivery_tx.clone() else {
             drop(session);
@@ -2168,23 +2162,17 @@ async fn establish_session(
         ClientSession::connect(target, certificate, pinned_identity, hello, limits, &cancel)
             .await
             .map_err(|_| StartupError::Stage(ServiceFailureStage::Handshake))?;
-    let reconnect_store = match ReconnectCapabilityStore::from_home(home) {
-        Ok(store) => store,
-        Err(_) => {
-            let _ = session.shutdown(&cancel).await;
-            return Err(StartupError::Stage(ServiceFailureStage::Credentials));
-        }
+    let Ok(reconnect_store) = ReconnectCapabilityStore::from_home(home) else {
+        let _ = session.shutdown(&cancel).await;
+        return Err(StartupError::Stage(ServiceFailureStage::Credentials));
     };
-    let reconnect_lease = match reconnect_store.initialize_owner_lease(
+    let Ok(reconnect_lease) = reconnect_store.initialize_owner_lease(
         binding,
         welcome.welcome.reconnect_capability,
         RECONNECT_LOCK_TIMEOUT,
-    ) {
-        Ok(lease) => lease,
-        Err(_) => {
-            let _ = session.shutdown(&cancel).await;
-            return Err(StartupError::Stage(ServiceFailureStage::Credentials));
-        }
+    ) else {
+        let _ = session.shutdown(&cancel).await;
+        return Err(StartupError::Stage(ServiceFailureStage::Credentials));
     };
     Ok((
         session,
