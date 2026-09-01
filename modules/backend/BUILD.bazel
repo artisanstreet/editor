@@ -111,6 +111,7 @@ rust_library(
         "@crates//:zeroize",
     ] + select({
         "@platforms//os:windows": [
+            "@crates//:command-group",
             "@crates//:native-dialog",
             "@crates//:winapi-util",
         ],

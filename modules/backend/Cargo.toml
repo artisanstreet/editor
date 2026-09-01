@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "
 zeroize.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+command-group.workspace = true
 native-dialog.workspace = true
 winapi-util.workspace = true
 
