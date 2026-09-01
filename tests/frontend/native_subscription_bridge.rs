@@ -91,7 +91,9 @@ fn resumed_baseline_acceptance_uses_host_cursor_not_empty_projection() {
         cursor: host_cursor,
     };
     assert!(validate_started_correlation(&thread, &resumed).is_ok());
-    custody.on_started(&resumed).expect("server resumed cursor");
+    custody
+        .on_started(Some(host_cursor), &resumed)
+        .expect("server resumed cursor");
     // Production custody keeps the server-confirmed baseline until explicit host ack.
     assert_eq!(custody.pending_after(), Some(host_cursor));
     custody.on_acknowledge(&thread, host_cursor).expect("ack");
@@ -110,7 +112,9 @@ fn fresh_started_records_pending_cursor_before_application_ack() {
     ));
 
     assert!(validate_started_correlation(&thread, &fresh).is_ok());
-    custody.on_started(&fresh).expect("server fresh cursor");
+    custody
+        .on_started(None, &fresh)
+        .expect("server fresh cursor");
     assert_eq!(custody.pending_after(), Some(snapshot_cursor));
     assert_eq!(custody.last_accepted_cursor(), None);
 
@@ -127,6 +131,75 @@ fn fresh_started_records_pending_cursor_before_application_ack() {
         .expect("fresh snapshot ack");
     assert_eq!(custody.last_accepted_cursor(), Some(snapshot_cursor));
     assert_eq!(custody.pending_after(), None);
+}
+
+#[test]
+fn started_mode_mismatch_leaves_pending_custody_unchanged() {
+    let mut custody = SubscriptionCustody::new();
+    let thread = thread_id("thread-mode-mismatch");
+    let requested = cursor(7);
+
+    custody.on_subscribe(thread.clone(), None);
+    let resumed_for_fresh = ConversationSubscriptionStarted::Resumed {
+        thread_id: thread.clone(),
+        cursor: requested,
+    };
+    let before_fresh = custody.clone();
+    let fresh_error = custody
+        .on_started(None, &resumed_for_fresh)
+        .expect_err("fresh request must reject Resumed");
+    assert_eq!(fresh_error.category, ServiceFailureCategory::Integrity);
+    assert_eq!(custody, before_fresh);
+
+    custody.on_subscribe(thread.clone(), Some(requested));
+    let fresh_for_resume = ConversationSubscriptionStarted::Fresh(
+        ConversationSubscriptionStart::new(snapshot_for(&thread, requested)),
+    );
+    let before_resume = custody.clone();
+    let resume_error = custody
+        .on_started(Some(requested), &fresh_for_resume)
+        .expect_err("resume request must reject Fresh");
+    assert_eq!(resume_error.category, ServiceFailureCategory::Integrity);
+    assert_eq!(custody, before_resume);
+}
+
+#[test]
+fn resumed_cursor_mismatch_leaves_pending_custody_unchanged() {
+    let mut custody = SubscriptionCustody::new();
+    let thread = thread_id("thread-cursor-mismatch");
+    let requested = cursor(12);
+    custody.on_subscribe(thread.clone(), Some(requested));
+
+    let mismatched = ConversationSubscriptionStarted::Resumed {
+        thread_id: thread,
+        cursor: cursor(13),
+    };
+    let before = custody.clone();
+    let error = custody
+        .on_started(Some(requested), &mismatched)
+        .expect_err("resume response cursor must match request");
+    assert_eq!(error.category, ServiceFailureCategory::Integrity);
+    assert_eq!(custody, before);
+}
+
+#[test]
+fn started_rejects_a_different_pending_request_without_mutation() {
+    let mut custody = SubscriptionCustody::new();
+    let thread = thread_id("thread-pending-mismatch");
+    let pending = cursor(18);
+    let expected = cursor(19);
+    custody.on_subscribe(thread.clone(), Some(pending));
+
+    let resumed = ConversationSubscriptionStarted::Resumed {
+        thread_id: thread,
+        cursor: expected,
+    };
+    let before = custody.clone();
+    let error = custody
+        .on_started(Some(expected), &resumed)
+        .expect_err("Started must match the pending request");
+    assert_eq!(error.category, ServiceFailureCategory::Integrity);
+    assert_eq!(custody, before);
 }
 
 #[test]
@@ -147,18 +220,20 @@ fn started_cursor_rejects_stale_thread_and_backwards_cursor_without_mutation() {
     ));
     let before_stale = custody.clone();
     let stale_error = custody
-        .on_started(&stale_started)
+        .on_started(Some(pending), &stale_started)
         .expect_err("stale Started thread must fail closed");
     assert_eq!(stale_error.category, ServiceFailureCategory::Integrity);
     assert_eq!(custody, before_stale);
 
+    let backwards_request = cursor(19);
+    custody.on_subscribe(thread.clone(), Some(backwards_request));
     let backwards_started = ConversationSubscriptionStarted::Resumed {
         thread_id: thread.clone(),
-        cursor: cursor(19),
+        cursor: backwards_request,
     };
     let before_backwards = custody.clone();
     let backwards_error = custody
-        .on_started(&backwards_started)
+        .on_started(Some(backwards_request), &backwards_started)
         .expect_err("backwards Started cursor must fail closed");
     assert_eq!(backwards_error.category, ServiceFailureCategory::Integrity);
     assert_eq!(custody, before_backwards);
@@ -176,7 +251,9 @@ fn acknowledgement_is_exact_and_rejects_stale_or_backwards_cursors() {
     let snap = snapshot_for(&thread, snapshot_cursor);
     let fresh = ConversationSubscriptionStarted::Fresh(ConversationSubscriptionStart::new(snap));
     assert!(validate_started_correlation(&thread, &fresh).is_ok());
-    custody.on_started(&fresh).expect("server fresh cursor");
+    custody
+        .on_started(None, &fresh)
+        .expect("server fresh cursor");
     assert_eq!(custody.pending_after(), Some(snapshot_cursor));
     assert_eq!(custody.last_accepted_cursor(), None);
     let stale = custody

@@ -1521,6 +1521,7 @@ impl SubscriptionCustody {
     /// application custody.
     pub fn on_started(
         &mut self,
+        expected_after: Option<ConversationCursor>,
         started: &ConversationSubscriptionStarted,
     ) -> Result<(), ServiceFailure> {
         let (thread_id, cursor) = match started {
@@ -1529,7 +1530,16 @@ impl SubscriptionCustody {
             }
             ConversationSubscriptionStarted::Resumed { thread_id, cursor } => (thread_id, *cursor),
         };
-        if self.active_thread.as_ref() != Some(thread_id)
+        let matches_request = match (expected_after, started) {
+            (None, ConversationSubscriptionStarted::Fresh(_)) => true,
+            (Some(expected), ConversationSubscriptionStarted::Resumed { cursor, .. }) => {
+                *cursor == expected
+            }
+            _ => false,
+        };
+        if !matches_request
+            || self.pending_after != expected_after
+            || self.active_thread.as_ref() != Some(thread_id)
             || self
                 .last_accepted_cursor
                 .is_some_and(|last| cursor.get() < last.get())
@@ -1730,7 +1740,7 @@ impl ServiceRuntime {
                         ServiceFailureCategory::Integrity,
                     ));
                 }
-                self.custody.on_started(&started)?;
+                self.custody.on_started(after, &started)?;
                 Ok(())
             }
             Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
@@ -2274,7 +2284,7 @@ async fn handle_subscribe(
             }
             runtime
                 .custody
-                .on_started(&started)
+                .on_started(after, &started)
                 .map_err(RequestFailure::terminal)?;
             // Do not install into a second projection; emit directly.
             // Cursor will be advanced only after explicit AcknowledgePatch from application.
