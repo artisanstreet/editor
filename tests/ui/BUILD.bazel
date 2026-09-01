@@ -5,7 +5,10 @@ load("@rules_rust//rust:defs.bzl", "rust_test")
 # (declared there), and the `tinted_svg_unit_test` target in
 # //modules/ui/BUILD.bazel builds it via `crate = ":ui"`.
 exports_files(
-    ["tinted_svg.rs"],
+    [
+        "command.rs",
+        "tinted_svg.rs",
+    ],
     visibility = ["//visibility:public"],
 )
 
