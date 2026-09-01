@@ -28,7 +28,8 @@
 //! sockets/threads die with the fixture process; the parent must observe
 //! process custody completion.
 
-use std::io::{BufRead, OpenOptions, Read, Write};
+use std::fs::OpenOptions;
+use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{self, Command, Stdio};
 use std::time::Duration;
