@@ -764,7 +764,8 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(cx.debug_bounds(OLD_MARKDOWN).is_some());
 
-    let (_, mut replacement_cx) = cx.cx.add_window_view(|_, _| SurfaceWindowHost {
+    let mut replacement_app = (*cx).clone();
+    let (_, replacement_cx) = replacement_app.add_window_view(|_, _| SurfaceWindowHost {
         surface: surface.clone(),
     });
     assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_some());
