@@ -22,11 +22,16 @@ use std::{
 #[cfg(test)]
 use std::collections::VecDeque;
 
+use artisan_assets::AssetId;
 use artisan_domain::{
     ConversationSnapshot, EngineProfileId, MessageBody, PatchBatch, ProjectId, ProjectListing,
     RequestId, ThreadId, ThreadListing,
 };
 use artisan_protocol::{ConversationSubscriptionStarted, FirstMessageReceipt};
+use artisan_ui::button::{
+    AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
+};
+use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
     App, AppContext as _, Application, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
@@ -70,6 +75,12 @@ pub(crate) const NATIVE_STATUS_SELECTOR: &str = "artisan-native-status";
 
 /// Stable selector for the engine-settings section.
 pub(crate) const NATIVE_ENGINE_SETTINGS_SELECTOR: &str = "artisan-native-engine-settings";
+
+/// Stable selector for the rail's add-project action.
+pub(crate) const NATIVE_RAIL_ADD_PROJECT_SELECTOR: &str = "artisan-native-rail-add-project";
+
+/// Accessible name retained by the rail's icon-only add-project action.
+pub(crate) const NATIVE_RAIL_ADD_PROJECT_LABEL: &str = "Add project";
 
 const NATIVE_KEY_CONTEXT: &str = "artisan-native-application";
 const SURFACE_WIDTH: f32 = 1_024.0;
@@ -152,6 +163,7 @@ const MAX_RETAINED_SWITCH_LISTINGS: usize = 8;
 pub struct NativeApplication {
     theme: ArtisanTheme,
     focus_handle: FocusHandle,
+    add_project_focus_handle: FocusHandle,
     service: Option<Arc<NativeTransportService>>,
     composer: Entity<NativeComposer>,
     _composer_subscription: Subscription,
@@ -207,6 +219,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let add_project_focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
         focus_handle.focus(window);
         let state = if service.is_some() {
             NativeViewState::Loading
@@ -224,6 +237,7 @@ impl NativeApplication {
         let mut application = Self {
             theme: ArtisanTheme::for_mode(ThemeMode::Dark),
             focus_handle,
+            add_project_focus_handle,
             service,
             composer,
             _composer_subscription: composer_subscription,
@@ -322,6 +336,28 @@ impl NativeApplication {
 
     fn message_submission_is_admissible(&self, cx: &App) -> bool {
         self.message_composer_visible(cx)
+    }
+
+    fn project_picker_action_is_admissible(&self) -> bool {
+        !self.shutdown_prepared
+            && !self.service_stopped
+            && self.intake_stage.is_none()
+            && self.thread_switch_flight.is_none()
+            && self.ordinary_unsubscribe_thread.is_none()
+    }
+
+    fn command_submission_is_available(&self) -> bool {
+        #[cfg(test)]
+        if self.test_command_sink.is_some() {
+            return true;
+        }
+        self.service
+            .as_ref()
+            .is_some_and(|service| !service.is_finished())
+    }
+
+    fn add_project_action_is_admissible(&self) -> bool {
+        self.project_picker_action_is_admissible() && self.command_submission_is_available()
     }
 
     fn message_composer_visible(&self, cx: &App) -> bool {
@@ -1321,10 +1357,7 @@ impl NativeApplication {
         self.submit_thread_switch_unsubscribe(cx);
     }
 
-    fn submit_thread_switch_command(
-        &self,
-        command: NativeTransportCommand,
-    ) -> Result<(), CommandSendError> {
+    fn submit_command(&self, command: NativeTransportCommand) -> Result<(), CommandSendError> {
         #[cfg(test)]
         if let Some(sink) = &self.test_command_sink {
             sink.commands.borrow_mut().push(command);
@@ -1350,7 +1383,7 @@ impl NativeApplication {
         else {
             return;
         };
-        match self.submit_thread_switch_command(NativeTransportCommand::Unsubscribe {
+        match self.submit_command(NativeTransportCommand::Unsubscribe {
             thread_id: source_thread,
         }) {
             Ok(()) => {
@@ -1413,7 +1446,7 @@ impl NativeApplication {
             self.complete_thread_retirement(generation, cx);
             return;
         }
-        match self.submit_thread_switch_command(NativeTransportCommand::Subscribe {
+        match self.submit_command(NativeTransportCommand::Subscribe {
             thread_id: target_thread,
             after: None,
         }) {
@@ -1848,11 +1881,7 @@ impl NativeApplication {
     }
 
     fn sync_thread_picker_disabled(&mut self, cx: &mut Context<Self>) {
-        let disabled = self.shutdown_prepared
-            || self.service_stopped
-            || self.intake_stage.is_some()
-            || self.thread_switch_flight.is_some()
-            || self.ordinary_unsubscribe_thread.is_some();
+        let disabled = !self.project_picker_action_is_admissible();
         self.set_picker_disabled(disabled, cx);
         self.set_thread_picker_disabled(disabled, cx);
     }
@@ -2144,12 +2173,7 @@ impl NativeApplication {
             return;
         }
         self.last_picker_action = Some(action.clone());
-        if self.shutdown_prepared
-            || self.service_stopped
-            || self.intake_stage.is_some()
-            || self.thread_switch_flight.is_some()
-            || self.ordinary_unsubscribe_thread.is_some()
-        {
+        if !self.project_picker_action_is_admissible() {
             return;
         }
         match picker_route(&action, &self.project_options) {
@@ -2197,20 +2221,8 @@ impl NativeApplication {
     }
 
     fn submit_intake_command(&mut self, cx: &mut Context<Self>) {
-        let Some(service) = self.service.clone() else {
-            self.handle_intake_failed(
-                NativeProjectIntakeOperation::PickDirectory,
-                ServiceFailure {
-                    stage: ServiceFailureStage::EventBridge,
-                    category: ServiceFailureCategory::ChannelClosed,
-                },
-                false,
-                cx,
-            );
-            return;
-        };
         let retryable = self.intake_retry_available;
-        match service.submit(intake_command(retryable)) {
+        match self.submit_command(intake_command(retryable)) {
             Ok(()) => {
                 self.retain_message_flight(cx);
                 self.clear_message_presentation();
@@ -2233,6 +2245,41 @@ impl NativeApplication {
                 );
             }
         }
+    }
+
+    fn activate_add_project(&mut self, cx: &mut Context<Self>) {
+        if !self.add_project_action_is_admissible() {
+            return;
+        }
+        self.submit_intake_command(cx);
+    }
+
+    fn add_project_button(&mut self, cx: &mut Context<Self>) -> Button {
+        let disabled = !self.add_project_action_is_admissible();
+        self.add_project_focus_handle = self.add_project_focus_handle.clone().tab_stop(!disabled);
+        let application = cx.entity().downgrade();
+        Button::new(
+            NATIVE_RAIL_ADD_PROJECT_SELECTOR,
+            self.add_project_focus_handle.clone(),
+            self.theme,
+            MotionPolicy::Reduced,
+            ButtonVariant::Ghost,
+            ButtonSize::IconSmall,
+            ButtonContent::icon_only(
+                AssetId::TABLER_FOLDER_PLUS,
+                AccessibleLabel::new(NATIVE_RAIL_ADD_PROJECT_LABEL)
+                    .expect("the native add-project button has a valid accessible label"),
+            ),
+        )
+        .expect("the native add-project button configuration is valid")
+        .focus_visibility(FocusVisibility::Visible)
+        .disabled(disabled)
+        .debug_selector(NATIVE_RAIL_ADD_PROJECT_SELECTOR)
+        .on_activate(move |_, _, app| {
+            let _ = application.update(app, |application, cx| {
+                application.activate_add_project(cx);
+            });
+        })
     }
 
     fn try_mount_pending_thread(&mut self, cx: &mut Context<Self>) {
@@ -3110,6 +3157,7 @@ fn message_status_panel(
 impl Render for NativeApplication {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let frame = ShellFrameStyle::resolve(self.theme);
+        let add_project_button = self.add_project_button(cx);
         let mut header = div()
             .w_full()
             .flex()
@@ -3188,7 +3236,14 @@ impl Render for NativeApplication {
             .flex_row()
             .bg(frame.window_background)
             .debug_selector(|| NATIVE_ROOT_SELECTOR.to_string())
-            .child(shell_rail(frame).bg(self.theme.sidebar.sidebar.to_paint()))
+            .child(
+                shell_rail(frame)
+                    .bg(self.theme.sidebar.sidebar.to_paint())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(add_project_button),
+            )
             .child(
                 div()
                     .flex_1()
@@ -3726,11 +3781,12 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        NativeApplication, NativeMessageFailure, NativeMessageFlight, NativeProjectIntakeOperation,
+        NATIVE_RAIL_ADD_PROJECT_LABEL, NATIVE_RAIL_ADD_PROJECT_SELECTOR, NativeApplication,
+        NativeMessageFailure, NativeMessageFlight, NativeProjectIntakeOperation,
         NativeProjectIntakeStage, NativeTestCommandSink, NativeTransportCommand,
         NativeTransportEvent, NativeViewState, PickerRoute, ServiceFailure, ServiceStopStatus,
-        ThreadSwitchPhase, WINDOW_TITLE, create_message_request_id, intake_command, picker_route,
-        project_options_from_listing, ready_membership_is_valid,
+        ThreadSwitchFlight, ThreadSwitchPhase, WINDOW_TITLE, create_message_request_id,
+        intake_command, picker_route, project_options_from_listing, ready_membership_is_valid,
     };
     use crate::composer::{ComposerState, DraftDisposition};
     use crate::{
@@ -3748,8 +3804,10 @@ mod tests {
     use artisan_protocol::{
         ConversationSubscriptionStarted, ConversationSubscriptionStopped, FirstMessageReceipt,
     };
+    use artisan_ui::button::{ButtonSize, ButtonStyle, ButtonVariant};
+    use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::ThemeMode;
-    use gpui::{Context, TestAppContext};
+    use gpui::{Context, Modifiers, TestAppContext};
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     fn project(id: &str, name: &str) -> ProjectSummary {
@@ -3876,6 +3934,190 @@ mod tests {
         );
         assert!(!busy.to_string().contains("127.0.0.1"));
         assert!(!stopped.to_string().contains("directory"));
+    }
+
+    #[gpui::test]
+    fn native_rail_add_project_has_stable_metadata_and_admission_policy(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _) = command_sink([Ok(())]);
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                let disabled_button = application.add_project_button(application_cx);
+                assert_eq!(
+                    disabled_button.accessible_label(),
+                    NATIVE_RAIL_ADD_PROJECT_LABEL
+                );
+                assert_eq!(application.add_project_focus_handle.tab_index, 0);
+                assert!(!application.add_project_action_is_admissible());
+
+                application.test_command_sink = Some(sink);
+                let enabled_button = application.add_project_button(application_cx);
+                assert_eq!(
+                    enabled_button.accessible_label(),
+                    NATIVE_RAIL_ADD_PROJECT_LABEL
+                );
+                assert_eq!(
+                    enabled_button.visual_style(),
+                    ButtonStyle::resolve(
+                        application.theme,
+                        ButtonVariant::Ghost,
+                        ButtonSize::IconSmall,
+                        MotionPolicy::Reduced,
+                    )
+                );
+                assert_eq!(application.add_project_focus_handle.tab_index, 0);
+                assert!(application.add_project_focus_handle.tab_stop);
+                assert!(application.add_project_action_is_admissible());
+                application_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds(NATIVE_RAIL_ADD_PROJECT_SELECTOR).is_some(),
+            "the rail action must paint its stable debug selector"
+        );
+    }
+
+    #[gpui::test]
+    fn admitted_rail_activation_submits_once_and_retains_restore_state(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Ok(())]);
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.state = NativeViewState::EmptyProjects;
+                application.test_command_sink = Some(sink);
+                application_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let button = cx
+            .debug_bounds(NATIVE_RAIL_ADD_PROJECT_SELECTOR)
+            .expect("admitted rail action must paint");
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                assert!(matches!(
+                    commands.borrow().as_slice(),
+                    [NativeTransportCommand::BeginProjectIntake]
+                ));
+                assert!(matches!(
+                    application.intake_stage,
+                    Some(NativeProjectIntakeStage::PickingDirectory)
+                ));
+                assert!(matches!(
+                    application.intake_restore_state.as_ref(),
+                    Some(NativeViewState::EmptyProjects)
+                ));
+                assert!(!application.add_project_action_is_admissible());
+            });
+        });
+
+        let disabled_button = cx
+            .debug_bounds(NATIVE_RAIL_ADD_PROJECT_SELECTOR)
+            .expect("disabled rail action remains rendered");
+        cx.simulate_click(disabled_button.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(commands.borrow().len(), 1);
+    }
+
+    #[gpui::test]
+    fn rail_busy_and_stopped_admission_preserve_typed_failures(cx: &mut TestAppContext) {
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([
+            Err(super::CommandSendError::Busy),
+            Err(super::CommandSendError::Stopped),
+        ]);
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.state = NativeViewState::EmptyProjects;
+                application.test_command_sink = Some(sink);
+                application.activate_add_project(application_cx);
+                assert!(matches!(
+                    commands.borrow().as_slice(),
+                    [NativeTransportCommand::BeginProjectIntake]
+                ));
+                assert!(application.intake_stage.is_none());
+                assert!(matches!(
+                    &application.state,
+                    NativeViewState::Failure(failure)
+                        if failure.stage == super::ServiceFailureStage::EventBridge
+                            && failure.category == super::ServiceFailureCategory::Backpressure
+                ));
+
+                application.activate_add_project(application_cx);
+                assert!(matches!(
+                    commands.borrow().as_slice(),
+                    [
+                        NativeTransportCommand::BeginProjectIntake,
+                        NativeTransportCommand::BeginProjectIntake
+                    ]
+                ));
+                assert!(application.intake_stage.is_none());
+                assert!(matches!(
+                    &application.state,
+                    NativeViewState::Failure(failure)
+                        if failure.stage == super::ServiceFailureStage::EventBridge
+                            && failure.category == super::ServiceFailureCategory::ChannelClosed
+                ));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn every_project_action_fence_disables_the_native_rail_action(cx: &mut TestAppContext) {
+        let (view, _) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Ok(())]);
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.test_command_sink = Some(sink);
+                assert!(application.add_project_action_is_admissible());
+
+                application.shutdown_prepared = true;
+                assert!(!application.add_project_action_is_admissible());
+                application.shutdown_prepared = false;
+
+                application.service_stopped = true;
+                assert!(!application.add_project_action_is_admissible());
+                application.service_stopped = false;
+
+                application.intake_stage = Some(NativeProjectIntakeStage::PickingDirectory);
+                assert!(!application.add_project_action_is_admissible());
+                application.intake_stage = None;
+
+                application.thread_switch_flight = Some(ThreadSwitchFlight {
+                    source_thread: ThreadId::parse("rail-source").expect("thread"),
+                    target_thread: Some(ThreadId::parse("rail-target").expect("thread")),
+                    generation: 1,
+                    phase: ThreadSwitchPhase::UnsubscribeAdmission {
+                        retry_pending: false,
+                        retry_used: false,
+                    },
+                });
+                assert!(!application.add_project_action_is_admissible());
+                application.thread_switch_flight = None;
+
+                application.ordinary_unsubscribe_thread =
+                    Some(ThreadId::parse("rail-unsubscribe").expect("thread"));
+                assert!(!application.add_project_action_is_admissible());
+                application.ordinary_unsubscribe_thread = None;
+
+                assert!(application.add_project_action_is_admissible());
+                assert!(commands.borrow().is_empty());
+                application_cx.notify();
+            });
+        });
     }
 
     #[test]
