@@ -585,73 +585,95 @@ fn uncompleted_attempt_fails_closed_and_overflow_does_not_wrap() {
     fs::remove_dir_all(home).expect("remove overflow fixture");
 }
 
-#[test]
-fn stale_binding_generation_file_id_and_owner_nonce_writers_fail_closed() {
-    let cases = [
-        ("owner-nonce", 0_u8),
-        ("generation", 1_u8),
-        ("instance", 2_u8),
-        ("endpoint", 3_u8),
-        ("certificate", 4_u8),
-        ("pid", 5_u8),
-        ("file-id", 6_u8),
-    ];
-    for (label, kind) in cases {
-        let home = temp_home(label);
-        let (store, owner) = initialize(&home, label);
-        let mut attempt = store
-            .checkout(owner, Duration::from_millis(100))
-            .expect("checkout stale-writer fixture");
-        let credential = attempt
-            .take_credential()
-            .expect("take stale-writer credential");
-        let mut current = read_record(&store);
-        let error = if kind == 6 {
-            let path = record_path(&store);
-            let backup = path.with_extension("stale");
-            fs::rename(&path, &backup).expect("move original record");
-            fs::write(&path, &current).expect("replace record identity");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                    .expect("restrict replacement record");
-            }
-            let error = attempt.quarantine().expect_err("file-id drift must fail");
-            let _ = fs::remove_file(&backup);
-            error
-        } else {
-            match kind {
-                0 => current[OWNER_NONCE_OFFSET] ^= 0x55,
-                1 => current[GENERATION_OFFSET..GENERATION_OFFSET + 8]
-                    .copy_from_slice(&2_u64.to_le_bytes()),
-                2 => current[INSTANCE_OFFSET] ^= 0x01,
-                3 => current[PORT_OFFSET] ^= 0x01,
-                4 => current[CERTIFICATE_OFFSET] ^= 0x01,
-                5 => current[PID_OFFSET] ^= 0x01,
-                _ => unreachable!("bounded stale-writer case"),
-            }
-            write_record(&store, &current);
-            if (2..=5).contains(&kind) {
-                match attempt.publish_next(owner, capability(0xd4)) {
-                    Ok(lease) => {
-                        drop(lease);
-                        panic!("binding drift unexpectedly published")
-                    }
-                    Err(error) => error,
+fn stale_writer_case_fails_closed(label: &str, kind: u8) {
+    let home = temp_home(label);
+    let (store, owner) = initialize(&home, label);
+    let mut attempt = store
+        .checkout(owner, Duration::from_millis(100))
+        .expect("checkout stale-writer fixture");
+    let credential = attempt
+        .take_credential()
+        .expect("take stale-writer credential");
+    let mut current = read_record(&store);
+    let error = if kind == 6 {
+        let path = record_path(&store);
+        let backup = path.with_extension("stale");
+        fs::rename(&path, &backup).expect("move original record");
+        fs::write(&path, &current).expect("replace record identity");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .expect("restrict replacement record");
+        }
+        let error = attempt.quarantine().expect_err("file-id drift must fail");
+        let _ = fs::remove_file(&backup);
+        error
+    } else {
+        match kind {
+            0 => current[OWNER_NONCE_OFFSET] ^= 0x55,
+            1 => current[GENERATION_OFFSET..GENERATION_OFFSET + 8]
+                .copy_from_slice(&2_u64.to_le_bytes()),
+            2 => current[INSTANCE_OFFSET] ^= 0x01,
+            3 => current[PORT_OFFSET] ^= 0x01,
+            4 => current[CERTIFICATE_OFFSET] ^= 0x01,
+            5 => current[PID_OFFSET] ^= 0x01,
+            _ => unreachable!("bounded stale-writer case"),
+        }
+        write_record(&store, &current);
+        if (2..=5).contains(&kind) {
+            match attempt.publish_next(owner, capability(0xd4)) {
+                Ok(lease) => {
+                    drop(lease);
+                    panic!("binding drift unexpectedly published")
                 }
-            } else {
-                drop(credential);
-                attempt.quarantine().expect_err("stale writer must fail")
+                Err(error) => error,
             }
-        };
-        assert!(matches!(
-            error,
-            ForgeCredentialError::ReconnectStaleWriter
-                | ForgeCredentialError::ReconnectBindingMismatch
-        ));
-        fs::remove_dir_all(home).expect("remove stale-writer fixture");
-    }
+        } else {
+            drop(credential);
+            attempt.quarantine().expect_err("stale writer must fail")
+        }
+    };
+    assert!(matches!(
+        error,
+        ForgeCredentialError::ReconnectStaleWriter | ForgeCredentialError::ReconnectBindingMismatch
+    ));
+    fs::remove_dir_all(home).expect("remove stale-writer fixture");
+}
+
+#[test]
+fn stale_owner_nonce_writer_fails_closed() {
+    stale_writer_case_fails_closed("owner-nonce", 0);
+}
+
+#[test]
+fn stale_generation_writer_fails_closed() {
+    stale_writer_case_fails_closed("generation", 1);
+}
+
+#[test]
+fn stale_instance_writer_fails_closed() {
+    stale_writer_case_fails_closed("instance", 2);
+}
+
+#[test]
+fn stale_endpoint_writer_fails_closed() {
+    stale_writer_case_fails_closed("endpoint", 3);
+}
+
+#[test]
+fn stale_certificate_writer_fails_closed() {
+    stale_writer_case_fails_closed("certificate", 4);
+}
+
+#[test]
+fn stale_pid_writer_fails_closed() {
+    stale_writer_case_fails_closed("pid", 5);
+}
+
+#[test]
+fn stale_file_id_writer_fails_closed() {
+    stale_writer_case_fails_closed("file-id", 6);
 }
 
 #[test]

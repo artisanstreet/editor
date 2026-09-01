@@ -4359,7 +4359,7 @@ mod tests {
 
     #[test]
     fn reconnect_binding_uses_validated_target_pin_and_owned_pid() {
-        let target = LoopbackTarget::new("127.0.0.1:40_123".parse().expect("socket address"))
+        let target = LoopbackTarget::new("127.0.0.1:40123".parse().expect("socket address"))
             .expect("loopback target");
         let pinned_identity = PinnedIdentity::from_digest([0xB6; 32]);
         let binding = build_reconnect_binding([0xC7; 16], target, pinned_identity, 4_242)
