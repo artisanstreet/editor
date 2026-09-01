@@ -1,7 +1,7 @@
 use artisan_domain::EngineProfileId;
 use artisan_native_engine::{
-    NativeOpenCode2Authority, NativeOpenCode2ProfileError, OpenCode2Profile, ProfileHomeKind,
-    ProfileRegistrationOutcome,
+    NativeOpenCode2Authority, NativeOpenCode2ProfileError, NativeOpenCode2ProfileLaunchError,
+    OpenCode2Profile, ProfileHomeKind, ProfileRegistrationOutcome, VerifiedOpenCode2ProfileLaunch,
 };
 use clap::{Subcommand, ValueEnum};
 
@@ -25,6 +25,13 @@ pub enum EngineProfileCommand {
     },
     /// Read one exact registered `OpenCode2` profile home.
     Read {
+        #[arg(long, required = true, value_parser = parse_engine_profile_id)]
+        profile_id: EngineProfileId,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify one exact registered `OpenCode2` profile launch.
+    Verify {
         #[arg(long, required = true, value_parser = parse_engine_profile_id)]
         profile_id: EngineProfileId,
         #[arg(long)]
@@ -78,6 +85,14 @@ pub(crate) fn run(
                 .read_profile(instance.database_path(), profile_id)
                 .map_err(profile_error)?;
             print_profile_read(&profile, *json);
+            Ok(())
+        }
+        EngineProfileCommand::Verify { profile_id, json } => {
+            let launch = NativeOpenCode2Authority::new()
+                .resolve_profile_launch(instance.database_path(), profile_id)
+                .map_err(launch_error)?;
+            print_verify(&launch, *json);
+            drop(launch);
             Ok(())
         }
     }
@@ -141,7 +156,51 @@ fn print_profile_read(profile: &EngineProfileSummary, json: bool) {
     }
 }
 
+fn print_verify(launch: &VerifiedOpenCode2ProfileLaunch, json: bool) {
+    let profile_id = launch.profile_id().as_str();
+    let home = launch.home().as_str();
+    let generation = launch.generation_id();
+    let version = launch.version();
+    let size_bytes = launch.executable_size_bytes();
+    let sha256 = hex_sha256(launch.executable_sha256());
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": "artisan-engine-profile-verify-v1",
+                "profile_id": profile_id,
+                "home": home,
+                "status": "verified",
+                "generation": generation,
+                "version": version,
+                "size_bytes": size_bytes,
+                "sha256": sha256,
+            })
+        );
+    } else {
+        println!(
+            "Verified OpenCode2 profile {profile_id} ({home}) generation {generation} {version} size {size_bytes} sha256 {sha256}"
+        );
+    }
+}
+
+fn hex_sha256(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn profile_error(error: NativeOpenCode2ProfileError) -> CliError {
+    CliError::OpenCode2Profile {
+        reason: error.cli_reason(),
+    }
+}
+
+fn launch_error(error: NativeOpenCode2ProfileLaunchError) -> CliError {
     CliError::OpenCode2Profile {
         reason: error.cli_reason(),
     }
