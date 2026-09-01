@@ -2146,7 +2146,7 @@ mod tests {
         serde_json::to_vec(&activation_document(root, active_version)).expect("activation JSON")
     }
 
-    fn assert_ambiguous(error: InstallerError) {
+    fn assert_ambiguous(error: &InstallerError) {
         assert!(matches!(
             error,
             InstallerError::InstallationActivationTransactionAmbiguous
@@ -2280,9 +2280,8 @@ mod tests {
                     "non-complete" => document["finalization_state"] = serde_json::json!("pending"),
                     "unsafe-version" => document["active_version"] = serde_json::json!("../escape"),
                     "unsafe-path" => {
-                        document["permanent_ae_path"] = serde_json::json!(invalid_root.join("ae"))
+                        document["permanent_ae_path"] = serde_json::json!(invalid_root.join("ae"));
                     }
-                    "malformed" => unreachable!(),
                     _ => unreachable!(),
                 }
                 serde_json::to_vec(&document).expect("invalid state document")
@@ -2290,7 +2289,7 @@ mod tests {
             fs::write(&current, &bytes).expect("invalid current pointer");
 
             let error = recover_activation_pointer_swap(&lock).expect_err("invalid pointer");
-            assert_ambiguous(error);
+            assert_ambiguous(&error);
             assert_eq!(fs::read(&current).expect("current remains"), bytes);
             assert!(
                 root.join(".installation.json.tmp")
@@ -2318,7 +2317,7 @@ mod tests {
         fs::write(&previous, &previous_bytes).expect("previous pointer");
 
         let error = recover_activation_pointer_swap(&lock).expect_err("ambiguous residue");
-        assert_ambiguous(error);
+        assert_ambiguous(&error);
         assert_eq!(fs::read(&current).expect("current remains"), current_bytes);
         assert_eq!(
             fs::read(&temporary).expect("temporary remains"),
@@ -2344,7 +2343,7 @@ mod tests {
         }
 
         let error = recover_activation_pointer_swap(&lock).expect_err("symlink residue");
-        assert_ambiguous(error);
+        assert_ambiguous(&error);
         assert!(temporary.symlink_metadata().is_ok());
         assert_eq!(
             fs::read(&target).expect("foreign pointer remains"),
@@ -2355,7 +2354,7 @@ mod tests {
         let previous = root.join(".installation.json.previous");
         fs::create_dir(&previous).expect("directory residue");
         let error = recover_activation_pointer_swap(&lock).expect_err("directory residue");
-        assert_ambiguous(error);
+        assert_ambiguous(&error);
         assert!(previous.is_dir());
     }
 
@@ -2374,7 +2373,7 @@ mod tests {
         }
 
         let error = recover_activation_pointer_swap(&lock).expect_err("reparse residue");
-        assert_ambiguous(error);
+        assert_ambiguous(&error);
         assert!(temporary.symlink_metadata().is_ok());
         assert!(target.is_dir());
     }
@@ -2396,7 +2395,7 @@ mod tests {
 
         let error =
             remove_validated_activation_pointer(&validated).expect_err("identity substitution");
-        assert_ambiguous(error);
+        assert_ambiguous(&error);
         assert!(temporary.is_file());
     }
 
