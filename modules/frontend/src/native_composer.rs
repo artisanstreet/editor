@@ -10,18 +10,20 @@
 use std::{ops::Range, panic};
 
 use artisan_ui::{
+    button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility},
     input::InputStyle,
+    motion::MotionPolicy,
     theme::{ArtisanTheme, ThemeMode},
 };
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler,
-    Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
-    KeyBinding, LayoutId, MouseButton, Pixels, Point, Render, SharedString, StyledText,
-    UTF16Selection, Window, actions, div, point,
+    actions, div, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
-    px, size,
+    px, size, AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId,
+    ElementInputHandler, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId,
+    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, Pixels, Point, Render,
+    SharedString, StyledText, UTF16Selection, Window,
 };
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
@@ -41,6 +43,7 @@ actions!(
         Cut,
         Home,
         End,
+        RequestSend,
         InsertNewline,
     ]
 );
@@ -48,6 +51,7 @@ actions!(
 const NATIVE_COMPOSER_KEY_CONTEXT: &str = "artisan-native-composer";
 const NATIVE_COMPOSER_PLACEHOLDER: &str = "Do anything";
 const NATIVE_COMPOSER_PLACEHOLDER_SELECTOR: &str = "artisan-native-composer-placeholder";
+const NATIVE_COMPOSER_SEND_SELECTOR: &str = "artisan-native-composer-send";
 
 /// One bounded application event emitted by the send control.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +64,7 @@ pub(crate) enum NativeComposerEvent {
 pub(crate) struct NativeComposer {
     state: ComposerState,
     focus_handle: FocusHandle,
+    send_focus_handle: FocusHandle,
     selection: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -79,7 +84,8 @@ impl NativeComposer {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         Self {
             state: ComposerState::new(),
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
+            send_focus_handle: cx.focus_handle().tab_index(1).tab_stop(true),
             selection: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -113,7 +119,7 @@ impl NativeComposer {
     }
 
     pub(crate) fn send_ready(&self) -> bool {
-        self.state.send_ready()
+        self.state.send_ready() && self.marked_range.is_none()
     }
 
     pub(crate) fn is_submitting(&self) -> bool {
@@ -146,9 +152,13 @@ impl NativeComposer {
     }
 
     fn request_send(&mut self, cx: &mut Context<Self>) {
-        if self.state.send_ready() {
+        if self.send_ready() {
             cx.emit(NativeComposerEvent::SendRequested);
         }
+    }
+
+    fn request_send_action(&mut self, _: &RequestSend, _: &mut Window, cx: &mut Context<Self>) {
+        self.request_send(cx);
     }
 
     fn replace_range(
@@ -257,7 +267,7 @@ impl NativeComposer {
             KeyBinding::new("ctrl-x", Cut, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("home", Home, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("end", End, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
-            KeyBinding::new("enter", InsertNewline, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("enter", RequestSend, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new(
                 "shift-enter",
                 InsertNewline,
@@ -539,6 +549,7 @@ impl Render for NativeComposer {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::move_home))
             .on_action(cx.listener(Self::move_end))
+            .on_action(cx.listener(Self::request_send_action))
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))
@@ -548,28 +559,24 @@ impl Render for NativeComposer {
             NativeComposerInputElement::new(editor.into_any_element(), entity.clone(), focus);
         let send_ready = self.send_ready();
         let sending = self.is_submitting();
+        self.send_focus_handle = self.send_focus_handle.clone().tab_stop(send_ready);
         let send_entity = entity.clone();
-        let mut send = div()
-            .id("artisan-native-composer-send")
-            .px(style.horizontal_padding)
-            .py(style.vertical_padding)
-            .rounded(style.corner_radius)
-            .border(style.border_width)
-            .border_color(style.border)
-            .bg(style.background)
-            .text_color(if send_ready {
-                style.foreground
-            } else {
-                style.placeholder_foreground
-            })
-            .child(if sending { "Sending…" } else { "Send" });
-        if send_ready {
-            send = send.on_click(move |_, _, cx| {
-                send_entity.update(cx, NativeComposer::request_send);
-            });
-        } else {
-            send = send.opacity(style.disabled_opacity);
-        }
+        let send = Button::new(
+            NATIVE_COMPOSER_SEND_SELECTOR,
+            self.send_focus_handle.clone(),
+            theme,
+            MotionPolicy::Reduced,
+            ButtonVariant::Ghost,
+            ButtonSize::Small,
+            ButtonContent::text(if sending { "Sending…" } else { "Send" }),
+        )
+        .expect("the native composer send button configuration is valid")
+        .focus_visibility(FocusVisibility::Visible)
+        .disabled(!send_ready)
+        .debug_selector(NATIVE_COMPOSER_SEND_SELECTOR)
+        .on_activate(move |_, _, cx| {
+            send_entity.update(cx, NativeComposer::request_send);
+        });
 
         div()
             .w_full()
@@ -910,13 +917,275 @@ fn next_character_boundary(text: &str, offset: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
     use super::{
-        NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR, NativeComposer,
         localize_painted_point, offset_layout_bounds, replace_text_preserving_raw,
-        utf8_offset_to_utf16, utf16_offset_to_utf8, utf16_range_to_utf8,
+        utf16_offset_to_utf8, utf16_range_to_utf8, utf8_offset_to_utf16, NativeComposer,
+        NativeComposerEvent, NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
+        NATIVE_COMPOSER_SEND_SELECTOR,
     };
     use crate::composer::DraftDisposition;
-    use gpui::{Bounds, Modifiers, TestAppContext, point, px, size};
+    use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
+    use artisan_ui::motion::MotionPolicy;
+    use artisan_ui::theme::{ArtisanTheme, ThemeMode};
+    use gpui::{
+        point, px, size, AppContext as _, Bounds, Entity, EntityInputHandler as _, KeyUpEvent,
+        Keystroke, Modifiers, Subscription, TestAppContext, VisualTestContext,
+    };
+
+    fn set_draft(cx: &mut VisualTestContext, view: &Entity<NativeComposer>, draft: &str) {
+        let draft = draft.to_owned();
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_draft(draft);
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn bind_actions(cx: &mut VisualTestContext) {
+        cx.update(|_, app| NativeComposer::bind_actions(app));
+    }
+
+    fn focus_editor(cx: &mut VisualTestContext, view: &Entity<NativeComposer>) {
+        cx.update(|window, app| {
+            let focus = view.read(app).focus_handle.clone();
+            window.focus(&focus);
+        });
+        cx.run_until_parked();
+    }
+
+    fn observe_send_requests(
+        cx: &mut VisualTestContext,
+        view: &Entity<NativeComposer>,
+    ) -> (Rc<Cell<usize>>, Subscription) {
+        let requests = Rc::new(Cell::new(0));
+        let observed_requests = requests.clone();
+        let subscription = cx.subscribe(view, move |_, event: &NativeComposerEvent, _| {
+            if *event == NativeComposerEvent::SendRequested {
+                observed_requests.set(observed_requests.get() + 1);
+            }
+        });
+        cx.run_until_parked();
+        (requests, subscription)
+    }
+
+    fn send_button(focus: gpui::FocusHandle) -> Button {
+        Button::new(
+            NATIVE_COMPOSER_SEND_SELECTOR,
+            focus,
+            ArtisanTheme::for_mode(ThemeMode::Dark),
+            MotionPolicy::Reduced,
+            ButtonVariant::Ghost,
+            ButtonSize::Small,
+            ButtonContent::text("Send"),
+        )
+        .expect("the native composer send button configuration is valid")
+        .focus_visibility(FocusVisibility::Visible)
+    }
+
+    #[gpui::test]
+    fn plain_enter_requests_send_and_shift_enter_inserts_a_newline(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        set_draft(cx, &view, "draft");
+        bind_actions(cx);
+        focus_editor(cx, &view);
+        let (requests, _subscription) = observe_send_requests(cx, &view);
+
+        cx.simulate_keystrokes("enter");
+        cx.update(|_, app| assert_eq!(view.read(app).draft(), "draft"));
+        assert_eq!(requests.get(), 1);
+
+        cx.simulate_keystrokes("shift-enter");
+        cx.update(|_, app| assert_eq!(view.read(app).draft(), "draft\n"));
+        assert_eq!(requests.get(), 1);
+    }
+
+    #[gpui::test]
+    fn modified_and_unready_enter_requests_are_refused(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        bind_actions(cx);
+        focus_editor(cx, &view);
+        let (requests, _subscription) = observe_send_requests(cx, &view);
+
+        set_draft(cx, &view, "draft");
+        cx.simulate_keystrokes("ctrl-enter alt-enter cmd-enter");
+        cx.update(|_, app| assert_eq!(view.read(app).draft(), "draft"));
+        assert_eq!(requests.get(), 0);
+
+        for draft in ["", " \t\n"] {
+            set_draft(cx, &view, draft);
+            cx.simulate_keystrokes("enter");
+            assert_eq!(requests.get(), 0);
+        }
+
+        set_draft(cx, &view, "disabled");
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_disabled(true, composer_cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        assert_eq!(requests.get(), 0);
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_disabled(false, composer_cx);
+                composer.set_draft("in flight");
+                assert!(composer.begin_submission().is_ok());
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        assert_eq!(requests.get(), 0);
+        cx.update(|_, app| assert!(view.read(app).is_submitting()));
+    }
+
+    #[gpui::test]
+    fn marked_ime_text_refuses_enter_until_composition_is_unmarked(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        bind_actions(cx);
+        focus_editor(cx, &view);
+        let (requests, _subscription) = observe_send_requests(cx, &view);
+
+        cx.update(|window, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.replace_and_mark_text_in_range(
+                    Some(0..0),
+                    "preedit",
+                    Some(0..7),
+                    window,
+                    composer_cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.draft(), "preedit");
+            assert!(composer.marked_range.is_some());
+            assert!(!composer.send_ready());
+        });
+
+        cx.simulate_keystrokes("enter");
+        assert_eq!(requests.get(), 0);
+
+        cx.update(|window, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.unmark_text(window, composer_cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(view.read(app).send_ready()));
+
+        cx.simulate_keystrokes("enter");
+        assert_eq!(requests.get(), 1);
+    }
+
+    #[gpui::test]
+    fn send_has_stable_identity_focusability_visible_focus_and_local_tab_order(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        set_draft(cx, &view, "draft");
+
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_SEND_SELECTOR).is_some(),
+            "the native Send button must retain its stable selector"
+        );
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.focus_handle.tab_index, 0);
+            assert_eq!(composer.send_focus_handle.tab_index, 1);
+            assert!(composer.focus_handle.tab_stop);
+            assert!(composer.send_focus_handle.tab_stop);
+        });
+
+        let ring_visible = cx.update(|window, app| {
+            let focus = view.read(app).send_focus_handle.clone();
+            window.focus(&focus);
+            send_button(focus).focus_ring_visible(window)
+        });
+        assert!(ring_visible);
+
+        cx.update(|window, app| {
+            let composer = view.read(app);
+            let editor_focus = composer.focus_handle.clone();
+            let send_focus = composer.send_focus_handle.clone();
+            window.focus(&editor_focus);
+            window.focus_next();
+            assert!(send_focus.is_focused(window));
+            window.focus_prev();
+            assert!(editor_focus.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn pointer_enter_and_space_activate_through_the_same_send_path(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        set_draft(cx, &view, "draft");
+        let (requests, _subscription) = observe_send_requests(cx, &view);
+        let send_bounds = cx
+            .debug_bounds(NATIVE_COMPOSER_SEND_SELECTOR)
+            .expect("the native Send button must paint");
+
+        cx.simulate_click(send_bounds.center(), Modifiers::none());
+        cx.update(|window, app| {
+            assert!(
+                view.read(app).send_focus_handle.is_focused(window),
+                "a pointer activation must focus the shared Send button"
+            );
+        });
+        for key in ["enter", "space"] {
+            cx.simulate_event(KeyUpEvent {
+                keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
+            });
+        }
+
+        assert_eq!(requests.get(), 3);
+    }
+
+    #[gpui::test]
+    fn repeated_activation_is_blocked_by_the_composer_single_flight(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        set_draft(cx, &view, "draft");
+        let (requests, _subscription) = observe_send_requests(cx, &view);
+        let send_bounds = cx
+            .debug_bounds(NATIVE_COMPOSER_SEND_SELECTOR)
+            .expect("the native Send button must paint");
+
+        cx.simulate_click(send_bounds.center(), Modifiers::none());
+        assert_eq!(requests.get(), 1);
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                assert!(composer.begin_submission().is_ok());
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!view.read(app).send_focus_handle.tab_stop));
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.request_send(composer_cx);
+            });
+        });
+        cx.simulate_click(send_bounds.center(), Modifiers::none());
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse("enter").expect("known keyboard activation key"),
+        });
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse("space").expect("known keyboard activation key"),
+        });
+
+        assert_eq!(requests.get(), 1);
+        cx.update(|_, app| assert!(view.read(app).is_submitting()));
+    }
 
     #[test]
     fn painted_geometry_translates_global_points_and_layout_bounds() {
