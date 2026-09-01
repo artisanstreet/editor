@@ -46,6 +46,8 @@ actions!(
 );
 
 const NATIVE_COMPOSER_KEY_CONTEXT: &str = "artisan-native-composer";
+const NATIVE_COMPOSER_PLACEHOLDER: &str = "Do anything";
+const NATIVE_COMPOSER_PLACEHOLDER_SELECTOR: &str = "artisan-native-composer-placeholder";
 
 /// One bounded application event emitted by the send control.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -502,6 +504,21 @@ impl Render for NativeComposer {
             .track_focus(&focus)
             .child(styled_text);
 
+        if self.state.draft().is_empty() {
+            editor = editor.child(
+                div()
+                    .absolute()
+                    .top(style.vertical_padding)
+                    .left(style.horizontal_padding)
+                    .text_color(style.placeholder_foreground)
+                    .text_size(style.text_size)
+                    .line_height(style.line_height)
+                    .whitespace_normal()
+                    .debug_selector(|| NATIVE_COMPOSER_PLACEHOLDER_SELECTOR.to_string())
+                    .child(NATIVE_COMPOSER_PLACEHOLDER),
+            );
+        }
+
         editor = editor.focus(move |focused| focused.border_color(style.focus_border));
 
         let mouse_entity = entity.clone();
@@ -894,10 +911,12 @@ fn next_character_boundary(text: &str, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
+        NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR, NativeComposer,
         localize_painted_point, offset_layout_bounds, replace_text_preserving_raw,
         utf8_offset_to_utf16, utf16_offset_to_utf8, utf16_range_to_utf8,
     };
-    use gpui::{Bounds, point, px, size};
+    use crate::composer::DraftDisposition;
+    use gpui::{Bounds, Modifiers, TestAppContext, point, px, size};
 
     #[test]
     fn painted_geometry_translates_global_points_and_layout_bounds() {
@@ -953,5 +972,203 @@ mod tests {
         assert_eq!(utf8_offset_to_utf16(text, 5), Some(3));
         assert!(utf16_range_to_utf8(text, 2..3).is_none());
         assert!(replace_text_preserving_raw(text, 2..2, "x").is_none());
+    }
+
+    #[gpui::test]
+    fn empty_composer_paints_exact_placeholder_selector_and_phrase(cx: &mut TestAppContext) {
+        assert_eq!(NATIVE_COMPOSER_PLACEHOLDER, "Do anything");
+        assert_eq!(
+            NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
+            "artisan-native-composer-placeholder"
+        );
+
+        let (_view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn nonempty_and_whitespace_drafts_hide_placeholder_without_rewriting(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+
+        for draft in ["message", " \t\n"] {
+            cx.update(|_, app| {
+                view.update(app, |composer, composer_cx| {
+                    composer.set_draft(draft);
+                    composer_cx.notify();
+                });
+            });
+            cx.run_until_parked();
+
+            assert!(
+                cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                    .is_none()
+            );
+            cx.update(|_, app| assert_eq!(view.read(app).draft(), draft));
+        }
+    }
+
+    #[gpui::test]
+    fn clearing_a_nonempty_draft_restores_placeholder(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_draft("message");
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                .is_none()
+        );
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_draft("");
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| assert_eq!(view.read(app).draft(), ""));
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn accepted_submission_clear_restores_placeholder(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_draft("accepted");
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let token = cx.update(|_, app| {
+            view.update(app, |composer, _| {
+                composer
+                    .begin_submission()
+                    .expect("nonempty draft begins a submission")
+                    .1
+            })
+        });
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.finish_submission(token, DraftDisposition::Accepted, composer_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.draft(), "");
+            assert!(!composer.is_submitting());
+        });
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn disabled_and_submitting_empty_states_keep_one_unchanged_placeholder(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_disabled(true, composer_cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.draft(), "");
+            assert!(!composer.is_submitting());
+        });
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                .is_some()
+        );
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_disabled(false, composer_cx);
+                composer.set_draft("in flight");
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let token = cx.update(|_, app| {
+            view.update(app, |composer, _| {
+                composer
+                    .begin_submission()
+                    .expect("nonempty draft begins a submission")
+                    .1
+            })
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_draft("");
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.draft(), "");
+            assert!(composer.is_submitting());
+        });
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                .is_some()
+        );
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.finish_submission(token, DraftDisposition::Accepted, composer_cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_painted_placeholder_uses_editor_selection_surface(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let placeholder = cx
+            .debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+            .expect("empty composer paints the placeholder");
+
+        cx.update(|window, app| {
+            let focus = view.read(app).focus_handle.clone();
+            window.focus(&focus);
+            view.update(app, |composer, _| {
+                composer.selection_reversed = true;
+            });
+        });
+
+        cx.simulate_click(placeholder.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let composer = view.read(app);
+            assert!(composer.focus_handle.is_focused(window));
+            assert_eq!(composer.selection, 0..0);
+            assert!(!composer.selection_reversed);
+        });
     }
 }
