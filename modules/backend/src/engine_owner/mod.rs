@@ -139,6 +139,64 @@ impl std::fmt::Debug for FixtureTurnInput {
     }
 }
 
+/// Private launch for the single internal configured pipeline.
+///
+/// The `Verified` variant carries the production capability and is present in
+/// all builds; the `Fixture` variant is `#[cfg(test)]` only and never
+/// constructible in non-test builds. Never `Clone`.
+pub(crate) enum InternalLaunch {
+    Verified(VerifiedOpenCode2ProfileLaunch),
+    #[cfg(test)]
+    Fixture(FixtureConfiguredLaunch),
+}
+
+impl std::fmt::Debug for InternalLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InternalLaunch { <redacted> }")
+    }
+}
+
+impl InternalLaunch {
+    pub(crate) fn profile_id(&self) -> &str {
+        match self {
+            Self::Verified(verified) => verified.profile_id().as_str(),
+            #[cfg(test)]
+            Self::Fixture(fixture) => fixture.profile_id.as_str(),
+        }
+    }
+
+    pub(crate) fn version(&self) -> &str {
+        match self {
+            Self::Verified(verified) => verified.version(),
+            #[cfg(test)]
+            Self::Fixture(fixture) => fixture.version,
+        }
+    }
+}
+
+/// Single internal input for the one configured-turn pipeline.
+///
+/// Both `EngineTurnInput` (production) and `FixtureTurnInput` (`#[cfg(test)]`)
+/// convert into this at admission, so the queued `Job::Turn` always carries
+/// the same type and exactly one executor proves the lifecycle.
+pub(crate) struct InternalTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt_text: MessageBody,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: InternalLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for InternalTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InternalTurnInput { <redacted> }")
+    }
+}
+
 /// Raw engine time limits.
 ///
 /// **UNVALIDATED** until accepted by [`EngineOwnerConfig::new`]. Callers may
@@ -541,61 +599,46 @@ impl EngineOwner {
         input: EngineTurnInput,
         budget: Duration,
     ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
-        if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
-            return Err(LaunchAdmissionError::Unavailable);
-        }
-        if budget == Duration::ZERO {
-            return Err(LaunchAdmissionError::InvalidDeadline);
-        }
-        let Some(deadline) = tokio::time::Instant::now().checked_add(budget) else {
-            return Err(LaunchAdmissionError::InvalidDeadline);
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt_text: input.prompt_text,
+            settings: input.settings,
+            launch: InternalLaunch::Verified(input.launch),
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
         };
-        let observation_capacity = usize::try_from(
-            input
-                .settings
-                .config()
-                .runtime()
-                .observation_capacity()
-                .get(),
-        )
-        .map_err(|_| LaunchAdmissionError::InvalidCapacity)?;
-        if observation_capacity == 0 || observation_capacity > tokio::sync::Semaphore::MAX_PERMITS {
-            return Err(LaunchAdmissionError::InvalidCapacity);
-        }
-        let control = Arc::new(CancelHandle::new());
-        let (prepared, prepared_receiver) = oneshot::channel();
-        let (authorize, authorize_receiver) = oneshot::channel();
-        let (respond, receiver) = oneshot::channel();
-        let (observations, observation_receiver) = mpsc::channel(observation_capacity);
-        let job = Job::Turn {
-            input: Box::new(input),
-            deadline,
-            control: Arc::clone(&control),
-            prepared,
-            authorize: authorize_receiver,
-            observations,
-            respond,
-        };
-        match self.jobs.try_send(job) {
-            Ok(()) => Ok(operation::AcceptedTurn::from_parts(
-                prepared_receiver,
-                authorize,
-                observation_receiver,
-                receiver,
-                control,
-            )),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
-        }
+        self.admit_internal(internal, budget)
     }
 
-    /// Test-only fixture admission. Mirrors `admit_turn` but carries an
-    /// explicitly supplied fixture program/version/profile instead of a
-    /// verified capability. `#[cfg(test)]` only.
+    /// Test-only fixture admission. Converts `FixtureTurnInput` into the
+    /// single internal input so the queued `Job::Turn` always carries the
+    /// same type and exactly one executor proves the lifecycle.
     #[cfg(test)]
     pub(crate) fn admit_fixture_turn(
         &self,
         input: FixtureTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt_text: input.prompt_text,
+            settings: input.settings,
+            launch: InternalLaunch::Fixture(input.fixture),
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    fn admit_internal(
+        &self,
+        input: InternalTurnInput,
         budget: Duration,
     ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
         if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
@@ -624,7 +667,7 @@ impl EngineOwner {
         let (authorize, authorize_receiver) = oneshot::channel();
         let (respond, receiver) = oneshot::channel();
         let (observations, observation_receiver) = mpsc::channel(observation_capacity);
-        let job = Job::FixtureTurn {
+        let job = Job::Turn {
             input: Box::new(input),
             deadline,
             control: Arc::clone(&control),
