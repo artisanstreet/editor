@@ -58,6 +58,12 @@ fn config_with_notifier(
     )
 }
 
+fn config_for_shutdown_custody() -> Result<NativeRunDispatcherConfig, NativeRunDispatcherConfigError>
+{
+    // Keep orderly custody within the existing finite 500 ms CI policy.
+    config_with_notifier(ConversationCommitNotifier::new(), Duration::from_millis(10))
+}
+
 #[test]
 fn scheduler_requires_positive_injected_durations() {
     let error = NativeRunDispatcherConfig::new(
@@ -162,7 +168,7 @@ async fn dispatcher_shutdown_joins_owner_custody() {
     let mut dispatcher = NativeRunDispatcher::start(
         repository,
         PathBuf::from("C:/forge/database.sqlite3"),
-        config("queue").expect("complete dispatcher policy"),
+        config_for_shutdown_custody().expect("complete dispatcher custody policy"),
         Arc::clone(&process_cancel),
         &tokio::runtime::Handle::current(),
     );
