@@ -1254,12 +1254,14 @@ impl NativeApplication {
                     )) => {
                         match effect {
                             crate::conversation_view_machine::ViewportEffect::ShowJumpToLatest => {
-                                host.surface().update(cx, |surface, surface_cx| {
+                                let surface = host.read(cx).surface().clone();
+                                surface.update(cx, |surface, surface_cx| {
                                     surface.set_jump_to_latest_visible(true, surface_cx);
                                 });
                             }
                             crate::conversation_view_machine::ViewportEffect::HideJumpToLatest => {
-                                host.surface().update(cx, |surface, surface_cx| {
+                                let surface = host.read(cx).surface().clone();
+                                surface.update(cx, |surface, surface_cx| {
                                     surface.set_jump_to_latest_visible(false, surface_cx);
                                 });
                             }
@@ -1278,7 +1280,8 @@ impl NativeApplication {
                                         }
                                 };
                                 if can_scroll {
-                                    host.surface().update(cx, |surface, surface_cx| {
+                                    let surface = host.read(cx).surface().clone();
+                                    surface.update(cx, |surface, surface_cx| {
                                         surface.scroll_to_bottom(surface_cx);
                                     });
                                 }
