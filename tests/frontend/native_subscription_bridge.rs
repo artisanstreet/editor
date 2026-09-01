@@ -407,8 +407,7 @@ fn unsubscribe_failure_is_terminal_after_custody_retirement() {
 #[test]
 fn stop_ack_does_not_loop_unsubscribe() {
     // Application handler must not send Unsubscribe again on stop ack
-    let code =
-        std::fs::read_to_string("modules/frontend/src/native_application.rs").expect("read app");
+    let code = include_str!("../../modules/frontend/src/native_application.rs");
     // Find handle_subscription_stopped
     let start = code
         .find("fn handle_subscription_stopped")
@@ -431,8 +430,7 @@ fn stop_ack_does_not_loop_unsubscribe() {
 
 #[test]
 fn no_synchronous_receiver_loop_remains() {
-    let code = std::fs::read_to_string("modules/frontend/src/native_transport_service.rs")
-        .expect("read service");
+    let code = include_str!("../../modules/frontend/src/native_transport_service.rs");
     assert!(
         !code.contains("std::sync::mpsc::Receiver<NativeTransportCommand>"),
         "sync receiver loop must be deleted"
@@ -531,10 +529,9 @@ fn delivery_loss_is_bounded_path_free_via_production_event() {
 async fn consuming_receiver_custody_not_select_cancelled() {
     // Delivery task must own receiver and not be select-cancelled for a command.
     // We prove by inspecting source that service loop never selects on receiver.recv
-    let code =
-        std::fs::read_to_string("modules/frontend/src/native_transport_service.rs").expect("read");
-    // The only loop that consumes receiver is delivery_task_loop with `receiver.recv(&cancel).await`
-    assert!(code.contains("receiver.recv(&cancel).await"));
+    let code = include_str!("../../modules/frontend/src/native_transport_service.rs");
+    // The only loop that consumes receiver is delivery_task_loop with `receiver.recv(cancel.as_ref()).await`
+    assert!(code.contains("receiver.recv(cancel.as_ref()).await"));
     // The service loop must only select on private channel, never on receiver
     let service_loop_start = code
         .find("async fn command_loop_with_delivery")
