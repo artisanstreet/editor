@@ -121,6 +121,13 @@ pub trait StartupReconciliationPatchSource {
         &mut self,
         candidate: &StartupReconciliationCandidate,
     ) -> Result<StartupReconciliationPatches, PatchSourceError>;
+
+    /// Synchronous hook invoked only after a durable `Interrupted` or
+    /// `AlreadyInterrupted` disposition for `candidate`. Never invoked for
+    /// `SkippedMoved` or any failure. The default is a no-op so existing
+    /// implementations require no change, and the hook must not perform I/O,
+    /// mint randomness, or retain provider material.
+    fn on_durable_disposition(&mut self, _candidate: &StartupReconciliationCandidate) {}
 }
 
 /// Bounded, content-free patch-source failure.
@@ -370,6 +377,7 @@ where
                             value: report.interrupted,
                         },
                     )?;
+                    patch_source.on_durable_disposition(candidate);
                 }
                 artisan_database::StartupReconciliationDispositionOutcome::AlreadyInterrupted(
                     _,
@@ -392,6 +400,7 @@ where
                             value: report.already_interrupted,
                         },
                     )?;
+                    patch_source.on_durable_disposition(candidate);
                 }
                 artisan_database::StartupReconciliationDispositionOutcome::SkippedMoved => {
                     report.attempted = report.attempted.checked_add(1).ok_or(
