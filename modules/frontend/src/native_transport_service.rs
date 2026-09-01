@@ -24,8 +24,10 @@ use std::{
 use artisan_domain::{
     AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationQuery,
     ConversationQueryBounds, ConversationRequest, ConversationSnapshot, CreateThread, DirectoryId,
-    ListAttachedProjects, ListProjectThreads, ProjectId, ProjectListing, ProjectSummary, Query,
-    QueryTurnCount, RequestId, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
+    EngineRunConfig, ListAttachedProjects, ListProjectThreads, ListRegisteredEngineProfiles,
+    ProjectId, ProjectListing, ProjectSummary, Query, QueryTurnCount, ReadThreadEngineSettings,
+    RequestId, SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle,
+    UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{NativeClientCredentials, load_client_credentials},
@@ -35,12 +37,14 @@ use artisan_editor_cli::{
     process::{ForgeLaunchSpec, ForgeProcessLease, start_owned},
 };
 use artisan_protocol::{
-    ClientRequest, ErrorCode, FrameId, Hello, HelloCredential, ProtocolVersion, ResponsePayload,
-    VersionOffer, WireEnvelope, WireEnvelopeBody,
+    ClientRequest, ErrorCode, FrameId, Hello, HelloCredential, ProtocolVersion,
+    RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
+    ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
-    CancelHandle, ClientSession, ClientSessionLimits, LoopbackTarget, PinnedIdentity,
-    RequestOutcome,
+    CancelHandle, ClientRequestError, ClientSession, ClientSessionLimits, DeadlineError,
+    EnvelopeReceiveError, EnvelopeSendError, ExchangeError, FrameError, LoopbackTarget,
+    PinnedIdentity, RequestOutcome,
 };
 use rustls_pki_types::CertificateDer;
 use thiserror::Error;
@@ -50,6 +54,38 @@ pub const COMMAND_CAPACITY: usize = 64;
 
 /// Maximum number of events waiting for the application thread.
 pub const EVENT_CAPACITY: usize = 64;
+
+/// Application-minted monotonic identity for one authoritative settings read.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SettingsLoadGeneration(u64);
+
+impl SettingsLoadGeneration {
+    /// Returns the first valid generation.
+    #[must_use]
+    pub const fn first() -> Self {
+        Self(1)
+    }
+
+    /// Returns the next generation, or `None` when the counter is exhausted.
+    #[must_use]
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(next) => Some(Self(next)),
+            None => None,
+        }
+    }
+
+    /// Returns the finite generation number for test and correlation checks.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn from_raw_for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
 
 /// Commands accepted by the native service.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,6 +98,17 @@ pub enum NativeTransportCommand {
     SelectProject(ProjectId),
     /// Request a real snapshot for a host mounted on a known thread.
     RequestSnapshot(ThreadId),
+    /// Load authoritative engine settings for one thread and generation.
+    LoadThreadEngineSettings {
+        /// Thread whose settings are being read.
+        thread_id: ThreadId,
+        /// Application-owned stale-response fence.
+        generation: SettingsLoadGeneration,
+    },
+    /// Load the certified engine profile catalogue.
+    ListRegisteredProfiles,
+    /// Durably save one complete thread engine configuration.
+    SetThreadEngineConfig(Box<SetThreadEngineConfig>),
     /// Stop accepting work and release the session and owned Forge.
     Shutdown,
 }
@@ -286,6 +333,44 @@ pub enum NativeTransportEvent {
     },
     /// Redacted startup, request, bridge, or cleanup failure.
     Failed(ServiceFailure),
+    /// Authoritative persisted thread engine settings with its load fence.
+    ThreadEngineSettings {
+        /// Generation minted for this read.
+        generation: SettingsLoadGeneration,
+        /// Authoritative settings result.
+        result: ThreadEngineSettingsResult,
+    },
+    /// Registered engine profile catalogue.
+    RegisteredProfiles(RegisteredEngineProfilesResult),
+    /// Registered engine profile catalogue read failure.
+    RegisteredProfilesFailed(ServiceFailure),
+    /// Durable thread engine configuration applied.
+    ThreadEngineConfigSet(SetThreadEngineConfigResult, Box<EngineRunConfig>),
+    /// Thread engine configuration precondition was stale.
+    ThreadEngineConfigConflict {
+        /// Thread whose save conflicted.
+        thread_id: ThreadId,
+        /// Exact save request that conflicted.
+        request_id: RequestId,
+    },
+    /// Durable engine configuration save failed with a redacted diagnostic.
+    ThreadEngineConfigFailed {
+        /// Thread whose save failed.
+        thread_id: ThreadId,
+        /// Exact save request that failed.
+        request_id: RequestId,
+        /// Redacted failure.
+        failure: ServiceFailure,
+    },
+    /// Authoritative thread-settings read failure with its load fence.
+    ThreadEngineSettingsFailed {
+        /// Thread whose settings were requested.
+        thread_id: ThreadId,
+        /// Generation minted for this read.
+        generation: SettingsLoadGeneration,
+        /// Redacted failure.
+        failure: ServiceFailure,
+    },
     /// Terminal service state.
     Stopped(ServiceStopStatus),
 }
@@ -702,6 +787,39 @@ fn snapshot_request(thread_id: ThreadId) -> Result<ClientRequest, ServiceFailure
     )?))
 }
 
+fn thread_engine_settings_request(thread_id: ThreadId) -> ClientRequest {
+    query_request(Query::ReadThreadEngineSettings(
+        ReadThreadEngineSettings::new(thread_id),
+    ))
+}
+
+fn registered_profiles_request() -> ClientRequest {
+    query_request(Query::ListRegisteredEngineProfiles(
+        ListRegisteredEngineProfiles,
+    ))
+}
+
+fn engine_config_stable_mutation(
+    command: Box<SetThreadEngineConfig>,
+) -> Result<StableMutation, ServiceFailure> {
+    let request_id = command.request_id().clone();
+    let frame_id = FrameId::parse(request_id.as_str().to_owned())
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    if &request_id != command.request_id() {
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+    }
+    let sent_at =
+        real_unix_millis().map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    Ok(StableMutation {
+        frame_id,
+        sent_at,
+        command: Command::SetThreadEngineConfig(command),
+    })
+}
+
 fn make_request_frame(
     frames: &mut FrameFactory,
     protocol_version: ProtocolVersion,
@@ -793,6 +911,12 @@ enum ExpectedResponse {
     CreatedThread,
     Threads(ProjectId),
     Snapshot(ThreadId),
+    ThreadEngineSettings(ThreadId),
+    RegisteredProfiles,
+    ThreadEngineConfigSet {
+        thread_id: ThreadId,
+        request_id: RequestId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -818,6 +942,9 @@ enum RequestAttemptError {
     },
     Terminal {
         failure: ServiceFailure,
+        /// Whether the consumed session was lost during the request
+        /// exchange and may be replaced for the durable-save retry.
+        retryable_local_session_loss: bool,
     },
 }
 
@@ -840,6 +967,7 @@ struct PeerFailure {
 struct RequestFailure {
     failure: ServiceFailure,
     peer: Option<PeerFailure>,
+    retryable_local_session_loss: bool,
 }
 
 impl RequestFailure {
@@ -847,6 +975,7 @@ impl RequestFailure {
         Self {
             failure,
             peer: None,
+            retryable_local_session_loss: false,
         }
     }
 
@@ -857,11 +986,75 @@ impl RequestFailure {
     fn code(self) -> Option<ErrorCode> {
         self.peer.map(|peer| peer.code)
     }
+
+    fn durable_save_retry_allowed(self) -> bool {
+        durable_save_retry_classification(self).is_eligible()
+    }
 }
 
 impl From<RequestFailure> for ServiceFailure {
     fn from(error: RequestFailure) -> Self {
         error.failure
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DurableSaveRetryClassification {
+    LocalSessionLoss,
+    RetryablePeer,
+    Integrity,
+    Authentication,
+    Conflict,
+    NonRetryablePeer,
+    Other,
+}
+
+impl DurableSaveRetryClassification {
+    const fn is_eligible(self) -> bool {
+        matches!(self, Self::LocalSessionLoss | Self::RetryablePeer)
+    }
+}
+
+fn durable_save_retry_classification(error: RequestFailure) -> DurableSaveRetryClassification {
+    if error.retryable_local_session_loss {
+        return DurableSaveRetryClassification::LocalSessionLoss;
+    }
+    if let Some(peer) = error.peer {
+        if peer.code == ErrorCode::EngineConfigConflict {
+            return DurableSaveRetryClassification::Conflict;
+        }
+        if peer.retryable
+            && !matches!(
+                peer.code,
+                ErrorCode::InvalidInput
+                    | ErrorCode::IdempotencyConflict
+                    | ErrorCode::UnsupportedVersion
+                    | ErrorCode::UnsupportedFeature
+            )
+        {
+            return DurableSaveRetryClassification::RetryablePeer;
+        }
+        return DurableSaveRetryClassification::NonRetryablePeer;
+    }
+    match error.failure.category {
+        ServiceFailureCategory::Integrity => DurableSaveRetryClassification::Integrity,
+        ServiceFailureCategory::Authentication => DurableSaveRetryClassification::Authentication,
+        _ => DurableSaveRetryClassification::Other,
+    }
+}
+
+fn local_session_request_loss_is_retryable(error: &ClientRequestError) -> bool {
+    match error {
+        ClientRequestError::Exchange(DeadlineError::Timeout { .. }) => true,
+        ClientRequestError::Exchange(DeadlineError::Peer { error, .. }) => matches!(
+            error,
+            ExchangeError::Open(_)
+                | ExchangeError::Send(EnvelopeSendError::Frame(FrameError::Write(_)))
+                | ExchangeError::Receive(EnvelopeReceiveError::Frame(
+                    FrameError::Read(_) | FrameError::Truncated { .. },
+                ))
+        ),
+        _ => false,
     }
 }
 
@@ -874,7 +1067,10 @@ async fn request_payload(
 ) -> Result<(ClientSession, ResponsePayload), RequestAttemptError> {
     let protocol_version = session.protocol_version();
     let (envelope, expected_request_id) = make_request_frame(frames, protocol_version, request)
-        .map_err(|failure| RequestAttemptError::Terminal { failure })?;
+        .map_err(|failure| RequestAttemptError::Terminal {
+            failure,
+            retryable_local_session_loss: false,
+        })?;
     request_envelope_payload(session, envelope, expected_request_id, expected, cancel).await
 }
 
@@ -889,8 +1085,9 @@ async fn request_envelope_payload(
         session
             .request(envelope, cancel)
             .await
-            .map_err(|_| RequestAttemptError::Terminal {
+            .map_err(|error| RequestAttemptError::Terminal {
                 failure: ServiceFailure::local_session(),
+                retryable_local_session_loss: local_session_request_loss_is_retryable(&error),
             })?;
     let (settled_request_id, outcome) = resolved.into_parts();
     if !request_id_matches(&expected_request_id, &settled_request_id) {
@@ -1009,6 +1206,23 @@ fn validate_response_family(
             ResponsePayload::ConversationSnapshot(snapshot),
         ) if snapshot.thread_id() == &thread_id => {
             Ok(ResponsePayload::ConversationSnapshot(snapshot))
+        }
+        (
+            ExpectedResponse::ThreadEngineSettings(thread_id),
+            ResponsePayload::ThreadEngineSettings(result),
+        ) if result.thread_id() == &thread_id => Ok(ResponsePayload::ThreadEngineSettings(result)),
+        (
+            ExpectedResponse::RegisteredProfiles,
+            ResponsePayload::RegisteredEngineProfiles(result),
+        ) => Ok(ResponsePayload::RegisteredEngineProfiles(result)),
+        (
+            ExpectedResponse::ThreadEngineConfigSet {
+                thread_id,
+                request_id,
+            },
+            ResponsePayload::ThreadEngineConfigSet(result),
+        ) if result.thread_id == thread_id && result.request_id == request_id => {
+            Ok(ResponsePayload::ThreadEngineConfigSet(result))
         }
         _ => Err(ServiceFailure::new(
             ServiceFailureStage::Request,
@@ -1175,11 +1389,22 @@ impl ServiceRuntime {
                 peer,
             }) => {
                 self.session = Some(*session);
-                Err(RequestFailure { failure, peer })
+                Err(RequestFailure {
+                    failure,
+                    peer,
+                    retryable_local_session_loss: false,
+                })
             }
-            Err(RequestAttemptError::Terminal { failure }) => {
+            Err(RequestAttemptError::Terminal {
+                failure,
+                retryable_local_session_loss,
+            }) => {
                 self.session = None;
-                Err(RequestFailure::terminal(failure))
+                Err(RequestFailure {
+                    failure,
+                    peer: None,
+                    retryable_local_session_loss,
+                })
             }
         }
     }
@@ -1489,6 +1714,18 @@ async fn command_loop(
             }
             Ok(NativeTransportCommand::RequestSnapshot(thread_id)) => {
                 request_snapshot(runtime, frames, events, thread_id).await?;
+            }
+            Ok(NativeTransportCommand::LoadThreadEngineSettings {
+                thread_id,
+                generation,
+            }) => {
+                load_thread_engine_settings(runtime, frames, events, thread_id, generation).await?;
+            }
+            Ok(NativeTransportCommand::ListRegisteredProfiles) => {
+                list_registered_profiles(runtime, frames, events).await?;
+            }
+            Ok(NativeTransportCommand::SetThreadEngineConfig(command)) => {
+                set_thread_engine_config(runtime, frames, events, command).await?;
             }
         }
     }
@@ -2063,6 +2300,255 @@ async fn request_snapshot(
     publish(events, NativeTransportEvent::Snapshot(snapshot))
 }
 
+async fn load_thread_engine_settings(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    generation: SettingsLoadGeneration,
+) -> Result<(), ServiceFailure> {
+    if !runtime.known_threads.contains(&thread_id) {
+        return publish(
+            events,
+            NativeTransportEvent::ThreadEngineSettingsFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    }
+    let payload = match runtime
+        .request(
+            frames,
+            thread_engine_settings_request(thread_id.clone()),
+            ExpectedResponse::ThreadEngineSettings(thread_id.clone()),
+        )
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            let failure: ServiceFailure = error.into();
+            return publish(
+                events,
+                NativeTransportEvent::ThreadEngineSettingsFailed {
+                    thread_id: thread_id.clone(),
+                    generation,
+                    failure,
+                },
+            );
+        }
+    };
+    let ResponsePayload::ThreadEngineSettings(result) = payload else {
+        return publish(
+            events,
+            NativeTransportEvent::ThreadEngineSettingsFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    };
+    if result.thread_id() != &thread_id {
+        return publish(
+            events,
+            NativeTransportEvent::ThreadEngineSettingsFailed {
+                thread_id,
+                generation,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    }
+    publish(
+        events,
+        NativeTransportEvent::ThreadEngineSettings { generation, result },
+    )
+}
+
+async fn list_registered_profiles(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    let payload = match runtime
+        .request(
+            frames,
+            registered_profiles_request(),
+            ExpectedResponse::RegisteredProfiles,
+        )
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            let failure: ServiceFailure = error.into();
+            return publish(
+                events,
+                NativeTransportEvent::RegisteredProfilesFailed(failure),
+            );
+        }
+    };
+    let ResponsePayload::RegisteredEngineProfiles(result) = payload else {
+        return publish(
+            events,
+            NativeTransportEvent::RegisteredProfilesFailed(ServiceFailure::invalid(
+                ServiceFailureStage::Request,
+            )),
+        );
+    };
+    publish(events, NativeTransportEvent::RegisteredProfiles(result))
+}
+
+async fn set_thread_engine_config(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    command: Box<SetThreadEngineConfig>,
+) -> Result<(), ServiceFailure> {
+    let thread_id = command.thread_id().clone();
+    let request_id = command.request_id().clone();
+    let retained = command.config().clone();
+    if !runtime.known_threads.contains(&thread_id) {
+        return publish_engine_config_failure(
+            events,
+            thread_id,
+            request_id,
+            ServiceFailure::invalid(ServiceFailureStage::Request),
+        );
+    }
+    let mutation = match engine_config_stable_mutation(command) {
+        Ok(mutation) => mutation,
+        Err(failure) => {
+            return publish_engine_config_failure(events, thread_id, request_id, failure);
+        }
+    };
+    let payload =
+        match durable_save_request(runtime, frames, &mutation, &thread_id, &request_id).await {
+            Ok(payload) => payload,
+            Err(DurableSaveFailure::Conflict) => {
+                return publish_engine_config_conflict(events, thread_id, request_id);
+            }
+            Err(DurableSaveFailure::Request(error)) => {
+                return publish_engine_config_failure(events, thread_id, request_id, error.into());
+            }
+        };
+    finish_engine_config_save(events, thread_id, request_id, retained, payload)
+}
+
+enum DurableSaveFailure {
+    Conflict,
+    Request(RequestFailure),
+}
+
+fn expected_engine_config_response(
+    thread_id: &ThreadId,
+    request_id: &RequestId,
+) -> ExpectedResponse {
+    ExpectedResponse::ThreadEngineConfigSet {
+        thread_id: thread_id.clone(),
+        request_id: request_id.clone(),
+    }
+}
+
+async fn durable_save_request(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    mutation: &StableMutation,
+    thread_id: &ThreadId,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, DurableSaveFailure> {
+    let first_attempt = runtime
+        .request_stable(
+            frames,
+            mutation,
+            expected_engine_config_response(thread_id, request_id),
+            false,
+        )
+        .await;
+    match first_attempt {
+        Ok(payload) => Ok(payload),
+        Err(error) if error.code() == Some(ErrorCode::EngineConfigConflict) => {
+            Err(DurableSaveFailure::Conflict)
+        }
+        Err(error) if error.durable_save_retry_allowed() => runtime
+            .request_stable(
+                frames,
+                mutation,
+                expected_engine_config_response(thread_id, request_id),
+                true,
+            )
+            .await
+            .map_err(|error| {
+                if error.code() == Some(ErrorCode::EngineConfigConflict) {
+                    DurableSaveFailure::Conflict
+                } else {
+                    DurableSaveFailure::Request(error)
+                }
+            }),
+        Err(error) => Err(DurableSaveFailure::Request(error)),
+    }
+}
+
+fn publish_engine_config_failure(
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    request_id: RequestId,
+    failure: ServiceFailure,
+) -> Result<(), ServiceFailure> {
+    publish(
+        events,
+        NativeTransportEvent::ThreadEngineConfigFailed {
+            thread_id,
+            request_id,
+            failure,
+        },
+    )
+}
+
+fn publish_engine_config_conflict(
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    request_id: RequestId,
+) -> Result<(), ServiceFailure> {
+    publish(
+        events,
+        NativeTransportEvent::ThreadEngineConfigConflict {
+            thread_id,
+            request_id,
+        },
+    )
+}
+
+fn finish_engine_config_save(
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    request_id: RequestId,
+    retained: EngineRunConfig,
+    payload: ResponsePayload,
+) -> Result<(), ServiceFailure> {
+    let ResponsePayload::ThreadEngineConfigSet(result) = payload else {
+        return publish_engine_config_failure(
+            events,
+            thread_id,
+            request_id,
+            ServiceFailure::invalid(ServiceFailureStage::Request),
+        );
+    };
+    if result.thread_id != thread_id || result.request_id != request_id {
+        return publish_engine_config_failure(
+            events,
+            thread_id,
+            request_id,
+            ServiceFailure::new(
+                ServiceFailureStage::Request,
+                ServiceFailureCategory::Integrity,
+            ),
+        );
+    }
+    publish(
+        events,
+        NativeTransportEvent::ThreadEngineConfigSet(result, Box::new(retained)),
+    )
+}
+
 fn publish(
     events: &SyncSender<NativeTransportEvent>,
     event: NativeTransportEvent,
@@ -2082,23 +2568,29 @@ mod tests {
         PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
         ServiceFailureCategory, StartupError, ThreadSelectionDecision, attach_mutation,
         contains_exact_project, contains_exact_thread, create_command_values, create_mutation,
-        finite_duration, make_request_frame, payload_health_decision, project_request,
-        reconnect_hello, session_needs_reconnect, snapshot_request, thread_selection_decision,
+        engine_config_stable_mutation, finite_duration, make_request_frame,
+        payload_health_decision, project_request, reconnect_hello, session_needs_reconnect,
+        snapshot_request, thread_engine_settings_request, thread_selection_decision,
         threads_request, try_send_command, validate_readiness, validate_response_family,
     };
     use artisan_domain::{
         AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
         ConversationQueryBounds, ConversationSnapshot, CreateThread, DirectoryId, DisplayName,
-        ListProjectThreads, ProjectId, ProjectListing, ProjectSummary, Query, QueryTurnCount,
-        ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadListing, ThreadSummary,
-        ThreadTitle, UnixMillis,
+        EngineProfileId, ListProjectThreads, ProjectId, ProjectListing, ProjectSummary, Query,
+        QueryTurnCount, ReceiptDisposition, RequestId, RootPath, SetThreadEngineConfig, ThreadId,
+        ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
     };
     use artisan_editor_cli::payload::PayloadHealth;
     use artisan_protocol::{
         ClientRequest, DirectoryPickOutcome, ErrorCode, HelloCredential, ProtocolVersion,
-        RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ResponsePayload, WireEnvelopeBody,
+        RECONNECT_CAPABILITY_BYTES, ReconnectCapability, RegisteredEngineProfilesResult,
+        ResponsePayload, SetThreadEngineConfigResult, WireEnvelopeBody,
     };
-    use std::sync::mpsc::sync_channel;
+    use artisan_transport::{
+        ClientRequestError, DeadlineError, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
+        FrameError, OperationKind,
+    };
+    use std::{sync::mpsc::sync_channel, time::Duration};
 
     fn project(value: &str, name: &str) -> ProjectSummary {
         ProjectSummary {
@@ -2527,12 +3019,145 @@ mod tests {
     fn local_session_request_errors_are_terminal() {
         let error = RequestAttemptError::Terminal {
             failure: ServiceFailure::local_session(),
+            retryable_local_session_loss: true,
         };
         assert!(!error.preserves_session());
         assert_eq!(
             ServiceFailure::local_session().category,
             ServiceFailureCategory::LocalSession
         );
+    }
+
+    #[test]
+    fn settings_load_generation_is_checked_and_monotonic() {
+        let first = super::SettingsLoadGeneration::first();
+        assert_eq!(first.get(), 1);
+        assert_eq!(first.checked_next().expect("next").get(), 2);
+        let exhausted = super::SettingsLoadGeneration(u64::MAX);
+        assert!(exhausted.checked_next().is_none());
+    }
+
+    #[test]
+    fn durable_save_retry_allows_only_local_loss_or_retryable_peer() {
+        let local_loss = RequestFailure {
+            failure: ServiceFailure::local_session(),
+            peer: None,
+            retryable_local_session_loss: true,
+        };
+        assert_eq!(
+            super::durable_save_retry_classification(local_loss),
+            super::DurableSaveRetryClassification::LocalSessionLoss
+        );
+        assert!(local_loss.durable_save_retry_allowed());
+
+        let retryable_peer = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::Internal,
+                retryable: true,
+            }),
+            retryable_local_session_loss: false,
+        };
+        assert_eq!(
+            super::durable_save_retry_classification(retryable_peer),
+            super::DurableSaveRetryClassification::RetryablePeer
+        );
+        assert!(retryable_peer.durable_save_retry_allowed());
+
+        let invalid_input = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::InvalidInput,
+                retryable: true,
+            }),
+            retryable_local_session_loss: false,
+        };
+        assert!(!invalid_input.durable_save_retry_allowed());
+
+        let conflict = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::EngineConfigConflict,
+                retryable: true,
+            }),
+            retryable_local_session_loss: false,
+        };
+        assert!(!conflict.durable_save_retry_allowed());
+
+        let nonretryable_peer = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::Internal,
+                retryable: false,
+            }),
+            retryable_local_session_loss: false,
+        };
+        assert_eq!(
+            super::durable_save_retry_classification(nonretryable_peer),
+            super::DurableSaveRetryClassification::NonRetryablePeer
+        );
+        assert!(!nonretryable_peer.durable_save_retry_allowed());
+
+        let integrity = RequestFailure::terminal(ServiceFailure::new(
+            super::ServiceFailureStage::Request,
+            ServiceFailureCategory::Integrity,
+        ));
+        assert_eq!(
+            super::durable_save_retry_classification(integrity),
+            super::DurableSaveRetryClassification::Integrity
+        );
+        assert!(!integrity.durable_save_retry_allowed());
+
+        let authentication = RequestFailure::terminal(ServiceFailure::new(
+            super::ServiceFailureStage::Handshake,
+            ServiceFailureCategory::Authentication,
+        ));
+        assert_eq!(
+            super::durable_save_retry_classification(authentication),
+            super::DurableSaveRetryClassification::Authentication
+        );
+        assert!(!authentication.durable_save_retry_allowed());
+    }
+
+    #[test]
+    fn local_session_loss_retry_excludes_integrity_and_cancellation() {
+        let timeout = ClientRequestError::Exchange(DeadlineError::Timeout {
+            operation: OperationKind::Receive,
+            limit: Duration::from_secs(1),
+        });
+        assert!(super::local_session_request_loss_is_retryable(&timeout));
+
+        let stream_loss = ClientRequestError::Exchange(DeadlineError::Peer {
+            operation: OperationKind::Receive,
+            error: ExchangeError::Receive(EnvelopeReceiveError::Frame(FrameError::Truncated {
+                expected: 4,
+                received: 0,
+            })),
+        });
+        assert!(super::local_session_request_loss_is_retryable(&stream_loss));
+
+        let integrity = ClientRequestError::Exchange(DeadlineError::Peer {
+            operation: OperationKind::Receive,
+            error: ExchangeError::Send(EnvelopeSendError::Frame(FrameError::Empty)),
+        });
+        assert!(!super::local_session_request_loss_is_retryable(&integrity));
+
+        let cancelled = ClientRequestError::Exchange(DeadlineError::Cancelled {
+            operation: OperationKind::Receive,
+        });
+        assert!(!super::local_session_request_loss_is_retryable(&cancelled));
     }
 
     #[test]
@@ -2546,6 +3171,7 @@ mod tests {
                 code: ErrorCode::Internal,
                 retryable: true,
             }),
+            retryable_local_session_loss: false,
         };
         assert!(retryable.retryable());
         assert_eq!(retryable.code(), Some(ErrorCode::Internal));
@@ -2559,6 +3185,7 @@ mod tests {
                 code: ErrorCode::IdempotencyConflict,
                 retryable: false,
             }),
+            retryable_local_session_loss: false,
         };
         assert!(!nonretryable.retryable());
         assert_eq!(nonretryable.code(), Some(ErrorCode::IdempotencyConflict));
@@ -2601,6 +3228,7 @@ mod tests {
                 code: ErrorCode::DirectoryUnknown,
                 retryable: true,
             }),
+            retryable_local_session_loss: false,
         };
         assert!(failure.retryable());
         assert_eq!(failure.code(), Some(ErrorCode::DirectoryUnknown));
@@ -2630,5 +3258,251 @@ mod tests {
     fn listener_duration_rejects_unbounded_zero() {
         assert!(finite_duration(0).is_err());
         assert_eq!(finite_duration(1_250).expect("finite").as_millis(), 1_250);
+    }
+
+    #[test]
+    fn thread_engine_settings_responses_are_thread_scoped() {
+        let thread_a = ThreadId::parse("thread-a").expect("thread");
+        let thread_b = ThreadId::parse("thread-b").expect("thread");
+        let unconfigured = artisan_protocol::ThreadEngineSettingsResult::Unconfigured {
+            thread_id: thread_a.clone(),
+        };
+        assert!(
+            validate_response_family(
+                ExpectedResponse::ThreadEngineSettings(thread_a.clone()),
+                ResponsePayload::ThreadEngineSettings(unconfigured.clone())
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_response_family(
+                ExpectedResponse::ThreadEngineSettings(thread_b),
+                ResponsePayload::ThreadEngineSettings(unconfigured)
+            )
+            .is_err()
+        );
+        let snapshot = ConversationSnapshot::new(
+            thread_a.clone(),
+            ConversationCursor::new(0),
+            Vec::new(),
+            Vec::new(),
+            UnixMillis::EPOCH,
+        )
+        .expect("snapshot");
+        assert!(
+            validate_response_family(
+                ExpectedResponse::ThreadEngineSettings(thread_a),
+                ResponsePayload::ConversationSnapshot(snapshot)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn registered_profiles_response_family_is_exact() {
+        let missing = RegisteredEngineProfilesResult::RegistryMissing;
+        assert!(
+            validate_response_family(
+                ExpectedResponse::RegisteredProfiles,
+                ResponsePayload::RegisteredEngineProfiles(missing)
+            )
+            .is_ok()
+        );
+        let present_empty = RegisteredEngineProfilesResult::RegistryPresent {
+            profile_ids: Vec::new(),
+        };
+        assert!(
+            validate_response_family(
+                ExpectedResponse::RegisteredProfiles,
+                ResponsePayload::RegisteredEngineProfiles(present_empty)
+            )
+            .is_ok()
+        );
+        let present = RegisteredEngineProfilesResult::RegistryPresent {
+            profile_ids: vec![EngineProfileId::parse("default").expect("profile")],
+        };
+        assert!(
+            validate_response_family(
+                ExpectedResponse::RegisteredProfiles,
+                ResponsePayload::RegisteredEngineProfiles(present)
+            )
+            .is_ok()
+        );
+        let listing = ProjectListing::new(vec![project("project-a", "A")]).expect("projects");
+        assert!(
+            validate_response_family(
+                ExpectedResponse::RegisteredProfiles,
+                ResponsePayload::ProjectListing(listing)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn thread_engine_config_set_response_requires_exact_thread_and_request() {
+        let thread_id = ThreadId::parse("thread-a").expect("thread");
+        let request_id = RequestId::parse("request-a").expect("request");
+        let other_thread = ThreadId::parse("thread-b").expect("thread");
+        let other_request = RequestId::parse("request-b").expect("request");
+        let result = SetThreadEngineConfigResult {
+            request_id: request_id.clone(),
+            thread_id: thread_id.clone(),
+            revision: artisan_domain::EngineConfigRevision::new(1).expect("rev"),
+            disposition: artisan_domain::ReceiptDisposition::Accepted,
+        };
+        assert!(
+            validate_response_family(
+                ExpectedResponse::ThreadEngineConfigSet {
+                    thread_id: thread_id.clone(),
+                    request_id: request_id.clone()
+                },
+                ResponsePayload::ThreadEngineConfigSet(result.clone())
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_response_family(
+                ExpectedResponse::ThreadEngineConfigSet {
+                    thread_id: other_thread,
+                    request_id: request_id.clone()
+                },
+                ResponsePayload::ThreadEngineConfigSet(result.clone())
+            )
+            .is_err()
+        );
+        assert!(
+            validate_response_family(
+                ExpectedResponse::ThreadEngineConfigSet {
+                    thread_id,
+                    request_id: other_request
+                },
+                ResponsePayload::ThreadEngineConfigSet(result)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn engine_config_stable_retry_retains_request_id_and_payload() {
+        let thread_id = ThreadId::parse("thread-a").expect("thread");
+        let profile = EngineProfileId::parse("default").expect("profile");
+        let model = artisan_domain::EngineModelId::parse("model-test").expect("model");
+        let route = artisan_domain::EngineRouteId::parse("route-test").expect("route");
+        let permission = artisan_domain::PermissionId::parse("perm-a").expect("perm");
+        let agent = artisan_domain::EngineAgentId::parse("agent-a").expect("agent");
+        let permission_policy = artisan_domain::EnginePermissionPolicy::new(
+            permission,
+            agent,
+            artisan_domain::ApprovalMode::Never,
+            artisan_domain::FilesystemAccess::None,
+            artisan_domain::NetworkAccess::Disabled,
+            artisan_domain::WebSearchAccess::Disabled,
+        );
+        let selection = artisan_domain::EngineSelection::OpenCode2(
+            artisan_domain::OpenCode2Selection::new(profile, model, route, None, permission_policy),
+        );
+        let runtime = artisan_domain::EngineRuntimeControls::new(
+            artisan_domain::EngineRuntimeControlsInput {
+                attempt_budget: artisan_domain::FiniteMillis::new(5).expect("budget"),
+                readiness_budget: artisan_domain::FiniteMillis::new(1).expect("budget"),
+                health_budget: artisan_domain::FiniteMillis::new(1).expect("budget"),
+                prompt_budget: artisan_domain::FiniteMillis::new(1).expect("budget"),
+                stream_budget: artisan_domain::FiniteMillis::new(1).expect("budget"),
+                close_budget: artisan_domain::FiniteMillis::new(1).expect("budget"),
+                max_json_body_bytes: artisan_domain::ByteLimit::new(1).expect("limit"),
+                max_sse_line_bytes: artisan_domain::ByteLimit::new(1).expect("limit"),
+                max_sse_event_bytes: artisan_domain::ByteLimit::new(1).expect("limit"),
+                max_readiness_line_bytes: artisan_domain::ByteLimit::new(1).expect("limit"),
+                max_header_count: artisan_domain::CountLimit::new(1).expect("limit"),
+                max_http_buffer_bytes: artisan_domain::ByteLimit::new(1).expect("limit"),
+                max_stderr_bytes: artisan_domain::ByteLimit::new(1).expect("limit"),
+                observation_capacity: artisan_domain::CountLimit::new(1).expect("limit"),
+            },
+        )
+        .expect("runtime");
+        let config = artisan_domain::EngineRunConfig::new(selection, runtime);
+        let request_id = RequestId::parse("engine-save-1").expect("request");
+        let command = Box::new(SetThreadEngineConfig::new(
+            request_id.clone(),
+            thread_id.clone(),
+            artisan_domain::EngineConfigUpdatePrecondition::Unconfigured,
+            config.clone(),
+        ));
+        let mutation = engine_config_stable_mutation(command).expect("mutation");
+        let (first_envelope, first_request_id) =
+            mutation.envelope(ProtocolVersion::V1).expect("envelope");
+        let (second_envelope, second_request_id) = mutation
+            .envelope(ProtocolVersion::V1)
+            .expect("retry envelope");
+        assert_eq!(
+            first_envelope.protocol_version,
+            second_envelope.protocol_version
+        );
+        assert!(first_envelope.body == second_envelope.body);
+        assert_eq!(first_request_id, second_request_id);
+        assert_eq!(first_envelope.frame_id, second_envelope.frame_id);
+        assert_eq!(first_envelope.sent_at, second_envelope.sent_at);
+        assert_eq!(
+            first_envelope.frame_id.to_request_id().expect("id"),
+            first_request_id
+        );
+        assert_eq!(first_request_id, request_id);
+        // Fresh read uses fresh frame.
+        let mut frames = FrameFactory::new();
+        let (fresh_first, _) = make_request_frame(
+            &mut frames,
+            ProtocolVersion::V1,
+            thread_engine_settings_request(thread_id.clone()),
+        )
+        .expect("fresh");
+        let (fresh_second, _) = make_request_frame(
+            &mut frames,
+            ProtocolVersion::V1,
+            thread_engine_settings_request(thread_id),
+        )
+        .expect("fresh second");
+        assert_ne!(fresh_first.frame_id, fresh_second.frame_id);
+    }
+
+    #[test]
+    fn engine_config_conflict_is_identifiable_and_retryable_flag_is_preserved() {
+        let conflict = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::EngineConfigConflict,
+                retryable: false,
+            }),
+            retryable_local_session_loss: false,
+        };
+        assert_eq!(conflict.code(), Some(ErrorCode::EngineConfigConflict));
+        assert!(!conflict.retryable());
+        let retryable = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::Internal,
+                retryable: true,
+            }),
+            retryable_local_session_loss: false,
+        };
+        assert!(retryable.retryable());
+    }
+
+    #[test]
+    fn redacted_service_failures_do_not_reveal_engine_values() {
+        let failure = ServiceFailure::new(
+            super::ServiceFailureStage::Request,
+            ServiceFailureCategory::Peer,
+        );
+        let text = failure.to_string();
+        assert!(!text.contains("model-test"));
+        assert!(!text.contains("route-test"));
+        assert!(!text.contains("default"));
+        assert!(!text.contains("engine-save"));
     }
 }
