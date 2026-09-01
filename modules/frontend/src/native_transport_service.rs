@@ -22,9 +22,10 @@ use std::{
 };
 
 use artisan_domain::{
-    CONVERSATION_QUERY_MAX_TURNS, ConversationQuery, ConversationQueryBounds, ConversationRequest,
-    ConversationSnapshot, ListAttachedProjects, ListProjectThreads, ProjectId, ProjectListing,
-    Query, QueryTurnCount, RequestId, ThreadId, ThreadListing, UnixMillis,
+    AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationQuery,
+    ConversationQueryBounds, ConversationRequest, ConversationSnapshot, CreateThread, DirectoryId,
+    ListAttachedProjects, ListProjectThreads, ProjectId, ProjectListing, ProjectSummary, Query,
+    QueryTurnCount, RequestId, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{NativeClientCredentials, load_client_credentials},
@@ -34,13 +35,14 @@ use artisan_editor_cli::{
     process::{ForgeLaunchSpec, ForgeProcessLease, start_owned},
 };
 use artisan_protocol::{
-    ClientRequest, FrameId, Hello, HelloCredential, ProtocolVersion, ResponsePayload, VersionOffer,
-    WireEnvelope, WireEnvelopeBody,
+    ClientRequest, ErrorCode, FrameId, Hello, HelloCredential, ProtocolVersion, ResponsePayload,
+    VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, ClientSession, ClientSessionLimits, LoopbackTarget, PinnedIdentity,
     RequestOutcome,
 };
+use rustls_pki_types::CertificateDer;
 use thiserror::Error;
 
 /// Maximum number of commands waiting for the service thread.
@@ -52,6 +54,10 @@ pub const EVENT_CAPACITY: usize = 64;
 /// Commands accepted by the native service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeTransportCommand {
+    /// Start a fresh opaque-directory project intake.
+    BeginProjectIntake,
+    /// Continue the one retained retry plan for project intake.
+    RetryProjectIntake,
     /// Select an existing Forge-owned project.
     SelectProject(ProjectId),
     /// Request a real snapshot for a host mounted on a known thread.
@@ -158,6 +164,36 @@ pub struct ServiceFailure {
     pub category: ServiceFailureCategory,
 }
 
+/// Redacted phase of one user-operated project intake.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeProjectIntakeStage {
+    /// Waiting for the native directory chooser to settle.
+    PickingDirectory,
+    /// Sending the stable attach mutation.
+    AttachingProject,
+    /// Rediscovering the complete attached-project catalog.
+    RefreshingProjects,
+    /// Sending the stable thread-creation mutation.
+    CreatingThread,
+    /// Rediscovering the complete project-scoped thread catalog.
+    RefreshingThreads,
+}
+
+/// Redacted operation classification for one project-intake failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeProjectIntakeOperation {
+    /// The explicit native directory chooser request.
+    PickDirectory,
+    /// The durable project attachment mutation.
+    AttachProject,
+    /// The attached-project rediscovery query.
+    RefreshProjects,
+    /// The durable thread creation mutation.
+    CreateThread,
+    /// The project-thread rediscovery query.
+    RefreshThreads,
+}
+
 impl ServiceFailure {
     const fn new(stage: ServiceFailureStage, category: ServiceFailureCategory) -> Self {
         Self { stage, category }
@@ -223,6 +259,30 @@ pub enum NativeTransportEvent {
     EmptyThreads {
         /// Project with no threads.
         project_id: ProjectId,
+    },
+    /// One redacted phase of the active project intake.
+    ProjectIntakeProgress(NativeProjectIntakeStage),
+    /// The user dismissed the native directory chooser.
+    ProjectIntakeCancelled,
+    /// The intake completed with authoritative listings and identities.
+    ProjectIntakeReady {
+        /// Complete authoritative attached-project catalog.
+        projects: ProjectListing,
+        /// Project contained in `projects` and returned by attach.
+        project_id: ProjectId,
+        /// Complete authoritative thread catalog for `project_id`.
+        threads: ThreadListing,
+        /// Thread contained in `threads` and returned by create.
+        thread_id: ThreadId,
+    },
+    /// One redacted intake failure and its single retry classification.
+    ProjectIntakeFailed {
+        /// Operation that failed.
+        operation: NativeProjectIntakeOperation,
+        /// Typed redacted failure.
+        failure: ServiceFailure,
+        /// Whether the one retained plan may be explicitly retried.
+        retryable: bool,
     },
     /// Redacted startup, request, bridge, or cleanup failure.
     Failed(ServiceFailure),
@@ -520,6 +580,42 @@ struct FrameStamp {
     sent_at: UnixMillis,
 }
 
+/// One durable mutation and its exact wire identity.
+///
+/// This value is deliberately service-private and implements neither
+/// `Debug` nor `Display`: a stable command may contain opaque routing values
+/// that must never reach a log or the application bridge.
+struct StableMutation {
+    frame_id: FrameId,
+    sent_at: UnixMillis,
+    command: Command,
+}
+
+impl StableMutation {
+    fn envelope(
+        &self,
+        protocol_version: ProtocolVersion,
+    ) -> Result<(WireEnvelope, RequestId), ServiceFailure> {
+        let request_id = self
+            .frame_id
+            .to_request_id()
+            .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+        if self.command.request_id() != &request_id {
+            return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+        }
+        let envelope = WireEnvelope {
+            protocol_version,
+            frame_id: self.frame_id.clone(),
+            sent_at: self.sent_at,
+            body: WireEnvelopeBody::Request(ClientRequest::Command(self.command.clone())),
+        };
+        envelope
+            .validate_correlation()
+            .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+        Ok((envelope, request_id))
+    }
+}
+
 /// Service-private identity minting. The checked monotonic counter makes
 /// identities unique even when the clock does not advance.
 struct FrameFactory {
@@ -630,8 +726,71 @@ fn make_request_frame(
     Ok((envelope, request_id))
 }
 
+fn stable_mutation_from_stamp(
+    stamp: FrameStamp,
+    command: Command,
+) -> Result<StableMutation, ServiceFailure> {
+    let request_id = stamp
+        .frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    if command.request_id() != &request_id {
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+    }
+    Ok(StableMutation {
+        frame_id: stamp.frame_id,
+        sent_at: stamp.sent_at,
+        command,
+    })
+}
+
+fn attach_mutation(
+    frames: &mut FrameFactory,
+    directory_id: DirectoryId,
+) -> Result<StableMutation, ServiceFailure> {
+    let stamp = frames
+        .next()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let request_id = stamp
+        .frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    stable_mutation_from_stamp(
+        stamp,
+        Command::AttachProject(AttachProject {
+            request_id,
+            directory_id,
+        }),
+    )
+}
+
+fn create_mutation(
+    frames: &mut FrameFactory,
+    project_id: ProjectId,
+    title: ThreadTitle,
+) -> Result<StableMutation, ServiceFailure> {
+    let stamp = frames
+        .next()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let request_id = stamp
+        .frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    stable_mutation_from_stamp(
+        stamp,
+        Command::CreateThread(CreateThread {
+            request_id,
+            project_id,
+            title,
+        }),
+    )
+}
+
 enum ExpectedResponse {
+    Directory,
     Projects,
+    AttachedProject,
+    CreatedThread,
     Threads(ProjectId),
     Snapshot(ThreadId),
 }
@@ -655,6 +814,7 @@ enum RequestAttemptError {
     Retained {
         session: Box<ClientSession>,
         failure: ServiceFailure,
+        peer: Option<PeerFailure>,
     },
     Terminal {
         failure: ServiceFailure,
@@ -668,6 +828,43 @@ impl RequestAttemptError {
     }
 }
 
+/// The only peer facts retained after correlated validation.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct PeerFailure {
+    code: ErrorCode,
+    retryable: bool,
+}
+
+/// Redacted request failure used by the intake policy.
+#[derive(Clone, Copy)]
+struct RequestFailure {
+    failure: ServiceFailure,
+    peer: Option<PeerFailure>,
+}
+
+impl RequestFailure {
+    fn terminal(failure: ServiceFailure) -> Self {
+        Self {
+            failure,
+            peer: None,
+        }
+    }
+
+    fn retryable(self) -> bool {
+        self.peer.is_some_and(|peer| peer.retryable)
+    }
+
+    fn code(self) -> Option<ErrorCode> {
+        self.peer.map(|peer| peer.code)
+    }
+}
+
+impl From<RequestFailure> for ServiceFailure {
+    fn from(error: RequestFailure) -> Self {
+        error.failure
+    }
+}
+
 async fn request_payload(
     session: ClientSession,
     frames: &mut FrameFactory,
@@ -678,6 +875,16 @@ async fn request_payload(
     let protocol_version = session.protocol_version();
     let (envelope, expected_request_id) = make_request_frame(frames, protocol_version, request)
         .map_err(|failure| RequestAttemptError::Terminal { failure })?;
+    request_envelope_payload(session, envelope, expected_request_id, expected, cancel).await
+}
+
+async fn request_envelope_payload(
+    session: ClientSession,
+    envelope: WireEnvelope,
+    expected_request_id: RequestId,
+    expected: ExpectedResponse,
+    cancel: &CancelHandle,
+) -> Result<(ClientSession, ResponsePayload), RequestAttemptError> {
     let (session, resolved) =
         session
             .request(envelope, cancel)
@@ -686,43 +893,51 @@ async fn request_payload(
                 failure: ServiceFailure::local_session(),
             })?;
     let (settled_request_id, outcome) = resolved.into_parts();
-    if settled_request_id != expected_request_id {
+    if !request_id_matches(&expected_request_id, &settled_request_id) {
         return Err(RequestAttemptError::Retained {
             session: Box::new(session),
             failure: ServiceFailure::new(
                 ServiceFailureStage::Request,
                 ServiceFailureCategory::Integrity,
             ),
+            peer: None,
         });
     }
 
     match outcome {
         RequestOutcome::Failure(failure) => {
-            if failure.request_id.as_ref() != Some(&expected_request_id) {
+            if !optional_request_id_matches(&expected_request_id, failure.request_id.as_ref()) {
                 return Err(RequestAttemptError::Retained {
                     session: Box::new(session),
                     failure: ServiceFailure::new(
                         ServiceFailureStage::Request,
                         ServiceFailureCategory::Integrity,
                     ),
+                    peer: None,
                 });
             }
+            let peer = PeerFailure {
+                code: failure.code,
+                retryable: failure.retryable,
+            };
             Err(RequestAttemptError::Retained {
                 session: Box::new(session),
                 failure: ServiceFailure::new(
                     ServiceFailureStage::Request,
                     ServiceFailureCategory::Peer,
                 ),
+                peer: Some(peer),
             })
         }
         RequestOutcome::Response(response) => {
-            if response.request_id != expected_request_id {
+            if !request_id_matches(&expected_request_id, &response.request_id) {
                 return Err(RequestAttemptError::Retained {
                     session: Box::new(session),
                     failure: ServiceFailure::new(
                         ServiceFailureStage::Request,
                         ServiceFailureCategory::Integrity,
                     ),
+                    peer: None,
                 });
             }
             match validate_response_family(expected, response.payload) {
@@ -730,10 +945,19 @@ async fn request_payload(
                 Err(failure) => Err(RequestAttemptError::Retained {
                     session: Box::new(session),
                     failure,
+                    peer: None,
                 }),
             }
         }
     }
+}
+
+fn request_id_matches(expected: &RequestId, actual: &RequestId) -> bool {
+    expected == actual
+}
+
+fn optional_request_id_matches(expected: &RequestId, actual: Option<&RequestId>) -> bool {
+    actual == Some(expected)
 }
 
 fn validate_response_family(
@@ -741,9 +965,32 @@ fn validate_response_family(
     payload: ResponsePayload,
 ) -> Result<ResponsePayload, ServiceFailure> {
     match (expected, payload) {
+        (ExpectedResponse::Directory, ResponsePayload::DirectoryPicked(outcome)) => {
+            Ok(ResponsePayload::DirectoryPicked(outcome))
+        }
         (ExpectedResponse::Projects, ResponsePayload::ProjectListing(listing)) => {
             Ok(ResponsePayload::ProjectListing(listing))
         }
+        (
+            ExpectedResponse::AttachedProject,
+            ResponsePayload::AttachedProject {
+                project,
+                disposition,
+            },
+        ) => Ok(ResponsePayload::AttachedProject {
+            project,
+            disposition,
+        }),
+        (
+            ExpectedResponse::CreatedThread,
+            ResponsePayload::CreatedThread {
+                thread,
+                disposition,
+            },
+        ) => Ok(ResponsePayload::CreatedThread {
+            thread,
+            disposition,
+        }),
         (ExpectedResponse::Threads(project_id), ResponsePayload::ThreadListing(listing)) => {
             if listing
                 .threads()
@@ -797,34 +1044,194 @@ fn cleanup_plan(
     plan
 }
 
+/// One private retry plan for a project intake. Stable mutations retain their
+/// complete command identity; reads and the picker are intentionally retried
+/// with fresh frames.
+enum IntakeRetry {
+    Pick,
+    Attach(StableMutation),
+    RefreshProjects {
+        attached: ProjectSummary,
+    },
+    Create(StableMutation),
+    RefreshThreads {
+        project_id: ProjectId,
+        created: ThreadSummary,
+    },
+}
+
+struct IntakeState {
+    selected_directory: Option<DirectoryId>,
+    projects: Option<ProjectListing>,
+    retry: Option<IntakeRetry>,
+}
+
+impl IntakeState {
+    fn new() -> Self {
+        Self {
+            selected_directory: None,
+            projects: None,
+            retry: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.selected_directory = None;
+        self.projects = None;
+        self.retry = None;
+    }
+}
+
+struct SessionMaterial {
+    certificate: CertificateDer<'static>,
+    target: LoopbackTarget,
+    pinned_identity: PinnedIdentity,
+    limits: ClientSessionLimits,
+}
+
 struct ServiceRuntime {
     session: Option<ClientSession>,
     reconnect_capability: Option<artisan_protocol::ReconnectCapability>,
+    certificate: CertificateDer<'static>,
+    target: LoopbackTarget,
+    pinned_identity: PinnedIdentity,
+    limits: ClientSessionLimits,
     lease: Option<ForgeProcessLease>,
     cancel: CancelHandle,
     shutdown_grace: Duration,
     known_threads: HashSet<ThreadId>,
+    intake: IntakeState,
 }
 
 impl ServiceRuntime {
+    async fn reconnect(&mut self, frames: &mut FrameFactory) -> Result<(), ServiceFailure> {
+        // A session is never reused after its lifetime budget or a stable
+        // mutation settlement. Dropping it before moving the one current
+        // capability makes custody explicit and prevents two live owners.
+        drop(self.session.take());
+        let Some(capability) = self.reconnect_capability.take() else {
+            return Err(ServiceFailure::local_session());
+        };
+        let hello = match reconnect_hello(frames, capability) {
+            Ok(hello) => hello,
+            Err(failure) => return Err(failure),
+        };
+        if let Ok((session, welcome)) = ClientSession::connect(
+            self.target,
+            self.certificate.clone(),
+            self.pinned_identity,
+            hello,
+            self.limits,
+            &self.cancel,
+        )
+        .await
+        {
+            self.session = Some(session);
+            self.reconnect_capability = Some(welcome.welcome.reconnect_capability);
+            Ok(())
+        } else {
+            // The old session and the only current capability are gone;
+            // an uncertain handshake cannot safely be retried here.
+            self.session = None;
+            self.reconnect_capability = None;
+            Err(ServiceFailure::new(
+                ServiceFailureStage::Handshake,
+                ServiceFailureCategory::Authentication,
+            ))
+        }
+    }
+
+    async fn ensure_session(
+        &mut self,
+        frames: &mut FrameFactory,
+        force_reconnect: bool,
+    ) -> Result<(), ServiceFailure> {
+        let needs_reconnect = match self.session.as_ref() {
+            Some(session) => session_needs_reconnect(
+                session.admitted(),
+                session.admission_budget(),
+                force_reconnect,
+            ),
+            None => true,
+        };
+        if needs_reconnect {
+            self.reconnect(frames).await?;
+        }
+        Ok(())
+    }
+
+    fn finish_request_attempt(
+        &mut self,
+        attempt: Result<(ClientSession, ResponsePayload), RequestAttemptError>,
+    ) -> Result<ResponsePayload, RequestFailure> {
+        match attempt {
+            Ok((session, payload)) => {
+                self.session = Some(session);
+                Ok(payload)
+            }
+            Err(RequestAttemptError::Retained {
+                session,
+                failure,
+                peer,
+            }) => {
+                self.session = Some(*session);
+                Err(RequestFailure { failure, peer })
+            }
+            Err(RequestAttemptError::Terminal { failure }) => {
+                self.session = None;
+                Err(RequestFailure::terminal(failure))
+            }
+        }
+    }
+
     async fn request(
         &mut self,
         frames: &mut FrameFactory,
         request: ClientRequest,
         expected: ExpectedResponse,
-    ) -> Result<ResponsePayload, ServiceFailure> {
-        let session = self.session.take().ok_or(ServiceFailure::local_session())?;
-        match request_payload(session, frames, request, expected, &self.cancel).await {
-            Ok((session, payload)) => {
-                self.session = Some(session);
-                Ok(payload)
-            }
-            Err(RequestAttemptError::Retained { session, failure }) => {
-                self.session = Some(*session);
-                Err(failure)
-            }
-            Err(RequestAttemptError::Terminal { failure }) => Err(failure),
-        }
+    ) -> Result<ResponsePayload, RequestFailure> {
+        self.ensure_session(frames, false)
+            .await
+            .map_err(RequestFailure::terminal)?;
+        let session = self
+            .session
+            .take()
+            .ok_or(RequestFailure::terminal(ServiceFailure::local_session()))?;
+        let attempt = request_payload(session, frames, request, expected, &self.cancel).await;
+        self.finish_request_attempt(attempt)
+    }
+
+    async fn request_stable(
+        &mut self,
+        frames: &mut FrameFactory,
+        mutation: &StableMutation,
+        expected: ExpectedResponse,
+        force_reconnect: bool,
+    ) -> Result<ResponsePayload, RequestFailure> {
+        self.ensure_session(frames, force_reconnect)
+            .await
+            .map_err(RequestFailure::terminal)?;
+        let protocol_version = self
+            .session
+            .as_ref()
+            .map(ClientSession::protocol_version)
+            .ok_or(RequestFailure::terminal(ServiceFailure::local_session()))?;
+        let (envelope, expected_request_id) = mutation
+            .envelope(protocol_version)
+            .map_err(RequestFailure::terminal)?;
+        let session = self
+            .session
+            .take()
+            .ok_or(RequestFailure::terminal(ServiceFailure::local_session()))?;
+        let attempt = request_envelope_payload(
+            session,
+            envelope,
+            expected_request_id,
+            expected,
+            &self.cancel,
+        )
+        .await;
+        self.finish_request_attempt(attempt)
     }
 
     async fn cleanup(&mut self) -> Result<(), ServiceFailure> {
@@ -866,6 +1273,31 @@ impl ServiceRuntime {
     }
 }
 
+fn session_needs_reconnect(admitted: usize, admission_budget: usize, force: bool) -> bool {
+    force || admitted >= admission_budget
+}
+
+fn reconnect_hello(
+    frames: &mut FrameFactory,
+    capability: artisan_protocol::ReconnectCapability,
+) -> Result<WireEnvelope, ServiceFailure> {
+    let stamp = frames
+        .next()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Handshake))?;
+    let supported_versions = VersionOffer::new(vec![1])
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Handshake))?;
+    Ok(WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: stamp.frame_id,
+        sent_at: stamp.sent_at,
+        body: WireEnvelopeBody::Hello(Hello {
+            supported_versions,
+            credential: HelloCredential::Reconnect(capability),
+            supports_lifecycle_control: false,
+        }),
+    })
+}
+
 async fn start_native_service() -> Result<(ServiceRuntime, FrameFactory), StartupError> {
     let layout =
         Layout::discover().map_err(|_| StartupError::Stage(ServiceFailureStage::Layout))?;
@@ -903,14 +1335,21 @@ async fn attach_to_owned_forge(
 ) -> Result<ServiceRuntime, StartupError> {
     let result = establish_session(config, &lease, credentials, frames).await;
     match result {
-        Ok((session, reconnect_capability, cancel, shutdown_grace)) => Ok(ServiceRuntime {
-            session: Some(session),
-            reconnect_capability: Some(reconnect_capability),
-            lease: Some(lease),
-            cancel,
-            shutdown_grace,
-            known_threads: HashSet::new(),
-        }),
+        Ok((session, reconnect_capability, cancel, shutdown_grace, material)) => {
+            Ok(ServiceRuntime {
+                session: Some(session),
+                reconnect_capability: Some(reconnect_capability),
+                certificate: material.certificate,
+                target: material.target,
+                pinned_identity: material.pinned_identity,
+                limits: material.limits,
+                lease: Some(lease),
+                cancel,
+                shutdown_grace,
+                known_threads: HashSet::new(),
+                intake: IntakeState::new(),
+            })
+        }
         Err(error) => {
             let shutdown_grace =
                 finite_duration(config.listener().drain_timeout_ms()).unwrap_or(Duration::ZERO);
@@ -931,6 +1370,7 @@ async fn establish_session(
         artisan_protocol::ReconnectCapability,
         CancelHandle,
         Duration,
+        SessionMaterial,
     ),
     StartupError,
 > {
@@ -970,6 +1410,7 @@ async fn establish_session(
         admission_budget: usize::try_from(listener.requests_per_connection().get())
             .map_err(|_| StartupError::Stage(ServiceFailureStage::Instance))?,
     };
+    let trusted_certificate = certificate.clone();
     let cancel = CancelHandle::new();
     let (session, welcome) =
         ClientSession::connect(target, certificate, pinned_identity, hello, limits, &cancel)
@@ -980,6 +1421,12 @@ async fn establish_session(
         welcome.welcome.reconnect_capability,
         cancel,
         limits.shutdown,
+        SessionMaterial {
+            certificate: trusted_certificate,
+            target,
+            pinned_identity,
+            limits,
+        },
     ))
 }
 
@@ -1031,6 +1478,12 @@ async fn command_loop(
     loop {
         match commands.recv() {
             Ok(NativeTransportCommand::Shutdown) | Err(RecvError) => return Ok(()),
+            Ok(NativeTransportCommand::BeginProjectIntake) => {
+                begin_project_intake(runtime, frames, events).await?;
+            }
+            Ok(NativeTransportCommand::RetryProjectIntake) => {
+                retry_project_intake(runtime, frames, events).await?;
+            }
             Ok(NativeTransportCommand::SelectProject(project_id)) => {
                 select_project(runtime, frames, events, project_id).await?;
             }
@@ -1039,6 +1492,491 @@ async fn command_loop(
             }
         }
     }
+}
+
+async fn begin_project_intake(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    runtime.intake.reset();
+    pick_directory(runtime, frames, events).await
+}
+
+async fn retry_project_intake(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    let Some(retry) = runtime.intake.retry.take() else {
+        return Ok(());
+    };
+    match retry {
+        IntakeRetry::Pick => {
+            runtime.intake.selected_directory = None;
+            runtime.intake.projects = None;
+            pick_directory(runtime, frames, events).await
+        }
+        IntakeRetry::Attach(mutation) => {
+            attach_project_with_mutation(runtime, frames, events, mutation, true).await
+        }
+        IntakeRetry::RefreshProjects { attached } => {
+            refresh_projects(runtime, frames, events, attached).await
+        }
+        IntakeRetry::Create(mutation) => {
+            let Some(projects) = runtime.intake.projects.clone() else {
+                return report_intake_failure(
+                    runtime,
+                    events,
+                    NativeProjectIntakeOperation::CreateThread,
+                    RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+                    None,
+                    false,
+                );
+            };
+            let Some((project_id, title)) = create_command_values(&mutation) else {
+                return report_intake_failure(
+                    runtime,
+                    events,
+                    NativeProjectIntakeOperation::CreateThread,
+                    RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+                    None,
+                    false,
+                );
+            };
+            create_thread_with_mutation(
+                runtime, frames, events, projects, project_id, title, mutation, true,
+            )
+            .await
+        }
+        IntakeRetry::RefreshThreads {
+            project_id,
+            created,
+        } => refresh_threads(runtime, frames, events, project_id, created).await,
+    }
+}
+
+async fn pick_directory(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    runtime.intake.selected_directory = None;
+    runtime.intake.projects = None;
+    publish(
+        events,
+        NativeTransportEvent::ProjectIntakeProgress(NativeProjectIntakeStage::PickingDirectory),
+    )?;
+    let payload = match runtime
+        .request(
+            frames,
+            ClientRequest::PickDirectory,
+            ExpectedResponse::Directory,
+        )
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return report_intake_failure(
+                runtime,
+                events,
+                NativeProjectIntakeOperation::PickDirectory,
+                error,
+                Some(IntakeRetry::Pick),
+                true,
+            );
+        }
+    };
+    match payload {
+        ResponsePayload::DirectoryPicked(artisan_protocol::DirectoryPickOutcome::Selected(
+            directory_id,
+        )) => {
+            runtime.intake.selected_directory = Some(directory_id);
+            attach_project(runtime, frames, events).await
+        }
+        ResponsePayload::DirectoryPicked(artisan_protocol::DirectoryPickOutcome::Cancelled) => {
+            runtime.intake.reset();
+            publish(events, NativeTransportEvent::ProjectIntakeCancelled)
+        }
+        _ => report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::PickDirectory,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        ),
+    }
+}
+
+async fn attach_project(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    let Some(directory_id) = runtime.intake.selected_directory.clone() else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::AttachProject,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    };
+    let mutation = match attach_mutation(frames, directory_id) {
+        Ok(mutation) => mutation,
+        Err(failure) => {
+            return report_intake_failure(
+                runtime,
+                events,
+                NativeProjectIntakeOperation::AttachProject,
+                RequestFailure::terminal(failure),
+                None,
+                false,
+            );
+        }
+    };
+    attach_project_with_mutation(runtime, frames, events, mutation, false).await
+}
+
+async fn attach_project_with_mutation(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    mutation: StableMutation,
+    force_reconnect: bool,
+) -> Result<(), ServiceFailure> {
+    publish(
+        events,
+        NativeTransportEvent::ProjectIntakeProgress(NativeProjectIntakeStage::AttachingProject),
+    )?;
+    let payload = match runtime
+        .request_stable(
+            frames,
+            &mutation,
+            ExpectedResponse::AttachedProject,
+            force_reconnect,
+        )
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            let allow_retry = attach_retry_allowed(error);
+            return report_intake_failure(
+                runtime,
+                events,
+                NativeProjectIntakeOperation::AttachProject,
+                error,
+                Some(IntakeRetry::Attach(mutation)),
+                allow_retry,
+            );
+        }
+    };
+    let ResponsePayload::AttachedProject {
+        project,
+        disposition: _,
+    } = payload
+    else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::AttachProject,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    };
+    refresh_projects(runtime, frames, events, project).await
+}
+
+async fn refresh_projects(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    attached: ProjectSummary,
+) -> Result<(), ServiceFailure> {
+    publish(
+        events,
+        NativeTransportEvent::ProjectIntakeProgress(NativeProjectIntakeStage::RefreshingProjects),
+    )?;
+    let payload = match runtime
+        .request(frames, project_request(), ExpectedResponse::Projects)
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return report_intake_failure(
+                runtime,
+                events,
+                NativeProjectIntakeOperation::RefreshProjects,
+                error,
+                Some(IntakeRetry::RefreshProjects { attached }),
+                true,
+            );
+        }
+    };
+    let ResponsePayload::ProjectListing(projects) = payload else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::RefreshProjects,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    };
+    if !contains_exact_project(&projects, &attached) {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::RefreshProjects,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    }
+    runtime.intake.projects = Some(projects.clone());
+    let Ok(title) = ThreadTitle::parse("New thread") else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::CreateThread,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    };
+    create_thread(
+        runtime,
+        frames,
+        events,
+        projects,
+        attached.project_id.clone(),
+        title,
+    )
+    .await
+}
+
+async fn create_thread(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    projects: ProjectListing,
+    project_id: ProjectId,
+    title: ThreadTitle,
+) -> Result<(), ServiceFailure> {
+    let mutation = match create_mutation(frames, project_id.clone(), title.clone()) {
+        Ok(mutation) => mutation,
+        Err(failure) => {
+            return report_intake_failure(
+                runtime,
+                events,
+                NativeProjectIntakeOperation::CreateThread,
+                RequestFailure::terminal(failure),
+                None,
+                false,
+            );
+        }
+    };
+    create_thread_with_mutation(
+        runtime, frames, events, projects, project_id, title, mutation, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_thread_with_mutation(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    projects: ProjectListing,
+    project_id: ProjectId,
+    title: ThreadTitle,
+    mutation: StableMutation,
+    force_reconnect: bool,
+) -> Result<(), ServiceFailure> {
+    publish(
+        events,
+        NativeTransportEvent::ProjectIntakeProgress(NativeProjectIntakeStage::CreatingThread),
+    )?;
+    let payload = match runtime
+        .request_stable(
+            frames,
+            &mutation,
+            ExpectedResponse::CreatedThread,
+            force_reconnect,
+        )
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return report_intake_failure(
+                runtime,
+                events,
+                NativeProjectIntakeOperation::CreateThread,
+                error,
+                Some(IntakeRetry::Create(mutation)),
+                true,
+            );
+        }
+    };
+    let ResponsePayload::CreatedThread {
+        thread,
+        disposition: _,
+    } = payload
+    else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::CreateThread,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    };
+    if thread.project_id != project_id || thread.title != title {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::CreateThread,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    }
+    runtime.intake.projects = Some(projects);
+    refresh_threads(runtime, frames, events, project_id, thread).await
+}
+
+fn create_command_values(mutation: &StableMutation) -> Option<(ProjectId, ThreadTitle)> {
+    match &mutation.command {
+        Command::CreateThread(command) => Some((command.project_id.clone(), command.title.clone())),
+        _ => None,
+    }
+}
+
+async fn refresh_threads(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    project_id: ProjectId,
+    created: ThreadSummary,
+) -> Result<(), ServiceFailure> {
+    let payload = {
+        publish(
+            events,
+            NativeTransportEvent::ProjectIntakeProgress(
+                NativeProjectIntakeStage::RefreshingThreads,
+            ),
+        )?;
+        match runtime
+            .request(
+                frames,
+                threads_request(project_id.clone()),
+                ExpectedResponse::Threads(project_id.clone()),
+            )
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                return report_intake_failure(
+                    runtime,
+                    events,
+                    NativeProjectIntakeOperation::RefreshThreads,
+                    error,
+                    Some(IntakeRetry::RefreshThreads {
+                        project_id,
+                        created,
+                    }),
+                    true,
+                );
+            }
+        }
+    };
+    let ResponsePayload::ThreadListing(threads) = payload else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::RefreshThreads,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    };
+    if !contains_exact_thread(&threads, &created) {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::RefreshThreads,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    }
+    let Some(projects) = runtime.intake.projects.clone() else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::RefreshThreads,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    };
+    runtime.known_threads.clear();
+    runtime.known_threads.extend(
+        threads
+            .threads()
+            .iter()
+            .map(|thread| thread.thread_id.clone()),
+    );
+    runtime.intake.reset();
+    publish(
+        events,
+        NativeTransportEvent::ProjectIntakeReady {
+            projects,
+            project_id,
+            threads,
+            thread_id: created.thread_id,
+        },
+    )
+}
+
+fn report_intake_failure(
+    runtime: &mut ServiceRuntime,
+    events: &SyncSender<NativeTransportEvent>,
+    operation: NativeProjectIntakeOperation,
+    error: RequestFailure,
+    retry: Option<IntakeRetry>,
+    allow_retry: bool,
+) -> Result<(), ServiceFailure> {
+    let retryable = retry.is_some() && report_retry_allowed(error, allow_retry);
+    runtime.intake.retry = if retryable { retry } else { None };
+    publish(
+        events,
+        NativeTransportEvent::ProjectIntakeFailed {
+            operation,
+            failure: error.failure,
+            retryable,
+        },
+    )
+}
+
+fn report_retry_allowed(error: RequestFailure, allow_retry: bool) -> bool {
+    allow_retry && error.retryable()
+}
+
+fn attach_retry_allowed(error: RequestFailure) -> bool {
+    error.code() != Some(ErrorCode::DirectoryUnknown) && error.retryable()
+}
+
+fn contains_exact_project(projects: &ProjectListing, expected: &ProjectSummary) -> bool {
+    projects.projects().contains(expected)
+}
+
+fn contains_exact_thread(threads: &ThreadListing, expected: &ThreadSummary) -> bool {
+    threads.threads().contains(expected)
 }
 
 async fn load_initial_catalog(
@@ -1140,20 +2078,26 @@ fn custody_trace() -> Vec<CustodyStep> {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMMAND_CAPACITY, ExpectedResponse, FrameFactory, NativeTransportCommand,
-        ReadinessValidationError, RequestAttemptError, ServiceFailure, ServiceFailureCategory,
-        StartupError, ThreadSelectionDecision, finite_duration, make_request_frame,
-        payload_health_decision, project_request, snapshot_request, thread_selection_decision,
+        COMMAND_CAPACITY, ExpectedResponse, FrameFactory, IntakeRetry, NativeTransportCommand,
+        PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
+        ServiceFailureCategory, StartupError, ThreadSelectionDecision, attach_mutation,
+        contains_exact_project, contains_exact_thread, create_command_values, create_mutation,
+        finite_duration, make_request_frame, payload_health_decision, project_request,
+        reconnect_hello, session_needs_reconnect, snapshot_request, thread_selection_decision,
         threads_request, try_send_command, validate_readiness, validate_response_family,
     };
     use artisan_domain::{
-        CONVERSATION_QUERY_MAX_TURNS, ConversationCursor, ConversationQueryBounds,
-        ConversationSnapshot, DisplayName, ListProjectThreads, ProjectId, ProjectListing,
-        ProjectSummary, Query, QueryTurnCount, RootPath, ThreadId, ThreadListing, ThreadSummary,
-        UnixMillis,
+        AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
+        ConversationQueryBounds, ConversationSnapshot, CreateThread, DirectoryId, DisplayName,
+        ListProjectThreads, ProjectId, ProjectListing, ProjectSummary, Query, QueryTurnCount,
+        ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadListing, ThreadSummary,
+        ThreadTitle, UnixMillis,
     };
     use artisan_editor_cli::payload::PayloadHealth;
-    use artisan_protocol::{ClientRequest, ProtocolVersion, ResponsePayload, WireEnvelopeBody};
+    use artisan_protocol::{
+        ClientRequest, DirectoryPickOutcome, ErrorCode, HelloCredential, ProtocolVersion,
+        RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ResponsePayload, WireEnvelopeBody,
+    };
     use std::sync::mpsc::sync_channel;
 
     fn project(value: &str, name: &str) -> ProjectSummary {
@@ -1238,6 +2182,177 @@ mod tests {
     }
 
     #[test]
+    fn picker_and_query_retries_are_fresh_but_mutation_retries_are_stable() {
+        let mut frames = FrameFactory::new();
+        let (first_picker, first_picker_id) = make_request_frame(
+            &mut frames,
+            ProtocolVersion::V1,
+            ClientRequest::PickDirectory,
+        )
+        .expect("first picker frame");
+        let (second_picker, second_picker_id) = make_request_frame(
+            &mut frames,
+            ProtocolVersion::V1,
+            ClientRequest::PickDirectory,
+        )
+        .expect("second picker frame");
+        assert_ne!(first_picker.frame_id, second_picker.frame_id);
+        assert_ne!(first_picker_id, second_picker_id);
+
+        let directory_id = DirectoryId::parse("directory-a").expect("directory");
+        let attach = attach_mutation(&mut frames, directory_id.clone()).expect("attach mutation");
+        let (attach_first, attach_first_id) = attach
+            .envelope(ProtocolVersion::V1)
+            .expect("attach envelope");
+        let (attach_retry, attach_retry_id) = attach
+            .envelope(ProtocolVersion::V1)
+            .expect("attach retry envelope");
+        assert_eq!(attach_first.frame_id, attach_retry.frame_id);
+        assert_eq!(attach_first.sent_at, attach_retry.sent_at);
+        assert_eq!(attach_first_id, attach_retry_id);
+        assert_eq!(
+            attach_first.frame_id.to_request_id().expect("attach id"),
+            attach_first_id
+        );
+        assert!(matches!(
+            attach_first.body,
+            WireEnvelopeBody::Request(ClientRequest::Command(Command::AttachProject(
+                AttachProject { request_id, directory_id: selected }
+            ))) if request_id == attach_first_id && selected == directory_id
+        ));
+
+        let (query_retry, query_retry_id) =
+            make_request_frame(&mut frames, ProtocolVersion::V1, project_request())
+                .expect("query retry frame");
+        assert_ne!(query_retry.frame_id, attach_retry.frame_id);
+        assert_ne!(query_retry_id, attach_retry_id);
+
+        let title = ThreadTitle::parse("New thread").expect("title");
+        let project_id = ProjectId::parse("project-a").expect("project");
+        let create = create_mutation(&mut frames, project_id.clone(), title.clone())
+            .expect("create mutation");
+        let (create_first, create_first_id) = create
+            .envelope(ProtocolVersion::V1)
+            .expect("create envelope");
+        let (create_retry, create_retry_id) = create
+            .envelope(ProtocolVersion::V1)
+            .expect("create retry envelope");
+        assert_eq!(create_first.frame_id, create_retry.frame_id);
+        assert_eq!(create_first.sent_at, create_retry.sent_at);
+        assert_eq!(create_first_id, create_retry_id);
+        assert!(matches!(
+            create_first.body,
+            WireEnvelopeBody::Request(ClientRequest::Command(Command::CreateThread(
+                CreateThread { request_id, project_id: selected, title: selected_title }
+            ))) if request_id == create_first_id
+                && selected == project_id
+                && selected_title == title
+        ));
+    }
+
+    #[test]
+    fn stable_retry_plan_keeps_the_complete_mutation_without_a_second_identity() {
+        let mut frames = FrameFactory::new();
+        let project_id = ProjectId::parse("project-a").expect("project");
+        let title = ThreadTitle::parse("New thread").expect("title");
+        let mutation = create_mutation(&mut frames, project_id.clone(), title.clone())
+            .expect("create mutation");
+        let (original_frame, original_id) = mutation.envelope(ProtocolVersion::V1).expect("frame");
+        let retry = IntakeRetry::Create(mutation);
+        let IntakeRetry::Create(stable) = retry else {
+            panic!("create retry plan changed variant");
+        };
+        let (retry_frame, retry_id) = stable.envelope(ProtocolVersion::V1).expect("retry frame");
+        assert_eq!(original_frame.frame_id, retry_frame.frame_id);
+        assert_eq!(original_frame.sent_at, retry_frame.sent_at);
+        assert_eq!(original_id, retry_id);
+        assert_eq!(create_command_values(&stable), Some((project_id, title)));
+    }
+
+    #[test]
+    fn response_families_cover_intake_mutations_and_reject_cross_family_payloads() {
+        let attached = project("project-a", "A");
+        assert!(matches!(
+            validate_response_family(
+                ExpectedResponse::AttachedProject,
+                ResponsePayload::AttachedProject {
+                    project: attached.clone(),
+                    disposition: ReceiptDisposition::Accepted,
+                },
+            ),
+            Ok(ResponsePayload::AttachedProject { .. })
+        ));
+
+        let created = thread("thread-a", "project-a");
+        assert!(matches!(
+            validate_response_family(
+                ExpectedResponse::CreatedThread,
+                ResponsePayload::CreatedThread {
+                    thread: created,
+                    disposition: ReceiptDisposition::Duplicate,
+                },
+            ),
+            Ok(ResponsePayload::CreatedThread { .. })
+        ));
+
+        let listing = ProjectListing::new(vec![attached]).expect("projects");
+        assert!(
+            validate_response_family(
+                ExpectedResponse::AttachedProject,
+                ResponsePayload::ProjectListing(listing),
+            )
+            .is_err()
+        );
+        let threads = ThreadListing::new(vec![thread("thread-a", "project-a")]).expect("threads");
+        assert!(
+            validate_response_family(
+                ExpectedResponse::CreatedThread,
+                ResponsePayload::ThreadListing(threads),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn authoritative_refreshes_require_full_summary_equality() {
+        let attached = project("project-a", "A");
+        let same_identity_different_summary = project("project-a", "Renamed");
+        let projects = ProjectListing::new(vec![attached.clone()]).expect("projects");
+        assert!(contains_exact_project(&projects, &attached));
+        assert!(!contains_exact_project(
+            &projects,
+            &same_identity_different_summary
+        ));
+
+        let created = thread("thread-a", "project-a");
+        let same_identity_different_thread = thread("thread-a", "project-a");
+        let threads = ThreadListing::new(vec![created.clone()]).expect("threads");
+        assert!(contains_exact_thread(&threads, &created));
+        assert!(!contains_exact_thread(
+            &threads,
+            &ThreadSummary {
+                title: ThreadTitle::parse("Different title").expect("title"),
+                ..same_identity_different_thread
+            }
+        ));
+    }
+
+    #[test]
+    fn cancelled_picker_outcome_has_no_durable_command_input() {
+        let payload = ResponsePayload::DirectoryPicked(DirectoryPickOutcome::Cancelled);
+        assert!(matches!(
+            &payload,
+            ResponsePayload::DirectoryPicked(DirectoryPickOutcome::Cancelled)
+        ));
+        assert!(!matches!(
+            &payload,
+            ResponsePayload::AttachedProject { .. }
+                | ResponsePayload::CreatedThread { .. }
+                | ResponsePayload::FirstMessageQueued(_)
+        ));
+    }
+
+    #[test]
     fn request_families_are_exact() {
         let project_id = ProjectId::parse("project-a").expect("project");
         let thread_id = ThreadId::parse("thread-a").expect("thread");
@@ -1263,6 +2378,15 @@ mod tests {
         let other_project_id = ProjectId::parse("project-b").expect("project");
         let thread_id = ThreadId::parse("thread-a").expect("thread");
         let other_thread_id = ThreadId::parse("thread-b").expect("thread");
+        assert!(matches!(
+            validate_response_family(
+                ExpectedResponse::Directory,
+                ResponsePayload::DirectoryPicked(DirectoryPickOutcome::Selected(
+                    DirectoryId::parse("directory-a").expect("directory")
+                )),
+            ),
+            Ok(ResponsePayload::DirectoryPicked(_))
+        ));
         let projects = ProjectListing::new(vec![project("project-a", "A")]).expect("projects");
         assert!(
             validate_response_family(
@@ -1315,6 +2439,20 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn response_correlation_requires_the_exact_outer_request_id() {
+        let expected = RequestId::parse("request-a").expect("request");
+        let other = RequestId::parse("request-b").expect("request");
+        assert!(super::request_id_matches(&expected, &expected));
+        assert!(!super::request_id_matches(&expected, &other));
+        assert!(super::optional_request_id_matches(
+            &expected,
+            Some(&expected)
+        ));
+        assert!(!super::optional_request_id_matches(&expected, Some(&other)));
+        assert!(!super::optional_request_id_matches(&expected, None));
     }
 
     #[test]
@@ -1395,6 +2533,80 @@ mod tests {
             ServiceFailure::local_session().category,
             ServiceFailureCategory::LocalSession
         );
+    }
+
+    #[test]
+    fn only_correlated_retryable_peer_classification_can_retain_a_retry_plan() {
+        let retryable = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::Internal,
+                retryable: true,
+            }),
+        };
+        assert!(retryable.retryable());
+        assert_eq!(retryable.code(), Some(ErrorCode::Internal));
+
+        let nonretryable = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::IdempotencyConflict,
+                retryable: false,
+            }),
+        };
+        assert!(!nonretryable.retryable());
+        assert_eq!(nonretryable.code(), Some(ErrorCode::IdempotencyConflict));
+
+        let terminal = RequestFailure::terminal(ServiceFailure::local_session());
+        assert!(!terminal.retryable());
+        assert_eq!(terminal.code(), None);
+    }
+
+    #[test]
+    fn admission_budget_one_rolls_before_the_next_request_and_stable_retry_forces_it() {
+        assert!(!session_needs_reconnect(0, 1, false));
+        assert!(session_needs_reconnect(1, 1, false));
+        assert!(session_needs_reconnect(1, 1, true));
+        assert!(session_needs_reconnect(0, 1, true));
+    }
+
+    #[test]
+    fn reconnect_hello_consumes_a_capability_without_formatting_or_copying_it() {
+        let capability = ReconnectCapability::from_bytes([0xA5; RECONNECT_CAPABILITY_BYTES]);
+        let mut frames = FrameFactory::new();
+        let hello = reconnect_hello(&mut frames, capability).expect("reconnect hello");
+        assert!(matches!(
+            hello.body,
+            WireEnvelopeBody::Hello(artisan_protocol::Hello {
+                credential: HelloCredential::Reconnect(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn directory_unknown_is_a_terminal_attach_classification() {
+        let failure = RequestFailure {
+            failure: ServiceFailure::new(
+                super::ServiceFailureStage::Request,
+                ServiceFailureCategory::Peer,
+            ),
+            peer: Some(PeerFailure {
+                code: ErrorCode::DirectoryUnknown,
+                retryable: true,
+            }),
+        };
+        assert!(failure.retryable());
+        assert_eq!(failure.code(), Some(ErrorCode::DirectoryUnknown));
+        // The attach path treats this exact code as terminal; the retained
+        // failure classification itself remains redacted.
+        assert!(!super::attach_retry_allowed(failure));
     }
 
     #[test]
