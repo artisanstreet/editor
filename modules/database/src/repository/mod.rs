@@ -12,6 +12,7 @@ mod run_launch;
 mod run_observation;
 mod startup_reconciliation;
 mod startup_reconciliation_disposition;
+mod thread_engine_config;
 
 use sea_orm::{DatabaseConnection, DbErr};
 use thiserror::Error;
@@ -55,6 +56,9 @@ pub use startup_reconciliation_disposition::{
     StartupReconciliationDisposition, StartupReconciliationDispositionError,
     StartupReconciliationDispositionOutcome, StartupReconciliationDispositionReceipt,
 };
+pub use thread_engine_config::{
+    SetThreadEngineConfigInput, SetThreadEngineConfigResult, ThreadEngineSettings,
+};
 
 /// Typed failures at the native persistence boundary.
 #[derive(Debug, Error)]
@@ -73,6 +77,13 @@ pub enum RepositoryError {
 
     #[error("thread `{thread_id}` is not attached to a known project")]
     ThreadNotFound { thread_id: ThreadId },
+
+    #[error("thread `{thread_id}` engine configuration revision does not match the precondition")]
+    EngineConfigRevisionConflict {
+        thread_id: ThreadId,
+        expected_revision: Option<artisan_domain::EngineConfigRevision>,
+        actual_revision: Option<artisan_domain::EngineConfigRevision>,
+    },
 
     #[error("thread `{thread_id}` already exists with different persisted values")]
     ThreadConflict { thread_id: ThreadId },

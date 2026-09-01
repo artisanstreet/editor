@@ -16,6 +16,7 @@ use sea_orm_migration::sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend,
 const INITIAL_MIGRATION: &str = "m20260824_000001_initial_native_schema";
 const RECEIPTS_MIGRATION: &str = "m20260824_000002_global_command_receipts";
 const EXECUTION_MIGRATION: &str = "m20260824_000003_conversation_execution";
+const ENGINE_CONFIG_MIGRATION: &str = "m20260830_000004_engine_run_config";
 
 const BASE_TABLES: [&str; 5] = [
     "attached_projects",
@@ -487,7 +488,7 @@ async fn reject_run(
     Ok(())
 }
 
-const RUN_COLUMNS: [&str; 18] = [
+const RUN_COLUMNS: [&str; 21] = [
     "run_id",
     "thread_id",
     "run_start_key",
@@ -506,6 +507,9 @@ const RUN_COLUMNS: [&str; 18] = [
     "created_at_ms",
     "updated_at_ms",
     "terminal_at_ms",
+    "engine_run_config_version",
+    "engine_run_config_revision",
+    "engine_run_config",
 ];
 
 struct RunSpec {
@@ -527,6 +531,9 @@ struct RunSpec {
     terminal_at: String,
     created_at: i64,
     updated_at: i64,
+    engine_config_version: String,
+    engine_config_revision: String,
+    engine_config: String,
 }
 
 fn queued_run(run_id: &str) -> RunSpec {
@@ -549,6 +556,9 @@ fn queued_run(run_id: &str) -> RunSpec {
         terminal_at: NULL_LITERAL.to_string(),
         created_at: 10,
         updated_at: 10,
+        engine_config_version: "1".to_string(),
+        engine_config_revision: "1".to_string(),
+        engine_config: filled_blob(1, 0x44),
     }
 }
 
@@ -620,6 +630,9 @@ impl RunSpec {
                 self.created_at.to_string(),
                 self.updated_at.to_string(),
                 self.terminal_at.clone(),
+                self.engine_config_version.clone(),
+                self.engine_config_revision.clone(),
+                self.engine_config.clone(),
             ],
         )
     }
@@ -1290,6 +1303,7 @@ async fn fresh_migrate_is_idempotent_and_registers_the_third_version() -> Result
             INITIAL_MIGRATION.to_string(),
             RECEIPTS_MIGRATION.to_string(),
             EXECUTION_MIGRATION.to_string(),
+            ENGINE_CONFIG_MIGRATION.to_string(),
         ]
     );
     reopened.close().await?;
@@ -1311,7 +1325,7 @@ async fn execution_upgrade_preserves_receipts_era_data() -> Result<(), Box<dyn E
 
     migrate_to_current(&database).await?;
 
-    assert_eq!(migration_versions(&database).await?.len(), 3);
+    assert_eq!(migration_versions(&database).await?.len(), 4);
     let dispatch = database
         .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
@@ -1361,7 +1375,7 @@ async fn down_reverses_only_execution_objects_then_reapply_restores_them()
 
     Migrator::up(&database, None).await?;
 
-    assert_eq!(migration_versions(&database).await?.len(), 3);
+    assert_eq!(migration_versions(&database).await?.len(), 4);
     assert_eq!(named_table_count(&database, &all_tables).await?, 13);
     assert_eq!(scalar_i64(&database, execution_index).await?, 1);
     database.close().await?;

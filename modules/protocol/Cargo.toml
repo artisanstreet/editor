@@ -26,5 +26,9 @@ path = "../../tests/protocol/owned_codec.rs"
 name = "product_roundtrip"
 path = "../../tests/protocol/product_roundtrip.rs"
 
+[[test]]
+name = "engine_run_config"
+path = "../../tests/protocol/engine_run_config.rs"
+
 [lints]
 workspace = true

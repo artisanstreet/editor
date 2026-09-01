@@ -30,6 +30,7 @@
 pub mod bounds;
 pub mod commands;
 pub mod conversation;
+pub mod engine_config;
 pub mod events;
 pub mod identifiers;
 mod legacy_workspace_id;
@@ -40,13 +41,16 @@ pub mod time;
 pub use bounds::{
     CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES, DIRECTORY_LISTING_MAX_ENTRIES,
-    DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, ENGINE_PROFILE_ID_MAX_BYTES,
-    IDENTIFIER_MAX_BYTES, MESSAGE_BODY_MAX_BYTES, PROJECT_LISTING_MAX_PROJECTS,
-    ROOT_PATH_MAX_BYTES, THREAD_LISTING_MAX_THREADS, THREAD_TITLE_MAX_BYTES,
+    DIRECTORY_LISTING_MAX_PLACES, DISPLAY_NAME_MAX_BYTES, ENGINE_CONFIG_MAX_ENCODED_BYTES,
+    ENGINE_PROFILE_ID_MAX_BYTES, ENGINE_RUNTIME_MAX_BODY_BYTES, ENGINE_RUNTIME_MAX_HEADER_COUNT,
+    ENGINE_RUNTIME_MAX_LINE_BYTES, ENGINE_RUNTIME_MAX_MILLIS, ENGINE_RUNTIME_MAX_OBSERVATIONS,
+    ENGINE_RUNTIME_MAX_SSE_EVENT_BYTES, ENGINE_RUNTIME_MAX_STDERR_BYTES, IDENTIFIER_MAX_BYTES,
+    MESSAGE_BODY_MAX_BYTES, PROJECT_LISTING_MAX_PROJECTS, ROOT_PATH_MAX_BYTES,
+    THREAD_LISTING_MAX_THREADS, THREAD_TITLE_MAX_BYTES,
 };
 pub use commands::{
     AttachProject, Command, CreateThread, ListAttachedProjects, ListDirectories,
-    ListProjectThreads, Query, QueueFirstMessage,
+    ListProjectThreads, Query, QueueFirstMessage, SetThreadEngineConfig,
 };
 pub use conversation::{
     AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
@@ -57,10 +61,17 @@ pub use conversation::{
     ItemOrdinal, LifecycleTransitionError, PatchBatch, PatchBatchError, PatchSequence,
     QueryTurnCount, QueryTurnCountError, Revision, TurnOrdinal, UserMessageItem,
 };
+pub use engine_config::{
+    ApprovalMode, ByteLimit, CountLimit, EngineConfigError, EngineConfigReason,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EnginePermissionPolicy,
+    EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection,
+    FilesystemAccess, FiniteMillis, NetworkAccess, OpenCode2Selection, WebSearchAccess,
+};
 pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
 pub use identifiers::{
-    DirectoryId, EngineProfileId, EngineProfileIdError, IdentifierError, ItemId, MessageId,
-    PatchId, ProjectId, RequestId, RunId, ThreadId, TurnId,
+    DirectoryId, EngineAgentId, EngineModelId, EngineProfileId, EngineProfileIdError,
+    EngineRouteId, EngineVariantId, IdentifierError, ItemId, MessageId, PatchId, PermissionId,
+    ProjectId, RequestId, RunId, ThreadId, TurnId,
 };
 pub use model::{
     CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,

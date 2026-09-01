@@ -57,6 +57,9 @@ async fn seed_parents(
         title: Set("Run and item entities".to_owned()),
         created_at_ms: Set(20),
         updated_at_ms: Set(20),
+        engine_run_config_version: Set(None),
+        engine_run_config_revision: Set(0),
+        engine_run_config: Set(None),
     }
     .insert(database)
     .await
@@ -116,6 +119,11 @@ async fn seed_run(database: &DatabaseConnection) -> entities::assistant_run::Mod
         created_at_ms: Set(50),
         updated_at_ms: Set(50),
         terminal_at_ms: Set(None),
+        engine_run_config_version: Set(Some(1)),
+        engine_run_config_revision: Set(Some(1)),
+        engine_run_config: Set(Some(OpaqueBytes::new(
+            br#"{"version":1,"engine":"opencode2","profile_id":"profile-fixture","model_id":"model-fixture","route_id":"route-fixture","variant_id":null,"permission":{"permission_id":"permission-fixture","agent_id":"agent-fixture","approval":"on_request","filesystem":"workspace","network":"enabled","web_search":"disabled"},"runtime":{"attempt_budget_ms":100,"readiness_budget_ms":1,"health_budget_ms":1,"prompt_budget_ms":1,"stream_budget_ms":1,"close_budget_ms":1,"max_json_body_bytes":8192,"max_sse_line_bytes":4096,"max_sse_event_bytes":8192,"max_readiness_line_bytes":4096,"max_header_count":8,"max_http_buffer_bytes":8192,"max_stderr_bytes":4096,"observation_capacity":16}}"#.to_vec(),
+        ))),
     }
     .insert(database)
     .await

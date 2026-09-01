@@ -88,6 +88,9 @@ async fn seed_core_graph(database: &DatabaseConnection) -> CoreGraph {
         title: Set("Entity test".to_owned()),
         created_at_ms: Set(20),
         updated_at_ms: Set(20),
+        engine_run_config_version: Set(None),
+        engine_run_config_revision: Set(0),
+        engine_run_config: Set(None),
     }
     .insert(database)
     .await

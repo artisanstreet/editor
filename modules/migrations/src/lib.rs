@@ -7,6 +7,7 @@
 mod m20260824_000001_initial_native_schema;
 mod m20260824_000002_global_command_receipts;
 mod m20260824_000003_conversation_execution;
+mod m20260830_000004_engine_run_config;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseConnection;
@@ -22,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260824_000001_initial_native_schema::Migration),
             Box::new(m20260824_000002_global_command_receipts::Migration),
             Box::new(m20260824_000003_conversation_execution::Migration),
+            Box::new(m20260830_000004_engine_run_config::Migration),
         ]
     }
 }

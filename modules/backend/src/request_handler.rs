@@ -38,15 +38,17 @@ use std::{
 
 use artisan_database::{
     AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError,
+    SetThreadEngineConfigInput,
 };
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, MessageId, PatchBatch, ProjectId, Query,
-    QueueFirstMessage, RequestId, RootPath, ThreadId, UnixMillis,
+    QueueFirstMessage, RequestId, RootPath, SetThreadEngineConfig, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome, ErrorCode, ErrorDetail,
     FirstMessageReceipt, ProtocolFailure, ResponsePayload, ServerResponse,
+    SetThreadEngineConfigResult,
 };
 use tokio::sync::Mutex;
 
@@ -739,6 +741,10 @@ impl RequestHandler {
             Command::QueueFirstMessage(queue) => {
                 self.queue_first_message_outcome(request_id, queue).await
             }
+            Command::SetThreadEngineConfig(config) => {
+                self.set_thread_engine_config_outcome(request_id, config.as_ref())
+                    .await
+            }
         }
     }
 
@@ -863,6 +869,45 @@ impl RequestHandler {
         ))
     }
 
+    /// Answers a durable thread engine-configuration mutation. Receipt
+    /// lookup is deliberately before the acceptance clock so exact replays
+    /// never consult fresh admission state.
+    async fn set_thread_engine_config_outcome(
+        &self,
+        request_id: &RequestId,
+        config: &SetThreadEngineConfig,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        if let Some(replay) = self
+            .repository
+            .lookup_set_thread_engine_config(
+                config.request_id(),
+                config.thread_id(),
+                config.precondition(),
+                config.config(),
+            )
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?
+        {
+            return Ok(set_thread_engine_config_response(request_id, &replay));
+        }
+        let accepted_at = self
+            .origin
+            .acceptance_instant()
+            .map_err(|error| origin_clock_failure(error, request_id))?;
+        let result = self
+            .repository
+            .set_thread_engine_config(SetThreadEngineConfigInput {
+                request_id: config.request_id().clone(),
+                thread_id: config.thread_id().clone(),
+                precondition: config.precondition(),
+                config: config.config().clone(),
+                accepted_at,
+            })
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?;
+        Ok(set_thread_engine_config_response(request_id, &result))
+    }
+
     /// Answers conversation reads and subscription control.
     ///
     /// `ConversationRequest::Query` calls `Repository::read_conversation_snapshot`
@@ -925,6 +970,7 @@ fn repository_failure(error: &RepositoryError, request_id: &RequestId) -> Protoc
     let (code, retryable) = match error {
         Failure::ProjectNotFound { .. } => (ErrorCode::ProjectUnknown, false),
         Failure::ThreadNotFound { .. } => (ErrorCode::ThreadUnknown, false),
+        Failure::EngineConfigRevisionConflict { .. } => (ErrorCode::EngineConfigConflict, false),
         Failure::IdempotencyConflict { .. } => (ErrorCode::IdempotencyConflict, false),
         Failure::FirstMessageAlreadyExists { .. } => (ErrorCode::InvalidInput, false),
         Failure::ProjectConflict { .. }
@@ -944,6 +990,21 @@ fn repository_failure(error: &RepositoryError, request_id: &RequestId) -> Protoc
         Failure::Database { .. } => (ErrorCode::Internal, true),
     };
     typed_failure(code, error.to_string(), retryable, request_id)
+}
+
+fn set_thread_engine_config_response(
+    request_id: &RequestId,
+    result: &artisan_database::SetThreadEngineConfigResult,
+) -> ServerResponse {
+    outcome(
+        request_id,
+        ResponsePayload::ThreadEngineConfigSet(SetThreadEngineConfigResult {
+            request_id: result.receipt().request_id.clone(),
+            thread_id: result.thread_id().clone(),
+            revision: result.revision(),
+            disposition: result.receipt().disposition,
+        }),
+    )
 }
 
 /// Maps a subscription-preparation failure without exposing its durable

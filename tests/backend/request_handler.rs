@@ -24,19 +24,24 @@ use artisan_database::{
     AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
     MessageDispatchPayload, ProviderBindingBytes, QueueFirstMessageInput, Repository,
-    RunLaunchCredentials, RunStartKey, SqliteConfig,
+    RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
 };
 use artisan_domain::{
-    Command, ConversationCursor, ConversationPatch, ConversationQuery, ConversationQueryBounds,
-    ConversationRequest, ConversationSubscribe, ConversationUnsubscribe, DirectoryId, DisplayName,
-    IncrementalText, ItemId, ListAttachedProjects, ListDirectories, ListProjectThreads,
-    MessageBody, MessageId, PatchBatch, PatchId, PatchSequence, ProjectId, Query, QueryTurnCount,
-    ReceiptDisposition, RequestId, Revision, RootPath, ThreadId, ThreadSummary, ThreadTitle,
-    UnixMillis,
+    ApprovalMode, ByteLimit, Command, ConversationCursor, ConversationPatch, ConversationQuery,
+    ConversationQueryBounds, ConversationRequest, ConversationSubscribe, ConversationUnsubscribe,
+    CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigRevision,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText, ItemId, ListAttachedProjects,
+    ListDirectories, ListProjectThreads, MessageBody, MessageId, NetworkAccess, OpenCode2Selection,
+    PatchBatch, PatchId, PatchSequence, PermissionId, ProjectId, Query, QueryTurnCount,
+    ReceiptDisposition, RequestId, Revision, RootPath, SetThreadEngineConfig, ThreadId,
+    ThreadSummary, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_protocol::{
-    ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt,
-    LifecycleRequest, ProtocolFailure, ResponsePayload, ServerResponse,
+    ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt, FrameId,
+    LifecycleRequest, ProtocolFailure, ProtocolValueError, ProtocolVersion, ResponsePayload,
+    ServerResponse, SetThreadEngineConfigResult, WireEnvelope, WireEnvelopeBody,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -275,6 +280,22 @@ fn queue_command(request_id: &str, thread: &str, body: &str) -> ClientRequest {
     ))
 }
 
+fn engine_config_command(
+    request_id: &str,
+    thread_id: &str,
+    precondition: EngineConfigUpdatePrecondition,
+    label: &str,
+) -> ClientRequest {
+    ClientRequest::Command(Command::SetThreadEngineConfig(Box::new(
+        SetThreadEngineConfig::new(
+            request(request_id),
+            ThreadId::parse(thread_id).expect("valid thread id"),
+            precondition,
+            engine_config(label),
+        ),
+    )))
+}
+
 /// Extracts the created-thread payload from a successful response.
 fn created_thread_of(response: ServerResponse) -> (ThreadSummary, ReceiptDisposition) {
     let ResponsePayload::CreatedThread {
@@ -293,6 +314,45 @@ fn queued_receipt_of(response: ServerResponse) -> FirstMessageReceipt {
         panic!("expected a first-message receipt payload");
     };
     receipt
+}
+
+fn engine_config(label: &str) -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse(format!("permission-{label}")).expect("permission id is valid"),
+        EngineAgentId::parse(format!("agent-{label}")).expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse(format!("profile-{label}")).expect("profile id is valid"),
+            EngineModelId::parse(format!("model-{label}")).expect("model id is valid"),
+            EngineRouteId::parse(format!("route-{label}")).expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
 }
 
 /// Reads back one durable dispatch payload through the repository facade.
@@ -327,6 +387,16 @@ async fn seed_conversation(repository: &Repository, thread_id: &str, label: &str
         .await
         .expect("seed thread should persist");
     repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: request(&format!("request-engine-{label}")),
+            thread_id: ThreadId::parse(thread_id).expect("valid thread id"),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: engine_config(label),
+            accepted_at: UnixMillis::from_millis(250),
+        })
+        .await
+        .expect("seed engine configuration should persist");
+    repository
         .queue_first_message(message_input(
             &format!("request-message-{label}"),
             thread_id,
@@ -352,12 +422,13 @@ async fn seed_conversation(repository: &Repository, thread_id: &str, label: &str
         artisan_domain::PatchId::parse(format!("patch-{label}-first")).expect("valid patch id");
     let second_patch_id =
         artisan_domain::PatchId::parse(format!("patch-{label}-second")).expect("valid patch id");
-    let mut run_start_key_bytes = [0x44; 32];
-    for (index, byte) in label.as_bytes().iter().take(32).enumerate() {
-        run_start_key_bytes[index] = *byte;
-    }
-    let run_start_key = RunStartKey::new(run_start_key_bytes);
+    let run_start_key = run_start_key(label);
     let credentials = RunLaunchCredentials::new([0xa1; 32], [0xb2; 32], [0xc3; 32]);
+    let engine_settings = repository
+        .read_thread_engine_settings(&ThreadId::parse(thread_id).expect("valid thread id"))
+        .await
+        .expect("seed engine configuration should read")
+        .expect("seed engine configuration should be present");
     let launched = repository
         .launch_claimed_run(LaunchClaimedRun {
             claimed: &claimed,
@@ -369,6 +440,7 @@ async fn seed_conversation(repository: &Repository, thread_id: &str, label: &str
             operated_at: UnixMillis::from_millis(500),
             run_start_key: &run_start_key,
             credentials: &credentials,
+            engine_settings: &engine_settings,
         })
         .await
         .expect("seed run launch should persist");
@@ -394,6 +466,14 @@ async fn seed_conversation(repository: &Repository, thread_id: &str, label: &str
         bound,
         BindRunProviderOutcome::Bound(_) | BindRunProviderOutcome::AlreadyBound(_)
     ));
+}
+
+fn run_start_key(label: &str) -> RunStartKey {
+    let mut bytes = [0x44; 32];
+    for (index, byte) in label.as_bytes().iter().take(32).enumerate() {
+        bytes[index] = *byte;
+    }
+    RunStartKey::new(bytes)
 }
 
 fn single_patch_batch(thread_id: ThreadId, from: u64, to: u64, patch_id: &str) -> PatchBatch {
@@ -728,6 +808,36 @@ async fn mismatched_command_correlation_fails_as_invalid_input() {
     assert_eq!(failure.code, ErrorCode::InvalidInput);
     assert!(!failure.retryable);
     assert_eq!(failure.request_id, Some(request("frame-other")));
+}
+
+#[test]
+fn engine_config_response_correlation_observes_nested_request_mismatch() {
+    fn envelope(nested_request_id: &str) -> WireEnvelope {
+        WireEnvelope {
+            protocol_version: ProtocolVersion::V1,
+            frame_id: FrameId::parse("request-engine-correlation").expect("valid frame id"),
+            sent_at: UnixMillis::from_millis(1),
+            body: WireEnvelopeBody::Response(ServerResponse {
+                request_id: request("request-engine-correlation"),
+                payload: ResponsePayload::ThreadEngineConfigSet(SetThreadEngineConfigResult {
+                    request_id: request(nested_request_id),
+                    thread_id: ThreadId::parse("thread-engine-correlation")
+                        .expect("valid thread id"),
+                    revision: EngineConfigRevision::new(1).expect("valid revision"),
+                    disposition: ReceiptDisposition::Accepted,
+                }),
+            }),
+        }
+    }
+
+    assert_eq!(
+        envelope("request-engine-correlation").validate_correlation(),
+        Ok(())
+    );
+    assert_eq!(
+        envelope("request-engine-other").validate_correlation(),
+        Err(ProtocolValueError::ResponseCorrelationMismatch)
+    );
 }
 
 #[tokio::test]
@@ -2150,6 +2260,144 @@ async fn receipt_handler_fresh_subscribe_returns_real_snapshot_pending_then_acti
     assert_eq!(active.state(), SubscriptionState::Active);
     assert_eq!(active.cursor().get(), 2);
     assert_eq!(active.lease(), activated.lease());
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn engine_config_command_is_durable_idempotent_and_revision_fenced() {
+    let (_temporary, storage) = opened_storage("engine-config-command").await;
+    let repository = storage.repository();
+    repository
+        .attach_project(attach_input(
+            "engine-project-request",
+            "engine-project-directory",
+            "engine-project",
+        ))
+        .await
+        .expect("engine project should attach");
+    repository
+        .create_thread(create_input(
+            "engine-thread-create",
+            "engine-project",
+            "engine-thread",
+        ))
+        .await
+        .expect("engine thread should create");
+
+    let origin = ScriptedOriginHandle::scripted(
+        Vec::new(),
+        vec![
+            Ok(UnixMillis::from_millis(400)),
+            Ok(UnixMillis::from_millis(401)),
+            Ok(UnixMillis::from_millis(402)),
+        ],
+    );
+    let handler = scripted_handler(&storage, &origin);
+    let first = engine_config_command(
+        "engine-first",
+        "engine-thread",
+        EngineConfigUpdatePrecondition::Unconfigured,
+        "handler-first",
+    );
+    let response = handler
+        .respond(&request("engine-first"), &first)
+        .await
+        .expect("first engine configuration should succeed");
+    let first_revision = match response.payload {
+        ResponsePayload::ThreadEngineConfigSet(result) => {
+            assert_eq!(result.request_id, request("engine-first"));
+            assert_eq!(result.thread_id, ThreadId::parse("engine-thread").unwrap());
+            assert_eq!(result.disposition, ReceiptDisposition::Accepted);
+            result.revision
+        }
+        payload => panic!("unexpected engine configuration payload: {payload:?}"),
+    };
+    assert_eq!(origin.instant_calls(), 1);
+
+    let replay = handler
+        .respond(&request("engine-first"), &first)
+        .await
+        .expect("exact engine configuration replay should succeed");
+    match replay.payload {
+        ResponsePayload::ThreadEngineConfigSet(result) => {
+            assert_eq!(result.revision, first_revision);
+            assert_eq!(result.disposition, ReceiptDisposition::Duplicate);
+        }
+        payload => panic!("unexpected replay payload: {payload:?}"),
+    }
+    assert_eq!(origin.instant_calls(), 1);
+
+    let update = engine_config_command(
+        "engine-update",
+        "engine-thread",
+        EngineConfigUpdatePrecondition::Exact(first_revision),
+        "handler-updated",
+    );
+    let update_response = handler
+        .respond(&request("engine-update"), &update)
+        .await
+        .expect("engine configuration update should succeed");
+    let second_revision = match update_response.payload {
+        ResponsePayload::ThreadEngineConfigSet(result) => {
+            assert_eq!(result.revision.get(), 2);
+            assert_eq!(result.disposition, ReceiptDisposition::Accepted);
+            result.revision
+        }
+        payload => panic!("unexpected update payload: {payload:?}"),
+    };
+    assert_ne!(second_revision, first_revision);
+
+    let stale = engine_config_command(
+        "engine-stale",
+        "engine-thread",
+        EngineConfigUpdatePrecondition::Exact(first_revision),
+        "handler-stale",
+    );
+    let failure = failure_of(handler.respond(&request("engine-stale"), &stale).await);
+    assert_eq!(failure.code, ErrorCode::EngineConfigConflict);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("engine-stale")));
+    assert_eq!(origin.instant_calls(), 3);
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn engine_config_command_rejects_correlation_mismatch_before_admission() {
+    let (_temporary, storage) = opened_storage("engine-config-correlation").await;
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), Vec::new());
+    let handler = scripted_handler(&storage, &origin);
+    let command = engine_config_command(
+        "engine-command",
+        "engine-thread",
+        EngineConfigUpdatePrecondition::Unconfigured,
+        "handler-correlation",
+    );
+    let failure = failure_of(handler.respond(&request("engine-frame"), &command).await);
+    assert_eq!(failure.code, ErrorCode::InvalidInput);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("engine-frame")));
+    assert_eq!(origin.instant_calls(), 0);
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn engine_config_command_maps_missing_thread_to_typed_failure() {
+    let (_temporary, storage) = opened_storage("engine-config-missing").await;
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), vec![Ok(UnixMillis::from_millis(500))]);
+    let handler = scripted_handler(&storage, &origin);
+    let command = engine_config_command(
+        "engine-missing",
+        "engine-thread-missing",
+        EngineConfigUpdatePrecondition::Unconfigured,
+        "handler-missing",
+    );
+    let failure = failure_of(handler.respond(&request("engine-missing"), &command).await);
+    assert_eq!(failure.code, ErrorCode::ThreadUnknown);
+    assert!(!failure.retryable);
+    assert_eq!(origin.instant_calls(), 1);
+
     storage.close().await.expect("storage should close");
 }
 

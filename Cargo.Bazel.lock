@@ -1,5 +1,5 @@
 {
-  "checksum": "90d646b101827d8ed5254d5f2b69a5f1c28e2e81f50344672cb1307ae2e38aa0",
+  "checksum": "5ba126ef1f9616251a9775ea244af22b57eb1d8dcbc9e04b591b17abf531f07e",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2350,6 +2350,14 @@
             {
               "id": "sea-orm 2.0.2",
               "target": "sea_orm"
+            },
+            {
+              "id": "serde 1.0.229",
+              "target": "serde"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
             },
             {
               "id": "sha2 0.11.0",

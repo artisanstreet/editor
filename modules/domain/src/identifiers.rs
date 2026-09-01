@@ -195,6 +195,31 @@ wire_identifier! {
     RunId
 }
 
+wire_identifier! {
+    /// Validated engine model identity selected for one thread.
+    EngineModelId
+}
+
+wire_identifier! {
+    /// Validated engine route identity selected for one thread.
+    EngineRouteId
+}
+
+wire_identifier! {
+    /// Validated engine variant identity selected for one thread.
+    EngineVariantId
+}
+
+wire_identifier! {
+    /// Validated engine agent identity selected for one thread.
+    EngineAgentId
+}
+
+wire_identifier! {
+    /// Validated permission policy identity selected for one thread.
+    PermissionId
+}
+
 /// Validation failure for a managed native engine profile id.
 ///
 /// The error deliberately carries no copy of the rejected value. Profile

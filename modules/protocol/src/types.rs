@@ -9,9 +9,9 @@ use std::fmt;
 
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
-    ConversationSubscriptionStart, DirectoryId, DirectoryListing, Event, IdentifierError,
-    MessageId, PatchBatch, ProjectListing, ProjectSummary, Query, RequestId, ThreadId,
-    ThreadListing, ThreadSummary, UnixMillis,
+    ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision, Event,
+    IdentifierError, MessageId, PatchBatch, ProjectListing, ProjectSummary, Query,
+    ReceiptDisposition, RequestId, ThreadId, ThreadListing, ThreadSummary, UnixMillis,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -647,6 +647,19 @@ pub enum ClientRequest {
     Lifecycle(LifecycleRequest),
 }
 
+/// Successful durable thread engine-configuration mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetThreadEngineConfigResult {
+    /// Stable client request identity echoed by the nested result.
+    pub request_id: RequestId,
+    /// Thread whose configuration was changed.
+    pub thread_id: ThreadId,
+    /// Resulting one-based configuration revision.
+    pub revision: EngineConfigRevision,
+    /// Newly accepted or exact duplicate replay.
+    pub disposition: ReceiptDisposition,
+}
+
 /// Receipt returned when a first message is durably queued.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirstMessageReceipt {
@@ -732,6 +745,8 @@ pub enum ResponsePayload {
     DirectoryPicked(DirectoryPickOutcome),
     /// Negotiated native lifecycle status or stop result.
     Lifecycle(LifecycleResponse),
+    /// Durable thread engine-configuration result.
+    ThreadEngineConfigSet(SetThreadEngineConfigResult),
 }
 
 /// Successful response correlated to a client request frame.
@@ -776,6 +791,8 @@ pub enum ErrorCode {
     UnsupportedFeature,
     /// Lifecycle control cannot be accepted while lifecycle work is busy.
     LifecycleBusy,
+    /// Thread engine configuration revision was stale.
+    EngineConfigConflict,
 }
 
 /// Typed application-protocol rejection or failure.
@@ -925,6 +942,12 @@ impl WireEnvelope {
                 request_id,
                 payload: ResponsePayload::FirstMessageQueued(receipt),
             }) if request_id != &receipt.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::ThreadEngineConfigSet(result),
+            }) if request_id != &result.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }
             _ => Ok(()),
