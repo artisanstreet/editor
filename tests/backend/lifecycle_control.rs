@@ -585,7 +585,7 @@ fn concrete_activity_gate_idle_stop_and_acquire_have_one_linearized_winner() {
         let acquire_thread = std::thread::spawn(move || {
             let lease = acquire_gate.acquire();
             acquire_barrier.wait();
-            let acquired = match lease {
+            match lease {
                 Ok(lease) => {
                     acquire_sender
                         .send(true)
@@ -600,8 +600,7 @@ fn concrete_activity_gate_idle_stop_and_acquire_have_one_linearized_winner() {
                     false
                 }
                 Err(error) => panic!("unexpected acquisition error: {error:?}"),
-            };
-            acquired
+            }
         });
 
         let stop_gate = Arc::clone(&gate);
