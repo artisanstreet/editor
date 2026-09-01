@@ -21,9 +21,12 @@
 //! deliberately finished; send-stream drop alone would FIN unfinished
 //! output, which is not a reset. A completed stage finishes its output
 //! first and marks that state, so cleanup never resets deliberate
-//! output. Successful Hello cleanup tolerates Forge's deliberate STOP
-//! after reading one Hello: finish attempts against a peer-stopped send
-//! side fail harmlessly and never mask the primary result.
+//! output. The dedicated response-acknowledging stage marks inbound delivery
+//! complete only after it observes clean EOF; every other escape, including
+//! ordinary request completion, still stops it. Successful Hello cleanup
+//! tolerates Forge's deliberate STOP after reading one Hello: finish attempts
+//! against a peer-stopped send side fail harmlessly and never mask the primary
+//! result.
 
 use artisan_domain::RequestId;
 use artisan_protocol::{
@@ -32,6 +35,8 @@ use artisan_protocol::{
 use quinn::{Connection, ConnectionError, RecvStream, SendStream};
 use thiserror::Error;
 
+use crate::MAX_FRAME_LEN;
+use crate::frame::{FrameOutcome, read_next_frame};
 use crate::handshake::kind as message_kind;
 use crate::handshake::{HandshakeError, ServerWelcome, client_handshake};
 use crate::{
@@ -64,6 +69,25 @@ pub enum ExchangeError {
     /// The reply could not be framed or decoded within bounds.
     #[error("receiving the reply failed: {0}")]
     Receive(#[from] EnvelopeReceiveError),
+    /// The response stream carried another complete frame after the one
+    /// reply that was admitted for this operation.
+    #[error("response stream carried trailing data")]
+    TrailingResponse,
+}
+
+/// Failure while running the response-acknowledging request stage.
+///
+/// Reply validation is deliberately kept separate from wire failures so the
+/// public client method can preserve its existing direct `Reply` errors while
+/// the whole composed stage remains under one deadline.
+#[derive(Debug, Error)]
+pub(super) enum AcknowledgingResponseError {
+    /// The guarded stream exchange failed before clean response EOF.
+    #[error(transparent)]
+    Exchange(#[from] ExchangeError),
+    /// The decoded reply failed the existing validation or settlement gate.
+    #[error(transparent)]
+    Reply(#[from] ReplyRejection),
 }
 
 /// Guarded owner of one composed stage's bidirectional stream pair.
@@ -78,11 +102,15 @@ pub(super) struct BidiGuard {
     /// Outbound half; taken during teardown so only one close action
     /// ever runs.
     send: Option<SendStream>,
-    /// Inbound half; stopped on every teardown path.
+    /// Inbound half; stopped on every incomplete teardown path.
     receive: Option<RecvStream>,
     /// Whether the outbound side was deliberately finished, in which
     /// case abandonment must not reset it.
     outbound_finished: bool,
+    /// Whether the dedicated response-acknowledging path observed clean
+    /// inbound EOF. Ordinary request completion intentionally leaves this
+    /// false so its drop still emits the private STOP.
+    inbound_finished: bool,
 }
 
 impl BidiGuard {
@@ -92,6 +120,7 @@ impl BidiGuard {
             send: Some(send),
             receive: Some(receive),
             outbound_finished: false,
+            inbound_finished: false,
         }
     }
 
@@ -119,6 +148,29 @@ impl BidiGuard {
         }
         self.outbound_finished = true;
     }
+
+    /// Awaits exactly the next bounded frame boundary on the response
+    /// stream. A clean finish before any next prefix byte is the sole
+    /// successful completion; a complete trailing frame and every partial,
+    /// oversized, empty, or unreadable continuation are errors.
+    async fn await_clean_response_eof(&mut self) -> Result<(), ExchangeError> {
+        let outcome = {
+            let receive = self
+                .receive
+                .as_mut()
+                .expect("receive half present until teardown");
+            read_next_frame(receive, MAX_FRAME_LEN)
+                .await
+                .map_err(EnvelopeReceiveError::Frame)?
+        };
+        match outcome {
+            FrameOutcome::Finished => {
+                self.inbound_finished = true;
+                Ok(())
+            }
+            FrameOutcome::Frame(_) => Err(ExchangeError::TrailingResponse),
+        }
+    }
 }
 
 impl Drop for BidiGuard {
@@ -131,8 +183,11 @@ impl Drop for BidiGuard {
         {
             let _reset = send.reset(close_code(STREAM_RESET_CODE));
         }
-        // Inbound delivery always stops, discarding any late peer data.
-        if let Some(mut receive) = self.receive.take() {
+        // Inbound delivery always stops, discarding any late peer data,
+        // except after the dedicated path has positively observed clean EOF.
+        if !self.inbound_finished
+            && let Some(mut receive) = self.receive.take()
+        {
             let _stopped = receive.stop(close_code(STREAM_STOP_CODE));
         }
     }
@@ -188,6 +243,52 @@ pub(super) async fn request_stage(
     streams.finish_outbound();
     drop(streams);
     Ok(reply)
+}
+
+/// Runs a request exchange whose caller must settle the one decoded reply
+/// before the stage may consume the response stream's clean EOF.
+///
+/// The callback runs after the same one-request send/receive sequence and
+/// after outbound FIN custody is established, but before any read that could
+/// acknowledge the peer's response FIN. Only after the callback succeeds does
+/// the stage accept a pre-frame [`FrameOutcome::Finished`]. Every other result
+/// drops the guard with its private inbound STOP.
+///
+/// # Errors
+///
+/// Returns [`AcknowledgingResponseError::Reply`] when the callback rejects or
+/// cannot settle the decoded reply, and [`AcknowledgingResponseError::Exchange`]
+/// for stream, framing, or response-EOF failures.
+pub(super) async fn request_stage_acknowledging_response<T, F>(
+    connection: &Connection,
+    envelope: WireEnvelope,
+    settle: F,
+) -> Result<T, AcknowledgingResponseError>
+where
+    F: FnOnce(&WireEnvelope) -> Result<T, AcknowledgingResponseError>,
+{
+    let (send, receive) = connection
+        .open_bi()
+        .await
+        .map_err(ExchangeError::from)
+        .map_err(AcknowledgingResponseError::from)?;
+    let mut streams = BidiGuard::new(send, receive);
+    let reply = {
+        let (send, receive) = streams.lend();
+        send_envelope(send, &envelope)
+            .await
+            .map_err(ExchangeError::from)
+            .map_err(AcknowledgingResponseError::from)?;
+        receive_envelope(receive)
+            .await
+            .map_err(ExchangeError::from)
+            .map_err(AcknowledgingResponseError::from)?
+    };
+    streams.finish_outbound();
+    let settled = settle(&reply)?;
+    streams.await_clean_response_eof().await?;
+    drop(streams);
+    Ok(settled)
 }
 
 /// A decoded reply that passed version, family, and correlation
