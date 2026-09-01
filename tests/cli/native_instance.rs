@@ -1,11 +1,14 @@
 use artisan_editor_cli::instance::{
     NativeInstanceConfig, NativeListenerConfig, NativeRunConfig, NativeRunConfigInput,
+    mint_instance_id,
 };
 use std::{
     fs,
     num::NonZeroU32,
     path::{Path, PathBuf},
 };
+
+const INSTANCE_ID: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -32,6 +35,7 @@ fn sample_listener() -> NativeListenerConfig {
 
 fn sample_config(home: &Path) -> NativeInstanceConfig {
     NativeInstanceConfig::new(
+        INSTANCE_ID,
         home.join("data").join("artisan.sqlite"),
         home.join("custody").join("lock"),
         home.join("readiness").join("ready"),
@@ -64,7 +68,11 @@ fn native_exact_round_trip() {
     config.write(&path).unwrap();
     let loaded = NativeInstanceConfig::load(&path).unwrap();
     assert_eq!(config, loaded);
+    assert_eq!(loaded.instance_id(), INSTANCE_ID);
     let encoded: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(encoded["schema"], "artisan-instance-v2");
+    assert_eq!(encoded["version"], 2);
+    assert_eq!(encoded["instance_id"], serde_json::json!(INSTANCE_ID));
     assert_eq!(
         encoded["native_run"],
         serde_json::json!({
@@ -95,17 +103,34 @@ fn native_rejects_unknown_and_version() {
     let path = home.join("instance-v2.json");
     fs::write(
         &path,
-        br#"{"schema":"artisan-instance-v2","version":2,"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":1,"requests_per_connection":1},"native_run":{"claim_lease_ms":1,"poll_interval_ms":1,"retry_backoff_ms":1,"shutdown_budget_ms":1,"queue_capacity":1,"max_command_retries":1,"prompt_delivery":"queue","stream_after":0},"extra":"field"}"#,
+        br#"{"schema":"artisan-instance-v2","version":2,"instance_id":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":1,"requests_per_connection":1},"native_run":{"claim_lease_ms":1,"poll_interval_ms":1,"retry_backoff_ms":1,"shutdown_budget_ms":1,"queue_capacity":1,"max_command_retries":1,"prompt_delivery":"queue","stream_after":0},"extra":"field"}"#,
     )
     .unwrap();
     assert!(NativeInstanceConfig::load(&path).is_err());
     fs::write(
         &path,
-        br#"{"schema":"artisan-instance-v2","version":1,"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":1,"requests_per_connection":1},"native_run":{"claim_lease_ms":1,"poll_interval_ms":1,"retry_backoff_ms":1,"shutdown_budget_ms":1,"queue_capacity":1,"max_command_retries":1,"prompt_delivery":"queue","stream_after":0}}"#,
+        br#"{"schema":"artisan-instance-v2","version":1,"instance_id":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":1,"requests_per_connection":1},"native_run":{"claim_lease_ms":1,"poll_interval_ms":1,"retry_backoff_ms":1,"shutdown_budget_ms":1,"queue_capacity":1,"max_command_retries":1,"prompt_delivery":"queue","stream_after":0}}"#,
     )
     .unwrap();
     assert!(NativeInstanceConfig::load(&path).is_err());
+    let valid = sample_config(&home);
+    valid.write(&path).unwrap();
+    let mut missing_identity: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    missing_identity
+        .as_object_mut()
+        .unwrap()
+        .remove("instance_id");
+    fs::write(&path, serde_json::to_vec(&missing_identity).unwrap()).unwrap();
+    assert!(NativeInstanceConfig::load(&path).is_err());
     fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn minted_native_instance_identity_is_nonzero() {
+    for _ in 0..8 {
+        assert!(mint_instance_id().unwrap().iter().any(|byte| *byte != 0));
+    }
 }
 
 #[test]
@@ -113,6 +138,7 @@ fn native_rejects_relative_and_zero() {
     let home = temp_dir("relative");
     assert!(
         NativeInstanceConfig::new(
+            INSTANCE_ID,
             PathBuf::from("relative"),
             PathBuf::from("/tmp/b"),
             PathBuf::from("/tmp/c"),
@@ -122,10 +148,30 @@ fn native_rejects_relative_and_zero() {
         )
         .is_err()
     );
+    assert!(
+        NativeInstanceConfig::new(
+            [0; 16],
+            home.join("data").join("artisan.sqlite"),
+            home.join("custody").join("lock"),
+            home.join("readiness").join("ready"),
+            home.join("credentials").join("manifest.json"),
+            sample_listener(),
+            sample_native_run(),
+        )
+        .is_err()
+    );
     let path = home.join("instance-v2.json");
+    let valid = sample_config(&home);
+    valid.write(&path).unwrap();
+    let mut zero_identity: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    zero_identity["instance_id"] =
+        serde_json::Value::Array((0..16).map(|_| serde_json::json!(0)).collect());
+    fs::write(&path, serde_json::to_vec(&zero_identity).unwrap()).unwrap();
+    assert!(NativeInstanceConfig::load(&path).is_err());
     fs::write(
         &path,
-        br#"{"schema":"artisan-instance-v2","version":2,"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":0,"requests_per_connection":1},"native_run":{"claim_lease_ms":1,"poll_interval_ms":1,"retry_backoff_ms":1,"shutdown_budget_ms":1,"queue_capacity":1,"max_command_retries":1,"prompt_delivery":"queue","stream_after":0}}"#,
+        br#"{"schema":"artisan-instance-v2","version":2,"instance_id":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],"database_path":"/tmp/a","custody_path":"/tmp/b","readiness_path":"/tmp/c","credentials_manifest":"/tmp/d","listener":{"admission_timeout_ms":1,"handshake_timeout_ms":1,"request_timeout_ms":1,"drain_timeout_ms":1,"admission_capacity":0,"requests_per_connection":1},"native_run":{"claim_lease_ms":1,"poll_interval_ms":1,"retry_backoff_ms":1,"shutdown_budget_ms":1,"queue_capacity":1,"max_command_retries":1,"prompt_delivery":"queue","stream_after":0}}"#,
     )
     .unwrap();
     assert!(NativeInstanceConfig::load(&path).is_err());
@@ -205,6 +251,7 @@ fn native_run_policy_accepts_inclusive_boundaries_and_stream_zero() {
     })
     .unwrap();
     let config = NativeInstanceConfig::new(
+        INSTANCE_ID,
         home.join("data").join("artisan.sqlite"),
         home.join("custody").join("lock"),
         home.join("readiness").join("ready"),
@@ -307,6 +354,7 @@ fn native_config_debug_redacts_paths_and_prompt_delivery() {
     let home = temp_dir("debug");
     let canary = "ATTACKER_NATIVE_RUN_PROMPT_CANARY_7F3A";
     let config = NativeInstanceConfig::new(
+        [0xA7; 16],
         home.join("data").join("artisan.sqlite"),
         home.join("custody").join("lock"),
         home.join("readiness").join("ready"),
@@ -328,6 +376,7 @@ fn native_config_debug_redacts_paths_and_prompt_delivery() {
     let debug = format!("{config:?}");
     assert!(debug.contains("NativeInstanceConfig"));
     assert!(debug.contains("prompt_delivery_bytes"));
+    assert!(!debug.contains("167"));
     assert!(!debug.contains(canary));
     for path in [
         config.database_path(),
@@ -437,6 +486,7 @@ fn atomic_replacement_identity_fenced() {
     let config = sample_config(&home);
     config.write(&path).unwrap();
     let config2 = NativeInstanceConfig::new(
+        [0x22; 16],
         home.join("data2").join("artisan.sqlite"),
         home.join("custody2").join("lock"),
         home.join("readiness2").join("ready"),

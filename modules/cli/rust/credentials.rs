@@ -36,6 +36,9 @@ const RECONNECT_RECORD_BYTES: usize = 8
 const RECONNECT_CAPABILITY_FILENAME: &str = "reconnect-capability.bin";
 const RECONNECT_LOCK_FILENAME: &str = ".reconnect-capability.lock";
 
+/// Maximum time spent waiting for exclusive reconnect-capability ownership.
+pub const RECONNECT_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum ForgeCredentialError {
     InvalidHome(PathBuf),
@@ -318,7 +321,7 @@ pub enum ReconnectCapabilityState {
 
 /// Non-secret identity that fences reconnect capability custody to one Forge
 /// instance and one native client process.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ReconnectBinding {
     pub instance_id: [u8; 16],
     pub endpoint_port: u16,
@@ -326,8 +329,20 @@ pub struct ReconnectBinding {
     pub pid: NonZeroU32,
 }
 
+impl std::fmt::Debug for ReconnectBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReconnectBinding")
+            .field("instance_id", &"[REDACTED]")
+            .field("endpoint_port", &self.endpoint_port)
+            .field("certificate_sha256", &"[REDACTED]")
+            .field("pid", &self.pid)
+            .finish()
+    }
+}
+
 impl ReconnectBinding {
-    /// Constructs a binding after checking its required nonzero port.
+    /// Constructs a binding after checking its nonzero identity, port, and PID.
     pub fn new(
         instance_id: [u8; 16],
         endpoint_port: u16,
@@ -354,8 +369,9 @@ impl ReconnectBinding {
         Self::new(instance_id, endpoint_port, certificate_sha256, pid)
     }
 
-    fn validate(self) -> Result<(), ForgeCredentialError> {
-        if self.endpoint_port == 0 || self.pid.get() == 0 {
+    /// Validates every persisted binding component, including its identity.
+    pub fn validate(self) -> Result<(), ForgeCredentialError> {
+        if bytes_are_zero(&self.instance_id) || self.endpoint_port == 0 || self.pid.get() == 0 {
             return Err(ForgeCredentialError::ReconnectInvalidBinding);
         }
         Ok(())
@@ -421,8 +437,7 @@ fn bytes_are_zero(bytes: &[u8]) -> bool {
 }
 
 fn validate_reconnect_record(record: &ReconnectRecord) -> Result<(), ForgeCredentialError> {
-    if record.binding.endpoint_port == 0 || record.binding.pid.get() == 0 || record.generation == 0
-    {
+    if record.binding.validate().is_err() || record.generation == 0 {
         return Err(ForgeCredentialError::ReconnectRecordMalformed);
     }
     let nonce_is_zero = bytes_are_zero(record.owner_nonce.as_ref());
@@ -477,7 +492,16 @@ fn encode_reconnect_record(
     Ok(bytes)
 }
 
-fn decode_reconnect_record(bytes: &[u8]) -> Result<ReconnectRecord, ForgeCredentialError> {
+struct ReconnectRecordMetadata {
+    state: ReconnectCapabilityState,
+    generation: u64,
+    binding: ReconnectBinding,
+    owner_nonce: Zeroizing<[u8; 16]>,
+}
+
+fn decode_reconnect_record_metadata(
+    bytes: &[u8],
+) -> Result<ReconnectRecordMetadata, ForgeCredentialError> {
     if bytes.len() != RECONNECT_RECORD_BYTES {
         return Err(ForgeCredentialError::ReconnectRecordMalformed);
     }
@@ -524,19 +548,44 @@ fn decode_reconnect_record(bytes: &[u8]) -> Result<ReconnectRecord, ForgeCredent
     let mut owner_nonce = Zeroizing::new([0_u8; 16]);
     owner_nonce[..].copy_from_slice(&bytes[offset..offset + 16]);
     offset += 16;
-    let mut capability = Zeroizing::new([0_u8; artisan_protocol::RECONNECT_CAPABILITY_BYTES]);
-    capability[..]
-        .copy_from_slice(&bytes[offset..offset + artisan_protocol::RECONNECT_CAPABILITY_BYTES]);
-    let record = ReconnectRecord {
+    let capability_bytes = &bytes[offset..offset + artisan_protocol::RECONNECT_CAPABILITY_BYTES];
+    let binding = ReconnectBinding {
+        instance_id,
+        endpoint_port,
+        certificate_sha256,
+        pid,
+    };
+    if binding.validate().is_err() || generation == 0 {
+        return Err(ForgeCredentialError::ReconnectRecordMalformed);
+    }
+    let nonce_is_zero = bytes_are_zero(owner_nonce.as_ref());
+    let capability_is_zero = bytes_are_zero(capability_bytes);
+    let valid = match state {
+        ReconnectCapabilityState::Ready => !capability_is_zero && nonce_is_zero,
+        ReconnectCapabilityState::InFlight => capability_is_zero && !nonce_is_zero,
+        ReconnectCapabilityState::Lost => capability_is_zero && nonce_is_zero,
+    };
+    if !valid {
+        return Err(ForgeCredentialError::ReconnectRecordMalformed);
+    }
+    Ok(ReconnectRecordMetadata {
         state,
         generation,
-        binding: ReconnectBinding {
-            instance_id,
-            endpoint_port,
-            certificate_sha256,
-            pid,
-        },
+        binding,
         owner_nonce,
+    })
+}
+
+fn decode_reconnect_record(bytes: &[u8]) -> Result<ReconnectRecord, ForgeCredentialError> {
+    let metadata = decode_reconnect_record_metadata(bytes)?;
+    let capability_offset = RECONNECT_RECORD_BYTES - artisan_protocol::RECONNECT_CAPABILITY_BYTES;
+    let mut capability = Zeroizing::new([0_u8; artisan_protocol::RECONNECT_CAPABILITY_BYTES]);
+    capability[..].copy_from_slice(&bytes[capability_offset..]);
+    let record = ReconnectRecord {
+        state: metadata.state,
+        generation: metadata.generation,
+        binding: metadata.binding,
+        owner_nonce: metadata.owner_nonce,
         capability,
     };
     validate_reconnect_record(&record)?;
@@ -653,6 +702,75 @@ impl ReconnectCapabilityStore {
     fn validate_directory(&self) -> Result<(), ForgeCredentialError> {
         validate_private_directory(&self.paths.credentials_dir())
     }
+
+    /// Initializes the owner lease after an authenticated welcome.
+    ///
+    /// The returned lease retains the exclusive reconnect lock for the whole
+    /// native session. An existing record is never replaced for the same
+    /// binding. A different binding is fenced by the existing record file
+    /// identity and generation, while its prior capability is discarded
+    /// without being materialized as a reconnect credential.
+    pub fn initialize_owner_lease(
+        &self,
+        binding: ReconnectBinding,
+        capability: artisan_protocol::ReconnectCapability,
+        timeout: Duration,
+    ) -> Result<ReconnectSessionLease, ForgeCredentialError> {
+        binding.validate()?;
+        self.validate_directory()?;
+        let lock = acquire_lock_with_timeout(&self.paths.reconnect_lock_path(), timeout)?;
+        let (generation, record_file_id) = match read_reconnect_record_metadata(&self.paths) {
+            Ok(current) => {
+                if current.metadata.binding == binding {
+                    return Err(ForgeCredentialError::ReconnectRecordExists);
+                }
+                let generation = current
+                    .metadata
+                    .generation
+                    .checked_add(1)
+                    .ok_or(ForgeCredentialError::ReconnectGenerationOverflow)?;
+                let desired = ReconnectRecord::ready(binding, generation, capability)?;
+                let record_file_id = replace_reconnect_record_for_rebind(
+                    &self.paths,
+                    current.file_id,
+                    current.metadata.state,
+                    current.metadata.generation,
+                    &current.metadata.owner_nonce,
+                    current.metadata.binding,
+                    &desired,
+                )?;
+                (generation, record_file_id)
+            }
+            Err(ForgeCredentialError::ReconnectRecordMissing) => {
+                let record = ReconnectRecord::ready(binding, 1, capability)?;
+                let encoded = encode_reconnect_record(&record)?;
+                let mut created = Vec::new();
+                let result = install_atomic(
+                    &self.paths.credentials_dir(),
+                    RECONNECT_CAPABILITY_FILENAME,
+                    encoded.as_ref(),
+                    &mut created,
+                );
+                if let Err(error) = result {
+                    cleanup_created(created);
+                    return Err(error);
+                }
+                let record_file_id = created
+                    .first()
+                    .map(|file| file.id)
+                    .ok_or(ForgeCredentialError::Provisioning)?;
+                (1, record_file_id)
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(ReconnectSessionLease {
+            store: self.clone(),
+            lock: Some(lock),
+            binding,
+            generation,
+            record_file_id,
+        })
+    }
 }
 
 pub struct ReconnectSessionLease {
@@ -707,6 +825,43 @@ impl ReconnectSessionLease {
             record_file_id,
             credential: Some(credential),
         })
+    }
+
+    /// Quarantines the ready capability and releases the owner lock.
+    pub fn quarantine(self) -> Result<(), ForgeCredentialError> {
+        self.quarantine_for_shutdown().map(|_| ())
+    }
+
+    /// Quarantines the ready capability while retaining the owner lock until
+    /// the caller has completed the dependent Forge shutdown step.
+    pub fn quarantine_for_shutdown(mut self) -> Result<Self, ForgeCredentialError> {
+        if self.lock.is_none() {
+            return Err(ForgeCredentialError::ReconnectAttemptComplete);
+        }
+        let current = read_reconnect_record_metadata(&self.store.paths)?;
+        if current.file_id != self.record_file_id {
+            return Err(ForgeCredentialError::ReconnectStaleWriter);
+        }
+        if current.metadata.binding != self.binding {
+            return Err(ForgeCredentialError::ReconnectBindingMismatch);
+        }
+        if current.metadata.state != ReconnectCapabilityState::Ready
+            || current.metadata.generation != self.generation
+            || !bytes_are_zero(current.metadata.owner_nonce.as_ref())
+        {
+            return Err(ForgeCredentialError::ReconnectStaleWriter);
+        }
+        let desired = ReconnectRecord::lost(self.binding, self.generation);
+        self.record_file_id = replace_reconnect_record(
+            &self.store.paths,
+            current.file_id,
+            ReconnectCapabilityState::Ready,
+            self.generation,
+            &[0_u8; 16],
+            self.binding,
+            &desired,
+        )?;
+        Ok(self)
     }
 
     /// Returns the generation held by this session lease.
@@ -2720,9 +2875,14 @@ struct ReconnectRecordRead {
     file_id: FileId,
 }
 
-fn read_reconnect_record(
+struct ReconnectRecordMetadataRead {
+    metadata: ReconnectRecordMetadata,
+    file_id: FileId,
+}
+
+fn read_reconnect_bytes(
     paths: &ForgeCredentialPaths,
-) -> Result<ReconnectRecordRead, ForgeCredentialError> {
+) -> Result<(Zeroizing<Vec<u8>>, FileId), ForgeCredentialError> {
     let directory = paths.credentials_dir();
     validate_private_directory(&directory)?;
     let path = paths.reconnect_capability_path();
@@ -2749,11 +2909,23 @@ fn read_reconnect_record(
     if !private_material_identity_chain_matches(&identity_chain) {
         return Err(ForgeCredentialError::ReconnectStaleWriter);
     }
-    let record = decode_reconnect_record(&read.bytes)?;
-    Ok(ReconnectRecordRead {
-        record,
-        file_id: permission_after_id,
-    })
+    Ok((read.bytes, permission_after_id))
+}
+
+fn read_reconnect_record(
+    paths: &ForgeCredentialPaths,
+) -> Result<ReconnectRecordRead, ForgeCredentialError> {
+    let (bytes, file_id) = read_reconnect_bytes(paths)?;
+    let record = decode_reconnect_record(&bytes)?;
+    Ok(ReconnectRecordRead { record, file_id })
+}
+
+fn read_reconnect_record_metadata(
+    paths: &ForgeCredentialPaths,
+) -> Result<ReconnectRecordMetadataRead, ForgeCredentialError> {
+    let (bytes, file_id) = read_reconnect_bytes(paths)?;
+    let metadata = decode_reconnect_record_metadata(&bytes)?;
+    Ok(ReconnectRecordMetadataRead { metadata, file_id })
 }
 
 fn revalidate_reconnect_record(
@@ -2778,6 +2950,66 @@ fn revalidate_reconnect_record(
         return Err(ForgeCredentialError::ReconnectStaleWriter);
     }
     Ok(())
+}
+
+fn revalidate_reconnect_record_metadata(
+    paths: &ForgeCredentialPaths,
+    expected_file_id: FileId,
+    expected_state: ReconnectCapabilityState,
+    expected_generation: u64,
+    expected_owner_nonce: &[u8; 16],
+    expected_binding: ReconnectBinding,
+) -> Result<(), ForgeCredentialError> {
+    let current = read_reconnect_record_metadata(paths)?;
+    if current.file_id != expected_file_id {
+        return Err(ForgeCredentialError::ReconnectStaleWriter);
+    }
+    if current.metadata.binding != expected_binding {
+        return Err(ForgeCredentialError::ReconnectBindingMismatch);
+    }
+    if current.metadata.state != expected_state
+        || current.metadata.generation != expected_generation
+        || current.metadata.owner_nonce.as_ref() != expected_owner_nonce
+    {
+        return Err(ForgeCredentialError::ReconnectStaleWriter);
+    }
+    Ok(())
+}
+
+fn replace_reconnect_record_for_rebind(
+    paths: &ForgeCredentialPaths,
+    expected_file_id: FileId,
+    expected_state: ReconnectCapabilityState,
+    expected_generation: u64,
+    expected_owner_nonce: &[u8; 16],
+    expected_binding: ReconnectBinding,
+    desired: &ReconnectRecord,
+) -> Result<FileId, ForgeCredentialError> {
+    let encoded = encode_reconnect_record(desired)?;
+    let path = paths.reconnect_capability_path();
+    let result = atomic_replace_private_file(&path, encoded.as_ref(), expected_file_id, || {
+        revalidate_reconnect_record_metadata(
+            paths,
+            expected_file_id,
+            expected_state,
+            expected_generation,
+            expected_owner_nonce,
+            expected_binding,
+        )
+    });
+    match result {
+        Ok(file_id) => Ok(file_id),
+        Err(error) => {
+            if desired.state == ReconnectCapabilityState::Ready {
+                quarantine_ready_after_failed_replacement(
+                    paths,
+                    desired.generation,
+                    desired.binding,
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 fn replace_reconnect_record(
@@ -2854,12 +3086,12 @@ fn quarantine_ready_after_failed_replacement(
     generation: u64,
     binding: ReconnectBinding,
 ) {
-    let Ok(current) = read_reconnect_record(paths) else {
+    let Ok(current) = read_reconnect_record_metadata(paths) else {
         return;
     };
-    if current.record.state != ReconnectCapabilityState::Ready
-        || current.record.generation != generation
-        || current.record.binding != binding
+    if current.metadata.state != ReconnectCapabilityState::Ready
+        || current.metadata.generation != generation
+        || current.metadata.binding != binding
     {
         return;
     }
@@ -2880,13 +3112,13 @@ fn quarantine_in_flight_after_failed_replacement(
     binding: ReconnectBinding,
     owner_nonce: &[u8; 16],
 ) {
-    let Ok(current) = read_reconnect_record(paths) else {
+    let Ok(current) = read_reconnect_record_metadata(paths) else {
         return;
     };
-    if current.record.state != ReconnectCapabilityState::InFlight
-        || current.record.generation != generation
-        || current.record.binding != binding
-        || current.record.owner_nonce.as_ref() != owner_nonce
+    if current.metadata.state != ReconnectCapabilityState::InFlight
+        || current.metadata.generation != generation
+        || current.metadata.binding != binding
+        || current.metadata.owner_nonce.as_ref() != owner_nonce
     {
         return;
     }
