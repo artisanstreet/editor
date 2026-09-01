@@ -2388,10 +2388,10 @@ async fn handle_unsubscribe(
 
 fn handle_acknowledge_patch(
     runtime: &mut ServiceRuntime,
-    thread_id: ThreadId,
+    thread_id: &ThreadId,
     cursor: ConversationCursor,
 ) -> Result<(), ServiceFailure> {
-    runtime.custody.on_acknowledge(&thread_id, cursor)
+    runtime.custody.on_acknowledge(thread_id, cursor)
 }
 
 async fn handle_delivery_lost_reconnect(
@@ -2474,7 +2474,7 @@ async fn command_loop_with_delivery(
                         handle_unsubscribe(runtime, frames, events, thread_id).await?;
                     }
                     Some(NativeTransportCommand::AcknowledgePatch { thread_id, cursor }) =>
-                        handle_acknowledge_patch(runtime, thread_id, cursor)?,
+                        handle_acknowledge_patch(runtime, &thread_id, cursor)?,
                 }
             }
             delivery = delivery_rx.recv() => {
