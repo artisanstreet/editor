@@ -518,7 +518,7 @@ struct AllRows {
 async fn setup_binding_scenario(
     database: &DatabaseConnection,
     repository: &Repository,
-) -> Option<Vec<u8>> {
+) -> Option<entities::OpaqueBytes> {
     seed_project_and_thread(database, repository, "thread-launch").await;
     let _ = queue_claim_launch(
         repository,
@@ -555,7 +555,7 @@ async fn setup_binding_scenario(
     before_binding
 }
 
-fn assert_binding_lifecycle(after: &AllRows, before_binding: &Option<Vec<u8>>) {
+fn assert_binding_lifecycle(after: &AllRows, before_binding: &Option<entities::OpaqueBytes>) {
     for msg in ["msg-launch", "msg-run"] {
         let dispatch = after
             .dispatches
@@ -587,7 +587,7 @@ fn assert_binding_lifecycle(after: &AllRows, before_binding: &Option<Vec<u8>>) {
         .iter()
         .find(|r| r.run_id == "run-run")
         .expect("run");
-    assert_eq!(run_run.provider_binding, *before_binding);
+    assert_eq!(run_run.provider_binding, before_binding.clone());
     assert!(run_run.provider_binding_version.is_some());
     let turn_launch = after
         .turns
