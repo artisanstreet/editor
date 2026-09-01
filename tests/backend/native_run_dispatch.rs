@@ -2120,7 +2120,6 @@ async fn collect_fixture_initial_delivery(
 
 async fn shutdown_fixture_initial_dispatch(
     state: FixtureDispatchState,
-    repository: &Repository,
     database: &DatabaseConnection,
     thread_id: &ThreadId,
     message_id: &MessageId,
@@ -2272,14 +2271,8 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
         start_fixture_dispatch(&repository, temp.path(), &thread_id, fixture).await;
     let (final_cursor, stream) =
         collect_fixture_initial_delivery(&repository, &thread_id, &mut dispatch_state).await;
-    let (restart_context, before_restart, identity_before) = shutdown_fixture_initial_dispatch(
-        dispatch_state,
-        &repository,
-        &database,
-        &thread_id,
-        &message_id,
-    )
-    .await;
+    let (restart_context, before_restart, identity_before) =
+        shutdown_fixture_initial_dispatch(dispatch_state, &database, &thread_id, &message_id).await;
     drop(repository);
     database
         .close()
