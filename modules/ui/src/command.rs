@@ -18,9 +18,9 @@ use std::rc::Rc;
 use artisan_assets::AssetId;
 use gpui::prelude::Refineable;
 use gpui::{
-    App, BoxShadow, ElementId, FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
-    div, point, px,
+    App, BoxShadow, Div, ElementId, FocusHandle, Hsla, InteractiveElement, IntoElement,
+    ParentElement, Pixels, RenderOnce, SharedString, Stateful, StatefulInteractiveElement,
+    StyleRefinement, Styled, Window, div, point, px,
 };
 
 pub use crate::button::FocusVisibility;
@@ -343,7 +343,7 @@ struct ItemLocation {
     item: usize,
 }
 
-fn item_at<'a>(groups: &'a [CommandGroup], location: ItemLocation) -> Option<&'a CommandItem> {
+fn item_at(groups: &[CommandGroup], location: ItemLocation) -> Option<&CommandItem> {
     groups
         .get(location.group)
         .and_then(|group| group.items.get(location.item))
@@ -531,17 +531,29 @@ fn arrow_direction(key: &str) -> Option<bool> {
     }
 }
 
-/// Returns `Some(target)` for a handled navigation key. The inner `None`
-/// represents a handled key when the list has no enabled item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NavigationTarget {
+    Unhandled,
+    Highlight(SharedString),
+    ClearHighlight,
+}
+
+fn highlight_or_clear(target: Option<SharedString>) -> NavigationTarget {
+    target.map_or(
+        NavigationTarget::ClearHighlight,
+        NavigationTarget::Highlight,
+    )
+}
+
 fn navigation_target(
     groups: &[CommandGroup],
     current: Option<&SharedString>,
     key: &str,
     modifiers: gpui::Modifiers,
-) -> Option<Option<SharedString>> {
+) -> NavigationTarget {
     if let Some(forward) = arrow_direction(key) {
         if modifiers.platform && !modifiers.control && !modifiers.shift && !modifiers.function {
-            return Some(if forward {
+            return highlight_or_clear(if forward {
                 last_enabled_id(groups)
             } else {
                 first_enabled_id(groups)
@@ -549,23 +561,23 @@ fn navigation_target(
         }
 
         if modifiers.alt && !modifiers.control && !modifiers.shift && !modifiers.function {
-            return Some(adjacent_group_id(groups, current, forward));
+            return highlight_or_clear(adjacent_group_id(groups, current, forward));
         }
 
         if !modifiers.modified() {
-            return Some(next_or_previous_id(groups, current, forward));
+            return highlight_or_clear(next_or_previous_id(groups, current, forward));
         }
     }
 
     if !modifiers.modified() {
         match key {
-            "home" | "start" => return Some(first_enabled_id(groups)),
-            "end" => return Some(last_enabled_id(groups)),
+            "home" | "start" => return highlight_or_clear(first_enabled_id(groups)),
+            "end" => return highlight_or_clear(last_enabled_id(groups)),
             _ => {}
         }
     }
 
-    None
+    NavigationTarget::Unhandled
 }
 
 type HighlightHandler = Rc<dyn Fn(Option<SharedString>, &mut Window, &mut App) + 'static>;
@@ -574,7 +586,7 @@ type ActivationHandler = Rc<dyn Fn(CommandActivation, &mut Window, &mut App) + '
 fn emit_highlight_change(
     state: &RefCell<Option<SharedString>>,
     next: Option<SharedString>,
-    handler: &Option<HighlightHandler>,
+    handler: Option<&HighlightHandler>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -583,7 +595,7 @@ fn emit_highlight_change(
         if *current == next {
             false
         } else {
-            *current = next.clone();
+            current.clone_from(&next);
             true
         }
     };
@@ -798,9 +810,455 @@ impl Styled for CommandPalette {
     }
 }
 
+struct CommandRenderContext<'a> {
+    palette_id: &'a ElementId,
+    theme: ArtisanTheme,
+    style: CommandStyle,
+    highlighted: Option<&'a SharedString>,
+    highlighted_state: &'a Rc<RefCell<Option<SharedString>>>,
+    on_highlight_change: Option<&'a HighlightHandler>,
+    on_activate: Option<&'a ActivationHandler>,
+}
+
+struct CommandRenderParts {
+    id: ElementId,
+    focus: FocusHandle,
+    theme: ArtisanTheme,
+    style: CommandStyle,
+    query: SharedString,
+    groups: Vec<CommandGroup>,
+    highlighted_id: Option<SharedString>,
+    on_highlight_change: Option<HighlightHandler>,
+    on_activate: Option<ActivationHandler>,
+    placeholder: Option<SharedString>,
+    empty_label: SharedString,
+    focus_visibility: FocusVisibility,
+    debug_selector: Option<SharedString>,
+    style_refinement: StyleRefinement,
+}
+
+fn render_input(
+    theme: ArtisanTheme,
+    style: CommandStyle,
+    query: SharedString,
+    placeholder: Option<SharedString>,
+    selector: String,
+) -> impl IntoElement + 'static {
+    let query_is_empty = query.is_empty();
+    let input_value = if query_is_empty {
+        placeholder.clone().unwrap_or_default()
+    } else {
+        query
+    };
+
+    let input_text = div()
+        .flex_1()
+        .min_w(px(0.0))
+        .truncate()
+        .text_size(style.item_text_size)
+        .line_height(style.item_line_height)
+        .text_color(if query_is_empty && placeholder.is_some() {
+            style.muted_foreground
+        } else {
+            style.foreground
+        })
+        .child(input_value);
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .min_w(px(0.0))
+        .h(style.input_height)
+        .px(style.input_horizontal_padding)
+        .gap(style.input_gap)
+        .rounded(style.outer_radius)
+        .border_1()
+        .border_color(style.input_border)
+        .bg(style.input_background)
+        .text_color(style.foreground)
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .child(
+            render_icon(IconStyle::resolve(
+                theme,
+                AssetId::TABLER_SEARCH,
+                IconSize::Default,
+                IconTint::Muted,
+            ))
+            .size(style.input_icon_size)
+            .opacity(style.search_icon_opacity),
+        )
+        .child(input_text)
+        .debug_selector(move || selector.clone())
+}
+
+fn render_empty(
+    style: CommandStyle,
+    empty_label: SharedString,
+    selector: String,
+) -> impl IntoElement + 'static {
+    div()
+        .flex()
+        .w_full()
+        .items_center()
+        .justify_center()
+        .py(style.empty_vertical_padding)
+        .text_size(style.empty_text_size)
+        .text_color(style.muted_foreground)
+        .debug_selector(move || selector.clone())
+        .child(empty_label)
+}
+
+fn render_separator(style: CommandStyle) -> impl IntoElement + 'static {
+    div()
+        .w_full()
+        .h(style.separator_height)
+        .my(style.separator_margin)
+        .bg(style.separator)
+}
+
+fn render_heading(style: CommandStyle, heading: SharedString) -> impl IntoElement + 'static {
+    div()
+        .w_full()
+        .px(style.heading_horizontal_padding)
+        .py(style.heading_vertical_padding)
+        .text_size(style.heading_text_size)
+        .font_weight(style.heading_weight)
+        .text_color(style.muted_foreground)
+        .whitespace_nowrap()
+        .child(heading)
+}
+
+fn render_item(
+    context: &CommandRenderContext<'_>,
+    group: &CommandGroup,
+    item: &CommandItem,
+) -> impl IntoElement + 'static {
+    let style = context.style;
+    let is_highlighted = context.highlighted == Some(&item.id);
+    let is_disabled = item.disabled;
+    let item_id = item.id.clone();
+    let group_id = group.id.clone();
+    let mut row = div()
+        .id(item_element_id(context.palette_id, &group_id, &item_id))
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .min_w(px(0.0))
+        .gap(style.item_gap)
+        .px(style.item_horizontal_padding)
+        .py(style.item_vertical_padding)
+        .rounded(style.item_corner_radius)
+        .text_size(style.item_text_size)
+        .line_height(style.item_line_height)
+        .text_color(if is_highlighted {
+            style.highlight_foreground
+        } else {
+            style.foreground
+        })
+        .whitespace_nowrap();
+
+    if is_highlighted {
+        row = row.bg(style.highlight_background);
+    }
+    if is_disabled {
+        row = row.opacity(style.disabled_opacity);
+    }
+
+    if let Some(icon) = item.icon {
+        row = row.child(
+            render_icon(IconStyle::resolve(
+                context.theme,
+                icon,
+                IconSize::Default,
+                IconTint::Inherit,
+            ))
+            .size(style.input_icon_size)
+            .flex_shrink_0(),
+        );
+    }
+
+    row = row.child(
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .truncate()
+            .child(item.label.clone()),
+    );
+
+    if let Some(shortcut) = &item.shortcut {
+        row = row.child(
+            div()
+                .flex_shrink_0()
+                .text_size(style.shortcut_text_size)
+                .text_color(style.muted_foreground)
+                .whitespace_nowrap()
+                .child(shortcut.clone()),
+        );
+    }
+
+    attach_item_interactions(
+        row,
+        context,
+        group_id,
+        item_id,
+        item.label.clone(),
+        is_disabled,
+    )
+}
+
+fn attach_item_interactions(
+    mut row: Stateful<Div>,
+    context: &CommandRenderContext<'_>,
+    group_id: SharedString,
+    item_id: SharedString,
+    label: SharedString,
+    is_disabled: bool,
+) -> Stateful<Div> {
+    if !is_disabled {
+        if let Some(handler) = context.on_highlight_change.cloned() {
+            let state = context.highlighted_state.clone();
+            let item_id_for_hover = item_id.clone();
+            row = row.on_hover(move |hovered, window, cx| {
+                if *hovered {
+                    emit_highlight_change(
+                        &state,
+                        Some(item_id_for_hover.clone()),
+                        Some(&handler),
+                        window,
+                        cx,
+                    );
+                }
+            });
+        }
+
+        if context.on_activate.is_some() || context.on_highlight_change.is_some() {
+            let state = context.highlighted_state.clone();
+            let highlight_handler = context.on_highlight_change.cloned();
+            let activation_handler = context.on_activate.cloned();
+            let activation = CommandActivation::new(group_id, item_id.clone(), label);
+            let item_id_for_click = item_id;
+            row = row.on_click(move |event, window, cx| {
+                if !event.standard_click() {
+                    return;
+                }
+
+                emit_highlight_change(
+                    &state,
+                    Some(item_id_for_click.clone()),
+                    highlight_handler.as_ref(),
+                    window,
+                    cx,
+                );
+                if let Some(handler) = &activation_handler {
+                    handler(activation.clone(), window, cx);
+                }
+                cx.stop_propagation();
+            });
+        }
+    }
+
+    row
+}
+
+fn render_list(
+    context: &CommandRenderContext<'_>,
+    groups: &[CommandGroup],
+    visible_groups: &[usize],
+    selector: String,
+) -> impl IntoElement + 'static {
+    let mut list = div()
+        .id(ElementId::NamedChild(
+            Box::new(context.palette_id.clone()),
+            SharedString::new_static("list"),
+        ))
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_h(px(0.0))
+        .max_h(context.style.list_max_height)
+        .py(context.style.list_scroll_padding)
+        .overflow_y_scroll()
+        .debug_selector(move || selector.clone());
+
+    for (visible_index, group_index) in visible_groups.iter().copied().enumerate() {
+        let group = &groups[group_index];
+        if visible_index > 0 {
+            list = list.child(render_separator(context.style));
+        }
+
+        if let Some(heading) = &group.heading {
+            list = list.child(render_heading(context.style, heading.clone()));
+        }
+
+        for item in &group.items {
+            list = list.child(render_item(context, group, item));
+        }
+    }
+
+    list
+}
+
+fn apply_navigation_target(
+    target: NavigationTarget,
+    state: &RefCell<Option<SharedString>>,
+    handler: Option<&HighlightHandler>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let next = match target {
+        NavigationTarget::Unhandled => return false,
+        NavigationTarget::Highlight(id) => Some(id),
+        NavigationTarget::ClearHighlight => None,
+    };
+
+    window.prevent_default();
+    emit_highlight_change(state, next, handler, window, cx);
+    cx.stop_propagation();
+    true
+}
+
+fn attach_keyboard_handler<E>(
+    root: E,
+    groups: Vec<CommandGroup>,
+    highlighted_state: Rc<RefCell<Option<SharedString>>>,
+    on_highlight_change: Option<HighlightHandler>,
+    on_activate: Option<ActivationHandler>,
+) -> E
+where
+    E: StatefulInteractiveElement,
+{
+    root.on_key_down(move |event, window, cx| {
+        let current = highlighted_state.borrow().clone();
+        if apply_navigation_target(
+            navigation_target(
+                &groups,
+                current.as_ref(),
+                event.keystroke.key.as_str(),
+                event.keystroke.modifiers,
+            ),
+            &highlighted_state,
+            on_highlight_change.as_ref(),
+            window,
+            cx,
+        ) {
+            return;
+        }
+
+        let key = event.keystroke.key.as_str();
+        if !event.keystroke.modifiers.modified() && matches!(key, "enter" | "return" | "space") {
+            window.prevent_default();
+            if let Some(handler) = on_activate.as_ref() {
+                let current = highlighted_state.borrow().clone();
+                if let Some(activation) = activation_for_id(&groups, current.as_ref()) {
+                    handler(activation, window, cx);
+                }
+            }
+            cx.stop_propagation();
+        }
+    })
+}
+
+fn render_palette(parts: CommandRenderParts) -> impl IntoElement + 'static {
+    let CommandRenderParts {
+        id,
+        focus,
+        theme,
+        style,
+        query,
+        groups,
+        highlighted_id,
+        on_highlight_change,
+        on_activate,
+        placeholder,
+        empty_label,
+        focus_visibility,
+        debug_selector,
+        style_refinement,
+    } = parts;
+
+    let highlighted = resolved_highlight_id(&groups, highlighted_id.as_ref());
+    let highlighted_state = Rc::new(RefCell::new(highlighted.clone()));
+    let root_selector = debug_selector.map_or_else(
+        || DEFAULT_DEBUG_SELECTOR.to_owned(),
+        |selector| selector.to_string(),
+    );
+    let input_selector = format!("{root_selector}-input");
+    let list_selector = format!("{root_selector}-list");
+    let empty_selector = format!("{root_selector}-empty");
+    let palette_id = id.clone();
+    let visible_groups = visible_group_indices(&groups);
+
+    let mut root = div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap(style.outer_padding)
+        .p(style.outer_padding)
+        .rounded(style.outer_radius)
+        .bg(style.background)
+        .text_color(style.foreground)
+        .overflow_hidden()
+        .track_focus(&focus)
+        .child(render_input(
+            theme,
+            style,
+            query,
+            placeholder,
+            input_selector,
+        ));
+
+    if visible_groups.is_empty() {
+        root = root.child(render_empty(style, empty_label, empty_selector));
+    } else {
+        let context = CommandRenderContext {
+            palette_id: &palette_id,
+            theme,
+            style,
+            highlighted: highlighted.as_ref(),
+            highlighted_state: &highlighted_state,
+            on_highlight_change: on_highlight_change.as_ref(),
+            on_activate: on_activate.as_ref(),
+        };
+        root = root.child(render_list(
+            &context,
+            &groups,
+            &visible_groups,
+            list_selector,
+        ));
+    }
+
+    root = attach_keyboard_handler(
+        root,
+        groups,
+        highlighted_state,
+        on_highlight_change,
+        on_activate,
+    );
+
+    if focus_visibility == FocusVisibility::Visible {
+        root = root.focus(move |focused| {
+            focused.shadow(vec![BoxShadow {
+                color: style.focus_ring,
+                offset: point(px(0.0), px(0.0)),
+                blur_radius: px(0.0),
+                spread_radius: style.focus_ring_width,
+            }])
+        });
+    }
+
+    let root_selector_for_debug = root_selector.clone();
+    root = root.debug_selector(move || root_selector_for_debug.clone());
+    root.style().refine(&style_refinement);
+    root
+}
+
 impl RenderOnce for CommandPalette {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let style = CommandStyle::resolve(self.theme);
         let CommandPalette {
             id,
             focus,
@@ -817,302 +1275,22 @@ impl RenderOnce for CommandPalette {
             style_refinement,
         } = self;
 
-        let highlighted = resolved_highlight_id(&groups, highlighted_id.as_ref());
-        let highlighted_state = Rc::new(RefCell::new(highlighted.clone()));
-        let root_selector = debug_selector.map_or_else(
-            || DEFAULT_DEBUG_SELECTOR.to_owned(),
-            |selector| selector.to_string(),
-        );
-        let input_selector = format!("{root_selector}-input");
-        let list_selector = format!("{root_selector}-list");
-        let empty_selector = format!("{root_selector}-empty");
-        let palette_id = id.clone();
-
-        let query_is_empty = query.is_empty();
-        let input_value = if query_is_empty {
-            placeholder.clone().unwrap_or_default()
-        } else {
-            query.clone()
-        };
-
-        let input_text = div()
-            .flex_1()
-            .min_w(px(0.0))
-            .truncate()
-            .text_size(style.item_text_size)
-            .line_height(style.item_line_height)
-            .text_color(if query_is_empty && placeholder.is_some() {
-                style.muted_foreground
-            } else {
-                style.foreground
-            })
-            .child(input_value);
-
-        let input = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .min_w(px(0.0))
-            .h(style.input_height)
-            .px(style.input_horizontal_padding)
-            .gap(style.input_gap)
-            .rounded(style.outer_radius)
-            .border_1()
-            .border_color(style.input_border)
-            .bg(style.input_background)
-            .text_color(style.foreground)
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .child(
-                render_icon(IconStyle::resolve(
-                    theme,
-                    AssetId::TABLER_SEARCH,
-                    IconSize::Default,
-                    IconTint::Muted,
-                ))
-                .size(style.input_icon_size)
-                .opacity(style.search_icon_opacity),
-            )
-            .child(input_text)
-            .debug_selector(move || input_selector.clone());
-
-        let visible_groups = visible_group_indices(&groups);
-
-        let mut root = div()
-            .id(id)
-            .flex()
-            .flex_col()
-            .w_full()
-            .gap(style.outer_padding)
-            .p(style.outer_padding)
-            .rounded(style.outer_radius)
-            .bg(style.background)
-            .text_color(style.foreground)
-            .overflow_hidden()
-            .track_focus(&focus)
-            .child(input);
-
-        if visible_groups.is_empty() {
-            root = root.child(
-                div()
-                    .flex()
-                    .w_full()
-                    .items_center()
-                    .justify_center()
-                    .py(style.empty_vertical_padding)
-                    .text_size(style.empty_text_size)
-                    .text_color(style.muted_foreground)
-                    .debug_selector(move || empty_selector.clone())
-                    .child(empty_label),
-            );
-        } else {
-            let mut list = div()
-                .id(ElementId::NamedChild(
-                    Box::new(palette_id.clone()),
-                    SharedString::new_static("list"),
-                ))
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_h(px(0.0))
-                .max_h(style.list_max_height)
-                .py(style.list_scroll_padding)
-                .overflow_y_scroll()
-                .debug_selector(move || list_selector.clone());
-
-            for (visible_index, group_index) in visible_groups.iter().copied().enumerate() {
-                let group = &groups[group_index];
-                if visible_index > 0 {
-                    list = list.child(
-                        div()
-                            .w_full()
-                            .h(style.separator_height)
-                            .my(style.separator_margin)
-                            .bg(style.separator),
-                    );
-                }
-
-                if let Some(heading) = &group.heading {
-                    list = list.child(
-                        div()
-                            .w_full()
-                            .px(style.heading_horizontal_padding)
-                            .py(style.heading_vertical_padding)
-                            .text_size(style.heading_text_size)
-                            .font_weight(style.heading_weight)
-                            .text_color(style.muted_foreground)
-                            .whitespace_nowrap()
-                            .child(heading.clone()),
-                    );
-                }
-
-                for item in &group.items {
-                    let is_highlighted = highlighted.as_ref() == Some(&item.id);
-                    let is_disabled = item.disabled;
-                    let item_id = item.id.clone();
-                    let group_id = group.id.clone();
-                    let mut row = div()
-                        .id(item_element_id(&palette_id, &group_id, &item_id))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .w_full()
-                        .min_w(px(0.0))
-                        .gap(style.item_gap)
-                        .px(style.item_horizontal_padding)
-                        .py(style.item_vertical_padding)
-                        .rounded(style.item_corner_radius)
-                        .text_size(style.item_text_size)
-                        .line_height(style.item_line_height)
-                        .text_color(if is_highlighted {
-                            style.highlight_foreground
-                        } else {
-                            style.foreground
-                        })
-                        .whitespace_nowrap();
-
-                    if is_highlighted {
-                        row = row.bg(style.highlight_background);
-                    }
-                    if is_disabled {
-                        row = row.opacity(style.disabled_opacity);
-                    }
-
-                    if let Some(icon) = item.icon {
-                        row = row.child(
-                            render_icon(IconStyle::resolve(
-                                theme,
-                                icon,
-                                IconSize::Default,
-                                IconTint::Inherit,
-                            ))
-                            .size(style.input_icon_size)
-                            .flex_shrink_0(),
-                        );
-                    }
-
-                    row = row.child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .child(item.label.clone()),
-                    );
-
-                    if let Some(shortcut) = &item.shortcut {
-                        row = row.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(style.shortcut_text_size)
-                                .text_color(style.muted_foreground)
-                                .whitespace_nowrap()
-                                .child(shortcut.clone()),
-                        );
-                    }
-
-                    if !is_disabled {
-                        if let Some(handler) = on_highlight_change.clone() {
-                            let state = highlighted_state.clone();
-                            let item_id_for_hover = item_id.clone();
-                            let handler = Some(handler);
-                            row = row.on_hover(move |hovered, window, cx| {
-                                if *hovered {
-                                    emit_highlight_change(
-                                        &state,
-                                        Some(item_id_for_hover.clone()),
-                                        &handler,
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            });
-                        }
-
-                        if on_activate.is_some() || on_highlight_change.is_some() {
-                            let state = highlighted_state.clone();
-                            let highlight_handler = on_highlight_change.clone();
-                            let activation_handler = on_activate.clone();
-                            let activation = CommandActivation::new(
-                                group_id.clone(),
-                                item_id.clone(),
-                                item.label.clone(),
-                            );
-                            let item_id_for_click = item_id.clone();
-                            row = row.on_click(move |event, window, cx| {
-                                if !event.standard_click() {
-                                    return;
-                                }
-
-                                emit_highlight_change(
-                                    &state,
-                                    Some(item_id_for_click.clone()),
-                                    &highlight_handler,
-                                    window,
-                                    cx,
-                                );
-                                if let Some(handler) = &activation_handler {
-                                    handler(activation.clone(), window, cx);
-                                }
-                                cx.stop_propagation();
-                            });
-                        }
-                    }
-
-                    list = list.child(row);
-                }
-            }
-
-            root = root.child(list);
-        }
-
-        let key_groups = groups;
-        let key_state = highlighted_state.clone();
-        let key_highlight_handler = on_highlight_change.clone();
-        let activation_handler = on_activate;
-        root = root.on_key_down(move |event, window, cx| {
-            let current = key_state.borrow().clone();
-            if let Some(next) = navigation_target(
-                &key_groups,
-                current.as_ref(),
-                event.keystroke.key.as_str(),
-                event.keystroke.modifiers,
-            ) {
-                window.prevent_default();
-                emit_highlight_change(&key_state, next, &key_highlight_handler, window, cx);
-                cx.stop_propagation();
-                return;
-            }
-
-            let key = event.keystroke.key.as_str();
-            if !event.keystroke.modifiers.modified() && matches!(key, "enter" | "return" | "space")
-            {
-                window.prevent_default();
-                if let Some(handler) = &activation_handler {
-                    let current = key_state.borrow().clone();
-                    if let Some(activation) = activation_for_id(&key_groups, current.as_ref()) {
-                        handler(activation, window, cx);
-                    }
-                }
-                cx.stop_propagation();
-            }
-        });
-
-        if focus_visibility == FocusVisibility::Visible {
-            root = root.focus(move |focused| {
-                focused.shadow(vec![BoxShadow {
-                    color: style.focus_ring,
-                    offset: point(px(0.0), px(0.0)),
-                    blur_radius: px(0.0),
-                    spread_radius: style.focus_ring_width,
-                }])
-            });
-        }
-
-        let root_selector_for_debug = root_selector.clone();
-        root = root.debug_selector(move || root_selector_for_debug.clone());
-        root.style().refine(&style_refinement);
-        root
+        render_palette(CommandRenderParts {
+            id,
+            focus,
+            theme,
+            style: CommandStyle::resolve(theme),
+            query,
+            groups,
+            highlighted_id,
+            on_highlight_change,
+            on_activate,
+            placeholder,
+            empty_label,
+            focus_visibility,
+            debug_selector,
+            style_refinement,
+        })
     }
 }
 

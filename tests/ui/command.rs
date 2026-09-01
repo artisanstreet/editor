@@ -14,7 +14,7 @@ use gpui::{
 
 use super::{
     COMMAND_PALETTE_ROLE, CommandActivation, CommandGroup, CommandItem, CommandPalette,
-    CommandStyle, DEFAULT_DEBUG_SELECTOR, DEFAULT_EMPTY_LABEL, activation_for_id,
+    CommandStyle, DEFAULT_DEBUG_SELECTOR, DEFAULT_EMPTY_LABEL, NavigationTarget, activation_for_id,
     adjacent_group_id, navigation_target, resolved_highlight_id, visible_group_indices,
 };
 
@@ -94,19 +94,19 @@ fn empty_and_all_disabled_lists_have_no_resolved_selection_or_activation() {
     assert_eq!(activation_for_id(&all_disabled, Some(&requested)), None);
     assert_eq!(
         navigation_target(&all_disabled, None, "down", Modifiers::none()),
-        Some(None)
+        NavigationTarget::ClearHighlight
     );
     assert_eq!(
         navigation_target(&all_disabled, None, "up", Modifiers::none()),
-        Some(None)
+        NavigationTarget::ClearHighlight
     );
     assert_eq!(
         navigation_target(&all_disabled, None, "home", Modifiers::none()),
-        Some(None)
+        NavigationTarget::ClearHighlight
     );
     assert_eq!(
         navigation_target(&all_disabled, None, "end", Modifiers::none()),
-        Some(None)
+        NavigationTarget::ClearHighlight
     );
 }
 
@@ -139,29 +139,29 @@ fn navigation_skips_disabled_rows_and_stops_at_edges() {
 
     assert_eq!(
         navigation_target(&groups, Some(&a), "down", Modifiers::none()),
-        Some(Some(b.clone()))
+        NavigationTarget::Highlight(b.clone())
     );
     assert_eq!(
         navigation_target(&groups, Some(&b), "down", Modifiers::none()),
-        Some(Some(c.clone()))
+        NavigationTarget::Highlight(c.clone())
     );
     assert_eq!(
         navigation_target(&groups, Some(&d), "down", Modifiers::none()),
-        Some(None),
+        NavigationTarget::ClearHighlight,
         "down stops at the final enabled row"
     );
     assert_eq!(
         navigation_target(&groups, Some(&a), "up", Modifiers::none()),
-        Some(None),
+        NavigationTarget::ClearHighlight,
         "up stops at the first enabled row"
     );
     assert_eq!(
         navigation_target(&groups, Some(&d), "home", Modifiers::none()),
-        Some(Some(a.clone()))
+        NavigationTarget::Highlight(a.clone())
     );
     assert_eq!(
         navigation_target(&groups, Some(&a), "end", Modifiers::none()),
-        Some(Some(d.clone()))
+        NavigationTarget::Highlight(d.clone())
     );
 }
 
@@ -176,11 +176,11 @@ fn meta_and_alt_arrows_use_stable_first_last_and_group_targets() {
         ),
         group("last", None, vec![item("d", "D"), item("e", "E")]),
     ];
-    let a = shared("a");
-    let b = shared("b");
-    let c = shared("c");
-    let d = shared("d");
-    let e = shared("e");
+    let first_item = shared("a");
+    let second_item = shared("b");
+    let middle_item = shared("c");
+    let last_group_first_item = shared("d");
+    let last_item = shared("e");
     let meta = Modifiers {
         platform: true,
         ..Modifiers::none()
@@ -191,30 +191,33 @@ fn meta_and_alt_arrows_use_stable_first_last_and_group_targets() {
     };
 
     assert_eq!(
-        navigation_target(&groups, Some(&c), "arrowup", meta),
-        Some(Some(a.clone()))
+        navigation_target(&groups, Some(&middle_item), "arrowup", meta),
+        NavigationTarget::Highlight(first_item.clone())
     );
     assert_eq!(
-        navigation_target(&groups, Some(&c), "arrowdown", meta),
-        Some(Some(e.clone()))
+        navigation_target(&groups, Some(&middle_item), "arrowdown", meta),
+        NavigationTarget::Highlight(last_item.clone())
     );
     assert_eq!(
-        navigation_target(&groups, Some(&a), "arrowdown", alt),
-        Some(Some(c.clone()))
+        navigation_target(&groups, Some(&first_item), "arrowdown", alt),
+        NavigationTarget::Highlight(middle_item.clone())
     );
     assert_eq!(
-        navigation_target(&groups, Some(&c), "arrowdown", alt),
-        Some(Some(d.clone()))
+        navigation_target(&groups, Some(&middle_item), "arrowdown", alt),
+        NavigationTarget::Highlight(last_group_first_item.clone())
     );
     assert_eq!(
-        navigation_target(&groups, Some(&d), "arrowup", alt),
-        Some(Some(c.clone()))
+        navigation_target(&groups, Some(&last_group_first_item), "arrowup", alt),
+        NavigationTarget::Highlight(middle_item.clone())
     );
     assert_eq!(
-        navigation_target(&groups, Some(&c), "arrowup", alt),
-        Some(Some(b.clone()))
+        navigation_target(&groups, Some(&middle_item), "arrowup", alt),
+        NavigationTarget::Highlight(second_item.clone())
     );
-    assert_eq!(adjacent_group_id(&groups, Some(&a), true), Some(c));
+    assert_eq!(
+        adjacent_group_id(&groups, Some(&first_item), true),
+        Some(middle_item)
+    );
 }
 
 #[test]
