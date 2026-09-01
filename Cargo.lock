@@ -398,6 +398,7 @@ dependencies = [
  "artisan-database",
  "artisan-domain",
  "artisan-migrations",
+ "artisan-native-engine",
  "artisan-protocol",
  "artisan-transport",
  "base64",

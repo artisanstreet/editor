@@ -50,7 +50,8 @@ pub use bounds::{
 };
 pub use commands::{
     AttachProject, Command, CreateThread, ListAttachedProjects, ListDirectories,
-    ListProjectThreads, Query, QueueFirstMessage, ReadThreadEngineSettings, SetThreadEngineConfig,
+    ListProjectThreads, ListRegisteredEngineProfiles, Query, QueueFirstMessage,
+    ReadThreadEngineSettings, SetThreadEngineConfig,
 };
 pub use conversation::{
     AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,

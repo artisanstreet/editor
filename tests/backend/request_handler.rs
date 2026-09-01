@@ -3526,3 +3526,255 @@ async fn read_thread_engine_settings_response_request_id_equals_triggering_frame
         ResponsePayload::ThreadEngineSettings(_)
     ));
 }
+
+#[derive(Debug)]
+struct ScriptedProfilesReader {
+    result: Mutex<
+        Option<
+            Result<
+                Option<Vec<EngineProfileId>>,
+                artisan_backend::request_handler::RegisteredEngineProfilesError,
+            >,
+        >,
+    >,
+    calls: AtomicU64,
+}
+
+impl ScriptedProfilesReader {
+    fn missing() -> Self {
+        Self {
+            result: Mutex::new(Some(Ok(None))),
+            calls: AtomicU64::new(0),
+        }
+    }
+
+    fn present(ids: Vec<&str>) -> Self {
+        let parsed = ids
+            .into_iter()
+            .map(|value| EngineProfileId::parse(value).expect("valid engine profile id"))
+            .collect();
+        Self {
+            result: Mutex::new(Some(Ok(Some(parsed)))),
+            calls: AtomicU64::new(0),
+        }
+    }
+
+    fn failing() -> Self {
+        Self {
+            result: Mutex::new(Some(Err(
+                artisan_backend::request_handler::RegisteredEngineProfilesError,
+            ))),
+            calls: AtomicU64::new(0),
+        }
+    }
+
+    fn calls(&self) -> u64 {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+impl artisan_backend::request_handler::RegisteredEngineProfilesReader for ScriptedProfilesReader {
+    fn list_profiles(
+        &self,
+    ) -> Result<
+        Option<Vec<EngineProfileId>>,
+        artisan_backend::request_handler::RegisteredEngineProfilesError,
+    > {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.result
+            .lock()
+            .expect("profile reader mutex should not be poisoned")
+            .take()
+            .expect("scripted profiles reader should cover every consult")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ScriptedProfilesHandle(Arc<ScriptedProfilesReader>);
+
+impl ScriptedProfilesHandle {
+    fn missing() -> Self {
+        Self(Arc::new(ScriptedProfilesReader::missing()))
+    }
+
+    fn present(ids: Vec<&str>) -> Self {
+        Self(Arc::new(ScriptedProfilesReader::present(ids)))
+    }
+
+    fn failing() -> Self {
+        Self(Arc::new(ScriptedProfilesReader::failing()))
+    }
+
+    fn calls(&self) -> u64 {
+        self.0.calls()
+    }
+}
+
+impl artisan_backend::request_handler::RegisteredEngineProfilesReader for ScriptedProfilesHandle {
+    fn list_profiles(
+        &self,
+    ) -> Result<
+        Option<Vec<EngineProfileId>>,
+        artisan_backend::request_handler::RegisteredEngineProfilesError,
+    > {
+        self.0.list_profiles()
+    }
+}
+
+fn profiles_query() -> ClientRequest {
+    ClientRequest::Query(Query::ListRegisteredEngineProfiles(
+        artisan_domain::commands::ListRegisteredEngineProfiles,
+    ))
+}
+
+fn profiles_handler(storage: &ForgeStorage, reader: ScriptedProfilesHandle) -> RequestHandler {
+    RequestHandler::new(storage.repository().clone()).with_registered_engine_profiles_reader(reader)
+}
+
+#[tokio::test]
+async fn list_registered_engine_profiles_missing_and_present_empty_remain_distinct() {
+    let (_temporary, storage) = opened_storage("profiles-missing").await;
+    let missing_reader = ScriptedProfilesHandle::missing();
+    let missing_handler = profiles_handler(&storage, missing_reader.clone());
+    let missing_response = missing_handler
+        .respond(&request("frame-profiles-missing"), &profiles_query())
+        .await
+        .expect("missing registry should answer");
+    assert_eq!(
+        missing_response.request_id,
+        request("frame-profiles-missing")
+    );
+    assert!(matches!(
+        &missing_response.payload,
+        ResponsePayload::RegisteredEngineProfiles(
+            artisan_protocol::RegisteredEngineProfilesResult::RegistryMissing
+        )
+    ));
+    assert_eq!(missing_reader.calls(), 1);
+
+    let present_empty_reader = ScriptedProfilesHandle::present(vec![]);
+    let present_empty_handler = profiles_handler(&storage, present_empty_reader.clone());
+    let present_empty_response = present_empty_handler
+        .respond(&request("frame-profiles-empty"), &profiles_query())
+        .await
+        .expect("present empty should answer");
+    assert_eq!(
+        present_empty_response.request_id,
+        request("frame-profiles-empty")
+    );
+    match &present_empty_response.payload {
+        ResponsePayload::RegisteredEngineProfiles(
+            artisan_protocol::RegisteredEngineProfilesResult::RegistryPresent { profile_ids },
+        ) => {
+            assert!(profile_ids.is_empty());
+        }
+        other => panic!("expected present empty, got {other:?}"),
+    }
+    assert_eq!(present_empty_reader.calls(), 1);
+    assert_ne!(&missing_response.payload, &present_empty_response.payload);
+
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn list_registered_engine_profiles_present_preserves_source_order_and_contains_no_home() {
+    let (_temporary, storage) = opened_storage("profiles-ordered").await;
+    let ordered = vec!["zeta", "alpha", "work.profile"];
+    let reader = ScriptedProfilesHandle::present(ordered.clone());
+    let handler = profiles_handler(&storage, reader.clone());
+    let response = handler
+        .respond(&request("frame-profiles-ordered"), &profiles_query())
+        .await
+        .expect("ordered profiles should answer");
+    assert_eq!(response.request_id, request("frame-profiles-ordered"));
+    match response.payload {
+        ResponsePayload::RegisteredEngineProfiles(
+            artisan_protocol::RegisteredEngineProfilesResult::RegistryPresent { profile_ids },
+        ) => {
+            let rendered: Vec<String> = profile_ids
+                .iter()
+                .map(|id| id.as_str().to_owned())
+                .collect();
+            assert_eq!(rendered, ordered);
+            let debug = format!("{profile_ids:?}");
+            assert!(
+                !debug.contains("home") && !debug.contains("path"),
+                "profile ids debug should not leak home/path: {debug}"
+            );
+        }
+        other => panic!("expected present ordered, got {other:?}"),
+    }
+    assert_eq!(reader.calls(), 1);
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn list_registered_engine_profiles_reader_failure_becomes_correlated_internal() {
+    let (_temporary, storage) = opened_storage("profiles-failure").await;
+    let reader = ScriptedProfilesHandle::failing();
+    let handler = profiles_handler(&storage, reader.clone());
+    let failure = failure_of(
+        handler
+            .respond(&request("frame-profiles-failure"), &profiles_query())
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::Internal);
+    assert!(!failure.retryable);
+    assert_eq!(failure.request_id, Some(request("frame-profiles-failure")));
+    assert_eq!(
+        failure.detail.as_str(),
+        "registered engine profiles are unavailable"
+    );
+    assert!(
+        !failure.detail.as_str().contains("frame-profiles-failure")
+            && !failure.detail.as_str().contains('/')
+            && !failure.detail.as_str().contains('\\'),
+        "detail should be bounded static path-free"
+    );
+    assert_eq!(reader.calls(), 1);
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn list_registered_engine_profiles_unconfigured_becomes_unsupported_feature() {
+    let (_temporary, storage) = opened_storage("profiles-unconfigured").await;
+    let handler = RequestHandler::new(storage.repository().clone());
+    let failure = failure_of(
+        handler
+            .respond(&request("frame-profiles-unconfigured"), &profiles_query())
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::UnsupportedFeature);
+    assert!(!failure.retryable);
+    assert_eq!(
+        failure.request_id,
+        Some(request("frame-profiles-unconfigured"))
+    );
+    assert_eq!(
+        failure.detail.as_str(),
+        "registered engine profiles are not supported"
+    );
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn list_registered_engine_profiles_correlation_and_no_origin_consult() {
+    let (_temporary, storage) = opened_storage("profiles-correlation").await;
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), Vec::new());
+    let reader = ScriptedProfilesHandle::present(vec!["alpha"]);
+    let base = RequestHandler::with_origin(storage.repository().clone(), Box::new(origin.clone()));
+    let handler = base.with_registered_engine_profiles_reader(reader.clone());
+    let response = handler
+        .respond(&request("frame-profiles-correlation"), &profiles_query())
+        .await
+        .expect("profiles query should succeed");
+    assert_eq!(response.request_id, request("frame-profiles-correlation"));
+    assert_eq!(origin.identity_calls(), 0);
+    assert_eq!(origin.instant_calls(), 0);
+    assert_eq!(reader.calls(), 1);
+    assert!(matches!(
+        response.payload,
+        ResponsePayload::RegisteredEngineProfiles(_)
+    ));
+    storage.close().await.expect("storage should close");
+}

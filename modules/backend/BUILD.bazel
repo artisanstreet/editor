@@ -86,6 +86,7 @@ rust_library(
         "//modules/database:database",
         "//modules/domain:domain",
         "//modules/migrations:migrations",
+        "//modules/native_engine:native_engine",
         "//modules/protocol:protocol",
         "//modules/transport:transport",
         "@crates//:base64",

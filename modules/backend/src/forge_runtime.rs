@@ -878,6 +878,11 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         app.repository().clone(),
         directory_controller,
         config.listener_limits().next_request,
+    )
+    .with_registered_engine_profiles_reader(
+        crate::request_handler::NativeRegisteredEngineProfilesReader::new(
+            config.database_path().to_path_buf(),
+        ),
     );
     let LoadedMaterial {
         certificate_chain,
