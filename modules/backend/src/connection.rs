@@ -1102,7 +1102,6 @@ mod lifecycle_response_ack_tests {
     use artisan_protocol::{LifecycleRequest, LifecycleResponse, LifecycleStopDisposition};
     use artisan_transport::CancelHandle;
     use quinn::{Connection, Endpoint, VarInt};
-    use tokio::io::AsyncWriteExt;
 
     const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1133,43 +1132,32 @@ mod lifecycle_response_ack_tests {
                 runtime.block_on(async move {
                     let server = artisan_transport::bind_loopback_server(server_config)
                         .expect("acknowledgement test server should bind");
-                    eprintln!("ACK_STAGE server_bound");
                     address_sender
                         .send(server.local_addr().expect("acknowledgement test address"))
                         .expect("acknowledgement test should receive the server address");
 
                     loop {
                         let incoming = tokio::select! {
-                            _ = &mut stop_receiver => {
-                                eprintln!("ACK_STAGE server_stop_observed");
-                                break;
-                            },
+                            _ = &mut stop_receiver => break,
                             incoming = server.accept() => incoming,
                         };
                         let Some(incoming) = incoming else {
                             break;
                         };
-                        eprintln!("ACK_STAGE server_accept");
                         let established = tokio::time::timeout(ACK_TIMEOUT, incoming)
                             .await
                             .expect("acknowledgement test handshake should settle")
                             .expect("acknowledgement test handshake should succeed");
-                        eprintln!("ACK_STAGE server_handshake_complete");
                         if connections_sender.send(established).await.is_err() {
                             break;
                         }
                     }
 
                     server.close(VarInt::from_u32(0), b"acknowledgement test complete");
-                    eprintln!("ACK_STAGE server_endpoint_closed");
                     drop(server);
-                    eprintln!("ACK_STAGE server_endpoint_dropped");
                 });
-                eprintln!("ACK_STAGE server_runtime_returned");
                 drop(runtime);
-                eprintln!("ACK_STAGE server_runtime_dropped");
                 let _sent = server_done_sender.send(());
-                eprintln!("ACK_STAGE server_completion_signaled");
             });
 
             let server_address = match address_receiver.recv_timeout(ACK_TIMEOUT) {
@@ -1194,21 +1182,17 @@ mod lifecycle_response_ack_tests {
         }
 
         fn request_server_stop(&mut self) {
-            eprintln!("ACK_STAGE server_stop_signal_start");
             if let Some(stop) = self.stop_server.take() {
                 let _sent = stop.send(());
             }
-            eprintln!("ACK_STAGE server_stop_signal_complete");
         }
 
         fn join_server_thread(&mut self) {
             self.request_server_stop();
             if let Some(thread) = self.server_thread.take() {
-                eprintln!("ACK_STAGE server_thread_join_start");
                 thread
                     .join()
                     .expect("acknowledgement test server thread should finish");
-                eprintln!("ACK_STAGE server_thread_join_complete");
             }
         }
 
@@ -1218,25 +1202,19 @@ mod lifecycle_response_ack_tests {
                 .take()
                 .expect("acknowledgement test client endpoint should remain owned");
             client.close(VarInt::from_u32(0), b"acknowledgement test complete");
-            eprintln!("ACK_STAGE client_endpoint_closed");
             self.request_server_stop();
-            eprintln!("ACK_STAGE client_wait_idle_start");
             tokio::time::timeout(ACK_TIMEOUT, client.wait_idle())
                 .await
                 .expect("acknowledgement test client endpoint should become idle");
-            eprintln!("ACK_STAGE client_wait_idle_complete");
             drop(client);
-            eprintln!("ACK_STAGE client_endpoint_dropped");
             let server_done = self
                 .server_done
                 .take()
                 .expect("acknowledgement test server completion should remain owned");
-            eprintln!("ACK_STAGE server_completion_receive_start");
             tokio::time::timeout(ACK_TIMEOUT, server_done)
                 .await
                 .expect("acknowledgement test server should report completion")
                 .expect("acknowledgement test server completion should be delivered");
-            eprintln!("ACK_STAGE server_completion_receive_complete");
             self.join_server_thread();
         }
     }
@@ -1252,9 +1230,7 @@ mod lifecycle_response_ack_tests {
     }
 
     async fn connected_pair() -> (AckLoopback, Connection, Connection) {
-        eprintln!("ACK_STAGE client_pair_setup_start");
         let mut loopback = AckLoopback::new();
-        eprintln!("ACK_STAGE client_connect_start");
         let client_connection = {
             let client = loopback
                 .client
@@ -1273,13 +1249,11 @@ mod lifecycle_response_ack_tests {
             .expect("acknowledgement test client connection should settle")
             .expect("acknowledgement test client handshake should succeed")
         };
-        eprintln!("ACK_STAGE client_connect_complete");
         let server_connection =
             tokio::time::timeout(ACK_TIMEOUT, loopback.server_connections.recv())
                 .await
                 .expect("acknowledgement test server connection should arrive")
                 .expect("acknowledgement test server should remain accepting");
-        eprintln!("ACK_STAGE client_pair_setup_complete");
         (loopback, server_connection, client_connection)
     }
 
@@ -1292,13 +1266,21 @@ mod lifecycle_response_ack_tests {
         quinn::SendStream,
         quinn::RecvStream,
     ) {
-        eprintln!("ACK_STAGE stream_pair_open_start");
-        let server_stream = server.accept_bi();
-        let client_stream = client.open_bi();
-        let (server_stream, client_stream) = tokio::join!(server_stream, client_stream);
-        let (server_send, server_recv) = server_stream.expect("server stream should open");
-        let (client_send, client_recv) = client_stream.expect("client stream should open");
-        eprintln!("ACK_STAGE stream_pair_open_complete");
+        let (mut client_send, client_recv) = tokio::time::timeout(ACK_TIMEOUT, client.open_bi())
+            .await
+            .expect("acknowledgement test client stream should open under deadline")
+            .expect("acknowledgement test client stream should open");
+        tokio::time::timeout(ACK_TIMEOUT, client_send.write_all(b"lifecycle-request"))
+            .await
+            .expect("acknowledgement test client request should write under deadline")
+            .expect("acknowledgement test client request should write");
+        client_send
+            .finish()
+            .expect("acknowledgement test client request should finish");
+        let (server_send, server_recv) = tokio::time::timeout(ACK_TIMEOUT, server.accept_bi())
+            .await
+            .expect("acknowledgement test server stream should arrive under deadline")
+            .expect("acknowledgement test server stream should open");
         (server_send, server_recv, client_send, client_recv)
     }
 
@@ -1335,23 +1317,16 @@ mod lifecycle_response_ack_tests {
         let mut streams = StageStreams::new();
         {
             let (server_send, _server_recv) = streams.install(server_send, server_recv);
-            eprintln!("ACK_STAGE response_write_start");
             server_send
                 .write_all(b"lifecycle-stop-response")
                 .await
                 .expect("acknowledgement response should be written");
-            eprintln!("ACK_STAGE response_write_complete");
-            eprintln!("ACK_STAGE response_finish_start");
             server_send
                 .finish()
                 .expect("acknowledgement response should finish");
-            eprintln!("ACK_STAGE response_finish_complete");
         }
         streams.mark_send_finished();
-        eprintln!("ACK_STAGE send_finished_marked");
 
-        eprintln!("ACK_STAGE peer_response_read_start");
-        eprintln!("ACK_STAGE lifecycle_completion_start");
         let (response, completion) = tokio::join!(
             tokio::time::timeout(ACK_TIMEOUT, client_recv.read_to_end(1024)),
             tokio::time::timeout(
@@ -1359,8 +1334,6 @@ mod lifecycle_response_ack_tests {
                 complete_lifecycle_receipt(&mut streams, receipt, &cancel),
             ),
         );
-        eprintln!("ACK_STAGE peer_response_read_complete");
-        eprintln!("ACK_STAGE lifecycle_completion_complete");
         assert_eq!(
             response
                 .expect("peer response read should settle")
@@ -1381,9 +1354,7 @@ mod lifecycle_response_ack_tests {
         drop(streams);
         drop(server);
         drop(client);
-        eprintln!("ACK_STAGE harness_shutdown_start");
         loopback.shutdown().await;
-        eprintln!("ACK_STAGE harness_shutdown_complete");
     }
 
     #[tokio::test]
@@ -1398,25 +1369,19 @@ mod lifecycle_response_ack_tests {
         let mut streams = StageStreams::new();
         {
             let (server_send, _server_recv) = streams.install(server_send, server_recv);
-            eprintln!("ACK_STAGE response_write_start");
             server_send
                 .write_all(b"lifecycle-stop-response")
                 .await
                 .expect("acknowledgement response should be written");
-            eprintln!("ACK_STAGE response_write_complete");
-            eprintln!("ACK_STAGE response_finish_start");
             server_send
                 .finish()
                 .expect("acknowledgement response should finish");
-            eprintln!("ACK_STAGE response_finish_complete");
         }
         client_recv
             .stop(VarInt::from_u32(7))
             .expect("peer STOP should be sent");
         streams.mark_send_finished();
-        eprintln!("ACK_STAGE send_finished_marked");
 
-        eprintln!("ACK_STAGE lifecycle_completion_start");
         let failure = tokio::time::timeout(
             ACK_TIMEOUT,
             complete_lifecycle_receipt(&mut streams, receipt, &cancel),
@@ -1424,7 +1389,6 @@ mod lifecycle_response_ack_tests {
         .await
         .expect("peer STOP acknowledgement should settle")
         .expect_err("peer STOP must reject the lifecycle receipt");
-        eprintln!("ACK_STAGE lifecycle_completion_complete");
         assert!(matches!(
             &failure,
             super::RequestStageError::LifecycleResponseAcknowledgement
@@ -1447,8 +1411,6 @@ mod lifecycle_response_ack_tests {
         drop(streams);
         drop(server);
         drop(client);
-        eprintln!("ACK_STAGE harness_shutdown_start");
         loopback.shutdown().await;
-        eprintln!("ACK_STAGE harness_shutdown_complete");
     }
 }
