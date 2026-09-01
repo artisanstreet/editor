@@ -2,8 +2,8 @@
 //! All tests invoke production helpers/state transitions.
 
 use artisan_domain::{
-    ConversationCursor, ConversationSnapshot, PatchBatch, PatchId, PatchSequence, RequestId,
-    ThreadId, UnixMillis,
+    ConversationCursor, ConversationSnapshot, ConversationSubscriptionStart, PatchBatch, PatchId,
+    PatchSequence, RequestId, ThreadId, UnixMillis,
 };
 use artisan_frontend::native_transport_service::{
     CommandSendError, NativeTransportCommand, NativeTransportEvent, ServiceFailure,
@@ -12,8 +12,7 @@ use artisan_frontend::native_transport_service::{
     try_send_command, validate_started_correlation, validate_uni_envelope,
 };
 use artisan_protocol::{
-    ConversationSubscriptionStart, ConversationSubscriptionStarted, FrameId, ProtocolVersion,
-    WireEnvelope, WireEnvelopeBody,
+    ConversationSubscriptionStarted, FrameId, ProtocolVersion, WireEnvelope, WireEnvelopeBody,
 };
 
 fn thread_id(v: &str) -> ThreadId {

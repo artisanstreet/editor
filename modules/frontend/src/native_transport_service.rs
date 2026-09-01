@@ -1033,11 +1033,9 @@ enum ExpectedResponse {
     },
     ConversationSubscriptionStarted {
         thread_id: ThreadId,
-        request_id: RequestId,
     },
     ConversationSubscriptionStopped {
         thread_id: ThreadId,
-        request_id: RequestId,
     },
 }
 
@@ -1391,10 +1389,7 @@ fn validate_response_family(
             Ok(ResponsePayload::FirstMessageQueued(receipt))
         }
         (
-            ExpectedResponse::ConversationSubscriptionStarted {
-                thread_id,
-                request_id: _,
-            },
+            ExpectedResponse::ConversationSubscriptionStarted { thread_id },
             ResponsePayload::ConversationSubscriptionStarted(started),
         ) => {
             let actual_thread = match &started {
@@ -1410,7 +1405,7 @@ fn validate_response_family(
             Ok(ResponsePayload::ConversationSubscriptionStarted(started))
         }
         (
-            ExpectedResponse::ConversationSubscriptionStopped { thread_id, .. },
+            ExpectedResponse::ConversationSubscriptionStopped { thread_id },
             ResponsePayload::ConversationSubscriptionStopped(stopped),
         ) if &stopped.thread_id == &thread_id => {
             Ok(ResponsePayload::ConversationSubscriptionStopped(stopped))
@@ -1726,7 +1721,6 @@ impl ServiceRuntime {
             .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
         let expected = ExpectedResponse::ConversationSubscriptionStarted {
             thread_id: thread_id.clone(),
-            request_id: request_id.clone(),
         };
         let session = self.session.take().ok_or(ServiceFailure::local_session())?;
         let attempt = request_envelope_payload(
@@ -1751,14 +1745,6 @@ impl ServiceRuntime {
             Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
             Err(error) => Err(error.into()),
         }
-    }
-
-    pub fn last_accepted_cursor_for_test(&self) -> Option<ConversationCursor> {
-        self.custody.last_accepted_cursor()
-    }
-
-    pub fn active_thread_for_test(&self) -> Option<ThreadId> {
-        self.custody.active_thread().cloned()
     }
 
     async fn ensure_session(
@@ -2263,7 +2249,6 @@ async fn handle_subscribe(
         make_request_frame(frames, protocol_version, request).map_err(RequestFailure::terminal)?;
     let expected = ExpectedResponse::ConversationSubscriptionStarted {
         thread_id: thread_id.clone(),
-        request_id: request_id.clone(),
     };
     let session = runtime
         .session
@@ -2333,7 +2318,6 @@ async fn handle_unsubscribe(
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
     let expected = ExpectedResponse::ConversationSubscriptionStopped {
         thread_id: thread_id.clone(),
-        request_id: request_id.clone(),
     };
     let session = runtime
         .session
