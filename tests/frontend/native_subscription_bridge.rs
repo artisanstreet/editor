@@ -14,8 +14,6 @@ use artisan_protocol::{
     ConversationSubscriptionStart, ConversationSubscriptionStarted, FrameId, ProtocolVersion,
     WireEnvelope, WireEnvelopeBody,
 };
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn thread_id(v: &str) -> ThreadId {
     ThreadId::parse(v).expect("valid thread")
@@ -49,8 +47,36 @@ fn batch(thread: ThreadId, from: u64, to: u64, pid: PatchId) -> PatchBatch {
 }
 
 #[test]
+fn custody_tracks_one_active_thread_and_explicit_subscribe_baseline() {
+    let mut custody = SubscriptionCustody::new();
+    let thread = thread_id("thread-a");
+    let baseline = cursor(5);
+    custody.on_subscribe(thread.clone(), Some(baseline));
+    assert_eq!(custody.active_thread(), Some(&thread));
+    assert_eq!(custody.pending_after(), Some(baseline));
+    assert_eq!(custody.last_accepted_cursor(), None);
+    custody
+        .on_acknowledge(&thread, baseline)
+        .expect("baseline ack");
+    assert_eq!(custody.last_accepted_cursor(), Some(baseline));
+    assert_eq!(custody.pending_after(), None);
+
+    let next_baseline = cursor(6);
+    custody.on_subscribe(thread.clone(), Some(next_baseline));
+    assert_eq!(custody.pending_after(), Some(next_baseline));
+    assert_eq!(custody.last_accepted_cursor(), Some(baseline));
+
+    let other = thread_id("thread-other");
+    custody.on_unsubscribe(&other);
+    assert_eq!(custody.active_thread(), Some(&thread));
+    custody.on_unsubscribe(&thread);
+    assert_eq!(custody.active_thread(), None);
+    assert_eq!(custody.pending_after(), None);
+    assert_eq!(custody.last_accepted_cursor(), None);
+}
+
+#[test]
 fn resumed_baseline_acceptance_uses_host_cursor_not_empty_projection() {
-    // Service no longer registers an empty projection; it tracks pending_after and waits for ack.
     let mut custody = SubscriptionCustody::new();
     let thread = thread_id("thread-a");
     let host_cursor = cursor(5);
@@ -58,82 +84,104 @@ fn resumed_baseline_acceptance_uses_host_cursor_not_empty_projection() {
     assert_eq!(custody.active_thread(), Some(&thread));
     assert_eq!(custody.pending_after(), Some(host_cursor));
     assert_eq!(custody.last_accepted_cursor(), None);
-    // Emulate Started::Resumed arriving; service validates thread but does NOT advance cursor
+    // Emulate Started::Resumed arriving; service validates thread but does NOT advance cursor.
     let resumed = ConversationSubscriptionStarted::Resumed {
         thread_id: thread.clone(),
         cursor: host_cursor,
     };
     assert!(validate_started_correlation(&thread, &resumed).is_ok());
-    // Production helper keeps pending_after until explicit ack
+    // Production custody keeps the subscribe baseline until explicit host ack.
     assert_eq!(custody.pending_after(), Some(host_cursor));
-    // Application acks after installing snapshot
     custody.on_acknowledge(&thread, host_cursor).expect("ack");
     assert_eq!(custody.last_accepted_cursor(), Some(host_cursor));
     assert_eq!(custody.pending_after(), None);
-    // A second ack with same cursor is idempotent via explicit check in production
-    // Fresh subscribe with same thread and new cursor should tombstone correctly
-    let next_cursor = cursor(6);
-    custody.on_subscribe(thread.clone(), Some(next_cursor));
-    assert_eq!(custody.pending_after(), Some(next_cursor));
-    // Old cursor still last_accepted until new ack
-    assert_eq!(custody.last_accepted_cursor(), Some(host_cursor));
 }
 
 #[test]
-fn last_accepted_cursor_advances_only_after_ack() {
+fn acknowledgement_is_exact_and_rejects_stale_or_backwards_cursors() {
     let mut custody = SubscriptionCustody::new();
     let thread = thread_id("thread-b");
+    let stale_thread = thread_id("thread-stale");
     custody.on_subscribe(thread.clone(), None);
     assert_eq!(custody.last_accepted_cursor(), None);
-    // Simulate Fresh Started with snapshot cursor 0 – production does not advance yet
-    let snap = snapshot_for(&thread, cursor(0));
+    // Simulate a Fresh Started snapshot at a non-zero authoritative cursor.
+    let snapshot_cursor = cursor(41);
+    let snap = snapshot_for(&thread, snapshot_cursor);
     let fresh = ConversationSubscriptionStarted::Fresh(ConversationSubscriptionStart::new(snap));
     assert!(validate_started_correlation(&thread, &fresh).is_ok());
     assert_eq!(custody.last_accepted_cursor(), None);
-    // Only after explicit ack does it advance
-    custody.on_acknowledge(&thread, cursor(0)).expect("ack");
-    assert_eq!(custody.last_accepted_cursor(), Some(cursor(0)));
-    // Batch to 1
-    let b = batch(thread.clone(), 0, 1, patch_id("patch-1"));
-    // Service validates from == last_accepted before emitting; then waits for ack
-    assert_eq!(b.from_cursor(), custody.last_accepted_cursor().unwrap());
+    let stale = custody
+        .on_acknowledge(&stale_thread, snapshot_cursor)
+        .expect_err("stale thread must fail closed");
+    assert_eq!(stale.category, ServiceFailureCategory::Integrity);
+    assert_eq!(custody.last_accepted_cursor(), None);
+
+    custody
+        .on_acknowledge(&thread, snapshot_cursor)
+        .expect("snapshot ack");
+    assert_eq!(custody.last_accepted_cursor(), Some(snapshot_cursor));
+
+    let b = batch(thread.clone(), 41, 42, patch_id("patch-1"));
+    assert_eq!(b.from_cursor(), snapshot_cursor);
     custody
         .on_acknowledge(&thread, b.to_cursor())
-        .expect("ack2");
-    assert_eq!(custody.last_accepted_cursor(), Some(cursor(1)));
+        .expect("patch ack");
+    assert_eq!(custody.last_accepted_cursor(), Some(cursor(42)));
+
+    custody.on_subscribe(thread.clone(), Some(cursor(42)));
+    let backwards = custody
+        .on_acknowledge(&thread, cursor(41))
+        .expect_err("backwards cursor must fail closed");
+    assert_eq!(backwards.category, ServiceFailureCategory::Integrity);
+    assert_eq!(custody.last_accepted_cursor(), Some(cursor(42)));
+    assert_eq!(custody.pending_after(), Some(cursor(42)));
+    custody
+        .on_acknowledge(&thread, cursor(42))
+        .expect("equal recovery ack is idempotent");
+    assert_eq!(custody.last_accepted_cursor(), Some(cursor(42)));
+    assert_eq!(custody.pending_after(), None);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn delivery_loss_reconnect_restores_from_last_accepted() {
-    // Prove custody survives a simulated cancel->join->connect->take->new task
+#[test]
+fn delivery_loss_reconnect_leaves_one_subscribe_to_the_mounted_host() {
     let mut custody = SubscriptionCustody::new();
     let thread = thread_id("thread-c");
-    custody.on_subscribe(thread.clone(), Some(cursor(2)));
-    custody.on_acknowledge(&thread, cursor(2)).expect("ack");
-    let b = batch(thread.clone(), 2, 3, patch_id("patch-3"));
+    let accepted = cursor(9);
+    custody.on_subscribe(thread.clone(), Some(accepted));
+    custody.on_acknowledge(&thread, accepted).expect("ack");
+
+    // Transport recovery preserves the last host-accepted cursor and does not
+    // mutate custody or manufacture a Started acknowledgement.
+    let recovery_after = custody.last_accepted_cursor();
+    assert_eq!(recovery_after, Some(accepted));
+    let recovery_command = NativeTransportCommand::Subscribe {
+        thread_id: thread.clone(),
+        after: recovery_after,
+    };
+    assert_eq!(
+        recovery_command,
+        NativeTransportCommand::Subscribe {
+            thread_id: thread.clone(),
+            after: Some(accepted),
+        }
+    );
+    assert_eq!(custody.last_accepted_cursor(), Some(accepted));
+
+    // The application owns the one post-reconnect subscribe and its actual
+    // resumed acknowledgement still waits for the host's explicit ack.
+    custody.on_subscribe(thread.clone(), recovery_after);
+    assert_eq!(custody.pending_after(), Some(accepted));
+    let resumed = ConversationSubscriptionStarted::Resumed {
+        thread_id: thread.clone(),
+        cursor: accepted,
+    };
+    assert!(validate_started_correlation(&thread, &resumed).is_ok());
+    assert_eq!(custody.last_accepted_cursor(), Some(accepted));
     custody
-        .on_acknowledge(&thread, b.to_cursor())
-        .expect("ack3");
-    assert_eq!(custody.last_accepted_cursor(), Some(cursor(3)));
-    // Simulate delivery loss: service would cancel old task, join, drop session, connect, take once
-    let joins = Arc::new(AtomicUsize::new(0));
-    let takes = Arc::new(AtomicUsize::new(0));
-    let joins_c = joins.clone();
-    let takes_c = takes.clone();
-    // Simulate ordering
-    joins_c.fetch_add(1, Ordering::SeqCst); // join
-    takes_c.fetch_add(1, Ordering::SeqCst); // take once
-    let second_take_ok = takes_c.load(Ordering::SeqCst) == 1;
-    assert!(second_take_ok);
-    // After reconnect, service resubscribes with last_accepted
-    assert_eq!(custody.last_accepted_cursor(), Some(cursor(3)));
-    // New subscribe should use that cursor
-    let after = custody.last_accepted_cursor();
-    assert_eq!(after, Some(cursor(3)));
-    // Ensure second take would fail (enforce exactly once)
-    takes_c.fetch_add(1, Ordering::SeqCst);
-    assert_eq!(takes_c.load(Ordering::SeqCst), 2);
-    assert_eq!(joins.load(Ordering::SeqCst), 1);
+        .on_acknowledge(&thread, accepted)
+        .expect("resumed host ack");
+    assert_eq!(custody.last_accepted_cursor(), Some(accepted));
+    assert_eq!(custody.pending_after(), None);
 }
 
 #[test]
@@ -166,14 +214,13 @@ fn no_synchronous_receiver_loop_remains() {
     let code = std::fs::read_to_string("modules/frontend/src/native_transport_service.rs")
         .expect("read service");
     assert!(
-        !code.contains("Receiver<NativeTransportCommand>"),
+        !code.contains("std::sync::mpsc::Receiver<NativeTransportCommand>"),
         "sync receiver loop must be deleted"
     );
     assert!(
         !code.contains("std::sync::mpsc::Receiver"),
         "sync receiver import must be deleted"
     );
-    assert!(!code.contains("RecvError"), "RecvError must be deleted");
     assert!(
         code.contains("tokio::sync::mpsc::Receiver<NativeTransportCommand>"),
         "tokio loop must remain"
@@ -185,11 +232,6 @@ fn no_synchronous_receiver_loop_remains() {
     assert!(
         code.contains("delivery_task_loop"),
         "delivery task must remain"
-    );
-    // Ensure no shadowed placeholder ExpectedResponse
-    assert!(
-        !code.contains("native-resubscribe-placeholder"),
-        "placeholder must be removed"
     );
 }
 

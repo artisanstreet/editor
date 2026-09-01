@@ -603,6 +603,7 @@ impl NativeApplication {
                 if dispatch.is_err() {
                     self.set_failure(invalid_service_failure(), cx);
                 } else {
+                    self.acknowledge_host_cursor(&host, cx);
                     self.pump_host_boundary(&host, cx);
                     cx.notify();
                 }
@@ -664,6 +665,7 @@ impl NativeApplication {
         if dispatch.is_err() {
             self.set_failure(invalid_service_failure(), cx);
         } else {
+            self.acknowledge_host_cursor(&host, cx);
             self.pump_host_boundary(&host, cx);
             cx.notify();
         }
@@ -932,9 +934,43 @@ impl NativeApplication {
         } else {
             self.pending_snapshot = None;
             self.state = NativeViewState::Ready;
+            self.acknowledge_host_cursor(host, cx);
             self.pump_host_boundary(host, cx);
             self.sync_composer_availability(cx);
             cx.notify();
+        }
+    }
+
+    fn acknowledge_host_cursor(&mut self, host: &Entity<ConversationHost>, cx: &mut Context<Self>) {
+        let delivery = host.read(cx).controller_view().delivery;
+        let Some(cursor) = delivery.cursor else {
+            self.set_failure(invalid_service_failure(), cx);
+            return;
+        };
+        let Some(service) = self.service.clone() else {
+            // Host-only tests deliberately omit the service and therefore have
+            // no custody owner to acknowledge.
+            return;
+        };
+        match service.submit(NativeTransportCommand::AcknowledgePatch {
+            thread_id: delivery.thread_id,
+            cursor,
+        }) {
+            Ok(()) => {}
+            Err(CommandSendError::Busy) => self.set_failure(
+                ServiceFailure {
+                    stage: ServiceFailureStage::EventBridge,
+                    category: ServiceFailureCategory::Backpressure,
+                },
+                cx,
+            ),
+            Err(CommandSendError::Stopped) => self.set_failure(
+                ServiceFailure {
+                    stage: ServiceFailureStage::EventBridge,
+                    category: ServiceFailureCategory::ChannelClosed,
+                },
+                cx,
+            ),
         }
     }
 
@@ -1081,10 +1117,13 @@ impl NativeApplication {
         // Subscribe for durable PatchBatch delivery using current cursor when available
         let after = host.read(cx).controller_view().delivery.cursor;
         if let Some(service) = self.service.clone() {
-            let _ = service.submit(NativeTransportCommand::Subscribe {
+            match service.submit(NativeTransportCommand::Subscribe {
                 thread_id: thread_id.clone(),
                 after,
-            });
+            }) {
+                Ok(()) => {}
+                Err(error) => self.set_failure(command_failure(error), cx),
+            }
         }
         if self
             .pending_snapshot
@@ -1099,9 +1138,12 @@ impl NativeApplication {
     fn retire_host(&mut self, cx: &mut Context<Self>) {
         if let Some(thread_id) = self.selected_thread.clone() {
             if let Some(service) = self.service.clone() {
-                let _ = service.submit(NativeTransportCommand::Unsubscribe {
+                match service.submit(NativeTransportCommand::Unsubscribe {
                     thread_id: thread_id.clone(),
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(error) => self.set_failure(command_failure(error), cx),
+                }
             }
         }
         self.retain_message_flight(cx);
