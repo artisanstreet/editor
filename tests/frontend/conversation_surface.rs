@@ -14,9 +14,10 @@ use conversation_scene::{
     TurnNarrationEntry,
 };
 use conversation_surface::{
-    ConversationSurface, ConversationSurfaceAction, ROOT_SELECTOR, RenderedBlockKind,
-    VIEWPORT_SELECTOR, block_selector, changed_file_selector, file_change_status_label,
-    format_elapsed_millis, ordered_block_kinds, steering_selector, turn_selector, turn_status_copy,
+    ConversationSurface, ConversationSurfaceAction, ConversationSurfaceTarget, ROOT_SELECTOR,
+    RenderedBlockKind, VIEWPORT_SELECTOR, ViewportObservation, block_selector,
+    changed_file_selector, file_change_status_label, format_elapsed_millis, ordered_block_kinds,
+    steering_selector, turn_selector, turn_status_copy,
 };
 use gpui::{Modifiers, TestAppContext, px, size};
 
@@ -55,6 +56,63 @@ fn scene(items: Vec<SceneItem>, narration_value: TurnNarration) -> ConversationS
         Vec::new(),
     )
     .expect("conversation scene is valid")
+}
+
+fn markdown_replacement_scenes() -> (ConversationScene, ConversationScene) {
+    let initial = scene(
+        vec![item(
+            "old-user",
+            "turn_a",
+            1,
+            SceneItemKind::UserMessage {
+                body: "old authoritative body".to_owned(),
+            },
+            None,
+        )],
+        TurnNarration::Quiet,
+    );
+    let replacement = scene(
+        vec![
+            item(
+                "new-assistant",
+                "turn_a",
+                1,
+                SceneItemKind::AssistantMessage {
+                    body: "new authoritative body with `code`".to_owned(),
+                    phase: AssistantPhase::Final,
+                },
+                None,
+            ),
+            item(
+                "replacement-change",
+                "turn_a",
+                2,
+                SceneItemKind::ChangeSet {
+                    files: vec![
+                        SceneFileChange::new("src/replacement.rs", FileChangeStatus::Modified)
+                            .expect("replacement path is valid"),
+                    ],
+                },
+                Some(SceneDisclosure::Open),
+            ),
+        ],
+        TurnNarration::Quiet,
+    );
+    (initial, replacement)
+}
+
+struct SurfaceWindowHost {
+    surface: gpui::Entity<ConversationSurface>,
+}
+
+impl gpui::Render for SurfaceWindowHost {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        self.surface.clone()
+    }
 }
 
 #[test]
@@ -552,6 +610,232 @@ fn mounted_surface_exposes_root_viewport_and_keyboard_focus_bounds(cx: &mut Test
         let focus = surface.read(app).transcript_focus_handle().clone();
         window.focus(&focus);
         assert!(focus.is_focused(window));
+    });
+}
+
+#[gpui::test]
+fn markdown_message_body_mounts_heading_paragraph_inline_code_and_fence(cx: &mut TestAppContext) {
+    const USER_MARKDOWN: &str = "artisan-conversation-surface-turn-turn_a-block-user-user-markdown";
+    const USER_HEADING: &str =
+        "artisan-conversation-surface-turn-turn_a-block-user-user-markdown-block-0";
+    const USER_PARAGRAPH: &str =
+        "artisan-conversation-surface-turn-turn_a-block-user-user-markdown-block-1";
+    const USER_CODE: &str =
+        "artisan-conversation-surface-turn-turn_a-block-user-user-markdown-block-2-code";
+    const ASSISTANT_MARKDOWN: &str =
+        "artisan-conversation-surface-turn-turn_a-block-assistant-assistant-markdown";
+    const ASSISTANT_HEADING: &str =
+        "artisan-conversation-surface-turn-turn_a-block-assistant-assistant-markdown-block-0";
+    const ASSISTANT_PARAGRAPH: &str =
+        "artisan-conversation-surface-turn-turn_a-block-assistant-assistant-markdown-block-1";
+    const ASSISTANT_CODE: &str =
+        "artisan-conversation-surface-turn-turn_a-block-assistant-assistant-markdown-block-2-code";
+    let body =
+        "# Message heading\n\nParagraph with `inline code`.\n\n```rust\nlet answer = 42;\n```";
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(
+                vec![
+                    item(
+                        "user",
+                        "turn_a",
+                        1,
+                        SceneItemKind::UserMessage {
+                            body: body.to_owned(),
+                        },
+                        None,
+                    ),
+                    item(
+                        "assistant",
+                        "turn_a",
+                        2,
+                        SceneItemKind::AssistantMessage {
+                            body: body.to_owned(),
+                            phase: AssistantPhase::Final,
+                        },
+                        None,
+                    ),
+                ],
+                TurnNarration::Quiet,
+            ),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(640.0)));
+    cx.run_until_parked();
+
+    for selector in [
+        USER_MARKDOWN,
+        USER_HEADING,
+        USER_PARAGRAPH,
+        USER_CODE,
+        ASSISTANT_MARKDOWN,
+        ASSISTANT_HEADING,
+        ASSISTANT_PARAGRAPH,
+        ASSISTANT_CODE,
+    ] {
+        let bounds = cx
+            .debug_bounds(selector)
+            .expect("accepted Markdown structure must paint bounds");
+        assert!(bounds.size.height > px(0.0), "{selector} must be visible");
+    }
+    cx.update(|_, app| assert!(surface.read(app).pending_actions().is_empty()));
+}
+
+#[gpui::test]
+fn markdown_open_unknown_fence_and_html_are_inert(cx: &mut TestAppContext) {
+    const OPEN_MARKDOWN: &str = "artisan-conversation-surface-turn-turn_a-block-user-open-markdown";
+    const UNKNOWN_MARKDOWN: &str =
+        "artisan-conversation-surface-turn-turn_a-block-assistant-unknown-markdown";
+    const HTML_MARKDOWN: &str = "artisan-conversation-surface-turn-turn_a-block-user-html-markdown";
+    const HTML_BLOCK: &str =
+        "artisan-conversation-surface-turn-turn_a-block-user-html-markdown-block-0";
+    const OPEN_CODE: &str =
+        "artisan-conversation-surface-turn-turn_a-block-user-open-markdown-block-0-code";
+    const UNKNOWN_CODE: &str =
+        "artisan-conversation-surface-turn-turn_a-block-assistant-unknown-markdown-block-0-code";
+    const HTML_CODE: &str =
+        "artisan-conversation-surface-turn-turn_a-block-user-html-markdown-block-0-code";
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(
+                vec![
+                    item(
+                        "open",
+                        "turn_a",
+                        1,
+                        SceneItemKind::UserMessage {
+                            body: "```rust\nlet value = 1;\n".to_owned(),
+                        },
+                        None,
+                    ),
+                    item(
+                        "unknown",
+                        "turn_a",
+                        2,
+                        SceneItemKind::AssistantMessage {
+                            body: "```not-a-language\nlet value = 2;\n```".to_owned(),
+                            phase: AssistantPhase::Final,
+                        },
+                        None,
+                    ),
+                    item(
+                        "html",
+                        "turn_a",
+                        3,
+                        SceneItemKind::UserMessage {
+                            body: "<div>literal HTML</div>".to_owned(),
+                        },
+                        None,
+                    ),
+                ],
+                TurnNarration::Quiet,
+            ),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+
+    for selector in [OPEN_MARKDOWN, UNKNOWN_MARKDOWN, HTML_MARKDOWN, HTML_BLOCK] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "inert source must remain mounted at {selector}"
+        );
+    }
+    for selector in [OPEN_CODE, UNKNOWN_CODE, HTML_CODE] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "inert source must not expose a highlighted code selector: {selector}"
+        );
+    }
+    cx.update(|_, app| assert!(surface.read(app).pending_actions().is_empty()));
+}
+
+#[gpui::test]
+fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppContext) {
+    const OLD_MARKDOWN: &str =
+        "artisan-conversation-surface-turn-turn_a-block-user-old-user-markdown";
+    const NEW_MARKDOWN: &str =
+        "artisan-conversation-surface-turn-turn_a-block-assistant-new-assistant-markdown";
+    const DISCLOSURE_TRIGGER: &str = "artisan-conversation-surface-turn-turn_a-block-change-replacement-change-disclosure-trigger";
+    let (initial, replacement) = markdown_replacement_scenes();
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(initial, ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(OLD_MARKDOWN).is_some());
+
+    let mut replacement_app = (*cx).clone();
+    let (_, replacement_cx) = replacement_app.add_window_view(|_, _| SurfaceWindowHost {
+        surface: surface.clone(),
+    });
+    assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_some());
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            surface.replace_scene(replacement, surface_cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds(NEW_MARKDOWN).is_some());
+
+    // Pinned GPUI 0.2.2's `Frame::clear` does not clear `debug_bounds`, while
+    // `VisualTestContext::debug_bounds` reads the rendered frame's map. After
+    // the original window has painted the old scene in both alternating frame
+    // maps, its old key is historical rather than current-frame geometry. The
+    // fresh test window painted the old scene once before replacement, so its
+    // clean alternate frame is an honest current-frame retirement probe for
+    // the same authoritative surface entity.
+    assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_none());
+    assert!(replacement_cx.debug_bounds(NEW_MARKDOWN).is_some());
+
+    let trigger = cx
+        .debug_bounds(DISCLOSURE_TRIGGER)
+        .expect("replacement disclosure trigger must remain mounted");
+    cx.simulate_click(trigger.center(), Modifiers::none());
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            assert!(surface.observe_viewport(
+                ViewportObservation {
+                    first_visible: Some(ConversationSurfaceTarget::Scene(scene_id("turn_a"))),
+                    last_visible: None,
+                    at_bottom: false,
+                },
+                surface_cx,
+            ));
+            assert!(surface.request_scroll(
+                ConversationSurfaceTarget::Scene(scene_id("turn_a")),
+                surface_cx,
+            ));
+        });
+    });
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        assert_eq!(
+            surface.read(app).pending_actions(),
+            &[
+                ConversationSurfaceAction::DisclosureToggleRequested {
+                    id: scene_id("replacement-change"),
+                    requested_open: false,
+                },
+                ConversationSurfaceAction::ViewportObserved(ViewportObservation {
+                    first_visible: Some(ConversationSurfaceTarget::Scene(scene_id("turn_a"))),
+                    last_visible: None,
+                    at_bottom: false,
+                }),
+                ConversationSurfaceAction::ScrollIntent {
+                    target: ConversationSurfaceTarget::Scene(scene_id("turn_a")),
+                },
+            ]
+        );
     });
 }
 
