@@ -775,6 +775,7 @@ pub struct InstallOptions {
 pub async fn install(options: InstallOptions) -> Result<()> {
     let root_lock = InstallerLock::acquire(&options.install_root, RootMode::Create)?;
     root_lock.fence()?;
+    recover_activation_pointer_swap(&root_lock)?;
     // Plain HTTP is permitted only from this machine's own loopback, which
     // cannot be intercepted off-host. A locally built, locally signed release
     // is installed by serving its output directory on 127.0.0.1; every remote
@@ -1434,6 +1435,7 @@ struct InstalledIntegrations {
 pub fn repair(root: &Path) -> Result<()> {
     let root_lock = InstallerLock::acquire(root, RootMode::Existing)?;
     root_lock.fence()?;
+    recover_activation_pointer_swap(&root_lock)?;
     let state = read_installed_state(root)?;
     validate_state_root(root, &state)?;
     let release = root.join("versions").join(&state.active_version);
@@ -1492,6 +1494,7 @@ pub fn repair(root: &Path) -> Result<()> {
 pub fn diagnose(root: &Path) -> Result<()> {
     let root_lock = InstallerLock::acquire(root, RootMode::Existing)?;
     root_lock.fence()?;
+    recover_activation_pointer_swap(&root_lock)?;
     let state = read_installed_state(root)?;
     validate_state_root(root, &state)?;
     let stable = root
@@ -1534,6 +1537,7 @@ fn invoke_ae_diagnostic(release: &Path, arguments: &[&str]) -> Result<()> {
 pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
     let root_lock = InstallerLock::acquire(root, RootMode::Existing)?;
     root_lock.fence()?;
+    recover_activation_pointer_swap(&root_lock)?;
     let state = read_installed_state(root)?;
     validate_state_root(root, &state)?;
     let stable = root
@@ -1593,6 +1597,7 @@ pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
 pub fn prepare_update(root: &Path, retirement: Option<RetirementPolicy>) -> Result<()> {
     let root_lock = InstallerLock::acquire(root, RootMode::Existing)?;
     root_lock.fence()?;
+    recover_activation_pointer_swap(&root_lock)?;
     let Some(retirement_policy) = retirement else {
         return Ok(());
     };
@@ -1670,6 +1675,159 @@ fn remove_path_integration(bin: &Path) -> Result<()> {
         std::fs::remove_file(&link).map_err(io(&link))?;
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivationPointerState {
+    activation_state: String,
+    finalization_state: String,
+    active_version: String,
+    install_root: PathBuf,
+    permanent_ae_path: PathBuf,
+}
+
+struct ValidatedActivationPointer {
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
+fn activation_pointer_paths(root: &Path) -> [PathBuf; 3] {
+    [
+        root.join("installation.json"),
+        root.join(".installation.json.tmp"),
+        root.join(".installation.json.previous"),
+    ]
+}
+
+fn ambiguous_activation_error() -> InstallerError {
+    InstallerError::InstallationActivationTransactionAmbiguous
+}
+
+/// Recover only the three files that participate in the activation pointer
+/// swap. Every file is inspected before any residue is removed or restored so
+/// an unsafe transaction remains available for a later, informed retry.
+fn recover_activation_pointer_swap(lock: &InstallerLock) -> Result<()> {
+    lock.fence().map_err(|_| ambiguous_activation_error())?;
+    let [current_path, temporary_path, previous_path] = activation_pointer_paths(&lock.root);
+    let current = inspect_activation_pointer(&lock.root, &current_path)?;
+    let temporary = inspect_activation_pointer(&lock.root, &temporary_path)?;
+    let previous = inspect_activation_pointer(&lock.root, &previous_path)?;
+
+    lock.fence().map_err(|_| ambiguous_activation_error())?;
+    if let Some(current) = current.as_ref() {
+        if let Some(temporary) = temporary.as_ref() {
+            revalidate_activation_pointer(Some(current), &current_path)?;
+            revalidate_activation_pointer(Some(temporary), &temporary_path)?;
+            revalidate_activation_pointer(previous.as_ref(), &previous_path)?;
+            remove_validated_activation_pointer(temporary)?;
+        }
+        if let Some(previous) = previous.as_ref() {
+            revalidate_activation_pointer(Some(current), &current_path)?;
+            revalidate_activation_pointer(Some(previous), &previous_path)?;
+            remove_validated_activation_pointer(previous)?;
+        }
+        return Ok(());
+    }
+
+    if let Some(previous) = previous.as_ref() {
+        revalidate_activation_pointer(None, &current_path)?;
+        revalidate_activation_pointer(Some(previous), &previous_path)?;
+        revalidate_activation_pointer(temporary.as_ref(), &temporary_path)?;
+        std::fs::rename(&previous.path, &current_path).map_err(|_| ambiguous_activation_error())?;
+        require_identity(&current_path, EntryKind::File, previous.identity)
+            .map_err(|_| ambiguous_activation_error())?;
+        if let Some(temporary) = temporary.as_ref() {
+            revalidate_activation_pointer(Some(temporary), &temporary_path)?;
+            require_identity(&current_path, EntryKind::File, previous.identity)
+                .map_err(|_| ambiguous_activation_error())?;
+            remove_validated_activation_pointer(temporary)?;
+        }
+        return Ok(());
+    }
+
+    if let Some(temporary) = temporary.as_ref() {
+        revalidate_activation_pointer(None, &current_path)?;
+        revalidate_activation_pointer(Some(temporary), &temporary_path)?;
+        revalidate_activation_pointer(None, &previous_path)?;
+        remove_validated_activation_pointer(temporary)?;
+    }
+    Ok(())
+}
+
+fn inspect_activation_pointer(
+    root: &Path,
+    path: &Path,
+) -> Result<Option<ValidatedActivationPointer>> {
+    let Some(identity) = owned_file_identity(path).map_err(|_| ambiguous_activation_error())?
+    else {
+        return Ok(None);
+    };
+    let mut file =
+        open_for_read(path, EntryKind::File).map_err(|_| ambiguous_activation_error())?;
+    if identity_from_file(&file, EntryKind::File).map_err(|_| ambiguous_activation_error())?
+        != identity
+    {
+        return Err(ambiguous_activation_error());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| ambiguous_activation_error())?;
+    if identity_from_file(&file, EntryKind::File).map_err(|_| ambiguous_activation_error())?
+        != identity
+    {
+        return Err(ambiguous_activation_error());
+    }
+    require_identity(path, EntryKind::File, identity).map_err(|_| ambiguous_activation_error())?;
+    let state: ActivationPointerState =
+        serde_json::from_slice(&bytes).map_err(|_| ambiguous_activation_error())?;
+    validate_activation_pointer_state(root, &state)?;
+    require_identity(path, EntryKind::File, identity).map_err(|_| ambiguous_activation_error())?;
+    Ok(Some(ValidatedActivationPointer {
+        path: path.to_path_buf(),
+        identity,
+    }))
+}
+
+fn validate_activation_pointer_state(root: &Path, state: &ActivationPointerState) -> Result<()> {
+    let stable = root
+        .join("bin")
+        .join(if cfg!(windows) { "ae.exe" } else { "ae" });
+    if state.activation_state != "active"
+        || state.finalization_state != "complete"
+        || state.install_root.as_path() != root
+        || state.permanent_ae_path.as_path() != stable.as_path()
+        || !is_safe_release_component(&state.active_version)
+    {
+        return Err(ambiguous_activation_error());
+    }
+    Ok(())
+}
+
+fn revalidate_activation_pointer(
+    pointer: Option<&ValidatedActivationPointer>,
+    path: &Path,
+) -> Result<()> {
+    match pointer {
+        Some(pointer) => {
+            let identity = owned_file_identity(path).map_err(|_| ambiguous_activation_error())?;
+            if identity != Some(pointer.identity) {
+                return Err(ambiguous_activation_error());
+            }
+        }
+        None => match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) | Err(_) => return Err(ambiguous_activation_error()),
+        },
+    }
+    Ok(())
+}
+
+fn remove_validated_activation_pointer(pointer: &ValidatedActivationPointer) -> Result<()> {
+    let identity = owned_file_identity(&pointer.path).map_err(|_| ambiguous_activation_error())?;
+    if identity != Some(pointer.identity) {
+        return Err(ambiguous_activation_error());
+    }
+    remove_owned_file(&pointer.path).map_err(|_| ambiguous_activation_error())
 }
 
 fn read_installed_state(root: &Path) -> Result<InstalledState> {
@@ -1929,14 +2087,15 @@ fn invoke_ae(release: &Path, arguments: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
     use super::{
         InstallerError, InstallerLock, PendingMarker, PendingMarkerKind, RootMode, StageLease,
-        complete_install, pending_marker_path, remove_path_in_root,
+        complete_install, inspect_activation_pointer, pending_marker_path,
+        recover_activation_pointer_swap, remove_path_in_root, remove_validated_activation_pointer,
     };
 
     #[cfg(windows)]
@@ -1970,6 +2129,305 @@ mod tests {
     #[cfg(windows)]
     fn create_file_link(target: &std::path::Path, link: &std::path::Path) -> bool {
         std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+
+    fn activation_document(root: &Path, active_version: &str) -> serde_json::Value {
+        serde_json::json!({
+            "format_version": 1,
+            "install_root": root,
+            "activation_state": "active",
+            "finalization_state": "complete",
+            "active_version": active_version,
+            "permanent_ae_path": root.join("bin").join(if cfg!(windows) { "ae.exe" } else { "ae" }),
+        })
+    }
+
+    fn activation_bytes(root: &Path, active_version: &str) -> Vec<u8> {
+        serde_json::to_vec(&activation_document(root, active_version)).expect("activation JSON")
+    }
+
+    fn assert_ambiguous(error: InstallerError) {
+        assert!(matches!(
+            error,
+            InstallerError::InstallationActivationTransactionAmbiguous
+        ));
+        assert_eq!(
+            error.to_string(),
+            "installation activation transaction is ambiguous; no files were changed"
+        );
+    }
+
+    #[test]
+    fn activation_recovery_without_residue_is_a_no_op() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+
+        recover_activation_pointer_swap(&lock).expect("no-residue recovery");
+
+        for path in super::activation_pointer_paths(&root) {
+            assert!(path.symlink_metadata().is_err());
+        }
+    }
+
+    #[test]
+    fn activation_recovery_after_crash_before_pointer_swap_preserves_current() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let [current, temporary, previous] = super::activation_pointer_paths(&root);
+        let current_bytes = activation_bytes(&root, "1.2.3");
+        fs::write(&current, &current_bytes).expect("current pointer");
+        fs::write(&temporary, activation_bytes(&root, "2.0.0")).expect("temporary pointer");
+
+        recover_activation_pointer_swap(&lock).expect("pre-swap recovery");
+
+        assert_eq!(fs::read(&current).expect("current bytes"), current_bytes);
+        assert!(temporary.symlink_metadata().is_err());
+        assert!(previous.symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn activation_recovery_after_current_to_previous_restores_exact_bytes() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let [current, temporary, previous] = super::activation_pointer_paths(&root);
+        let previous_bytes = activation_bytes(&root, "1.2.3");
+        fs::write(&previous, &previous_bytes).expect("previous pointer");
+        fs::write(&temporary, activation_bytes(&root, "2.0.0")).expect("temporary pointer");
+
+        recover_activation_pointer_swap(&lock).expect("previous recovery");
+
+        assert_eq!(fs::read(&current).expect("restored bytes"), previous_bytes);
+        assert!(temporary.symlink_metadata().is_err());
+        assert!(previous.symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn activation_recovery_removes_uncommitted_temporary_without_pointer() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let [current, temporary, previous] = super::activation_pointer_paths(&root);
+        fs::write(&temporary, activation_bytes(&root, "2.0.0")).expect("temporary pointer");
+
+        recover_activation_pointer_swap(&lock).expect("temporary-only recovery");
+
+        assert!(current.symlink_metadata().is_err());
+        assert!(temporary.symlink_metadata().is_err());
+        assert!(previous.symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn activation_recovery_after_new_current_installation_keeps_new_bytes() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let [current, temporary, previous] = super::activation_pointer_paths(&root);
+        let current_bytes = activation_bytes(&root, "2.0.0");
+        fs::write(&current, &current_bytes).expect("new current pointer");
+        fs::write(&previous, activation_bytes(&root, "1.2.3")).expect("previous pointer");
+
+        recover_activation_pointer_swap(&lock).expect("post-swap recovery");
+
+        assert_eq!(fs::read(&current).expect("current bytes"), current_bytes);
+        assert!(temporary.symlink_metadata().is_err());
+        assert!(previous.symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn activation_recovery_is_idempotent_after_first_recovery() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let [current, temporary, previous] = super::activation_pointer_paths(&root);
+        let current_bytes = activation_bytes(&root, "1.2.3");
+        fs::write(&current, &current_bytes).expect("current pointer");
+        fs::write(&temporary, activation_bytes(&root, "2.0.0")).expect("temporary pointer");
+        fs::write(&previous, activation_bytes(&root, "0.9.0")).expect("previous pointer");
+
+        recover_activation_pointer_swap(&lock).expect("first recovery");
+        recover_activation_pointer_swap(&lock).expect("second recovery");
+
+        assert_eq!(fs::read(&current).expect("current bytes"), current_bytes);
+        assert!(temporary.symlink_metadata().is_err());
+        assert!(previous.symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn activation_recovery_rejects_invalid_documents_without_mutation() {
+        let directory = tempdir().expect("temp");
+        let invalid_root = directory.path().join("different-root");
+        for name in [
+            "malformed",
+            "root-mismatch",
+            "pending",
+            "non-complete",
+            "unsafe-version",
+            "unsafe-path",
+        ] {
+            let root = directory.path().join(format!("case-{name}"));
+            let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+            let current = root.join("installation.json");
+            let bytes = if name == "malformed" {
+                b"{".to_vec()
+            } else {
+                let mut document = activation_document(&root, "1.2.3");
+                match name {
+                    "root-mismatch" => document["install_root"] = serde_json::json!(invalid_root),
+                    "pending" => document["activation_state"] = serde_json::json!("pending"),
+                    "non-complete" => document["finalization_state"] = serde_json::json!("pending"),
+                    "unsafe-version" => document["active_version"] = serde_json::json!("../escape"),
+                    "unsafe-path" => {
+                        document["permanent_ae_path"] = serde_json::json!(invalid_root.join("ae"))
+                    }
+                    "malformed" => unreachable!(),
+                    _ => unreachable!(),
+                }
+                serde_json::to_vec(&document).expect("invalid state document")
+            };
+            fs::write(&current, &bytes).expect("invalid current pointer");
+
+            let error = recover_activation_pointer_swap(&lock).expect_err("invalid pointer");
+            assert_ambiguous(error);
+            assert_eq!(fs::read(&current).expect("current remains"), bytes);
+            assert!(
+                root.join(".installation.json.tmp")
+                    .symlink_metadata()
+                    .is_err()
+            );
+            assert!(
+                root.join(".installation.json.previous")
+                    .symlink_metadata()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn activation_recovery_validates_all_residue_before_mutating() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let [current, temporary, previous] = super::activation_pointer_paths(&root);
+        let current_bytes = activation_bytes(&root, "1.2.3");
+        let previous_bytes = activation_bytes(&root, "0.9.0");
+        fs::write(&current, &current_bytes).expect("current pointer");
+        fs::write(&temporary, b"malformed").expect("malformed temporary pointer");
+        fs::write(&previous, &previous_bytes).expect("previous pointer");
+
+        let error = recover_activation_pointer_swap(&lock).expect_err("ambiguous residue");
+        assert_ambiguous(error);
+        assert_eq!(fs::read(&current).expect("current remains"), current_bytes);
+        assert_eq!(
+            fs::read(&temporary).expect("temporary remains"),
+            b"malformed"
+        );
+        assert_eq!(
+            fs::read(&previous).expect("previous remains"),
+            previous_bytes
+        );
+    }
+
+    #[test]
+    fn activation_recovery_rejects_links_and_directories_without_mutation() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let target = root.join("foreign-pointer");
+        let temporary = root.join(".installation.json.tmp");
+        fs::write(&target, activation_bytes(&root, "1.2.3")).expect("foreign pointer");
+        if !create_file_link(&target, &temporary) {
+            eprintln!("SKIP: file links are not supported on this host");
+            return;
+        }
+
+        let error = recover_activation_pointer_swap(&lock).expect_err("symlink residue");
+        assert_ambiguous(error);
+        assert!(temporary.symlink_metadata().is_ok());
+        assert_eq!(
+            fs::read(&target).expect("foreign pointer remains"),
+            activation_bytes(&root, "1.2.3")
+        );
+
+        fs::remove_file(&temporary).expect("remove test link");
+        let previous = root.join(".installation.json.previous");
+        fs::create_dir(&previous).expect("directory residue");
+        let error = recover_activation_pointer_swap(&lock).expect_err("directory residue");
+        assert_ambiguous(error);
+        assert!(previous.is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn activation_recovery_rejects_windows_reparse_residue_without_mutation() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let target = root.join("foreign-directory");
+        let temporary = root.join(".installation.json.tmp");
+        fs::create_dir(&target).expect("foreign directory");
+        if !create_directory_link(&target, &temporary) {
+            eprintln!("SKIP: directory links are not supported on this host");
+            return;
+        }
+
+        let error = recover_activation_pointer_swap(&lock).expect_err("reparse residue");
+        assert_ambiguous(error);
+        assert!(temporary.symlink_metadata().is_ok());
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn activation_recovery_rejects_identity_substituted_residue() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let temporary = root.join(".installation.json.tmp");
+        let replacement = root.join("replacement");
+        fs::write(&temporary, activation_bytes(&root, "1.2.3")).expect("temporary pointer");
+        let validated = inspect_activation_pointer(&root, &temporary)
+            .expect("inspect temporary pointer")
+            .expect("temporary pointer");
+        fs::write(&replacement, activation_bytes(&root, "2.0.0")).expect("replacement");
+        fs::remove_file(&temporary).expect("remove original pointer");
+        fs::rename(&replacement, &temporary).expect("substitute pointer");
+
+        let error =
+            remove_validated_activation_pointer(&validated).expect_err("identity substitution");
+        assert_ambiguous(error);
+        assert!(temporary.is_file());
+    }
+
+    #[test]
+    fn activation_recovery_preserves_versions_credentials_data_and_spaces() {
+        let directory = tempdir().expect("temp");
+        let root = directory.path().join("Artisan install root with spaces");
+        let lock = InstallerLock::acquire(&root, RootMode::Create).expect("root lock");
+        let versions = root.join("versions").join("1.2.3").join("payload");
+        let credentials = root.join("credentials").join("credentials.json");
+        let data = root.join("data").join("state.db");
+        for path in [&versions, &credentials, &data] {
+            fs::create_dir_all(path.parent().expect("parent")).expect("preserved directory");
+            fs::write(path, path.to_string_lossy().as_bytes()).expect("preserved file");
+        }
+        let [current, temporary, previous] = super::activation_pointer_paths(&root);
+        let current_bytes = activation_bytes(&root, "1.2.3");
+        fs::write(&current, &current_bytes).expect("current pointer");
+        fs::write(&temporary, activation_bytes(&root, "2.0.0")).expect("temporary pointer");
+
+        recover_activation_pointer_swap(&lock).expect("space-path recovery");
+
+        assert_eq!(fs::read(&current).expect("current bytes"), current_bytes);
+        for path in [&versions, &credentials, &data] {
+            assert_eq!(
+                fs::read(path).expect("preserved file bytes"),
+                path.to_string_lossy().as_bytes()
+            );
+        }
+        assert!(temporary.symlink_metadata().is_err());
+        assert!(previous.symlink_metadata().is_err());
     }
 
     #[test]
