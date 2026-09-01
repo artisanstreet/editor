@@ -462,23 +462,9 @@ impl NativeApplication {
                 failure,
                 retryable,
             } => self.handle_intake_failed(operation, failure, retryable, cx),
-            NativeTransportEvent::EmptyProjects => {
-                self.pending_thread = None;
-                self.pending_snapshot = None;
-                self.retire_host(cx);
-                self.state = NativeViewState::EmptyProjects;
-                cx.notify();
-            }
+            NativeTransportEvent::EmptyProjects => self.handle_empty_projects(cx),
             NativeTransportEvent::EmptyThreads { project_id } => {
-                if self.selected_project.as_ref() != Some(&project_id) {
-                    self.set_failure(invalid_service_failure(), cx);
-                    return;
-                }
-                self.pending_thread = None;
-                self.pending_snapshot = None;
-                self.retire_host(cx);
-                self.state = NativeViewState::EmptyThreads;
-                cx.notify();
+                self.handle_empty_threads(&project_id, cx);
             }
             NativeTransportEvent::Failed(failure) => {
                 self.retain_message_flight(cx);
@@ -530,16 +516,36 @@ impl NativeApplication {
                 thread_id,
                 request_id: _,
                 started,
-            } => self.handle_subscription_started(thread_id, started, cx),
+            } => self.handle_subscription_started(&thread_id, started, cx),
             NativeTransportEvent::ConversationSubscriptionStopped {
                 thread_id,
                 request_id: _,
                 stopped: _,
-            } => self.handle_subscription_stopped(thread_id, cx),
-            NativeTransportEvent::PatchBatch(batch) => self.handle_patch_batch(batch, cx),
+            } => self.handle_subscription_stopped(&thread_id, cx),
+            NativeTransportEvent::PatchBatch(batch) => self.handle_patch_batch(&batch, cx),
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
         }
+    }
+
+    fn handle_empty_projects(&mut self, cx: &mut Context<Self>) {
+        self.pending_thread = None;
+        self.pending_snapshot = None;
+        self.retire_host(cx);
+        self.state = NativeViewState::EmptyProjects;
+        cx.notify();
+    }
+
+    fn handle_empty_threads(&mut self, project_id: &ProjectId, cx: &mut Context<Self>) {
+        if self.selected_project.as_ref() != Some(project_id) {
+            self.set_failure(invalid_service_failure(), cx);
+            return;
+        }
+        self.pending_thread = None;
+        self.pending_snapshot = None;
+        self.retire_host(cx);
+        self.state = NativeViewState::EmptyThreads;
+        cx.notify();
     }
 
     fn handle_service_stopped(&mut self, status: ServiceStopStatus, cx: &mut Context<Self>) {
@@ -563,14 +569,14 @@ impl NativeApplication {
 
     fn handle_subscription_started(
         &mut self,
-        thread_id: ThreadId,
+        thread_id: &ThreadId,
         started: ConversationSubscriptionStarted,
         cx: &mut Context<Self>,
     ) {
         match started {
             ConversationSubscriptionStarted::Fresh(start) => {
                 let snapshot = start.snapshot().clone();
-                if &thread_id != snapshot.thread_id() {
+                if thread_id != snapshot.thread_id() {
                     self.set_failure(invalid_service_failure(), cx);
                     return;
                 }
@@ -581,7 +587,7 @@ impl NativeApplication {
                 cursor,
             } => {
                 if self.selected_thread.as_ref() != Some(&resumed_thread)
-                    || resumed_thread != thread_id
+                    || &resumed_thread != thread_id
                 {
                     self.set_failure(invalid_service_failure(), cx);
                     return;
@@ -611,11 +617,11 @@ impl NativeApplication {
         }
     }
 
-    fn handle_subscription_stopped(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+    fn handle_subscription_stopped(&mut self, thread_id: &ThreadId, cx: &mut Context<Self>) {
         // Stop ack must never create an unsubscribe loop. If this thread is not the active
         // selected thread, it is a stale ack and is ignored. If it is active, finish the
         // already-started local retirement without sending another Unsubscribe.
-        if self.selected_thread.as_ref() != Some(&thread_id) {
+        if self.selected_thread.as_ref() != Some(thread_id) {
             return;
         }
         // Finish retirement without sending Unsubscribe again
@@ -644,7 +650,7 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn handle_patch_batch(&mut self, batch: PatchBatch, cx: &mut Context<Self>) {
+    fn handle_patch_batch(&mut self, batch: &PatchBatch, cx: &mut Context<Self>) {
         if self.selected_thread.as_ref() != Some(batch.thread_id()) {
             return;
         }
@@ -673,41 +679,41 @@ impl NativeApplication {
 
     fn handle_delivery_lost(&mut self, failure: ServiceFailure, cx: &mut Context<Self>) {
         // Use mounted host's last-good cursor and existing recovery policy to resubscribe
-        if let Some(thread_id) = self.selected_thread.clone() {
-            if let Some(host) = self.conversation_host.clone() {
-                let cursor = host.read(cx).controller_view().delivery.cursor;
-                if let Some(service) = self.service.clone() {
-                    // Explicit retry via Subscribe with last-good cursor; Busy/Stopped remain explicit
-                    let result = service.submit(NativeTransportCommand::Subscribe {
-                        thread_id: thread_id.clone(),
-                        after: cursor,
-                    });
-                    match result {
-                        Ok(()) => {
-                            // keep current view, await Started/Patch; do not fabricate snapshot
-                            cx.notify();
-                            return;
-                        }
-                        Err(CommandSendError::Busy) => {
-                            self.set_failure(
-                                ServiceFailure {
-                                    stage: ServiceFailureStage::EventBridge,
-                                    category: ServiceFailureCategory::Backpressure,
-                                },
-                                cx,
-                            );
-                            return;
-                        }
-                        Err(CommandSendError::Stopped) => {
-                            self.set_failure(
-                                ServiceFailure {
-                                    stage: ServiceFailureStage::EventBridge,
-                                    category: ServiceFailureCategory::ChannelClosed,
-                                },
-                                cx,
-                            );
-                            return;
-                        }
+        if let Some(thread_id) = self.selected_thread.clone()
+            && let Some(host) = self.conversation_host.clone()
+        {
+            let cursor = host.read(cx).controller_view().delivery.cursor;
+            if let Some(service) = self.service.clone() {
+                // Explicit retry via Subscribe with last-good cursor; Busy/Stopped remain explicit
+                let result = service.submit(NativeTransportCommand::Subscribe {
+                    thread_id: thread_id.clone(),
+                    after: cursor,
+                });
+                match result {
+                    Ok(()) => {
+                        // keep current view, await Started/Patch; do not fabricate snapshot
+                        cx.notify();
+                        return;
+                    }
+                    Err(CommandSendError::Busy) => {
+                        self.set_failure(
+                            ServiceFailure {
+                                stage: ServiceFailureStage::EventBridge,
+                                category: ServiceFailureCategory::Backpressure,
+                            },
+                            cx,
+                        );
+                        return;
+                    }
+                    Err(CommandSendError::Stopped) => {
+                        self.set_failure(
+                            ServiceFailure {
+                                stage: ServiceFailureStage::EventBridge,
+                                category: ServiceFailureCategory::ChannelClosed,
+                            },
+                            cx,
+                        );
+                        return;
                     }
                 }
             }
@@ -1136,14 +1142,14 @@ impl NativeApplication {
     }
 
     fn retire_host(&mut self, cx: &mut Context<Self>) {
-        if let Some(thread_id) = self.selected_thread.clone() {
-            if let Some(service) = self.service.clone() {
-                match service.submit(NativeTransportCommand::Unsubscribe {
-                    thread_id: thread_id.clone(),
-                }) {
-                    Ok(()) => {}
-                    Err(error) => self.set_failure(command_failure(error), cx),
-                }
+        if let Some(thread_id) = self.selected_thread.clone()
+            && let Some(service) = self.service.clone()
+        {
+            match service.submit(NativeTransportCommand::Unsubscribe {
+                thread_id: thread_id.clone(),
+            }) {
+                Ok(()) => {}
+                Err(error) => self.set_failure(command_failure(error), cx),
             }
         }
         self.retain_message_flight(cx);

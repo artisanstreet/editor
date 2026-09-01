@@ -637,6 +637,12 @@ impl NativeTransportService {
     }
 }
 
+/// Tries to admit one command to the bounded Tokio queue.
+///
+/// # Errors
+///
+/// Returns [`CommandSendError::Busy`] when the queue is full, or
+/// [`CommandSendError::Stopped`] when its receiver is closed.
 pub fn try_send_command(
     sender: &tokio::sync::mpsc::Sender<NativeTransportCommand>,
     command: NativeTransportCommand,
@@ -1110,6 +1116,7 @@ pub enum SubscriptionFailureDisposition {
 
 /// Classifies one subscription request failure without inferring retryability
 /// from its public category alone.
+#[must_use]
 pub const fn subscription_failure_disposition(
     operation: SubscriptionRequestKind,
     failure: ServiceFailure,
@@ -1407,7 +1414,7 @@ fn validate_response_family(
         (
             ExpectedResponse::ConversationSubscriptionStopped { thread_id },
             ResponsePayload::ConversationSubscriptionStopped(stopped),
-        ) if &stopped.thread_id == &thread_id => {
+        ) if stopped.thread_id == thread_id => {
             Ok(ResponsePayload::ConversationSubscriptionStopped(stopped))
         }
         _ => Err(ServiceFailure::new(
@@ -1489,7 +1496,7 @@ struct SessionMaterial {
     limits: ClientSessionLimits,
 }
 
-/// Minimal custody for the active subscription; the ConversationHost is the projection authority.
+/// Minimal custody for the active subscription; the `ConversationHost` is the projection authority.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionCustody {
     active_thread: Option<ThreadId>,
@@ -1499,6 +1506,7 @@ pub struct SubscriptionCustody {
 
 impl SubscriptionCustody {
     /// Creates empty custody.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1514,6 +1522,12 @@ impl SubscriptionCustody {
 
     /// Derives and records a Fresh or Resumed server cursor without advancing
     /// application custody.
+    ///
+    /// # Errors
+    ///
+    /// Returns an integrity failure when the response does not match the
+    /// active thread, pending request, requested mode/cursor, or accepted
+    /// cursor floor.
     pub fn on_started(
         &mut self,
         expected_after: Option<ConversationCursor>,
@@ -1549,6 +1563,11 @@ impl SubscriptionCustody {
     }
 
     /// Advances cursor only after explicit application acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an integrity failure for a stale thread or a cursor behind the
+    /// accepted or pending cursor.
     pub fn on_acknowledge(
         &mut self,
         thread_id: &ThreadId,
@@ -1587,16 +1606,19 @@ impl SubscriptionCustody {
     }
 
     /// Returns the active thread.
+    #[must_use]
     pub fn active_thread(&self) -> Option<&ThreadId> {
         self.active_thread.as_ref()
     }
 
     /// Returns the last application-accepted cursor.
+    #[must_use]
     pub fn last_accepted_cursor(&self) -> Option<ConversationCursor> {
         self.last_accepted_cursor
     }
 
     /// Returns the pending after cursor for the in-flight subscribe.
+    #[must_use]
     pub fn pending_after(&self) -> Option<ConversationCursor> {
         self.pending_after
     }
@@ -1687,12 +1709,10 @@ impl ServiceRuntime {
         ));
         self.delivery_cancel = Some(cancel);
         self.delivery_join = Some(join);
-        if restore_subscription {
-            if let Some(thread_id) = self.custody.active_thread().cloned() {
-                let after = self.custody.last_accepted_cursor();
-                self.resubscribe_after_reconnect(frames, thread_id, after)
-                    .await?;
-            }
+        if restore_subscription && let Some(thread_id) = self.custody.active_thread().cloned() {
+            let after = self.custody.last_accepted_cursor();
+            self.resubscribe_after_reconnect(frames, thread_id, after)
+                .await?;
         }
         Ok(())
     }
@@ -2060,6 +2080,12 @@ async fn establish_session(
     ))
 }
 
+/// Validates one uni-stream envelope and extracts a patch batch.
+///
+/// # Errors
+///
+/// Returns an integrity failure when the protocol version or envelope body
+/// does not match the expected delivery family.
 pub fn validate_uni_envelope(
     envelope: &WireEnvelope,
     expected_version: ProtocolVersion,
@@ -2079,6 +2105,11 @@ pub fn validate_uni_envelope(
     }
 }
 
+/// Validates the thread identity in a subscription-start response.
+///
+/// # Errors
+///
+/// Returns an integrity failure when the response names a different thread.
 pub fn validate_started_correlation(
     expected_thread_id: &ThreadId,
     started: &ConversationSubscriptionStarted,
@@ -2096,6 +2127,11 @@ pub fn validate_started_correlation(
     Ok(())
 }
 
+/// Validates the thread identity in a subscription-stop response.
+///
+/// # Errors
+///
+/// Returns an integrity failure when the response names a different thread.
 pub fn validate_stopped_correlation(
     expected_thread_id: &ThreadId,
     stopped: &ConversationSubscriptionStopped,
@@ -2116,30 +2152,27 @@ pub async fn delivery_task_loop(
     expected_version: ProtocolVersion,
 ) {
     loop {
-        match receiver.recv(cancel.as_ref()).await {
-            Ok((next_receiver, envelope)) => {
-                receiver = next_receiver;
-                let result = match validate_uni_envelope(&envelope, expected_version) {
-                    Ok(batch) => PrivateDelivery::Batch(batch),
-                    Err(failure) => PrivateDelivery::Lost(failure),
-                };
-                let is_lost = matches!(result, PrivateDelivery::Lost(_));
-                if tx.send(result).await.is_err() {
-                    break;
-                }
-                if is_lost {
-                    break;
-                }
-            }
-            Err(_) => {
-                let _ = tx
-                    .send(PrivateDelivery::Lost(ServiceFailure::new(
-                        ServiceFailureStage::Delivery,
-                        ServiceFailureCategory::LocalSession,
-                    )))
-                    .await;
+        if let Ok((next_receiver, envelope)) = receiver.recv(cancel.as_ref()).await {
+            receiver = next_receiver;
+            let result = match validate_uni_envelope(&envelope, expected_version) {
+                Ok(batch) => PrivateDelivery::Batch(batch),
+                Err(failure) => PrivateDelivery::Lost(failure),
+            };
+            let is_lost = matches!(result, PrivateDelivery::Lost(_));
+            if tx.send(result).await.is_err() {
                 break;
             }
+            if is_lost {
+                break;
+            }
+        } else {
+            let _ = tx
+                .send(PrivateDelivery::Lost(ServiceFailure::new(
+                    ServiceFailureStage::Delivery,
+                    ServiceFailureCategory::LocalSession,
+                )))
+                .await;
+            break;
         }
     }
 }
@@ -2165,8 +2198,7 @@ async fn service_main(
                             let version = runtime
                                 .session
                                 .as_ref()
-                                .map(ClientSession::protocol_version)
-                                .unwrap_or(ProtocolVersion::V1);
+                                .map_or(ProtocolVersion::V1, ClientSession::protocol_version);
                             let join = tokio::spawn(delivery_task_loop(
                                 receiver,
                                 delivery_tx.clone(),
@@ -2279,7 +2311,7 @@ async fn handle_subscribe(
             // Do not install into a second projection; emit directly.
             // Cursor will be advanced only after explicit AcknowledgePatch from application.
             publish(
-                &events,
+                events,
                 NativeTransportEvent::ConversationSubscriptionStarted {
                     thread_id,
                     request_id,
@@ -2303,7 +2335,7 @@ async fn handle_unsubscribe(
 ) -> Result<(), ServiceFailure> {
     let is_active = runtime.custody.active_thread() == Some(&thread_id);
     if is_active {
-        runtime.custody.on_unsubscribe(&thread_id)
+        runtime.custody.on_unsubscribe(&thread_id);
     }
     let request =
         ClientRequest::Conversation(ConversationRequest::Unsubscribe(ConversationUnsubscribe {
@@ -2341,7 +2373,7 @@ async fn handle_unsubscribe(
                 return Err(failure);
             }
             publish(
-                &events,
+                events,
                 NativeTransportEvent::ConversationSubscriptionStopped {
                     thread_id,
                     request_id,
@@ -2354,7 +2386,7 @@ async fn handle_unsubscribe(
     }
 }
 
-async fn handle_acknowledge_patch(
+fn handle_acknowledge_patch(
     runtime: &mut ServiceRuntime,
     thread_id: ThreadId,
     cursor: ConversationCursor,
@@ -2373,6 +2405,28 @@ async fn handle_delivery_lost_reconnect(
     // Perform cancel->join->drop->connect->take_delivery->new task
     // The application owns the one recovery Subscribe from its mounted host cursor.
     runtime.reconnect(frames, false).await
+}
+
+async fn handle_subscribe_command(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    after: Option<ConversationCursor>,
+) -> Result<(), ServiceFailure> {
+    if let Err(failure) = handle_subscribe(runtime, frames, events, thread_id, after).await {
+        match subscription_failure_disposition(
+            SubscriptionRequestKind::Subscribe,
+            failure.failure,
+            failure.retryable_local_session_loss,
+        ) {
+            SubscriptionFailureDisposition::RecoverDelivery => {
+                handle_delivery_lost_reconnect(runtime, frames, events, failure.failure).await?;
+            }
+            SubscriptionFailureDisposition::Terminal => return Err(failure.failure),
+        }
+    }
+    Ok(())
 }
 
 async fn command_loop_with_delivery(
@@ -2412,37 +2466,15 @@ async fn command_loop_with_delivery(
                         queue_first_message(runtime, frames, events, *command).await?;
                     }
                     Some(NativeTransportCommand::Subscribe { thread_id, after }) => {
-                        if let Err(failure) = handle_subscribe(runtime, frames, events, thread_id, after).await {
-                            match subscription_failure_disposition(
-                                SubscriptionRequestKind::Subscribe,
-                                failure.failure,
-                                failure.retryable_local_session_loss,
-                            ) {
-                                SubscriptionFailureDisposition::RecoverDelivery => {
-                                    handle_delivery_lost_reconnect(
-                                        runtime,
-                                        frames,
-                                        events,
-                                        failure.failure,
-                                    )
-                                    .await?;
-                                }
-                                SubscriptionFailureDisposition::Terminal => {
-                                    return Err(failure.failure);
-                                }
-                            }
-                        }
+                        handle_subscribe_command(runtime, frames, events, thread_id, after).await?;
                     }
                     Some(NativeTransportCommand::Unsubscribe { thread_id }) => {
-                        if let Err(failure) = handle_unsubscribe(runtime, frames, events, thread_id).await {
-                            // The host is retiring; never turn an unsubscribe failure into a
-                            // recovery Subscribe for that same host.
-                            return Err(failure);
-                        }
+                        // The host is retiring; never turn an unsubscribe failure into a
+                        // recovery Subscribe for that same host.
+                        handle_unsubscribe(runtime, frames, events, thread_id).await?;
                     }
-                    Some(NativeTransportCommand::AcknowledgePatch { thread_id, cursor }) => {
-                        handle_acknowledge_patch(runtime, thread_id, cursor).await?;
-                    }
+                    Some(NativeTransportCommand::AcknowledgePatch { thread_id, cursor }) =>
+                        handle_acknowledge_patch(runtime, thread_id, cursor)?,
                 }
             }
             delivery = delivery_rx.recv() => {
@@ -2451,7 +2483,7 @@ async fn command_loop_with_delivery(
                         let is_stale = runtime
                             .custody
                             .active_thread()
-                            .map_or(true, |tid| tid != batch.thread_id());
+                            .is_none_or(|tid| tid != batch.thread_id());
                         if is_stale {
                             continue;
                         }
@@ -2479,18 +2511,16 @@ async fn command_loop_with_delivery(
                             continue;
                         }
                         // Do not advance cursor here; emit to application and wait for explicit ack
-                        publish(&events, NativeTransportEvent::PatchBatch(batch))?;
+                        publish(events, NativeTransportEvent::PatchBatch(batch))?;
                     }
-                    Some(PrivateDelivery::Lost(failure)) => {
-                        handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
-                    }
+                    Some(PrivateDelivery::Lost(failure)) =>
+                        handle_delivery_lost_reconnect(runtime, frames, events, failure).await?,
                     None => {
                         let failure = ServiceFailure::new(
                             ServiceFailureStage::Delivery,
                             ServiceFailureCategory::LocalSession,
                         );
                         handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
-                        continue;
                     }
                 }
             }
