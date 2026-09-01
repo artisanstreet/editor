@@ -29,6 +29,7 @@ rust_binary(
         "@crates//:chrono",
         "@crates//:clap",
         "@crates//:ed25519-dalek",
+        "@crates//:fs2",
         "@crates//:hex",
         "@crates//:reqwest",
         "@crates//:semver",
@@ -42,7 +43,10 @@ rust_binary(
         "@crates//:zip",
         "@crates//:zstd",
     ] + select({
-        "@platforms//os:windows": ["@crates//:winreg"],
+        "@platforms//os:windows": [
+            "@crates//:winapi-util",
+            "@crates//:winreg",
+        ],
         "//conditions:default": [],
     }),
     edition = "2024",

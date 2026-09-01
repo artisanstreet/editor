@@ -1,5 +1,5 @@
 {
-  "checksum": "a40745c2e2f467aae4a9a781a4ccc56dd7929b78b7f0d0e6ddf50f6fbdfba838",
+  "checksum": "1b48ef9d01b70a4e3fdf14e2a167f75d6437f0c140c812504037c1c7598beadd",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -119,6 +119,10 @@
               "target": "ed25519_dalek"
             },
             {
+              "id": "fs2 0.4.3",
+              "target": "fs2"
+            },
+            {
               "id": "hex 0.4.3",
               "target": "hex"
             },
@@ -173,6 +177,10 @@
           ],
           "selects": {
             "cfg(windows)": [
+              {
+                "id": "winapi-util 0.1.11",
+                "target": "winapi_util"
+              },
               {
                 "id": "winreg 0.55.0",
                 "target": "winreg"
