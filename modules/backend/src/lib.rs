@@ -32,6 +32,7 @@ pub mod host_machines_policy;
 pub mod host_suspend_detection_policy;
 pub mod lifecycle_control;
 pub mod listener;
+pub mod native_run_dispatch;
 pub mod orchestration_intake_policy;
 pub mod preview_service_policy;
 pub mod process_custody;
@@ -48,6 +49,10 @@ pub mod thread_metadata_refiner_policy;
 pub mod thread_resource_quiescence_policy;
 pub mod usage_interruption_model_policy;
 pub mod wake_lock_policy;
+
+#[cfg(test)]
+#[path = "../../../tests/backend/native_run_dispatch.rs"]
+mod native_run_dispatch_tests;
 
 pub use process_custody::{ForgeProcessCustody, ForgeProcessCustodyError};
 
@@ -76,12 +81,17 @@ pub use directory_selection::{
 };
 pub use forge_runtime::{
     CredentialMaterialError, ForgeCleanupError, ForgeConfigError, ForgeLaunchConfig,
-    ForgePrimaryCleanupError, ForgeRuntimeError, ForgeServiceError, ReadinessError,
+    ForgeLaunchConfigInput, ForgePrimaryCleanupError, ForgeRuntimeError, ForgeServiceError,
+    ReadinessError,
 };
 pub use lifecycle_control::LifecycleController;
 pub use listener::{
     AdmissionCause, ForgeListener, ListenerError, ListenerLimits, MetadataError,
     RequestTermination, ServiceReport,
+};
+pub use native_run_dispatch::{
+    NativeRunDispatcherConfig, NativeRunDispatcherConfigError, NativeRunDispatcherConfigInput,
+    NativeRunDispatcherShutdown,
 };
 pub use request_handler::RequestHandler;
 pub use storage::{ForgeStorage, ForgeStorageCloseError, ForgeStorageOpenError};

@@ -23,18 +23,24 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use artisan_domain::RunId;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
-use artisan_domain::RunId;
 use artisan_transport::CancelHandle;
 
-use super::http::{HealthError, HealthSecret};
+use super::http::{
+    CreateSessionInput, HealthError, HealthSecret, PromptError, PromptFile, PromptInput,
+    perform_create_session, perform_interrupt, perform_prompt,
+};
+use super::observation::{EngineObservation, TerminalState};
 use super::process::{
     ChildParts, CleanupObservation, LaunchRecipe, LifelineWriter, RetainedEngine, StderrCounter,
-    cleanup_after_abort, eventual_wait_once, spawn_engine,
+    cleanup_after_abort, eventual_wait_once, spawn_configured_engine, spawn_engine,
 };
 use super::readiness::ReadinessError;
+use super::readiness::ValidatedEndpoint;
+use super::stream::{StreamError, StreamInput, follow_stream_for_run};
 use super::{EngineBounds, EngineLimits};
 
 /// Payload-free engine health observable by the facade.
@@ -104,6 +110,8 @@ pub(crate) enum LaunchAdmissionError {
     Busy,
     /// The caller-supplied budget cannot form a representable deadline.
     InvalidDeadline,
+    /// The persisted observation capacity cannot form a bounded channel.
+    InvalidCapacity,
 }
 
 /// Typed, payload-free failure of one engine operation.
@@ -130,6 +138,13 @@ pub(crate) enum EngineOperationError {
     HealthFailed(HealthError),
     /// Health version was incompatible with the expected value.
     IncompatibleVersion,
+    /// Persisted turn settings could not be translated into owner limits.
+    Configuration,
+    /// The provider session could not be created or the prompt could not be
+    /// delivered. The exact provider payload remains private to the owner.
+    ProviderRequestFailed,
+    /// The authenticated observation stream did not settle normally.
+    StreamFailed,
     /// Cleanup could not observe the child's death and no primary cause
     /// existed to preserve alongside it.
     ReapUnresolved,
@@ -161,15 +176,25 @@ pub(crate) enum LaunchOutcome {
 pub(crate) type LaunchResult = Result<LaunchOutcome, EngineOperationError>;
 
 /// One admitted launch travelling from the facade to the owner task.
-pub(crate) struct Job {
-    /// The target run identity.
-    pub(crate) run_id: RunId,
-    /// Absolute checked deadline measured from the admission call.
-    pub(crate) deadline: Instant,
-    /// Abandonment and explicit-cancellation signal installed before admission.
-    pub(crate) control: Arc<CancelHandle>,
-    /// Single-use response slot back to the caller's future.
-    pub(crate) respond: oneshot::Sender<LaunchResult>,
+pub(crate) enum Job {
+    /// Existing readiness/health launch used by the isolated owner tests.
+    Legacy {
+        run_id: RunId,
+        deadline: Instant,
+        control: Arc<CancelHandle>,
+        respond: oneshot::Sender<LaunchResult>,
+    },
+    /// A fully immutable configured turn handed to the owner after durable
+    /// launch. The owner alone may move the verified profile capability.
+    Turn {
+        input: Box<super::EngineTurnInput>,
+        deadline: Instant,
+        control: Arc<CancelHandle>,
+        prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+        authorize: oneshot::Receiver<()>,
+        observations: mpsc::Sender<EngineObservation>,
+        respond: oneshot::Sender<TurnResult>,
+    },
 }
 
 /// Single-owner future for one admitted launch.
@@ -219,6 +244,110 @@ impl Drop for AcceptedLaunch {
     }
 }
 
+/// Safe session metadata released only after `OpenCode2` `CreateSession`.
+pub(crate) struct PreparedSession {
+    session: String,
+}
+
+impl PreparedSession {
+    fn new(session: String) -> Self {
+        Self { session }
+    }
+
+    pub(crate) fn session(&self) -> &str {
+        &self.session
+    }
+}
+
+impl std::fmt::Debug for PreparedSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreparedSession { <redacted> }")
+    }
+}
+
+/// Result of one configured provider turn after the owner has cleaned up its
+/// child and transport drivers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EngineTurnResult {
+    terminal: TerminalState,
+}
+
+impl EngineTurnResult {
+    pub(crate) const fn terminal(self) -> TerminalState {
+        self.terminal
+    }
+}
+
+pub(crate) type TurnResult = Result<EngineTurnResult, EngineOperationError>;
+
+/// Single-owner handoff for the configured turn phases.
+pub(crate) struct AcceptedTurn {
+    prepared: oneshot::Receiver<Result<PreparedSession, EngineOperationError>>,
+    authorize_sender: Option<oneshot::Sender<()>>,
+    observations: mpsc::Receiver<EngineObservation>,
+    receiver: Option<oneshot::Receiver<TurnResult>>,
+    control: Arc<CancelHandle>,
+}
+
+impl AcceptedTurn {
+    pub(crate) fn from_parts(
+        prepared: oneshot::Receiver<Result<PreparedSession, EngineOperationError>>,
+        authorize_sender: oneshot::Sender<()>,
+        observations: mpsc::Receiver<EngineObservation>,
+        receiver: oneshot::Receiver<TurnResult>,
+        control: Arc<CancelHandle>,
+    ) -> Self {
+        Self {
+            prepared,
+            authorize_sender: Some(authorize_sender),
+            observations,
+            receiver: Some(receiver),
+            control,
+        }
+    }
+
+    pub(crate) async fn prepare(&mut self) -> TurnResultPrepared {
+        match (&mut self.prepared).await {
+            Ok(result) => result,
+            Err(_) => Err(EngineOperationError::ReapUnresolved),
+        }
+    }
+
+    pub(crate) fn authorize(&mut self) -> Result<(), EngineOperationError> {
+        self.authorize_sender
+            .take()
+            .ok_or(EngineOperationError::ProviderRequestFailed)?
+            .send(())
+            .map_err(|()| EngineOperationError::ProviderRequestFailed)
+    }
+
+    pub(crate) async fn next_observation(&mut self) -> Option<EngineObservation> {
+        self.observations.recv().await
+    }
+
+    pub(crate) async fn finish(mut self) -> TurnResult {
+        let Some(receiver) = self.receiver.take() else {
+            return Err(EngineOperationError::ReapUnresolved);
+        };
+        match receiver.await {
+            Ok(result) => result,
+            Err(_) => Err(EngineOperationError::ReapUnresolved),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.control.cancel();
+    }
+}
+
+impl Drop for AcceptedTurn {
+    fn drop(&mut self) {
+        self.control.cancel();
+    }
+}
+
+type TurnResultPrepared = Result<PreparedSession, EngineOperationError>;
+
 /// How one executed job ended for the owner loop.
 pub(crate) enum Execution {
     /// The response was settled and no custody remains.
@@ -237,7 +366,7 @@ pub(crate) async fn run_owner(
     limits: EngineLimits,
     bounds: EngineBounds,
 ) {
-    run_owner_with_allocator(
+    Box::pin(run_owner_with_allocator(
         jobs,
         shutdown,
         health,
@@ -245,19 +374,65 @@ pub(crate) async fn run_owner(
         limits,
         bounds,
         GenerationAllocator::new(),
-    )
+    ))
     .await;
 }
 
 /// Variant that starts from a caller-supplied allocator (test-seeded).
 pub(crate) async fn run_owner_with_allocator(
-    mut jobs: mpsc::Receiver<Job>,
+    jobs: mpsc::Receiver<Job>,
     shutdown: Arc<CancelHandle>,
     health: watch::Sender<HealthState>,
     recipe: LaunchRecipe,
     limits: EngineLimits,
     bounds: EngineBounds,
     mut generations: GenerationAllocator,
+) {
+    Box::pin(run_owner_loop(
+        jobs,
+        shutdown,
+        health,
+        Some(LegacyOwnerConfig {
+            recipe,
+            limits,
+            bounds,
+        }),
+        &mut generations,
+    ))
+    .await;
+}
+
+/// Runs the configured owner lane.  Unlike the legacy test lane it has no
+/// executable, version, budget, or bound values of its own: each turn carries
+/// the immutable persisted snapshot that must govern its attempt.
+pub(crate) async fn run_configured_owner(
+    jobs: mpsc::Receiver<Job>,
+    shutdown: Arc<CancelHandle>,
+    health: watch::Sender<HealthState>,
+) {
+    let mut generations = GenerationAllocator::new();
+    Box::pin(run_owner_loop(
+        jobs,
+        shutdown,
+        health,
+        None,
+        &mut generations,
+    ))
+    .await;
+}
+
+struct LegacyOwnerConfig {
+    recipe: LaunchRecipe,
+    limits: EngineLimits,
+    bounds: EngineBounds,
+}
+
+async fn run_owner_loop(
+    mut jobs: mpsc::Receiver<Job>,
+    shutdown: Arc<CancelHandle>,
+    health: watch::Sender<HealthState>,
+    legacy: Option<LegacyOwnerConfig>,
+    generations: &mut GenerationAllocator,
 ) {
     loop {
         tokio::select! {
@@ -268,25 +443,45 @@ pub(crate) async fn run_owner_with_allocator(
             job = jobs.recv() => {
                 let Some(job) = job else { break };
                 if shutdown.is_cancelled() {
-                    let _ = job.respond.send(Err(EngineOperationError::Shutdown));
+                    reject_job(job, EngineOperationError::Shutdown);
                     continue;
                 }
-                if job.control.is_cancelled() {
-                    let _ = job.respond.send(Err(EngineOperationError::Cancelled));
+                if job_control(&job).is_cancelled() {
+                    reject_job(job, EngineOperationError::Cancelled);
                     continue;
                 }
-                if Instant::now() >= job.deadline {
-                    let _ = job.respond.send(Err(EngineOperationError::Deadline));
+                if Instant::now() >= job_deadline(&job) {
+                    reject_job(job, EngineOperationError::Deadline);
                     continue;
                 }
                 let Some(generation) = generations.mint() else {
                     let _ = health.send(HealthState::Quarantined);
-                    let _ = job.respond.send(Err(EngineOperationError::GenerationExhausted));
+                    reject_job(job, EngineOperationError::GenerationExhausted);
                     quarantine_tail(&mut jobs, None).await;
                     return;
                 };
 
-                match execute_job(&recipe, generation, job, &shutdown, limits, bounds).await {
+                let execution = match job {
+                    job @ Job::Legacy { .. } => {
+                        let Some(config) = legacy.as_ref() else {
+                            reject_job(job, EngineOperationError::Configuration);
+                            continue;
+                        };
+                        execute_legacy_job(
+                            &config.recipe,
+                            generation,
+                            job,
+                            &shutdown,
+                            config.limits,
+                            config.bounds,
+                        )
+                        .await
+                    }
+                    job @ Job::Turn { .. } => {
+                        Box::pin(execute_configured_job(job, &shutdown)).await
+                    }
+                };
+                match execution {
                     Execution::Completed => {}
                     Execution::Quarantined(retained) => {
                         let _ = health.send(HealthState::Quarantined);
@@ -299,7 +494,33 @@ pub(crate) async fn run_owner_with_allocator(
     }
 
     while let Ok(job) = jobs.try_recv() {
-        let _ = job.respond.send(Err(EngineOperationError::Shutdown));
+        reject_job(job, EngineOperationError::Shutdown);
+    }
+}
+
+fn job_control(job: &Job) -> &Arc<CancelHandle> {
+    match job {
+        Job::Legacy { control, .. } | Job::Turn { control, .. } => control,
+    }
+}
+
+fn job_deadline(job: &Job) -> Instant {
+    match job {
+        Job::Legacy { deadline, .. } | Job::Turn { deadline, .. } => *deadline,
+    }
+}
+
+fn reject_job(job: Job, error: EngineOperationError) {
+    match job {
+        Job::Legacy { respond, .. } => {
+            let _ = respond.send(Err(error));
+        }
+        Job::Turn {
+            prepared, respond, ..
+        } => {
+            let _ = prepared.send(Err(error.clone()));
+            let _ = respond.send(Err(error));
+        }
     }
 }
 
@@ -309,7 +530,7 @@ pub(crate) async fn run_owner_with_allocator(
 async fn quarantine_tail(jobs: &mut mpsc::Receiver<Job>, retained: Option<Box<RetainedEngine>>) {
     jobs.close();
     while let Some(job) = jobs.recv().await {
-        let _ = job.respond.send(Err(EngineOperationError::Shutdown));
+        reject_job(job, EngineOperationError::Shutdown);
     }
 
     if let Some(engine) = retained {
@@ -409,8 +630,10 @@ async fn handle_health_phase(
     }
 }
 
-/// Executes one admitted job end to end, including P3 readiness and health.
-async fn execute_job(
+/// Executes one legacy readiness/health job end to end.  This path remains
+/// available only for the existing owner tests; configured production turns
+/// use the immutable snapshot path below.
+async fn execute_legacy_job(
     recipe: &LaunchRecipe,
     generation: u64,
     job: Job,
@@ -418,12 +641,15 @@ async fn execute_job(
     limits: EngineLimits,
     bounds: EngineBounds,
 ) -> Execution {
-    let Job {
+    let Job::Legacy {
         run_id: _,
         deadline,
         control,
         respond,
-    } = job;
+    } = job
+    else {
+        unreachable!("legacy executor received a configured turn");
+    };
     if shutdown.is_cancelled() {
         let _ = respond.send(Err(EngineOperationError::Shutdown));
         return Execution::Completed;
@@ -501,6 +727,704 @@ async fn execute_job(
         shutdown,
     };
     handle_health_phase(parts, generation, endpoint, secret, respond, ctx).await
+}
+
+/// Executes one configured `OpenCode2` turn.  The profile capability and the
+/// settings snapshot are moved into this owner call and are never reread from
+/// durable state or ambient process configuration.
+async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execution {
+    let Job::Turn {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+    } = job
+    else {
+        unreachable!("configured executor received a legacy launch");
+    };
+
+    let request = ConfiguredTurnRequest {
+        input: *input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+    };
+    let runtime = match configured_runtime(&request.input.settings, request.input.control_capacity)
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return request.fail(error),
+    };
+    let selection = request.input.settings.config().selection().as_opencode2();
+    if request.input.launch.profile_id() != selection.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    if shutdown.is_cancelled() {
+        return request.fail(EngineOperationError::Shutdown);
+    }
+    if request.control.is_cancelled() {
+        return request.fail(EngineOperationError::Cancelled);
+    }
+
+    Box::pin(execute_configured_turn(request, runtime, shutdown)).await
+}
+
+struct ConfiguredTurnRequest {
+    input: super::EngineTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+}
+
+impl ConfiguredTurnRequest {
+    fn fail(self, error: EngineOperationError) -> Execution {
+        let _ = self.prepared.send(Err(error.clone()));
+        let _ = self.respond.send(Err(error));
+        Execution::Completed
+    }
+}
+
+struct ConfiguredProcess {
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    secret: HealthSecret,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+}
+
+struct PreparedConfiguredSession {
+    input: super::EngineTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+    secret: HealthSecret,
+    runtime: ConfiguredRuntime,
+    session: String,
+}
+
+struct ConfiguredSession {
+    input: super::EngineTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+    secret: HealthSecret,
+    runtime: ConfiguredRuntime,
+    session: String,
+}
+
+impl ConfiguredSession {
+    async fn abort(self, shutdown: &Arc<CancelHandle>, cause: EngineOperationError) -> Execution {
+        let ConfiguredSession {
+            input,
+            deadline,
+            control: _,
+            authorize: _,
+            observations,
+            respond,
+            parts,
+            endpoint,
+            secret,
+            runtime,
+            session,
+        } = self;
+        abort_after_session(AbortAfterSession {
+            parts,
+            endpoint: &endpoint,
+            secret: &secret,
+            runtime: &runtime,
+            session: &session,
+            run_id: &input.run_id,
+            stream_after: input.stream_after,
+            observations,
+            respond,
+            shutdown,
+            cause,
+            attempt_deadline: deadline,
+        })
+        .await
+    }
+}
+
+async fn execute_configured_turn(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let process = match prepare_configured_process(request, runtime, shutdown).await {
+        Ok(process) => process,
+        Err(execution) => return execution,
+    };
+    Box::pin(execute_configured_session(process, shutdown)).await
+}
+
+async fn prepare_configured_process(
+    request: ConfiguredTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Result<ConfiguredProcess, Execution> {
+    let Ok(secret) = HealthSecret::generate() else {
+        return Err(request.fail(EngineOperationError::EntropyFailed));
+    };
+    let Ok(mut child) = spawn_configured_engine(
+        &request.input.launch,
+        &request.input.project_root,
+        secret.as_str(),
+    ) else {
+        return Err(request.fail(EngineOperationError::SpawnFailed));
+    };
+    let lifeline = LifelineWriter::take(&mut child);
+    let maybe_stdout = child.stdout.take();
+    let stderr_counter = StderrCounter::new(child.stderr.take(), runtime.bounds.stderr_cap_bytes);
+    let Some(mut stdout) = maybe_stdout else {
+        let parts = ChildParts {
+            child,
+            lifeline,
+            stdout: None,
+            stderr_counter,
+        };
+        let error = EngineOperationError::ReadinessFailed(ReadinessError::Io);
+        return Err(finish_configured_start(request, parts, error, runtime.limits.close).await);
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let endpoint = match drive_readiness(
+        &mut stdout,
+        &mut parts,
+        phase_deadline(runtime.limits.readiness, request.deadline),
+        shutdown,
+        &request.control,
+        runtime.bounds.max_readiness_line,
+    )
+    .await
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            drop(stdout);
+            let error = map_readiness_error(error);
+            return Err(finish_configured_start(request, parts, error, runtime.limits.close).await);
+        }
+    };
+    drop(stdout);
+    if let Err(error) = super::http::perform_health(
+        &endpoint,
+        &secret,
+        &runtime.bounds,
+        phase_deadline(runtime.limits.health, request.deadline),
+        &request.control,
+        shutdown,
+        Some(request.input.launch.version()),
+    )
+    .await
+    {
+        let error = map_health_error(error);
+        return Err(finish_configured_start(request, parts, error, runtime.limits.close).await);
+    }
+    Ok(ConfiguredProcess {
+        request,
+        runtime,
+        secret,
+        parts,
+        endpoint,
+    })
+}
+
+async fn finish_configured_start(
+    request: ConfiguredTurnRequest,
+    parts: ChildParts,
+    error: EngineOperationError,
+    close_budget: Duration,
+) -> Execution {
+    let ConfiguredTurnRequest {
+        prepared, respond, ..
+    } = request;
+    let _ = prepared.send(Err(error.clone()));
+    finish_turn_result(parts, Err(error), respond, close_budget).await
+}
+
+async fn execute_configured_session(
+    process: ConfiguredProcess,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let state = match create_configured_session(process, shutdown).await {
+        Ok(state) => state,
+        Err(execution) => return execution,
+    };
+    authorize_configured_session(state, shutdown).await
+}
+
+async fn create_configured_session(
+    process: ConfiguredProcess,
+    shutdown: &Arc<CancelHandle>,
+) -> Result<PreparedConfiguredSession, Execution> {
+    let ConfiguredProcess {
+        request,
+        runtime,
+        secret,
+        parts,
+        endpoint,
+    } = process;
+    let ConfiguredTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+    } = request;
+    let selection = input.settings.config().selection().as_opencode2();
+    let permission = selection.permission();
+    let create_input = CreateSessionInput {
+        directory: input.project_root.as_str(),
+        profile_id: selection.profile_id().as_str(),
+        model_id: selection.model_id().as_str(),
+        route_id: selection.route_id().as_str(),
+        variant_id: selection
+            .variant_id()
+            .map(artisan_domain::EngineVariantId::as_str),
+        permission_id: permission.permission_id().as_str(),
+        agent_id: permission.agent_id().as_str(),
+        approval: permission.approval().as_str(),
+        filesystem: permission.filesystem().as_str(),
+        network: permission.network().as_str(),
+        web_search: permission.web_search().as_str(),
+    };
+    let session_receipt = match perform_create_session(
+        &endpoint,
+        &secret,
+        &runtime.bounds,
+        phase_deadline(runtime.limits.prompt, deadline),
+        &control,
+        shutdown,
+        create_input,
+    )
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let error = map_prompt_error(error);
+            return Err(finish_configured_start(
+                ConfiguredTurnRequest {
+                    input,
+                    deadline,
+                    control,
+                    prepared,
+                    authorize,
+                    observations,
+                    respond,
+                },
+                parts,
+                error,
+                runtime.limits.close,
+            )
+            .await);
+        }
+    };
+    Ok(PreparedConfiguredSession {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session: session_receipt.session().to_owned(),
+    })
+}
+
+async fn authorize_configured_session(
+    state: PreparedConfiguredSession,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let PreparedConfiguredSession {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session,
+    } = state;
+    let session = ConfiguredSession {
+        input,
+        deadline,
+        control,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session,
+    };
+    if prepared
+        .send(Ok(PreparedSession::new(session.session.clone())))
+        .is_err()
+    {
+        return session
+            .abort(shutdown, EngineOperationError::Cancelled)
+            .await;
+    }
+    execute_authorized_configured_turn(session, shutdown).await
+}
+
+async fn execute_authorized_configured_turn(
+    mut session: ConfiguredSession,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    if let Err(error) = wait_for_authorization(
+        &mut session.parts,
+        &mut session.authorize,
+        session.deadline,
+        shutdown,
+        &session.control,
+    )
+    .await
+    {
+        return session.abort(shutdown, error).await;
+    }
+    let files: [PromptFile; 0] = [];
+    if let Err(error) = perform_prompt(
+        &session.endpoint,
+        &session.secret,
+        &session.runtime.bounds,
+        phase_deadline(session.runtime.limits.prompt, session.deadline),
+        &session.control,
+        shutdown,
+        PromptInput::new(
+            &session.session,
+            &session.input.prompt_delivery,
+            &files,
+            &session.input.prompt_id,
+            false,
+            session.input.prompt_text.as_str(),
+        ),
+    )
+    .await
+    {
+        return session.abort(shutdown, map_prompt_error(error)).await;
+    }
+    let stream_result = follow_stream_for_run(
+        StreamInput::new((
+            &session.endpoint,
+            &session.secret,
+            &session.runtime.bounds,
+            phase_deadline(session.runtime.limits.sse, session.deadline),
+            &session.control,
+            shutdown,
+            &session.session,
+            session.input.stream_after,
+            session.observations.clone(),
+        )),
+        &session.input.run_id,
+    )
+    .await;
+    match stream_result {
+        Ok(receipt) => {
+            let terminal = receipt.state();
+            let ConfiguredSession {
+                parts,
+                runtime,
+                observations,
+                respond,
+                ..
+            } = session;
+            drop(observations);
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        Err(error) => session.abort(shutdown, map_stream_error(error)).await,
+    }
+}
+
+struct ConfiguredRuntime {
+    limits: EngineLimits,
+    bounds: EngineBounds,
+}
+
+fn configured_runtime(
+    settings: &artisan_database::ThreadEngineSettings,
+    control_capacity: usize,
+) -> Result<ConfiguredRuntime, EngineOperationError> {
+    let runtime = settings.config().runtime();
+    let limits = EngineLimits {
+        readiness: Duration::from_millis(runtime.readiness_budget().get()),
+        health: Duration::from_millis(runtime.health_budget().get()),
+        prompt: Duration::from_millis(runtime.prompt_budget().get()),
+        sse: Duration::from_millis(runtime.stream_budget().get()),
+        close: Duration::from_millis(runtime.close_budget().get()),
+    };
+    let bounds = EngineBounds {
+        max_json_body: checked_usize(runtime.max_json_body_bytes().get())?,
+        max_sse_line: checked_usize(runtime.max_sse_line_bytes().get())?,
+        max_sse_event: checked_usize(runtime.max_sse_event_bytes().get())?,
+        max_readiness_line: checked_usize(runtime.max_readiness_line_bytes().get())?,
+        max_headers: checked_usize(runtime.max_header_count().get())?,
+        max_buf_bytes: checked_usize(runtime.max_http_buffer_bytes().get())?,
+        stderr_cap_bytes: checked_usize(runtime.max_stderr_bytes().get())?,
+        sink_capacity: checked_usize(runtime.observation_capacity().get())?,
+        control_capacity,
+    };
+    if bounds.max_buf_bytes < 8192
+        || bounds.sink_capacity == 0
+        || bounds.control_capacity == 0
+        || bounds.max_json_body == 0
+        || bounds.max_sse_line == 0
+        || bounds.max_sse_event == 0
+        || bounds.max_readiness_line == 0
+        || bounds.max_headers == 0
+        || bounds.stderr_cap_bytes == 0
+    {
+        return Err(EngineOperationError::Configuration);
+    }
+    if tokio::time::Instant::now()
+        .checked_add(limits.readiness)
+        .is_none()
+        || tokio::time::Instant::now()
+            .checked_add(limits.health)
+            .is_none()
+        || tokio::time::Instant::now()
+            .checked_add(limits.prompt)
+            .is_none()
+        || tokio::time::Instant::now()
+            .checked_add(limits.sse)
+            .is_none()
+        || tokio::time::Instant::now()
+            .checked_add(limits.close)
+            .is_none()
+    {
+        return Err(EngineOperationError::Configuration);
+    }
+    Ok(ConfiguredRuntime { limits, bounds })
+}
+
+fn checked_usize(value: u64) -> Result<usize, EngineOperationError> {
+    usize::try_from(value).map_err(|_| EngineOperationError::Configuration)
+}
+
+fn phase_deadline(budget: Duration, attempt_deadline: Instant) -> Instant {
+    Instant::now()
+        .checked_add(budget)
+        .map_or(attempt_deadline, |candidate| {
+            candidate.min(attempt_deadline)
+        })
+}
+
+async fn wait_for_authorization(
+    parts: &mut ChildParts,
+    authorize: &mut oneshot::Receiver<()>,
+    deadline: Instant,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+) -> Result<(), EngineOperationError> {
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.wait() => return Err(EngineOperationError::Shutdown),
+            () = control.wait() => return Err(EngineOperationError::Cancelled),
+            () = tokio::time::sleep_until(deadline) => return Err(EngineOperationError::Deadline),
+            result = &mut *authorize => {
+                return result.map_err(|_| EngineOperationError::ProviderRequestFailed);
+            }
+            event = parts.stderr_counter.pump(), if parts.stderr_counter.state() == super::process::StderrState::Open => {
+                let _ = event;
+            }
+        }
+    }
+}
+
+struct AbortAfterSession<'a> {
+    parts: ChildParts,
+    endpoint: &'a ValidatedEndpoint,
+    secret: &'a HealthSecret,
+    runtime: &'a ConfiguredRuntime,
+    session: &'a str,
+    run_id: &'a RunId,
+    stream_after: u64,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+    shutdown: &'a Arc<CancelHandle>,
+    cause: EngineOperationError,
+    attempt_deadline: Instant,
+}
+
+async fn abort_after_session(input: AbortAfterSession<'_>) -> Execution {
+    let AbortAfterSession {
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session,
+        run_id,
+        stream_after,
+        observations,
+        respond,
+        shutdown,
+        cause,
+        attempt_deadline,
+    } = input;
+    let interrupt_cancel = CancelHandle::new();
+    let interrupt_deadline = phase_deadline(runtime.limits.close, attempt_deadline);
+    let _ = perform_interrupt(
+        endpoint,
+        secret,
+        &runtime.bounds,
+        interrupt_deadline,
+        &interrupt_cancel,
+        shutdown,
+        session,
+    )
+    .await;
+
+    let stream_cancel = CancelHandle::new();
+    let stream_deadline = phase_deadline(runtime.limits.sse, attempt_deadline);
+    let stream_result = follow_stream_for_run(
+        StreamInput::new((
+            endpoint,
+            secret,
+            &runtime.bounds,
+            stream_deadline,
+            &stream_cancel,
+            shutdown,
+            session,
+            stream_after,
+            observations,
+        )),
+        run_id,
+    )
+    .await;
+    match stream_result {
+        Ok(receipt) => {
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult {
+                    terminal: receipt.state(),
+                }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        Err(_) => finish_turn_result(parts, Err(cause), respond, runtime.limits.close).await,
+    }
+}
+
+async fn finish_turn_result(
+    parts: ChildParts,
+    result: TurnResult,
+    respond: oneshot::Sender<TurnResult>,
+    close_budget: Duration,
+) -> Execution {
+    let ChildParts {
+        mut child,
+        mut lifeline,
+        stdout: _,
+        stderr_counter,
+    } = parts;
+    lifeline.close();
+    let first_wait = match tokio::time::Instant::now().checked_add(close_budget) {
+        Some(deadline) => tokio::time::timeout_at(deadline, child.wait())
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "turn close budget elapsed",
+                ))
+            }),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "turn close budget unrepresentable",
+        )),
+    };
+    if let Ok(status) = first_wait {
+        #[cfg(test)]
+        super::process::note_observed_reap_for_tests(status);
+        #[cfg(not(test))]
+        let _ = status;
+        drop(stderr_counter);
+        drop(lifeline);
+        let _ = respond.send(result);
+        return Execution::Completed;
+    }
+
+    let parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    match cleanup_after_abort(parts, Duration::ZERO).await {
+        CleanupObservation::ReapedWithoutKill(status)
+        | CleanupObservation::ReapedAfterKill(status) => {
+            #[cfg(test)]
+            super::process::note_observed_reap_for_tests(status);
+            #[cfg(not(test))]
+            let _ = status;
+            let _ = respond.send(result);
+            Execution::Completed
+        }
+        CleanupObservation::Retained(engine) => {
+            let primary = result
+                .err()
+                .map_or_else(|| Box::new(EngineOperationError::ReapUnresolved), Box::new);
+            let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring { primary }));
+            Execution::Quarantined(engine)
+        }
+    }
+}
+
+fn map_prompt_error(error: PromptError) -> EngineOperationError {
+    match error {
+        PromptError::Shutdown => EngineOperationError::Shutdown,
+        PromptError::Cancelled => EngineOperationError::Cancelled,
+        PromptError::Timeout => EngineOperationError::Deadline,
+        _ => EngineOperationError::ProviderRequestFailed,
+    }
+}
+
+fn map_stream_error(error: StreamError) -> EngineOperationError {
+    match error {
+        StreamError::Shutdown => EngineOperationError::Shutdown,
+        StreamError::Cancelled => EngineOperationError::Cancelled,
+        StreamError::Timeout => EngineOperationError::Deadline,
+        _ => EngineOperationError::StreamFailed,
+    }
 }
 
 fn map_readiness_error(error: ReadinessError) -> EngineOperationError {

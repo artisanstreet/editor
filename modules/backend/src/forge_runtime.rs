@@ -7,7 +7,10 @@
 //! endpoint exist.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::module_name_repetitions)]
+
+#[cfg(test)]
+#[path = "../../../tests/backend/forge_configured_run.rs"]
+mod forge_configured_run;
 
 use std::{
     ffi::{OsStr, OsString},
@@ -15,7 +18,7 @@ use std::{
     fs::{self, File, Metadata, OpenOptions},
     io::{self, Read, Write},
     net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -25,6 +28,7 @@ use std::{
 };
 
 use artisan_database::SqliteConfig;
+use artisan_native_engine::NativeOpenCode2Authority;
 use artisan_protocol::{LocalCapability, LocalCapabilityError};
 use artisan_transport::{CancelHandle, PinnedIdentity, TransportError, server_config};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -35,11 +39,16 @@ use crate::{
     ForgeApp, ForgeConfig, ForgeListener, ForgeProcessCustody, ForgeProcessCustodyError,
     ForgeShutdownError, ForgeStartupError, ListenerError, ListenerLimits, RequestHandler,
     SystemCommandOrigin,
+    conversation_commit_notifier::ConversationCommitNotifier,
     directory_controller::{
         ControllerStartError, DirectoryController, DirectoryControllerConfig, ShutdownReport,
     },
     file_identity_policy::{FileIdentity, read_file_identity, same_file_identity},
     listener::ServeUntilCancelError,
+    native_run_dispatch::{
+        NativeRunDispatcher, NativeRunDispatcherConfig, NativeRunDispatcherConfigError,
+        NativeRunDispatcherConfigInput, NativeRunDispatcherShutdown,
+    },
 };
 
 /// Stable process exit code for invalid configuration or credential material.
@@ -71,11 +80,20 @@ const REQUEST_TIMEOUT_OPTION: &str = "--request-timeout-ms";
 const DRAIN_TIMEOUT_OPTION: &str = "--drain-timeout-ms";
 const ADMISSION_CAPACITY_OPTION: &str = "--admission-capacity";
 const REQUESTS_PER_CONNECTION_OPTION: &str = "--requests-per-connection";
+const NATIVE_CLAIM_LEASE_OPTION: &str = "--native-run-claim-lease-ms";
+const NATIVE_POLL_INTERVAL_OPTION: &str = "--native-run-poll-interval-ms";
+const NATIVE_RETRY_BACKOFF_OPTION: &str = "--native-run-retry-backoff-ms";
+const NATIVE_SHUTDOWN_BUDGET_OPTION: &str = "--native-run-shutdown-budget-ms";
+const NATIVE_QUEUE_CAPACITY_OPTION: &str = "--native-run-queue-capacity";
+const NATIVE_MAX_COMMAND_RETRIES_OPTION: &str = "--native-run-max-command-retries";
+const NATIVE_PROMPT_DELIVERY_OPTION: &str = "--native-run-prompt-delivery";
+const NATIVE_STREAM_AFTER_OPTION: &str = "--native-run-stream-after";
 
 /// Typed failures raised while parsing the exact Forge command-line contract.
 ///
 /// No rejected argument value is retained. In particular, malformed input
 /// cannot be reflected into diagnostics merely by asking for `Debug`.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ForgeConfigError {
     /// An option was supplied without its required value.
@@ -122,6 +140,50 @@ pub enum ForgeConfigError {
     /// A required option was not supplied.
     #[error("Forge option {option} is required")]
     MissingOption { option: &'static str },
+
+    /// A text option was not valid UTF-8 at the operating-system boundary.
+    #[error("Forge option {option} contains invalid text")]
+    InvalidText { option: &'static str },
+
+    /// The complete native-run scheduler could not be represented safely.
+    #[error("Forge native-run configuration is invalid")]
+    NativeRunConfiguration {
+        #[source]
+        source: NativeRunDispatcherConfigError,
+    },
+}
+
+/// Complete inputs for one Forge launch.
+///
+/// The public input has no defaults: callers must provide the native-run
+/// scheduler together with every storage, listener, credential, and custody
+/// input. Path and scheduler validation is performed atomically by
+/// [`ForgeLaunchConfig::new`].
+#[allow(clippy::module_name_repetitions)]
+#[derive(Debug)]
+pub struct ForgeLaunchConfigInput {
+    /// SQLite database path.
+    pub database: PathBuf,
+    /// Process-custody path.
+    pub custody: PathBuf,
+    /// Ordered certificate DER paths, leaf first.
+    pub certificate_der: Vec<PathBuf>,
+    /// PKCS#8 private-key DER path.
+    pub private_key_der: PathBuf,
+    /// Bootstrap capability path.
+    pub bootstrap_capability: PathBuf,
+    /// Readiness receipt path.
+    pub ready_file: PathBuf,
+    /// Listener timeouts.
+    pub limits: ListenerLimits,
+    /// Listener admission capacity.
+    pub admission_capacity: NonZeroU32,
+    /// Per-connection request capacity.
+    pub requests_per_connection: NonZeroU32,
+    /// Complete configured native-run scheduler.
+    pub native_run: NativeRunDispatcherConfig,
+    /// Caller-owned process cancellation handle.
+    pub cancel: Arc<CancelHandle>,
 }
 
 /// Explicit process configuration. No implicit storage location, filename, or
@@ -129,6 +191,7 @@ pub enum ForgeConfigError {
 ///
 /// The type deliberately has no `Default`. A caller must provide every
 /// process path, limit, capacity, and cancellation owner explicitly.
+#[allow(clippy::module_name_repetitions)]
 pub struct ForgeLaunchConfig {
     database: PathBuf,
     custody: PathBuf,
@@ -140,6 +203,7 @@ pub struct ForgeLaunchConfig {
     admission_capacity: NonZeroU32,
     requests_per_connection: NonZeroU32,
     cancel: Arc<CancelHandle>,
+    native_run: NativeRunDispatcherConfig,
 }
 
 impl fmt::Debug for ForgeLaunchConfig {
@@ -156,6 +220,7 @@ impl fmt::Debug for ForgeLaunchConfig {
             .field("admission_capacity", &self.admission_capacity)
             .field("requests_per_connection", &self.requests_per_connection)
             .field("cancel", &"caller-owned")
+            .field("native_run", &"configured")
             .finish()
     }
 }
@@ -171,21 +236,22 @@ impl ForgeLaunchConfig {
     ///
     /// Returns [`ForgeConfigError`] when a path is empty, relative, or lacks
     /// a file component, or when no certificate path is supplied.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        database: impl Into<PathBuf>,
-        custody: impl Into<PathBuf>,
-        certificate_der: Vec<PathBuf>,
-        private_key_der: impl Into<PathBuf>,
-        bootstrap_capability: impl Into<PathBuf>,
-        ready_file: impl Into<PathBuf>,
-        limits: ListenerLimits,
-        admission_capacity: NonZeroU32,
-        requests_per_connection: NonZeroU32,
-        cancel: Arc<CancelHandle>,
-    ) -> Result<Self, ForgeConfigError> {
-        let database = explicit_path(DATABASE_OPTION, database.into())?;
-        let custody = explicit_path(CUSTODY_OPTION, custody.into())?;
+    pub fn new(input: ForgeLaunchConfigInput) -> Result<Self, ForgeConfigError> {
+        let ForgeLaunchConfigInput {
+            database,
+            custody,
+            certificate_der,
+            private_key_der,
+            bootstrap_capability,
+            ready_file,
+            limits,
+            admission_capacity,
+            requests_per_connection,
+            native_run,
+            cancel,
+        } = input;
+        let database = explicit_path(DATABASE_OPTION, database)?;
+        let custody = explicit_path(CUSTODY_OPTION, custody)?;
         if certificate_der.is_empty() {
             return Err(ForgeConfigError::MissingOption {
                 option: CERTIFICATE_OPTION,
@@ -195,9 +261,9 @@ impl ForgeLaunchConfig {
             .into_iter()
             .map(|path| explicit_path(CERTIFICATE_OPTION, path))
             .collect::<Result<Vec<_>, _>>()?;
-        let private_key_der = explicit_path(PRIVATE_KEY_OPTION, private_key_der.into())?;
-        let bootstrap_capability = explicit_path(BOOTSTRAP_OPTION, bootstrap_capability.into())?;
-        let ready_file = explicit_path(READY_FILE_OPTION, ready_file.into())?;
+        let private_key_der = explicit_path(PRIVATE_KEY_OPTION, private_key_der)?;
+        let bootstrap_capability = explicit_path(BOOTSTRAP_OPTION, bootstrap_capability)?;
+        let ready_file = explicit_path(READY_FILE_OPTION, ready_file)?;
         Ok(Self {
             database,
             custody,
@@ -209,6 +275,7 @@ impl ForgeLaunchConfig {
             admission_capacity,
             requests_per_connection,
             cancel,
+            native_run,
         })
     }
 
@@ -288,6 +355,68 @@ impl ForgeLaunchConfig {
     }
 }
 
+struct ParsedNativeRunArguments {
+    claim_lease_ms: Option<u64>,
+    poll_interval_ms: Option<u64>,
+    retry_backoff_ms: Option<u64>,
+    shutdown_budget_ms: Option<u64>,
+    queue_capacity: Option<NonZeroUsize>,
+    max_command_retries: Option<NonZeroUsize>,
+    prompt_delivery: Option<String>,
+    stream_after: Option<u64>,
+}
+
+impl ParsedNativeRunArguments {
+    fn empty() -> Self {
+        Self {
+            claim_lease_ms: None,
+            poll_interval_ms: None,
+            retry_backoff_ms: None,
+            shutdown_budget_ms: None,
+            queue_capacity: None,
+            max_command_retries: None,
+            prompt_delivery: None,
+            stream_after: None,
+        }
+    }
+}
+
+struct ParsedForgeArguments {
+    database: Option<PathBuf>,
+    custody: Option<PathBuf>,
+    certificate_der: Vec<PathBuf>,
+    private_key_der: Option<PathBuf>,
+    bootstrap_capability: Option<PathBuf>,
+    ready_file: Option<PathBuf>,
+    admission_timeout_ms: Option<u64>,
+    handshake_timeout_ms: Option<u64>,
+    request_timeout_ms: Option<u64>,
+    drain_timeout_ms: Option<u64>,
+    admission_capacity: Option<NonZeroU32>,
+    requests_per_connection: Option<NonZeroU32>,
+    native_run: ParsedNativeRunArguments,
+}
+
+impl ParsedForgeArguments {
+    fn empty() -> Self {
+        Self {
+            database: None,
+            custody: None,
+            certificate_der: Vec::new(),
+            private_key_der: None,
+            bootstrap_capability: None,
+            ready_file: None,
+            admission_timeout_ms: None,
+            handshake_timeout_ms: None,
+            request_timeout_ms: None,
+            drain_timeout_ms: None,
+            admission_capacity: None,
+            requests_per_connection: None,
+            native_run: ParsedNativeRunArguments::empty(),
+        }
+    }
+}
+
 /// Parses the exact Forge command-line contract after the executable name.
 ///
 /// # Errors
@@ -302,19 +431,17 @@ where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
 {
+    let parsed = parse_argument_values(args)?;
+    build_launch_config(parsed, cancel)
+}
+
+fn parse_argument_values<I, S>(args: I) -> Result<ParsedForgeArguments, ForgeConfigError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
     let mut arguments = args.into_iter().map(Into::into);
-    let mut database = None;
-    let mut custody = None;
-    let mut certificate_der = Vec::new();
-    let mut private_key_der = None;
-    let mut bootstrap_capability = None;
-    let mut ready_file = None;
-    let mut admission_timeout_ms = None;
-    let mut handshake_timeout_ms = None;
-    let mut request_timeout_ms = None;
-    let mut drain_timeout_ms = None;
-    let mut admission_capacity = None;
-    let mut requests_per_connection = None;
+    let mut parsed = ParsedForgeArguments::empty();
 
     while let Some(raw_option) = arguments.next() {
         let Some(option) = recognized_option(&raw_option) else {
@@ -323,62 +450,182 @@ where
         let raw_value = arguments
             .next()
             .ok_or(ForgeConfigError::MissingValue { option })?;
-        match option {
-            DATABASE_OPTION => set_path(&mut database, option, raw_value)?,
-            CUSTODY_OPTION => set_path(&mut custody, option, raw_value)?,
-            CERTIFICATE_OPTION => certificate_der.push(explicit_path(option, raw_value.into())?),
-            PRIVATE_KEY_OPTION => set_path(&mut private_key_der, option, raw_value)?,
-            BOOTSTRAP_OPTION => set_path(&mut bootstrap_capability, option, raw_value)?,
-            READY_FILE_OPTION => set_path(&mut ready_file, option, raw_value)?,
-            ADMISSION_TIMEOUT_OPTION => {
-                set_duration(&mut admission_timeout_ms, option, raw_value.as_os_str())?;
-            }
-            HANDSHAKE_TIMEOUT_OPTION => {
-                set_duration(&mut handshake_timeout_ms, option, raw_value.as_os_str())?;
-            }
-            REQUEST_TIMEOUT_OPTION => {
-                set_duration(&mut request_timeout_ms, option, raw_value.as_os_str())?;
-            }
-            DRAIN_TIMEOUT_OPTION => {
-                set_duration(&mut drain_timeout_ms, option, raw_value.as_os_str())?;
-            }
-            ADMISSION_CAPACITY_OPTION => {
-                set_capacity(&mut admission_capacity, option, raw_value.as_os_str())?;
-            }
-            REQUESTS_PER_CONNECTION_OPTION => {
-                set_capacity(&mut requests_per_connection, option, raw_value.as_os_str())?;
-            }
-            _ => return Err(ForgeConfigError::UnknownOption),
-        }
+        parse_option(&mut parsed, option, raw_value)?;
     }
 
-    let admission_timeout_ms = required(admission_timeout_ms, ADMISSION_TIMEOUT_OPTION)?;
-    let handshake_timeout_ms = required(handshake_timeout_ms, HANDSHAKE_TIMEOUT_OPTION)?;
-    let request_timeout_ms = required(request_timeout_ms, REQUEST_TIMEOUT_OPTION)?;
-    let drain_timeout_ms = required(drain_timeout_ms, DRAIN_TIMEOUT_OPTION)?;
-    ForgeLaunchConfig::new(
-        required(database, DATABASE_OPTION)?,
-        required(custody, CUSTODY_OPTION)?,
-        if certificate_der.is_empty() {
+    Ok(parsed)
+}
+
+fn parse_option(
+    parsed: &mut ParsedForgeArguments,
+    option: &'static str,
+    raw_value: OsString,
+) -> Result<(), ForgeConfigError> {
+    if option.starts_with("--native-run-") {
+        return parse_native_option(&mut parsed.native_run, option, raw_value);
+    }
+    match option {
+        DATABASE_OPTION => set_path(&mut parsed.database, option, raw_value),
+        CUSTODY_OPTION => set_path(&mut parsed.custody, option, raw_value),
+        CERTIFICATE_OPTION => {
+            parsed
+                .certificate_der
+                .push(explicit_path(option, raw_value.into())?);
+            Ok(())
+        }
+        PRIVATE_KEY_OPTION => set_path(&mut parsed.private_key_der, option, raw_value),
+        BOOTSTRAP_OPTION => set_path(&mut parsed.bootstrap_capability, option, raw_value),
+        READY_FILE_OPTION => set_path(&mut parsed.ready_file, option, raw_value),
+        ADMISSION_TIMEOUT_OPTION => set_duration(
+            &mut parsed.admission_timeout_ms,
+            option,
+            raw_value.as_os_str(),
+        ),
+        HANDSHAKE_TIMEOUT_OPTION => set_duration(
+            &mut parsed.handshake_timeout_ms,
+            option,
+            raw_value.as_os_str(),
+        ),
+        REQUEST_TIMEOUT_OPTION => set_duration(
+            &mut parsed.request_timeout_ms,
+            option,
+            raw_value.as_os_str(),
+        ),
+        DRAIN_TIMEOUT_OPTION => {
+            set_duration(&mut parsed.drain_timeout_ms, option, raw_value.as_os_str())
+        }
+        ADMISSION_CAPACITY_OPTION => set_capacity(
+            &mut parsed.admission_capacity,
+            option,
+            raw_value.as_os_str(),
+        ),
+        REQUESTS_PER_CONNECTION_OPTION => set_capacity(
+            &mut parsed.requests_per_connection,
+            option,
+            raw_value.as_os_str(),
+        ),
+        _ => Err(ForgeConfigError::UnknownOption),
+    }
+}
+
+fn parse_native_option(
+    parsed: &mut ParsedNativeRunArguments,
+    option: &'static str,
+    raw_value: OsString,
+) -> Result<(), ForgeConfigError> {
+    match option {
+        NATIVE_CLAIM_LEASE_OPTION => {
+            set_duration(&mut parsed.claim_lease_ms, option, raw_value.as_os_str())
+        }
+        NATIVE_POLL_INTERVAL_OPTION => {
+            set_duration(&mut parsed.poll_interval_ms, option, raw_value.as_os_str())
+        }
+        NATIVE_RETRY_BACKOFF_OPTION => {
+            set_duration(&mut parsed.retry_backoff_ms, option, raw_value.as_os_str())
+        }
+        NATIVE_SHUTDOWN_BUDGET_OPTION => set_duration(
+            &mut parsed.shutdown_budget_ms,
+            option,
+            raw_value.as_os_str(),
+        ),
+        NATIVE_QUEUE_CAPACITY_OPTION => {
+            set_usize_capacity(&mut parsed.queue_capacity, option, raw_value.as_os_str())
+        }
+        NATIVE_MAX_COMMAND_RETRIES_OPTION => set_usize_capacity(
+            &mut parsed.max_command_retries,
+            option,
+            raw_value.as_os_str(),
+        ),
+        NATIVE_PROMPT_DELIVERY_OPTION => set_text(&mut parsed.prompt_delivery, option, raw_value),
+        NATIVE_STREAM_AFTER_OPTION => {
+            set_number(&mut parsed.stream_after, option, raw_value.as_os_str())
+        }
+        _ => Err(ForgeConfigError::UnknownOption),
+    }
+}
+
+fn build_launch_config(
+    parsed: ParsedForgeArguments,
+    cancel: Arc<CancelHandle>,
+) -> Result<ForgeLaunchConfig, ForgeConfigError> {
+    let ParsedForgeArguments {
+        database,
+        custody,
+        certificate_der,
+        private_key_der,
+        bootstrap_capability,
+        ready_file,
+        admission_timeout_ms,
+        handshake_timeout_ms,
+        request_timeout_ms,
+        drain_timeout_ms,
+        admission_capacity,
+        requests_per_connection,
+        native_run,
+    } = parsed;
+    let native_run = NativeRunDispatcherConfig::new(
+        NativeOpenCode2Authority::new(),
+        ConversationCommitNotifier::new(),
+        NativeRunDispatcherConfigInput {
+            claim_lease: Duration::from_millis(required(
+                native_run.claim_lease_ms,
+                NATIVE_CLAIM_LEASE_OPTION,
+            )?),
+            poll_interval: Duration::from_millis(required(
+                native_run.poll_interval_ms,
+                NATIVE_POLL_INTERVAL_OPTION,
+            )?),
+            retry_backoff: Duration::from_millis(required(
+                native_run.retry_backoff_ms,
+                NATIVE_RETRY_BACKOFF_OPTION,
+            )?),
+            shutdown_budget: Duration::from_millis(required(
+                native_run.shutdown_budget_ms,
+                NATIVE_SHUTDOWN_BUDGET_OPTION,
+            )?),
+            queue_capacity: required(native_run.queue_capacity, NATIVE_QUEUE_CAPACITY_OPTION)?,
+            max_command_retries: required(
+                native_run.max_command_retries,
+                NATIVE_MAX_COMMAND_RETRIES_OPTION,
+            )?,
+            prompt_delivery: required(native_run.prompt_delivery, NATIVE_PROMPT_DELIVERY_OPTION)?,
+            stream_after: required(native_run.stream_after, NATIVE_STREAM_AFTER_OPTION)?,
+        },
+    )
+    .map_err(|source| ForgeConfigError::NativeRunConfiguration { source })?;
+    ForgeLaunchConfig::new(ForgeLaunchConfigInput {
+        database: required(database, DATABASE_OPTION)?,
+        custody: required(custody, CUSTODY_OPTION)?,
+        certificate_der: if certificate_der.is_empty() {
             return Err(ForgeConfigError::MissingOption {
                 option: CERTIFICATE_OPTION,
             });
         } else {
             certificate_der
         },
-        required(private_key_der, PRIVATE_KEY_OPTION)?,
-        required(bootstrap_capability, BOOTSTRAP_OPTION)?,
-        required(ready_file, READY_FILE_OPTION)?,
-        ListenerLimits {
-            admission: Duration::from_millis(admission_timeout_ms),
-            handshake: Duration::from_millis(handshake_timeout_ms),
-            next_request: Duration::from_millis(request_timeout_ms),
-            drain: Duration::from_millis(drain_timeout_ms),
+        private_key_der: required(private_key_der, PRIVATE_KEY_OPTION)?,
+        bootstrap_capability: required(bootstrap_capability, BOOTSTRAP_OPTION)?,
+        ready_file: required(ready_file, READY_FILE_OPTION)?,
+        limits: ListenerLimits {
+            admission: Duration::from_millis(required(
+                admission_timeout_ms,
+                ADMISSION_TIMEOUT_OPTION,
+            )?),
+            handshake: Duration::from_millis(required(
+                handshake_timeout_ms,
+                HANDSHAKE_TIMEOUT_OPTION,
+            )?),
+            next_request: Duration::from_millis(required(
+                request_timeout_ms,
+                REQUEST_TIMEOUT_OPTION,
+            )?),
+            drain: Duration::from_millis(required(drain_timeout_ms, DRAIN_TIMEOUT_OPTION)?),
         },
-        required(admission_capacity, ADMISSION_CAPACITY_OPTION)?,
-        required(requests_per_connection, REQUESTS_PER_CONNECTION_OPTION)?,
+        admission_capacity: required(admission_capacity, ADMISSION_CAPACITY_OPTION)?,
+        requests_per_connection: required(requests_per_connection, REQUESTS_PER_CONNECTION_OPTION)?,
+        native_run,
         cancel,
-    )
+    })
 }
 
 /// Typed failures raised while reading explicit credential material.
@@ -462,6 +709,7 @@ pub enum CredentialMaterialError {
 /// This alias deliberately keeps [`ServeUntilCancelError`] as the stored
 /// value. Its private representation retains the service cause and any
 /// secondary drain error without introducing a second classification surface.
+#[allow(clippy::module_name_repetitions)]
 pub type ForgeServiceError = ServeUntilCancelError;
 
 /// Aggregated failures observed while stopping a partially or fully started
@@ -469,6 +717,7 @@ pub type ForgeServiceError = ServeUntilCancelError;
 ///
 /// Keeping every typed failure in this private-field value means cleanup
 /// errors are not silently replaced by the first startup or service error.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug)]
 pub struct ForgeCleanupError {
     failures: Vec<ForgeRuntimeError>,
@@ -506,6 +755,7 @@ impl std::error::Error for ForgeCleanupError {
 /// The private fields keep the primary/cleanup relationship correlated. The
 /// primary remains the process outcome, while every cleanup failure remains
 /// available through typed accessors for diagnostics and tests.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug)]
 pub struct ForgePrimaryCleanupError {
     primary: Box<ForgeRuntimeError>,
@@ -558,6 +808,7 @@ impl std::error::Error for ForgePrimaryCleanupError {
 }
 
 /// Complete typed Forge process outcome.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Error)]
 pub enum ForgeRuntimeError {
     /// Explicit configuration was absent or malformed.
@@ -636,6 +887,12 @@ pub enum ForgeRuntimeError {
     #[error("Forge directory controller shutdown failed")]
     DirectoryControllerShutdown(ShutdownReport),
 
+    /// The configured native-run dispatcher did not join cleanly during
+    /// cleanup. Its owner is awaited before this error is reported so child
+    /// custody is never detached from Forge shutdown.
+    #[error("Forge native-run dispatcher shutdown failed")]
+    NativeRunDispatcherShutdown,
+
     /// More than one failure was observed while stopping Forge.
     #[error("Forge shutdown encountered multiple failures")]
     Shutdown(#[source] ForgeCleanupError),
@@ -677,6 +934,7 @@ impl ForgeRuntimeError {
             | Self::ApplicationShutdown(_)
             | Self::ReadinessCleanup(_)
             | Self::DirectoryControllerShutdown(_)
+            | Self::NativeRunDispatcherShutdown
             | Self::Shutdown(_) => EXIT_CODE_SHUTDOWN,
             Self::PrimaryWithCleanup(composite) => composite.primary().exit_code(),
         }
@@ -826,17 +1084,25 @@ pub enum ReadinessError {
 ///
 /// Returns a typed failure mapped to the stable process exit codes exposed by
 /// [`ForgeRuntimeError::exit_code`].
-#[allow(clippy::too_many_lines)]
 pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
     let material = load_material(&config).map_err(ForgeRuntimeError::Credentials)?;
+    let ForgeLaunchConfig {
+        database,
+        custody: custody_path,
+        certificate_der: _,
+        private_key_der: _,
+        bootstrap_capability: _,
+        ready_file,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+        cancel,
+        native_run,
+    } = config;
     let custody =
-        ForgeProcessCustody::acquire(config.custody_path()).map_err(ForgeRuntimeError::Custody)?;
+        ForgeProcessCustody::acquire(&custody_path).map_err(ForgeRuntimeError::Custody)?;
 
-    let app = match ForgeApp::start(ForgeConfig::new(SqliteConfig::file(
-        config.database_path().to_path_buf(),
-    )))
-    .await
-    {
+    let app = match ForgeApp::start(ForgeConfig::new(SqliteConfig::file(database.clone()))).await {
         Ok(app) => app,
         Err(error) => {
             drop(custody);
@@ -844,12 +1110,55 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         }
     };
 
+    run_with_context(ForgeRunContext {
+        app,
+        custody,
+        material,
+        database,
+        ready_file,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+        cancel,
+        native_run,
+    })
+    .await
+}
+
+struct ForgeRunContext {
+    app: ForgeApp,
+    custody: ForgeProcessCustody,
+    material: LoadedMaterial,
+    database: PathBuf,
+    ready_file: PathBuf,
+    limits: ListenerLimits,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+    cancel: Arc<CancelHandle>,
+    native_run: NativeRunDispatcherConfig,
+}
+
+async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeError> {
+    let ForgeRunContext {
+        app,
+        custody,
+        material,
+        database,
+        ready_file,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+        cancel,
+        native_run,
+    } = context;
+
     let Ok(forge_executable) = std::env::current_exe() else {
         let handler = RequestHandler::with_subscriptions(app.repository().clone());
         return finish(
             app,
             handler,
             custody,
+            None,
             None,
             None,
             Some(ForgeRuntimeError::DirectoryControllerExecutable),
@@ -869,6 +1178,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
                 custody,
                 None,
                 None,
+                None,
                 Some(ForgeRuntimeError::DirectoryControllerStartup(error)),
             )
             .await;
@@ -877,94 +1187,141 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
     let handler = RequestHandler::with_directory_picker(
         app.repository().clone(),
         directory_controller,
-        config.listener_limits().next_request,
+        limits.next_request,
     )
     .with_registered_engine_profiles_reader(
-        crate::request_handler::NativeRegisteredEngineProfilesReader::new(
-            config.database_path().to_path_buf(),
-        ),
+        crate::request_handler::NativeRegisteredEngineProfilesReader::new(database.clone()),
     );
+    run_with_handler(
+        ForgeRunContext {
+            app,
+            custody,
+            material,
+            database,
+            ready_file,
+            limits,
+            admission_capacity,
+            requests_per_connection,
+            cancel,
+            native_run,
+        },
+        handler,
+    )
+    .await
+}
+
+struct ForgeListenerStartup {
+    listener: ForgeListener,
+    address: SocketAddr,
+    leaf: CertificateDer<'static>,
+}
+
+struct ForgeListenerStartupError {
+    listener: Option<ForgeListener>,
+    error: Box<ForgeRuntimeError>,
+}
+
+fn prepare_forge_listener(
+    material: LoadedMaterial,
+    limits: ListenerLimits,
+    admission_capacity: NonZeroU32,
+    requests_per_connection: NonZeroU32,
+) -> Result<ForgeListenerStartup, Box<ForgeListenerStartupError>> {
     let LoadedMaterial {
         certificate_chain,
         private_key,
         bootstrap,
         leaf,
     } = material;
-
     let server = match server_config(certificate_chain, private_key) {
         Ok(server) => server,
         Err(error) => {
-            return finish(
-                app,
-                handler,
-                custody,
-                None,
-                None,
-                Some(ForgeRuntimeError::ServerConfiguration(error)),
-            )
-            .await;
+            return Err(Box::new(ForgeListenerStartupError {
+                listener: None,
+                error: Box::new(ForgeRuntimeError::ServerConfiguration(error)),
+            }));
         }
     };
-
     let listener = match ForgeListener::bind(
         server,
         bootstrap,
         Box::new(SystemCommandOrigin),
-        config.listener_limits(),
-        config.admission_capacity(),
-        config.requests_per_connection(),
+        limits,
+        admission_capacity,
+        requests_per_connection,
     ) {
         Ok(listener) => listener,
         Err(error) => {
-            return finish(
-                app,
-                handler,
-                custody,
-                None,
-                None,
-                Some(ForgeRuntimeError::ListenerBind(error)),
-            )
-            .await;
+            return Err(Box::new(ForgeListenerStartupError {
+                listener: None,
+                error: Box::new(ForgeRuntimeError::ListenerBind(error)),
+            }));
         }
     };
-
     let address = match listener.local_addr() {
         Ok(address) if is_required_loopback(address) => address,
         Ok(address) => {
-            return finish(
-                app,
-                handler,
-                custody,
-                Some(listener),
-                None,
-                Some(ForgeRuntimeError::Address(io::Error::new(
+            return Err(Box::new(ForgeListenerStartupError {
+                listener: Some(listener),
+                error: Box::new(ForgeRuntimeError::Address(io::Error::new(
                     io::ErrorKind::AddrNotAvailable,
                     format!("Forge listener address is not required loopback: {address}"),
                 ))),
-            )
-            .await;
+            }));
         }
         Err(error) => {
-            return finish(
-                app,
-                handler,
-                custody,
-                Some(listener),
-                None,
-                Some(ForgeRuntimeError::Address(error)),
-            )
-            .await;
+            return Err(Box::new(ForgeListenerStartupError {
+                listener: Some(listener),
+                error: Box::new(ForgeRuntimeError::Address(error)),
+            }));
         }
     };
+    Ok(ForgeListenerStartup {
+        listener,
+        address,
+        leaf,
+    })
+}
 
-    if config.cancel_handle().is_cancelled() {
-        return finish(app, handler, custody, Some(listener), None, None).await;
+async fn run_with_handler(
+    context: ForgeRunContext,
+    handler: RequestHandler,
+) -> Result<(), ForgeRuntimeError> {
+    let ForgeRunContext {
+        app,
+        custody,
+        material,
+        database,
+        ready_file,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+        cancel,
+        native_run,
+    } = context;
+    let ForgeListenerStartup {
+        listener,
+        address,
+        leaf,
+    } = match prepare_forge_listener(
+        material,
+        limits,
+        admission_capacity,
+        requests_per_connection,
+    ) {
+        Ok(startup) => startup,
+        Err(startup_error) => {
+            let ForgeListenerStartupError { listener, error } = *startup_error;
+            return finish(app, handler, custody, listener, None, None, Some(*error)).await;
+        }
+    };
+    if cancel.is_cancelled() {
+        return finish(app, handler, custody, Some(listener), None, None, None).await;
     }
-
     // The leaf is retained separately so this identity computation happens
     // only after the actual listener address has been observed.
     let identity = PinnedIdentity::from_certificate(&leaf);
-    let receipt = match ReadinessReceipt::publish(config.ready_file_path(), address, identity) {
+    let receipt = match ReadinessReceipt::publish(&ready_file, address, identity) {
         Ok(receipt) => receipt,
         Err(error) => {
             return finish(
@@ -973,16 +1330,20 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
                 custody,
                 Some(listener),
                 None,
+                None,
                 Some(ForgeRuntimeError::Readiness(error)),
             )
             .await;
         }
     };
-
-    let primary = match listener
-        .serve_until_cancel(&handler, config.cancel_handle())
-        .await
-    {
+    let native_dispatcher = NativeRunDispatcher::start(
+        app.repository().clone(),
+        database,
+        native_run,
+        Arc::clone(&cancel),
+        &tokio::runtime::Handle::current(),
+    );
+    let primary = match listener.serve_until_cancel(&handler, &cancel).await {
         Ok(()) => None,
         Err(error) if error.is_service_failure() => Some(ForgeRuntimeError::Service(error)),
         Err(error) if error.is_drain_failure() => Some(ForgeRuntimeError::ListenerDrain(error)),
@@ -991,10 +1352,18 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         // keep the conservative shutdown exit rather than flattening it.
         Err(error) => Some(ForgeRuntimeError::ListenerDrain(error)),
     };
-
     // `serve_until_cancel` consumes the listener on every path. No listener
     // owner or endpoint custody remains to pass into the cleanup tail.
-    finish(app, handler, custody, None, Some(receipt), primary).await
+    finish(
+        app,
+        handler,
+        custody,
+        None,
+        Some(receipt),
+        Some(native_dispatcher),
+        primary,
+    )
+    .await
 }
 
 /// Finishes every owner in the required order and preserves every failure.
@@ -1004,6 +1373,7 @@ async fn finish(
     custody: ForgeProcessCustody,
     listener: Option<ForgeListener>,
     receipt: Option<ReadinessReceipt>,
+    mut native_dispatcher: Option<NativeRunDispatcher>,
     primary: Option<ForgeRuntimeError>,
 ) -> Result<(), ForgeRuntimeError> {
     let mut cleanup_failures = Vec::new();
@@ -1011,6 +1381,14 @@ async fn finish(
         && let Err(error) = listener.drain().await
     {
         cleanup_failures.push(ForgeRuntimeError::ListenerShutdown(error));
+    }
+    if let Some(dispatcher) = native_dispatcher.as_mut()
+        && !matches!(
+            dispatcher.shutdown().await,
+            NativeRunDispatcherShutdown::Joined
+        )
+    {
+        cleanup_failures.push(ForgeRuntimeError::NativeRunDispatcherShutdown);
     }
     if let Some(receipt) = receipt
         && let Err(error) = receipt.remove()
@@ -1217,7 +1595,6 @@ struct ReadinessReceipt {
 }
 
 impl ReadinessReceipt {
-    #[allow(clippy::too_many_lines)]
     fn publish(
         path: &Path,
         address: SocketAddr,
@@ -1233,70 +1610,7 @@ impl ReadinessReceipt {
         inspect_readiness_target(path)?;
 
         let body = readiness_json(address, identity);
-        let mut temporary = None;
-        let mut file = None;
-        for _ in 0..32 {
-            let candidate = temporary_path(parent);
-            match create_private_temporary(&candidate) {
-                Ok(created) => {
-                    temporary = Some(candidate);
-                    file = Some(created);
-                    break;
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(source) => {
-                    return Err(ReadinessError::CreateTemporary {
-                        path: candidate,
-                        source,
-                    });
-                }
-            }
-        }
-        let temporary = temporary.ok_or_else(|| ReadinessError::CreateTemporary {
-            path: parent.to_path_buf(),
-            source: io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "readiness temporary-name space is exhausted",
-            ),
-        })?;
-        let mut file = file.expect("temporary file exists whenever its path exists");
-        if let Err(source) = file.write_all(body.as_bytes()) {
-            let temporary_path = temporary.clone();
-            return Err(with_open_temporary_cleanup(
-                temporary,
-                file,
-                ReadinessError::WriteTemporary {
-                    path: temporary_path,
-                    source,
-                },
-            ));
-        }
-        if let Err(source) = file.flush().and_then(|()| file.sync_all()) {
-            let temporary_path = temporary.clone();
-            return Err(with_open_temporary_cleanup(
-                temporary,
-                file,
-                ReadinessError::WriteTemporary {
-                    path: temporary_path,
-                    source,
-                },
-            ));
-        }
-        let temporary_identity = match read_file_identity(&file) {
-            Ok(identity) => identity,
-            Err(source) => {
-                let temporary_path = temporary.clone();
-                return Err(with_open_temporary_cleanup(
-                    temporary,
-                    file,
-                    ReadinessError::WriteTemporary {
-                        path: temporary_path,
-                        source,
-                    },
-                ));
-            }
-        };
-        drop(file);
+        let (temporary, temporary_identity) = write_readiness_temporary(parent, &body)?;
 
         if let Err(source) = fs::hard_link(&temporary, path) {
             let error = if source.kind() == io::ErrorKind::AlreadyExists {
@@ -1555,6 +1869,74 @@ fn open_readiness_file(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+fn write_readiness_temporary(
+    parent: &Path,
+    body: &str,
+) -> Result<(PathBuf, FileIdentity), ReadinessError> {
+    let (temporary, mut file) = create_readiness_temporary(parent)?;
+    if let Err(source) = file.write_all(body.as_bytes()) {
+        let temporary_path = temporary.clone();
+        return Err(with_open_temporary_cleanup(
+            temporary,
+            file,
+            ReadinessError::WriteTemporary {
+                path: temporary_path,
+                source,
+            },
+        ));
+    }
+    if let Err(source) = file.flush().and_then(|()| file.sync_all()) {
+        let temporary_path = temporary.clone();
+        return Err(with_open_temporary_cleanup(
+            temporary,
+            file,
+            ReadinessError::WriteTemporary {
+                path: temporary_path,
+                source,
+            },
+        ));
+    }
+    let temporary_identity = match read_file_identity(&file) {
+        Ok(identity) => identity,
+        Err(source) => {
+            let temporary_path = temporary.clone();
+            return Err(with_open_temporary_cleanup(
+                temporary,
+                file,
+                ReadinessError::WriteTemporary {
+                    path: temporary_path,
+                    source,
+                },
+            ));
+        }
+    };
+    drop(file);
+    Ok((temporary, temporary_identity))
+}
+
+fn create_readiness_temporary(parent: &Path) -> Result<(PathBuf, File), ReadinessError> {
+    for _ in 0..32 {
+        let candidate = temporary_path(parent);
+        match create_private_temporary(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(ReadinessError::CreateTemporary {
+                    path: candidate,
+                    source,
+                });
+            }
+        }
+    }
+    Err(ReadinessError::CreateTemporary {
+        path: parent.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "readiness temporary-name space is exhausted",
+        ),
+    })
+}
+
 fn readiness_contents_match(file: &mut File, expected: &[u8]) -> io::Result<bool> {
     let expected_length = u64::try_from(expected.len()).unwrap_or(u64::MAX);
     let limit = expected_length.saturating_add(1);
@@ -1727,6 +2109,14 @@ fn recognized_option(option: &OsStr) -> Option<&'static str> {
         DRAIN_TIMEOUT_OPTION => Some(DRAIN_TIMEOUT_OPTION),
         ADMISSION_CAPACITY_OPTION => Some(ADMISSION_CAPACITY_OPTION),
         REQUESTS_PER_CONNECTION_OPTION => Some(REQUESTS_PER_CONNECTION_OPTION),
+        NATIVE_CLAIM_LEASE_OPTION => Some(NATIVE_CLAIM_LEASE_OPTION),
+        NATIVE_POLL_INTERVAL_OPTION => Some(NATIVE_POLL_INTERVAL_OPTION),
+        NATIVE_RETRY_BACKOFF_OPTION => Some(NATIVE_RETRY_BACKOFF_OPTION),
+        NATIVE_SHUTDOWN_BUDGET_OPTION => Some(NATIVE_SHUTDOWN_BUDGET_OPTION),
+        NATIVE_QUEUE_CAPACITY_OPTION => Some(NATIVE_QUEUE_CAPACITY_OPTION),
+        NATIVE_MAX_COMMAND_RETRIES_OPTION => Some(NATIVE_MAX_COMMAND_RETRIES_OPTION),
+        NATIVE_PROMPT_DELIVERY_OPTION => Some(NATIVE_PROMPT_DELIVERY_OPTION),
+        NATIVE_STREAM_AFTER_OPTION => Some(NATIVE_STREAM_AFTER_OPTION),
         _ => None,
     }
 }
@@ -1766,6 +2156,48 @@ fn set_capacity(
     let value = parse_unsigned(raw_value, option)?;
     let value = u32::try_from(value).map_err(|_| ForgeConfigError::NumberOverflow { option })?;
     *slot = Some(NonZeroU32::new(value).ok_or(ForgeConfigError::ZeroCapacity { option })?);
+    Ok(())
+}
+
+fn set_usize_capacity(
+    slot: &mut Option<NonZeroUsize>,
+    option: &'static str,
+    raw_value: &OsStr,
+) -> Result<(), ForgeConfigError> {
+    if slot.is_some() {
+        return Err(ForgeConfigError::Duplicate { option });
+    }
+    let value = parse_unsigned(raw_value, option)?;
+    let value = usize::try_from(value).map_err(|_| ForgeConfigError::NumberOverflow { option })?;
+    *slot = Some(NonZeroUsize::new(value).ok_or(ForgeConfigError::ZeroCapacity { option })?);
+    Ok(())
+}
+
+fn set_number(
+    slot: &mut Option<u64>,
+    option: &'static str,
+    raw_value: &OsStr,
+) -> Result<(), ForgeConfigError> {
+    if slot.is_some() {
+        return Err(ForgeConfigError::Duplicate { option });
+    }
+    *slot = Some(parse_unsigned(raw_value, option)?);
+    Ok(())
+}
+
+fn set_text(
+    slot: &mut Option<String>,
+    option: &'static str,
+    raw_value: OsString,
+) -> Result<(), ForgeConfigError> {
+    if slot.is_some() {
+        return Err(ForgeConfigError::Duplicate { option });
+    }
+    *slot = Some(
+        raw_value
+            .into_string()
+            .map_err(|_| ForgeConfigError::InvalidText { option })?,
+    );
     Ok(())
 }
 
