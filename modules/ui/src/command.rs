@@ -908,6 +908,10 @@ impl RenderOnce for CommandPalette {
             );
         } else {
             let mut list = div()
+                .id(ElementId::NamedChild(
+                    Box::new(palette_id.clone()),
+                    SharedString::new_static("list"),
+                ))
                 .flex()
                 .flex_col()
                 .w_full()
