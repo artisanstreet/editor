@@ -1583,6 +1583,14 @@ fn lifecycle_offer_reports_idle_status_and_stops_after_correlated_finished_reply
     };
     assert_eq!(receipt.disposition, LifecycleStopDisposition::Accepted);
     assert_eq!(receipt.state, LifecycleState::Draining);
+    // `lifecycle_request` has already decoded the correlated response. Only
+    // after that observation do we wait for the deferred runtime cancellation;
+    // a close that preempted the response would have failed that receive.
+    runtime.block_on(async {
+        tokio::time::timeout(FUTURE_WAIT, cancel.wait())
+            .await
+            .expect("runtime cancellation should follow the correlated stop response");
+    });
     assert!(
         cancel.is_cancelled(),
         "runtime cancellation follows the finished stop response"

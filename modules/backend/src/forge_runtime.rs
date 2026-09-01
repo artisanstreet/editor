@@ -1365,7 +1365,8 @@ async fn run_with_handler(
         native_run,
     } = context;
     let activity = ActivityGateImpl::new();
-    let lifecycle = LifecycleController::with_activity_gate(Arc::new(activity.clone()));
+    let mut lifecycle = LifecycleController::with_activity_gate(Arc::new(activity.clone()));
+    lifecycle.defer_cancel_after_response(Arc::clone(&cancel));
     let ForgeListenerStartup {
         listener,
         address,
