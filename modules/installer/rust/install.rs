@@ -269,7 +269,7 @@ fn ensure_root(root: &Path, mode: RootMode) -> Result<FileIdentity> {
                     Err(_) => return Err(InstallerError::UnsafeInstallationRoot),
                 }
                 let metadata = std::fs::symlink_metadata(&ancestor)
-                    .map_err(|()| InstallerError::UnsafeInstallationRoot)?;
+                    .map_err(|_| InstallerError::UnsafeInstallationRoot)?;
                 if !ordinary_metadata(&metadata, EntryKind::Directory) {
                     return Err(InstallerError::UnsafeInstallationRoot);
                 }
