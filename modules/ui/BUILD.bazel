@@ -9,6 +9,7 @@ rust_library(
     # module linkage in src/asset_seam.rs and the tinted_svg_unit_test
     # target below.
     srcs = glob(["src/**/*.rs"]) + [
+        "//tests/ui:command.rs",
         "//tests/ui:tinted_svg.rs",
     ],
     crate_name = "artisan_ui",
@@ -29,6 +30,15 @@ rust_library(
 # items. See tests/ui/tinted_svg.rs.
 rust_test(
     name = "tinted_svg_unit_test",
+    crate = ":ui",
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "command_unit_test",
     crate = ":ui",
     edition = "2024",
     lint_config = "//:workspace_lints",
