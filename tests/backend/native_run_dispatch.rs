@@ -438,37 +438,38 @@ async fn bind_running(
     }
 }
 
-async fn commit_running_item(
-    repository: &Repository,
-    claimed: &artisan_database::ClaimedMessageDispatch,
-    receipt: &artisan_database::LaunchedRunReceipt,
-    bound: &artisan_database::BoundRunReceipt,
-    start_key: &RunStartKey,
-    creds: &RunLaunchCredentials,
-    item_id: &ItemId,
-    patch_turn: &PatchId,
-    patch_item: &PatchId,
-) {
+struct RunningItemSeed<'a> {
+    claimed: &'a artisan_database::ClaimedMessageDispatch,
+    receipt: &'a artisan_database::LaunchedRunReceipt,
+    bound: &'a artisan_database::BoundRunReceipt,
+    start_key: &'a RunStartKey,
+    credentials: &'a RunLaunchCredentials,
+    item_id: &'a ItemId,
+    turn_patch_id: &'a PatchId,
+    item_patch_id: &'a PatchId,
+}
+
+async fn commit_running_item(repository: &Repository, seed: RunningItemSeed<'_>) {
     let body = AssistantBody::parse("hello assistant").expect("body");
     repository
         .commit_run_batch(artisan_database::CommitRunBatch {
             scope: artisan_database::RunBatchScope {
-                claimed,
-                launched: receipt,
-                bound,
-                run_start_key: start_key,
-                credentials: creds,
+                claimed: seed.claimed,
+                launched: seed.receipt,
+                bound: seed.bound,
+                run_start_key: seed.start_key,
+                credentials: seed.credentials,
                 expected_launch_at: UnixMillis::from_millis(150),
                 expected_updated_at: UnixMillis::from_millis(200),
             },
             batch_sequence: 1,
             operated_at: UnixMillis::from_millis(250),
-            activate_turn_patch_id: Some(patch_turn),
+            activate_turn_patch_id: Some(seed.turn_patch_id),
             changes: &[AssistantChange::Start {
-                item_id,
+                item_id: seed.item_id,
                 phase: AssistantMessagePhase::Final,
                 body: &body,
-                patch_id: patch_item,
+                patch_id: seed.item_patch_id,
             }],
             checkpoint: artisan_database::CheckpointUpdate::Keep,
         })
@@ -540,22 +541,26 @@ async fn setup_binding_scenario(
         .provider_binding
         .clone();
     let item_id = ItemId::parse("assistant-run").expect("item");
+    let turn_patch_id = PatchId::parse("p-turn-run").expect("p");
+    let item_patch_id = PatchId::parse("p-item-run").expect("p");
     commit_running_item(
         repository,
-        &claimed2,
-        &receipt2,
-        &bound2,
-        &sk2,
-        &cr2,
-        &item_id,
-        &PatchId::parse("p-turn-run").expect("p"),
-        &PatchId::parse("p-item-run").expect("p"),
+        RunningItemSeed {
+            claimed: &claimed2,
+            receipt: &receipt2,
+            bound: &bound2,
+            start_key: &sk2,
+            credentials: &cr2,
+            item_id: &item_id,
+            turn_patch_id: &turn_patch_id,
+            item_patch_id: &item_patch_id,
+        },
     )
     .await;
     before_binding
 }
 
-fn assert_binding_lifecycle(after: &AllRows, before_binding: &Option<entities::OpaqueBytes>) {
+fn assert_binding_lifecycle(after: &AllRows, before_binding: Option<&entities::OpaqueBytes>) {
     for msg in ["msg-launch", "msg-run"] {
         let dispatch = after
             .dispatches
@@ -587,7 +592,7 @@ fn assert_binding_lifecycle(after: &AllRows, before_binding: &Option<entities::O
         .iter()
         .find(|r| r.run_id == "run-run")
         .expect("run");
-    assert_eq!(run_run.provider_binding, before_binding.clone());
+    assert_eq!(run_run.provider_binding.as_ref(), before_binding);
     assert!(run_run.provider_binding_version.is_some());
     let turn_launch = after
         .turns
@@ -785,7 +790,7 @@ async fn dispatch_failed_dispatch_interrupted_run_binding_retained() {
         NativeRunDispatcherShutdown::Joined
     );
     let after = fetch_all(&database).await;
-    assert_binding_lifecycle(&after, &before_binding);
+    assert_binding_lifecycle(&after, before_binding.as_ref());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -815,9 +820,9 @@ async fn dispatch_post_disposition_notifier_wake() {
         &tokio::runtime::Handle::current(),
     );
 
-    let notified = tokio::time::timeout(Duration::from_millis(800), subscription.wait()).await;
+    let wake_result = tokio::time::timeout(Duration::from_millis(800), subscription.wait()).await;
     assert!(
-        notified.is_ok(),
+        wake_result.is_ok(),
         "notifier should wake after durable disposition"
     );
 
