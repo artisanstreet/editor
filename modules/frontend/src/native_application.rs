@@ -120,7 +120,7 @@ enum NativeViewState {
 struct NativeMessageFlight {
     thread_id: ThreadId,
     request_id: RequestId,
-    _body: MessageBody,
+    body: MessageBody,
     token: SubmissionToken,
 }
 
@@ -131,6 +131,7 @@ struct NativeMessageRetry {
     thread_id: ThreadId,
     request_id: RequestId,
     body: MessageBody,
+    draft_matches: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -186,7 +187,6 @@ pub struct NativeApplication {
     _composer_observation: Subscription,
     message_flight: Option<NativeMessageFlight>,
     message_retry: Option<NativeMessageRetry>,
-    message_retry_draft_matches: bool,
     message_receipt: Option<FirstMessageReceipt>,
     message_failure: Option<NativeMessageFailure>,
     picker: Option<Entity<ProjectPickerView>>,
@@ -255,7 +255,7 @@ impl NativeApplication {
                 NativeComposerEvent::SendRequested => application.begin_message_submission(cx),
             });
         let composer_observation = cx.observe(&composer, |application, composer, cx| {
-            application.observe_composer_change(composer, cx);
+            application.observe_composer_change(&composer, cx);
         });
         let mut application = Self {
             theme: ArtisanTheme::for_mode(ThemeMode::Dark),
@@ -268,7 +268,6 @@ impl NativeApplication {
             _composer_observation: composer_observation,
             message_flight: None,
             message_retry: None,
-            message_retry_draft_matches: false,
             message_receipt: None,
             message_failure: None,
             picker: None,
@@ -450,7 +449,7 @@ impl NativeApplication {
                 self.message_flight = Some(NativeMessageFlight {
                     thread_id,
                     request_id,
-                    _body: body,
+                    body,
                     token,
                 });
             }
@@ -473,28 +472,31 @@ impl NativeApplication {
     }
 
     fn message_retry_is_admissible(&self, cx: &App) -> bool {
-        self.message_retry_context_is_admissible(cx) && self.message_retry_draft_matches
+        self.message_retry_context_is_admissible(cx)
+            && self
+                .message_retry
+                .as_ref()
+                .is_some_and(|retry| retry.draft_matches)
     }
 
     fn observe_composer_change(
         &mut self,
-        composer: Entity<NativeComposer>,
+        composer: &Entity<NativeComposer>,
         cx: &mut Context<Self>,
     ) {
-        let Some(retry) = self.message_retry.as_ref() else {
+        let Some(retry) = self.message_retry.as_mut() else {
             return;
         };
         if self.message_flight.is_some() {
             return;
         }
         let matches = composer.read(cx).draft_matches_body(&retry.body);
-        self.message_retry_draft_matches = matches;
+        retry.draft_matches = matches;
         cx.notify();
     }
 
     fn clear_message_retry(&mut self) {
         self.message_retry = None;
-        self.message_retry_draft_matches = false;
         self.message_retry_focus_handle = self.message_retry_focus_handle.clone().tab_stop(false);
     }
 
@@ -521,7 +523,9 @@ impl NativeApplication {
         let (body, token) = match submission {
             Ok(submission) => submission,
             Err(blocked) => {
-                self.message_retry_draft_matches = false;
+                if let Some(retry) = self.message_retry.as_mut() {
+                    retry.draft_matches = false;
+                }
                 if let Some(failure) = submission_blocked_failure(blocked) {
                     self.message_failure = Some(NativeMessageFailure { failure });
                 }
@@ -530,7 +534,9 @@ impl NativeApplication {
             }
         };
         if body.as_str().as_bytes() != retry_body.as_str().as_bytes() {
-            self.message_retry_draft_matches = false;
+            if let Some(retry) = self.message_retry.as_mut() {
+                retry.draft_matches = false;
+            }
             self.finish_composer_submission(token, DraftDisposition::Retained, cx);
             self.sync_composer_availability(cx);
             cx.notify();
@@ -552,7 +558,7 @@ impl NativeApplication {
                 self.message_flight = Some(NativeMessageFlight {
                     thread_id,
                     request_id,
-                    _body: retry_body,
+                    body: retry_body,
                     token,
                 });
             }
@@ -666,9 +672,9 @@ impl NativeApplication {
         self.message_retry = Some(NativeMessageRetry {
             thread_id: flight.thread_id,
             request_id: flight.request_id,
-            body: flight._body,
+            body: flight.body,
+            draft_matches: false,
         });
-        self.message_retry_draft_matches = false;
         self.message_receipt = None;
         self.message_failure = Some(NativeMessageFailure { failure });
         self.sync_composer_availability(cx);
@@ -4110,7 +4116,7 @@ mod tests {
         application.message_flight = Some(NativeMessageFlight {
             thread_id,
             request_id: request(request_id),
-            _body: body,
+            body,
             token,
         });
     }
@@ -4908,7 +4914,7 @@ mod tests {
                     .as_ref()
                     .expect("admitted flight");
                 let request_id = flight.request_id.clone();
-                let body = flight._body.as_str().to_owned();
+                let body = flight.body.as_str().to_owned();
 
                 application.handle_service_event(
                     NativeTransportEvent::FirstMessageFailed {
@@ -4932,7 +4938,12 @@ mod tests {
         assert_eq!(commands.borrow().len(), 1);
         cx.update(|_, app| {
             let application = view.read(app);
-            assert!(application.message_retry_draft_matches);
+            assert!(
+                application
+                    .message_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.draft_matches)
+            );
             assert!(!application.composer.read(app).is_submitting());
         });
     }
@@ -4998,7 +5009,12 @@ mod tests {
         cx.update(|_, app| {
             let application = view.read(app);
             assert!(application.message_retry.is_some());
-            assert!(!application.message_retry_draft_matches);
+            assert!(
+                !application
+                    .message_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.draft_matches)
+            );
             assert!(!application.message_retry_focus_handle.tab_stop);
         });
     }
@@ -5224,7 +5240,7 @@ mod tests {
                 let flight = application.message_flight.as_ref().expect("fresh flight");
                 assert_ne!(flight.request_id, original_request);
                 assert_eq!(flight.thread_id, thread_id);
-                assert_eq!(flight._body.as_str(), "edited fresh body");
+                assert_eq!(flight.body.as_str(), "edited fresh body");
             });
         });
 
@@ -5574,7 +5590,7 @@ mod tests {
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-first").expect("request"),
-                    _body: body,
+                    body,
                     token,
                 });
                 application.handle_service_event(
@@ -5608,7 +5624,7 @@ mod tests {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-second")
                         .expect("request"),
-                    _body: body,
+                    body,
                     token,
                 });
                 application.composer.update(application_cx, |composer, _| {
@@ -5659,7 +5675,7 @@ mod tests {
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-newer").expect("request"),
-                    _body: body,
+                    body,
                     token,
                 });
                 application.handle_service_event(
@@ -5701,7 +5717,7 @@ mod tests {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-failure")
                         .expect("request"),
-                    _body: body,
+                    body,
                     token,
                 });
                 application.handle_service_event(
@@ -5734,7 +5750,7 @@ mod tests {
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-stop").expect("request"),
-                    _body: body,
+                    body,
                     token,
                 });
                 application.handle_service_event(
@@ -5773,7 +5789,7 @@ mod tests {
                     thread_id: old_thread.clone(),
                     request_id: artisan_domain::RequestId::parse("request-transition")
                         .expect("request"),
-                    _body: body,
+                    body,
                     token,
                 });
                 application.message_receipt = Some(first_receipt(
@@ -5812,7 +5828,7 @@ mod tests {
                     thread_id: old_thread,
                     request_id: artisan_domain::RequestId::parse("request-shutdown")
                         .expect("request"),
-                    _body: body,
+                    body,
                     token,
                 });
                 application.prepare_shutdown(application_cx);
@@ -5909,7 +5925,7 @@ mod tests {
         application.message_flight = Some(NativeMessageFlight {
             thread_id: source.clone(),
             request_id: request("message-switch"),
-            _body: body,
+            body,
             token,
         });
 
@@ -6225,7 +6241,7 @@ mod tests {
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: source.clone(),
                     request_id: request("message-stopped"),
-                    _body: body,
+                    body,
                     token,
                 });
                 let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
