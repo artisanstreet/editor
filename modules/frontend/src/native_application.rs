@@ -736,102 +736,7 @@ impl NativeApplication {
         }
 
         if self.thread_switch_flight.is_some() {
-            let Some((target_thread, generation, request_matches)) = self
-                .thread_switch_flight
-                .as_ref()
-                .and_then(|flight| match &flight.phase {
-                    ThreadSwitchPhase::AwaitingSubscriptionStart {
-                        request_id: receipt,
-                    } => Some((
-                        flight.target_thread.clone(),
-                        flight.generation,
-                        receipt
-                            .as_ref()
-                            .is_none_or(|expected| expected == request_id),
-                    )),
-                    _ => None,
-                })
-            else {
-                self.remember_switch_request_id(request_id.clone());
-                return;
-            };
-            let Some(target_thread) = target_thread else {
-                self.remember_switch_request_id(request_id.clone());
-                return;
-            };
-            if self.shutdown_prepared
-                || !request_matches
-                || thread_id != &target_thread
-                || !self.thread_is_listed(&target_thread)
-                || self.selected_thread.as_ref() != Some(&target_thread)
-            {
-                self.remember_switch_request_id(request_id.clone());
-                return;
-            }
-
-            let snapshot = match started {
-                ConversationSubscriptionStarted::Fresh(start) => start.snapshot().clone(),
-                // A switch always submits a fresh subscription with no cursor.
-                // A resumed response cannot advance this flight.
-                ConversationSubscriptionStarted::Resumed { .. } => {
-                    self.remember_switch_request_id(request_id.clone());
-                    return;
-                }
-            };
-            if snapshot.thread_id() != &target_thread {
-                self.remember_switch_request_id(request_id.clone());
-                return;
-            }
-            self.forget_switch_snapshot_thread(&target_thread);
-            self.standalone_snapshot_thread = Some(target_thread.clone());
-            if let Some(flight) = self.thread_switch_flight.as_mut()
-                && flight.generation == generation
-                && let ThreadSwitchPhase::AwaitingSubscriptionStart {
-                    request_id: receipt,
-                } = &mut flight.phase
-            {
-                *receipt = Some(request_id.clone());
-            }
-            self.remember_switch_request_id(request_id.clone());
-            let Some(host) = self.conversation_host.clone() else {
-                self.fail_thread_switch(invalid_service_failure(), false, cx);
-                return;
-            };
-            if host.read(cx).controller_view().delivery.thread_id != target_thread {
-                self.fail_thread_switch(invalid_service_failure(), false, cx);
-                return;
-            }
-            self.dispatch_snapshot(&host, snapshot, cx);
-            if !self
-                .conversation_host
-                .as_ref()
-                .is_some_and(|mounted| mounted.read(cx).controller_view().delivery.has_snapshot)
-            {
-                self.fail_thread_switch(invalid_service_failure(), false, cx);
-                return;
-            }
-            let complete = self.thread_switch_flight.as_ref().is_some_and(|flight| {
-                flight.generation == generation
-                    && matches!(
-                        &flight.phase,
-                        ThreadSwitchPhase::AwaitingSubscriptionStart {
-                            request_id: Some(receipt)
-                        } if receipt == request_id
-                    )
-                    && self.selected_thread.as_ref() == Some(&target_thread)
-                    && self.conversation_host.as_ref().is_some_and(|mounted| {
-                        mounted.read(cx).controller_view().delivery.has_snapshot
-                    })
-            });
-            if complete {
-                self.active_subscription_request_id = Some(request_id.clone());
-                self.thread_switch_flight = None;
-                self.pending_thread = None;
-                self.sync_thread_picker_selected(cx);
-                self.sync_thread_picker_disabled(cx);
-                self.sync_composer_availability(cx);
-                cx.notify();
-            }
+            self.handle_thread_switch_subscription_started(thread_id, request_id, started, cx);
             return;
         }
 
@@ -840,6 +745,139 @@ impl NativeApplication {
             return;
         }
 
+        self.handle_standalone_subscription_started(thread_id, request_id, started, cx);
+    }
+
+    fn handle_thread_switch_subscription_started(
+        &mut self,
+        thread_id: &ThreadId,
+        request_id: &RequestId,
+        started: ConversationSubscriptionStarted,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((target_thread, generation, request_matches)) = self
+            .thread_switch_flight
+            .as_ref()
+            .and_then(|flight| match &flight.phase {
+                ThreadSwitchPhase::AwaitingSubscriptionStart {
+                    request_id: receipt,
+                } => Some((
+                    flight.target_thread.clone(),
+                    flight.generation,
+                    receipt
+                        .as_ref()
+                        .is_none_or(|expected| expected == request_id),
+                )),
+                _ => None,
+            })
+        else {
+            self.remember_switch_request_id(request_id.clone());
+            return;
+        };
+        let Some(target_thread) = target_thread else {
+            self.remember_switch_request_id(request_id.clone());
+            return;
+        };
+        if self.shutdown_prepared
+            || !request_matches
+            || thread_id != &target_thread
+            || !self.thread_is_listed(&target_thread)
+            || self.selected_thread.as_ref() != Some(&target_thread)
+        {
+            self.remember_switch_request_id(request_id.clone());
+            return;
+        }
+
+        let snapshot = match started {
+            ConversationSubscriptionStarted::Fresh(start) => start.snapshot().clone(),
+            // A switch always submits a fresh subscription with no cursor.
+            // A resumed response cannot advance this flight.
+            ConversationSubscriptionStarted::Resumed { .. } => {
+                self.remember_switch_request_id(request_id.clone());
+                return;
+            }
+        };
+        if snapshot.thread_id() != &target_thread {
+            self.remember_switch_request_id(request_id.clone());
+            return;
+        }
+        self.advance_thread_switch_with_snapshot(
+            &target_thread,
+            generation,
+            request_id,
+            snapshot,
+            cx,
+        );
+    }
+
+    fn advance_thread_switch_with_snapshot(
+        &mut self,
+        target_thread: &ThreadId,
+        generation: u64,
+        request_id: &RequestId,
+        snapshot: ConversationSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.forget_switch_snapshot_thread(target_thread);
+        self.standalone_snapshot_thread = Some(target_thread.clone());
+        if let Some(flight) = self.thread_switch_flight.as_mut()
+            && flight.generation == generation
+            && let ThreadSwitchPhase::AwaitingSubscriptionStart {
+                request_id: receipt,
+            } = &mut flight.phase
+        {
+            *receipt = Some(request_id.clone());
+        }
+        self.remember_switch_request_id(request_id.clone());
+        let Some(host) = self.conversation_host.clone() else {
+            self.fail_thread_switch(invalid_service_failure(), false, cx);
+            return;
+        };
+        if host.read(cx).controller_view().delivery.thread_id != *target_thread {
+            self.fail_thread_switch(invalid_service_failure(), false, cx);
+            return;
+        }
+        self.dispatch_snapshot(&host, snapshot, cx);
+        if !self
+            .conversation_host
+            .as_ref()
+            .is_some_and(|mounted| mounted.read(cx).controller_view().delivery.has_snapshot)
+        {
+            self.fail_thread_switch(invalid_service_failure(), false, cx);
+            return;
+        }
+        let complete = self.thread_switch_flight.as_ref().is_some_and(|flight| {
+            flight.generation == generation
+                && matches!(
+                    &flight.phase,
+                    ThreadSwitchPhase::AwaitingSubscriptionStart {
+                        request_id: Some(receipt)
+                    } if receipt == request_id
+                )
+                && self.selected_thread.as_ref() == Some(target_thread)
+                && self
+                    .conversation_host
+                    .as_ref()
+                    .is_some_and(|mounted| mounted.read(cx).controller_view().delivery.has_snapshot)
+        });
+        if complete {
+            self.active_subscription_request_id = Some(request_id.clone());
+            self.thread_switch_flight = None;
+            self.pending_thread = None;
+            self.sync_thread_picker_selected(cx);
+            self.sync_thread_picker_disabled(cx);
+            self.sync_composer_availability(cx);
+            cx.notify();
+        }
+    }
+
+    fn handle_standalone_subscription_started(
+        &mut self,
+        thread_id: &ThreadId,
+        request_id: &RequestId,
+        started: ConversationSubscriptionStarted,
+        cx: &mut Context<Self>,
+    ) {
         match started {
             ConversationSubscriptionStarted::Fresh(start) => {
                 let snapshot = start.snapshot().clone();
@@ -1247,20 +1285,17 @@ impl NativeApplication {
         source_thread: ThreadId,
         cx: &mut Context<Self>,
     ) {
-        if !self
+        if self
             .conversation_host
             .as_ref()
-            .is_some_and(|host| host.read(cx).controller_view().delivery.thread_id == source_thread)
+            .is_none_or(|host| host.read(cx).controller_view().delivery.thread_id != source_thread)
         {
             self.set_failure(invalid_service_failure(), cx);
             return;
         }
-        let generation = match self.next_thread_switch_generation.checked_add(1) {
-            Some(generation) => generation,
-            None => {
-                self.set_failure(invalid_service_failure(), cx);
-                return;
-            }
+        let Some(generation) = self.next_thread_switch_generation.checked_add(1) else {
+            self.set_failure(invalid_service_failure(), cx);
+            return;
         };
         self.retain_message_flight(cx);
         self.clear_message_presentation();
@@ -1866,41 +1901,60 @@ impl NativeApplication {
                 .iter()
                 .all(|thread| &thread.project_id == project_id);
         if self.thread_switch_flight.is_some() {
-            if !listing_is_valid {
-                // A project/catalog response from an older project selection
-                // cannot mutate a newer thread-switch generation.
-                return;
-            }
-            let source_removed = self.thread_switch_flight.as_ref().is_some_and(|flight| {
+            self.handle_threads_during_switch(listing_is_valid, listing, cx);
+            return;
+        }
+        self.handle_threads_without_switch(listing_is_valid, project_id, listing, cx);
+    }
+
+    fn handle_threads_during_switch(
+        &mut self,
+        listing_is_valid: bool,
+        listing: &ThreadListing,
+        cx: &mut Context<Self>,
+    ) {
+        if !listing_is_valid {
+            // A project/catalog response from an older project selection
+            // cannot mutate a newer thread-switch generation.
+            return;
+        }
+        let source_removed = self.thread_switch_flight.as_ref().is_some_and(|flight| {
+            !listing
+                .threads()
+                .iter()
+                .any(|thread| thread.thread_id == flight.source_thread)
+        });
+        let target_removed = self
+            .thread_switch_flight
+            .as_ref()
+            .and_then(|flight| flight.target_thread.as_ref())
+            .is_some_and(|target| {
                 !listing
                     .threads()
                     .iter()
-                    .any(|thread| &thread.thread_id == &flight.source_thread)
+                    .any(|thread| &thread.thread_id == target)
             });
-            let target_removed = self
-                .thread_switch_flight
-                .as_ref()
-                .and_then(|flight| flight.target_thread.as_ref())
-                .is_some_and(|target| {
-                    !listing
-                        .threads()
-                        .iter()
-                        .any(|thread| &thread.thread_id == target)
-                });
-            if source_removed || target_removed {
-                self.remember_switch_listing();
-                self.thread_listing = Some(listing.clone());
-                let selected_thread = self.selected_thread.clone();
-                self.update_thread_picker(listing.clone(), selected_thread, cx);
-                self.pending_snapshot = None;
-                if target_removed {
-                    self.handle_removed_thread_during_switch(cx);
-                }
-                self.sync_thread_picker_disabled(cx);
-                cx.notify();
+        if source_removed || target_removed {
+            self.remember_switch_listing();
+            self.thread_listing = Some(listing.clone());
+            let selected_thread = self.selected_thread.clone();
+            self.update_thread_picker(listing.clone(), selected_thread, cx);
+            self.pending_snapshot = None;
+            if target_removed {
+                self.handle_removed_thread_during_switch(cx);
             }
-            return;
+            self.sync_thread_picker_disabled(cx);
+            cx.notify();
         }
+    }
+
+    fn handle_threads_without_switch(
+        &mut self,
+        listing_is_valid: bool,
+        project_id: &ProjectId,
+        listing: &ThreadListing,
+        cx: &mut Context<Self>,
+    ) {
         if !listing_is_valid {
             self.set_failure(invalid_service_failure(), cx);
             return;
@@ -3695,7 +3749,7 @@ mod tests {
         ConversationSubscriptionStarted, ConversationSubscriptionStopped, FirstMessageReceipt,
     };
     use artisan_ui::theme::ThemeMode;
-    use gpui::TestAppContext;
+    use gpui::{Context, TestAppContext};
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     fn project(id: &str, name: &str) -> ProjectSummary {
@@ -4651,232 +4705,295 @@ mod tests {
 
         cx.update(|app| {
             view.update(app, |application, application_cx| {
-                let source_host =
-                    ConversationHost::mount(source.clone(), ThemeMode::Dark, &mut *application_cx)
-                        .expect("source host");
-                application.project_options = vec![ProjectOption {
-                    id: project_id.clone(),
-                    name: "Switch project".into(),
-                }];
-                application.selected_project = Some(project_id.clone());
-                application.thread_listing = Some(listing.clone());
-                application.selected_thread = Some(source.clone());
-                application.conversation_host = Some(source_host.clone());
-                application.active_subscription_request_id = Some(request("switch-start-a-1"));
-                application.state = NativeViewState::Ready;
-
-                let (body, token) = application
-                    .composer
-                    .update(application_cx, |composer, composer_cx| {
-                        composer.set_disabled(false, composer_cx);
-                        composer.set_draft("retained switch draft");
-                        composer.begin_submission()
-                    })
-                    .expect("message flight");
-                application.message_flight = Some(NativeMessageFlight {
-                    thread_id: source.clone(),
-                    request_id: request("message-switch"),
-                    _body: body,
-                    token,
-                });
-
-                let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(()), Ok(())]);
-                application.test_command_sink = Some(sink);
-                application.install_thread_picker(
-                    listing.clone(),
-                    Some(source.clone()),
+                let commands = prepare_thread_switch_fixture(
+                    application,
                     application_cx,
+                    &project_id,
+                    &source,
+                    &target,
+                    &listing,
                 );
-
-                application.begin_thread_switch(target.clone(), application_cx);
-                assert!(matches!(
-                    application
-                        .thread_switch_flight
-                        .as_ref()
-                        .map(|flight| &flight.phase),
-                    Some(ThreadSwitchPhase::AwaitingUnsubscribeStop { request_id: None })
-                ));
-                assert_eq!(commands.borrow().len(), 1);
-                assert!(matches!(
-                    &commands.borrow()[0],
-                    NativeTransportCommand::Unsubscribe { thread_id } if thread_id == &source
-                ));
-                assert_eq!(application.conversation_host.as_ref(), Some(&source_host));
-                assert_eq!(application.selected_thread.as_ref(), Some(&source));
-                assert!(
-                    application
-                        .thread_picker
-                        .as_ref()
-                        .expect("thread picker")
-                        .read(application_cx)
-                        .state()
-                        .is_disabled()
-                );
-                assert_eq!(
-                    application.composer.read(application_cx).draft(),
-                    "retained switch draft"
-                );
-
-                let stop_request = request("switch-stop-a-1");
-                application.handle_service_event(
-                    NativeTransportEvent::ConversationSubscriptionStopped {
-                        thread_id: source.clone(),
-                        request_id: stop_request.clone(),
-                        stopped: ConversationSubscriptionStopped {
-                            thread_id: source.clone(),
-                        },
-                    },
+                let stop_request = complete_first_thread_switch(
+                    application,
                     application_cx,
+                    &source,
+                    &target,
+                    &commands,
                 );
-                assert_eq!(commands.borrow().len(), 2);
-                assert!(matches!(
-                    &commands.borrow()[1],
-                    NativeTransportCommand::Subscribe {
-                        thread_id,
-                        after: None,
-                    } if thread_id == &target
-                ));
-                assert_eq!(application.selected_thread.as_ref(), Some(&target));
-                assert_eq!(
-                    application
-                        .conversation_host
-                        .as_ref()
-                        .expect("target host")
-                        .read(application_cx)
-                        .controller_view()
-                        .delivery
-                        .thread_id,
-                    target
-                );
-                assert!(matches!(
-                    application
-                        .thread_switch_flight
-                        .as_ref()
-                        .map(|flight| &flight.phase),
-                    Some(ThreadSwitchPhase::AwaitingSubscriptionStart { request_id: None })
-                ));
-                assert!(application.conversation_effects.is_empty());
-
-                application.handle_service_event(
-                    fresh_start_event(&target, "switch-start-b-1", 1),
+                refresh_listing_and_reject_stale_snapshot(
+                    application,
                     application_cx,
+                    &project_id,
+                    &source,
+                    &listing,
                 );
-                assert!(application.thread_switch_flight.is_none());
-                assert_eq!(application.selected_thread.as_ref(), Some(&target));
-                assert!(matches!(&application.state, NativeViewState::Ready));
-                assert!(
-                    application
-                        .conversation_host
-                        .as_ref()
-                        .expect("started target host")
-                        .read(application_cx)
-                        .controller_view()
-                        .delivery
-                        .has_snapshot
-                );
-                assert_eq!(commands.borrow().len(), 2);
-                assert_eq!(
-                    application.composer.read(application_cx).draft(),
-                    "retained switch draft"
-                );
-
-                let refreshed_listing = ThreadListing::new(vec![
-                    thread("switch-thread-a", "switch-project", "A refreshed"),
-                    thread("switch-thread-b", "switch-project", "B refreshed"),
-                ])
-                .expect("refreshed listing");
-                application.handle_service_event(
-                    NativeTransportEvent::Threads {
-                        project_id: project_id.clone(),
-                        listing: refreshed_listing.clone(),
-                    },
+                return_to_source_and_reject_old_generation(
+                    application,
                     application_cx,
+                    &source,
+                    &target,
+                    &commands,
+                    stop_request,
                 );
-                assert_eq!(
-                    application.thread_listing.as_ref(),
-                    Some(&refreshed_listing)
-                );
-                application.handle_service_event(
-                    NativeTransportEvent::Threads {
-                        project_id: project_id.clone(),
-                        listing: listing.clone(),
-                    },
-                    application_cx,
-                );
-                assert_eq!(
-                    application.thread_listing.as_ref(),
-                    Some(&refreshed_listing)
-                );
-
-                let target_host = application.conversation_host.clone().expect("target host");
-                application.handle_service_event(
-                    NativeTransportEvent::Snapshot(snapshot_for(&source, 99)),
-                    application_cx,
-                );
-                assert_eq!(application.conversation_host.as_ref(), Some(&target_host));
-                assert_eq!(application.pending_snapshot, None);
-                assert!(matches!(&application.state, NativeViewState::Ready));
-
-                application.begin_thread_switch(source.clone(), application_cx);
-                assert_eq!(commands.borrow().len(), 3);
-                application.handle_service_event(
-                    NativeTransportEvent::ConversationSubscriptionStopped {
-                        thread_id: target.clone(),
-                        request_id: request("switch-stop-b-1"),
-                        stopped: ConversationSubscriptionStopped {
-                            thread_id: target.clone(),
-                        },
-                    },
-                    application_cx,
-                );
-                assert_eq!(commands.borrow().len(), 4);
-                assert!(matches!(
-                    &commands.borrow()[3],
-                    NativeTransportCommand::Subscribe {
-                        thread_id,
-                        after: None,
-                    } if thread_id == &source
-                ));
-                application.handle_service_event(
-                    fresh_start_event(&source, "switch-start-a-2", 2),
-                    application_cx,
-                );
-                let returned_host = application
-                    .conversation_host
-                    .clone()
-                    .expect("returned host");
-                assert!(application.thread_switch_flight.is_none());
-                assert_eq!(application.selected_thread.as_ref(), Some(&source));
-                assert_eq!(
-                    returned_host
-                        .read(application_cx)
-                        .controller_view()
-                        .delivery
-                        .cursor,
-                    Some(ConversationCursor::new(2))
-                );
-
-                // The first A start and stop receipts belong to the older
-                // generation. Neither may displace the current A host.
-                application.handle_service_event(
-                    fresh_start_event(&source, "switch-start-a-1", 99),
-                    application_cx,
-                );
-                application.handle_service_event(
-                    NativeTransportEvent::ConversationSubscriptionStopped {
-                        thread_id: source.clone(),
-                        request_id: stop_request,
-                        stopped: ConversationSubscriptionStopped {
-                            thread_id: source.clone(),
-                        },
-                    },
-                    application_cx,
-                );
-                assert_eq!(application.conversation_host.as_ref(), Some(&returned_host));
-                assert_eq!(application.selected_thread.as_ref(), Some(&source));
-                assert_eq!(commands.borrow().len(), 4);
             });
         });
+    }
+
+    fn prepare_thread_switch_fixture(
+        application: &mut NativeApplication,
+        application_cx: &mut Context<NativeApplication>,
+        project_id: &ProjectId,
+        source: &ThreadId,
+        target: &ThreadId,
+        listing: &ThreadListing,
+    ) -> Rc<RefCell<Vec<NativeTransportCommand>>> {
+        let source_host =
+            ConversationHost::mount(source.clone(), ThemeMode::Dark, &mut *application_cx)
+                .expect("source host");
+        application.project_options = vec![ProjectOption {
+            id: project_id.clone(),
+            name: "Switch project".into(),
+        }];
+        application.selected_project = Some(project_id.clone());
+        application.thread_listing = Some(listing.clone());
+        application.selected_thread = Some(source.clone());
+        application.conversation_host = Some(source_host.clone());
+        application.active_subscription_request_id = Some(request("switch-start-a-1"));
+        application.state = NativeViewState::Ready;
+
+        let (body, token) = application
+            .composer
+            .update(application_cx, |composer, composer_cx| {
+                composer.set_disabled(false, composer_cx);
+                composer.set_draft("retained switch draft");
+                composer.begin_submission()
+            })
+            .expect("message flight");
+        application.message_flight = Some(NativeMessageFlight {
+            thread_id: source.clone(),
+            request_id: request("message-switch"),
+            _body: body,
+            token,
+        });
+
+        let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(()), Ok(())]);
+        application.test_command_sink = Some(sink);
+        application.install_thread_picker(listing.clone(), Some(source.clone()), application_cx);
+
+        application.begin_thread_switch(target.clone(), application_cx);
+        assert!(matches!(
+            application
+                .thread_switch_flight
+                .as_ref()
+                .map(|flight| &flight.phase),
+            Some(ThreadSwitchPhase::AwaitingUnsubscribeStop { request_id: None })
+        ));
+        assert_eq!(commands.borrow().len(), 1);
+        assert!(matches!(
+            &commands.borrow()[0],
+            NativeTransportCommand::Unsubscribe { thread_id } if thread_id == source
+        ));
+        assert_eq!(application.conversation_host.as_ref(), Some(&source_host));
+        assert_eq!(application.selected_thread.as_ref(), Some(source));
+        assert!(
+            application
+                .thread_picker
+                .as_ref()
+                .expect("thread picker")
+                .read(application_cx)
+                .state()
+                .is_disabled()
+        );
+        assert_eq!(
+            application.composer.read(application_cx).draft(),
+            "retained switch draft"
+        );
+        commands
+    }
+
+    fn complete_first_thread_switch(
+        application: &mut NativeApplication,
+        application_cx: &mut Context<NativeApplication>,
+        source: &ThreadId,
+        target: &ThreadId,
+        commands: &Rc<RefCell<Vec<NativeTransportCommand>>>,
+    ) -> RequestId {
+        let stop_request = request("switch-stop-a-1");
+        application.handle_service_event(
+            NativeTransportEvent::ConversationSubscriptionStopped {
+                thread_id: source.clone(),
+                request_id: stop_request.clone(),
+                stopped: ConversationSubscriptionStopped {
+                    thread_id: source.clone(),
+                },
+            },
+            application_cx,
+        );
+        assert_eq!(commands.borrow().len(), 2);
+        assert!(matches!(
+            &commands.borrow()[1],
+            NativeTransportCommand::Subscribe {
+                thread_id,
+                after: None,
+            } if thread_id == target
+        ));
+        assert_eq!(application.selected_thread.as_ref(), Some(target));
+        assert_eq!(
+            application
+                .conversation_host
+                .as_ref()
+                .expect("target host")
+                .read(application_cx)
+                .controller_view()
+                .delivery
+                .thread_id,
+            *target
+        );
+        assert!(matches!(
+            application
+                .thread_switch_flight
+                .as_ref()
+                .map(|flight| &flight.phase),
+            Some(ThreadSwitchPhase::AwaitingSubscriptionStart { request_id: None })
+        ));
+        assert!(application.conversation_effects.is_empty());
+
+        application.handle_service_event(
+            fresh_start_event(target, "switch-start-b-1", 1),
+            application_cx,
+        );
+        assert!(application.thread_switch_flight.is_none());
+        assert_eq!(application.selected_thread.as_ref(), Some(target));
+        assert!(matches!(&application.state, NativeViewState::Ready));
+        assert!(
+            application
+                .conversation_host
+                .as_ref()
+                .expect("started target host")
+                .read(application_cx)
+                .controller_view()
+                .delivery
+                .has_snapshot
+        );
+        assert_eq!(commands.borrow().len(), 2);
+        assert_eq!(
+            application.composer.read(application_cx).draft(),
+            "retained switch draft"
+        );
+        stop_request
+    }
+
+    fn refresh_listing_and_reject_stale_snapshot(
+        application: &mut NativeApplication,
+        application_cx: &mut Context<NativeApplication>,
+        project_id: &ProjectId,
+        source: &ThreadId,
+        listing: &ThreadListing,
+    ) {
+        let refreshed_listing = ThreadListing::new(vec![
+            thread("switch-thread-a", "switch-project", "A refreshed"),
+            thread("switch-thread-b", "switch-project", "B refreshed"),
+        ])
+        .expect("refreshed listing");
+        application.handle_service_event(
+            NativeTransportEvent::Threads {
+                project_id: project_id.clone(),
+                listing: refreshed_listing.clone(),
+            },
+            application_cx,
+        );
+        assert_eq!(
+            application.thread_listing.as_ref(),
+            Some(&refreshed_listing)
+        );
+        application.handle_service_event(
+            NativeTransportEvent::Threads {
+                project_id: project_id.clone(),
+                listing: listing.clone(),
+            },
+            application_cx,
+        );
+        assert_eq!(
+            application.thread_listing.as_ref(),
+            Some(&refreshed_listing)
+        );
+
+        let target_host = application.conversation_host.clone().expect("target host");
+        application.handle_service_event(
+            NativeTransportEvent::Snapshot(snapshot_for(source, 99)),
+            application_cx,
+        );
+        assert_eq!(application.conversation_host.as_ref(), Some(&target_host));
+        assert_eq!(application.pending_snapshot, None);
+        assert!(matches!(&application.state, NativeViewState::Ready));
+    }
+
+    fn return_to_source_and_reject_old_generation(
+        application: &mut NativeApplication,
+        application_cx: &mut Context<NativeApplication>,
+        source: &ThreadId,
+        target: &ThreadId,
+        commands: &Rc<RefCell<Vec<NativeTransportCommand>>>,
+        stop_request: RequestId,
+    ) {
+        application.begin_thread_switch(source.clone(), application_cx);
+        assert_eq!(commands.borrow().len(), 3);
+        application.handle_service_event(
+            NativeTransportEvent::ConversationSubscriptionStopped {
+                thread_id: target.clone(),
+                request_id: request("switch-stop-b-1"),
+                stopped: ConversationSubscriptionStopped {
+                    thread_id: target.clone(),
+                },
+            },
+            application_cx,
+        );
+        assert_eq!(commands.borrow().len(), 4);
+        assert!(matches!(
+            &commands.borrow()[3],
+            NativeTransportCommand::Subscribe {
+                thread_id,
+                after: None,
+            } if thread_id == source
+        ));
+        application.handle_service_event(
+            fresh_start_event(source, "switch-start-a-2", 2),
+            application_cx,
+        );
+        let returned_host = application
+            .conversation_host
+            .clone()
+            .expect("returned host");
+        assert!(application.thread_switch_flight.is_none());
+        assert_eq!(application.selected_thread.as_ref(), Some(source));
+        assert_eq!(
+            returned_host
+                .read(application_cx)
+                .controller_view()
+                .delivery
+                .cursor,
+            Some(ConversationCursor::new(2))
+        );
+
+        // The first A start and stop receipts belong to the older
+        // generation. Neither may displace the current A host.
+        application.handle_service_event(
+            fresh_start_event(source, "switch-start-a-1", 99),
+            application_cx,
+        );
+        application.handle_service_event(
+            NativeTransportEvent::ConversationSubscriptionStopped {
+                thread_id: source.clone(),
+                request_id: stop_request,
+                stopped: ConversationSubscriptionStopped {
+                    thread_id: source.clone(),
+                },
+            },
+            application_cx,
+        );
+        assert_eq!(application.conversation_host.as_ref(), Some(&returned_host));
+        assert_eq!(application.selected_thread.as_ref(), Some(source));
+        assert_eq!(commands.borrow().len(), 4);
     }
 
     #[gpui::test]
