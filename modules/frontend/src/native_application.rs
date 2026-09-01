@@ -1252,7 +1252,7 @@ impl NativeApplication {
                     ConversationHostEffect::Controller(ConversationStateEffect::Viewport(
                         effect,
                     )) => {
-                        if !self.apply_viewport_effect(host, effect, cx) {
+                        if !self.apply_viewport_effect(host, &effect, cx) {
                             return;
                         }
                         self.conversation_effects.remove(0);
@@ -1277,7 +1277,7 @@ impl NativeApplication {
     fn apply_viewport_effect(
         &mut self,
         host: &Entity<ConversationHost>,
-        effect: crate::conversation_view_machine::ViewportEffect,
+        effect: &crate::conversation_view_machine::ViewportEffect,
         cx: &mut Context<Self>,
     ) -> bool {
         match effect {
@@ -1298,12 +1298,12 @@ impl NativeApplication {
             } => {
                 let can_scroll = {
                     let view = host.read(cx).controller_view();
-                    view.viewport_generation == generation
+                    view.viewport_generation == *generation
                         && match &view.viewport_state {
                             ViewportState::Following => true,
                             ViewportState::Scrolling {
                                 generation: active_generation,
-                            } => *active_generation == generation,
+                            } => *active_generation == *generation,
                             _ => false,
                         }
                 };
