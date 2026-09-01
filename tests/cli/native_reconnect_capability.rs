@@ -165,7 +165,12 @@ fn assert_no_temporary_records(store: &ReconnectCapabilityStore) {
         .expect("read credential directory")
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(".reconnect-capability.bin.") && name.ends_with(".tmp"))
+        .filter(|name| {
+            name.starts_with(".reconnect-capability.bin.")
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+        })
         .collect::<Vec<_>>();
     assert!(temporary.is_empty(), "temporary reconnect files remain");
 }
@@ -175,6 +180,91 @@ fn consuming_transfer_preserves_secret_fencing_traits() {
     let bytes = capability(0x5a).into_zeroizing_bytes();
     assert_eq!(bytes.as_ref(), &[0x5a; RECONNECT_CAPABILITY_BYTES]);
     drop(bytes);
+}
+
+fn assert_invalid_reconnect_record_states(
+    store: &ReconnectCapabilityStore,
+    owner: ReconnectBinding,
+    original: &[u8],
+) {
+    let mut zero_generation = original.to_vec();
+    zero_generation[GENERATION_OFFSET..GENERATION_OFFSET + 8].fill(0);
+    write_record(store, &zero_generation);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut zero_port = original.to_vec();
+    zero_port[PORT_OFFSET..PORT_OFFSET + 2].fill(0);
+    write_record(store, &zero_port);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut zero_pid = original.to_vec();
+    zero_pid[PID_OFFSET..PID_OFFSET + 4].fill(0);
+    write_record(store, &zero_pid);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut ready_nonce = original.to_vec();
+    ready_nonce[OWNER_NONCE_OFFSET] = 0x77;
+    write_record(store, &ready_nonce);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut ready_capability = original.to_vec();
+    ready_capability[CAPABILITY_OFFSET..].fill(0);
+    write_record(store, &ready_capability);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut in_flight_nonce = original.to_vec();
+    in_flight_nonce[STATE_OFFSET] = 1;
+    in_flight_nonce[OWNER_NONCE_OFFSET..CAPABILITY_OFFSET].fill(0);
+    in_flight_nonce[CAPABILITY_OFFSET..].fill(0);
+    write_record(store, &in_flight_nonce);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut in_flight_capability = in_flight_nonce.clone();
+    in_flight_capability[OWNER_NONCE_OFFSET] = 0x88;
+    in_flight_capability[CAPABILITY_OFFSET] = 0x01;
+    write_record(store, &in_flight_capability);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut lost_nonce = original.to_vec();
+    lost_nonce[STATE_OFFSET] = 2;
+    lost_nonce[OWNER_NONCE_OFFSET] = 0x44;
+    lost_nonce[CAPABILITY_OFFSET..].fill(0);
+    write_record(store, &lost_nonce);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut lost_capability = original.to_vec();
+    lost_capability[STATE_OFFSET] = 2;
+    lost_capability[OWNER_NONCE_OFFSET..CAPABILITY_OFFSET].fill(0);
+    lost_capability[CAPABILITY_OFFSET] = 0x02;
+    write_record(store, &lost_capability);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
 }
 
 #[test]
@@ -219,84 +309,7 @@ fn strict_record_round_trip_and_malformed_inputs_are_rejected() {
         ));
     }
 
-    let mut zero_generation = original.clone();
-    zero_generation[GENERATION_OFFSET..GENERATION_OFFSET + 8].fill(0);
-    write_record(&store, &zero_generation);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
-
-    let mut zero_port = original.clone();
-    zero_port[PORT_OFFSET..PORT_OFFSET + 2].fill(0);
-    write_record(&store, &zero_port);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
-
-    let mut zero_pid = original.clone();
-    zero_pid[PID_OFFSET..PID_OFFSET + 4].fill(0);
-    write_record(&store, &zero_pid);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
-
-    let mut ready_nonce = original.clone();
-    ready_nonce[OWNER_NONCE_OFFSET] = 0x77;
-    write_record(&store, &ready_nonce);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
-
-    let mut ready_capability = original.clone();
-    ready_capability[CAPABILITY_OFFSET..].fill(0);
-    write_record(&store, &ready_capability);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
-
-    let mut in_flight_nonce = original.clone();
-    in_flight_nonce[STATE_OFFSET] = 1;
-    in_flight_nonce[OWNER_NONCE_OFFSET..CAPABILITY_OFFSET].fill(0);
-    in_flight_nonce[CAPABILITY_OFFSET..].fill(0);
-    write_record(&store, &in_flight_nonce);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
-
-    let mut in_flight_capability = in_flight_nonce.clone();
-    in_flight_capability[OWNER_NONCE_OFFSET] = 0x88;
-    in_flight_capability[CAPABILITY_OFFSET] = 0x01;
-    write_record(&store, &in_flight_capability);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
-
-    let mut lost_nonce = original.clone();
-    lost_nonce[STATE_OFFSET] = 2;
-    lost_nonce[OWNER_NONCE_OFFSET] = 0x44;
-    lost_nonce[CAPABILITY_OFFSET..].fill(0);
-    write_record(&store, &lost_nonce);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
-
-    let mut lost_capability = original.clone();
-    lost_capability[STATE_OFFSET] = 2;
-    lost_capability[OWNER_NONCE_OFFSET..CAPABILITY_OFFSET].fill(0);
-    lost_capability[CAPABILITY_OFFSET] = 0x02;
-    write_record(&store, &lost_capability);
-    assert!(matches!(
-        checkout_error(&store, owner),
-        ForgeCredentialError::ReconnectRecordMalformed
-    ));
+    assert_invalid_reconnect_record_states(&store, owner, &original);
 
     write_record(&store, &original);
     assert_no_temporary_records(&store);
@@ -545,6 +558,7 @@ fn identity_loader_is_non_provisioning_and_never_needs_bootstrap_bytes() {
 fn private_directory_modes_and_record_symlinks_fail_closed() {
     let home = temp_home("unsafe-path");
     let (store, owner) = initialize(&home, "unsafe-path");
+    #[cfg(unix)]
     let directory = store.paths().credentials_dir();
 
     #[cfg(unix)]
