@@ -2,7 +2,6 @@ use artisan_editor_cli::{
     CliError,
     commands::{Cli, Commands, EngineCommand, EngineProfileCommand, EngineProfileHomeArg},
 };
-use artisan_native_engine::NativeOpenCode2ProfileLaunchError;
 use clap::Parser;
 
 #[test]
@@ -207,63 +206,15 @@ fn verify_rejects_invalid_profile_ids_and_unknown_arguments() {
 }
 
 #[test]
-fn verify_launch_errors_map_to_pathless_profile_error_with_stable_exit_code() {
-    // Mirrors engine_profiles::launch_cli_reason exhaustive mapping.
-    fn reason_for(error: NativeOpenCode2ProfileLaunchError) -> &'static str {
-        match error {
-            NativeOpenCode2ProfileLaunchError::UnsupportedPlatform => "unsupported_platform",
-            NativeOpenCode2ProfileLaunchError::ProfileRegistryTooLarge
-            | NativeOpenCode2ProfileLaunchError::ProfileRegistryMalformed
-            | NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsupportedVersion
-            | NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsupportedEngine
-            | NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsafe
-            | NativeOpenCode2ProfileLaunchError::ProfileRegistryUnavailable
-            | NativeOpenCode2ProfileLaunchError::DuplicateProfile
-            | NativeOpenCode2ProfileLaunchError::MultiplePrimaryProfiles => {
-                "profile_registry_invalid"
-            }
-            NativeOpenCode2ProfileLaunchError::ProfileNotFound => "profile_not_found",
-            NativeOpenCode2ProfileLaunchError::ProfileHomeUnsafe => "profile_home_unsafe",
-            NativeOpenCode2ProfileLaunchError::ProfileHomeUnavailable => "profile_home_unavailable",
-            NativeOpenCode2ProfileLaunchError::LockUnavailable => "profile_lock_unavailable",
-            NativeOpenCode2ProfileLaunchError::InstallStateMissing => "install_state_missing",
-            NativeOpenCode2ProfileLaunchError::InstallStateInvalid => "install_state_invalid",
-            NativeOpenCode2ProfileLaunchError::GenerationUnsafe => "generation_unsafe",
-            NativeOpenCode2ProfileLaunchError::GenerationUntrusted => "generation_untrusted",
-            NativeOpenCode2ProfileLaunchError::ExecutableUnavailable => "executable_unavailable",
-            NativeOpenCode2ProfileLaunchError::ExecutableChanged => "executable_changed",
-            NativeOpenCode2ProfileLaunchError::ExecutableSizeMismatch => "executable_size_mismatch",
-            NativeOpenCode2ProfileLaunchError::ExecutableHashMismatch => "executable_hash_mismatch",
-            NativeOpenCode2ProfileLaunchError::ProfileChanged => "profile_changed",
-        }
-    }
-
-    for error in [
-        NativeOpenCode2ProfileLaunchError::UnsupportedPlatform,
-        NativeOpenCode2ProfileLaunchError::ProfileRegistryTooLarge,
-        NativeOpenCode2ProfileLaunchError::ProfileRegistryMalformed,
-        NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsupportedVersion,
-        NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsupportedEngine,
-        NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsafe,
-        NativeOpenCode2ProfileLaunchError::ProfileRegistryUnavailable,
-        NativeOpenCode2ProfileLaunchError::DuplicateProfile,
-        NativeOpenCode2ProfileLaunchError::MultiplePrimaryProfiles,
-        NativeOpenCode2ProfileLaunchError::ProfileNotFound,
-        NativeOpenCode2ProfileLaunchError::ProfileHomeUnsafe,
-        NativeOpenCode2ProfileLaunchError::ProfileHomeUnavailable,
-        NativeOpenCode2ProfileLaunchError::LockUnavailable,
-        NativeOpenCode2ProfileLaunchError::InstallStateMissing,
-        NativeOpenCode2ProfileLaunchError::InstallStateInvalid,
-        NativeOpenCode2ProfileLaunchError::GenerationUnsafe,
-        NativeOpenCode2ProfileLaunchError::GenerationUntrusted,
-        NativeOpenCode2ProfileLaunchError::ExecutableUnavailable,
-        NativeOpenCode2ProfileLaunchError::ExecutableChanged,
-        NativeOpenCode2ProfileLaunchError::ExecutableSizeMismatch,
-        NativeOpenCode2ProfileLaunchError::ExecutableHashMismatch,
-        NativeOpenCode2ProfileLaunchError::ProfileChanged,
+fn verify_errors_remain_profile_scoped_and_redacted() {
+    for reason in [
+        "profile_registry_invalid",
+        "profile_not_found",
+        "profile_home_unsafe",
+        "executable_hash_mismatch",
     ] {
-        let reason = reason_for(error);
         let cli_error = CliError::OpenCode2Profile { reason };
+        assert!(matches!(&cli_error, CliError::OpenCode2Profile { .. }));
         assert_eq!(cli_error.exit_code(), 4);
         let display = cli_error.to_string();
         assert_eq!(
@@ -274,34 +225,20 @@ fn verify_launch_errors_map_to_pathless_profile_error_with_stable_exit_code() {
         assert!(!display.contains('\\'));
         assert!(!display.contains("C:"));
         assert!(!format!("{cli_error:?}").contains("C:\\secret"));
-        assert!(!format!("{error}").contains("C:\\secret"));
-        assert!(!format!("{error:?}").contains("profiles.json"));
         assert!(!reason.contains('/'));
         assert!(!reason.contains('\\'));
     }
 }
 
 #[test]
-fn launch_capability_display_and_debug_are_redacted() {
-    // VerifiedOpenCode2ProfileLaunch intentionally hides all fields in Debug/Display.
-    // We assert the CliError wrapping the reason also stays redacted, mirroring the
-    // authority's path-free guarantee without constructing a live install-lock capability.
+fn verify_error_debug_redacts_paths_and_credentials() {
     let error = CliError::OpenCode2Profile {
-        reason: "profile_not_found",
+        reason: "executable_hash_mismatch",
     };
     let debug = format!("{error:?}");
-    assert!(debug.contains("profile_not_found"));
+    assert!(debug.contains("executable_hash_mismatch"));
     assert!(!debug.contains("C:\\"));
     assert!(!debug.contains("/tmp"));
     assert!(!debug.contains("profiles.json"));
-    assert!(!debug.contains("opencode2.exe"));
-
-    for launch_error in [
-        NativeOpenCode2ProfileLaunchError::ProfileNotFound,
-        NativeOpenCode2ProfileLaunchError::ExecutableHashMismatch,
-    ] {
-        let display = launch_error.to_string();
-        assert!(!display.contains("C:\\"));
-        assert!(!format!("{launch_error:?}").contains("C:\\"));
-    }
+    assert!(!debug.contains("OPENCODE_PASSWORD"));
 }

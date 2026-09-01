@@ -202,34 +202,7 @@ fn profile_error(error: NativeOpenCode2ProfileError) -> CliError {
 
 fn launch_error(error: NativeOpenCode2ProfileLaunchError) -> CliError {
     CliError::OpenCode2Profile {
-        reason: launch_cli_reason(error),
-    }
-}
-
-fn launch_cli_reason(error: NativeOpenCode2ProfileLaunchError) -> &'static str {
-    match error {
-        NativeOpenCode2ProfileLaunchError::UnsupportedPlatform => "unsupported_platform",
-        NativeOpenCode2ProfileLaunchError::ProfileRegistryTooLarge
-        | NativeOpenCode2ProfileLaunchError::ProfileRegistryMalformed
-        | NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsupportedVersion
-        | NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsupportedEngine
-        | NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsafe
-        | NativeOpenCode2ProfileLaunchError::ProfileRegistryUnavailable
-        | NativeOpenCode2ProfileLaunchError::DuplicateProfile
-        | NativeOpenCode2ProfileLaunchError::MultiplePrimaryProfiles => "profile_registry_invalid",
-        NativeOpenCode2ProfileLaunchError::ProfileNotFound => "profile_not_found",
-        NativeOpenCode2ProfileLaunchError::ProfileHomeUnsafe => "profile_home_unsafe",
-        NativeOpenCode2ProfileLaunchError::ProfileHomeUnavailable => "profile_home_unavailable",
-        NativeOpenCode2ProfileLaunchError::LockUnavailable => "profile_lock_unavailable",
-        NativeOpenCode2ProfileLaunchError::InstallStateMissing => "install_state_missing",
-        NativeOpenCode2ProfileLaunchError::InstallStateInvalid => "install_state_invalid",
-        NativeOpenCode2ProfileLaunchError::GenerationUnsafe => "generation_unsafe",
-        NativeOpenCode2ProfileLaunchError::GenerationUntrusted => "generation_untrusted",
-        NativeOpenCode2ProfileLaunchError::ExecutableUnavailable => "executable_unavailable",
-        NativeOpenCode2ProfileLaunchError::ExecutableChanged => "executable_changed",
-        NativeOpenCode2ProfileLaunchError::ExecutableSizeMismatch => "executable_size_mismatch",
-        NativeOpenCode2ProfileLaunchError::ExecutableHashMismatch => "executable_hash_mismatch",
-        NativeOpenCode2ProfileLaunchError::ProfileChanged => "profile_changed",
+        reason: error.cli_reason(),
     }
 }
 

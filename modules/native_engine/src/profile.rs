@@ -218,6 +218,40 @@ pub enum NativeOpenCode2ProfileLaunchError {
     ProfileChanged,
 }
 
+impl NativeOpenCode2ProfileLaunchError {
+    /// Returns the stable CLI classification for this launch failure.
+    ///
+    /// Registry structural failures intentionally share
+    /// `profile_registry_invalid`.
+    #[must_use]
+    pub const fn cli_reason(self) -> &'static str {
+        match self {
+            Self::UnsupportedPlatform => "unsupported_platform",
+            Self::ProfileRegistryTooLarge
+            | Self::ProfileRegistryMalformed
+            | Self::ProfileRegistryUnsupportedVersion
+            | Self::ProfileRegistryUnsupportedEngine
+            | Self::ProfileRegistryUnsafe
+            | Self::ProfileRegistryUnavailable
+            | Self::DuplicateProfile
+            | Self::MultiplePrimaryProfiles => "profile_registry_invalid",
+            Self::ProfileNotFound => "profile_not_found",
+            Self::ProfileHomeUnsafe => "profile_home_unsafe",
+            Self::ProfileHomeUnavailable => "profile_home_unavailable",
+            Self::LockUnavailable => "profile_lock_unavailable",
+            Self::InstallStateMissing => "install_state_missing",
+            Self::InstallStateInvalid => "install_state_invalid",
+            Self::GenerationUnsafe => "generation_unsafe",
+            Self::GenerationUntrusted => "generation_untrusted",
+            Self::ExecutableUnavailable => "executable_unavailable",
+            Self::ExecutableChanged => "executable_changed",
+            Self::ExecutableSizeMismatch => "executable_size_mismatch",
+            Self::ExecutableHashMismatch => "executable_hash_mismatch",
+            Self::ProfileChanged => "profile_changed",
+        }
+    }
+}
+
 impl fmt::Display for NativeOpenCode2ProfileLaunchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -1316,6 +1350,107 @@ mod tests {
             assert!(!error.to_string().contains("C:\\secret"));
             assert!(!format!("{error:?}").contains("profiles.json"));
             assert!(!format!("{error:?}").contains("OPENCODE_PASSWORD"));
+        }
+    }
+
+    #[test]
+    fn launch_error_cli_reason_taxonomy_is_exhaustive() {
+        let reasons = [
+            (
+                NativeOpenCode2ProfileLaunchError::UnsupportedPlatform,
+                "unsupported_platform",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileRegistryTooLarge,
+                "profile_registry_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileRegistryMalformed,
+                "profile_registry_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsupportedVersion,
+                "profile_registry_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsupportedEngine,
+                "profile_registry_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsafe,
+                "profile_registry_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileRegistryUnavailable,
+                "profile_registry_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::DuplicateProfile,
+                "profile_registry_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::MultiplePrimaryProfiles,
+                "profile_registry_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileNotFound,
+                "profile_not_found",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileHomeUnsafe,
+                "profile_home_unsafe",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileHomeUnavailable,
+                "profile_home_unavailable",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::LockUnavailable,
+                "profile_lock_unavailable",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::InstallStateMissing,
+                "install_state_missing",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::InstallStateInvalid,
+                "install_state_invalid",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::GenerationUnsafe,
+                "generation_unsafe",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::GenerationUntrusted,
+                "generation_untrusted",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ExecutableUnavailable,
+                "executable_unavailable",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ExecutableChanged,
+                "executable_changed",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ExecutableSizeMismatch,
+                "executable_size_mismatch",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ExecutableHashMismatch,
+                "executable_hash_mismatch",
+            ),
+            (
+                NativeOpenCode2ProfileLaunchError::ProfileChanged,
+                "profile_changed",
+            ),
+        ];
+        for (error, expected) in reasons {
+            assert_eq!(
+                error.cli_reason(),
+                expected,
+                "unexpected reason for {error:?}"
+            );
         }
     }
 
