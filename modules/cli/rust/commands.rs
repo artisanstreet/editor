@@ -1,18 +1,36 @@
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
+    net::SocketAddr,
     num::NonZeroU32,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use artisan_domain::{RequestId, UnixMillis};
+use artisan_protocol::{
+    ClientRequest, ErrorCode, FrameId, Hello, HelloCredential, LifecycleRequest, LifecycleResponse,
+    LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
+    ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope, WireEnvelopeBody,
+};
+use artisan_transport::{
+    CancelHandle, ClientRequestError, ClientSession, ClientSessionError, ClientSessionLimits,
+    LoopbackTarget, PinnedIdentity, RequestOutcome,
+};
+#[cfg(test)]
+use artisan_transport::{DeadlineError, OperationKind};
 use clap::{Parser, Subcommand, ValueEnum};
+use rustls_pki_types::CertificateDer;
 
 use crate::{
     CliError, Result,
-    credentials::{self, ForgeCredentialPaths},
+    credentials::{
+        self, ForgeCredentialError, ForgeCredentialPaths, ReconnectAttempt, ReconnectBinding,
+        ReconnectCapabilityStore,
+    },
     engine_catalog::{NativeOpenCode2Authority, OpenCode2Inspection},
     engine_install::{self, InstallOutcome},
     error::io,
@@ -35,6 +53,7 @@ const MAX_FOLLOW_BYTES: u64 = 64 * 1024;
 const FORGE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const FORGE_START_LAUNCH_URL: &str = "artisan://forge/start";
 const AUTOSTART_TASK_NAME: &str = "Artisan Forge";
+static NEXT_LIFECYCLE_FRAME: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Parser)]
 #[command(name = "ae", version, about = "Artisan Editor and Forge")]
@@ -141,16 +160,12 @@ pub enum Commands {
         foreground: bool,
     },
     Stop {
-        /// Stop only this exact Forge instance. Intended for editor cleanup.
-        #[arg(long, hide = true, conflicts_with = "pid")]
-        instance_id: Option<String>,
-        /// Stop only the authenticated Forge with this process identity.
-        /// Intended for installer retirement.
-        #[arg(long, hide = true, conflicts_with = "instance_id")]
-        pid: Option<u32>,
+        /// Stop only the authenticated Forge with this readiness process identity.
+        #[arg(long, hide = true, required = true, value_parser = parse_nonzero_u32)]
+        pid: NonZeroU32,
         /// Refuse shutdown when Forge reports live model work. Intended for
         /// installer retirement before an update is activated.
-        #[arg(long, hide = true, requires = "pid")]
+        #[arg(long, hide = true, required = true)]
         if_idle: bool,
     },
     Restart {
@@ -357,9 +372,8 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Commands::Start { foreground } => start(&layout, foreground).map(|_| ()),
-        Commands::Stop { .. } | Commands::Restart { .. } | Commands::Uninstall { .. } => {
-            unsupported_lifecycle_control()
-        }
+        Commands::Stop { pid, if_idle } => stop(&layout, pid, if_idle),
+        Commands::Restart { .. } | Commands::Uninstall { .. } => unsupported_lifecycle_control(),
         Commands::Status { json } => status(&layout, json),
         Commands::Logs { lines, follow } => logs(&layout, lines, follow),
         Commands::Doctor { fix, json } => doctor(&layout, fix, json),
@@ -940,29 +954,40 @@ fn hidden_schtasks(
         .map_err(io(context))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleOperation {
+    Status,
+    Stop,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LifecycleResult {
+    Status(LifecycleStatus),
+    Stop(LifecycleStopReceipt),
+}
+
+struct LifecycleMaterial {
+    certificate: CertificateDer<'static>,
+    pinned_identity: PinnedIdentity,
+    target: LoopbackTarget,
+    binding: ReconnectBinding,
+    limits: ClientSessionLimits,
+}
+
 fn status(layout: &Layout, json: bool) -> Result<()> {
     let manifest = require_installation(layout)?;
-    let config = load_native_instance(layout)?;
+    let config = load_lifecycle_instance(layout)?;
     match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
         process::ForgeReadinessStatus::Ready(readiness) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "certificate_sha256": readiness.certificate_sha256(),
-                        "endpoint": readiness.endpoint(),
-                        "pid": readiness.pid(),
-                        "readiness": "ready",
-                        "schema": readiness.schema(),
-                    })
-                );
-            } else {
-                println!(
-                    "ready (pid {} at {})",
-                    readiness.pid(),
-                    readiness.endpoint()
-                );
-            }
+            let result =
+                authenticated_lifecycle(layout, &config, &readiness, LifecycleOperation::Status)?;
+            let LifecycleResult::Status(lifecycle) = result else {
+                return Err(CliError::LifecycleService {
+                    reason: "unexpected lifecycle response",
+                });
+            };
+            print_lifecycle_status(&readiness, &lifecycle, json);
+            Ok(())
         }
         process::ForgeReadinessStatus::Missing => {
             if json {
@@ -970,6 +995,7 @@ fn status(layout: &Layout, json: bool) -> Result<()> {
             } else {
                 println!("missing");
             }
+            Ok(())
         }
         process::ForgeReadinessStatus::Invalid => {
             if json {
@@ -977,9 +1003,525 @@ fn status(layout: &Layout, json: bool) -> Result<()> {
             } else {
                 println!("invalid");
             }
+            Ok(())
         }
     }
+}
+
+fn stop(layout: &Layout, pid: NonZeroU32, if_idle: bool) -> Result<()> {
+    if !if_idle {
+        return Err(CliError::Unsupported("stop requires --if-idle".to_owned()));
+    }
+
+    let manifest = require_installation(layout)?;
+    let config = load_lifecycle_instance(layout)?;
+    match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
+        process::ForgeReadinessStatus::Missing => Err(CliError::NotRunning),
+        process::ForgeReadinessStatus::Invalid => Err(CliError::LifecycleReadiness {
+            reason: "readiness receipt is invalid or stale",
+        }),
+        process::ForgeReadinessStatus::Ready(readiness) => {
+            if readiness.pid() != pid.get() {
+                return Err(CliError::LifecycleReadiness {
+                    reason: "PID does not match the readiness receipt",
+                });
+            }
+            let result =
+                authenticated_lifecycle(layout, &config, &readiness, LifecycleOperation::Stop)?;
+            let LifecycleResult::Stop(receipt) = result else {
+                return Err(CliError::LifecycleService {
+                    reason: "unexpected lifecycle response",
+                });
+            };
+            print_stop_receipt(&receipt);
+            Ok(())
+        }
+    }
+}
+
+fn load_lifecycle_instance(layout: &Layout) -> Result<NativeInstanceConfig> {
+    match load_native_instance(layout) {
+        Ok(config) => Ok(config),
+        Err(CliError::MissingInstance) => Err(CliError::MissingInstance),
+        Err(_) => Err(CliError::LifecycleService {
+            reason: "native instance configuration is unavailable",
+        }),
+    }
+}
+
+fn authenticated_lifecycle(
+    layout: &Layout,
+    config: &NativeInstanceConfig,
+    readiness: &process::ForgeReadiness,
+    operation: LifecycleOperation,
+) -> Result<LifecycleResult> {
+    let material = lifecycle_material(layout, config, readiness)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CliError::LifecycleService {
+            reason: "create lifecycle runtime",
+        })?;
+    let store = ReconnectCapabilityStore::from_home(&layout.root)
+        .map_err(|error| lifecycle_credential_error(&error))?;
+    let attempt = store
+        .checkout(material.binding, credentials::RECONNECT_LOCK_TIMEOUT)
+        .map_err(|error| lifecycle_credential_error(&error))?;
+    runtime.block_on(authenticated_lifecycle_session(
+        material, operation, attempt,
+    ))
+}
+
+fn lifecycle_material(
+    layout: &Layout,
+    config: &NativeInstanceConfig,
+    readiness: &process::ForgeReadiness,
+) -> Result<LifecycleMaterial> {
+    let identity = credentials::load_existing_client_identity(&layout.root)
+        .map_err(|error| lifecycle_credential_error(&error))?;
+    if config.credentials_manifest() != identity.paths().manifest_path() {
+        return Err(CliError::LifecycleCredentialState {
+            reason: "credential manifest does not match the instance",
+        });
+    }
+
+    let certificate = identity.certificate().clone();
+    let pinned_identity = PinnedIdentity::from_certificate(&certificate);
+    let expected_pin = pinned_identity.to_hex();
+    if readiness.certificate_sha256() != expected_pin
+        || readiness.certificate_sha256() != readiness.certificate_sha256().to_ascii_lowercase()
+    {
+        return Err(CliError::LifecycleReadiness {
+            reason: "readiness certificate does not match the client identity",
+        });
+    }
+
+    let address =
+        readiness
+            .endpoint()
+            .parse::<SocketAddr>()
+            .map_err(|_| CliError::LifecycleReadiness {
+                reason: "readiness endpoint is invalid",
+            })?;
+    let target = LoopbackTarget::new(address).map_err(|_| CliError::LifecycleReadiness {
+        reason: "readiness endpoint is not exact loopback",
+    })?;
+    let pid = NonZeroU32::new(readiness.pid()).ok_or(CliError::LifecycleReadiness {
+        reason: "readiness PID is zero",
+    })?;
+    let binding = ReconnectBinding::new(
+        config.instance_id(),
+        target.addr().port(),
+        *pinned_identity.as_bytes(),
+        pid,
+    )
+    .map_err(|error| lifecycle_credential_error(&error))?;
+    let listener = config.listener();
+    let limits = ClientSessionLimits {
+        connect: lifecycle_duration(listener.admission_timeout_ms())?,
+        handshake: lifecycle_duration(listener.handshake_timeout_ms())?,
+        request: lifecycle_duration(listener.request_timeout_ms())?,
+        shutdown: lifecycle_duration(listener.drain_timeout_ms())?,
+        admission_budget: usize::try_from(listener.requests_per_connection().get()).map_err(
+            |_| CliError::LifecycleService {
+                reason: "request admission budget is not representable",
+            },
+        )?,
+    };
+
+    Ok(LifecycleMaterial {
+        certificate,
+        pinned_identity,
+        target,
+        binding,
+        limits,
+    })
+}
+
+fn lifecycle_duration(milliseconds: u64) -> Result<Duration> {
+    if milliseconds == 0 {
+        return Err(CliError::LifecycleService {
+            reason: "listener timeout is zero",
+        });
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
+async fn authenticated_lifecycle_session(
+    material: LifecycleMaterial,
+    operation: LifecycleOperation,
+    mut attempt: ReconnectAttempt,
+) -> Result<LifecycleResult> {
+    let cancel = CancelHandle::new();
+    let capability = match attempt.take_credential() {
+        Ok(capability) => capability,
+        Err(error) => {
+            let primary = lifecycle_credential_error(&error);
+            return match attempt.quarantine() {
+                Ok(()) => Err(primary),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
+            };
+        }
+    };
+    let hello = match lifecycle_hello_with_capability(capability) {
+        Ok(hello) => hello,
+        Err((failure, capability)) => {
+            return match attempt.restore_before_handshake(capability) {
+                Ok(_) => Err(failure),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
+            };
+        }
+    };
+
+    let connected = ClientSession::connect(
+        material.target,
+        material.certificate.clone(),
+        material.pinned_identity,
+        hello,
+        material.limits,
+        &cancel,
+    )
+    .await;
+    let (session, welcome) = match connected {
+        Ok(connected) => connected,
+        Err(error) => {
+            let failure = lifecycle_connect_error(&error);
+            return match attempt.quarantine() {
+                Ok(()) => Err(failure),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
+            };
+        }
+    };
+    let reconnect_lease =
+        match attempt.publish_next(material.binding, welcome.welcome.reconnect_capability) {
+            Ok(lease) => lease,
+            Err(error) => {
+                let _ = session.shutdown(&cancel).await;
+                return Err(lifecycle_credential_error(&error));
+            }
+        };
+
+    if !session.lifecycle_control_supported() {
+        let _ = session.shutdown(&cancel).await;
+        drop(reconnect_lease);
+        return Err(CliError::UnsupportedLifecycleControl);
+    }
+
+    let (request, expected_request_id) = match lifecycle_request(operation) {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = session.shutdown(&cancel).await;
+            drop(reconnect_lease);
+            return Err(error);
+        }
+    };
+    let (session, resolved) = match session
+        .request_acknowledging_response(request, &cancel)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let quarantine = lifecycle_request_requires_quarantine(&error);
+            let failure = lifecycle_request_error(&error);
+            if quarantine {
+                return match reconnect_lease.quarantine() {
+                    Ok(()) => Err(failure),
+                    Err(custody) => Err(lifecycle_credential_error(&custody)),
+                };
+            }
+            drop(reconnect_lease);
+            return Err(failure);
+        }
+    };
+    let result = classify_lifecycle_response(operation, &expected_request_id, &resolved);
+    // The request stage has already settled its terminal outcome. Shutdown is
+    // best-effort here; it cannot turn an acknowledged stop into a retryable
+    // operation and the session is consumed even if the bounded drain fails.
+    let _ = session.shutdown(&cancel).await;
+    if lifecycle_response_requires_quarantine(&expected_request_id, &resolved, &result) {
+        return match reconnect_lease.quarantine() {
+            Ok(()) => result,
+            Err(custody) => Err(lifecycle_credential_error(&custody)),
+        };
+    }
+    drop(reconnect_lease);
+    result
+}
+
+fn lifecycle_hello_with_capability(
+    capability: artisan_protocol::ReconnectCapability,
+) -> std::result::Result<WireEnvelope, (CliError, artisan_protocol::ReconnectCapability)> {
+    let (frame_id, sent_at) = match lifecycle_frame_stamp() {
+        Ok(stamp) => stamp,
+        Err(error) => return Err((error, capability)),
+    };
+    let Ok(supported_versions) = VersionOffer::new(vec![1]) else {
+        return Err((
+            CliError::LifecycleService {
+                reason: "build protocol version offer",
+            },
+            capability,
+        ));
+    };
+    Ok(WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id,
+        sent_at,
+        body: WireEnvelopeBody::Hello(Hello {
+            supported_versions,
+            credential: HelloCredential::Reconnect(capability),
+            supports_lifecycle_control: true,
+        }),
+    })
+}
+
+fn lifecycle_request(operation: LifecycleOperation) -> Result<(WireEnvelope, RequestId)> {
+    let (frame_id, sent_at) = lifecycle_frame_stamp()?;
+    let request_id = frame_id
+        .to_request_id()
+        .map_err(|_| CliError::LifecycleService {
+            reason: "build request correlation",
+        })?;
+    let request = match operation {
+        LifecycleOperation::Status => LifecycleRequest::Status,
+        LifecycleOperation::Stop => LifecycleRequest::Stop { require_idle: true },
+    };
+    let envelope = WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id,
+        sent_at,
+        body: WireEnvelopeBody::Request(ClientRequest::Lifecycle(request)),
+    };
+    envelope
+        .validate_correlation()
+        .map_err(|_| CliError::LifecycleService {
+            reason: "validate request correlation",
+        })?;
+    Ok((envelope, request_id))
+}
+
+fn lifecycle_frame_stamp() -> Result<(FrameId, UnixMillis)> {
+    let sent_at = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => {
+            UnixMillis::from_millis(i64::try_from(duration.as_millis()).map_err(|_| {
+                CliError::LifecycleService {
+                    reason: "build frame timestamp",
+                }
+            })?)
+        }
+        Err(error) => UnixMillis::from_millis(
+            i64::try_from(error.duration().as_millis())
+                .map_err(|_| CliError::LifecycleService {
+                    reason: "build frame timestamp",
+                })?
+                .saturating_neg(),
+        ),
+    };
+    let sequence = NEXT_LIFECYCLE_FRAME
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| CliError::LifecycleService {
+            reason: "lifecycle frame sequence exhausted",
+        })?
+        .checked_add(1)
+        .ok_or(CliError::LifecycleService {
+            reason: "lifecycle frame sequence exhausted",
+        })?;
+    let text = format!(
+        "native-{}-{}-{}",
+        std::process::id(),
+        sent_at.as_millis(),
+        sequence
+    );
+    let frame_id = FrameId::parse(text).map_err(|_| CliError::LifecycleService {
+        reason: "build frame identity",
+    })?;
+    frame_id
+        .to_request_id()
+        .map_err(|_| CliError::LifecycleService {
+            reason: "build frame correlation",
+        })?;
+    Ok((frame_id, sent_at))
+}
+
+fn classify_lifecycle_response(
+    operation: LifecycleOperation,
+    expected_request_id: &RequestId,
+    resolved: &artisan_transport::ResolvedRequest,
+) -> Result<LifecycleResult> {
+    if resolved.request_id() != expected_request_id {
+        return Err(CliError::LifecycleService {
+            reason: "response correlation failed",
+        });
+    }
+    match resolved.outcome() {
+        RequestOutcome::Failure(failure) => classify_lifecycle_failure(operation, failure.code),
+        RequestOutcome::Response(response) => match (&operation, &response.payload) {
+            (
+                LifecycleOperation::Status,
+                ResponsePayload::Lifecycle(LifecycleResponse::Status(status)),
+            ) => {
+                if status.validate().is_err() {
+                    return Err(CliError::LifecycleService {
+                        reason: "lifecycle status was invalid",
+                    });
+                }
+                Ok(LifecycleResult::Status(status.clone()))
+            }
+            (
+                LifecycleOperation::Stop,
+                ResponsePayload::Lifecycle(LifecycleResponse::Stop(receipt)),
+            ) => {
+                classify_stop_receipt(receipt)?;
+                Ok(LifecycleResult::Stop(receipt.clone()))
+            }
+            _ => Err(CliError::LifecycleService {
+                reason: "unexpected lifecycle response payload",
+            }),
+        },
+    }
+}
+
+fn classify_stop_receipt(receipt: &LifecycleStopReceipt) -> Result<()> {
+    if receipt.state != LifecycleState::Draining {
+        return Err(CliError::LifecycleService {
+            reason: "stop response did not enter draining",
+        });
+    }
     Ok(())
+}
+
+fn classify_lifecycle_failure(
+    operation: LifecycleOperation,
+    code: ErrorCode,
+) -> Result<LifecycleResult> {
+    match code {
+        ErrorCode::UnsupportedFeature => Err(CliError::UnsupportedLifecycleControl),
+        ErrorCode::LifecycleBusy if operation == LifecycleOperation::Stop => {
+            Err(CliError::LifecycleBusy)
+        }
+        _ => Err(CliError::LifecycleService {
+            reason: "Forge rejected the lifecycle request",
+        }),
+    }
+}
+
+fn lifecycle_connect_error(error: &ClientSessionError) -> CliError {
+    if matches!(error, ClientSessionError::Handshake(_)) {
+        CliError::LifecycleAmbiguous
+    } else {
+        CliError::LifecycleService {
+            reason: "lifecycle connection failed",
+        }
+    }
+}
+
+fn lifecycle_request_error(error: &ClientRequestError) -> CliError {
+    match error {
+        ClientRequestError::UnsupportedFeature => CliError::UnsupportedLifecycleControl,
+        ClientRequestError::Exchange(_) => CliError::LifecycleService {
+            reason: "lifecycle response exchange failed",
+        },
+        ClientRequestError::Reply(_) => CliError::LifecycleService {
+            reason: "lifecycle response was invalid",
+        },
+        ClientRequestError::NotARequest { .. }
+        | ClientRequestError::VersionMismatch { .. }
+        | ClientRequestError::Correlation(_)
+        | ClientRequestError::Admission(_) => CliError::LifecycleService {
+            reason: "lifecycle request was invalid",
+        },
+    }
+}
+
+fn lifecycle_request_requires_quarantine(error: &ClientRequestError) -> bool {
+    matches!(
+        error,
+        ClientRequestError::Correlation(_)
+            | ClientRequestError::Exchange(_)
+            | ClientRequestError::Reply(_)
+    )
+}
+
+fn lifecycle_response_requires_quarantine(
+    expected_request_id: &RequestId,
+    resolved: &artisan_transport::ResolvedRequest,
+    result: &Result<LifecycleResult>,
+) -> bool {
+    if resolved.request_id() != expected_request_id {
+        return true;
+    }
+    matches!(resolved.outcome(), RequestOutcome::Response(_)) && result.is_err()
+}
+
+fn lifecycle_credential_error(error: &ForgeCredentialError) -> CliError {
+    match error {
+        ForgeCredentialError::CapabilityBusy
+        | ForgeCredentialError::ReconnectCapabilityUnavailable
+        | ForgeCredentialError::ReconnectBindingMismatch
+        | ForgeCredentialError::ReconnectStaleWriter
+        | ForgeCredentialError::ReconnectGenerationOverflow
+        | ForgeCredentialError::ReconnectInvalidBinding
+        | ForgeCredentialError::ReconnectAttemptComplete
+        | ForgeCredentialError::ReconnectRecordExists => CliError::LifecycleCustody {
+            reason: "reconnect capability custody is unavailable",
+        },
+        _ => CliError::LifecycleCredentialState {
+            reason: "reconnect capability or client identity is unavailable",
+        },
+    }
+}
+
+fn print_lifecycle_status(
+    readiness: &process::ForgeReadiness,
+    lifecycle: &LifecycleStatus,
+    json: bool,
+) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "certificate_sha256": readiness.certificate_sha256(),
+                "endpoint": readiness.endpoint(),
+                "lifecycle": {
+                    "active_work_count": lifecycle.active_work_count,
+                    "state": lifecycle_state_name(lifecycle.state),
+                },
+                "pid": readiness.pid(),
+                "readiness": "ready",
+                "schema": readiness.schema(),
+            })
+        );
+    } else {
+        println!(
+            "ready (pid {} at {})",
+            readiness.pid(),
+            readiness.endpoint()
+        );
+        println!(
+            "lifecycle: {} ({} active work item(s))",
+            lifecycle_state_name(lifecycle.state),
+            lifecycle.active_work_count
+        );
+    }
+}
+
+fn print_stop_receipt(receipt: &LifecycleStopReceipt) {
+    match receipt.disposition {
+        LifecycleStopDisposition::Accepted => println!("stop accepted (draining)"),
+        LifecycleStopDisposition::Duplicate | LifecycleStopDisposition::AlreadyStopping => {
+            println!("stop already in progress (draining)");
+        }
+    }
+}
+
+const fn lifecycle_state_name(state: LifecycleState) -> &'static str {
+    match state {
+        LifecycleState::Ready => "ready",
+        LifecycleState::Busy => "busy",
+        LifecycleState::Draining => "draining",
+    }
 }
 
 fn logs(layout: &Layout, lines: usize, follow: bool) -> Result<()> {
@@ -1444,39 +1986,21 @@ mod tests {
     }
 
     #[test]
-    fn hidden_exact_stop_and_autostart_commands_parse_without_widening_stop() {
-        let exact_stop = Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1"]).unwrap();
-        assert!(matches!(
-            exact_stop.command,
-            Some(Commands::Stop {
-                instance_id: Some(id),
-                pid: None,
-                if_idle: false,
-            }) if id == "forge-1"
-        ));
+    fn idle_pid_stop_is_the_only_supported_stop_syntax() {
         let pid_stop = Cli::try_parse_from(["ae", "stop", "--pid", "6172", "--if-idle"]).unwrap();
         assert!(matches!(
             pid_stop.command,
             Some(Commands::Stop {
-                instance_id: None,
-                pid: Some(6172),
+                pid,
                 if_idle: true,
-            })
+            }) if pid.get() == 6172
         ));
-        assert!(
-            Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1", "--pid", "6172",])
-                .is_err()
-        );
-        let ordinary_stop = Cli::try_parse_from(["ae", "stop"]).unwrap();
-        assert!(matches!(
-            ordinary_stop.command,
-            Some(Commands::Stop {
-                instance_id: None,
-                pid: None,
-                if_idle: false,
-            })
-        ));
+        assert!(Cli::try_parse_from(["ae", "stop"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "6172"]).is_err());
         assert!(Cli::try_parse_from(["ae", "stop", "--if-idle"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "0", "--if-idle"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "6172", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1"]).is_err());
         let disable = Cli::try_parse_from(["ae", "autostart", "--disable"]).unwrap();
         assert!(matches!(
             disable.command,
@@ -1524,15 +2048,172 @@ mod tests {
     }
 
     #[test]
-    fn native_lifecycle_controls_are_explicitly_unsupported_before_l1() {
+    fn restart_remains_explicitly_unsupported() {
         assert!(matches!(
             unsupported_lifecycle_control(),
             Err(CliError::UnsupportedLifecycleControl)
         ));
         assert_eq!(
             CliError::UnsupportedLifecycleControl.to_string(),
-            "native Forge lifecycle control is unavailable until L1"
+            "native Forge lifecycle control is unsupported by this Forge"
         );
+    }
+
+    #[test]
+    fn lifecycle_requests_are_correlated_and_stop_is_idle_fenced() {
+        let (status, status_id) = lifecycle_request(LifecycleOperation::Status).unwrap();
+        assert_eq!(status.frame_id.to_request_id().unwrap(), status_id);
+        assert!(matches!(
+            status.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(LifecycleRequest::Status))
+        ));
+
+        let (stop, stop_id) = lifecycle_request(LifecycleOperation::Stop).unwrap();
+        assert_eq!(stop.frame_id.to_request_id().unwrap(), stop_id);
+        assert_ne!(status.frame_id, stop.frame_id);
+        assert!(matches!(
+            stop.body,
+            WireEnvelopeBody::Request(ClientRequest::Lifecycle(LifecycleRequest::Stop {
+                require_idle: true
+            }))
+        ));
+    }
+
+    #[test]
+    fn lifecycle_failure_boundaries_are_typed_without_retryable_outcomes() {
+        assert_eq!(
+            classify_lifecycle_failure(LifecycleOperation::Stop, ErrorCode::LifecycleBusy)
+                .unwrap_err()
+                .exit_code(),
+            5
+        );
+        assert_eq!(
+            classify_lifecycle_failure(LifecycleOperation::Status, ErrorCode::Internal)
+                .unwrap_err()
+                .exit_code(),
+            72
+        );
+        assert_eq!(
+            classify_lifecycle_failure(LifecycleOperation::Status, ErrorCode::UnsupportedFeature)
+                .unwrap_err()
+                .exit_code(),
+            1
+        );
+        assert_eq!(
+            lifecycle_connect_error(&ClientSessionError::DeliveryAlreadyTaken).exit_code(),
+            72
+        );
+    }
+
+    #[test]
+    fn lifecycle_handshake_and_request_failures_are_terminal_and_redacted() {
+        let handshake_timeout = ClientSessionError::Handshake(DeadlineError::Timeout {
+            operation: OperationKind::Handshake,
+            limit: Duration::from_millis(10),
+        });
+        assert_eq!(lifecycle_connect_error(&handshake_timeout).exit_code(), 75);
+
+        let connect_timeout = ClientSessionError::Connect(DeadlineError::Timeout {
+            operation: OperationKind::Connect,
+            limit: Duration::from_millis(10),
+        });
+        assert_eq!(lifecycle_connect_error(&connect_timeout).exit_code(), 72);
+
+        let acknowledgement_timeout = ClientRequestError::Exchange(DeadlineError::Timeout {
+            operation: OperationKind::Receive,
+            limit: Duration::from_millis(10),
+        });
+        assert!(lifecycle_request_requires_quarantine(
+            &acknowledgement_timeout
+        ));
+        let failure = lifecycle_request_error(&acknowledgement_timeout);
+        assert_eq!(failure.exit_code(), 72);
+        assert!(!failure.to_string().contains("10ms"));
+
+        let correlation_failure =
+            ClientRequestError::Correlation(artisan_domain::IdentifierError::Empty);
+        assert!(lifecycle_request_requires_quarantine(&correlation_failure));
+    }
+
+    #[test]
+    fn lifecycle_hello_advertises_control_with_only_reconnect_credential() {
+        let Ok(hello) =
+            lifecycle_hello_with_capability(artisan_protocol::ReconnectCapability::from_bytes(
+                [0xa5; artisan_protocol::RECONNECT_CAPABILITY_BYTES],
+            ))
+        else {
+            panic!("lifecycle hello construction failed");
+        };
+        let WireEnvelopeBody::Hello(hello) = hello.body else {
+            panic!("lifecycle hello body");
+        };
+        assert!(hello.supports_lifecycle_control);
+        assert!(matches!(hello.credential, HelloCredential::Reconnect(_)));
+    }
+
+    #[test]
+    fn lifecycle_custody_states_keep_missing_malformed_and_stale_fences_distinct() {
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectRecordMissing).exit_code(),
+            64
+        );
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectRecordMalformed).exit_code(),
+            64
+        );
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::CapabilityBusy).exit_code(),
+            75
+        );
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectStaleWriter).exit_code(),
+            75
+        );
+        assert_eq!(
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectBindingMismatch).exit_code(),
+            75
+        );
+    }
+
+    #[test]
+    fn lifecycle_status_accepts_all_valid_states_and_stop_only_drains() {
+        for (state, count) in [
+            (LifecycleState::Ready, 0),
+            (LifecycleState::Busy, 2),
+            (LifecycleState::Draining, 2),
+        ] {
+            let status = LifecycleStatus::new(state, count).unwrap();
+            assert_eq!(
+                lifecycle_state_name(state),
+                match state {
+                    LifecycleState::Ready => "ready",
+                    LifecycleState::Busy => "busy",
+                    LifecycleState::Draining => "draining",
+                }
+            );
+            assert!(status.validate().is_ok());
+        }
+        let ready_receipt = LifecycleStopReceipt {
+            disposition: LifecycleStopDisposition::Accepted,
+            state: LifecycleState::Ready,
+        };
+        assert_eq!(
+            classify_stop_receipt(&ready_receipt)
+                .unwrap_err()
+                .exit_code(),
+            72
+        );
+        for disposition in [
+            LifecycleStopDisposition::Accepted,
+            LifecycleStopDisposition::Duplicate,
+            LifecycleStopDisposition::AlreadyStopping,
+        ] {
+            let receipt = LifecycleStopReceipt {
+                disposition,
+                state: LifecycleState::Draining,
+            };
+            assert!(classify_stop_receipt(&receipt).is_ok());
+        }
     }
 
     #[test]
