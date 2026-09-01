@@ -636,120 +636,129 @@ fn validate_log_request(raw: &[u8], expected_auth: &str) -> Result<(), u16> {
 }
 
 fn p4_server_loop(listener: &TcpListener, expected_auth: &str) {
+    if !serve_p4_health_phase(listener, expected_auth) {
+        return;
+    }
+    if !serve_p4_prompt_phase(listener, expected_auth) {
+        return;
+    }
+    serve_p4_log_phase(listener, expected_auth);
+}
+
+fn serve_p4_health_phase(listener: &TcpListener, expected_auth: &str) -> bool {
     // Step 1: GET /api/health
     let Ok((mut stream, _)) = listener.accept() else {
-        return;
+        return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let Ok(raw) = read_bounded_headers(&mut stream) else {
         send_error(&mut stream, 400);
-        return;
+        return false;
     };
     match validate_health_request(&raw, expected_auth) {
         Ok(()) => send_health_ok(&mut stream, EXPECTED_HEALTH_VERSION),
         Err(code) => {
             send_error(&mut stream, code);
-            return;
+            return false;
         }
     }
     drop(stream);
+    true
+}
 
+fn serve_p4_prompt_phase(listener: &TcpListener, expected_auth: &str) -> bool {
     // Step 2 is flexible: either POST /api/session (configured create) or
     // POST /api/session/test-session/prompt (smoke direct). The smoke harness
     // historically sent prompt immediately after health, so we accept either to
     // keep the fixture backward compatible.
     let Ok((mut stream2, _)) = listener.accept() else {
-        return;
+        return false;
     };
     let _ = stream2.set_read_timeout(Some(Duration::from_secs(5)));
     let Ok((raw2, body_prefix2)) = read_bounded_headers_with_remainder(&mut stream2) else {
         send_error(&mut stream2, 400);
-        return;
+        return false;
     };
 
     // Try create-session first.
     if let Ok(declared_create) = validate_create_session_request(&raw2, expected_auth) {
-        let body_create = match read_exact_body_with_prefix(
-            &mut stream2,
-            declared_create,
-            PROMPT_BODY_CAP,
-            body_prefix2,
-        ) {
-            Ok(b) => b,
-            Err(code) => {
-                send_error(&mut stream2, code);
-                return;
-            }
-        };
-        if validate_create_session_json(&body_create).is_err() {
-            send_error(&mut stream2, 400);
-            return;
+        if !serve_p4_create_session(&mut stream2, declared_create, body_prefix2) {
+            return false;
         }
-        send_create_session_ok(&mut stream2);
         drop(stream2);
 
         // Step 3: POST /api/session/test-session/prompt (after create)
-        let Ok((mut stream_prompt, _)) = listener.accept() else {
-            return;
-        };
-        let _ = stream_prompt.set_read_timeout(Some(Duration::from_secs(5)));
-        let Ok((raw_prompt, body_prefix_prompt)) =
-            read_bounded_headers_with_remainder(&mut stream_prompt)
-        else {
-            send_error(&mut stream_prompt, 400);
-            return;
-        };
-        let declared_prompt = match validate_prompt_request(&raw_prompt, expected_auth) {
-            Ok(n) => n,
-            Err(code) => {
-                send_error(&mut stream_prompt, code);
-                return;
-            }
-        };
-        let body_prompt = match read_exact_body_with_prefix(
-            &mut stream_prompt,
-            declared_prompt,
-            PROMPT_BODY_CAP,
-            body_prefix_prompt,
-        ) {
-            Ok(b) => b,
-            Err(code) => {
-                send_error(&mut stream_prompt, code);
-                return;
-            }
-        };
-        if validate_prompt_json(&body_prompt).is_err() {
-            send_error(&mut stream_prompt, 400);
-            return;
-        }
-        send_prompt_ok(&mut stream_prompt);
-        drop(stream_prompt);
+        serve_p4_prompt_after_create(listener, expected_auth)
     } else if let Ok(declared_prompt) = validate_prompt_request(&raw2, expected_auth) {
         // Smoke path: prompt directly without prior create.
-        let body_prompt = match read_exact_body_with_prefix(
-            &mut stream2,
-            declared_prompt,
-            PROMPT_BODY_CAP,
-            body_prefix2,
-        ) {
-            Ok(b) => b,
-            Err(code) => {
-                send_error(&mut stream2, code);
-                return;
-            }
-        };
-        if validate_prompt_json(&body_prompt).is_err() {
-            send_error(&mut stream2, 400);
-            return;
+        if !serve_p4_prompt_body(&mut stream2, declared_prompt, body_prefix2) {
+            return false;
         }
-        send_prompt_ok(&mut stream2);
         drop(stream2);
+        true
     } else {
         // Neither create nor prompt matches.
         send_error(&mut stream2, 400);
-        return;
+        false
     }
+}
 
+fn serve_p4_create_session(stream: &mut TcpStream, declared: usize, body_prefix: Vec<u8>) -> bool {
+    let body = match read_exact_body_with_prefix(stream, declared, PROMPT_BODY_CAP, body_prefix) {
+        Ok(body) => body,
+        Err(code) => {
+            send_error(stream, code);
+            return false;
+        }
+    };
+    if validate_create_session_json(&body).is_err() {
+        send_error(stream, 400);
+        return false;
+    }
+    send_create_session_ok(stream);
+    true
+}
+
+fn serve_p4_prompt_after_create(listener: &TcpListener, expected_auth: &str) -> bool {
+    let Ok((mut stream, _)) = listener.accept() else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let Ok((raw, body_prefix)) = read_bounded_headers_with_remainder(&mut stream) else {
+        send_error(&mut stream, 400);
+        return false;
+    };
+    let declared = match validate_prompt_request(&raw, expected_auth) {
+        Ok(n) => n,
+        Err(code) => {
+            send_error(&mut stream, code);
+            return false;
+        }
+    };
+    if !serve_p4_prompt_body(&mut stream, declared, body_prefix) {
+        return false;
+    }
+    drop(stream);
+    true
+}
+
+fn serve_p4_prompt_body(stream: &mut TcpStream, declared: usize, body_prefix: Vec<u8>) -> bool {
+    let body = match read_exact_body_with_prefix(stream, declared, PROMPT_BODY_CAP, body_prefix) {
+        Ok(body) => body,
+        Err(code) => {
+            send_error(stream, code);
+            return false;
+        }
+    };
+    if validate_prompt_json(&body).is_err() {
+        send_error(stream, 400);
+        return false;
+    }
+    send_prompt_ok(stream);
+    true
+}
+
+fn serve_p4_log_phase(listener: &TcpListener, expected_auth: &str) {
     // Next: GET /api/experimental/session/test-session/log?after=0&follow=true
     let Ok((mut stream3, _)) = listener.accept() else {
         return;
