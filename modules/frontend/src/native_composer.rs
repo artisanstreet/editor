@@ -99,6 +99,15 @@ impl NativeComposer {
         self.state.draft()
     }
 
+    /// Returns whether the authored draft is byte-identical to `body`.
+    ///
+    /// This read-only seam keeps draft comparison out of the submission
+    /// lifecycle: it does not expose text, allocate, mint a token, mutate
+    /// editor state, or notify observers.
+    pub(crate) fn draft_matches_body(&self, body: &artisan_domain::MessageBody) -> bool {
+        self.state.draft().as_bytes() == body.as_str().as_bytes()
+    }
+
     #[cfg(test)]
     pub(crate) fn set_draft(&mut self, draft: impl Into<String>) {
         self.state.set_draft(draft);
@@ -943,6 +952,40 @@ mod tests {
             });
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn draft_body_match_is_exact_and_does_not_change_editor_state(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let draft = "  exact\n😀  ";
+        set_draft(cx, &view, draft);
+
+        cx.update(|_, app| {
+            view.update(app, |composer, _| {
+                composer.selection = 2..7;
+                composer.selection_reversed = true;
+                composer.marked_range = Some(2..7);
+                let selection = composer.selection.clone();
+                let selection_reversed = composer.selection_reversed;
+                let marked_range = composer.marked_range.clone();
+                let layout_present = composer.layout.is_some();
+                let painted_bounds_present = composer.painted_bounds.is_some();
+                let submitting = composer.is_submitting();
+                let body =
+                    artisan_domain::MessageBody::parse(draft.to_owned()).expect("draft body");
+                let changed = artisan_domain::MessageBody::parse("  exact\n😀  !".to_owned())
+                    .expect("changed body");
+
+                assert!(composer.draft_matches_body(&body));
+                assert!(!composer.draft_matches_body(&changed));
+                assert_eq!(composer.selection, selection);
+                assert_eq!(composer.selection_reversed, selection_reversed);
+                assert_eq!(composer.marked_range, marked_range);
+                assert_eq!(composer.layout.is_some(), layout_present);
+                assert_eq!(composer.painted_bounds.is_some(), painted_bounds_present);
+                assert_eq!(composer.is_submitting(), submitting);
+            });
+        });
     }
 
     fn bind_actions(cx: &mut VisualTestContext) {

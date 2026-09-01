@@ -187,7 +187,6 @@ pub struct NativeApplication {
     message_flight: Option<NativeMessageFlight>,
     message_retry: Option<NativeMessageRetry>,
     message_retry_draft_matches: bool,
-    suppress_next_composer_observation: bool,
     message_receipt: Option<FirstMessageReceipt>,
     message_failure: Option<NativeMessageFailure>,
     picker: Option<Entity<ProjectPickerView>>,
@@ -270,7 +269,6 @@ impl NativeApplication {
             message_flight: None,
             message_retry: None,
             message_retry_draft_matches: false,
-            suppress_next_composer_observation: false,
             message_receipt: None,
             message_failure: None,
             picker: None,
@@ -474,13 +472,6 @@ impl NativeApplication {
             && !self.composer.read(cx).is_submitting()
     }
 
-    /// Checks the current draft through the existing composer submission seam.
-    ///
-    /// `NativeComposer` deliberately keeps its draft private in production.
-    /// Beginning and immediately retaining a probe gives this application the
-    /// validated current bytes without adding a draft getter or changing the
-    /// lower composer API. The probe token is retired like every other token;
-    /// it is never reused for the actual retry flight.
     fn message_retry_is_admissible(&self, cx: &App) -> bool {
         self.message_retry_context_is_admissible(cx) && self.message_retry_draft_matches
     }
@@ -490,29 +481,13 @@ impl NativeApplication {
         composer: Entity<NativeComposer>,
         cx: &mut Context<Self>,
     ) {
-        if self.suppress_next_composer_observation {
-            self.suppress_next_composer_observation = false;
-            return;
-        }
         let Some(retry) = self.message_retry.as_ref() else {
             return;
         };
         if self.message_flight.is_some() {
             return;
         }
-        let expected = retry.body.clone();
-        let submission = composer.update(cx, |composer, _| composer.begin_submission());
-        let matches = match submission {
-            Ok((body, token)) => {
-                let matches = body.as_str().as_bytes() == expected.as_str().as_bytes();
-                composer.update(cx, |composer, composer_cx| {
-                    composer.finish_submission(token, DraftDisposition::Retained, composer_cx);
-                });
-                self.suppress_next_composer_observation = true;
-                matches
-            }
-            Err(_) => false,
-        };
+        let matches = composer.read(cx).draft_matches_body(&retry.body);
         self.message_retry_draft_matches = matches;
         cx.notify();
     }
@@ -520,7 +495,6 @@ impl NativeApplication {
     fn clear_message_retry(&mut self) {
         self.message_retry = None;
         self.message_retry_draft_matches = false;
-        self.suppress_next_composer_observation = false;
         self.message_retry_focus_handle = self.message_retry_focus_handle.clone().tab_stop(false);
     }
 
