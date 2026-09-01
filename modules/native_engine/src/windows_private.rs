@@ -14,6 +14,7 @@ const ACL_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ACL_OUTPUT_BYTES: usize = 64 * 1024;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct WindowsIdentity {
     sid: String,
     account: String,
@@ -29,10 +30,32 @@ pub(crate) fn restrict_directory(path: &Path) -> Result<(), NativeFileError> {
             path_text.clone(),
             "/inheritance:r".to_owned(),
             "/grant:r".to_owned(),
-            grant,
+            grant.clone(),
         ],
     )?;
-    if !output.status.success() {
+    validate_icacls_mutation_output(&output)?;
+
+    let query = query_directory_acl(&path_text)?;
+    let removals = plan_acl_removals(&query, &identity, &path_text)?;
+    if !removals.is_empty() {
+        for principal in removals {
+            let removal = icacls_remove_argument(&principal)?;
+            let output = run_command(
+                "icacls.exe",
+                &[path_text.clone(), "/remove".to_owned(), removal],
+            )?;
+            validate_icacls_mutation_output(&output)?;
+        }
+
+        let output = run_command(
+            "icacls.exe",
+            &[path_text.clone(), "/grant:r".to_owned(), grant],
+        )?;
+        validate_icacls_mutation_output(&output)?;
+    }
+
+    let final_identity = resolve_current_identity()?;
+    if !same_identity(&identity, &final_identity) {
         return Err(NativeFileError::PrivatePermissions);
     }
     validate_directory_output(path, &path_text, &identity)
@@ -49,13 +72,43 @@ fn validate_directory_output(
     path_text: &str,
     identity: &WindowsIdentity,
 ) -> Result<(), NativeFileError> {
+    let text = query_directory_acl(path_text)?;
+    let is_directory = std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
+    validate_acl(&text, path_text, identity, is_directory)
+}
+
+fn query_directory_acl(path_text: &str) -> Result<String, NativeFileError> {
     let output = run_command("icacls.exe", &[path_text.to_owned()])?;
     if !output.status.success() {
         return Err(NativeFileError::PrivatePermissions);
     }
-    let text = String::from_utf8(output.stdout).map_err(|_| NativeFileError::PrivatePermissions)?;
-    let is_directory = std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
-    validate_acl(&text, path_text, identity, is_directory)
+    String::from_utf8(output.stdout).map_err(|_| NativeFileError::PrivatePermissions)
+}
+
+fn validate_icacls_mutation_output(output: &Output) -> Result<(), NativeFileError> {
+    if !output.status.success() {
+        return Err(NativeFileError::PrivatePermissions);
+    }
+    let text =
+        std::str::from_utf8(&output.stdout).map_err(|_| NativeFileError::PrivatePermissions)?;
+    let mut saw_summary = false;
+    for line in text.lines() {
+        if line.chars().any(char::is_control) {
+            return Err(NativeFileError::PrivatePermissions);
+        }
+        let lower = line.trim().to_ascii_lowercase();
+        if lower.starts_with("successfully") {
+            if !is_success_summary(&lower) || saw_summary {
+                return Err(NativeFileError::PrivatePermissions);
+            }
+            saw_summary = true;
+        }
+    }
+    Ok(())
+}
+
+fn same_identity(left: &WindowsIdentity, right: &WindowsIdentity) -> bool {
+    left.sid.eq_ignore_ascii_case(&right.sid) && left.account.eq_ignore_ascii_case(&right.account)
 }
 
 fn run_command(executable: &str, arguments: &[String]) -> Result<Output, NativeFileError> {
@@ -166,6 +219,9 @@ fn is_valid_account(account: &str) -> bool {
         || account.contains(':')
         || account.contains('"')
         || account.contains(',')
+        || account.contains('*')
+        || account.contains('(')
+        || account.contains(')')
         || account.chars().any(char::is_control)
     {
         return false;
@@ -186,28 +242,27 @@ fn validate_acl(
     let [ace] = ace_lines.as_slice() else {
         return Err(NativeFileError::PrivatePermissions);
     };
-    let colon = ace.find(':').ok_or(NativeFileError::PrivatePermissions)?;
-    let principal = ace[..colon].trim();
+    let principal = ace.principal.as_str();
     if !principal.eq_ignore_ascii_case(&identity.sid)
         && !principal.eq_ignore_ascii_case(&identity.account)
     {
         return Err(NativeFileError::PrivatePermissions);
     }
-    let tokens = parse_flag_tokens(&ace[colon + 1..])?;
     let required: &[&str] = if expect_directory {
         &["f", "oi", "ci"]
     } else {
         &["f"]
     };
-    if tokens.len() != required.len()
+    if ace.tokens.len() != required.len()
         || required.iter().any(|required| {
-            tokens
+            ace.tokens
                 .iter()
                 .filter(|candidate| candidate.as_str() == *required)
                 .count()
                 != 1
         })
-        || tokens
+        || ace
+            .tokens
             .iter()
             .any(|token| !required.contains(&token.as_str()))
     {
@@ -216,56 +271,88 @@ fn validate_acl(
     Ok(())
 }
 
-fn collect_ace_lines(output: &str, queried_path: &str) -> Result<Vec<String>, NativeFileError> {
+#[derive(Debug, Eq, PartialEq)]
+struct ParsedAce {
+    principal: String,
+    tokens: Vec<String>,
+}
+
+fn collect_ace_lines(output: &str, queried_path: &str) -> Result<Vec<ParsedAce>, NativeFileError> {
     if output.len() > MAX_ACL_OUTPUT_BYTES {
         return Err(NativeFileError::TooLarge);
     }
     let queried_lower = queried_path.to_ascii_lowercase();
     let mut first_line = true;
+    let mut saw_summary = false;
     let mut ace_lines = Vec::new();
     for line in output.lines() {
+        if line.chars().any(char::is_control) {
+            return Err(NativeFileError::PrivatePermissions);
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("successfully") {
-            if is_success_summary(&lower) {
-                continue;
+            if !is_success_summary(&lower) || saw_summary {
+                return Err(NativeFileError::PrivatePermissions);
             }
-            return Err(NativeFileError::PrivatePermissions);
+            saw_summary = true;
+            continue;
         }
         let mut candidate = trimmed.to_owned();
         if !queried_path.is_empty() && lower.starts_with(&queried_lower) {
-            let remainder = trimmed[queried_path.len()..].trim();
+            let remainder = &trimmed[queried_path.len()..];
             if remainder.is_empty() {
                 first_line = false;
                 continue;
             }
-            remainder.clone_into(&mut candidate);
-        } else if first_line && trimmed.contains(":\\") && !trimmed.contains('(') {
+            if !remainder.chars().next().is_some_and(char::is_whitespace) {
+                return Err(NativeFileError::PrivatePermissions);
+            }
+            remainder.trim().clone_into(&mut candidate);
+        } else if first_line && is_windows_path_header(trimmed) && !trimmed.contains('(') {
+            if !queried_path.is_empty() {
+                return Err(NativeFileError::PrivatePermissions);
+            }
             first_line = false;
             continue;
         }
         first_line = false;
-        let colon = candidate
-            .find(':')
-            .ok_or(NativeFileError::PrivatePermissions)?;
-        if candidate[..colon].trim().is_empty() {
-            return Err(NativeFileError::PrivatePermissions);
-        }
-        parse_flag_tokens(&candidate[colon + 1..])?;
-        ace_lines.push(candidate);
+        ace_lines.push(parse_ace_line(&candidate)?);
     }
     Ok(ace_lines)
 }
 
+fn is_windows_path_header(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\')
+        || line.starts_with(r"\\")
+}
+
+fn parse_ace_line(line: &str) -> Result<ParsedAce, NativeFileError> {
+    let colon = line.find(':').ok_or(NativeFileError::PrivatePermissions)?;
+    let principal = line[..colon].trim();
+    if principal.is_empty() || principal.chars().any(char::is_control) {
+        return Err(NativeFileError::PrivatePermissions);
+    }
+    let tokens = parse_flag_tokens(&line[colon + 1..])?;
+    Ok(ParsedAce {
+        principal: principal.to_owned(),
+        tokens,
+    })
+}
+
 fn parse_flag_tokens(flags: &str) -> Result<Vec<String>, NativeFileError> {
+    if flags.chars().any(char::is_control) {
+        return Err(NativeFileError::PrivatePermissions);
+    }
     let chars = flags.chars().collect::<Vec<_>>();
     let mut index = 0;
     let mut tokens = Vec::new();
     while index < chars.len() {
-        while index < chars.len() && chars[index].is_whitespace() {
+        while index < chars.len() && chars[index] == ' ' {
             index += 1;
         }
         if index == chars.len() || chars[index] != '(' {
@@ -279,18 +366,114 @@ fn parse_flag_tokens(flags: &str) -> Result<Vec<String>, NativeFileError> {
         if index == chars.len() || index == start {
             return Err(NativeFileError::PrivatePermissions);
         }
-        tokens.push(
-            chars[start..index]
+        let token = chars[start..index].iter().collect::<String>();
+        if !token.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            || tokens
                 .iter()
-                .collect::<String>()
-                .to_ascii_lowercase(),
-        );
+                .any(|candidate: &String| candidate.eq_ignore_ascii_case(&token))
+        {
+            return Err(NativeFileError::PrivatePermissions);
+        }
+        tokens.push(token.to_ascii_lowercase());
         index += 1;
     }
     if tokens.is_empty() {
         Err(NativeFileError::PrivatePermissions)
     } else {
         Ok(tokens)
+    }
+}
+
+fn plan_acl_removals(
+    output: &str,
+    identity: &WindowsIdentity,
+    queried_path: &str,
+) -> Result<Vec<String>, NativeFileError> {
+    if !is_valid_sid(&identity.sid)
+        || !is_valid_account(&identity.account)
+        || identity.sid.eq_ignore_ascii_case(&identity.account)
+    {
+        return Err(NativeFileError::PrivatePermissions);
+    }
+    let ace_lines = collect_ace_lines(output, queried_path)?;
+    if ace_lines.is_empty() {
+        return Err(NativeFileError::PrivatePermissions);
+    }
+
+    let mut removals = Vec::new();
+    let mut current_identity_count = 0;
+    for ace in ace_lines {
+        if ace
+            .tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "i" | "deny" | "allow"))
+        {
+            return Err(NativeFileError::PrivatePermissions);
+        }
+
+        let is_current_identity = ace.principal.eq_ignore_ascii_case(&identity.sid)
+            || ace.principal.eq_ignore_ascii_case(&identity.account);
+        if is_current_identity {
+            current_identity_count += 1;
+            if current_identity_count > 1 {
+                return Err(NativeFileError::PrivatePermissions);
+            }
+            continue;
+        }
+
+        if !is_safe_acl_principal(&ace.principal)
+            || removals
+                .iter()
+                .any(|candidate: &String| candidate.eq_ignore_ascii_case(&ace.principal))
+        {
+            return Err(NativeFileError::PrivatePermissions);
+        }
+        removals.push(ace.principal);
+    }
+
+    if current_identity_count != 1 {
+        return Err(NativeFileError::PrivatePermissions);
+    }
+    Ok(removals)
+}
+
+fn is_safe_acl_principal(principal: &str) -> bool {
+    if principal.is_empty()
+        || principal.chars().any(|character| {
+            character.is_control() || matches!(character, '*' | '(' | ')' | ':' | ',' | '"')
+        })
+    {
+        return false;
+    }
+    if is_valid_sid(principal) || is_valid_account(principal) {
+        return true;
+    }
+    matches!(
+        principal.to_ascii_lowercase().as_str(),
+        "everyone"
+            | "creator owner"
+            | "owner rights"
+            | "all application packages"
+            | "all restricted application packages"
+            | "authenticated users"
+            | "anonymous logon"
+            | "interactive"
+            | "local service"
+            | "network service"
+            | "administrators"
+            | "users"
+            | "system"
+    )
+}
+
+fn icacls_remove_argument(principal: &str) -> Result<String, NativeFileError> {
+    if !is_safe_acl_principal(principal) {
+        return Err(NativeFileError::PrivatePermissions);
+    }
+    if is_valid_sid(principal) {
+        Ok(format!("*{principal}"))
+    } else {
+        Ok(principal.to_owned())
     }
 }
 
@@ -341,5 +524,84 @@ Successfully processed 1 files; Failed processing 0 files.",
         ] {
             assert!(validate_acl(invalid, r"C:\\private", &identity, true).is_err());
         }
+    }
+
+    #[test]
+    fn acl_planner_converges_multiple_safe_explicit_principals() {
+        let identity = identity();
+        let path = r"C:\\private";
+        let output = format!(
+            "{path} {}:(OI)(CI)(F)\nDOMAIN\\Runner:(OI)(CI)(F)\nBUILTIN\\Administrators:(F)\nEveryone:(F)",
+            identity.sid
+        );
+        assert_eq!(
+            plan_acl_removals(&output, &identity, path).unwrap(),
+            vec![
+                "DOMAIN\\Runner".to_owned(),
+                "BUILTIN\\Administrators".to_owned(),
+                "Everyone".to_owned(),
+            ]
+        );
+        let converged = format!("{path} {}:(OI)(CI)(F)", identity.sid);
+        assert!(validate_acl(&converged, path, &identity, true).is_ok());
+    }
+
+    #[test]
+    fn exact_single_owner_acl_is_a_noop() {
+        let identity = identity();
+        let path = r"C:\\private";
+        let output = format!("{path} {}:(OI)(CI)(F)", identity.sid);
+        assert_eq!(
+            plan_acl_removals(&output, &identity, path).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn acl_planner_rejects_inherited_duplicate_malformed_and_unsafe_shapes() {
+        let identity = identity();
+        let path = r"C:\\private";
+        let sid = identity.sid.as_str();
+        let account = identity.account.as_str();
+        for output in [
+            format!("{path} {sid}:(I)(OI)(CI)(F)"),
+            format!("{path} {sid}:(OI)(CI)(F)\n{account}:(OI)(CI)(F)"),
+            format!("{path} {sid}:(OI)(CI)(F)\nDOMAIN/Runner:(F)"),
+            format!("{path} {sid}:(OI)(CI)(F)\nDOMAIN\\Runner:(F)\nDOMAIN\\runner:(M)"),
+            format!("{path} {sid}:(OI)(CI)(F)\nEveryone:(DENY)(F)"),
+            format!("{path} {sid}:(OI)(CI)(F)\n*:(F)"),
+            format!("{path} {sid}:(OI)(CI)(F)\nDOMAIN\\Other\u{0007}:(F)"),
+            format!("{path} {sid}:(OI)(CI)(F)(F)"),
+            format!("{path} {sid}:(OI)(CI)(F)\u{0007}"),
+            format!("{path} {sid}:(OI)(CI)(F) trailing"),
+        ] {
+            assert!(plan_acl_removals(&output, &identity, path).is_err());
+        }
+    }
+
+    #[test]
+    fn acl_parser_rejects_ambiguous_path_and_summary_output() {
+        let identity = identity();
+        let path = r"C:\\private";
+        let wrong_path = r"C:\\other";
+        let wrong_header = format!("{wrong_path} {}:(OI)(CI)(F)", identity.sid);
+        assert!(plan_acl_removals(&wrong_header, &identity, path).is_err());
+
+        let duplicate_summary = format!(
+            "{path} {}:(OI)(CI)(F)\nSuccessfully processed 1 files; Failed processing 0 files.\nSuccessfully processed 1 files; Failed processing 0 files.",
+            identity.sid
+        );
+        assert!(plan_acl_removals(&duplicate_summary, &identity, path).is_err());
+
+        let malformed_summary = format!(
+            "{path} {}:(OI)(CI)(F)\nSuccessfully processed 2 files; Failed processing 0 files.",
+            identity.sid
+        );
+        assert!(plan_acl_removals(&malformed_summary, &identity, path).is_err());
+        let oversized = "x".repeat(MAX_ACL_OUTPUT_BYTES + 1);
+        assert_eq!(
+            collect_ace_lines(&oversized, path),
+            Err(NativeFileError::TooLarge)
+        );
     }
 }
