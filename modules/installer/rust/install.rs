@@ -1764,7 +1764,7 @@ fn inspect_activation_pointer(
     };
     let mut file =
         open_for_read(path, EntryKind::File).map_err(|_| ambiguous_activation_error())?;
-    if identity_from_file(&file, EntryKind::File).map_err(|_| ambiguous_activation_error())?
+    if identity_from_file(&file, EntryKind::File).map_err(|()| ambiguous_activation_error())?
         != identity
     {
         return Err(ambiguous_activation_error());
@@ -1772,7 +1772,7 @@ fn inspect_activation_pointer(
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|_| ambiguous_activation_error())?;
-    if identity_from_file(&file, EntryKind::File).map_err(|_| ambiguous_activation_error())?
+    if identity_from_file(&file, EntryKind::File).map_err(|()| ambiguous_activation_error())?
         != identity
     {
         return Err(ambiguous_activation_error());
