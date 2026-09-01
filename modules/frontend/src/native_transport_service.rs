@@ -21,13 +21,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::subscription_projection::{
+    DeliveryOutcome, SubscriptionHandle, SubscriptionProjectionRegistry, SubscriptionStatus,
+};
 use artisan_domain::{
-    AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationQuery,
-    ConversationQueryBounds, ConversationRequest, ConversationSnapshot, CreateThread, DirectoryId,
-    EngineRunConfig, ListAttachedProjects, ListProjectThreads, ListRegisteredEngineProfiles,
-    ProjectId, ProjectListing, ProjectSummary, Query, QueryTurnCount, QueueFirstMessage,
-    ReadThreadEngineSettings, RequestId, SetThreadEngineConfig, ThreadId, ThreadListing,
-    ThreadSummary, ThreadTitle, UnixMillis,
+    AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor, ConversationQuery,
+    ConversationQueryBounds, ConversationRequest, ConversationSnapshot, ConversationSubscribe,
+    ConversationUnsubscribe, CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects,
+    ListProjectThreads, ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing,
+    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, ReadThreadEngineSettings, RequestId,
+    SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{NativeClientCredentials, load_client_credentials},
@@ -37,14 +40,15 @@ use artisan_editor_cli::{
     process::{ForgeLaunchSpec, ForgeProcessLease, start_owned},
 };
 use artisan_protocol::{
-    ClientRequest, ErrorCode, FirstMessageReceipt, FrameId, Hello, HelloCredential,
-    ProtocolVersion, RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
+    ClientRequest, ConversationSubscriptionStarted, ConversationSubscriptionStopped, ErrorCode,
+    FirstMessageReceipt, FrameId, Hello, HelloCredential, ProtocolVersion,
+    RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
     ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, ClientRequestError, ClientSession, ClientSessionLimits, DeadlineError,
-    EnvelopeReceiveError, EnvelopeSendError, ExchangeError, FrameError, LoopbackTarget,
-    PinnedIdentity, RequestOutcome,
+    DeliveryReceiver, EnvelopeReceiveError, EnvelopeSendError, ExchangeError, FrameError,
+    LoopbackTarget, PinnedIdentity, RequestOutcome,
 };
 use rustls_pki_types::CertificateDer;
 use thiserror::Error;
@@ -111,6 +115,18 @@ pub enum NativeTransportCommand {
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
     /// Durably queue the first exact message body on one known thread.
     QueueFirstMessage(Box<QueueFirstMessage>),
+    /// Begin or resume authoritative conversation subscription.
+    Subscribe {
+        /// Thread to observe.
+        thread_id: ThreadId,
+        /// Cursor after which to resume, or None for fresh.
+        after: Option<ConversationCursor>,
+    },
+    /// End authoritative conversation subscription.
+    Unsubscribe {
+        /// Thread no longer observed.
+        thread_id: ThreadId,
+    },
     /// Stop accepting work and release the session and owned Forge.
     Shutdown,
 }
@@ -126,6 +142,8 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::ListRegisteredProfiles => "ListRegisteredProfiles",
             Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
             Self::QueueFirstMessage(_) => "QueueFirstMessage",
+            Self::Subscribe { .. } => "Subscribe",
+            Self::Unsubscribe { .. } => "Unsubscribe",
             Self::Shutdown => "Shutdown",
         };
         formatter.write_str("NativeTransportCommand::")?;
@@ -158,6 +176,8 @@ pub enum ServiceFailureStage {
     EventBridge,
     /// Session/Forge release.
     Cleanup,
+    /// Uni delivery stream.
+    Delivery,
 }
 
 impl std::fmt::Display for ServiceFailureStage {
@@ -174,6 +194,7 @@ impl std::fmt::Display for ServiceFailureStage {
             Self::Request => "request",
             Self::EventBridge => "event bridge",
             Self::Cleanup => "cleanup",
+            Self::Delivery => "delivery",
         };
         formatter.write_str(text)
     }
@@ -214,6 +235,7 @@ impl std::fmt::Display for ServiceFailureCategory {
             Self::Backpressure => "backpressure",
             Self::ChannelClosed => "channel closed",
             Self::Cleanup => "cleanup",
+            Self::Delivery => "delivery",
         };
         formatter.write_str(text)
     }
@@ -402,6 +424,28 @@ pub enum NativeTransportEvent {
         /// Redacted failure.
         failure: ServiceFailure,
     },
+    /// Correlated subscription start acknowledgement.
+    ConversationSubscriptionStarted {
+        /// Thread whose subscription started.
+        thread_id: ThreadId,
+        /// Request that started the subscription.
+        request_id: RequestId,
+        /// Fresh or resumed start payload.
+        started: ConversationSubscriptionStarted,
+    },
+    /// Correlated subscription stop acknowledgement.
+    ConversationSubscriptionStopped {
+        /// Thread whose subscription stopped.
+        thread_id: ThreadId,
+        /// Request that stopped the subscription.
+        request_id: RequestId,
+        /// Stop payload.
+        stopped: ConversationSubscriptionStopped,
+    },
+    /// Uni-stream patch batch.
+    PatchBatch(PatchBatch),
+    /// Bounded path-free delivery loss.
+    DeliveryLost(ServiceFailure),
     /// Terminal service state.
     Stopped(ServiceStopStatus),
 }
@@ -444,10 +488,19 @@ pub enum ServiceSpawnError {
     Thread,
 }
 
+/// Delivery frame flowing from the dedicated delivery task via the private bounded Tokio channel.
+#[derive(Debug)]
+pub enum PrivateDelivery {
+    /// Valid uni patch batch.
+    Batch(PatchBatch),
+    /// Bounded delivery loss.
+    Lost(ServiceFailure),
+}
+
 /// One cloneable application-side handle to the native service.
 #[derive(Clone)]
 pub struct NativeTransportService {
-    commands: SyncSender<NativeTransportCommand>,
+    commands: tokio::sync::mpsc::Sender<NativeTransportCommand>,
     events: Arc<Mutex<Receiver<NativeTransportEvent>>>,
     finished: Arc<AtomicBool>,
     shutdown_requested: Arc<AtomicBool>,
@@ -464,7 +517,7 @@ impl NativeTransportService {
     /// Returns [`ServiceSpawnError::Thread`] if the service thread cannot be
     /// created.
     pub fn spawn() -> Result<Self, ServiceSpawnError> {
-        let (command_tx, command_rx) = sync_channel(COMMAND_CAPACITY);
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(COMMAND_CAPACITY);
         let (event_tx, event_rx) = sync_channel(EVENT_CAPACITY);
         let finished = Arc::new(AtomicBool::new(false));
         let finished_for_thread = Arc::clone(&finished);
@@ -580,14 +633,14 @@ impl NativeTransportService {
     }
 }
 
-fn try_send_command(
-    sender: &SyncSender<NativeTransportCommand>,
+pub fn try_send_command(
+    sender: &tokio::sync::mpsc::Sender<NativeTransportCommand>,
     command: NativeTransportCommand,
 ) -> Result<(), CommandSendError> {
     match sender.try_send(command) {
         Ok(()) => Ok(()),
-        Err(TrySendError::Full(_)) => Err(CommandSendError::Busy),
-        Err(TrySendError::Disconnected(_)) => Err(CommandSendError::Stopped),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(CommandSendError::Busy),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(CommandSendError::Stopped),
     }
 }
 
@@ -974,6 +1027,14 @@ enum ExpectedResponse {
         thread_id: ThreadId,
         request_id: RequestId,
     },
+    ConversationSubscriptionStarted {
+        thread_id: ThreadId,
+        request_id: RequestId,
+    },
+    ConversationSubscriptionStopped {
+        thread_id: ThreadId,
+        request_id: RequestId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1290,6 +1351,31 @@ fn validate_response_family(
         ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
             Ok(ResponsePayload::FirstMessageQueued(receipt))
         }
+        (
+            ExpectedResponse::ConversationSubscriptionStarted {
+                thread_id,
+                request_id: _,
+            },
+            ResponsePayload::ConversationSubscriptionStarted(started),
+        ) => {
+            let actual_thread = match &started {
+                ConversationSubscriptionStarted::Fresh(start) => start.snapshot().thread_id(),
+                ConversationSubscriptionStarted::Resumed { thread_id, .. } => thread_id,
+            };
+            if actual_thread != &thread_id {
+                return Err(ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                ));
+            }
+            Ok(ResponsePayload::ConversationSubscriptionStarted(started))
+        }
+        (
+            ExpectedResponse::ConversationSubscriptionStopped { thread_id, .. },
+            ResponsePayload::ConversationSubscriptionStopped(stopped),
+        ) if &stopped.thread_id == &thread_id => {
+            Ok(ResponsePayload::ConversationSubscriptionStopped(stopped))
+        }
         _ => Err(ServiceFailure::new(
             ServiceFailureStage::Request,
             ServiceFailureCategory::Integrity,
@@ -1381,13 +1467,24 @@ struct ServiceRuntime {
     shutdown_grace: Duration,
     known_threads: HashSet<ThreadId>,
     intake: IntakeState,
+    subscription_registry: SubscriptionProjectionRegistry,
+    active_subscription: Option<SubscriptionHandle>,
+    delivery_cancel: Option<CancelHandle>,
+    delivery_join: Option<tokio::task::JoinHandle<()>>,
+    delivery_tx: Option<tokio::sync::mpsc::Sender<PrivateDelivery>>,
 }
 
 impl ServiceRuntime {
     async fn reconnect(&mut self, frames: &mut FrameFactory) -> Result<(), ServiceFailure> {
-        // A session is never reused after its lifetime budget or a stable
-        // mutation settlement. Dropping it before moving the one current
-        // capability makes custody explicit and prevents two live owners.
+        // Custody order: cancel delivery task, await its join exactly once,
+        // drop the old session, connect, take_delivery exactly once, start
+        // one new delivery task, then resubscribe using the durable cursor.
+        if let Some(cancel) = self.delivery_cancel.take() {
+            cancel.cancel();
+        }
+        if let Some(join) = self.delivery_join.take() {
+            let _ = join.await;
+        }
         drop(self.session.take());
         let Some(capability) = self.reconnect_capability.take() else {
             return Err(ServiceFailure::local_session());
@@ -1396,7 +1493,7 @@ impl ServiceRuntime {
             Ok(hello) => hello,
             Err(failure) => return Err(failure),
         };
-        if let Ok((session, welcome)) = ClientSession::connect(
+        let (session, welcome) = ClientSession::connect(
             self.target,
             self.certificate.clone(),
             self.pinned_identity,
@@ -1405,19 +1502,101 @@ impl ServiceRuntime {
             &self.cancel,
         )
         .await
-        {
-            self.session = Some(session);
-            self.reconnect_capability = Some(welcome.welcome.reconnect_capability);
-            Ok(())
-        } else {
-            // The old session and the only current capability are gone;
-            // an uncertain handshake cannot safely be retried here.
+        .map_err(|_| {
             self.session = None;
             self.reconnect_capability = None;
-            Err(ServiceFailure::new(
+            ServiceFailure::new(
                 ServiceFailureStage::Handshake,
                 ServiceFailureCategory::Authentication,
-            ))
+            )
+        })?;
+        self.session = Some(session);
+        self.reconnect_capability = Some(welcome.welcome.reconnect_capability);
+        // take_delivery exactly once
+        let session = self.session.take().ok_or(ServiceFailure::local_session())?;
+        let (session, receiver) = session
+            .take_delivery()
+            .map_err(|_| ServiceFailure::local_session())?;
+        self.session = Some(session);
+        let Some(tx) = self.delivery_tx.clone() else {
+            return Err(ServiceFailure::local_session());
+        };
+        let cancel = CancelHandle::new();
+        let version = self
+            .session
+            .as_ref()
+            .map(ClientSession::protocol_version)
+            .ok_or(ServiceFailure::local_session())?;
+        let join = tokio::spawn(delivery_task_loop(receiver, tx, cancel.clone(), version));
+        self.delivery_cancel = Some(cancel);
+        self.delivery_join = Some(join);
+        // resubscribe using durable projection cursor
+        if let Some(handle) = self.active_subscription.clone() {
+            let thread_id = handle.thread_id().clone();
+            let after = self.subscription_registry.cursor(&handle);
+            let _ = self
+                .resubscribe_after_reconnect(frames, thread_id, after)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn resubscribe_after_reconnect(
+        &mut self,
+        frames: &mut FrameFactory,
+        thread_id: ThreadId,
+        after: Option<ConversationCursor>,
+    ) -> Result<(), ServiceFailure> {
+        let Some(handle) = self.active_subscription.clone() else {
+            return Ok(());
+        };
+        if handle.thread_id() != &thread_id {
+            return Ok(());
+        }
+        let subscribe = match after {
+            Some(cursor) => ConversationSubscribe::resume(thread_id.clone(), cursor),
+            None => ConversationSubscribe::fresh(thread_id.clone()),
+        };
+        let request = ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe));
+        let expected = ExpectedResponse::ConversationSubscriptionStarted {
+            thread_id: thread_id.clone(),
+            request_id: RequestId::parse("native-resubscribe-placeholder")
+                .unwrap_or_else(|_| thread_id.as_str().parse().unwrap()),
+        };
+        // Use a fresh frame to get real request_id
+        let protocol_version = self
+            .session
+            .as_ref()
+            .map(ClientSession::protocol_version)
+            .ok_or(ServiceFailure::local_session())?;
+        let (envelope, request_id) = make_request_frame(frames, protocol_version, request)
+            .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+        let expected = ExpectedResponse::ConversationSubscriptionStarted {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        };
+        let session = self.session.take().ok_or(ServiceFailure::local_session())?;
+        let attempt = request_envelope_payload(
+            session,
+            envelope,
+            request_id.clone(),
+            expected,
+            &self.cancel,
+        )
+        .await;
+        match self.finish_request_attempt(attempt) {
+            Ok(ResponsePayload::ConversationSubscriptionStarted(started)) => {
+                if validate_started_correlation(&thread_id, &started).is_err() {
+                    return Err(ServiceFailure::new(
+                        ServiceFailureStage::Request,
+                        ServiceFailureCategory::Integrity,
+                    ));
+                }
+                let _ = self.subscription_registry.start(&handle, &started);
+                Ok(())
+            }
+            Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -1526,6 +1705,15 @@ impl ServiceRuntime {
     }
 
     async fn cleanup(&mut self) -> Result<(), ServiceFailure> {
+        if let Some(handle) = self.active_subscription.take() {
+            let _ = self.subscription_registry.unsubscribe(&handle);
+        }
+        if let Some(cancel) = self.delivery_cancel.take() {
+            cancel.cancel();
+        }
+        if let Some(join) = self.delivery_join.take() {
+            let _ = join.await;
+        }
         let mut failed = false;
         for step in cleanup_plan(
             self.session.is_some(),
@@ -1639,6 +1827,11 @@ async fn attach_to_owned_forge(
                 shutdown_grace,
                 known_threads: HashSet::new(),
                 intake: IntakeState::new(),
+                subscription_registry: SubscriptionProjectionRegistry::new(),
+                active_subscription: None,
+                delivery_cancel: None,
+                delivery_join: None,
+                delivery_tx: None,
             })
         }
         Err(error) => {
@@ -1721,24 +1914,149 @@ async fn establish_session(
     ))
 }
 
+pub fn validate_uni_envelope(
+    envelope: &WireEnvelope,
+    expected_version: ProtocolVersion,
+) -> Result<PatchBatch, ServiceFailure> {
+    if envelope.protocol_version != expected_version {
+        return Err(ServiceFailure::new(
+            ServiceFailureStage::Request,
+            ServiceFailureCategory::Integrity,
+        ));
+    }
+    match &envelope.body {
+        WireEnvelopeBody::PatchBatch(batch) => Ok(batch.clone()),
+        _ => Err(ServiceFailure::new(
+            ServiceFailureStage::Delivery,
+            ServiceFailureCategory::Integrity,
+        )),
+    }
+}
+
+pub fn validate_started_correlation(
+    expected_thread_id: &ThreadId,
+    started: &ConversationSubscriptionStarted,
+) -> Result<(), ServiceFailure> {
+    let actual_thread = match started {
+        ConversationSubscriptionStarted::Fresh(start) => start.snapshot().thread_id(),
+        ConversationSubscriptionStarted::Resumed { thread_id, .. } => thread_id,
+    };
+    if actual_thread != expected_thread_id {
+        return Err(ServiceFailure::new(
+            ServiceFailureStage::Request,
+            ServiceFailureCategory::Integrity,
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_stopped_correlation(
+    expected_thread_id: &ThreadId,
+    stopped: &ConversationSubscriptionStopped,
+) -> Result<(), ServiceFailure> {
+    if &stopped.thread_id != expected_thread_id {
+        return Err(ServiceFailure::new(
+            ServiceFailureStage::Request,
+            ServiceFailureCategory::Integrity,
+        ));
+    }
+    Ok(())
+}
+
+pub async fn delivery_task_loop(
+    mut receiver: DeliveryReceiver,
+    tx: tokio::sync::mpsc::Sender<PrivateDelivery>,
+    cancel: CancelHandle,
+    expected_version: ProtocolVersion,
+) {
+    loop {
+        match receiver.recv(&cancel).await {
+            Ok((next_receiver, envelope)) => {
+                receiver = next_receiver;
+                let result = match validate_uni_envelope(&envelope, expected_version) {
+                    Ok(batch) => PrivateDelivery::Batch(batch),
+                    Err(failure) => PrivateDelivery::Lost(failure),
+                };
+                let is_lost = matches!(result, PrivateDelivery::Lost(_));
+                if tx.send(result).await.is_err() {
+                    break;
+                }
+                if is_lost {
+                    break;
+                }
+            }
+            Err(_) => {
+                let _ = tx
+                    .send(PrivateDelivery::Lost(ServiceFailure::new(
+                        ServiceFailureStage::Delivery,
+                        ServiceFailureCategory::LocalSession,
+                    )))
+                    .await;
+                break;
+            }
+        }
+    }
+}
+
 async fn service_main(
-    commands: Receiver<NativeTransportCommand>,
+    mut commands: tokio::sync::mpsc::Receiver<NativeTransportCommand>,
     events: SyncSender<NativeTransportEvent>,
 ) {
     let mut status = ServiceStopStatus::Clean;
     let started = start_native_service().await;
     match started {
         Ok((mut runtime, mut frames)) => {
-            let run_result = load_initial_catalog(&mut runtime, &mut frames, &events).await;
-            if let Err(failure) = run_result {
+            let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(64);
+            runtime.delivery_tx = Some(delivery_tx.clone());
+            // take_delivery exactly once for this session
+            let delivery_started = {
+                let session = runtime.session.take();
+                match session {
+                    Some(session) => match session.take_delivery() {
+                        Ok((session, receiver)) => {
+                            runtime.session = Some(session);
+                            let cancel = CancelHandle::new();
+                            let version = runtime
+                                .session
+                                .as_ref()
+                                .map(ClientSession::protocol_version)
+                                .unwrap_or(ProtocolVersion::V1);
+                            let join = tokio::spawn(delivery_task_loop(
+                                receiver,
+                                delivery_tx.clone(),
+                                cancel.clone(),
+                                version,
+                            ));
+                            runtime.delivery_cancel = Some(cancel);
+                            runtime.delivery_join = Some(join);
+                            Ok(())
+                        }
+                        Err(_) => Err(ServiceFailure::local_session()),
+                    },
+                    None => Err(ServiceFailure::local_session()),
+                }
+            };
+            if let Err(failure) = delivery_started {
                 status = ServiceStopStatus::Failed;
                 let _ = publish(&events, NativeTransportEvent::Failed(failure));
             } else {
-                let command_result =
-                    command_loop(commands, &mut runtime, &mut frames, &events).await;
-                if let Err(failure) = command_result {
+                let run_result = load_initial_catalog(&mut runtime, &mut frames, &events).await;
+                if let Err(failure) = run_result {
                     status = ServiceStopStatus::Failed;
                     let _ = publish(&events, NativeTransportEvent::Failed(failure));
+                } else {
+                    let command_result = command_loop_with_delivery(
+                        &mut commands,
+                        &mut delivery_rx,
+                        &mut runtime,
+                        &mut frames,
+                        &events,
+                    )
+                    .await;
+                    if let Err(failure) = command_result {
+                        status = ServiceStopStatus::Failed;
+                        let _ = publish(&events, NativeTransportEvent::Failed(failure));
+                    }
                 }
             }
             if runtime.cleanup().await.is_err() {
@@ -1758,6 +2076,249 @@ async fn service_main(
         }
     }
     let _ = publish(&events, NativeTransportEvent::Stopped(status));
+}
+
+async fn handle_subscribe(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    after: Option<ConversationCursor>,
+) -> Result<(), ServiceFailure> {
+    // Thread switch tombstones old handle but does not restart receiver
+    if let Some(old) = runtime.active_subscription.clone() {
+        if old.thread_id() != &thread_id {
+            let _ = runtime.subscription_registry.unsubscribe(&old);
+            runtime.active_subscription = None;
+        }
+    }
+    let handle = runtime
+        .subscription_registry
+        .register(thread_id.clone())
+        .map_err(|_| {
+            ServiceFailure::new(
+                ServiceFailureStage::Request,
+                ServiceFailureCategory::Integrity,
+            )
+        })?;
+    runtime.active_subscription = Some(handle.clone());
+    let subscribe = match after {
+        Some(cursor) => ConversationSubscribe::resume(thread_id.clone(), cursor),
+        None => ConversationSubscribe::fresh(thread_id.clone()),
+    };
+    let request = ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe));
+    let protocol_version = runtime
+        .session
+        .as_ref()
+        .map(ClientSession::protocol_version)
+        .ok_or(ServiceFailure::local_session())?;
+    let (envelope, request_id) = make_request_frame(frames, protocol_version, request)
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let expected = ExpectedResponse::ConversationSubscriptionStarted {
+        thread_id: thread_id.clone(),
+        request_id: request_id.clone(),
+    };
+    let session = runtime
+        .session
+        .take()
+        .ok_or(ServiceFailure::local_session())?;
+    let attempt = request_envelope_payload(
+        session,
+        envelope,
+        request_id.clone(),
+        expected,
+        &runtime.cancel,
+    )
+    .await;
+    match runtime.finish_request_attempt(attempt) {
+        Ok(ResponsePayload::ConversationSubscriptionStarted(started)) => {
+            if validate_started_correlation(&thread_id, &started).is_err() {
+                let failure = ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                );
+                let _ = publish(&events, NativeTransportEvent::DeliveryLost(failure));
+                return Ok(());
+            }
+            match runtime.subscription_registry.start(&handle, &started) {
+                Ok(_) => publish(
+                    &events,
+                    NativeTransportEvent::ConversationSubscriptionStarted {
+                        thread_id,
+                        request_id,
+                        started,
+                    },
+                ),
+                Err(_) => publish(
+                    &events,
+                    NativeTransportEvent::DeliveryLost(ServiceFailure::new(
+                        ServiceFailureStage::Request,
+                        ServiceFailureCategory::Integrity,
+                    )),
+                ),
+            }
+        }
+        Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+        Err(error) => {
+            let failure: ServiceFailure = error.into();
+            publish(&events, NativeTransportEvent::DeliveryLost(failure))
+        }
+    }
+}
+
+async fn handle_unsubscribe(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+) -> Result<(), ServiceFailure> {
+    if let Some(handle) = runtime.active_subscription.clone() {
+        if handle.thread_id() == &thread_id {
+            let _ = runtime.subscription_registry.unsubscribe(&handle);
+            runtime.active_subscription = None;
+        }
+    }
+    let request =
+        ClientRequest::Conversation(ConversationRequest::Unsubscribe(ConversationUnsubscribe {
+            thread_id: thread_id.clone(),
+        }));
+    let protocol_version = runtime
+        .session
+        .as_ref()
+        .map(ClientSession::protocol_version)
+        .ok_or(ServiceFailure::local_session())?;
+    let (envelope, request_id) = make_request_frame(frames, protocol_version, request)
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let expected = ExpectedResponse::ConversationSubscriptionStopped {
+        thread_id: thread_id.clone(),
+        request_id: request_id.clone(),
+    };
+    let session = runtime
+        .session
+        .take()
+        .ok_or(ServiceFailure::local_session())?;
+    let attempt = request_envelope_payload(
+        session,
+        envelope,
+        request_id.clone(),
+        expected,
+        &runtime.cancel,
+    )
+    .await;
+    match runtime.finish_request_attempt(attempt) {
+        Ok(ResponsePayload::ConversationSubscriptionStopped(stopped)) => {
+            if validate_stopped_correlation(&thread_id, &stopped).is_err() {
+                let failure = ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                );
+                return publish(&events, NativeTransportEvent::DeliveryLost(failure));
+            }
+            publish(
+                &events,
+                NativeTransportEvent::ConversationSubscriptionStopped {
+                    thread_id,
+                    request_id,
+                    stopped,
+                },
+            )
+        }
+        Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+        Err(error) => {
+            let failure: ServiceFailure = error.into();
+            publish(&events, NativeTransportEvent::DeliveryLost(failure))
+        }
+    }
+}
+
+async fn command_loop_with_delivery(
+    commands: &mut tokio::sync::mpsc::Receiver<NativeTransportCommand>,
+    delivery_rx: &mut tokio::sync::mpsc::Receiver<PrivateDelivery>,
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    loop {
+        tokio::select! {
+            cmd = commands.recv() => {
+                match cmd {
+                    Some(NativeTransportCommand::Shutdown) | None => return Ok(()),
+                    Some(NativeTransportCommand::BeginProjectIntake) => {
+                        begin_project_intake(runtime, frames, events).await?;
+                    }
+                    Some(NativeTransportCommand::RetryProjectIntake) => {
+                        retry_project_intake(runtime, frames, events).await?;
+                    }
+                    Some(NativeTransportCommand::SelectProject(project_id)) => {
+                        select_project(runtime, frames, events, project_id).await?;
+                    }
+                    Some(NativeTransportCommand::RequestSnapshot(thread_id)) => {
+                        request_snapshot(runtime, frames, events, thread_id).await?;
+                    }
+                    Some(NativeTransportCommand::LoadThreadEngineSettings { thread_id, generation }) => {
+                        load_thread_engine_settings(runtime, frames, events, thread_id, generation).await?;
+                    }
+                    Some(NativeTransportCommand::ListRegisteredProfiles) => {
+                        list_registered_profiles(runtime, frames, events).await?;
+                    }
+                    Some(NativeTransportCommand::SetThreadEngineConfig(command)) => {
+                        set_thread_engine_config(runtime, frames, events, command).await?;
+                    }
+                    Some(NativeTransportCommand::QueueFirstMessage(command)) => {
+                        queue_first_message(runtime, frames, events, *command).await?;
+                    }
+                    Some(NativeTransportCommand::Subscribe { thread_id, after }) => {
+                        handle_subscribe(runtime, frames, events, thread_id, after).await?;
+                    }
+                    Some(NativeTransportCommand::Unsubscribe { thread_id }) => {
+                        handle_unsubscribe(runtime, frames, events, thread_id).await?;
+                    }
+                }
+            }
+            delivery = delivery_rx.recv() => {
+                match delivery {
+                    Some(PrivateDelivery::Batch(batch)) => {
+                        let is_stale = runtime
+                            .active_subscription
+                            .as_ref()
+                            .map_or(true, |handle| handle.thread_id() != batch.thread_id());
+                        if is_stale {
+                            continue;
+                        }
+                        if let Some(handle) = runtime.active_subscription.clone() {
+                            match runtime.subscription_registry.deliver(&handle, batch.clone()) {
+                                Ok(_) => {
+                                    publish(&events, NativeTransportEvent::PatchBatch(batch))?;
+                                }
+                                Err(_) => {
+                                    publish(
+                                        &events,
+                                        NativeTransportEvent::DeliveryLost(ServiceFailure::new(
+                                            ServiceFailureStage::Delivery,
+                                            ServiceFailureCategory::Integrity,
+                                        )),
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                    Some(PrivateDelivery::Lost(failure)) => {
+                        publish(&events, NativeTransportEvent::DeliveryLost(failure))?;
+                    }
+                    None => {
+                        publish(
+                            &events,
+                            NativeTransportEvent::DeliveryLost(ServiceFailure::new(
+                                ServiceFailureStage::Delivery,
+                                ServiceFailureCategory::LocalSession,
+                            )),
+                        )?;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn command_loop(
@@ -1795,6 +2356,13 @@ async fn command_loop(
             }
             Ok(NativeTransportCommand::QueueFirstMessage(command)) => {
                 queue_first_message(runtime, frames, events, *command).await?;
+            }
+            Ok(NativeTransportCommand::Subscribe { .. })
+            | Ok(NativeTransportCommand::Unsubscribe { .. }) => {
+                return Err(ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                ));
             }
         }
     }

@@ -20,10 +20,10 @@ use std::{
 };
 
 use artisan_domain::{
-    ConversationSnapshot, EngineProfileId, MessageBody, ProjectId, ProjectListing, RequestId,
-    ThreadId,
+    ConversationCursor, ConversationSnapshot, EngineProfileId, MessageBody, PatchBatch, ProjectId,
+    ProjectListing, RequestId, ThreadId,
 };
-use artisan_protocol::FirstMessageReceipt;
+use artisan_protocol::{ConversationSubscriptionStarted, FirstMessageReceipt};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
     App, AppContext as _, Application, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
@@ -526,6 +526,18 @@ impl NativeApplication {
             } => {
                 self.handle_first_message_failure(&thread_id, &request_id, failure, cx);
             }
+            NativeTransportEvent::ConversationSubscriptionStarted {
+                thread_id,
+                request_id: _,
+                started,
+            } => self.handle_subscription_started(thread_id, started, cx),
+            NativeTransportEvent::ConversationSubscriptionStopped {
+                thread_id,
+                request_id: _,
+                stopped: _,
+            } => self.handle_subscription_stopped(thread_id, cx),
+            NativeTransportEvent::PatchBatch(batch) => self.handle_patch_batch(batch, cx),
+            NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
         }
     }
@@ -547,6 +559,92 @@ impl NativeApplication {
             self.sync_composer_availability(cx);
             cx.notify();
         }
+    }
+
+    fn handle_subscription_started(
+        &mut self,
+        thread_id: ThreadId,
+        started: ConversationSubscriptionStarted,
+        cx: &mut Context<Self>,
+    ) {
+        match started {
+            ConversationSubscriptionStarted::Fresh(start) => {
+                let snapshot = start.snapshot().clone();
+                if &thread_id != snapshot.thread_id() {
+                    self.set_failure(invalid_service_failure(), cx);
+                    return;
+                }
+                self.handle_snapshot(snapshot, cx);
+            }
+            ConversationSubscriptionStarted::Resumed {
+                thread_id: resumed_thread,
+                cursor,
+            } => {
+                if self.selected_thread.as_ref() != Some(&resumed_thread)
+                    || resumed_thread != thread_id
+                {
+                    self.set_failure(invalid_service_failure(), cx);
+                    return;
+                }
+                let Some(host) = self.conversation_host.clone() else {
+                    return;
+                };
+                let dispatch = host.update(cx, |host, host_cx| {
+                    host.dispatch(
+                        ConversationStateEvent::Delivery(
+                            ConversationDeliveryEvent::SubscriptionResumed {
+                                thread_id: resumed_thread.clone(),
+                                cursor,
+                            },
+                        ),
+                        host_cx,
+                    )
+                });
+                if dispatch.is_err() {
+                    self.set_failure(invalid_service_failure(), cx);
+                } else {
+                    self.pump_host_boundary(&host, cx);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn handle_subscription_stopped(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+        if self.selected_thread.as_ref() == Some(&thread_id) {
+            self.retire_host(cx);
+        }
+        cx.notify();
+    }
+
+    fn handle_patch_batch(&mut self, batch: PatchBatch, cx: &mut Context<Self>) {
+        if self.selected_thread.as_ref() != Some(batch.thread_id()) {
+            return;
+        }
+        let Some(host) = self.conversation_host.clone() else {
+            return;
+        };
+        if host.read(cx).controller_view().delivery.thread_id != *batch.thread_id() {
+            return;
+        }
+        let dispatch = host.update(cx, |host, host_cx| {
+            host.dispatch(
+                ConversationStateEvent::Delivery(ConversationDeliveryEvent::BatchReceived(
+                    batch.clone(),
+                )),
+                host_cx,
+            )
+        });
+        if dispatch.is_err() {
+            self.set_failure(invalid_service_failure(), cx);
+        } else {
+            self.pump_host_boundary(&host, cx);
+            cx.notify();
+        }
+    }
+
+    fn handle_delivery_lost(&mut self, failure: ServiceFailure, cx: &mut Context<Self>) {
+        self.set_failure(failure, cx);
     }
 
     fn handle_intake_progress(&mut self, stage: NativeProjectIntakeStage, cx: &mut Context<Self>) {
@@ -914,6 +1012,14 @@ impl NativeApplication {
         suppress_conversation_tab_stops(&host, cx);
         self.collect_host_effects(&host, cx);
         self.pump_host_boundary(&host, cx);
+        // Subscribe for durable PatchBatch delivery using current cursor when available
+        let after = host.read(cx).controller_view().delivery.cursor;
+        if let Some(service) = self.service.clone() {
+            let _ = service.submit(NativeTransportCommand::Subscribe {
+                thread_id: thread_id.clone(),
+                after,
+            });
+        }
         if self
             .pending_snapshot
             .as_ref()
@@ -925,6 +1031,13 @@ impl NativeApplication {
     }
 
     fn retire_host(&mut self, cx: &mut Context<Self>) {
+        if let Some(thread_id) = self.selected_thread.clone() {
+            if let Some(service) = self.service.clone() {
+                let _ = service.submit(NativeTransportCommand::Unsubscribe {
+                    thread_id: thread_id.clone(),
+                });
+            }
+        }
         self.retain_message_flight(cx);
         self.clear_message_presentation();
         let Some(host) = self.conversation_host.clone() else {
@@ -2225,7 +2338,7 @@ mod tests {
         ProjectSummary, ReceiptDisposition, RootPath, ThreadId, ThreadListing, ThreadSummary,
         ThreadTitle, UnixMillis,
     };
-    use artisan_protocol::FirstMessageReceipt;
+    use artisan_protocol::{ConversationSubscriptionStarted, FirstMessageReceipt};
     use artisan_ui::theme::ThemeMode;
     use gpui::TestAppContext;
 
