@@ -5,8 +5,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use artisan_ui::button::FocusVisibility;
-use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
+use crate::button::FocusVisibility;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
 use gpui::{
     Context, FocusHandle, IntoElement, Modifiers, ParentElement, Render, SharedString, Styled,
     TestAppContext, Window, div, point, px,

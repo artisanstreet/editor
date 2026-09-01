@@ -19,7 +19,8 @@ use artisan_assets::AssetId;
 use gpui::prelude::Refineable;
 use gpui::{
     App, BoxShadow, ElementId, FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderOnce, SharedString, StyleRefinement, Styled, Window, div, point, px,
+    Pixels, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
+    div, point, px,
 };
 
 pub use crate::button::FocusVisibility;
