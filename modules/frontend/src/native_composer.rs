@@ -991,22 +991,23 @@ mod tests {
 
     #[gpui::test]
     fn nonempty_and_whitespace_drafts_hide_placeholder_without_rewriting(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
-
         for draft in ["message", " \t\n"] {
-            cx.update(|_, app| {
+            let (view, window_cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+
+            window_cx.update(|_, app| {
                 view.update(app, |composer, composer_cx| {
                     composer.set_draft(draft);
                     composer_cx.notify();
                 });
             });
-            cx.run_until_parked();
+            window_cx.run_until_parked();
 
             assert!(
-                cx.debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
+                window_cx
+                    .debug_bounds(NATIVE_COMPOSER_PLACEHOLDER_SELECTOR)
                     .is_none()
             );
-            cx.update(|_, app| assert_eq!(view.read(app).draft(), draft));
+            window_cx.update(|_, app| assert_eq!(view.read(app).draft(), draft));
         }
     }
 
