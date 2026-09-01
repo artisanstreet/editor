@@ -1252,52 +1252,8 @@ impl NativeApplication {
                     ConversationHostEffect::Controller(ConversationStateEffect::Viewport(
                         effect,
                     )) => {
-                        match effect {
-                            crate::conversation_view_machine::ViewportEffect::ShowJumpToLatest => {
-                                let surface = host.read(cx).surface().clone();
-                                surface.update(cx, |surface, surface_cx| {
-                                    surface.set_jump_to_latest_visible(true, surface_cx);
-                                });
-                            }
-                            crate::conversation_view_machine::ViewportEffect::HideJumpToLatest => {
-                                let surface = host.read(cx).surface().clone();
-                                surface.update(cx, |surface, surface_cx| {
-                                    surface.set_jump_to_latest_visible(false, surface_cx);
-                                });
-                            }
-                            crate::conversation_view_machine::ViewportEffect::RequestBottomScroll {
-                                generation,
-                            } => {
-                                let can_scroll = {
-                                    let view = host.read(cx).controller_view();
-                                    view.viewport_generation == generation
-                                        && match &view.viewport_state {
-                                            ViewportState::Following => true,
-                                            ViewportState::Scrolling {
-                                                generation: active_generation,
-                                            } => *active_generation == generation,
-                                            _ => false,
-                                        }
-                                };
-                                if can_scroll {
-                                    let surface = host.read(cx).surface().clone();
-                                    surface.update(cx, |surface, surface_cx| {
-                                        surface.scroll_to_bottom(surface_cx);
-                                    });
-                                }
-                            }
-                            crate::conversation_view_machine::ViewportEffect::None
-                            | crate::conversation_view_machine::ViewportEffect::InvalidateRender
-                            | crate::conversation_view_machine::ViewportEffect::CompletionRejected {
-                                ..
-                            } => {}
-                            crate::conversation_view_machine::ViewportEffect::RequestAnchorRestore {
-                                ..
-                            }
-                            | crate::conversation_view_machine::ViewportEffect::GenerationExhausted => {
-                                self.set_failure(invalid_service_failure(), cx);
-                                return;
-                            }
+                        if !self.apply_viewport_effect(host, effect, cx) {
+                            return;
                         }
                         self.conversation_effects.remove(0);
                     }
@@ -1316,6 +1272,58 @@ impl NativeApplication {
             retried_surface = true;
             host.update(cx, ConversationHost::process_pending_actions);
         }
+    }
+
+    fn apply_viewport_effect(
+        &mut self,
+        host: &Entity<ConversationHost>,
+        effect: crate::conversation_view_machine::ViewportEffect,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match effect {
+            crate::conversation_view_machine::ViewportEffect::ShowJumpToLatest => {
+                let surface = host.read(cx).surface().clone();
+                surface.update(cx, |surface, surface_cx| {
+                    surface.set_jump_to_latest_visible(true, surface_cx);
+                });
+            }
+            crate::conversation_view_machine::ViewportEffect::HideJumpToLatest => {
+                let surface = host.read(cx).surface().clone();
+                surface.update(cx, |surface, surface_cx| {
+                    surface.set_jump_to_latest_visible(false, surface_cx);
+                });
+            }
+            crate::conversation_view_machine::ViewportEffect::RequestBottomScroll {
+                generation,
+            } => {
+                let can_scroll = {
+                    let view = host.read(cx).controller_view();
+                    view.viewport_generation == generation
+                        && match &view.viewport_state {
+                            ViewportState::Following => true,
+                            ViewportState::Scrolling {
+                                generation: active_generation,
+                            } => *active_generation == generation,
+                            _ => false,
+                        }
+                };
+                if can_scroll {
+                    let surface = host.read(cx).surface().clone();
+                    surface.update(cx, |surface, surface_cx| {
+                        surface.scroll_to_bottom(surface_cx);
+                    });
+                }
+            }
+            crate::conversation_view_machine::ViewportEffect::None
+            | crate::conversation_view_machine::ViewportEffect::InvalidateRender
+            | crate::conversation_view_machine::ViewportEffect::CompletionRejected { .. } => {}
+            crate::conversation_view_machine::ViewportEffect::RequestAnchorRestore { .. }
+            | crate::conversation_view_machine::ViewportEffect::GenerationExhausted => {
+                self.set_failure(invalid_service_failure(), cx);
+                return false;
+            }
+        }
+        true
     }
 
     fn set_failure(&mut self, failure: ServiceFailure, cx: &mut Context<Self>) {
