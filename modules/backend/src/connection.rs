@@ -1111,6 +1111,7 @@ mod lifecycle_response_ack_tests {
         client: Option<Endpoint>,
         server_connections: tokio::sync::mpsc::Receiver<Connection>,
         stop_server: Option<tokio::sync::oneshot::Sender<()>>,
+        server_done: Option<tokio::sync::oneshot::Receiver<()>>,
         server_thread: Option<JoinHandle<()>>,
     }
 
@@ -1122,6 +1123,7 @@ mod lifecycle_response_ack_tests {
             let (address_sender, address_receiver) = std::sync::mpsc::channel();
             let (connections_sender, connections_receiver) = tokio::sync::mpsc::channel(1);
             let (stop_sender, mut stop_receiver) = tokio::sync::oneshot::channel();
+            let (server_done_sender, server_done_receiver) = tokio::sync::oneshot::channel();
 
             let server_thread = std::thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1152,15 +1154,11 @@ mod lifecycle_response_ack_tests {
                         }
                     }
 
-                    artisan_transport::shutdown(
-                        &server,
-                        VarInt::from_u32(0),
-                        b"acknowledgement test complete",
-                        ACK_TIMEOUT,
-                    )
-                    .await
-                    .expect("acknowledgement test server should shut down");
+                    server.close(VarInt::from_u32(0), b"acknowledgement test complete");
+                    drop(server);
                 });
+                drop(runtime);
+                let _sent = server_done_sender.send(());
             });
 
             let server_address = match address_receiver.recv_timeout(ACK_TIMEOUT) {
@@ -1179,6 +1177,7 @@ mod lifecycle_response_ack_tests {
                 client: Some(client),
                 server_connections: connections_receiver,
                 stop_server: Some(stop_sender),
+                server_done: Some(server_done_receiver),
                 server_thread: Some(server_thread),
             }
         }
@@ -1204,10 +1203,19 @@ mod lifecycle_response_ack_tests {
                 .take()
                 .expect("acknowledgement test client endpoint should remain owned");
             client.close(VarInt::from_u32(0), b"acknowledgement test complete");
+            self.request_server_stop();
             tokio::time::timeout(ACK_TIMEOUT, client.wait_idle())
                 .await
                 .expect("acknowledgement test client endpoint should become idle");
             drop(client);
+            let server_done = self
+                .server_done
+                .take()
+                .expect("acknowledgement test server completion should remain owned");
+            tokio::time::timeout(ACK_TIMEOUT, server_done)
+                .await
+                .expect("acknowledgement test server should report completion")
+                .expect("acknowledgement test server completion should be delivered");
             self.join_server_thread();
         }
     }
