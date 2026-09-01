@@ -10,7 +10,7 @@ use artisan_transport::CancelHandle;
 
 use super::{
     NativeRunDispatcherConfig, NativeRunDispatcherConfigError, NativeRunDispatcherConfigInput,
-    conversation_commit_notifier::ConversationCommitNotifier,
+    conversation_commit_notifier::{ConversationCommitNotifier, ConversationCommitSubscription},
 };
 use crate::native_run_dispatch::{
     LaunchAuthority, NativeRunDispatcher, NativeRunDispatcherShutdown, PromptAuthorization,
@@ -1622,66 +1622,181 @@ async fn fixture_durable_replay_prefix(
     .unwrap_or_else(|_| panic!("durable replay prefix should remain contiguous"))
 }
 
-fn assert_fixture_stream_batch(batch: &PatchBatch) {
-    assert_eq!(batch.thread_id().as_str(), "fixture-thread");
-    assert_eq!(batch.from_cursor(), ConversationCursor::default());
-    assert_eq!(batch.to_cursor(), ConversationCursor::new(4));
-    assert_eq!(batch.patches().len(), 4);
-    assert_eq!(
-        batch
-            .patches()
-            .iter()
-            .map(|patch| patch.sequence().get())
-            .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
-    );
-    assert!(
-        batch.patches().iter().any(|patch| {
-            patch.sequence().get() == 4
-                && matches!(
-                    patch,
-                    ConversationPatch::ItemUpsert {
-                        item: ConversationItem::AssistantMessage(_),
-                        ..
-                    }
-                )
-        }),
-        "first Forge batch should contain the assistant stream item"
-    );
-}
-
-fn assert_fixture_terminal_batch(batch: &PatchBatch, from_cursor: ConversationCursor) {
-    assert_eq!(batch.thread_id().as_str(), "fixture-thread");
-    assert_eq!(batch.from_cursor(), from_cursor);
-    assert_eq!(batch.to_cursor(), ConversationCursor::new(6));
-    assert_eq!(batch.patches().len(), 2);
-    assert_eq!(
-        batch
-            .patches()
-            .iter()
-            .map(|patch| patch.sequence().get())
-            .collect::<Vec<_>>(),
-        vec![5, 6]
-    );
-    assert!(
-        batch.patches().iter().any(|patch| matches!(
+fn fixture_replay_has_terminal_completion(patches: &[ConversationPatch]) -> bool {
+    patches.iter().any(|patch| {
+        matches!(
             patch,
             ConversationPatch::ItemLifecycle {
                 lifecycle: ConversationLifecycle::Completed,
                 ..
             }
-        )),
-        "terminal Forge batch should complete the assistant item"
-    );
-    assert!(
-        batch.patches().iter().any(|patch| matches!(
+        )
+    }) && patches.iter().any(|patch| {
+        matches!(
             patch,
             ConversationPatch::TurnLifecycle {
                 lifecycle: ConversationLifecycle::Completed,
                 ..
             }
-        )),
-        "terminal Forge batch should complete the turn"
+        )
+    })
+}
+
+async fn wait_for_fixture_final_replay(
+    repository: &Repository,
+    thread_id: &ThreadId,
+    commit_subscription: &mut ConversationCommitSubscription,
+) -> PatchBatch {
+    tokio::time::timeout(FORGE_REPLAY_PROOF_DEADLINE, async {
+        loop {
+            let replay = repository
+                .read_conversation_patch_replay(thread_id, ConversationCursor::default())
+                .await
+                .unwrap_or_else(|_| panic!("durable conversation replay should be readable"));
+            match replay {
+                ConversationPatchReplay::Batch(batch)
+                    if fixture_replay_has_terminal_completion(batch.patches()) =>
+                {
+                    return batch;
+                }
+                ConversationPatchReplay::Batch(_) | ConversationPatchReplay::Current { .. } => {}
+                ConversationPatchReplay::ResnapshotRequired { .. } => {
+                    panic!("durable fixture replay should not require a resnapshot")
+                }
+            }
+            commit_subscription
+                .wait()
+                .await
+                .expect("fixture commit notifier should remain open");
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("fixture terminal replay exceeded the test deadline"))
+}
+
+fn assert_fixture_delivery_batch(
+    batch: &PatchBatch,
+    expected_from: ConversationCursor,
+    final_cursor: ConversationCursor,
+    expected_cursor: &mut ConversationCursor,
+) {
+    assert_eq!(batch.thread_id().as_str(), "fixture-thread");
+    assert_eq!(batch.from_cursor(), expected_from);
+    assert!(
+        batch.to_cursor() > expected_from,
+        "Forge delivery batch must advance its cursor"
+    );
+    assert!(
+        batch.to_cursor() <= final_cursor,
+        "Forge delivery batch must remain within the final durable cursor"
+    );
+    for patch in batch.patches() {
+        let expected_sequence = expected_cursor
+            .checked_next_sequence()
+            .expect("fixture replay sequence should not overflow");
+        assert_eq!(
+            patch.sequence(),
+            expected_sequence,
+            "Forge delivery must not duplicate or skip a sequence"
+        );
+        *expected_cursor = ConversationCursor::from(patch.sequence());
+    }
+    assert_eq!(*expected_cursor, batch.to_cursor());
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FixtureStreamObservation {
+    cursor: ConversationCursor,
+    assistant_item_id: ItemId,
+    turn_id: TurnId,
+}
+
+fn fixture_stream_observation(patches: &[ConversationPatch]) -> FixtureStreamObservation {
+    let mut streaming_items = patches.iter().filter_map(|patch| match patch {
+        ConversationPatch::ItemUpsert {
+            sequence,
+            item: ConversationItem::AssistantMessage(item),
+            ..
+        } if item.lifecycle == ConversationLifecycle::Streaming => Some(FixtureStreamObservation {
+            cursor: ConversationCursor::from(*sequence),
+            assistant_item_id: item.item_id.clone(),
+            turn_id: item.turn_id.clone(),
+        }),
+        _ => None,
+    });
+    let observation = streaming_items
+        .next()
+        .expect("delivered Forge patches should contain the assistant stream item");
+    assert!(
+        streaming_items.next().is_none(),
+        "delivered Forge patches should contain one assistant stream item"
+    );
+    observation
+}
+
+fn assert_fixture_terminal_patches(
+    patches: &[ConversationPatch],
+    stream: &FixtureStreamObservation,
+    final_cursor: ConversationCursor,
+) {
+    let item_completions: Vec<_> = patches
+        .iter()
+        .filter(|patch| {
+            matches!(
+                patch,
+                ConversationPatch::ItemLifecycle {
+                    lifecycle: ConversationLifecycle::Completed,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        item_completions.len(),
+        1,
+        "delivered Forge patches should contain one assistant completion"
+    );
+    let item_completion = item_completions[0];
+    let ConversationPatch::ItemLifecycle {
+        sequence, item_id, ..
+    } = item_completion
+    else {
+        unreachable!("assistant completion was filtered as an item lifecycle")
+    };
+    assert_eq!(item_id, &stream.assistant_item_id);
+    assert!(
+        sequence.get() > stream.cursor.get() && sequence.get() <= final_cursor.get(),
+        "assistant completion must follow the streaming item before the final cursor"
+    );
+
+    let turn_completions: Vec<_> = patches
+        .iter()
+        .filter(|patch| {
+            matches!(
+                patch,
+                ConversationPatch::TurnLifecycle {
+                    lifecycle: ConversationLifecycle::Completed,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        turn_completions.len(),
+        1,
+        "delivered Forge patches should contain one turn completion"
+    );
+    let turn_completion = turn_completions[0];
+    let ConversationPatch::TurnLifecycle {
+        sequence, turn_id, ..
+    } = turn_completion
+    else {
+        unreachable!("turn completion was filtered as a turn lifecycle")
+    };
+    assert_eq!(turn_id, &stream.turn_id);
+    assert!(
+        sequence.get() > stream.cursor.get() && sequence.get() <= final_cursor.get(),
+        "turn completion must follow the streaming item before the final cursor"
     );
 }
 
@@ -1875,6 +1990,9 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
 
     let pki = fixture_forge_pki();
     let notifier = ConversationCommitNotifier::new();
+    let mut commit_subscription = notifier
+        .subscribe(thread_id.clone())
+        .expect("fixture commit subscription");
     let (listener, handler, listener_cancel, listener_address) =
         bind_fixture_forge_listener(repository.clone(), notifier.clone(), &pki);
     let listener_task = tokio::spawn(serve_fixture_forge_listener(
@@ -1905,29 +2023,41 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
     );
 
     let mut delivery_stream = accept_fixture_delivery(&first_client.connection).await;
-    let first_batch = receive_fixture_patch_batch(&mut delivery_stream).await;
-    assert_fixture_stream_batch(&first_batch);
-    let expected_first = fixture_durable_replay_prefix(
-        &repository,
-        &thread_id,
-        first_batch.from_cursor(),
-        first_batch.to_cursor(),
-    )
-    .await;
+    let final_replay =
+        wait_for_fixture_final_replay(&repository, &thread_id, &mut commit_subscription).await;
+    let final_cursor = final_replay.to_cursor();
     assert!(
-        first_batch == expected_first,
-        "the first Forge batch must equal the durable replay at its cursor"
+        final_cursor > ConversationCursor::default(),
+        "fixture final replay should advance past cursor zero"
     );
 
-    let first_cursor = first_batch.to_cursor();
-    let second_batch = receive_fixture_patch_batch(&mut delivery_stream).await;
-    assert_eq!(second_batch.from_cursor(), first_cursor);
-    assert_fixture_terminal_batch(&second_batch, first_cursor);
-    let expected_terminal = fixture_durable_replay(&repository, &thread_id, first_cursor).await;
-    assert!(
-        second_batch == expected_terminal,
-        "the terminal Forge batch must equal the durable replay"
+    let mut next_cursor = ConversationCursor::default();
+    let mut delivered_patches = Vec::new();
+    while next_cursor < final_cursor {
+        let batch = receive_fixture_patch_batch(&mut delivery_stream).await;
+        let expected_from = next_cursor;
+        assert_fixture_delivery_batch(&batch, expected_from, final_cursor, &mut next_cursor);
+        let expected = fixture_durable_replay_prefix(
+            &repository,
+            &thread_id,
+            batch.from_cursor(),
+            batch.to_cursor(),
+        )
+        .await;
+        assert_eq!(
+            batch, expected,
+            "each Forge batch must equal the durable replay for its cursor range"
+        );
+        delivered_patches.extend(batch.patches().iter().cloned());
+    }
+    assert_eq!(next_cursor, final_cursor);
+    assert_eq!(
+        delivered_patches.as_slice(),
+        final_replay.patches(),
+        "Forge batches must cover the exact final durable replay without gaps"
     );
+    let stream = fixture_stream_observation(&delivered_patches);
+    assert_fixture_terminal_patches(&delivered_patches, &stream, final_cursor);
 
     process_cancel.cancel();
     assert_eq!(
@@ -1964,16 +2094,23 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
         Arc::clone(&restarted_cancel),
     ));
     let resumed_client = connect_fixture_forge_client(&pki, restarted_address).await;
-    let restarted =
-        subscribe_fixture_forge_client(&resumed_client.connection, thread_id.clone(), first_cursor)
-            .await;
-    assert_fixture_resumed_subscription(restarted, &thread_id, first_cursor);
+    let restarted = subscribe_fixture_forge_client(
+        &resumed_client.connection,
+        thread_id.clone(),
+        stream.cursor,
+    )
+    .await;
+    assert_fixture_resumed_subscription(restarted, &thread_id, stream.cursor);
     let mut resumed_stream = accept_fixture_delivery(&resumed_client.connection).await;
     let resumed_batch = receive_fixture_patch_batch(&mut resumed_stream).await;
-    let final_replay = fixture_durable_replay(&reopened_repository, &thread_id, first_cursor).await;
+    let restarted_final_replay =
+        fixture_durable_replay(&reopened_repository, &thread_id, stream.cursor).await;
+    assert_eq!(restarted_final_replay.to_cursor(), final_cursor);
+    assert_eq!(resumed_batch.from_cursor(), stream.cursor);
+    assert_eq!(resumed_batch.to_cursor(), final_cursor);
     assert!(
-        resumed_batch == final_replay,
-        "restart delivery must be the exact final replay from the first cursor"
+        resumed_batch == restarted_final_replay,
+        "restart delivery must be the exact final replay from the stream cursor"
     );
 
     restarted_cancel.cancel();
