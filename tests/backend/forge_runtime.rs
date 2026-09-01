@@ -701,9 +701,9 @@ async fn lifecycle_request(
         sent_at: UnixMillis::from_millis(2),
         body: WireEnvelopeBody::Request(ClientRequest::Lifecycle(request)),
     };
-    // Keep the peer receive pending before the server can finish an accepted
-    // stop. Its local send FIN is the receipt boundary, while the subsequent
-    // connection close can race peer observation of that stream.
+    // Keep the peer receive active before the server can finish an accepted
+    // stop. The connection owner waits for Quinn's finished-send
+    // acknowledgement before it commits the stop and cancels the runtime.
     let response = tokio::time::timeout(FUTURE_WAIT, receive_envelope(&mut receive));
     let (response, ()) = tokio::join!(response, async {
         tokio::time::timeout(FUTURE_WAIT, send_envelope(&mut send, &envelope))
@@ -1583,13 +1583,13 @@ fn lifecycle_offer_reports_idle_status_and_stops_after_correlated_finished_reply
     };
     assert_eq!(receipt.disposition, LifecycleStopDisposition::Accepted);
     assert_eq!(receipt.state, LifecycleState::Draining);
-    // `lifecycle_request` has already decoded the correlated response. Only
-    // after that observation do we wait for the deferred runtime cancellation;
-    // a close that preempted the response would have failed that receive.
+    // The response has been decoded before this observation. Cancellation is
+    // published only after the server's finished response stream receives the
+    // Quinn peer acknowledgement; wait for that real event across runtimes.
     runtime.block_on(async {
         tokio::time::timeout(FUTURE_WAIT, cancel.wait())
             .await
-            .expect("runtime cancellation should follow the correlated stop response");
+            .expect("runtime cancellation should follow peer acknowledgement");
     });
     assert!(
         cancel.is_cancelled(),

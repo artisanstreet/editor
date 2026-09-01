@@ -33,6 +33,8 @@
 //! [`ForgeConnection::respond_next`] consumes the owner and returns it only
 //! after one complete, deadline-bounded, successful dispatch, including reply
 //! write and send-side FIN plus any local post-write subscription activation.
+//! An accepted lifecycle stop additionally waits for Quinn to acknowledge its
+//! finished response stream before committing the stop.
 //! Cancellation of the caller's shared [`CancelHandle`] is observed, never
 //! invoked, and this leaf never closes the shared endpoint or database.
 //!
@@ -237,6 +239,11 @@ pub enum RequestStageError {
     #[error("request dispatch failed")]
     Dispatch(#[from] ServerDispatchError<Infallible>),
 
+    /// The peer did not acknowledge all bytes on an accepted lifecycle-stop
+    /// response stream.
+    #[error("lifecycle response acknowledgement failed")]
+    LifecycleResponseAcknowledgement,
+
     /// A prepared conversation subscription could not be activated after its
     /// correlated response was written and the server send side finished.
     #[error("activating the conversation subscription failed")]
@@ -387,9 +394,10 @@ impl ForgeConnection<'_, '_, '_, '_> {
     /// public [`RequestHandler`] answered it, the correlated reply crossed
     /// the wire under the supplied fresh server frame stamp and the
     /// negotiated protocol version, the server send side was finished, and
-    /// any local post-write subscription activation completed. A successful
-    /// call proves neither peer application nor durable acknowledgement,
-    /// patch replay, or delivery.
+    /// any local post-write subscription activation completed. An accepted
+    /// lifecycle stop also requires Quinn to observe peer acknowledgement of
+    /// the finished response stream. No call proves peer application or
+    /// durable acknowledgement, patch replay, or delivery.
     /// The caller may loop sequentially; every dispatch accepts the next
     /// bidirectional stream on this connection.
     ///
@@ -901,13 +909,25 @@ async fn complete_request_receipt(
             })
         }
         PostResponseReceipt::Lifecycle(receipt) => {
-            receipt.commit_after_response(cancel);
+            complete_lifecycle_receipt(streams, receipt, cancel).await?;
             Ok(RequestDispatchOutcome {
                 activation: None,
                 stopped_thread: None,
             })
         }
     }
+}
+
+async fn complete_lifecycle_receipt(
+    streams: &mut StageStreams,
+    receipt: LifecycleControlReceipt,
+    cancel: &CancelHandle,
+) -> Result<(), RequestStageError> {
+    if receipt.is_pending() {
+        streams.await_finished_send_ack().await?;
+    }
+    receipt.commit_after_response(cancel);
+    Ok(())
 }
 
 /// A correlated, bounded failure for a lifecycle request sent without the
@@ -993,6 +1013,20 @@ impl StageStreams {
         self.send_finished = true;
     }
 
+    /// Waits for Quinn to observe that the peer acknowledged every byte on a
+    /// finished lifecycle response stream. A peer STOP or connection loss is
+    /// deliberately collapsed to a payload-free request-stage failure.
+    async fn await_finished_send_ack(&self) -> Result<(), RequestStageError> {
+        let send = self
+            .send
+            .as_ref()
+            .expect("response send stream is installed before acknowledgement");
+        match send.stopped().await {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) | Err(_) => Err(RequestStageError::LifecycleResponseAcknowledgement),
+        }
+    }
+
     /// Discharges both directions after a completed stage so the guard's
     /// [`Drop`] performs no cleanup actions on them.
     fn release(&mut self) {
@@ -1050,3 +1084,290 @@ impl Drop for AdmissionGuard {
 #[cfg(test)]
 #[path = "../../../tests/backend/lifecycle_connection.rs"]
 pub(crate) mod lifecycle_connection_tests;
+
+#[cfg(test)]
+mod lifecycle_response_ack_tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    use super::{StageStreams, complete_lifecycle_receipt};
+    use crate::lifecycle_control::{
+        ActivityGateError, ActivityGateImpl, LifecycleControlReceipt, LifecycleController,
+        LifecycleDispatch,
+    };
+    use artisan_domain::RequestId;
+    use artisan_protocol::{LifecycleRequest, LifecycleResponse, LifecycleStopDisposition};
+    use artisan_transport::CancelHandle;
+    use quinn::{Connection, Endpoint, VarInt};
+    use tokio::io::AsyncWriteExt;
+
+    const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+    struct AckLoopback {
+        server_address: SocketAddr,
+        client: Endpoint,
+        server_connections: tokio::sync::mpsc::Receiver<Connection>,
+        stop_server: Option<tokio::sync::oneshot::Sender<()>>,
+        server_thread: Option<JoinHandle<()>>,
+    }
+
+    impl AckLoopback {
+        fn new() -> Self {
+            let pki = super::lifecycle_connection_tests::test_pki();
+            let server_config = super::lifecycle_connection_tests::server_config(&pki);
+            let client_config = super::lifecycle_connection_tests::client_config(&pki);
+            let (address_sender, address_receiver) = std::sync::mpsc::channel();
+            let (connections_sender, connections_receiver) = tokio::sync::mpsc::channel(1);
+            let (stop_sender, mut stop_receiver) = tokio::sync::oneshot::channel();
+
+            let server_thread = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("acknowledgement test server runtime should build");
+                runtime.block_on(async move {
+                    let server = artisan_transport::bind_loopback_server(server_config)
+                        .expect("acknowledgement test server should bind");
+                    address_sender
+                        .send(server.local_addr().expect("acknowledgement test address"))
+                        .expect("acknowledgement test should receive the server address");
+
+                    loop {
+                        let incoming = tokio::select! {
+                            _ = &mut stop_receiver => break,
+                            incoming = server.accept() => incoming,
+                        };
+                        let Some(incoming) = incoming else {
+                            break;
+                        };
+                        let established = tokio::time::timeout(ACK_TIMEOUT, incoming)
+                            .await
+                            .expect("acknowledgement test handshake should settle")
+                            .expect("acknowledgement test handshake should succeed");
+                        if connections_sender.send(established).await.is_err() {
+                            break;
+                        }
+                    }
+
+                    artisan_transport::shutdown(
+                        &server,
+                        VarInt::from_u32(0),
+                        b"acknowledgement test complete",
+                        ACK_TIMEOUT,
+                    )
+                    .await
+                    .expect("acknowledgement test server should shut down");
+                });
+            });
+
+            let server_address = match address_receiver.recv_timeout(ACK_TIMEOUT) {
+                Ok(address) => address,
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("acknowledgement test server did not bind")
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("acknowledgement test server thread died before binding")
+                }
+            };
+            let client = artisan_transport::bind_loopback_client(client_config)
+                .expect("acknowledgement test client should bind");
+            Self {
+                server_address,
+                client,
+                server_connections: connections_receiver,
+                stop_server: Some(stop_sender),
+                server_thread: Some(server_thread),
+            }
+        }
+
+        fn join_server_thread(&mut self) {
+            if let Some(stop) = self.stop_server.take() {
+                let _sent = stop.send(());
+            }
+            if let Some(thread) = self.server_thread.take() {
+                thread
+                    .join()
+                    .expect("acknowledgement test server thread should finish");
+            }
+        }
+    }
+
+    impl Drop for AckLoopback {
+        fn drop(&mut self) {
+            self.join_server_thread();
+        }
+    }
+
+    async fn connected_pair() -> (AckLoopback, Connection, Connection) {
+        let mut loopback = AckLoopback::new();
+        let client_connection = tokio::time::timeout(
+            ACK_TIMEOUT,
+            loopback
+                .client
+                .connect(
+                    loopback.server_address,
+                    artisan_transport::LOOPBACK_SERVER_NAME,
+                )
+                .expect("acknowledgement test client should connect"),
+        )
+        .await
+        .expect("acknowledgement test client connection should settle")
+        .expect("acknowledgement test client handshake should succeed");
+        let server_connection =
+            tokio::time::timeout(ACK_TIMEOUT, loopback.server_connections.recv())
+                .await
+                .expect("acknowledgement test server connection should arrive")
+                .expect("acknowledgement test server should remain accepting");
+        (loopback, server_connection, client_connection)
+    }
+
+    async fn open_stream_pair(
+        server: &Connection,
+        client: &Connection,
+    ) -> (
+        quinn::SendStream,
+        quinn::RecvStream,
+        quinn::SendStream,
+        quinn::RecvStream,
+    ) {
+        let server_stream = server.accept_bi();
+        let client_stream = client.open_bi();
+        let (server_stream, client_stream) = tokio::join!(server_stream, client_stream);
+        let (server_send, server_recv) = server_stream.expect("server stream should open");
+        let (client_send, client_recv) = client_stream.expect("client stream should open");
+        (server_send, server_recv, client_send, client_recv)
+    }
+
+    async fn accepted_stop(
+        controller: &LifecycleController,
+        request_id: &str,
+    ) -> LifecycleControlReceipt {
+        let dispatch = controller
+            .dispatch(
+                RequestId::parse(request_id).expect("acknowledgement request id should be valid"),
+                LifecycleRequest::Stop { require_idle: true },
+            )
+            .await;
+        let LifecycleDispatch::Reply {
+            response: LifecycleResponse::Stop(stop),
+            receipt,
+        } = dispatch
+        else {
+            panic!("acknowledgement test should admit an idle stop");
+        };
+        assert_eq!(stop.disposition, LifecycleStopDisposition::Accepted);
+        receipt
+    }
+
+    #[tokio::test]
+    async fn acknowledged_lifecycle_stop_commits_and_cancels_after_peer_receipt() {
+        let (loopback, server, client) = connected_pair().await;
+        let gate = ActivityGateImpl::new();
+        let controller = LifecycleController::with_activity_gate(Arc::new(gate.clone()));
+        let cancel = CancelHandle::new();
+        let receipt = accepted_stop(&controller, "ack-success").await;
+        let (server_send, server_recv, client_send, mut client_recv) =
+            open_stream_pair(&server, &client).await;
+        let mut streams = StageStreams::new();
+        {
+            let (server_send, _server_recv) = streams.install(server_send, server_recv);
+            server_send
+                .write_all(b"lifecycle-stop-response")
+                .await
+                .expect("acknowledgement response should be written");
+            server_send
+                .finish()
+                .expect("acknowledgement response should finish");
+        }
+        streams.mark_send_finished();
+
+        let (response, completion) = tokio::join!(
+            tokio::time::timeout(ACK_TIMEOUT, client_recv.read_to_end(1024)),
+            tokio::time::timeout(
+                ACK_TIMEOUT,
+                complete_lifecycle_receipt(&mut streams, receipt, &cancel),
+            ),
+        );
+        assert_eq!(
+            response
+                .expect("peer response read should settle")
+                .expect("peer should read the finished response"),
+            b"lifecycle-stop-response"
+        );
+        completion
+            .expect("peer acknowledgement should settle")
+            .expect("peer acknowledgement should permit commit");
+        assert!(cancel.is_cancelled());
+        assert!(matches!(
+            gate.acquire(),
+            Err(ActivityGateError::Unavailable)
+        ));
+
+        drop(client_recv);
+        drop(client_send);
+        drop(streams);
+        drop(server);
+        drop(client);
+        drop(loopback);
+    }
+
+    #[tokio::test]
+    async fn peer_stop_returns_typed_failure_and_rolls_back_lifecycle_receipt() {
+        let (loopback, server, client) = connected_pair().await;
+        let gate = ActivityGateImpl::new();
+        let controller = LifecycleController::with_activity_gate(Arc::new(gate.clone()));
+        let cancel = CancelHandle::new();
+        let receipt = accepted_stop(&controller, "ack-peer-stop").await;
+        let (server_send, server_recv, client_send, mut client_recv) =
+            open_stream_pair(&server, &client).await;
+        let mut streams = StageStreams::new();
+        {
+            let (server_send, _server_recv) = streams.install(server_send, server_recv);
+            server_send
+                .write_all(b"lifecycle-stop-response")
+                .await
+                .expect("acknowledgement response should be written");
+            server_send
+                .finish()
+                .expect("acknowledgement response should finish");
+        }
+        client_recv
+            .stop(VarInt::from_u32(7))
+            .expect("peer STOP should be sent");
+        streams.mark_send_finished();
+
+        let failure = tokio::time::timeout(
+            ACK_TIMEOUT,
+            complete_lifecycle_receipt(&mut streams, receipt, &cancel),
+        )
+        .await
+        .expect("peer STOP acknowledgement should settle")
+        .expect_err("peer STOP must reject the lifecycle receipt");
+        assert!(matches!(
+            &failure,
+            super::RequestStageError::LifecycleResponseAcknowledgement
+        ));
+        assert_eq!(
+            failure.to_string(),
+            "lifecycle response acknowledgement failed"
+        );
+        assert!(!cancel.is_cancelled());
+
+        let retry = accepted_stop(&controller, "ack-peer-stop-retry").await;
+        drop(retry);
+        let lease = gate
+            .acquire()
+            .expect("failed acknowledgement should reopen activity admission");
+        drop(lease);
+
+        drop(client_recv);
+        drop(client_send);
+        drop(streams);
+        drop(server);
+        drop(client);
+        drop(loopback);
+    }
+}

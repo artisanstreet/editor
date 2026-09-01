@@ -310,33 +310,6 @@ async fn committed_receipt_transitions_to_draining_and_cancels_once() {
 }
 
 #[tokio::test]
-async fn configured_stop_cancels_after_the_response_task_yields() {
-    let (mut controller, gate) = controller(0);
-    let cancel = Arc::new(CancelHandle::new());
-    controller.defer_cancel_after_response(Arc::clone(&cancel));
-    let (_, receipt) = stop_of(
-        controller
-            .dispatch(
-                request_id("deferred-stop"),
-                LifecycleRequest::Stop { require_idle: true },
-            )
-            .await,
-    );
-
-    receipt.commit_after_response(cancel.as_ref());
-    assert!(
-        !cancel.is_cancelled(),
-        "configured cancellation must not run in the response task"
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(1), cancel.wait())
-        .await
-        .expect("deferred cancellation should follow the response task boundary");
-    assert!(cancel.is_cancelled());
-    assert_eq!(gate.committed.load(Ordering::Relaxed), 1);
-    assert_eq!(gate.rolled_back.load(Ordering::Relaxed), 0);
-}
-
-#[tokio::test]
 async fn concurrent_stop_admissions_have_one_serialized_winner() {
     let (controller, gate) = controller(0);
     let controller = Arc::new(controller);

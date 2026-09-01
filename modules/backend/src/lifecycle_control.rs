@@ -37,7 +37,6 @@ const PENDING_STATE_DETAIL: &str = "native lifecycle control is settling another
 pub struct LifecycleController {
     state: Arc<Mutex<ControlState>>,
     activity: Option<Arc<dyn ActivityGate>>,
-    response_cancel: Option<Arc<CancelHandle>>,
 }
 
 /// The one process-wide activity boundary shared by lifecycle control and the
@@ -264,11 +263,13 @@ pub(crate) enum LifecycleDispatch {
     Failure(ProtocolFailure),
 }
 
-/// Local custody proving that an accepted stop's response and FIN succeeded.
+/// Local custody proving that an accepted stop's response FIN was acknowledged
+/// by the peer.
 ///
 /// The pending controller mutex guard remains inside this value until the
-/// connection releases it after successful response FIN. Dropping it before
-/// commit restores `Ready` and rolls back the activity reservation.
+/// connection releases it after peer acknowledgement of the finished response.
+/// Dropping it before commit restores `Ready` and rolls back the activity
+/// reservation.
 pub(crate) struct LifecycleControlReceipt {
     pending: Option<PendingStop>,
 }
@@ -277,7 +278,6 @@ struct PendingStop {
     guard: OwnedMutexGuard<ControlState>,
     key: StopKey,
     reservation: Box<dyn ActivityStopReservation>,
-    response_cancel: Option<Arc<CancelHandle>>,
 }
 
 impl fmt::Debug for LifecycleController {
@@ -302,7 +302,6 @@ impl LifecycleController {
         Self {
             state: Arc::new(Mutex::new(ControlState::Ready)),
             activity: None,
-            response_cancel: None,
         }
     }
 
@@ -312,15 +311,7 @@ impl LifecycleController {
         Self {
             state: Arc::new(Mutex::new(ControlState::Ready)),
             activity: Some(activity),
-            response_cancel: None,
         }
-    }
-
-    /// Installs the runtime cancellation boundary used after a successful
-    /// lifecycle response. The handle is captured by each accepted receipt;
-    /// the receipt still owns the only cancellation transition.
-    pub(crate) fn defer_cancel_after_response(&mut self, cancel: Arc<CancelHandle>) {
-        self.response_cancel = Some(cancel);
     }
 
     /// Returns whether this controller has an installed activity boundary.
@@ -382,10 +373,6 @@ impl LifecycleController {
                                         guard,
                                         key,
                                         reservation,
-                                        response_cancel: self
-                                            .response_cancel
-                                            .as_ref()
-                                            .map(Arc::clone),
                                     }),
                                 },
                             }
@@ -439,13 +426,17 @@ impl LifecycleControlReceipt {
         Self { pending: None }
     }
 
-    /// Commits the accepted stop after its response and FIN have succeeded.
+    /// Returns whether this receipt owns an accepted stop reservation.
+    pub(crate) const fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Commits the accepted stop after its finished response was acknowledged.
     pub(crate) fn commit_after_response(mut self, cancel: &CancelHandle) {
         let Some(PendingStop {
             mut guard,
             key,
             reservation,
-            response_cancel,
         }) = self.pending.take()
         else {
             return;
@@ -454,18 +445,7 @@ impl LifecycleControlReceipt {
         *guard = ControlState::Draining(key);
         reservation.commit();
         drop(guard);
-        if let Some(response_cancel) = response_cancel {
-            // Let the request task return after releasing its finished send
-            // stream before cancellation makes the listener tear down the
-            // authenticated connection. This is an executor boundary, not a
-            // time-based grace period or a retry.
-            drop(tokio::spawn(async move {
-                tokio::task::yield_now().await;
-                response_cancel.cancel();
-            }));
-        } else {
-            cancel.cancel();
-        }
+        cancel.cancel();
     }
 }
 
@@ -475,7 +455,6 @@ impl Drop for LifecycleControlReceipt {
             mut guard,
             reservation,
             key: _,
-            response_cancel: _,
         }) = self.pending.take()
         else {
             return;
