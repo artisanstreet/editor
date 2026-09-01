@@ -67,6 +67,10 @@ mod engine_owner_streaming;
 #[path = "../../../../tests/backend/engine_owner_configured.rs"]
 mod engine_owner_configured;
 
+#[cfg(test)]
+#[path = "../../../../tests/backend/engine_owner_preflight.rs"]
+mod engine_owner_preflight;
+
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
 
@@ -195,6 +199,63 @@ impl std::fmt::Debug for InternalTurnInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("InternalTurnInput { <redacted> }")
     }
+}
+
+/// Absolute deadlines for one configured-engine preflight.
+///
+/// The admission deadline bounds queue waiting and both protocol phases. The
+/// close deadline belongs to teardown and remains an uncancellable cleanup
+/// boundary once a child has been spawned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PreflightDeadlines {
+    pub(crate) readiness: tokio::time::Instant,
+    pub(crate) health: tokio::time::Instant,
+    pub(crate) close: tokio::time::Instant,
+    pub(crate) admission: tokio::time::Instant,
+}
+
+/// Immutable production input for one owner-serialized configured preflight.
+///
+/// The caller supplies the already verified launch capability, exact project
+/// root, absolute phase/admission deadlines, and the existing protocol
+/// bounds. No profile, root, executable, credential, or budget is discovered
+/// by the owner.
+pub(crate) struct EnginePreflightInput {
+    pub(crate) project_root: RootPath,
+    pub(crate) launch: VerifiedOpenCode2ProfileLaunch,
+    pub(crate) deadlines: PreflightDeadlines,
+    pub(crate) bounds: EngineBounds,
+}
+
+impl fmt::Debug for EnginePreflightInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EnginePreflightInput { <redacted> }")
+    }
+}
+
+/// Test-only input for the same preflight executor using the existing
+/// configured-engine fixture seam.
+#[cfg(test)]
+pub(crate) struct FixturePreflightInput {
+    pub(crate) project_root: RootPath,
+    pub(crate) fixture: FixtureConfiguredLaunch,
+    pub(crate) deadlines: PreflightDeadlines,
+    pub(crate) bounds: EngineBounds,
+}
+
+#[cfg(test)]
+impl fmt::Debug for FixturePreflightInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FixturePreflightInput { <redacted> }")
+    }
+}
+
+/// Single internal preflight input carried by the owner queue.
+pub(crate) struct InternalPreflightInput {
+    pub(crate) project_root: RootPath,
+    pub(crate) launch: InternalLaunch,
+    pub(crate) deadlines: PreflightDeadlines,
+    pub(crate) bounds: EngineBounds,
 }
 
 /// Raw engine time limits.
@@ -611,6 +672,63 @@ impl EngineOwner {
             control_capacity: input.control_capacity,
         };
         self.admit_internal(internal, budget)
+    }
+
+    /// Admits one configured-engine preflight into the single owner queue.
+    ///
+    /// The capability and project root are moved into the owner. The owner
+    /// performs only configured spawn, readiness, authenticated health, and
+    /// observed cleanup; it does not create a provider session or deliver a
+    /// prompt.
+    pub(crate) fn admit_preflight(
+        &self,
+        input: EnginePreflightInput,
+    ) -> Result<operation::AcceptedPreflight, LaunchAdmissionError> {
+        let internal = InternalPreflightInput {
+            project_root: input.project_root,
+            launch: InternalLaunch::Verified(Box::new(input.launch)),
+            deadlines: input.deadlines,
+            bounds: input.bounds,
+        };
+        self.admit_internal_preflight(internal)
+    }
+
+    /// Test-only fixture admission for the same owner-serialized preflight
+    /// branch. It uses the existing configured fixture launch seam and no
+    /// alternate engine protocol.
+    #[cfg(test)]
+    pub(crate) fn admit_fixture_preflight(
+        &self,
+        input: FixturePreflightInput,
+    ) -> Result<operation::AcceptedPreflight, LaunchAdmissionError> {
+        let internal = InternalPreflightInput {
+            project_root: input.project_root,
+            launch: InternalLaunch::Fixture(input.fixture),
+            deadlines: input.deadlines,
+            bounds: input.bounds,
+        };
+        self.admit_internal_preflight(internal)
+    }
+
+    fn admit_internal_preflight(
+        &self,
+        input: InternalPreflightInput,
+    ) -> Result<operation::AcceptedPreflight, LaunchAdmissionError> {
+        if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
+            return Err(LaunchAdmissionError::Unavailable);
+        }
+        let control = Arc::new(CancelHandle::new());
+        let (respond, receiver) = oneshot::channel();
+        let job = Job::Preflight {
+            input: Box::new(input),
+            control: Arc::clone(&control),
+            respond,
+        };
+        match self.jobs.try_send(job) {
+            Ok(()) => Ok(operation::AcceptedPreflight::from_parts(receiver, control)),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
+        }
     }
 
     /// Test-only fixture admission. Converts `FixtureTurnInput` into the
