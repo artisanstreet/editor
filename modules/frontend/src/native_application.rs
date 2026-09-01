@@ -5046,7 +5046,7 @@ mod tests {
             window.focus(&focus);
         });
         cx.run_until_parked();
-        complete_key_press(&mut cx, "enter");
+        complete_key_press(cx, "enter");
         cx.run_until_parked();
         assert_eq!(commands.borrow().len(), 2);
 
@@ -5061,7 +5061,7 @@ mod tests {
             window.focus(&focus);
         });
         cx.run_until_parked();
-        complete_key_press(&mut cx, "space");
+        complete_key_press(cx, "space");
         cx.run_until_parked();
 
         let commands = commands.borrow();
