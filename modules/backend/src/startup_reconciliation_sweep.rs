@@ -236,14 +236,15 @@ pub enum StartupReconciliationSweepError {
 // pass without changing behavior or public API. Splitting would obscure the
 // single-pass invariant.
 #[allow(clippy::too_many_lines)]
-async fn sweep_impl<S>(
+async fn sweep_impl<S, F>(
     repository: &Repository,
     input: StartupReconciliationSweepInput,
     patch_source: &mut S,
-    observer: &mut dyn FnMut(&StartupReconciliationCandidate),
+    observer: &mut F,
 ) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
 where
     S: StartupReconciliationPatchSource,
+    F: FnMut(&StartupReconciliationCandidate) + Send,
 {
     if !(1..=64).contains(&input.limit) {
         return Err(StartupReconciliationSweepError::InvalidLimit { limit: input.limit });
@@ -451,7 +452,7 @@ pub(crate) async fn sweep_startup_reconciliation_observed<S, F>(
 ) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
 where
     S: StartupReconciliationPatchSource,
-    F: FnMut(&StartupReconciliationCandidate),
+    F: FnMut(&StartupReconciliationCandidate) + Send,
 {
     sweep_impl(repository, input, patch_source, &mut observer).await
 }

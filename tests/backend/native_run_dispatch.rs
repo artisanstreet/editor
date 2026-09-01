@@ -12,6 +12,7 @@ use super::{
     NativeRunDispatcherConfig, NativeRunDispatcherConfigError, NativeRunDispatcherConfigInput,
     conversation_commit_notifier::ConversationCommitNotifier,
 };
+use crate::CommandOrigin;
 use crate::native_run_dispatch::{
     LaunchAuthority, NativeRunDispatcher, NativeRunDispatcherShutdown, PromptAuthorization,
     SettingsLoadDecision, classify_launch_result, classify_settings_load, notify_after_commit,
@@ -514,6 +515,100 @@ struct AllRows {
     states: Vec<entities::ConversationState>,
 }
 
+async fn setup_binding_scenario(
+    database: &DatabaseConnection,
+    repository: &Repository,
+) -> Option<Vec<u8>> {
+    seed_project_and_thread(database, repository, "thread-launch").await;
+    let _ = queue_claim_launch(
+        repository,
+        "thread-launch",
+        "msg-launch",
+        "run-launch",
+        "turn-launch",
+    )
+    .await;
+    seed_project_and_thread(database, repository, "thread-run").await;
+    let (claimed2, receipt2, sk2, cr2) =
+        queue_claim_launch(repository, "thread-run", "msg-run", "run-run", "turn-run").await;
+    let bound2 = bind_running(repository, &claimed2, &receipt2, &sk2, &cr2).await;
+    let before_binding = entities::assistant_run::Entity::find_by_id("run-run")
+        .one(database)
+        .await
+        .expect("find")
+        .expect("run")
+        .provider_binding
+        .clone();
+    let item_id = ItemId::parse("assistant-run").expect("item");
+    commit_running_item(
+        repository,
+        &claimed2,
+        &receipt2,
+        &bound2,
+        &sk2,
+        &cr2,
+        &item_id,
+        &PatchId::parse("p-turn-run").expect("p"),
+        &PatchId::parse("p-item-run").expect("p"),
+    )
+    .await;
+    before_binding
+}
+
+fn assert_binding_lifecycle(after: &AllRows, before_binding: &Option<Vec<u8>>) {
+    for msg in ["msg-launch", "msg-run"] {
+        let dispatch = after
+            .dispatches
+            .iter()
+            .find(|x| x.message_id == msg)
+            .expect("dispatch");
+        assert_eq!(dispatch.state, DispatchState::Failed);
+        assert_eq!(
+            dispatch.last_error.as_deref(),
+            Some("startup reconciliation: unknown outcome after lease expiry")
+        );
+    }
+    for run_id in ["run-launch", "run-run"] {
+        let run = after.runs.iter().find(|x| x.run_id == run_id).expect("run");
+        assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("startup_reconciliation_unknown_outcome")
+        );
+    }
+    let run_launch = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-launch")
+        .expect("launch");
+    assert!(run_launch.provider_binding.is_none());
+    let run_run = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-run")
+        .expect("run");
+    assert_eq!(run_run.provider_binding, *before_binding);
+    assert!(run_run.provider_binding_version.is_some());
+    let turn_launch = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == "turn-launch")
+        .expect("turn");
+    assert_eq!(turn_launch.lifecycle, EntityLifecycle::Interrupted);
+    let turn_run = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == "turn-run")
+        .expect("turn");
+    assert_eq!(turn_run.lifecycle, EntityLifecycle::Interrupted);
+    let item = after
+        .items
+        .iter()
+        .find(|i| i.item_id == "assistant-run")
+        .expect("item");
+    assert_eq!(item.lifecycle, EntityLifecycle::Interrupted);
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch live-recovery tests
 // ---------------------------------------------------------------------------
@@ -671,47 +766,8 @@ async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_failed_dispatch_interrupted_run_binding_retained() {
     let (database, repository, _temp) = temp_repository("dispatch-binding").await;
-    // launching candidate (no item, no binding)
-    seed_project_and_thread(&database, &repository, "thread-launch").await;
-    let (_cl1, _rc1, _sk1, _cr1) = queue_claim_launch(
-        &repository,
-        "thread-launch",
-        "msg-launch",
-        "run-launch",
-        "turn-launch",
-    )
-    .await;
-    // running candidate with item and binding
-    seed_project_and_thread(&database, &repository, "thread-run").await;
-    let (claimed2, receipt2, sk2, cr2) =
-        queue_claim_launch(&repository, "thread-run", "msg-run", "run-run", "turn-run").await;
-    let bound2 = bind_running(&repository, &claimed2, &receipt2, &sk2, &cr2).await;
-    let before_binding = {
-        let run = entities::assistant_run::Entity::find_by_id("run-run")
-            .one(&database)
-            .await
-            .expect("find")
-            .expect("run");
-        run.provider_binding.clone()
-    };
-    assert!(
-        before_binding.is_some(),
-        "running candidate must have binding before sweep"
-    );
-    let item_id = ItemId::parse("assistant-run").expect("item");
-    commit_running_item(
-        &repository,
-        &claimed2,
-        &receipt2,
-        &bound2,
-        &sk2,
-        &cr2,
-        &item_id,
-        &PatchId::parse("p-turn-run").expect("p"),
-        &PatchId::parse("p-item-run").expect("p"),
-    )
-    .await;
-
+    let before_binding = setup_binding_scenario(&database, &repository).await;
+    assert!(before_binding.is_some());
     let notifier = ConversationCommitNotifier::new();
     let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
     let process_cancel = Arc::new(CancelHandle::new());
@@ -728,66 +784,8 @@ async fn dispatch_failed_dispatch_interrupted_run_binding_retained() {
         dispatcher.shutdown().await,
         NativeRunDispatcherShutdown::Joined
     );
-
     let after = fetch_all(&database).await;
-    // Both dispatches failed
-    for msg in ["msg-launch", "msg-run"] {
-        let d = after
-            .dispatches
-            .iter()
-            .find(|x| x.message_id == msg)
-            .expect("dispatch");
-        assert_eq!(d.state, DispatchState::Failed);
-        assert_eq!(
-            d.last_error.as_deref(),
-            Some("startup reconciliation: unknown outcome after lease expiry")
-        );
-    }
-    // Both runs interrupted
-    for run_id in ["run-launch", "run-run"] {
-        let r = after.runs.iter().find(|x| x.run_id == run_id).expect("run");
-        assert_eq!(r.lifecycle, AssistantRunLifecycle::Interrupted);
-        assert_eq!(
-            r.error_code.as_deref(),
-            Some("startup_reconciliation_unknown_outcome")
-        );
-    }
-    // Binding retained for running candidate, still None for launching
-    let run_launch = after
-        .runs
-        .iter()
-        .find(|r| r.run_id == "run-launch")
-        .expect("launch");
-    assert!(run_launch.provider_binding.is_none());
-    let run_run = after
-        .runs
-        .iter()
-        .find(|r| r.run_id == "run-run")
-        .expect("run");
-    assert_eq!(
-        run_run.provider_binding, before_binding,
-        "binding must be retained"
-    );
-    assert!(run_run.provider_binding_version.is_some());
-    // Conversation lifecycle interrupted
-    let turn_launch = after
-        .turns
-        .iter()
-        .find(|t| t.turn_id == "turn-launch")
-        .expect("turn");
-    assert_eq!(turn_launch.lifecycle, EntityLifecycle::Interrupted);
-    let turn_run = after
-        .turns
-        .iter()
-        .find(|t| t.turn_id == "turn-run")
-        .expect("turn");
-    assert_eq!(turn_run.lifecycle, EntityLifecycle::Interrupted);
-    let item = after
-        .items
-        .iter()
-        .find(|i| i.item_id == "assistant-run")
-        .expect("item");
-    assert_eq!(item.lifecycle, EntityLifecycle::Interrupted);
+    assert_binding_lifecycle(&after, &before_binding);
 }
 
 #[tokio::test(flavor = "current_thread")]
