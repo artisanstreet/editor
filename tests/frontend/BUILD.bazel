@@ -762,6 +762,22 @@ rust_test(
 )
 
 rust_test(
+    name = "native_thread_picker_test",
+    srcs = ["native_thread_picker.rs"],
+    crate_name = "native_thread_picker_test",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "latest_request_gate_test",
     srcs = ["latest_request_gate.rs"],
     crate_name = "latest_request_gate_test",
