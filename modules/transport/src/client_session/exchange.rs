@@ -185,10 +185,10 @@ impl Drop for BidiGuard {
         }
         // Inbound delivery always stops, discarding any late peer data,
         // except after the dedicated path has positively observed clean EOF.
-        if !self.inbound_finished {
-            if let Some(mut receive) = self.receive.take() {
-                let _stopped = receive.stop(close_code(STREAM_STOP_CODE));
-            }
+        if !self.inbound_finished
+            && let Some(mut receive) = self.receive.take()
+        {
+            let _stopped = receive.stop(close_code(STREAM_STOP_CODE));
         }
     }
 }

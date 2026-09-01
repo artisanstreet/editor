@@ -734,6 +734,12 @@ impl ClientSession {
     /// as [`ClientSession::request`]. The request exchange deadline covers
     /// stream open, send, reply receive, reply settlement, and clean response
     /// EOF as one total budget.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the just-settled waiter cannot deliver its one outcome,
+    /// which would mean lifecycle bookkeeping diverged from its registry
+    /// mirror; no decoded input reaches that invariant violation.
     pub async fn request_acknowledging_response(
         mut self,
         envelope: WireEnvelope,
