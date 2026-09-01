@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Div, FontWeight, HighlightStyle, IntoElement, ParentElement, SharedString, Styled,
-    StyledText, div,
+    StyledText, div, prelude::InteractiveElement as _,
 };
 
 use crate::markdown::{Block, CodeFence, CodeToken, CodeTokenKind, MarkdownEngine, Span};
