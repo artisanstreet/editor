@@ -1513,6 +1513,44 @@ fn readiness_is_exact_and_shutdown_removes_only_this_receipt() {
     });
 }
 
+fn assert_lifecycle_stop(
+    runtime: &tokio::runtime::Runtime,
+    connection: &Connection,
+    cancel: &CancelHandle,
+) {
+    let stop = runtime.block_on(lifecycle_request(
+        connection,
+        "runtime-stop",
+        LifecycleRequest::Stop { require_idle: true },
+        true,
+    ));
+    let WireEnvelopeBody::Response(ServerResponse {
+        request_id,
+        payload,
+    }) = stop.body
+    else {
+        panic!("accepted lifecycle stop should be a correlated response");
+    };
+    assert_eq!(request_id.as_str(), "runtime-stop");
+    let ResponsePayload::Lifecycle(LifecycleResponse::Stop(receipt)) = payload else {
+        panic!("accepted lifecycle stop should carry its lifecycle payload");
+    };
+    assert_eq!(receipt.disposition, LifecycleStopDisposition::Accepted);
+    assert_eq!(receipt.state, LifecycleState::Draining);
+    // The response has been decoded before this observation. Cancellation is
+    // published only after the server's finished response stream receives the
+    // Quinn peer acknowledgement; wait for that real event across runtimes.
+    runtime.block_on(async {
+        tokio::time::timeout(FUTURE_WAIT, cancel.wait())
+            .await
+            .expect("runtime cancellation should follow peer acknowledgement");
+    });
+    assert!(
+        cancel.is_cancelled(),
+        "runtime cancellation follows the finished stop response"
+    );
+}
+
 #[test]
 fn lifecycle_offer_reports_idle_status_and_stops_after_correlated_finished_reply() {
     let directory = TemporaryDirectory::new("lifecycle-runtime");
@@ -1564,37 +1602,7 @@ fn lifecycle_offer_reports_idle_status_and_stops_after_correlated_finished_reply
     );
     assert!(!cancel.is_cancelled(), "status must not cancel the runtime");
 
-    let stop = runtime.block_on(lifecycle_request(
-        &connection,
-        "runtime-stop",
-        LifecycleRequest::Stop { require_idle: true },
-        true,
-    ));
-    let WireEnvelopeBody::Response(ServerResponse {
-        request_id,
-        payload,
-    }) = stop.body
-    else {
-        panic!("accepted lifecycle stop should be a correlated response");
-    };
-    assert_eq!(request_id.as_str(), "runtime-stop");
-    let ResponsePayload::Lifecycle(LifecycleResponse::Stop(receipt)) = payload else {
-        panic!("accepted lifecycle stop should carry its lifecycle payload");
-    };
-    assert_eq!(receipt.disposition, LifecycleStopDisposition::Accepted);
-    assert_eq!(receipt.state, LifecycleState::Draining);
-    // The response has been decoded before this observation. Cancellation is
-    // published only after the server's finished response stream receives the
-    // Quinn peer acknowledgement; wait for that real event across runtimes.
-    runtime.block_on(async {
-        tokio::time::timeout(FUTURE_WAIT, cancel.wait())
-            .await
-            .expect("runtime cancellation should follow peer acknowledgement");
-    });
-    assert!(
-        cancel.is_cancelled(),
-        "runtime cancellation follows the finished stop response"
-    );
+    assert_lifecycle_stop(&runtime, &connection, cancel.as_ref());
     drop(connection);
 
     let result = join_within(
