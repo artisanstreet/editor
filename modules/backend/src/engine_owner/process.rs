@@ -772,7 +772,9 @@ mod tests {
         let document: serde_json::Value =
             serde_json::from_str(&first).expect("managed config should be valid JSON");
         assert_eq!(
-            document.get("autoupdate").and_then(|value| value.as_bool()),
+            document
+                .get("autoupdate")
+                .and_then(serde_json::Value::as_bool),
             Some(false)
         );
         assert_eq!(
@@ -786,7 +788,7 @@ mod tests {
             Some("disabled")
         );
         assert_eq!(
-            document.get("warming").and_then(|value| value.as_bool()),
+            document.get("warming").and_then(serde_json::Value::as_bool),
             Some(false)
         );
 
@@ -816,7 +818,7 @@ mod tests {
                 Some("Artisan-managed OpenCode execution policy.")
             );
             assert_eq!(
-                agent.get("hidden").and_then(|value| value.as_bool()),
+                agent.get("hidden").and_then(serde_json::Value::as_bool),
                 Some(true)
             );
             assert_eq!(
@@ -855,21 +857,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn configured_environment_projects_exact_allowlist_without_ambient_values() {
-        let home = TestPath::private("environment");
-        let environment = ConfiguredProfileEnvironment::prepare(home.path())
-            .expect("private profile environment should prepare");
-        let secret = "runtime-secret-redacted";
-        let profile_path = home.path().to_string_lossy().into_owned();
-        let mut command = tokio::process::Command::new("not-spawned");
-        command
-            .env("PATH", "ambient-path")
-            .env("HOME", "ambient-home")
-            .env("USERPROFILE", "ambient-user-profile")
-            .env("ARTISAN_AUTH_TOKEN", "ambient-provider-secret");
-        environment.apply(&mut command, secret);
-
+    fn expected_configured_environment(
+        home: &TestPath,
+        environment: &ConfiguredProfileEnvironment,
+        secret: &str,
+    ) -> BTreeMap<OsString, Option<OsString>> {
         let mut expected = BTreeMap::from([
             (
                 OsString::from("OPENCODE_CLIENT"),
@@ -937,6 +929,25 @@ mod tests {
         if let Some(system_root) = std::env::var_os("SYSTEMROOT") {
             expected.insert(OsString::from("SYSTEMROOT"), Some(system_root));
         }
+        expected
+    }
+
+    #[test]
+    fn configured_environment_projects_exact_allowlist_without_ambient_values() {
+        let home = TestPath::private("environment");
+        let environment = ConfiguredProfileEnvironment::prepare(home.path())
+            .expect("private profile environment should prepare");
+        let secret = "runtime-secret-redacted";
+        let profile_path = home.path().to_string_lossy().into_owned();
+        let mut command = tokio::process::Command::new("not-spawned");
+        command
+            .env("PATH", "ambient-path")
+            .env("HOME", "ambient-home")
+            .env("USERPROFILE", "ambient-user-profile")
+            .env("ARTISAN_AUTH_TOKEN", "ambient-provider-secret");
+        environment.apply(&mut command, secret);
+
+        let expected = expected_configured_environment(&home, &environment, secret);
 
         let actual = command_environment(&command);
         assert_eq!(actual, expected);
