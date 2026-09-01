@@ -398,7 +398,9 @@ struct DispatchLoopExit {
     owner: EngineOwnerShutdown,
 }
 
-struct LiveRecoveryPatchSource;
+struct LiveRecoveryPatchSource {
+    notifier: ConversationCommitNotifier,
+}
 
 impl StartupReconciliationPatchSource for LiveRecoveryPatchSource {
     fn patch_ids_for(
@@ -417,6 +419,13 @@ impl StartupReconciliationPatchSource for LiveRecoveryPatchSource {
             item_patch_id,
         ))
     }
+
+    fn on_durable_disposition(
+        &mut self,
+        candidate: &artisan_database::StartupReconciliationCandidate,
+    ) {
+        let _ = self.notifier.publish(&candidate.thread_id);
+    }
 }
 
 async fn perform_live_recovery_page(
@@ -425,20 +434,19 @@ async fn perform_live_recovery_page(
     operated_at: UnixMillis,
 ) -> Result<
     crate::startup_reconciliation_sweep::StartupReconciliationSweepReport,
-    crate::startup_reconciliation_sweep::StartupReconciliationSweepError,
+    Box<crate::startup_reconciliation_sweep::StartupReconciliationSweepError>,
 > {
-    let input = StartupReconciliationSweepInput::new(operated_at, 64)?;
-    let mut source = LiveRecoveryPatchSource;
-    let notifier = config.conversation_commit_notifier();
-    crate::startup_reconciliation_sweep::sweep_startup_reconciliation_observed(
+    let input = StartupReconciliationSweepInput::new(operated_at, 64).map_err(Box::new)?;
+    let mut source = LiveRecoveryPatchSource {
+        notifier: config.conversation_commit_notifier(),
+    };
+    crate::startup_reconciliation_sweep::sweep_startup_reconciliation(
         repository,
         input,
         &mut source,
-        |candidate| {
-            let _ = notifier.publish(&candidate.thread_id);
-        },
     )
     .await
+    .map_err(Box::new)
 }
 
 async fn run_recovery_pages(
@@ -458,22 +466,19 @@ async fn run_recovery_pages(
             }
             return false;
         };
-        match perform_live_recovery_page(repository, config, operated_at).await {
-            Ok(report) => {
-                if report.discovered == 64 {
-                    if !wait_for_next_claim(stop, process_cancel, config.poll_interval).await {
-                        return false;
-                    }
-                    continue;
-                }
-                return true;
-            }
-            Err(_) => {
+        if let Ok(report) = perform_live_recovery_page(repository, config, operated_at).await {
+            if report.discovered == 64 {
                 if !wait_for_next_claim(stop, process_cancel, config.poll_interval).await {
                     return false;
                 }
+                continue;
+            }
+            return true;
+        } else {
+            if !wait_for_next_claim(stop, process_cancel, config.poll_interval).await {
                 return false;
             }
+            return false;
         }
     }
 }

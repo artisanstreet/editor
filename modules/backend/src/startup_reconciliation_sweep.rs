@@ -121,6 +121,13 @@ pub trait StartupReconciliationPatchSource {
         &mut self,
         candidate: &StartupReconciliationCandidate,
     ) -> Result<StartupReconciliationPatches, PatchSourceError>;
+
+    /// Synchronous hook invoked only after a durable `Interrupted` or
+    /// `AlreadyInterrupted` disposition for `candidate`. Never invoked for
+    /// `SkippedMoved` or any failure. The default is a no-op so existing
+    /// implementations require no change, and the hook must not perform I/O,
+    /// mint randomness, or retain provider material.
+    fn on_durable_disposition(&mut self, _candidate: &StartupReconciliationCandidate) {}
 }
 
 /// Bounded, content-free patch-source failure.
@@ -230,21 +237,41 @@ pub enum StartupReconciliationSweepError {
 // Coordinator
 // ---------------------------------------------------------------------------
 
+/// Bounded single-pass sweep over an injected repository.
+///
+/// The function calls discovery once, then disposes candidates sequentially in
+/// discovery order. An empty discovery is success and never consults the patch
+/// source. Source or patch-shape failure for candidate `N` occurs before any
+/// mutation of `N`. A moved candidate is counted as `skipped_moved` and the
+/// pass continues. An identical durable replay is counted as
+/// `already_interrupted` and continues. The first source or disposition error
+/// stops the pass and returns the already-committed prefix report with the
+/// failing candidate's index and run identity; earlier per-candidate
+/// transactions may already be durable and are never claimed rolled back.
+///
+/// One pass never loops, sleeps, schedules a timer, opens storage, acquires
+/// custody, contacts a provider, requeues, retries a prompt, or wires
+/// `ForgeApp::start`.
+///
+/// # Errors
+///
+/// Returns [`StartupReconciliationSweepError`] for invalid limits, discovery
+/// failures, patch-source or patch-shape failures, counter overflow, and
+/// disposition failures. Each error that carries a `report` has committed only
+/// its prefix.
 #[allow(clippy::result_large_err)]
 // The coordinator is intrinsically sequential and bounded: it must handle
 // discovery, patch-source validation, and three disposition outcomes in one
 // pass without changing behavior or public API. Splitting would obscure the
 // single-pass invariant.
 #[allow(clippy::too_many_lines)]
-async fn sweep_impl<S, F>(
+pub async fn sweep_startup_reconciliation<S>(
     repository: &Repository,
     input: StartupReconciliationSweepInput,
     patch_source: &mut S,
-    observer: &mut F,
 ) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
 where
     S: StartupReconciliationPatchSource,
-    F: FnMut(&StartupReconciliationCandidate) + Send,
 {
     if !(1..=64).contains(&input.limit) {
         return Err(StartupReconciliationSweepError::InvalidLimit { limit: input.limit });
@@ -350,7 +377,7 @@ where
                             value: report.interrupted,
                         },
                     )?;
-                    observer(candidate);
+                    patch_source.on_durable_disposition(candidate);
                 }
                 artisan_database::StartupReconciliationDispositionOutcome::AlreadyInterrupted(
                     _,
@@ -373,7 +400,7 @@ where
                             value: report.already_interrupted,
                         },
                     )?;
-                    observer(candidate);
+                    patch_source.on_durable_disposition(candidate);
                 }
                 artisan_database::StartupReconciliationDispositionOutcome::SkippedMoved => {
                     report.attempted = report.attempted.checked_add(1).ok_or(
@@ -408,51 +435,4 @@ where
     }
 
     Ok(report)
-}
-
-/// Bounded single-pass sweep over an injected repository.
-///
-/// The function calls discovery once, then disposes candidates sequentially in
-/// discovery order. An empty discovery is success and never consults the patch
-/// source. Source or patch-shape failure for candidate `N` occurs before any
-/// mutation of `N`. A moved candidate is counted as `skipped_moved` and the
-/// pass continues. An identical durable replay is counted as
-/// `already_interrupted` and continues. The first source or disposition error
-/// stops the pass and returns the already-committed prefix report with the
-/// failing candidate's index and run identity; earlier per-candidate
-/// transactions may already be durable and are never claimed rolled back.
-///
-/// One pass never loops, sleeps, schedules a timer, opens storage, acquires
-/// custody, contacts a provider, requeues, retries a prompt, or wires
-/// `ForgeApp::start`.
-///
-/// # Errors
-///
-/// Returns [`StartupReconciliationSweepError`] for invalid limits, discovery
-/// failures, patch-source or patch-shape failures, counter overflow, and
-/// disposition failures. Each error that carries a `report` has committed only
-/// its prefix.
-pub async fn sweep_startup_reconciliation<S>(
-    repository: &Repository,
-    input: StartupReconciliationSweepInput,
-    patch_source: &mut S,
-) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
-where
-    S: StartupReconciliationPatchSource,
-{
-    let mut noop = |_: &StartupReconciliationCandidate| {};
-    sweep_impl(repository, input, patch_source, &mut noop).await
-}
-
-pub(crate) async fn sweep_startup_reconciliation_observed<S, F>(
-    repository: &Repository,
-    input: StartupReconciliationSweepInput,
-    patch_source: &mut S,
-    mut observer: F,
-) -> Result<StartupReconciliationSweepReport, StartupReconciliationSweepError>
-where
-    S: StartupReconciliationPatchSource,
-    F: FnMut(&StartupReconciliationCandidate) + Send,
-{
-    sweep_impl(repository, input, patch_source, &mut observer).await
 }
