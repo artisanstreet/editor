@@ -311,7 +311,7 @@ fn collect_ace_lines(output: &str, queried_path: &str) -> Result<Vec<ParsedAce>,
             if !remainder.chars().next().is_some_and(char::is_whitespace) {
                 return Err(NativeFileError::PrivatePermissions);
             }
-            candidate = remainder.trim().to_owned();
+            remainder.trim().clone_into(&mut candidate);
         } else if first_line && is_windows_path_header(trimmed) && !trimmed.contains('(') {
             if !queried_path.is_empty() {
                 return Err(NativeFileError::PrivatePermissions);
