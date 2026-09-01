@@ -37,6 +37,26 @@ fn config(
     )
 }
 
+fn config_with_notifier(
+    notifier: ConversationCommitNotifier,
+    poll_interval: Duration,
+) -> Result<NativeRunDispatcherConfig, NativeRunDispatcherConfigError> {
+    NativeRunDispatcherConfig::new(
+        NativeOpenCode2Authority::new(),
+        notifier,
+        NativeRunDispatcherConfigInput {
+            claim_lease: Duration::from_millis(10),
+            poll_interval,
+            retry_backoff: Duration::from_millis(10),
+            shutdown_budget: Duration::from_millis(500),
+            queue_capacity: NonZeroUsize::new(1).expect("one queue slot is nonzero"),
+            max_command_retries: NonZeroUsize::new(1).expect("one retry is nonzero"),
+            prompt_delivery: "queue".to_owned(),
+            stream_after: 0,
+        },
+    )
+}
+
 #[test]
 fn scheduler_requires_positive_injected_durations() {
     let error = NativeRunDispatcherConfig::new(
@@ -155,4 +175,739 @@ async fn dispatcher_shutdown_joins_owner_custody() {
         dispatcher.shutdown().await,
         NativeRunDispatcherShutdown::Joined
     );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for live-recovery dispatch tests
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf as StdPathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use artisan_database::entities::{self, AssistantRunLifecycle, DispatchState, EntityLifecycle};
+use artisan_database::{
+    AssistantChange, BindRunProvider, ClaimMessageDispatch, CreateThreadInput,
+    ProviderBindingBytes, QueueFirstMessageInput, Repository, RunLaunchCredentials, RunStartKey,
+    SetThreadEngineConfigInput,
+};
+use artisan_domain::ThreadId as DomainThreadId;
+use artisan_domain::{
+    ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, CountLimit, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, NetworkAccess,
+    OpenCode2Selection, PatchId, ProjectId, RequestId, RunId, ThreadId, TurnId, UnixMillis,
+    WebSearchAccess,
+};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+struct TempDatabase {
+    dir: StdPathBuf,
+    file: StdPathBuf,
+}
+
+impl TempDatabase {
+    fn new(label: &str) -> Self {
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "artisan-dispatch-{}-{}-{}",
+            label,
+            std::process::id(),
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let file = dir.join("test.db");
+        Self { dir, file }
+    }
+
+    fn path(&self) -> &Path {
+        &self.file
+    }
+}
+
+impl Drop for TempDatabase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let sidecar = StdPathBuf::from(format!("{}{}", self.file.display(), suffix));
+            let _ = std::fs::remove_file(sidecar);
+        }
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+async fn temp_repository(label: &str) -> (DatabaseConnection, Repository, TempDatabase) {
+    let temp = TempDatabase::new(label);
+    let database = connect(
+        SqliteConfig::file(temp.path())
+            .min_connections(1)
+            .max_connections(4)
+            .sqlx_logging(false),
+    )
+    .await
+    .expect("temp db");
+    migrate_to_current(&database).await.expect("migrate");
+    (database.clone(), Repository::new(database), temp)
+}
+
+fn fixture_engine_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-reconcile").expect("permission id is valid"),
+        EngineAgentId::parse("agent-reconcile").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::OpenCode2(OpenCode2Selection::new(
+            EngineProfileId::parse("profile-reconcile").expect("profile id is valid"),
+            EngineModelId::parse("model-reconcile").expect("model id is valid"),
+            EngineRouteId::parse("route-reconcile").expect("route id is valid"),
+            None,
+            permission,
+        )),
+        runtime,
+    )
+}
+
+use artisan_domain::PermissionId;
+
+async fn seed_project_and_thread(
+    database: &DatabaseConnection,
+    repository: &Repository,
+    thread_id: &str,
+) {
+    let project = entities::attached_project::ActiveModel {
+        project_id: Set("project-1".to_owned()),
+        root_path: Set("C:/repos/artisan".to_owned()),
+        display_name: Set("Artisan".to_owned()),
+        attached_at_ms: Set(1),
+    };
+    let _ = entities::attached_project::Entity::insert(project)
+        .exec(database)
+        .await;
+    let _ = repository
+        .create_thread(CreateThreadInput {
+            request_id: RequestId::parse(format!("req-{thread_id}")).expect("req"),
+            thread_id: ThreadId::parse(thread_id).expect("tid"),
+            project_id: ProjectId::parse("project-1").expect("pid"),
+            title: artisan_domain::ThreadTitle::parse("Thread").expect("title"),
+            created_at: UnixMillis::from_millis(10),
+            updated_at: UnixMillis::from_millis(10),
+        })
+        .await;
+    let thread = ThreadId::parse(thread_id).expect("tid");
+    if repository
+        .read_thread_engine_settings(&thread)
+        .await
+        .expect("engine configuration should read")
+        .is_none()
+    {
+        repository
+            .set_thread_engine_config(SetThreadEngineConfigInput {
+                request_id: RequestId::parse(format!("engine-{thread_id}")).expect("request id"),
+                thread_id: thread,
+                precondition: EngineConfigUpdatePrecondition::Unconfigured,
+                config: fixture_engine_config(),
+                accepted_at: UnixMillis::from_millis(10),
+            })
+            .await
+            .expect("engine configuration should create");
+    }
+}
+
+const OWNER_BYTES: [u8; 32] = [0xa1; 32];
+const LEASE_BYTES: [u8; 32] = [0xb2; 32];
+const CLAIM_TOKEN_BYTES: [u8; 32] = [0xc3; 32];
+const DISPATCH_OWNER_BYTE: u8 = 0x11;
+
+async fn queue_claim_launch(
+    repository: &Repository,
+    thread_id: &str,
+    message_id: &str,
+    run_id: &str,
+    turn_id: &str,
+) -> (
+    artisan_database::ClaimedMessageDispatch,
+    artisan_database::LaunchedRunReceipt,
+    RunStartKey,
+    RunLaunchCredentials,
+) {
+    let queue = QueueFirstMessageInput {
+        request_id: RequestId::parse(format!("req-{message_id}")).expect("req"),
+        message_id: MessageId::parse(message_id).expect("mid"),
+        thread_id: ThreadId::parse(thread_id).expect("tid"),
+        body: MessageBody::parse("hello").expect("body"),
+        accepted_at: UnixMillis::from_millis(50),
+    };
+    repository.queue_first_message(queue).await.expect("queue");
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: artisan_database::DispatchLeaseOwner::new([DISPATCH_OWNER_BYTE; 32]),
+            claimed_at: UnixMillis::from_millis(100),
+            lease_expires_at: UnixMillis::from_millis(600),
+        })
+        .await
+        .expect("claim")
+        .expect("claimed");
+    let run = RunId::parse(run_id).expect("run");
+    let turn = TurnId::parse(turn_id).expect("turn");
+    let item = ItemId::parse(format!("item-{run_id}")).expect("item");
+    let p1 = PatchId::parse(format!("patch-{run_id}-a")).expect("p");
+    let p2 = PatchId::parse(format!("patch-{run_id}-b")).expect("p");
+    let mut bytes = [0u8; 32];
+    for (idx, byte) in run_id.bytes().cycle().take(32).enumerate() {
+        bytes[idx] = byte ^ 0x5a;
+    }
+    let len_u8 = u8::try_from(run_id.len()).unwrap_or(255);
+    bytes[0] = bytes[0].wrapping_add(len_u8);
+    let start_key = RunStartKey::new(bytes);
+    let creds = RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES);
+    let engine_settings = repository
+        .read_thread_engine_settings(&ThreadId::parse(thread_id).expect("tid"))
+        .await
+        .expect("engine configuration should read")
+        .expect("engine configuration should be present");
+    let outcome = repository
+        .launch_claimed_run(artisan_database::LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &run,
+            turn_id: &turn,
+            item_id: &item,
+            first_patch_id: &p1,
+            second_patch_id: &p2,
+            operated_at: UnixMillis::from_millis(150),
+            run_start_key: &start_key,
+            credentials: &creds,
+            engine_settings: &engine_settings,
+        })
+        .await
+        .expect("launch");
+    let artisan_database::LaunchClaimedRunOutcome::Started(receipt) = outcome else {
+        panic!("started");
+    };
+    (claimed, receipt, start_key, creds)
+}
+
+async fn bind_running(
+    repository: &Repository,
+    claimed: &artisan_database::ClaimedMessageDispatch,
+    receipt: &artisan_database::LaunchedRunReceipt,
+    start_key: &RunStartKey,
+    creds: &RunLaunchCredentials,
+) -> artisan_database::BoundRunReceipt {
+    let binding = ProviderBindingBytes::new(vec![0xab; 16]).expect("binding");
+    let outcome = repository
+        .bind_run_provider(BindRunProvider {
+            claimed,
+            receipt,
+            run_start_key: start_key,
+            credentials: creds,
+            expected_launch_at: UnixMillis::from_millis(150),
+            bound_at: UnixMillis::from_millis(200),
+            binding_version: 2,
+            binding_bytes: &binding,
+        })
+        .await
+        .expect("bind");
+    match outcome {
+        artisan_database::BindRunProviderOutcome::Bound(r)
+        | artisan_database::BindRunProviderOutcome::AlreadyBound(r) => r,
+    }
+}
+
+async fn commit_running_item(
+    repository: &Repository,
+    claimed: &artisan_database::ClaimedMessageDispatch,
+    receipt: &artisan_database::LaunchedRunReceipt,
+    bound: &artisan_database::BoundRunReceipt,
+    start_key: &RunStartKey,
+    creds: &RunLaunchCredentials,
+    item_id: &ItemId,
+    patch_turn: &PatchId,
+    patch_item: &PatchId,
+) {
+    let body = AssistantBody::parse("hello assistant").expect("body");
+    repository
+        .commit_run_batch(artisan_database::CommitRunBatch {
+            scope: artisan_database::RunBatchScope {
+                claimed,
+                launched: receipt,
+                bound,
+                run_start_key: start_key,
+                credentials: creds,
+                expected_launch_at: UnixMillis::from_millis(150),
+                expected_updated_at: UnixMillis::from_millis(200),
+            },
+            batch_sequence: 1,
+            operated_at: UnixMillis::from_millis(250),
+            activate_turn_patch_id: Some(patch_turn),
+            changes: &[AssistantChange::Start {
+                item_id,
+                phase: AssistantMessagePhase::Final,
+                body: &body,
+                patch_id: patch_item,
+            }],
+            checkpoint: artisan_database::CheckpointUpdate::Keep,
+        })
+        .await
+        .expect("commit batch");
+}
+
+async fn fetch_all(database: &DatabaseConnection) -> AllRows {
+    async fn all<E>(db: &DatabaseConnection) -> Vec<E::Model>
+    where
+        E: EntityTrait,
+    {
+        E::find().all(db).await.expect("rows")
+    }
+    let mut dispatches = all::<entities::message_dispatch::Entity>(database).await;
+    let mut runs = all::<entities::assistant_run::Entity>(database).await;
+    let mut turns = all::<entities::conversation_turn::Entity>(database).await;
+    let mut items = all::<entities::conversation_item::Entity>(database).await;
+    let mut patches = all::<entities::conversation_patch::Entity>(database).await;
+    let mut states = all::<entities::conversation_state::Entity>(database).await;
+    dispatches.sort_by(|a, b| a.message_id.cmp(&b.message_id));
+    runs.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+    turns.sort_by(|a, b| a.turn_id.cmp(&b.turn_id));
+    items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
+    patches.sort_by_key(|a| a.sequence);
+    states.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
+    AllRows {
+        dispatches,
+        runs,
+        turns,
+        items,
+        patches,
+        states,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AllRows {
+    dispatches: Vec<entities::MessageDispatch>,
+    runs: Vec<entities::AssistantRun>,
+    turns: Vec<entities::ConversationTurn>,
+    items: Vec<entities::ConversationItem>,
+    patches: Vec<entities::ConversationPatch>,
+    states: Vec<entities::ConversationState>,
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch live-recovery tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_recovers_65_expired_across_bounded_pages() {
+    let (database, repository, _temp) = temp_repository("dispatch-65").await;
+    for i in 0..65 {
+        let thread = format!("thread-65-{i}");
+        let msg = format!("msg-65-{i}");
+        let run = format!("run-65-{i:03}");
+        let turn = format!("turn-65-{i:03}");
+        seed_project_and_thread(&database, &repository, &thread).await;
+        let (_cl, _rc, _sk, _cr) =
+            queue_claim_launch(&repository, &thread, &msg, &run, &turn).await;
+    }
+    let before = fetch_all(&database).await;
+    let before_patches = before.patches.len();
+
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_with_notifier(notifier, Duration::from_millis(20)).expect("config");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        StdPathBuf::from("C:/forge/database.sqlite3"),
+        config,
+        Arc::clone(&process_cancel),
+        &tokio::runtime::Handle::current(),
+    );
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+
+    let after = fetch_all(&database).await;
+    let interrupted = after
+        .runs
+        .iter()
+        .filter(|r| r.lifecycle == AssistantRunLifecycle::Interrupted)
+        .count();
+    assert_eq!(interrupted, 65, "all 65 expired runs should be interrupted");
+    assert_eq!(after.patches.len(), before_patches + 65);
+    for run in &after.runs {
+        if run.run_id.starts_with("run-65-") {
+            assert_eq!(run.lease, None);
+            assert_eq!(run.owner, None);
+        }
+    }
+    for dispatch in &after.dispatches {
+        if dispatch.message_id.starts_with("msg-65-") {
+            assert_eq!(dispatch.state, DispatchState::Failed);
+            assert_eq!(dispatch.lease_owner, None);
+            assert_eq!(dispatch.lease_expires_at_ms, None);
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_unexpired_candidate_remains_byte_stable_until_expiry() {
+    let (database, repository, _temp) = temp_repository("dispatch-unexpired").await;
+    seed_project_and_thread(&database, &repository, "thread-unexp").await;
+    let (_cl, _rc, _sk, _cr) = queue_claim_launch(
+        &repository,
+        "thread-unexp",
+        "msg-unexp",
+        "run-unexp",
+        "turn-unexp",
+    )
+    .await;
+    // Make lease far in the future so it is not expired.
+    // wall_clock is now ~= now_ms; set lease to now + 60s.
+    let future_ms = {
+        let now = crate::CommandOriginClockError::from(std::io::Error::other("clock"))
+            .to_string()
+            .len() as i64;
+        let _ = now;
+        let wall = crate::SystemCommandOrigin
+            .acceptance_instant()
+            .expect("clock should succeed");
+        wall.as_millis() + 60_000
+    };
+    let dispatch_row = entities::message_dispatch::Entity::find_by_id("msg-unexp")
+        .one(&database)
+        .await
+        .expect("find")
+        .expect("dispatch");
+    let mut active: entities::message_dispatch::ActiveModel = dispatch_row.into();
+    active.lease_expires_at_ms = Set(Some(future_ms));
+    active.update(&database).await.expect("update future lease");
+
+    let before = fetch_all(&database).await;
+
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        StdPathBuf::from("C:/forge/database.sqlite3"),
+        config,
+        Arc::clone(&process_cancel),
+        &tokio::runtime::Handle::current(),
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mid = fetch_all(&database).await;
+    assert_eq!(
+        before.dispatches, mid.dispatches,
+        "unexpired dispatch must stay byte-stable"
+    );
+    assert_eq!(before.runs, mid.runs, "unexpired run must stay byte-stable");
+    assert_eq!(before.patches, mid.patches, "no patches for unexpired");
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    let after = fetch_all(&database).await;
+    assert_eq!(
+        before.dispatches, after.dispatches,
+        "still byte-stable after shutdown"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_failed_dispatch_interrupted_run_binding_retained() {
+    let (database, repository, _temp) = temp_repository("dispatch-binding").await;
+    // launching candidate (no item, no binding)
+    seed_project_and_thread(&database, &repository, "thread-launch").await;
+    let (_cl1, _rc1, _sk1, _cr1) = queue_claim_launch(
+        &repository,
+        "thread-launch",
+        "msg-launch",
+        "run-launch",
+        "turn-launch",
+    )
+    .await;
+    // running candidate with item and binding
+    seed_project_and_thread(&database, &repository, "thread-run").await;
+    let (claimed2, receipt2, sk2, cr2) =
+        queue_claim_launch(&repository, "thread-run", "msg-run", "run-run", "turn-run").await;
+    let bound2 = bind_running(&repository, &claimed2, &receipt2, &sk2, &cr2).await;
+    let before_binding = {
+        let run = entities::assistant_run::Entity::find_by_id("run-run")
+            .one(&database)
+            .await
+            .expect("find")
+            .expect("run");
+        run.provider_binding.clone()
+    };
+    assert!(
+        before_binding.is_some(),
+        "running candidate must have binding before sweep"
+    );
+    let item_id = ItemId::parse("assistant-run").expect("item");
+    commit_running_item(
+        &repository,
+        &claimed2,
+        &receipt2,
+        &bound2,
+        &sk2,
+        &cr2,
+        &item_id,
+        &PatchId::parse("p-turn-run").expect("p"),
+        &PatchId::parse("p-item-run").expect("p"),
+    )
+    .await;
+
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        StdPathBuf::from("C:/forge/database.sqlite3"),
+        config,
+        Arc::clone(&process_cancel),
+        &tokio::runtime::Handle::current(),
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+
+    let after = fetch_all(&database).await;
+    // Both dispatches failed
+    for msg in ["msg-launch", "msg-run"] {
+        let d = after
+            .dispatches
+            .iter()
+            .find(|x| x.message_id == msg)
+            .expect("dispatch");
+        assert_eq!(d.state, DispatchState::Failed);
+        assert_eq!(
+            d.last_error.as_deref(),
+            Some("startup reconciliation: unknown outcome after lease expiry")
+        );
+    }
+    // Both runs interrupted
+    for run_id in ["run-launch", "run-run"] {
+        let r = after.runs.iter().find(|x| x.run_id == run_id).expect("run");
+        assert_eq!(r.lifecycle, AssistantRunLifecycle::Interrupted);
+        assert_eq!(
+            r.error_code.as_deref(),
+            Some("startup_reconciliation_unknown_outcome")
+        );
+    }
+    // Binding retained for running candidate, still None for launching
+    let run_launch = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-launch")
+        .expect("launch");
+    assert!(run_launch.provider_binding.is_none());
+    let run_run = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-run")
+        .expect("run");
+    assert_eq!(
+        run_run.provider_binding, before_binding,
+        "binding must be retained"
+    );
+    assert!(run_run.provider_binding_version.is_some());
+    // Conversation lifecycle interrupted
+    let turn_launch = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == "turn-launch")
+        .expect("turn");
+    assert_eq!(turn_launch.lifecycle, EntityLifecycle::Interrupted);
+    let turn_run = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == "turn-run")
+        .expect("turn");
+    assert_eq!(turn_run.lifecycle, EntityLifecycle::Interrupted);
+    let item = after
+        .items
+        .iter()
+        .find(|i| i.item_id == "assistant-run")
+        .expect("item");
+    assert_eq!(item.lifecycle, EntityLifecycle::Interrupted);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_post_disposition_notifier_wake() {
+    let (database, repository, _temp) = temp_repository("dispatch-notify").await;
+    seed_project_and_thread(&database, &repository, "thread-notify").await;
+    let (_cl, _rc, _sk, _cr) = queue_claim_launch(
+        &repository,
+        "thread-notify",
+        "msg-notify",
+        "run-notify",
+        "turn-notify",
+    )
+    .await;
+
+    let notifier = ConversationCommitNotifier::new();
+    let mut subscription = notifier
+        .subscribe(DomainThreadId::parse("thread-notify").expect("tid"))
+        .expect("subscribe");
+    let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        StdPathBuf::from("C:/forge/database.sqlite3"),
+        config,
+        Arc::clone(&process_cancel),
+        &tokio::runtime::Handle::current(),
+    );
+
+    let notified = tokio::time::timeout(Duration::from_millis(800), subscription.wait()).await;
+    assert!(
+        notified.is_ok(),
+        "notifier should wake after durable disposition"
+    );
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    // Ensure durable state
+    let after = fetch_all(&database).await;
+    let run = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-notify")
+        .expect("run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_final_bounded_cancellation_page_plus_owner_join() {
+    let (database, repository, _temp) = temp_repository("dispatch-final").await;
+    // Seed after dispatcher start to race cancellation path, but easiest seed before.
+    seed_project_and_thread(&database, &repository, "thread-final").await;
+    let (_cl, _rc, _sk, _cr) = queue_claim_launch(
+        &repository,
+        "thread-final",
+        "msg-final",
+        "run-final",
+        "turn-final",
+    )
+    .await;
+
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_with_notifier(notifier, Duration::from_millis(10)).expect("config");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        StdPathBuf::from("C:/forge/database.sqlite3"),
+        config,
+        Arc::clone(&process_cancel),
+        &tokio::runtime::Handle::current(),
+    );
+    // Immediately cancel to force final page path.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    process_cancel.cancel();
+    let shutdown = dispatcher.shutdown().await;
+    assert_eq!(shutdown, NativeRunDispatcherShutdown::Joined);
+
+    let after = fetch_all(&database).await;
+    let run = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-final")
+        .expect("run");
+    assert_eq!(
+        run.lifecycle,
+        AssistantRunLifecycle::Interrupted,
+        "final page should have recovered"
+    );
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == "msg-final")
+        .expect("dispatch");
+    assert_eq!(dispatch.state, DispatchState::Failed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_no_provider_child_for_recovery_only() {
+    let (database, repository, _temp) = temp_repository("dispatch-noprovider").await;
+    for i in 0..3 {
+        let thread = format!("thread-np-{i}");
+        let msg = format!("msg-np-{i}");
+        let run = format!("run-np-{i}");
+        let turn = format!("turn-np-{i}");
+        seed_project_and_thread(&database, &repository, &thread).await;
+        let (_cl, _rc, _sk, _cr) =
+            queue_claim_launch(&repository, &thread, &msg, &run, &turn).await;
+    }
+    let before = fetch_all(&database).await;
+    let before_run_count = before.runs.len();
+    let before_patches = before.patches.len();
+
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_with_notifier(notifier, Duration::from_millis(15)).expect("config");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start(
+        repository.clone(),
+        StdPathBuf::from("C:/forge/database.sqlite3"),
+        config,
+        Arc::clone(&process_cancel),
+        &tokio::runtime::Handle::current(),
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+
+    let after = fetch_all(&database).await;
+    assert_eq!(
+        after.runs.len(),
+        before_run_count,
+        "recovery must not create new provider runs"
+    );
+    assert_eq!(
+        after.patches.len(),
+        before_patches + 3,
+        "only recovery patches, no provider children"
+    );
+    // Ensure no run gained a new provider binding that wasn't there before
+    for run in &after.runs {
+        if run.run_id.starts_with("run-np-") {
+            assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
+        }
+    }
 }
