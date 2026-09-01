@@ -33,7 +33,8 @@ use conversation_steering_machine::{
     SourceReference, SteeringEffect, SteeringEvent, SteeringLabelKind,
 };
 use conversation_surface::{
-    ConversationSurfaceAction, ConversationSurfaceTarget, ViewportObservation, ordered_block_kinds,
+    ConversationSurfaceAction, ConversationSurfaceTarget, JUMP_TO_LATEST_SELECTOR,
+    ViewportObservation, ordered_block_kinds,
 };
 use conversation_turn_machine::TurnEvent;
 use conversation_view_machine::{DisclosureState, ViewportEffect};
@@ -193,6 +194,20 @@ fn dispatch_following_viewport_burst(
         });
     });
     cx.run_until_parked();
+}
+
+fn bottom_scroll_requests(effects: &[ConversationHostEffect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| {
+            matches!(
+                effect,
+                ConversationHostEffect::Controller(ConversationStateEffect::Viewport(
+                    ViewportEffect::RequestBottomScroll { .. }
+                ))
+            )
+        })
+        .count()
 }
 
 fn proof_host(
@@ -557,6 +572,137 @@ fn explicit_viewport_observations_and_scroll_intents_stay_typed(cx: &mut TestApp
             ))
         )));
     });
+}
+
+#[gpui::test]
+fn jump_to_latest_routes_to_viewport_controller_and_enters_scrolling(cx: &mut TestAppContext) {
+    let (host, cx) = add_host(cx);
+    cx.run_until_parked();
+    let surface = cx.update(|_, app| host.read(app).surface().clone());
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            surface.set_jump_to_latest_visible(true, surface_cx);
+        });
+    });
+    cx.run_until_parked();
+    let button = cx
+        .debug_bounds(JUMP_TO_LATEST_SELECTOR)
+        .expect("hosted jump control must paint");
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        let host = host.read(app);
+        assert!(host.controller_view().viewport_state.is_scrolling());
+        assert_eq!(bottom_scroll_requests(host.pending_effects()), 1);
+        assert!(host.pending_effects().iter().any(|effect| matches!(
+            effect,
+            ConversationHostEffect::Controller(ConversationStateEffect::Viewport(
+                ViewportEffect::HideJumpToLatest
+            ))
+        )));
+    });
+}
+
+#[gpui::test]
+fn extent_changed_is_dispatched_once_for_render_invalidations_and_not_for_viewport_only(
+    cx: &mut TestAppContext,
+) {
+    let (host, cx) = add_host(cx);
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        host.update(app, |host, _| {
+            let _ = host.drain_effects();
+        });
+    });
+
+    cx.update(|_, app| {
+        host.update(app, |host, host_cx| {
+            host.dispatch(
+                ConversationStateEvent::RegisterTurn {
+                    turn_id: turn_id("extent-following"),
+                },
+                host_cx,
+            )
+            .expect("following scene invalidation is accepted");
+        });
+    });
+    let following_effects = cx.update(|_, app| host.update(app, |host, _| host.drain_effects()));
+    assert_eq!(bottom_scroll_requests(&following_effects), 1);
+
+    let surface = cx.update(|_, app| host.read(app).surface().clone());
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            assert!(surface.observe_viewport(
+                ViewportObservation {
+                    first_visible: None,
+                    last_visible: None,
+                    at_bottom: false,
+                },
+                surface_cx,
+            ));
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        assert!(
+            host.read(app)
+                .controller_view()
+                .viewport_state
+                .is_detached()
+        );
+    });
+    let detached_observation_effects =
+        cx.update(|_, app| host.update(app, |host, _| host.drain_effects()));
+    assert_eq!(bottom_scroll_requests(&detached_observation_effects), 0);
+
+    cx.update(|_, app| {
+        host.update(app, |host, host_cx| {
+            host.dispatch(
+                ConversationStateEvent::RegisterTurn {
+                    turn_id: turn_id("extent-detached"),
+                },
+                host_cx,
+            )
+            .expect("detached scene invalidation is accepted");
+        });
+    });
+    let detached_effects = cx.update(|_, app| host.update(app, |host, _| host.drain_effects()));
+    assert_eq!(bottom_scroll_requests(&detached_effects), 0);
+
+    cx.update(|_, app| {
+        host.update(app, |host, host_cx| {
+            host.dispatch(
+                ConversationStateEvent::Viewport(
+                    conversation_view_machine::ViewportEvent::UserScrolled { at_bottom: true },
+                ),
+                host_cx,
+            )
+            .expect("physical bottom observation returns to following");
+        });
+    });
+    let _ = cx.update(|_, app| host.update(app, |host, _| host.drain_effects()));
+    cx.update(|_, app| {
+        host.update(app, |host, host_cx| {
+            host.dispatch(
+                ConversationStateEvent::Viewport(
+                    conversation_view_machine::ViewportEvent::UserScrolled { at_bottom: false },
+                ),
+                host_cx,
+            )
+            .expect("viewport-only invalidation is accepted");
+        });
+    });
+    let viewport_only_effects =
+        cx.update(|_, app| host.update(app, |host, _| host.drain_effects()));
+    assert_eq!(bottom_scroll_requests(&viewport_only_effects), 0);
+    assert!(viewport_only_effects.iter().any(|effect| matches!(
+        effect,
+        ConversationHostEffect::Controller(ConversationStateEffect::Viewport(
+            ViewportEffect::InvalidateRender
+        ))
+    )));
 }
 
 #[gpui::test]

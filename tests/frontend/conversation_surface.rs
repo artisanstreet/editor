@@ -14,12 +14,12 @@ use conversation_scene::{
     TurnNarrationEntry,
 };
 use conversation_surface::{
-    ConversationSurface, ConversationSurfaceAction, ConversationSurfaceTarget, ROOT_SELECTOR,
-    RenderedBlockKind, VIEWPORT_SELECTOR, ViewportObservation, block_selector,
-    changed_file_selector, file_change_status_label, format_elapsed_millis, ordered_block_kinds,
-    steering_selector, turn_selector, turn_status_copy,
+    ConversationSurface, ConversationSurfaceAction, ConversationSurfaceTarget,
+    JUMP_TO_LATEST_SELECTOR, ROOT_SELECTOR, RenderedBlockKind, VIEWPORT_SELECTOR,
+    ViewportObservation, block_selector, changed_file_selector, file_change_status_label,
+    format_elapsed_millis, ordered_block_kinds, steering_selector, turn_selector, turn_status_copy,
 };
-use gpui::{Modifiers, TestAppContext, px, size};
+use gpui::{Modifiers, TestAppContext, point, px, size};
 
 fn scene_id(value: &str) -> SceneId {
     SceneId::parse(value).expect("scene id is valid")
@@ -113,6 +113,30 @@ impl gpui::Render for SurfaceWindowHost {
     ) -> impl gpui::IntoElement {
         self.surface.clone()
     }
+}
+
+fn drain_surface_actions(
+    surface: &gpui::Entity<ConversationSurface>,
+    cx: &mut gpui::VisualTestContext,
+) -> Vec<ConversationSurfaceAction> {
+    cx.update(|_, app| surface.update(app, |surface, _| surface.take_actions()))
+}
+
+fn tall_scene() -> ConversationScene {
+    let body = (0..160)
+        .map(|line| format!("Transcript line {line} keeps the viewport measurable."))
+        .collect::<Vec<_>>()
+        .join("\n");
+    scene(
+        vec![item(
+            "tall-user",
+            "turn_a",
+            1,
+            SceneItemKind::UserMessage { body },
+            None,
+        )],
+        TurnNarration::Quiet,
+    )
 }
 
 #[test]
@@ -545,6 +569,7 @@ fn disclosure_click_emits_request_without_mutating_scene(cx: &mut TestAppContext
     });
     cx.simulate_resize(size(px(720.0), px(480.0)));
     cx.run_until_parked();
+    let _ = drain_surface_actions(&surface, cx);
 
     let trigger = cx
         .debug_bounds(CHANGE_DISCLOSURE_TRIGGER)
@@ -610,6 +635,177 @@ fn mounted_surface_exposes_root_viewport_and_keyboard_focus_bounds(cx: &mut Test
         let focus = surface.read(app).transcript_focus_handle().clone();
         window.focus(&focus);
         assert!(focus.is_focused(window));
+    });
+}
+
+#[gpui::test]
+fn jump_to_latest_is_an_overlay_and_pointer_keyboard_activation_is_typed(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(
+                vec![item(
+                    "user",
+                    "turn_a",
+                    1,
+                    SceneItemKind::UserMessage {
+                        body: "rendered body".to_owned(),
+                    },
+                    None,
+                )],
+                TurnNarration::Quiet,
+            ),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+    let root_before = cx.debug_bounds(ROOT_SELECTOR).expect("surface root bounds");
+    let viewport_before = cx
+        .debug_bounds(VIEWPORT_SELECTOR)
+        .expect("surface viewport bounds");
+    let _ = drain_surface_actions(&surface, cx);
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            surface.set_jump_to_latest_visible(true, surface_cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(cx.debug_bounds(ROOT_SELECTOR), Some(root_before));
+    assert_eq!(cx.debug_bounds(VIEWPORT_SELECTOR), Some(viewport_before));
+    let button = cx
+        .debug_bounds(JUMP_TO_LATEST_SELECTOR)
+        .expect("visible jump control must paint a stable selector");
+
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        drain_surface_actions(&surface, cx)
+            .iter()
+            .any(|action| matches!(action, ConversationSurfaceAction::JumpToLatestRequested))
+    );
+
+    cx.update(|window, app| {
+        let focus = surface.read(app).transcript_focus_handle().clone();
+        window.focus(&focus);
+        window.focus_next();
+    });
+    cx.simulate_keystrokes("enter space");
+    let keyboard_actions = drain_surface_actions(&surface, cx);
+    assert_eq!(
+        keyboard_actions
+            .iter()
+            .filter(|action| matches!(action, ConversationSurfaceAction::JumpToLatestRequested))
+            .count(),
+        2
+    );
+}
+
+#[gpui::test]
+fn viewport_geometry_reports_top_near_bottom_and_detached_positions(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(tall_scene(), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+
+    let handle = cx.update(|_, app| surface.read(app).scroll_handle().clone());
+    let (max_height, viewport_height) = cx.update(|_, app| {
+        let surface = surface.read(app);
+        (
+            f64::from(surface.scroll_handle().max_offset().height),
+            f64::from(surface.scroll_handle().bounds().size.height),
+        )
+    });
+    assert!(max_height > viewport_height * 0.06 + 64.0);
+    let tolerance = (viewport_height * 0.06).max(64.0);
+    let initial_observations = drain_surface_actions(&surface, cx);
+    let initial_observation = initial_observations.iter().find_map(|action| match action {
+        ConversationSurfaceAction::ViewportObserved(observation) => Some(observation),
+        _ => None,
+    });
+    assert_eq!(
+        initial_observation.map(|observation| observation.at_bottom),
+        Some(false)
+    );
+    let positions = [
+        (max_height - (tolerance - 1.0), true),
+        (max_height - (tolerance + 1.0), false),
+    ];
+
+    for (scroll_top, expected_at_bottom) in positions {
+        handle.set_offset(point(px(0.0), px(-(scroll_top as f32))));
+        cx.update(|_, app| surface.update(app, |_, surface_cx| surface_cx.notify()));
+        cx.run_until_parked();
+        let observations = drain_surface_actions(&surface, cx);
+        let observation = observations.iter().find_map(|action| match action {
+            ConversationSurfaceAction::ViewportObserved(observation) => Some(observation),
+            _ => None,
+        });
+        assert_eq!(
+            observation.map(|observation| observation.at_bottom),
+            Some(expected_at_bottom)
+        );
+        assert!(observation.is_some_and(|observation| {
+            observation.first_visible.is_none() && observation.last_visible.is_none()
+        }));
+    }
+}
+
+#[gpui::test]
+fn viewport_observations_deduplicate_and_retry_after_queue_backpressure(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(Vec::new(), TurnNarration::Quiet),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.run_until_parked();
+    let _ = drain_surface_actions(&surface, cx);
+
+    let first = ViewportObservation {
+        first_visible: None,
+        last_visible: None,
+        at_bottom: false,
+    };
+    let retry = ViewportObservation {
+        first_visible: None,
+        last_visible: None,
+        at_bottom: true,
+    };
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            assert!(surface.observe_viewport(first.clone(), surface_cx));
+            assert!(!surface.observe_viewport(first.clone(), surface_cx));
+            assert_eq!(surface.pending_actions().len(), 1);
+            let _ = surface.take_actions();
+            for _ in 0..conversation_surface::CONVERSATION_SURFACE_MAX_ACTIONS {
+                assert!(surface.request_scroll(
+                    ConversationSurfaceTarget::Scene(scene_id("fill")),
+                    surface_cx,
+                ));
+            }
+            assert!(!surface.observe_viewport(retry.clone(), surface_cx));
+            assert_eq!(
+                surface.pending_actions().len(),
+                conversation_surface::CONVERSATION_SURFACE_MAX_ACTIONS
+            );
+        });
+    });
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            let _ = surface.take_next_action();
+            assert!(!surface.observe_viewport(retry.clone(), surface_cx));
+            assert!(matches!(
+                surface.pending_actions().last(),
+                Some(ConversationSurfaceAction::ViewportObserved(observation))
+                    if observation == &retry
+            ));
+        });
     });
 }
 
@@ -680,6 +876,7 @@ fn markdown_message_body_mounts_heading_paragraph_inline_code_and_fence(cx: &mut
             .expect("accepted Markdown structure must paint bounds");
         assert!(bounds.size.height > px(0.0), "{selector} must be visible");
     }
+    let _ = drain_surface_actions(&surface, cx);
     cx.update(|_, app| assert!(surface.read(app).pending_actions().is_empty()));
 }
 
@@ -751,6 +948,7 @@ fn markdown_open_unknown_fence_and_html_are_inert(cx: &mut TestAppContext) {
             "inert source must not expose a highlighted code selector: {selector}"
         );
     }
+    let _ = drain_surface_actions(&surface, cx);
     cx.update(|_, app| assert!(surface.read(app).pending_actions().is_empty()));
 }
 
@@ -767,6 +965,7 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     });
     cx.simulate_resize(size(px(720.0), px(480.0)));
     cx.run_until_parked();
+    let _ = drain_surface_actions(&surface, cx);
     assert!(cx.debug_bounds(OLD_MARKDOWN).is_some());
 
     let mut replacement_app = (*cx).clone();
@@ -783,6 +982,7 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     cx.run_until_parked();
 
     assert!(cx.debug_bounds(NEW_MARKDOWN).is_some());
+    let _ = drain_surface_actions(&surface, cx);
 
     // Pinned GPUI 0.2.2's `Frame::clear` does not clear `debug_bounds`, while
     // `VisualTestContext::debug_bounds` reads the rendered frame's map. After
@@ -799,6 +999,7 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
         .expect("replacement disclosure trigger must remain mounted");
     cx.simulate_click(trigger.center(), Modifiers::none());
     cx.run_until_parked();
+    let _ = drain_surface_actions(&surface, cx);
 
     cx.update(|_, app| {
         surface.update(app, |surface, surface_cx| {
