@@ -75,6 +75,22 @@ pub enum InstallerError {
     NonUtf8Path(PathBuf),
     #[error("could not start self-cleanup helper: {0}")]
     CleanupHelper(#[source] std::io::Error),
+    #[error("installation root is busy")]
+    InstallationRootBusy,
+    #[error("installation root is unsafe")]
+    UnsafeInstallationRoot,
+    #[error("installation root changed during operation")]
+    InstallationRootChanged,
+    #[error("installation root has a pending operation")]
+    InstallationRootPending,
+    #[error("installer pending marker is invalid")]
+    InvalidInstallerMarker,
+    #[error("installer lock sentinel is invalid")]
+    InvalidInstallerLock,
+    #[error("installer lifecycle helper could not be started")]
+    LifecycleHelper,
+    #[error("owned installation path is unsafe")]
+    UnsafeOwnedPath,
 }
 
 pub type Result<T> = std::result::Result<T, InstallerError>;
