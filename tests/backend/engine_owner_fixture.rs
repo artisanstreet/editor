@@ -218,6 +218,12 @@ fn run_descendant_holds_sentinel() -> ! {
         .expect("descendant helper readiness should be readable");
     let port = parse_descendant_ready(&helper_ready)
         .expect("descendant helper readiness should be READY <port>");
+    if let Some(status) = helper
+        .try_wait()
+        .expect("descendant helper status observation should succeed")
+    {
+        panic!("descendant helper exited before marker creation: {status:?}");
+    }
 
     let mut marker = OpenOptions::new()
         .write(true)
