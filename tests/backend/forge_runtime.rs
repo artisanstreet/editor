@@ -332,6 +332,8 @@ async fn seed_reconciliation_running_run(
     let turn_id =
         TurnId::parse(format!("reconcile-turn-{}", seed.label)).expect("turn id should parse");
     let item_id = ItemId::parse(seed.item_id).expect("item id should parse");
+    let launch_item_id = ItemId::parse(format!("reconcile-launch-item-{}", seed.label))
+        .expect("launch item id should parse");
     let first_patch_id = PatchId::parse(format!("reconcile-launch-turn-{}", seed.label))
         .expect("launch turn patch should parse");
     let second_patch_id = PatchId::parse(format!("reconcile-launch-item-{}", seed.label))
@@ -352,7 +354,7 @@ async fn seed_reconciliation_running_run(
             claimed: &claimed,
             run_id: &run_id,
             turn_id: &turn_id,
-            item_id: &item_id,
+            item_id: &launch_item_id,
             first_patch_id: &first_patch_id,
             second_patch_id: &second_patch_id,
             operated_at: UnixMillis::from_millis(5),
