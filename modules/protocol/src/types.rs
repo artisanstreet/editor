@@ -332,6 +332,17 @@ impl ReconnectCapability {
         bool::from(self.0.ct_eq(&candidate.0))
     }
 
+    /// Consumes the capability into a zeroizing fixed-size byte buffer.
+    ///
+    /// The private array is moved into the returned buffer. The consumed
+    /// value is replaced with zeroes before its destructor runs, so the
+    /// destructor never has to expose or retain the transferred capability.
+    #[must_use]
+    pub fn into_zeroizing_bytes(mut self) -> zeroize::Zeroizing<[u8; RECONNECT_CAPABILITY_BYTES]> {
+        let bytes = std::mem::replace(&mut self.0, [0_u8; RECONNECT_CAPABILITY_BYTES]);
+        zeroize::Zeroizing::new(bytes)
+    }
+
     /// Borrows the secret solely for serialization or constant-time
     /// authentication at a restricted boundary. Callers must never format it.
     #[must_use]
