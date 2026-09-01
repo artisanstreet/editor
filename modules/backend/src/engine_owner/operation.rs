@@ -185,9 +185,10 @@ pub(crate) enum Job {
         respond: oneshot::Sender<LaunchResult>,
     },
     /// A fully immutable configured turn handed to the owner after durable
-    /// launch. The owner alone may move the verified profile capability.
+    /// launch. Carries the single internal input so production and `#[cfg(test)]`
+    /// fixture admissions share exactly one queued type and one executor.
     Turn {
-        input: Box<super::EngineTurnInput>,
+        input: Box<super::InternalTurnInput>,
         deadline: Instant,
         control: Arc<CancelHandle>,
         prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
@@ -761,7 +762,7 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         Err(error) => return request.fail(error),
     };
     let selection = request.input.settings.config().selection().as_opencode2();
-    if request.input.launch.profile_id() != selection.profile_id() {
+    if request.input.launch.profile_id() != selection.profile_id().as_str() {
         return request.fail(EngineOperationError::Configuration);
     }
     if shutdown.is_cancelled() {
@@ -775,7 +776,7 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
 }
 
 struct ConfiguredTurnRequest {
-    input: super::EngineTurnInput,
+    input: super::InternalTurnInput,
     deadline: Instant,
     control: Arc<CancelHandle>,
     prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
@@ -801,7 +802,7 @@ struct ConfiguredProcess {
 }
 
 struct PreparedConfiguredSession {
-    input: super::EngineTurnInput,
+    input: super::InternalTurnInput,
     deadline: Instant,
     control: Arc<CancelHandle>,
     prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
@@ -816,7 +817,7 @@ struct PreparedConfiguredSession {
 }
 
 struct ConfiguredSession {
-    input: super::EngineTurnInput,
+    input: super::InternalTurnInput,
     deadline: Instant,
     control: Arc<CancelHandle>,
     authorize: oneshot::Receiver<()>,
@@ -882,11 +883,21 @@ async fn prepare_configured_process(
     let Ok(secret) = HealthSecret::generate() else {
         return Err(request.fail(EngineOperationError::EntropyFailed));
     };
-    let Ok(mut child) = spawn_configured_engine(
-        &request.input.launch,
-        &request.input.project_root,
-        secret.as_str(),
-    ) else {
+    let Ok(mut child) = (match &request.input.launch {
+        crate::engine_owner::InternalLaunch::Verified(verified) => spawn_configured_engine(
+            verified.as_ref(),
+            &request.input.project_root,
+            secret.as_str(),
+        ),
+        #[cfg(test)]
+        crate::engine_owner::InternalLaunch::Fixture(fixture) => {
+            crate::engine_owner::process::spawn_configured_fixture_engine(
+                &fixture.program,
+                fixture.scenario,
+                secret.as_str(),
+            )
+        }
+    }) else {
         return Err(request.fail(EngineOperationError::SpawnFailed));
     };
     let lifeline = LifelineWriter::take(&mut child);

@@ -118,6 +118,45 @@ pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<Ch
     Ok(child)
 }
 
+/// Test-only launch seam for the configured fixture.
+///
+/// This spawns the existing `prompt_text_then_terminal` fixture binary as the
+/// configured child, using the same secret-derived `Basic` credential as the
+/// production path via `HealthSecret::basic_auth`. It is `#[cfg(test)]` only
+/// and never reachable in a normal production build.
+#[cfg(test)]
+pub(crate) fn spawn_configured_fixture_engine(
+    program: &Path,
+    scenario: &'static str,
+    secret: &str,
+) -> io::Result<Child> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .env_clear()
+        .env("ARTISAN_ENGINE_OWNER_TEST_SCENARIO", scenario)
+        .env("OPENCODE_PASSWORD", secret)
+        .env("OPENCODE_SERVER_PASSWORD", "");
+    let secret_obj = crate::engine_owner::http::HealthSecret::from_raw_for_tests(secret.to_owned());
+    let auth_value = secret_obj.basic_auth();
+    command.env("ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION", auth_value);
+    if let Ok(value) = std::env::var("SYSTEMROOT") {
+        command.env("SYSTEMROOT", value);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let child = command.spawn()?;
+    witness_spawned();
+    Ok(child)
+}
+
 /// Spawns the exact certified `OpenCode2` profile selected for one durable run.
 ///
 /// Revalidation is deliberately the last authority operation before the

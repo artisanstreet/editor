@@ -93,6 +93,110 @@ impl std::fmt::Debug for EngineTurnInput {
     }
 }
 
+/// Test-only launch seam for the configured fixture.
+///
+/// Production `VerifiedOpenCode2ProfileLaunch` remains non-constructible and
+/// non-cloneable; this seam is `#[cfg(test)]` only and never appears in a
+/// normal production build or in any manufactured install/profile/product
+/// receipt. The fixture executable is an explicitly supplied regular file path
+/// and the scenario is a frozen fixture string.
+#[cfg(test)]
+pub(crate) struct FixtureConfiguredLaunch {
+    pub(crate) program: PathBuf,
+    pub(crate) version: &'static str,
+    pub(crate) profile_id: String,
+    pub(crate) scenario: &'static str,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for FixtureConfiguredLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FixtureConfiguredLaunch { <redacted> }")
+    }
+}
+
+/// Test-only input for the configured fixture turn.
+///
+/// Mirrors `EngineTurnInput` but replaces the verified capability with an
+/// explicitly supplied fixture program/version/profile. `#[cfg(test)]` only.
+#[cfg(test)]
+pub(crate) struct FixtureTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt_text: MessageBody,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) fixture: FixtureConfiguredLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for FixtureTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FixtureTurnInput { <redacted> }")
+    }
+}
+
+/// Private launch for the single internal configured pipeline.
+///
+/// The `Verified` variant carries the production capability and is present in
+/// all builds; the `Fixture` variant is `#[cfg(test)]` only and never
+/// constructible in non-test builds. Never `Clone`.
+pub(crate) enum InternalLaunch {
+    Verified(Box<VerifiedOpenCode2ProfileLaunch>),
+    #[cfg(test)]
+    Fixture(FixtureConfiguredLaunch),
+}
+
+impl std::fmt::Debug for InternalLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InternalLaunch { <redacted> }")
+    }
+}
+
+impl InternalLaunch {
+    pub(crate) fn profile_id(&self) -> &str {
+        match self {
+            Self::Verified(verified) => verified.as_ref().profile_id().as_str(),
+            #[cfg(test)]
+            Self::Fixture(fixture) => fixture.profile_id.as_str(),
+        }
+    }
+
+    pub(crate) fn version(&self) -> &str {
+        match self {
+            Self::Verified(verified) => verified.as_ref().version(),
+            #[cfg(test)]
+            Self::Fixture(fixture) => fixture.version,
+        }
+    }
+}
+
+/// Single internal input for the one configured-turn pipeline.
+///
+/// Both `EngineTurnInput` (production) and `FixtureTurnInput` (`#[cfg(test)]`)
+/// convert into this at admission, so the queued `Job::Turn` always carries
+/// the same type and exactly one executor proves the lifecycle.
+pub(crate) struct InternalTurnInput {
+    pub(crate) run_id: RunId,
+    pub(crate) project_root: RootPath,
+    pub(crate) prompt_id: String,
+    pub(crate) prompt_text: MessageBody,
+    pub(crate) settings: ThreadEngineSettings,
+    pub(crate) launch: InternalLaunch,
+    pub(crate) prompt_delivery: String,
+    pub(crate) stream_after: u64,
+    pub(crate) control_capacity: usize,
+}
+
+impl std::fmt::Debug for InternalTurnInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InternalTurnInput { <redacted> }")
+    }
+}
+
 /// Raw engine time limits.
 ///
 /// **UNVALIDATED** until accepted by [`EngineOwnerConfig::new`]. Callers may
@@ -493,6 +597,48 @@ impl EngineOwner {
     pub(crate) fn admit_turn(
         &self,
         input: EngineTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt_text: input.prompt_text,
+            settings: input.settings,
+            launch: InternalLaunch::Verified(Box::new(input.launch)),
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    /// Test-only fixture admission. Converts `FixtureTurnInput` into the
+    /// single internal input so the queued `Job::Turn` always carries the
+    /// same type and exactly one executor proves the lifecycle.
+    #[cfg(test)]
+    pub(crate) fn admit_fixture_turn(
+        &self,
+        input: FixtureTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        let internal = InternalTurnInput {
+            run_id: input.run_id,
+            project_root: input.project_root,
+            prompt_id: input.prompt_id,
+            prompt_text: input.prompt_text,
+            settings: input.settings,
+            launch: InternalLaunch::Fixture(input.fixture),
+            prompt_delivery: input.prompt_delivery,
+            stream_after: input.stream_after,
+            control_capacity: input.control_capacity,
+        };
+        self.admit_internal(internal, budget)
+    }
+
+    fn admit_internal(
+        &self,
+        input: InternalTurnInput,
         budget: Duration,
     ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
         if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
