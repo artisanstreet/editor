@@ -1,13 +1,14 @@
 //! TEST-ONLY engine-owner protocol child fixture.
 //!
 //! One ordinary `main` in a `testonly` Bazel `rust_binary`: no libtest
-//! harness, no banner, never shipped. It implements seven frozen scenarios:
-//! six P0 first-wave readiness/health cases plus one finite P4 transport
+//! harness, no banner, never shipped. It implements eight frozen scenarios:
+//! six P0 first-wave readiness/health cases, one finite P4 transport
 //! prerequisite `prompt_text_then_terminal` that serves a bounded
 //! `GET /api/health` → `POST /api/session/test-session/prompt` →
 //! `GET /api/experimental/session/test-session/log?after=0&follow=true` SSE
-//! sequence. No product module is imported; the only non-`std` dependency is
-//! the pinned `@crates//:serde_json` (1.0.151).
+//! sequence, and one child-custody proof scenario. No product module is
+//! imported; the only non-`std` dependency is the pinned
+//! `@crates//:serde_json` (1.0.151).
 //!
 //! Selector is child-only `ARTISAN_ENGINE_OWNER_TEST_SCENARIO` set on the
 //! spawned `Command` environment. Missing, non-Unicode or unknown exits 87
@@ -19,16 +20,18 @@
 //!
 //! Main is dedicated to the stdin lifeline: EOF exits 3; any unexpected
 //! input byte or read error exits 87. A fixture-local 20s watchdog exits
-//! 99 and is always failure. At most one server thread plus the watchdog
-//! exists; no thread-per-request, nested processes, temporary directories,
-//! marker files or recursive discovery. Connections are sequential with
-//! `Connection: close`. Blocking accept/read cannot prevent main from
-//! observing lifeline EOF. OS sockets/threads die with this test process;
-//! parent must observe `Child::wait`.
+//! 99 and is always failure. Ordinary scenarios use at most one server
+//! thread; the custody proof alone starts one explicit descendant helper and
+//! writes one marker file. There is no thread-per-request or recursive
+//! discovery. Connections are sequential with `Connection: close`.
+//! Blocking accept/read cannot prevent main from observing lifeline EOF. OS
+//! sockets/threads die with the fixture process; the parent must observe
+//! process custody completion.
 
-use std::io::{Read, Write};
+use std::fs::OpenOptions;
+use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process;
+use std::process::{self, Command, Stdio};
 use std::time::Duration;
 
 /// Fixture-local lifeline-lost exit code (mirrors helper contract value 3).
@@ -43,6 +46,10 @@ const ABRUPT_EXIT_CODE: i32 = 7;
 const SCENARIO_ENV: &str = "ARTISAN_ENGINE_OWNER_TEST_SCENARIO";
 /// Child-only expected Authorization credential for health scenarios.
 const AUTH_ENV: &str = "ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION";
+/// Child-only marker path for the descendant-custody proof.
+const DESCENDANT_SENTINEL_MARKER_ENV: &str = "ARTISAN_ENGINE_OWNER_DESCENDANT_SENTINEL_MARKER";
+/// Fixed response served by the descendant helper.
+const DESCENDANT_SENTINEL_RESPONSE: &[u8] = b"descendant-alive";
 
 // Synthetic fixture values — private, never product defaults.
 /// Expected health version for `ready_ok`.
@@ -68,6 +75,10 @@ const FIXTURE_RUN_ID: &str = "fixture-run";
 const WATCHDOG_SECS: u64 = 20;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--descendant-sentinel") {
+        run_descendant_sentinel_helper();
+    }
+
     std::thread::Builder::new()
         .name("engine-owner-fixture-watchdog".to_owned())
         .spawn(|| {
@@ -96,6 +107,7 @@ fn main() {
         "hang_until_lifeline" => run_hang_until_lifeline(),
         "abrupt_child_exit_nonzero" => process::exit(ABRUPT_EXIT_CODE),
         "prompt_text_then_terminal" => run_prompt_text_then_terminal(),
+        "descendant_holds_sentinel" => run_descendant_holds_sentinel(),
         _ => process::exit(SCENARIO_REFUSED_EXIT),
     }
 }
@@ -173,6 +185,97 @@ fn run_prompt_text_then_terminal() -> ! {
         .spawn(move || p4_server_loop(&listener, &expected_auth))
         .expect("p4 thread should spawn");
     wait_for_lifeline_eof();
+}
+
+fn run_descendant_holds_sentinel() -> ! {
+    let expected_auth = get_expected_auth_or_exit();
+    let marker_path = match std::env::var_os(DESCENDANT_SENTINEL_MARKER_ENV) {
+        Some(path) if !path.is_empty() => path,
+        _ => process::exit(SCENARIO_REFUSED_EXIT),
+    };
+    let executable = std::env::current_exe().expect("fixture executable path");
+    let mut helper_command = Command::new(executable);
+    helper_command
+        .env_clear()
+        .arg("--descendant-sentinel")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    if let Some(system_root) = std::env::var_os("SYSTEMROOT") {
+        helper_command.env("SYSTEMROOT", system_root);
+    }
+    let mut helper = helper_command
+        .spawn()
+        .expect("descendant helper should spawn");
+    let helper_stdout = helper
+        .stdout
+        .take()
+        .expect("descendant helper stdout should be piped");
+    let mut helper_ready = String::new();
+    std::io::BufReader::new(helper_stdout)
+        .read_line(&mut helper_ready)
+        .expect("descendant helper readiness should be readable");
+    let port = parse_descendant_ready(&helper_ready)
+        .expect("descendant helper readiness should be READY <port>");
+    if let Some(status) = helper
+        .try_wait()
+        .expect("descendant helper status observation should succeed")
+    {
+        panic!("descendant helper exited before marker creation: {status:?}");
+    }
+
+    let mut marker = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker_path)
+        .expect("descendant marker should be created once");
+    writeln!(marker, "{port}").expect("descendant marker should be written");
+    marker
+        .sync_all()
+        .expect("descendant marker should be durable");
+    drop(marker);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+    assert!(port != 0, "advertised port must be nonzero");
+    let readiness = build_readiness_line(port);
+    debug_assert!(readiness.len() <= READINESS_LIMIT);
+    {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{readiness}").expect("readiness write");
+        out.flush().expect("readiness flush");
+    }
+    std::thread::Builder::new()
+        .name("engine-owner-fixture-descendant-proof".to_owned())
+        .spawn(move || p4_server_loop(&listener, &expected_auth))
+        .expect("descendant proof server thread should spawn");
+    wait_for_lifeline_eof();
+}
+
+fn parse_descendant_ready(line: &str) -> Option<u16> {
+    let port_text = line.strip_prefix("READY ")?.strip_suffix('\n')?;
+    let port_text = port_text.strip_suffix('\r').unwrap_or(port_text);
+    let port = port_text.parse().ok()?;
+    (port != 0).then_some(port)
+}
+
+fn run_descendant_sentinel_helper() -> ! {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("descendant bind");
+    let port = listener.local_addr().expect("descendant local_addr").port();
+    assert!(port != 0, "descendant port must be nonzero");
+    {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "READY {port}").expect("descendant readiness write");
+        out.flush().expect("descendant readiness flush");
+    }
+    loop {
+        let Ok((mut stream, _)) = listener.accept() else {
+            process::exit(SCENARIO_REFUSED_EXIT);
+        };
+        let _ = stream.write_all(DESCENDANT_SENTINEL_RESPONSE);
+        let _ = stream.flush();
+    }
 }
 
 fn build_readiness_line(port: u16) -> String {
@@ -819,6 +922,7 @@ fn is_known_scenario(name: &str) -> bool {
             | "hang_until_lifeline"
             | "abrupt_child_exit_nonzero"
             | "prompt_text_then_terminal"
+            | "descendant_holds_sentinel"
     )
 }
 
@@ -909,6 +1013,7 @@ mod tests {
             "hang_until_lifeline",
             "abrupt_child_exit_nonzero",
             "prompt_text_then_terminal",
+            "descendant_holds_sentinel",
         ] {
             assert!(is_known_scenario(s), "{s} should be known");
         }

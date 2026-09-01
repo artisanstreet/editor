@@ -310,6 +310,33 @@ async fn assert_happy_path_child_reaped(owner: &mut EngineOwner) {
     assert_eq!(owner.health(), EngineOwnerHealth::Active);
 }
 
+#[cfg(windows)]
+fn descendant_sentinel_response(port: u16) -> Vec<u8> {
+    use std::io::Read as _;
+
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(5))
+        .expect("descendant should accept the proof connection");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("descendant proof read timeout should set");
+    let mut response = vec![0; b"descendant-alive".len()];
+    stream
+        .read_exact(&mut response)
+        .expect("descendant should return its fixed sentinel");
+    response
+}
+
+#[cfg(windows)]
+fn assert_descendant_sentinel_reaped(port: u16) {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let result = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(5));
+    assert!(
+        result.is_err(),
+        "descendant sentinel listener must be gone after observed group reap"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -413,6 +440,94 @@ async fn configured_fixture_happy_path_delivers_observation_and_reaps() {
     assert_eq!(result.terminal(), TerminalState::Completed);
 
     assert_happy_path_child_reaped(&mut owner).await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "current_thread")]
+async fn configured_fixture_descendant_holds_sentinel_until_group_reap() {
+    reset_witnesses();
+    let fixture = fixture_program_path();
+    assert_fixture_program_is_regular_file(&fixture);
+
+    let temp_root = TempRoot::new("descendant");
+    let root = temp_root.root_path();
+    let settings = settings_for_profile("fixture-test", &root).await;
+    let marker = temp_root.path.join("descendant-port");
+
+    let mut owner = EngineOwner::start_configured(
+        NonZeroUsize::new(1).expect("one slot"),
+        &tokio::runtime::Handle::current(),
+    );
+    crate::engine_owner::process::set_descendant_sentinel_marker(marker.clone());
+
+    let input = FixtureTurnInput {
+        run_id: RunId::parse("fixture-run").expect("run id"),
+        project_root: root.clone(),
+        prompt_id: "prompt-descendant".to_owned(),
+        prompt_text: MessageBody::parse("hello world").expect("body"),
+        settings,
+        fixture: FixtureConfiguredLaunch {
+            program: fixture,
+            version: "0.0.0-fixture",
+            profile_id: "fixture-test".to_owned(),
+            scenario: "descendant_holds_sentinel",
+        },
+        prompt_delivery: "immediate".to_owned(),
+        stream_after: 0,
+        control_capacity: 1,
+    };
+
+    let mut turn = owner
+        .admit_fixture_turn(input, Duration::from_secs(10))
+        .expect("admit");
+    let prepared = tokio::time::timeout(Duration::from_secs(8), turn.prepare())
+        .await
+        .expect("prepare timeout")
+        .expect("prepared");
+    assert_eq!(prepared.session(), "test-session");
+
+    let marker_contents = std::fs::read_to_string(&marker).expect("marker should be readable");
+    let port: u16 = marker_contents
+        .trim()
+        .parse()
+        .expect("marker should contain a TCP port");
+    assert!(port != 0, "marker port must be nonzero");
+    assert_eq!(
+        descendant_sentinel_response(port),
+        b"descendant-alive",
+        "descendant must remain alive while the parent is prepared"
+    );
+
+    turn.cancel();
+    turn.authorize().expect("authorize should succeed");
+    while let Ok(Some(_)) =
+        tokio::time::timeout(Duration::from_millis(500), turn.next_observation()).await
+    {}
+
+    let result = tokio::time::timeout(Duration::from_secs(8), turn.finish())
+        .await
+        .expect("finish timeout");
+    let error = result.expect_err("cancellation should return a typed error");
+    assert!(
+        matches!(
+            error,
+            EngineOperationError::Cancelled
+                | EngineOperationError::ProviderRequestFailed
+                | EngineOperationError::StreamFailed
+                | EngineOperationError::Deadline
+                | EngineOperationError::Shutdown
+        ),
+        "cancellation should map to an allowed typed error, got {error:?}"
+    );
+
+    let counts = witness_counts();
+    assert_eq!(counts.spawned, 1);
+    assert_eq!(counts.kills_requested, 1);
+    assert_eq!(counts.reaps_observed, 1);
+    assert_eq!(counts.watchdog_failures_seen, 0);
+
+    assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    assert_descendant_sentinel_reaped(port);
 }
 
 #[tokio::test(flavor = "current_thread")]

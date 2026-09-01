@@ -13,7 +13,7 @@
 //! owner interleaves waits and control signals on one task.
 
 #[cfg(test)]
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 #[cfg(test)]
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -27,10 +27,17 @@ use std::time::Duration;
 
 #[cfg(test)]
 use base64::Engine as _;
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
+#[cfg(windows)]
+use command_group::AsyncCommandGroup;
+#[cfg(not(windows))]
+use tokio::process::Child;
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
 use artisan_domain::RootPath;
 use artisan_native_engine::VerifiedOpenCode2ProfileLaunch;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// The exact executable launch the owner task performs.
 ///
@@ -56,10 +63,164 @@ pub(crate) enum LaunchRecipe {
     },
 }
 
+/// Internal process custody for one engine launch.
+///
+/// Windows stores the `command-group` child itself so the Job Object remains
+/// the authority for termination and completion. The pipe handles are taken
+/// out through the grouped child's non-consuming `inner()` view only so the
+/// operation layer can keep its existing stdin/stdout/stderr surface; the
+/// grouped child is never converted back into a raw Tokio child.
+pub(crate) struct EngineChild {
+    #[cfg(windows)]
+    inner: command_group::AsyncGroupChild,
+    #[cfg(not(windows))]
+    inner: Child,
+    /// Configured Windows launches must terminate the whole Job Object before
+    /// an abort wait, because a leader exit can otherwise precede its
+    /// descendant's completion notification.
+    terminate_group_before_abort_wait: bool,
+    /// The child stdin pipe, until the owner moves it into `LifelineWriter`.
+    pub(crate) stdin: Option<ChildStdin>,
+    /// The child stdout pipe, until the owner takes its readiness stream.
+    pub(crate) stdout: Option<ChildStdout>,
+    /// The child stderr pipe, until the owner moves it into `StderrCounter`.
+    pub(crate) stderr: Option<ChildStderr>,
+}
+
+impl EngineChild {
+    /// Spawns an engine with whole-job custody on Windows and direct-child
+    /// custody elsewhere.
+    fn spawn(
+        mut command: tokio::process::Command,
+        terminate_group_before_abort_wait: bool,
+    ) -> io::Result<Self> {
+        #[cfg(windows)]
+        {
+            let grouped = command
+                .group()
+                .kill_on_drop(true)
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()?;
+            let child = Self::from_grouped(grouped, terminate_group_before_abort_wait);
+            witness_spawned();
+            Ok(child)
+        }
+
+        #[cfg(not(windows))]
+        {
+            command.kill_on_drop(true);
+            let child = Self::from_direct(command.spawn()?, terminate_group_before_abort_wait);
+            witness_spawned();
+            Ok(child)
+        }
+    }
+
+    #[cfg(windows)]
+    fn from_grouped(
+        mut inner: command_group::AsyncGroupChild,
+        terminate_group_before_abort_wait: bool,
+    ) -> Self {
+        let (stdin, stdout, stderr) = {
+            let child = inner.inner();
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        };
+        Self {
+            inner,
+            terminate_group_before_abort_wait,
+            stdin,
+            stdout,
+            stderr,
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn from_direct(mut inner: Child, terminate_group_before_abort_wait: bool) -> Self {
+        let stdin = inner.stdin.take();
+        let stdout = inner.stdout.take();
+        let stderr = inner.stderr.take();
+        Self {
+            inner,
+            terminate_group_before_abort_wait,
+            stdin,
+            stdout,
+            stderr,
+        }
+    }
+
+    /// Waits for the process or whole process group to complete.
+    pub(crate) async fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.inner.wait().await
+    }
+
+    /// Requests termination of the process or whole process group.
+    pub(crate) fn start_kill(&mut self) -> io::Result<()> {
+        self.inner.start_kill()
+    }
+
+    /// Requests configured Windows group termination before an abort wait.
+    ///
+    /// The caller must close the lifeline first. Non-Windows and legacy
+    /// launches intentionally keep the existing wait-first cleanup sequence.
+    fn request_group_termination_before_abort_wait(&mut self) -> bool {
+        if !self.terminate_group_before_abort_wait {
+            return false;
+        }
+
+        #[cfg(windows)]
+        {
+            witness_kill_requested();
+            let _termination_error = self.start_kill();
+            true
+        }
+
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    /// Returns the leader process identifier while it remains available.
+    #[allow(dead_code)]
+    pub(crate) fn id(&self) -> Option<u32> {
+        self.inner.id()
+    }
+}
+
+#[cfg(test)]
+const DESCENDANT_SENTINEL_MARKER_ENV: &str = "ARTISAN_ENGINE_OWNER_DESCENDANT_SENTINEL_MARKER";
+
+#[cfg(test)]
+thread_local! {
+    static DESCENDANT_SENTINEL_MARKER: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Supplies the next configured fixture launch with its unique marker path.
+///
+/// The path is held only in the test thread until spawn, then crosses the
+/// process boundary solely as the fixture child's explicit environment entry.
+#[cfg(test)]
+pub(crate) fn set_descendant_sentinel_marker(path: PathBuf) {
+    DESCENDANT_SENTINEL_MARKER.with(|marker| {
+        drop(marker.replace(Some(path)));
+    });
+}
+
+#[cfg(test)]
+fn take_descendant_sentinel_marker() -> io::Result<PathBuf> {
+    DESCENDANT_SENTINEL_MARKER.with(|marker| {
+        marker.replace(None).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "descendant sentinel marker unavailable",
+            )
+        })
+    })
+}
+
 /// Spawns one engine child from the supplied recipe with the P3 secret.
 ///
 /// All three standard streams are piped, `kill_on_drop(true)` is set so the
-/// final `Child` drop is best-effort containment, and on Windows
+/// final `EngineChild` drop is best-effort containment, and on Windows
 /// `CREATE_NO_WINDOW` is applied. For `Production`, `env_clear()` is called
 /// with no arguments: the explicit refusal of ambient inheritance, not a
 /// shipping launch claim. The child environment then receives exactly
@@ -73,7 +234,7 @@ pub(crate) enum LaunchRecipe {
 ///
 /// Returns the raw spawn failure; the caller reduces it to a typed,
 /// payload-free cause and never surfaces the operating-system message.
-pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<Child> {
+pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<EngineChild> {
     let mut command = match recipe {
         LaunchRecipe::Production { executable } => {
             let mut command = tokio::process::Command::new(executable);
@@ -109,16 +270,7 @@ pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<Ch
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let child = command.spawn()?;
-    witness_spawned();
-    Ok(child)
+    EngineChild::spawn(command, false)
 }
 
 /// Test-only launch seam for the configured fixture.
@@ -132,7 +284,7 @@ pub(crate) fn spawn_configured_fixture_engine(
     program: &Path,
     scenario: &'static str,
     secret: &str,
-) -> io::Result<Child> {
+) -> io::Result<EngineChild> {
     let mut command = tokio::process::Command::new(program);
     command
         .env_clear()
@@ -145,19 +297,17 @@ pub(crate) fn spawn_configured_fixture_engine(
     if let Ok(value) = std::env::var("SYSTEMROOT") {
         command.env("SYSTEMROOT", value);
     }
+    if scenario == "descendant_holds_sentinel" {
+        command.env(
+            DESCENDANT_SENTINEL_MARKER_ENV,
+            take_descendant_sentinel_marker()?,
+        );
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    let child = command.spawn()?;
-    witness_spawned();
-    Ok(child)
+        .stderr(Stdio::piped());
+    EngineChild::spawn(command, true)
 }
 
 const CONFIGURED_PROFILE_DIRECTORIES: [&str; 5] = ["config", "cache", "data", "state", "tmp"];
@@ -327,7 +477,7 @@ pub(crate) fn spawn_configured_engine(
     launch: &VerifiedOpenCode2ProfileLaunch,
     project_root: &RootPath,
     secret: &str,
-) -> io::Result<Child> {
+) -> io::Result<EngineChild> {
     let environment = ConfiguredProfileEnvironment::prepare(launch.profile_home())?;
 
     let mut command = tokio::process::Command::new(launch.executable_path());
@@ -338,32 +488,24 @@ pub(crate) fn spawn_configured_engine(
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+        .stderr(Stdio::piped());
 
     launch
         .revalidate()
         .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "profile rejected"))?;
-    let child = command.spawn()?;
-    witness_spawned();
-    Ok(child)
+    EngineChild::spawn(command, true)
 }
 
 /// The taken sole stdin writer kept open for the whole operation.
 ///
-/// The writer is removed from the [`Child`] immediately after spawn so the
+/// The writer is removed from the [`EngineChild`] immediately after spawn so the
 /// child's own `wait()` can never close it implicitly; it closes exactly
 /// when the owner drops it.
 pub(crate) struct LifelineWriter(Option<ChildStdin>);
 
 impl LifelineWriter {
     /// Takes the child's piped stdin as the sole lifeline writer.
-    pub(crate) fn take(child: &mut Child) -> Self {
+    pub(crate) fn take(child: &mut EngineChild) -> Self {
         Self(child.stdin.take())
     }
 
@@ -472,8 +614,8 @@ pub(crate) enum StderrEvent {
 
 /// Exact custody retained when a child's death could not be observed.
 pub(crate) struct RetainedEngine {
-    /// The exact child, boxed for long-term ownership.
-    pub(crate) child: Box<Child>,
+    /// The exact direct child or whole-job child, boxed for long-term custody.
+    pub(crate) child: Box<EngineChild>,
     /// The closed sole writer, kept as part of exact custody.
     pub(crate) lifeline: LifelineWriter,
     /// The stderr counting state at abandonment.
@@ -492,8 +634,8 @@ pub(crate) enum CleanupObservation {
 
 /// The complete set of resources one active operation owns.
 pub(crate) struct ChildParts {
-    /// The exact child; kept owned until an observed reap or quarantine.
-    pub(crate) child: Child,
+    /// The exact child custody object; kept owned until an observed reap or quarantine.
+    pub(crate) child: EngineChild,
     /// The sole stdin writer.
     pub(crate) lifeline: LifelineWriter,
     /// Owned stdout pipe for exactly one bounded readiness record.
@@ -504,12 +646,14 @@ pub(crate) struct ChildParts {
 
 /// Runs the fixed, uncancellable cleanup sequence for one unresolved child.
 ///
-/// Order is contractual: close the sole lifeline writer first, then wait up
-/// to the caller-supplied `close_budget`, request termination with
-/// `start_kill` if no exit was observed, then wait for the remaining budget
-/// (or once without waiting when the budget is already expired). Pipe
-/// resources are released only together with a successful observed reap or
-/// moved whole into [`RetainedEngine`].
+/// Order is contractual: close the sole lifeline writer first. Configured
+/// Windows groups request whole-job termination at that point, before their
+/// bounded wait; other launches wait up to the caller-supplied `close_budget`
+/// and request termination with `start_kill` only if no exit was observed.
+/// The remaining budget is then used for one more wait (or one immediate poll
+/// when the budget is already expired). Pipe resources are released only
+/// together with a successful observed reap or moved whole into
+/// [`RetainedEngine`].
 pub(crate) async fn cleanup_after_abort(
     parts: ChildParts,
     close_budget: Duration,
@@ -524,6 +668,7 @@ pub(crate) async fn cleanup_after_abort(
     lifeline.close();
     let start = tokio::time::Instant::now();
     let deadline = start.checked_add(close_budget);
+    let kill_requested = child.request_group_termination_before_abort_wait();
 
     // First wait: bounded by close_budget (or immediate poll when ZERO).
     let first_wait = match deadline {
@@ -537,11 +682,17 @@ pub(crate) async fn cleanup_after_abort(
         witness_reaped(status);
         drop(stderr_counter);
         drop(lifeline);
-        return CleanupObservation::ReapedWithoutKill(status);
+        return if kill_requested {
+            CleanupObservation::ReapedAfterKill(status)
+        } else {
+            CleanupObservation::ReapedWithoutKill(status)
+        };
     }
 
-    witness_kill_requested();
-    let _termination_error = child.start_kill();
+    if !kill_requested {
+        witness_kill_requested();
+        let _termination_error = child.start_kill();
+    }
     // Second wait: remaining budget, or one immediate poll when ZERO/expired.
     let remaining = deadline
         .and_then(|d| d.checked_duration_since(tokio::time::Instant::now()))
@@ -578,7 +729,10 @@ pub(crate) async fn cleanup_after_abort(
 }
 
 /// Waits for the child to exit until the absolute deadline.
-async fn wait_until(child: &mut Child, deadline: tokio::time::Instant) -> io::Result<ExitStatus> {
+async fn wait_until(
+    child: &mut EngineChild,
+    deadline: tokio::time::Instant,
+) -> io::Result<ExitStatus> {
     match tokio::time::timeout_at(deadline, child.wait()).await {
         Ok(result) => result,
         Err(_) => Err(io::Error::new(
@@ -619,7 +773,7 @@ pub(crate) struct WitnessCounts {
     pub(crate) kills_requested: u64,
     /// Exits actually observed through a completed wait.
     pub(crate) reaps_observed: u64,
-    /// How many observed reaps ended with a failure classification.
+    /// How many observed reaps ended with the fixture watchdog exit (99).
     pub(crate) watchdog_failures_seen: u64,
     /// Successful control driver joins observed.
     pub(crate) control_driver_joined: u64,
@@ -635,6 +789,9 @@ thread_local! {
 }
 
 #[cfg(test)]
+const WATCHDOG_FAILURE_EXIT: i32 = 99;
+
+#[cfg(test)]
 fn witness_spawned() {
     WITNESS_SPAWNED.with(|c| c.set(c.get() + 1));
 }
@@ -647,7 +804,7 @@ fn witness_kill_requested() {
 #[cfg(test)]
 fn witness_reaped(status: ExitStatus) {
     WITNESS_REAPS.with(|c| c.set(c.get() + 1));
-    if !status.success() {
+    if status.code() == Some(WATCHDOG_FAILURE_EXIT) {
         WITNESS_WATCHDOG.with(|c| c.set(c.get() + 1));
     }
 }
@@ -665,6 +822,9 @@ pub(crate) fn reset_witnesses() {
     WITNESS_REAPS.with(|c| c.set(0));
     WITNESS_WATCHDOG.with(|c| c.set(0));
     WITNESS_CONTROL_DRIVER.with(|c| c.set(0));
+    DESCENDANT_SENTINEL_MARKER.with(|marker| {
+        drop(marker.replace(None));
+    });
 }
 
 /// Reads the current phase witnesses (test-only).

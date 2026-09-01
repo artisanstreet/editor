@@ -1,5 +1,5 @@
 {
-  "checksum": "1b48ef9d01b70a4e3fdf14e2a167f75d6437f0c140c812504037c1c7598beadd",
+  "checksum": "7a81e9a34f9a4af92778d6c8a6ce437e62eedb59c7696249300cca9ec7298eec",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -2267,6 +2267,10 @@
           ],
           "selects": {
             "cfg(target_os = \"windows\")": [
+              {
+                "id": "command-group 5.0.1",
+                "target": "command_group"
+              },
               {
                 "id": "native-dialog 0.9.7",
                 "target": "native_dialog"
@@ -9391,6 +9395,84 @@
         "Apache-2.0"
       ],
       "license_file": "LICENSE"
+    },
+    "command-group 5.0.1": {
+      "name": "command-group",
+      "version": "5.0.1",
+      "package_url": "https://github.com/watchexec/command-group",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/command-group/5.0.1/download",
+          "sha256": "a68fa787550392a9d58f44c21a3022cfb3ea3e2458b7f85d3b399d0ceeccf409"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "command_group",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "command_group",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "async-trait",
+            "tokio",
+            "with-tokio"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "tokio 1.53.1",
+              "target": "tokio"
+            }
+          ],
+          "selects": {
+            "cfg(unix)": [
+              {
+                "id": "nix 0.27.1",
+                "target": "nix"
+              }
+            ],
+            "cfg(windows)": [
+              {
+                "id": "winapi 0.3.9",
+                "target": "winapi"
+              }
+            ]
+          }
+        },
+        "edition": "2021",
+        "proc_macro_deps": {
+          "common": [
+            {
+              "id": "async-trait 0.1.92",
+              "target": "async_trait"
+            }
+          ],
+          "selects": {}
+        },
+        "version": "5.0.1"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
     },
     "compression-codecs 0.4.38": {
       "name": "compression-codecs",
@@ -27259,6 +27341,61 @@
         "MIT"
       ],
       "license_file": "LICENSE-MIT"
+    },
+    "nix 0.27.1": {
+      "name": "nix",
+      "version": "0.27.1",
+      "package_url": "https://github.com/nix-rust/nix",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/nix/0.27.1/download",
+          "sha256": "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "nix",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "nix",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "bitflags 2.13.1",
+              "target": "bitflags"
+            },
+            {
+              "id": "cfg-if 1.0.4",
+              "target": "cfg_if"
+            },
+            {
+              "id": "libc 0.2.189",
+              "target": "libc"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.27.1"
+      },
+      "license": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_file": "LICENSE"
     },
     "nix 0.29.0": {
       "name": "nix",
@@ -51544,6 +51681,9 @@
           "common": [
             "fileapi",
             "handleapi",
+            "impl-default",
+            "ioapiset",
+            "jobapi2",
             "knownfolders",
             "objbase",
             "processthreadsapi",
@@ -51552,6 +51692,7 @@
             "shobjidl",
             "shobjidl_core",
             "std",
+            "tlhelp32",
             "winbase",
             "winerror",
             "winuser"
@@ -60189,6 +60330,7 @@
     "capnpc 0.27.0",
     "chrono 0.4.45",
     "clap 4.6.6",
+    "command-group 5.0.1",
     "ed25519-dalek 2.2.0",
     "flate2 1.1.10",
     "fs2 0.4.3",

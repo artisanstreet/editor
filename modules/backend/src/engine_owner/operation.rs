@@ -1731,6 +1731,22 @@ async fn finish_turn_result(
     respond: oneshot::Sender<TurnResult>,
     close_budget: Duration,
 ) -> Execution {
+    if result.is_err() {
+        return match cleanup_after_abort(parts, close_budget).await {
+            CleanupObservation::ReapedWithoutKill(_) | CleanupObservation::ReapedAfterKill(_) => {
+                let _ = respond.send(result);
+                Execution::Completed
+            }
+            CleanupObservation::Retained(engine) => {
+                let primary = result
+                    .err()
+                    .map_or_else(|| Box::new(EngineOperationError::ReapUnresolved), Box::new);
+                let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring { primary }));
+                Execution::Quarantined(engine)
+            }
+        };
+    }
+
     let ChildParts {
         mut child,
         mut lifeline,
