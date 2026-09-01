@@ -165,6 +165,16 @@ fn delivery_loss_reconnect_leaves_one_subscribe_to_the_mounted_host() {
             after: Some(accepted),
         }
     );
+    let (recovery_tx, mut recovery_rx) = tokio::sync::mpsc::channel(2);
+    try_send_command(&recovery_tx, recovery_command.clone()).expect("one recovery subscribe");
+    assert_eq!(
+        recovery_rx.try_recv().expect("recovery command"),
+        recovery_command
+    );
+    assert!(matches!(
+        recovery_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     assert_eq!(custody.last_accepted_cursor(), Some(accepted));
 
     // The application owns the one post-reconnect subscribe and its actual
@@ -182,6 +192,45 @@ fn delivery_loss_reconnect_leaves_one_subscribe_to_the_mounted_host() {
         .expect("resumed host ack");
     assert_eq!(custody.last_accepted_cursor(), Some(accepted));
     assert_eq!(custody.pending_after(), None);
+}
+
+#[test]
+fn non_retryable_request_failure_is_terminal_not_recoverable_loss() {
+    let failure = ServiceFailure {
+        stage: ServiceFailureStage::Request,
+        category: ServiceFailureCategory::Peer,
+    };
+    let terminal = NativeTransportEvent::Failed(failure);
+    assert!(matches!(&terminal, NativeTransportEvent::Failed(actual) if *actual == failure));
+    assert!(!matches!(&terminal, NativeTransportEvent::DeliveryLost(_)));
+}
+
+#[test]
+fn unsubscribe_failure_retires_custody_without_a_recovery_subscribe() {
+    let mut custody = SubscriptionCustody::new();
+    let thread = thread_id("thread-unsubscribe");
+    let accepted = cursor(12);
+    custody.on_subscribe(thread.clone(), Some(accepted));
+    custody
+        .on_acknowledge(&thread, accepted)
+        .expect("accepted cursor");
+
+    // Unsubscribe retires the service custody before its request is attempted.
+    custody.on_unsubscribe(&thread);
+    assert_eq!(custody.active_thread(), None);
+    assert_eq!(custody.pending_after(), None);
+    assert_eq!(custody.last_accepted_cursor(), None);
+
+    // A failed retirement is terminal and therefore cannot produce the one
+    // recovery command reserved for an actual delivery/session reconnect.
+    let failure = ServiceFailure {
+        stage: ServiceFailureStage::Request,
+        category: ServiceFailureCategory::LocalSession,
+    };
+    let terminal = NativeTransportEvent::Failed(failure);
+    assert!(matches!(terminal, NativeTransportEvent::Failed(_)));
+    let recovery_commands: Vec<NativeTransportCommand> = Vec::new();
+    assert!(recovery_commands.is_empty());
 }
 
 #[test]

@@ -2206,7 +2206,7 @@ async fn handle_subscribe(
                     ServiceFailureStage::Request,
                     ServiceFailureCategory::Integrity,
                 );
-                return publish(&events, NativeTransportEvent::DeliveryLost(failure));
+                return Err(failure);
             }
             // Do not install into a second projection; emit directly.
             // Cursor will be advanced only after explicit AcknowledgePatch from application.
@@ -2220,10 +2220,7 @@ async fn handle_subscribe(
             )
         }
         Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
-        Err(error) => {
-            let failure: ServiceFailure = error.into();
-            publish(&events, NativeTransportEvent::DeliveryLost(failure))
-        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -2271,7 +2268,7 @@ async fn handle_unsubscribe(
                     ServiceFailureStage::Request,
                     ServiceFailureCategory::Integrity,
                 );
-                return publish(&events, NativeTransportEvent::DeliveryLost(failure));
+                return Err(failure);
             }
             publish(
                 &events,
@@ -2283,10 +2280,7 @@ async fn handle_unsubscribe(
             )
         }
         Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
-        Err(error) => {
-            let failure: ServiceFailure = error.into();
-            publish(&events, NativeTransportEvent::DeliveryLost(failure))
-        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -2349,21 +2343,20 @@ async fn command_loop_with_delivery(
                     }
                     Some(NativeTransportCommand::Subscribe { thread_id, after }) => {
                         if let Err(failure) = handle_subscribe(runtime, frames, events, thread_id, after).await {
-                            // Bidi session loss may require reconnect; preserve subscription
+                            // Only a real local-session loss owns delivery recovery. All other
+                            // request failures are terminal and must not trigger a retry storm.
                             if failure.category == ServiceFailureCategory::LocalSession {
                                 handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
                             } else {
-                                publish(events, NativeTransportEvent::DeliveryLost(failure))?;
+                                return Err(failure);
                             }
                         }
                     }
                     Some(NativeTransportCommand::Unsubscribe { thread_id }) => {
                         if let Err(failure) = handle_unsubscribe(runtime, frames, events, thread_id).await {
-                            if failure.category == ServiceFailureCategory::LocalSession {
-                                handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
-                            } else {
-                                publish(events, NativeTransportEvent::DeliveryLost(failure))?;
-                            }
+                            // The host is retiring; never turn an unsubscribe failure into a
+                            // recovery Subscribe for that same host.
+                            return Err(failure);
                         }
                     }
                     Some(NativeTransportCommand::AcknowledgePatch { thread_id, cursor }) => {
