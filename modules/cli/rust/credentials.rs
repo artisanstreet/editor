@@ -588,7 +588,7 @@ impl ReconnectCapabilityStore {
         let credential =
             artisan_protocol::ReconnectCapability::from_bytes(*current.record.capability);
         let owner_nonce = random_owner_nonce()?;
-        let desired = ReconnectRecord::in_flight(binding, current.record.generation, &*owner_nonce);
+        let desired = ReconnectRecord::in_flight(binding, current.record.generation, &owner_nonce);
         let record_file_id = replace_reconnect_record(
             &self.paths,
             current.file_id,
@@ -596,7 +596,7 @@ impl ReconnectCapabilityStore {
             current.record.generation,
             &[0_u8; 16],
             binding,
-            desired,
+            &desired,
         )?;
         Ok(ReconnectAttempt {
             store: self.clone(),
@@ -685,7 +685,7 @@ impl ReconnectSessionLease {
         let credential =
             artisan_protocol::ReconnectCapability::from_bytes(*current.record.capability);
         let owner_nonce = random_owner_nonce()?;
-        let desired = ReconnectRecord::in_flight(self.binding, self.generation, &*owner_nonce);
+        let desired = ReconnectRecord::in_flight(self.binding, self.generation, &owner_nonce);
         let record_file_id = replace_reconnect_record(
             &self.store.paths,
             current.file_id,
@@ -693,11 +693,10 @@ impl ReconnectSessionLease {
             self.generation,
             &[0_u8; 16],
             self.binding,
-            desired,
+            &desired,
         )?;
-        let lock = match self.lock.take() {
-            Some(lock) => lock,
-            None => return Err(ForgeCredentialError::ReconnectAttemptComplete),
+        let Some(lock) = self.lock.take() else {
+            return Err(ForgeCredentialError::ReconnectAttemptComplete);
         };
         Ok(ReconnectAttempt {
             store: self.store.clone(),
@@ -758,14 +757,13 @@ impl ReconnectAttempt {
             self.record_file_id,
             ReconnectCapabilityState::InFlight,
             self.generation,
-            &*self.owner_nonce,
+            &self.owner_nonce,
             self.binding,
-            desired,
+            &desired,
         )?;
         self.credential.take();
-        let lock = match self.lock.take() {
-            Some(lock) => lock,
-            None => return Err(ForgeCredentialError::ReconnectAttemptComplete),
+        let Some(lock) = self.lock.take() else {
+            return Err(ForgeCredentialError::ReconnectAttemptComplete);
         };
         Ok(ReconnectSessionLease {
             store: self.store.clone(),
@@ -797,14 +795,13 @@ impl ReconnectAttempt {
             self.record_file_id,
             ReconnectCapabilityState::InFlight,
             self.generation,
-            &*self.owner_nonce,
+            &self.owner_nonce,
             self.binding,
-            desired,
+            &desired,
         )?;
         self.credential.take();
-        let lock = match self.lock.take() {
-            Some(lock) => lock,
-            None => return Err(ForgeCredentialError::ReconnectAttemptComplete),
+        let Some(lock) = self.lock.take() else {
+            return Err(ForgeCredentialError::ReconnectAttemptComplete);
         };
         Ok(ReconnectSessionLease {
             store: self.store.clone(),
@@ -822,7 +819,7 @@ impl ReconnectAttempt {
             &self.store.paths,
             self.record_file_id,
             self.generation,
-            &*self.owner_nonce,
+            &self.owner_nonce,
             self.binding,
         )?;
         self.credential.take();
@@ -854,7 +851,7 @@ impl Drop for ReconnectAttempt {
             &self.store.paths,
             self.record_file_id,
             self.generation,
-            &*self.owner_nonce,
+            &self.owner_nonce,
             self.binding,
         );
         self.credential.take();
@@ -2343,7 +2340,7 @@ fn validate_lock_after_open(lock_path: &Path, file: &File) -> Result<(), ForgeCr
         }
     }
     {
-        let open_id = file_id_from_file(&file)?;
+        let open_id = file_id_from_file(file)?;
         let path_id = file_id(lock_path)?;
         if open_id != path_id {
             return Err(ForgeCredentialError::UnsafePath(lock_path.to_path_buf()));
@@ -2790,7 +2787,7 @@ fn replace_reconnect_record(
     expected_generation: u64,
     expected_owner_nonce: &[u8; 16],
     expected_binding: ReconnectBinding,
-    desired: ReconnectRecord,
+    desired: &ReconnectRecord,
 ) -> Result<FileId, ForgeCredentialError> {
     if desired.binding != expected_binding {
         return Err(ForgeCredentialError::ReconnectBindingMismatch);
@@ -2798,7 +2795,7 @@ fn replace_reconnect_record(
     let desired_state = desired.state;
     let desired_generation = desired.generation;
     let desired_owner_nonce = Zeroizing::new(*desired.owner_nonce);
-    let encoded = encode_reconnect_record(&desired)?;
+    let encoded = encode_reconnect_record(desired)?;
     let path = paths.reconnect_capability_path();
     let result = atomic_replace_private_file(&path, encoded.as_ref(), expected_file_id, || {
         revalidate_reconnect_record(
@@ -2824,7 +2821,7 @@ fn replace_reconnect_record(
                     paths,
                     desired_generation,
                     expected_binding,
-                    &*desired_owner_nonce,
+                    &desired_owner_nonce,
                 );
             }
             Err(error)
@@ -2847,7 +2844,7 @@ fn quarantine_reconnect_record(
         generation,
         owner_nonce,
         binding,
-        desired,
+        &desired,
     )
     .map(|_| ())
 }
@@ -2873,7 +2870,7 @@ fn quarantine_ready_after_failed_replacement(
         generation,
         &[0_u8; 16],
         binding,
-        ReconnectRecord::lost(binding, generation),
+        &ReconnectRecord::lost(binding, generation),
     );
 }
 
@@ -2900,7 +2897,7 @@ fn quarantine_in_flight_after_failed_replacement(
         generation,
         owner_nonce,
         binding,
-        ReconnectRecord::lost(binding, generation),
+        &ReconnectRecord::lost(binding, generation),
     );
 }
 
