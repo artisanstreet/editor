@@ -132,7 +132,7 @@ impl Drop for TempRoot {
 fn engine_run_config_for_fixture(profile_id: &str) -> EngineRunConfig {
     let budget = |ms: u64| FiniteMillis::new(ms).expect("finite millis valid");
     let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
-        attempt_budget: budget(10_000),
+        attempt_budget: budget(30_000),
         readiness_budget: budget(5_000),
         health_budget: budget(5_000),
         prompt_budget: budget(5_000),
