@@ -27,7 +27,8 @@ use std::{
     time::Duration,
 };
 
-use artisan_database::SqliteConfig;
+use artisan_database::{SqliteConfig, StartupReconciliationCandidate};
+use artisan_domain::PatchId;
 use artisan_native_engine::NativeOpenCode2Authority;
 use artisan_protocol::{LocalCapability, LocalCapabilityError};
 use artisan_transport::{CancelHandle, PinnedIdentity, TransportError, server_config};
@@ -36,9 +37,9 @@ use thiserror::Error;
 use zeroize::Zeroize;
 
 use crate::{
-    ForgeApp, ForgeConfig, ForgeListener, ForgeProcessCustody, ForgeProcessCustodyError,
-    ForgeShutdownError, ForgeStartupError, ListenerError, ListenerLimits, RequestHandler,
-    SystemCommandOrigin,
+    CommandOrigin, CommandOriginClockError, ForgeApp, ForgeConfig, ForgeListener,
+    ForgeProcessCustody, ForgeProcessCustodyError, ForgeShutdownError, ForgeStartupError,
+    ListenerError, ListenerLimits, RequestHandler, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
     directory_controller::{
         ControllerStartError, DirectoryController, DirectoryControllerConfig, ShutdownReport,
@@ -48,6 +49,11 @@ use crate::{
     native_run_dispatch::{
         NativeRunDispatcher, NativeRunDispatcherConfig, NativeRunDispatcherConfigError,
         NativeRunDispatcherConfigInput, NativeRunDispatcherShutdown,
+    },
+    startup_reconciliation_sweep::{
+        PatchSourceError, StartupReconciliationPatchSource, StartupReconciliationPatches,
+        StartupReconciliationSweepError, StartupReconciliationSweepInput,
+        sweep_startup_reconciliation,
     },
 };
 
@@ -827,6 +833,15 @@ pub enum ForgeRuntimeError {
     #[error("Forge application startup failed")]
     ApplicationStartup(#[source] ForgeStartupError),
 
+    /// The startup reconciliation clock could not provide a representable
+    /// operation instant.
+    #[error("Forge startup reconciliation clock failed")]
+    StartupReconciliationClock(#[source] CommandOriginClockError),
+
+    /// The bounded startup reconciliation pass failed.
+    #[error("Forge startup reconciliation failed")]
+    StartupReconciliation(#[source] Box<StartupReconciliationSweepError>),
+
     /// The running Forge executable could not be resolved for the native
     /// directory controller.
     #[error("Forge directory controller executable could not be resolved")]
@@ -918,7 +933,9 @@ impl ForgeRuntimeError {
         match self {
             Self::Configuration(_) | Self::Credentials(_) => EXIT_CODE_CONFIGURATION,
             Self::Custody(_) => EXIT_CODE_CUSTODY,
-            Self::ApplicationStartup(_) => EXIT_CODE_APPLICATION_STARTUP,
+            Self::ApplicationStartup(_)
+            | Self::StartupReconciliationClock(_)
+            | Self::StartupReconciliation(_) => EXIT_CODE_APPLICATION_STARTUP,
             Self::DirectoryControllerExecutable | Self::DirectoryControllerStartup(_) => {
                 EXIT_CODE_SERVER_STARTUP
             }
@@ -1138,6 +1155,45 @@ struct ForgeRunContext {
     native_run: NativeRunDispatcherConfig,
 }
 
+/// Deterministic patch identities used only by startup reconciliation.
+///
+/// The discovered run and assistant-item identities are already Forge-minted
+/// opaque text. Retyping that text keeps recovery synchronous and
+/// restart-stable without a second entropy or I/O boundary.
+struct ForgeStartupReconciliationPatchSource;
+
+impl StartupReconciliationPatchSource for ForgeStartupReconciliationPatchSource {
+    fn patch_ids_for(
+        &mut self,
+        candidate: &StartupReconciliationCandidate,
+    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+        let turn_patch_id =
+            PatchId::parse(candidate.run_id.as_str()).map_err(|_| PatchSourceError)?;
+        let item_patch_id = candidate
+            .assistant_item_id
+            .as_ref()
+            .map(|item_id| PatchId::parse(item_id.as_str()).map_err(|_| PatchSourceError))
+            .transpose()?;
+        Ok(StartupReconciliationPatches::new(
+            turn_patch_id,
+            item_patch_id,
+        ))
+    }
+}
+
+async fn reconcile_startup(app: &ForgeApp) -> Result<(), ForgeRuntimeError> {
+    let operated_at = SystemCommandOrigin
+        .acceptance_instant()
+        .map_err(ForgeRuntimeError::StartupReconciliationClock)?;
+    let input = StartupReconciliationSweepInput::new(operated_at, 64)
+        .expect("the startup reconciliation limit is within its validated bound");
+    let mut patch_source = ForgeStartupReconciliationPatchSource;
+    sweep_startup_reconciliation(app.repository(), input, &mut patch_source)
+        .await
+        .map(|_| ())
+        .map_err(|error| ForgeRuntimeError::StartupReconciliation(Box::new(error)))
+}
+
 async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeError> {
     let ForgeRunContext {
         app,
@@ -1151,6 +1207,11 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
         cancel,
         native_run,
     } = context;
+
+    if let Err(error) = reconcile_startup(&app).await {
+        let handler = RequestHandler::with_subscriptions(app.repository().clone());
+        return finish(app, handler, custody, None, None, None, Some(error)).await;
+    }
 
     let Ok(forge_executable) = std::env::current_exe() else {
         let handler = RequestHandler::with_subscriptions(app.repository().clone());

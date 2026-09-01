@@ -247,6 +247,7 @@ rust_test(
         "@crates//:quinn",
         "@crates//:rcgen",
         "@crates//:rustls-pki-types",
+        "@crates//:sea-orm",
         "@crates//:serde_json",
         "@crates//:tokio",
     ],
