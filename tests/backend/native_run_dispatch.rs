@@ -244,7 +244,7 @@ use artisan_protocol::{
 };
 use artisan_transport::{
     DeadlineError, LOOPBACK_SERVER_NAME, OperationKind, PinnedIdentity, bind_loopback_client,
-    client_config, client_handshake, receive_envelope, send_envelope,
+    client_handshake, receive_envelope, send_envelope,
 };
 use quinn::{ClientConfig, Connection, Endpoint, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -1254,7 +1254,6 @@ async fn dispatch_fixture_composes_claim_through_durable_settlement() {
         })
         .await
         .expect("one fixture message should queue");
-    assert_queued_fixture_message(&fetch_all(&database).await, &message_id);
     assert_queued_fixture_message(&fetch_all(&database).await, &message_id);
 
     let notifier = ConversationCommitNotifier::new();
