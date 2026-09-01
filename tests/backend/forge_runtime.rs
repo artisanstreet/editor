@@ -1568,7 +1568,7 @@ fn lifecycle_offer_reports_idle_status_and_stops_after_correlated_finished_reply
         &connection,
         "runtime-stop",
         LifecycleRequest::Stop { require_idle: true },
-        false,
+        true,
     ));
     let WireEnvelopeBody::Response(ServerResponse {
         request_id,
