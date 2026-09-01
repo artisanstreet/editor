@@ -836,12 +836,12 @@ fn classify_response_stream_disposition(
 
 /// Requires the exact private stream STOP for an ordinary request whose
 /// session remains alive while the witness is collected.
-fn assert_response_stream_stopped(disposition: ResponseStreamDisposition) {
+fn assert_response_stream_stopped(disposition: &ResponseStreamDisposition) {
     let ResponseStreamDisposition::StreamStopped(code) = disposition else {
         panic!("ordinary response did not report its private stream STOP");
     };
     assert_eq!(
-        code,
+        *code,
         VarInt::from_u32(LEAF_STREAM_STOP_CODE),
         "ordinary response must report the exact private stream STOP"
     );
@@ -850,10 +850,10 @@ fn assert_response_stream_stopped(disposition: ResponseStreamDisposition) {
 /// Accepts only the two exact terminal-error observations: the private stream
 /// STOP code or the session's typed application abandonment close. Clean FIN
 /// is never terminal-error evidence.
-fn assert_response_stream_abandoned(disposition: ResponseStreamDisposition) {
+fn assert_response_stream_abandoned(disposition: &ResponseStreamDisposition) {
     match disposition {
         ResponseStreamDisposition::StreamStopped(code) => assert_eq!(
-            code,
+            *code,
             VarInt::from_u32(LEAF_STREAM_STOP_CODE),
             "a terminal response must report the exact private stream STOP"
         ),
@@ -1016,7 +1016,7 @@ async fn acknowledging_response_rejection(
             .await
             .map_err(|_| "rejected response STOP witness timed out")?
             .map_err(|_| "rejected response STOP witness was dropped")?;
-        assert_response_stream_abandoned(stopped);
+        assert_response_stream_abandoned(&stopped);
         Ok::<_, Box<dyn Error>>(())
     };
 
@@ -1103,7 +1103,7 @@ async fn acknowledging_response_fin_abandonment(
             .await
             .map_err(|_| "abandoned response STOP witness timed out")?
             .map_err(|_| "abandoned response STOP witness was dropped")?;
-        assert_response_stream_abandoned(stopped);
+        assert_response_stream_abandoned(&stopped);
         Ok::<_, Box<dyn Error>>(())
     };
 
@@ -1734,7 +1734,7 @@ async fn ordinary_request_stops_after_one_correlated_response() -> Result<(), Bo
             .await
             .map_err(|_| "ordinary response STOP witness timed out")?
             .map_err(|_| "ordinary response STOP witness was dropped")?;
-        assert_response_stream_stopped(stopped);
+        assert_response_stream_stopped(&stopped);
         session.shutdown(&cancel).await?;
         Ok::<_, Box<dyn Error>>(())
     };
@@ -1748,7 +1748,8 @@ async fn ordinary_request_stops_after_one_correlated_response() -> Result<(), Bo
 }
 
 /// The dedicated mode returns the same correlated response owner only after
-/// the server has FINed the response and observed clean acknowledgement.
+/// the server has finished the response stream and observed clean
+/// acknowledgement.
 #[tokio::test]
 async fn acknowledging_response_waits_for_clean_response_fin() -> Result<(), Box<dyn Error>> {
     let (certificate, private_key, pin) = ephemeral_identity();
