@@ -588,8 +588,7 @@ impl ReconnectCapabilityStore {
         let credential =
             artisan_protocol::ReconnectCapability::from_bytes(*current.record.capability);
         let owner_nonce = random_owner_nonce()?;
-        let desired =
-            ReconnectRecord::in_flight(binding, current.record.generation, owner_nonce.as_ref());
+        let desired = ReconnectRecord::in_flight(binding, current.record.generation, &*owner_nonce);
         let record_file_id = replace_reconnect_record(
             &self.paths,
             current.file_id,
@@ -686,8 +685,7 @@ impl ReconnectSessionLease {
         let credential =
             artisan_protocol::ReconnectCapability::from_bytes(*current.record.capability);
         let owner_nonce = random_owner_nonce()?;
-        let desired =
-            ReconnectRecord::in_flight(self.binding, self.generation, owner_nonce.as_ref());
+        let desired = ReconnectRecord::in_flight(self.binding, self.generation, &*owner_nonce);
         let record_file_id = replace_reconnect_record(
             &self.store.paths,
             current.file_id,
@@ -760,7 +758,7 @@ impl ReconnectAttempt {
             self.record_file_id,
             ReconnectCapabilityState::InFlight,
             self.generation,
-            self.owner_nonce.as_ref(),
+            &*self.owner_nonce,
             self.binding,
             desired,
         )?;
@@ -799,7 +797,7 @@ impl ReconnectAttempt {
             self.record_file_id,
             ReconnectCapabilityState::InFlight,
             self.generation,
-            self.owner_nonce.as_ref(),
+            &*self.owner_nonce,
             self.binding,
             desired,
         )?;
@@ -824,7 +822,7 @@ impl ReconnectAttempt {
             &self.store.paths,
             self.record_file_id,
             self.generation,
-            self.owner_nonce.as_ref(),
+            &*self.owner_nonce,
             self.binding,
         )?;
         self.credential.take();
@@ -856,7 +854,7 @@ impl Drop for ReconnectAttempt {
             &self.store.paths,
             self.record_file_id,
             self.generation,
-            self.owner_nonce.as_ref(),
+            &*self.owner_nonce,
             self.binding,
         );
         self.credential.take();
@@ -1750,6 +1748,7 @@ fn validate_icacls_flag_tokens(
     output: &str,
     ace_count: usize,
 ) -> Result<(), ForgeCredentialError> {
+    let _ = (output, ace_count);
     // Flags must be exactly a sequence of (...) tokens with optional whitespace, nothing else
     let mut idx = 0;
     let chars: Vec<char> = flags_part.chars().collect();
@@ -2825,7 +2824,7 @@ fn replace_reconnect_record(
                     paths,
                     desired_generation,
                     expected_binding,
-                    desired_owner_nonce.as_ref(),
+                    &*desired_owner_nonce,
                 );
             }
             Err(error)
