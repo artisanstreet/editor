@@ -1108,7 +1108,7 @@ mod lifecycle_response_ack_tests {
 
     struct AckLoopback {
         server_address: SocketAddr,
-        client: Endpoint,
+        client: Option<Endpoint>,
         server_connections: tokio::sync::mpsc::Receiver<Connection>,
         stop_server: Option<tokio::sync::oneshot::Sender<()>>,
         server_thread: Option<JoinHandle<()>>,
@@ -1176,7 +1176,7 @@ mod lifecycle_response_ack_tests {
                 .expect("acknowledgement test client should bind");
             Self {
                 server_address,
-                client,
+                client: Some(client),
                 server_connections: connections_receiver,
                 stop_server: Some(stop_sender),
                 server_thread: Some(server_thread),
@@ -1184,6 +1184,13 @@ mod lifecycle_response_ack_tests {
         }
 
         fn join_server_thread(&mut self) {
+            let client = self
+                .client
+                .take()
+                .expect("acknowledgement test client endpoint should remain owned");
+            client.close(VarInt::from_u32(0), b"acknowledgement test complete");
+            drop(client);
+
             if let Some(stop) = self.stop_server.take() {
                 let _sent = stop.send(());
             }
@@ -1203,19 +1210,24 @@ mod lifecycle_response_ack_tests {
 
     async fn connected_pair() -> (AckLoopback, Connection, Connection) {
         let mut loopback = AckLoopback::new();
-        let client_connection = tokio::time::timeout(
-            ACK_TIMEOUT,
-            loopback
+        let client_connection = {
+            let client = loopback
                 .client
-                .connect(
-                    loopback.server_address,
-                    artisan_transport::LOOPBACK_SERVER_NAME,
-                )
-                .expect("acknowledgement test client should connect"),
-        )
-        .await
-        .expect("acknowledgement test client connection should settle")
-        .expect("acknowledgement test client handshake should succeed");
+                .as_ref()
+                .expect("acknowledgement test client endpoint should be available");
+            tokio::time::timeout(
+                ACK_TIMEOUT,
+                client
+                    .connect(
+                        loopback.server_address,
+                        artisan_transport::LOOPBACK_SERVER_NAME,
+                    )
+                    .expect("acknowledgement test client should connect"),
+            )
+            .await
+            .expect("acknowledgement test client connection should settle")
+            .expect("acknowledgement test client handshake should succeed")
+        };
         let server_connection =
             tokio::time::timeout(ACK_TIMEOUT, loopback.server_connections.recv())
                 .await
