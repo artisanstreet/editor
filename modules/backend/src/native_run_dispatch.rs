@@ -474,12 +474,11 @@ async fn run_recovery_pages(
                 continue;
             }
             return true;
-        } else {
-            if !wait_for_next_claim(stop, process_cancel, config.poll_interval).await {
-                return false;
-            }
+        }
+        if !wait_for_next_claim(stop, process_cancel, config.poll_interval).await {
             return false;
         }
+        return false;
     }
 }
 
