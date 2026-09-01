@@ -64,6 +64,25 @@ fn config_for_shutdown_custody() -> Result<NativeRunDispatcherConfig, NativeRunD
     config_with_notifier(ConversationCommitNotifier::new(), Duration::from_millis(10))
 }
 
+fn config_for_fixture_dispatch(
+    notifier: ConversationCommitNotifier,
+) -> Result<NativeRunDispatcherConfig, NativeRunDispatcherConfigError> {
+    NativeRunDispatcherConfig::new(
+        NativeOpenCode2Authority::new(),
+        notifier,
+        NativeRunDispatcherConfigInput {
+            claim_lease: Duration::from_secs(30),
+            poll_interval: Duration::from_millis(10),
+            retry_backoff: Duration::from_millis(10),
+            shutdown_budget: Duration::from_secs(5),
+            queue_capacity: NonZeroUsize::new(1).expect("one queue slot is nonzero"),
+            max_command_retries: NonZeroUsize::new(3).expect("three retries are nonzero"),
+            prompt_delivery: "immediate".to_owned(),
+            stream_after: 0,
+        },
+    )
+}
+
 #[test]
 fn scheduler_requires_positive_injected_durations() {
     let error = NativeRunDispatcherConfig::new(
@@ -191,7 +210,10 @@ async fn dispatcher_shutdown_joins_owner_custody() {
 use std::path::{Path, PathBuf as StdPathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use artisan_database::entities::{self, AssistantRunLifecycle, DispatchState, EntityLifecycle};
+use artisan_database::entities::{
+    self, AssistantRunLifecycle, ConversationItemKind, ConversationPatchKind, DispatchState,
+    EntityLifecycle, RenderPhase,
+};
 use artisan_database::{
     AssistantChange, BindRunProvider, ClaimMessageDispatch, CreateThreadInput,
     ProviderBindingBytes, QueueFirstMessageInput, Repository, RunLaunchCredentials, RunStartKey,
@@ -245,6 +267,21 @@ impl Drop for TempDatabase {
     }
 }
 
+fn registered_fixture_program() -> PathBuf {
+    let mapping = std::env::var("ARTISAN_ENGINE_OWNER_FIXTURE")
+        .expect("ARTISAN_ENGINE_OWNER_FIXTURE must be set via rlocationpath");
+    let runfiles =
+        runfiles::Runfiles::create().expect("official runfiles discovery should succeed");
+    let path = runfiles::rlocation!(runfiles, mapping.as_str())
+        .unwrap_or_else(|| panic!("declared fixture artifact must resolve: {mapping}"));
+    assert!(
+        path.is_file(),
+        "declared fixture artifact must be a regular file: {}",
+        path.display()
+    );
+    path
+}
+
 async fn temp_repository(label: &str) -> (DatabaseConnection, Repository, TempDatabase) {
     let temp = TempDatabase::new(label);
     let database = connect(
@@ -260,14 +297,23 @@ async fn temp_repository(label: &str) -> (DatabaseConnection, Repository, TempDa
 }
 
 fn fixture_engine_config() -> EngineRunConfig {
-    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    fixture_engine_config_with_budgets("profile-reconcile", 100, 1, 1)
+}
+
+fn fixture_engine_config_with_budgets(
+    profile_id: &str,
+    attempt_budget: u64,
+    phase_budget: u64,
+    close_budget: u64,
+) -> EngineRunConfig {
+    let phase = FiniteMillis::new(phase_budget).expect("phase budget is valid");
     let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
-        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
-        readiness_budget: one,
-        health_budget: one,
-        prompt_budget: one,
-        stream_budget: one,
-        close_budget: one,
+        attempt_budget: FiniteMillis::new(attempt_budget).expect("attempt budget is valid"),
+        readiness_budget: phase,
+        health_budget: phase,
+        prompt_budget: phase,
+        stream_budget: phase,
+        close_budget: FiniteMillis::new(close_budget).expect("close budget is valid"),
         max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
         max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
         max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
@@ -288,7 +334,7 @@ fn fixture_engine_config() -> EngineRunConfig {
     );
     EngineRunConfig::new(
         EngineSelection::OpenCode2(OpenCode2Selection::new(
-            EngineProfileId::parse("profile-reconcile").expect("profile id is valid"),
+            EngineProfileId::parse(profile_id).expect("profile id is valid"),
             EngineModelId::parse("model-reconcile").expect("model id is valid"),
             EngineRouteId::parse("route-reconcile").expect("route id is valid"),
             None,
@@ -304,6 +350,27 @@ async fn seed_project_and_thread(
     database: &DatabaseConnection,
     repository: &Repository,
     thread_id: &str,
+) {
+    seed_project_and_thread_with_profile(
+        database,
+        repository,
+        thread_id,
+        "profile-reconcile",
+        100,
+        1,
+        1,
+    )
+    .await;
+}
+
+async fn seed_project_and_thread_with_profile(
+    database: &DatabaseConnection,
+    repository: &Repository,
+    thread_id: &str,
+    profile_id: &str,
+    attempt_budget: u64,
+    phase_budget: u64,
+    close_budget: u64,
 ) {
     let project = entities::attached_project::ActiveModel {
         project_id: Set("project-1".to_owned()),
@@ -336,7 +403,12 @@ async fn seed_project_and_thread(
                 request_id: RequestId::parse(format!("engine-{thread_id}")).expect("request id"),
                 thread_id: thread,
                 precondition: EngineConfigUpdatePrecondition::Unconfigured,
-                config: fixture_engine_config(),
+                config: fixture_engine_config_with_budgets(
+                    profile_id,
+                    attempt_budget,
+                    phase_budget,
+                    close_budget,
+                ),
                 accepted_at: UnixMillis::from_millis(10),
             })
             .await
@@ -934,4 +1006,244 @@ async fn dispatch_no_provider_child_for_recovery_only() {
     }
     let counts = crate::engine_owner::witness_counts();
     assert_eq!(counts.spawned, 0);
+}
+
+fn assert_queued_fixture_message(after: &AllRows, message_id: &MessageId) {
+    assert_eq!(after.dispatches.len(), 1);
+    let dispatch = &after.dispatches[0];
+    assert_eq!(dispatch.message_id, message_id.as_str());
+    assert_eq!(dispatch.state, DispatchState::Queued);
+    assert_eq!(dispatch.attempt_count, 0);
+}
+
+fn assert_fixture_dispatch(after: &AllRows, message_id: &MessageId) {
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|dispatch| dispatch.message_id == message_id.as_str())
+        .expect("fixture dispatch");
+    assert_eq!(dispatch.state, DispatchState::Completed);
+    assert_eq!(dispatch.attempt_count, 1);
+    assert!(dispatch.lease_owner.is_none());
+    assert!(dispatch.lease_expires_at_ms.is_none());
+    assert!(dispatch.last_error.is_none());
+}
+
+fn assert_fixture_run(after: &AllRows) {
+    assert_eq!(after.runs.len(), 1);
+    let run = after
+        .runs
+        .iter()
+        .find(|run| run.run_id == "fixture-run")
+        .expect("fixture run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Completed);
+    assert_eq!(run.generation, 1);
+    assert!(run.terminal_at_ms.is_some());
+    assert!(run.owner.is_none());
+    assert!(run.lease.is_none());
+    assert!(run.claim_token.is_none());
+    assert!(run.error_code.is_none());
+    assert!(run.error_message.is_none());
+    assert_eq!(run.provider_binding_version, Some(1));
+    let binding: serde_json::Value = serde_json::from_slice(
+        run.provider_binding
+            .as_ref()
+            .expect("provider binding")
+            .as_slice(),
+    )
+    .expect("provider binding JSON");
+    assert_eq!(
+        binding,
+        serde_json::json!({
+            "engine": "opencode2",
+            "profile_id": "fixture-test",
+            "session_id": "test-session",
+        })
+    );
+}
+
+fn assert_fixture_transcript(after: &AllRows, thread_id: &ThreadId) {
+    assert_eq!(after.turns.len(), 1);
+    assert_eq!(after.items.len(), 2);
+    let turn = after
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == "fixture-turn")
+        .expect("origin turn");
+    assert_eq!(turn.lifecycle, EntityLifecycle::Completed);
+    assert_eq!(turn.revision, 2);
+    let assistant_items: Vec<_> = after
+        .items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::AssistantMessage)
+        .collect();
+    assert_eq!(assistant_items.len(), 1);
+    let user_items: Vec<_> = after
+        .items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::UserMessage)
+        .collect();
+    assert_eq!(user_items.len(), 1);
+    assert_eq!(user_items[0].body, "hello world");
+    let assistant = assistant_items[0];
+    assert_eq!(assistant.lifecycle, EntityLifecycle::Completed);
+    assert_eq!(assistant.phase, Some(RenderPhase::Final));
+    assert_eq!(assistant.revision, 1);
+    assert_eq!(assistant.body, "hello world");
+    assert_eq!(assistant.run_id.as_deref(), Some("fixture-run"));
+
+    assert_eq!(after.patches.len(), 6);
+    assert_eq!(
+        after
+            .patches
+            .iter()
+            .map(|patch| patch.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(
+        after
+            .patches
+            .iter()
+            .map(|patch| patch.kind.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ConversationPatchKind::TurnUpsert,
+            ConversationPatchKind::ItemUpsert,
+            ConversationPatchKind::TurnLifecycle,
+            ConversationPatchKind::ItemUpsert,
+            ConversationPatchKind::ItemLifecycle,
+            ConversationPatchKind::TurnLifecycle,
+        ]
+    );
+    assert_eq!(after.patches[1].body.as_deref(), Some("hello world"));
+    assert_eq!(
+        after.patches[1].item_kind,
+        Some(ConversationItemKind::UserMessage)
+    );
+    assert_eq!(after.patches[3].body.as_deref(), Some("hello world"));
+    assert_eq!(
+        after.patches[3].item_kind,
+        Some(ConversationItemKind::AssistantMessage)
+    );
+
+    let state = after
+        .states
+        .iter()
+        .find(|state| state.thread_id == thread_id.as_str())
+        .expect("conversation state");
+    assert_eq!(state.last_patch_sequence, 6);
+    assert_eq!(state.next_renderer_ordinal, 3);
+}
+
+async fn assert_fixture_batch_durability(database: &DatabaseConnection) {
+    let checkpoints = entities::run_checkpoint::Entity::find()
+        .all(database)
+        .await
+        .expect("checkpoint rows");
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].run_id, "fixture-run");
+    assert_eq!(checkpoints[0].generation, 1);
+    assert_eq!(checkpoints[0].last_batch_sequence, 1);
+
+    let receipts = entities::run_batch_receipt::Entity::find()
+        .all(database)
+        .await
+        .expect("batch receipt rows");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].run_id, "fixture-run");
+    assert_eq!(receipts[0].batch_sequence, 1);
+    assert_eq!(receipts[0].generation, 1);
+    assert!(receipts[0].committed);
+    assert_eq!(receipts[0].digest.as_slice().len(), 32);
+}
+
+fn assert_fixture_custody() {
+    let counts = crate::engine_owner::witness_counts();
+    assert_eq!(counts.spawned, 1);
+    assert_eq!(counts.reaps_observed, 1);
+    assert_eq!(counts.kills_requested, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_fixture_composes_claim_through_durable_settlement() {
+    let fixture = registered_fixture_program();
+    let (database, repository, temp) = temp_repository("dispatch-composition").await;
+    let thread_id = ThreadId::parse("fixture-thread").expect("thread id");
+    let message_id = MessageId::parse("fixture-message").expect("message id");
+    seed_project_and_thread_with_profile(
+        &database,
+        &repository,
+        thread_id.as_str(),
+        "fixture-test",
+        30_000,
+        5_000,
+        2_000,
+    )
+    .await;
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("fixture-request").expect("request id"),
+            message_id: message_id.clone(),
+            thread_id: thread_id.clone(),
+            body: MessageBody::parse("hello world").expect("message body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("one fixture message should queue");
+    assert_queued_fixture_message(&fetch_all(&database).await, &message_id);
+
+    let notifier = ConversationCommitNotifier::new();
+    let mut subscription = notifier
+        .subscribe(thread_id.clone())
+        .expect("fixture thread subscription");
+    let config = config_for_fixture_dispatch(notifier).expect("fixture dispatch policy");
+    crate::engine_owner::reset_witnesses();
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start_with_fixture_for_tests(
+        repository.clone(),
+        temp.path().to_owned(),
+        config,
+        Arc::clone(&process_cancel),
+        &tokio::runtime::Handle::current(),
+        fixture,
+    );
+
+    let mut settled = false;
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(10), subscription.wait())
+            .await
+            .expect("fixture commit wake should arrive")
+            .expect("fixture notifier should remain open");
+        let run = entities::assistant_run::Entity::find_by_id("fixture-run")
+            .one(&database)
+            .await
+            .expect("fixture run query")
+            .expect("fixture run should exist");
+        if run.lifecycle == AssistantRunLifecycle::Completed {
+            settled = true;
+            break;
+        }
+    }
+    assert!(
+        settled,
+        "fixture run must settle after bounded commit wakes"
+    );
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+
+    let after = fetch_all(&database).await;
+    assert_fixture_dispatch(&after, &message_id);
+    assert_fixture_run(&after);
+    assert_fixture_transcript(&after, &thread_id);
+    assert_fixture_batch_durability(&database).await;
+    assert_fixture_custody();
 }
