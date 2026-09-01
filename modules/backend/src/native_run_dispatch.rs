@@ -33,6 +33,8 @@ use artisan_native_engine::{NativeOpenCode2Authority, VerifiedOpenCode2ProfileLa
 use artisan_transport::CancelHandle;
 use tokio::{runtime::Handle, task::JoinHandle};
 
+#[cfg(test)]
+use crate::engine_owner::{FixtureConfiguredLaunch, FixtureTurnInput};
 use crate::{
     CommandOrigin, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
@@ -318,6 +320,47 @@ pub struct NativeRunDispatcher {
     observed: Option<NativeRunDispatcherShutdown>,
 }
 
+/// The production dispatcher resolves a certified profile for every claim.
+/// The fixture variant exists only in test builds and is consumed before the
+/// one claim it is allowed to authorize.
+enum DispatchLaunchMode {
+    Configured,
+    #[cfg(test)]
+    Fixture(Option<FixtureConfiguredLaunch>),
+}
+
+enum ClaimLaunchMode {
+    Configured,
+    #[cfg(test)]
+    Fixture(FixtureConfiguredLaunch),
+}
+
+enum ClaimLaunchAvailability {
+    Available(ClaimLaunchMode),
+    Exhausted,
+}
+
+enum ResolvedLaunch {
+    Configured(Box<VerifiedOpenCode2ProfileLaunch>),
+    #[cfg(test)]
+    Fixture(FixtureConfiguredLaunch),
+}
+
+impl DispatchLaunchMode {
+    fn claim_for_next(&mut self) -> ClaimLaunchAvailability {
+        match self {
+            Self::Configured => ClaimLaunchAvailability::Available(ClaimLaunchMode::Configured),
+            #[cfg(test)]
+            Self::Fixture(launch) => match launch.take() {
+                Some(launch) => {
+                    ClaimLaunchAvailability::Available(ClaimLaunchMode::Fixture(launch))
+                }
+                None => ClaimLaunchAvailability::Exhausted,
+            },
+        }
+    }
+}
+
 impl std::fmt::Debug for NativeRunDispatcher {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("NativeRunDispatcher { <payload-free> }")
@@ -334,6 +377,51 @@ impl NativeRunDispatcher {
         process_cancel: Arc<CancelHandle>,
         runtime: &Handle,
     ) -> Self {
+        Self::start_with_mode(
+            repository,
+            database_path,
+            config,
+            process_cancel,
+            runtime,
+            DispatchLaunchMode::Configured,
+        )
+    }
+
+    /// Starts the common dispatcher pipeline against the registered protocol
+    /// fixture. This launch mode is test-only and one-shot by construction.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn start_with_fixture_for_tests(
+        repository: Repository,
+        database_path: PathBuf,
+        config: NativeRunDispatcherConfig,
+        process_cancel: Arc<CancelHandle>,
+        runtime: &Handle,
+        fixture_program: PathBuf,
+    ) -> Self {
+        Self::start_with_mode(
+            repository,
+            database_path,
+            config,
+            process_cancel,
+            runtime,
+            DispatchLaunchMode::Fixture(Some(FixtureConfiguredLaunch {
+                program: fixture_program,
+                version: "0.0.0-fixture",
+                profile_id: "fixture-test".to_owned(),
+                scenario: "prompt_text_then_terminal",
+            })),
+        )
+    }
+
+    fn start_with_mode(
+        repository: Repository,
+        database_path: PathBuf,
+        config: NativeRunDispatcherConfig,
+        process_cancel: Arc<CancelHandle>,
+        runtime: &Handle,
+        launch_mode: DispatchLaunchMode,
+    ) -> Self {
         let shutdown_budget = config.shutdown_budget;
         let stop = Arc::new(CancelHandle::new());
         let owner = EngineOwner::start_configured(config.queue_capacity, runtime);
@@ -344,6 +432,7 @@ impl NativeRunDispatcher {
             Arc::clone(&stop),
             process_cancel,
             owner,
+            launch_mode,
         ));
         Self {
             stop,
@@ -500,6 +589,7 @@ async fn dispatch_loop(
     stop: Arc<CancelHandle>,
     process_cancel: Arc<CancelHandle>,
     mut owner: EngineOwner,
+    mut launch_mode: DispatchLaunchMode,
 ) -> DispatchLoopExit {
     let origin = SystemCommandOrigin;
     loop {
@@ -514,6 +604,12 @@ async fn dispatch_loop(
         if !proceed {
             continue;
         }
+        // Consuming the fixture capability before this claim makes its fixed
+        // run identity one-shot: a later loop cannot claim or admit it again.
+        let launch_mode = match launch_mode.claim_for_next() {
+            ClaimLaunchAvailability::Available(launch_mode) => launch_mode,
+            ClaimLaunchAvailability::Exhausted => break,
+        };
         let Some(claimed_at) = wall_clock(&origin) else {
             if !wait_for_next_claim(&stop, &process_cancel, config.poll_interval).await {
                 break;
@@ -543,16 +639,19 @@ async fn dispatch_loop(
             }
             continue;
         };
-        execute_claim(ClaimExecution {
-            repository: &repository,
-            database_path: Path::new(&database_path),
-            config: &config,
-            origin: &origin,
-            stop: &stop,
-            process_cancel: &process_cancel,
-            owner: &owner,
-            claimed,
-        })
+        execute_claim(
+            ClaimExecution {
+                repository: &repository,
+                database_path: Path::new(&database_path),
+                config: &config,
+                origin: &origin,
+                stop: &stop,
+                process_cancel: &process_cancel,
+                owner: &owner,
+                claimed,
+            },
+            launch_mode,
+        )
         .await;
     }
 
@@ -668,7 +767,7 @@ struct LoadedClaim<'a> {
     payload: artisan_database::MessageDispatchPayload,
     settings: artisan_database::ThreadEngineSettings,
     project_root: RootPath,
-    launch: VerifiedOpenCode2ProfileLaunch,
+    launch: ResolvedLaunch,
 }
 
 struct ClaimIds {
@@ -687,7 +786,7 @@ struct LaunchedClaim<'a> {
     payload: artisan_database::MessageDispatchPayload,
     settings: artisan_database::ThreadEngineSettings,
     project_root: RootPath,
-    launch: VerifiedOpenCode2ProfileLaunch,
+    launch: ResolvedLaunch,
     ids: ClaimIds,
     receipt: LaunchedRunReceipt,
 }
@@ -710,15 +809,19 @@ struct BoundClaim<'a> {
     turn: AcceptedTurn,
 }
 
-async fn execute_claim(context: ClaimExecution<'_>) {
+async fn execute_claim(context: ClaimExecution<'_>, launch_mode: ClaimLaunchMode) {
     if context.stop.is_cancelled() || context.process_cancel.is_cancelled() {
         context.requeue("dispatcher stopping").await;
         return;
     }
-    let Some(loaded) = load_claim(context).await else {
+    let Some(loaded) = load_claim(context, launch_mode).await else {
         return;
     };
-    let ids = match mint_claim_ids(loaded.context.origin, loaded.context.claimed.updated_at) {
+    let ids = match mint_claim_ids(
+        loaded.context.origin,
+        loaded.context.claimed.updated_at,
+        &loaded.launch,
+    ) {
         Ok(ids) => ids,
         Err(reason) => {
             loaded.context.requeue(reason).await;
@@ -737,7 +840,10 @@ async fn execute_claim(context: ClaimExecution<'_>) {
     consume_bound_claim(bound).await;
 }
 
-async fn load_claim(context: ClaimExecution<'_>) -> Option<LoadedClaim<'_>> {
+async fn load_claim(
+    context: ClaimExecution<'_>,
+    launch_mode: ClaimLaunchMode,
+) -> Option<LoadedClaim<'_>> {
     let Some(payload) = read_payload(context.repository, &context.claimed).await else {
         context.requeue("message payload unavailable").await;
         return None;
@@ -773,14 +879,28 @@ async fn load_claim(context: ClaimExecution<'_>) -> Option<LoadedClaim<'_>> {
             return None;
         }
     };
-    let profile_id = settings.config().selection().as_opencode2().profile_id();
-    let Ok(launch) = context
-        .config
-        .authority
-        .resolve_profile_launch(context.database_path, profile_id)
-    else {
-        context.requeue("engine profile unavailable").await;
-        return None;
+    let launch = match launch_mode {
+        ClaimLaunchMode::Configured => {
+            let profile_id = settings.config().selection().as_opencode2().profile_id();
+            let Ok(launch) = context
+                .config
+                .authority
+                .resolve_profile_launch(context.database_path, profile_id)
+            else {
+                context.requeue("engine profile unavailable").await;
+                return None;
+            };
+            ResolvedLaunch::Configured(Box::new(launch))
+        }
+        #[cfg(test)]
+        ClaimLaunchMode::Fixture(fixture) => {
+            let configured_profile = settings.config().selection().as_opencode2().profile_id();
+            if configured_profile.as_str() != fixture.profile_id.as_str() {
+                context.requeue("engine profile unavailable").await;
+                return None;
+            }
+            ResolvedLaunch::Fixture(fixture)
+        }
     };
     Some(LoadedClaim {
         context,
@@ -794,12 +914,19 @@ async fn load_claim(context: ClaimExecution<'_>) -> Option<LoadedClaim<'_>> {
 fn mint_claim_ids(
     origin: &SystemCommandOrigin,
     updated_at: UnixMillis,
+    launch: &ResolvedLaunch,
 ) -> Result<ClaimIds, &'static str> {
-    let run_id = mint_run_id(origin).ok_or("run identity unavailable")?;
-    let turn_id = mint_turn_id(origin).ok_or("run identity unavailable")?;
-    let item_id = mint_item_id(origin).ok_or("run identity unavailable")?;
-    let first_patch_id = mint_patch_id(origin).ok_or("run identity unavailable")?;
-    let second_patch_id = mint_patch_id(origin).ok_or("run identity unavailable")?;
+    let (run_id, turn_id, item_id, first_patch_id, second_patch_id) = match launch {
+        ResolvedLaunch::Configured(_) => (
+            mint_run_id(origin).ok_or("run identity unavailable")?,
+            mint_turn_id(origin).ok_or("run identity unavailable")?,
+            mint_item_id(origin).ok_or("run identity unavailable")?,
+            mint_patch_id(origin).ok_or("run identity unavailable")?,
+            mint_patch_id(origin).ok_or("run identity unavailable")?,
+        ),
+        #[cfg(test)]
+        ResolvedLaunch::Fixture(_) => fixture_claim_ids()?,
+    };
     let operated_at = at_or_after(origin, updated_at).ok_or("run clock unavailable")?;
     let (run_start_key, credentials) =
         mint_run_capabilities().ok_or("run capability unavailable")?;
@@ -813,6 +940,17 @@ fn mint_claim_ids(
         run_start_key,
         credentials,
     })
+}
+
+#[cfg(test)]
+fn fixture_claim_ids() -> Result<(RunId, TurnId, ItemId, PatchId, PatchId), &'static str> {
+    Ok((
+        RunId::parse("fixture-run").map_err(|_| "run identity unavailable")?,
+        TurnId::parse("fixture-turn").map_err(|_| "run identity unavailable")?,
+        ItemId::parse("fixture-user-item").map_err(|_| "run identity unavailable")?,
+        PatchId::parse("fixture-launch-turn").map_err(|_| "run identity unavailable")?,
+        PatchId::parse("fixture-launch-item").map_err(|_| "run identity unavailable")?,
+    ))
 }
 
 async fn launch_claim(loaded: LoadedClaim<'_>, ids: ClaimIds) -> Option<LaunchedClaim<'_>> {
@@ -877,18 +1015,43 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> Option<PreparedClaim<'_>> {
         receipt,
     } = claim;
     let attempt_budget = Duration::from_millis(settings.config().runtime().attempt_budget().get());
-    let input = EngineTurnInput {
-        run_id: receipt.run_id.clone(),
-        project_root,
-        prompt_id: payload.message_id.as_str().to_owned(),
-        prompt_text: payload.body,
-        settings: settings.clone(),
-        launch,
-        prompt_delivery: context.config.prompt_delivery.clone(),
-        stream_after: context.config.stream_after,
-        control_capacity: context.config.queue_capacity.get(),
+    let prompt_id = payload.message_id.as_str().to_owned();
+    let prompt_text = payload.body;
+    let prompt_delivery = context.config.prompt_delivery.clone();
+    let stream_after = context.config.stream_after;
+    let control_capacity = context.config.queue_capacity.get();
+    let turn_result = match launch {
+        ResolvedLaunch::Configured(launch) => context.owner.admit_turn(
+            EngineTurnInput {
+                run_id: receipt.run_id.clone(),
+                project_root,
+                prompt_id,
+                prompt_text,
+                settings: settings.clone(),
+                launch: *launch,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
+        #[cfg(test)]
+        ResolvedLaunch::Fixture(fixture) => context.owner.admit_fixture_turn(
+            FixtureTurnInput {
+                run_id: receipt.run_id.clone(),
+                project_root,
+                prompt_id,
+                prompt_text,
+                settings: settings.clone(),
+                fixture,
+                prompt_delivery,
+                stream_after,
+                control_capacity,
+            },
+            attempt_budget,
+        ),
     };
-    let Ok(mut turn) = context.owner.admit_turn(input, attempt_budget) else {
+    let Ok(mut turn) = turn_result else {
         return None;
     };
     let Ok(session) = turn.prepare().await else {
