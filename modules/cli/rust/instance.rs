@@ -270,6 +270,8 @@ pub enum NativeInstanceError {
     FileChanged,
     FileSizeMismatch,
     FileHashMismatch,
+    EntropyUnavailable,
+    InvalidInstanceIdentity,
     InvalidPath(PathBuf),
     Io {
         context: &'static str,
@@ -288,6 +290,8 @@ impl std::fmt::Display for NativeInstanceError {
             Self::FileChanged => f.write_str("native file changed while it was read"),
             Self::FileSizeMismatch => f.write_str("native file size does not match"),
             Self::FileHashMismatch => f.write_str("native file hash does not match"),
+            Self::EntropyUnavailable => f.write_str("secure random source failed"),
+            Self::InvalidInstanceIdentity => f.write_str("invalid native instance identity"),
             Self::InvalidPath(path) => write!(f, "invalid absolute path: {}", path.display()),
             Self::Io { context, path } => {
                 write!(f, "{context} at {}: [REDACTED]", path.display())
@@ -315,6 +319,8 @@ impl std::fmt::Debug for NativeInstanceError {
             Self::FileChanged => f.debug_tuple("FileChanged").finish(),
             Self::FileSizeMismatch => f.debug_tuple("FileSizeMismatch").finish(),
             Self::FileHashMismatch => f.debug_tuple("FileHashMismatch").finish(),
+            Self::EntropyUnavailable => f.debug_tuple("EntropyUnavailable").finish(),
+            Self::InvalidInstanceIdentity => f.debug_tuple("InvalidInstanceIdentity").finish(),
             Self::InvalidPath(_) => f.debug_tuple("InvalidPath").field(&"<redacted>").finish(),
             Self::Io { context, .. } => f
                 .debug_struct("Io")
@@ -334,11 +340,23 @@ impl std::error::Error for NativeInstanceError {}
 
 type NativeResult<T> = std::result::Result<T, NativeInstanceError>;
 
+/// Mints one stable native instance identity from the operating system's
+/// entropy source.
+pub fn mint_instance_id() -> NativeResult<[u8; 16]> {
+    let mut instance_id = [0_u8; 16];
+    getrandom::fill(&mut instance_id).map_err(|_| NativeInstanceError::EntropyUnavailable)?;
+    if instance_id.iter().all(|byte| *byte == 0) {
+        return Err(NativeInstanceError::InvalidInstanceIdentity);
+    }
+    Ok(instance_id)
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeInstanceFile {
     schema: String,
     version: u64,
+    instance_id: [u8; 16],
     database_path: PathBuf,
     custody_path: PathBuf,
     readiness_path: PathBuf,
@@ -576,6 +594,7 @@ impl NativeRunConfig {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct NativeInstanceConfig {
+    instance_id: [u8; 16],
     database_path: PathBuf,
     custody_path: PathBuf,
     readiness_path: PathBuf,
@@ -588,6 +607,7 @@ impl std::fmt::Debug for NativeInstanceConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("NativeInstanceConfig")
+            .field("instance_id", &"[REDACTED]")
             .field("database_path", &"<redacted>")
             .field("custody_path", &"<redacted>")
             .field("readiness_path", &"<redacted>")
@@ -674,6 +694,28 @@ fn open_and_read_native(path: &Path) -> NativeResult<Vec<u8>> {
 }
 
 impl NativeInstanceConfig {
+    #[cfg(not(test))]
+    pub fn new(
+        instance_id: [u8; 16],
+        database_path: PathBuf,
+        custody_path: PathBuf,
+        readiness_path: PathBuf,
+        credentials_manifest: PathBuf,
+        listener: NativeListenerConfig,
+        native_run: NativeRunConfig,
+    ) -> NativeResult<Self> {
+        Self::new_with_instance_id(
+            instance_id,
+            database_path,
+            custody_path,
+            readiness_path,
+            credentials_manifest,
+            listener,
+            native_run,
+        )
+    }
+
+    #[cfg(test)]
     pub fn new(
         database_path: PathBuf,
         custody_path: PathBuf,
@@ -682,6 +724,29 @@ impl NativeInstanceConfig {
         listener: NativeListenerConfig,
         native_run: NativeRunConfig,
     ) -> NativeResult<Self> {
+        Self::new_with_instance_id(
+            mint_instance_id()?,
+            database_path,
+            custody_path,
+            readiness_path,
+            credentials_manifest,
+            listener,
+            native_run,
+        )
+    }
+
+    pub fn new_with_instance_id(
+        instance_id: [u8; 16],
+        database_path: PathBuf,
+        custody_path: PathBuf,
+        readiness_path: PathBuf,
+        credentials_manifest: PathBuf,
+        listener: NativeListenerConfig,
+        native_run: NativeRunConfig,
+    ) -> NativeResult<Self> {
+        if instance_id.iter().all(|byte| *byte == 0) {
+            return Err(NativeInstanceError::InvalidInstanceIdentity);
+        }
         for path in [
             &database_path,
             &custody_path,
@@ -693,6 +758,7 @@ impl NativeInstanceConfig {
             }
         }
         Ok(Self {
+            instance_id,
             database_path,
             custody_path,
             readiness_path,
@@ -700,6 +766,12 @@ impl NativeInstanceConfig {
             listener,
             native_run,
         })
+    }
+
+    /// Returns a copy of the stable identity for this native instance.
+    #[must_use]
+    pub fn instance_id(&self) -> [u8; 16] {
+        self.instance_id
     }
 
     pub fn database_path(&self) -> &Path {
@@ -740,7 +812,8 @@ impl NativeInstanceConfig {
         if file.version != 2 {
             return Err(NativeInstanceError::InvalidManifest);
         }
-        Self::new(
+        Self::new_with_instance_id(
+            file.instance_id,
             file.database_path,
             file.custody_path,
             file.readiness_path,
@@ -785,6 +858,7 @@ impl NativeInstanceConfig {
         let file = NativeInstanceFile {
             schema: "artisan-instance-v2".to_string(),
             version: 2,
+            instance_id: self.instance_id,
             database_path: self.database_path.clone(),
             custody_path: self.custody_path.clone(),
             readiness_path: self.readiness_path.clone(),

@@ -12,6 +12,8 @@
 use std::{
     collections::HashSet,
     net::SocketAddr,
+    num::NonZeroU32,
+    path::Path,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -30,7 +32,10 @@ use artisan_domain::{
     SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
-    credentials::{NativeClientCredentials, load_client_credentials},
+    credentials::{
+        NativeClientCredentials, RECONNECT_LOCK_TIMEOUT, ReconnectBinding,
+        ReconnectCapabilityStore, ReconnectSessionLease, load_client_credentials,
+    },
     instance::NativeInstanceConfig,
     manifest::InstallationManifest,
     paths::Layout,
@@ -1427,25 +1432,25 @@ fn validate_response_family(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CustodyStep {
     SessionShutdown,
+    ReconnectQuarantine,
     LeaseShutdown,
-    ReconnectDrop,
+    ReconnectRelease,
     Stopped,
 }
 
-fn cleanup_plan(
-    has_session: bool,
-    has_lease: bool,
-    has_reconnect_capability: bool,
-) -> Vec<CustodyStep> {
-    let mut plan = Vec::with_capacity(4);
+fn cleanup_plan(has_session: bool, has_reconnect_lease: bool, has_lease: bool) -> Vec<CustodyStep> {
+    let mut plan = Vec::with_capacity(5);
     if has_session {
         plan.push(CustodyStep::SessionShutdown);
+    }
+    if has_reconnect_lease {
+        plan.push(CustodyStep::ReconnectQuarantine);
     }
     if has_lease {
         plan.push(CustodyStep::LeaseShutdown);
     }
-    if has_reconnect_capability {
-        plan.push(CustodyStep::ReconnectDrop);
+    if has_reconnect_lease {
+        plan.push(CustodyStep::ReconnectRelease);
     }
     plan.push(CustodyStep::Stopped);
     plan
@@ -1494,6 +1499,7 @@ struct SessionMaterial {
     target: LoopbackTarget,
     pinned_identity: PinnedIdentity,
     limits: ClientSessionLimits,
+    binding: ReconnectBinding,
 }
 
 /// Minimal custody for the active subscription; the `ConversationHost` is the projection authority.
@@ -1626,7 +1632,8 @@ impl SubscriptionCustody {
 
 struct ServiceRuntime {
     session: Option<ClientSession>,
-    reconnect_capability: Option<artisan_protocol::ReconnectCapability>,
+    reconnect_lease: Option<ReconnectSessionLease>,
+    reconnect_binding: ReconnectBinding,
     certificate: CertificateDer<'static>,
     target: LoopbackTarget,
     pinned_identity: PinnedIdentity,
@@ -1649,10 +1656,11 @@ impl ServiceRuntime {
         restore_subscription: bool,
     ) -> Result<(), ServiceFailure> {
         // Custody order: cancel delivery task, await its join exactly once,
-        // drop the old session, connect, take_delivery exactly once, start
-        // one new delivery task. Request-driven reconnects additionally restore
-        // the active subscription before their request continues; delivery-loss
-        // recovery leaves that one subscribe to the application.
+        // drop the old session, check out the fenced capability, connect,
+        // publish the rotated capability, take_delivery exactly once, and
+        // start one new delivery task. Request-driven reconnects additionally
+        // restore the active subscription before their request continues;
+        // delivery-loss recovery leaves that one subscribe to the application.
         if let Some(cancel) = self.delivery_cancel.take() {
             cancel.cancel();
         }
@@ -1660,14 +1668,26 @@ impl ServiceRuntime {
             let _ = join.await;
         }
         drop(self.session.take());
-        let Some(capability) = self.reconnect_capability.take() else {
-            return Err(ServiceFailure::local_session());
-        };
-        let hello = match reconnect_hello(frames, capability) {
+        let lease = self
+            .reconnect_lease
+            .take()
+            .ok_or(ServiceFailure::local_session())?;
+        let mut attempt = lease
+            .begin_reconnect()
+            .map_err(|_| reconnect_custody_failure())?;
+        let capability = attempt
+            .take_credential()
+            .map_err(|_| reconnect_custody_failure())?;
+        let hello = match reconnect_hello_with_capability(frames, capability) {
             Ok(hello) => hello,
-            Err(failure) => return Err(failure),
+            Err((failure, capability)) => {
+                if let Ok(lease) = attempt.restore_before_handshake(capability) {
+                    self.reconnect_lease = Some(lease);
+                }
+                return Err(failure);
+            }
         };
-        let (session, welcome) = ClientSession::connect(
+        let connected = ClientSession::connect(
             self.target,
             self.certificate.clone(),
             self.pinned_identity,
@@ -1675,32 +1695,37 @@ impl ServiceRuntime {
             self.limits,
             &self.cancel,
         )
-        .await
-        .map_err(|_| {
-            self.session = None;
-            self.reconnect_capability = None;
-            ServiceFailure::new(
-                ServiceFailureStage::Handshake,
-                ServiceFailureCategory::Authentication,
-            )
-        })?;
-        self.session = Some(session);
-        self.reconnect_capability = Some(welcome.welcome.reconnect_capability);
+        .await;
+        let (session, welcome) = match connected {
+            Ok(connected) => connected,
+            Err(_) => {
+                let _ = attempt.quarantine();
+                return Err(ServiceFailure::new(
+                    ServiceFailureStage::Handshake,
+                    ServiceFailureCategory::Authentication,
+                ));
+            }
+        };
+        let reconnect_lease = attempt
+            .publish_next(self.reconnect_binding, welcome.welcome.reconnect_capability)
+            .map_err(|_| reconnect_custody_failure())?;
         // take_delivery exactly once
-        let session = self.session.take().ok_or(ServiceFailure::local_session())?;
-        let (session, receiver) = session
-            .take_delivery()
-            .map_err(|_| ServiceFailure::local_session())?;
-        self.session = Some(session);
+        let (session, receiver) = match session.take_delivery() {
+            Ok(parts) => parts,
+            Err(_) => {
+                let _ = reconnect_lease.quarantine();
+                return Err(ServiceFailure::local_session());
+            }
+        };
         let Some(tx) = self.delivery_tx.clone() else {
+            drop(session);
+            let _ = reconnect_lease.quarantine();
             return Err(ServiceFailure::local_session());
         };
+        let version = session.protocol_version();
+        self.session = Some(session);
+        self.reconnect_lease = Some(reconnect_lease);
         let cancel = Arc::new(CancelHandle::new());
-        let version = self
-            .session
-            .as_ref()
-            .map(ClientSession::protocol_version)
-            .ok_or(ServiceFailure::local_session())?;
         let join = tokio::spawn(delivery_task_loop(
             receiver,
             tx,
@@ -1711,10 +1736,21 @@ impl ServiceRuntime {
         self.delivery_join = Some(join);
         if restore_subscription && let Some(thread_id) = self.custody.active_thread().cloned() {
             let after = self.custody.last_accepted_cursor();
-            self.resubscribe_after_reconnect(frames, thread_id, after)
-                .await?;
+            if let Err(failure) = self
+                .resubscribe_after_reconnect(frames, thread_id, after)
+                .await
+            {
+                self.quarantine_reconnect_lease();
+                return Err(failure);
+            }
         }
         Ok(())
+    }
+
+    fn quarantine_reconnect_lease(&mut self) {
+        if let Some(lease) = self.reconnect_lease.take() {
+            let _ = lease.quarantine();
+        }
     }
 
     async fn resubscribe_after_reconnect(
@@ -1884,8 +1920,8 @@ impl ServiceRuntime {
         let mut failed = false;
         for step in cleanup_plan(
             self.session.is_some(),
+            self.reconnect_lease.is_some(),
             self.lease.is_some(),
-            self.reconnect_capability.is_some(),
         ) {
             match step {
                 CustodyStep::SessionShutdown => {
@@ -1895,6 +1931,14 @@ impl ServiceRuntime {
                         failed = true;
                     }
                 }
+                CustodyStep::ReconnectQuarantine => {
+                    if let Some(lease) = self.reconnect_lease.take() {
+                        match lease.quarantine_for_shutdown() {
+                            Ok(lease) => self.reconnect_lease = Some(lease),
+                            Err(_) => failed = true,
+                        }
+                    }
+                }
                 CustodyStep::LeaseShutdown => {
                     if let Some(lease) = self.lease.take()
                         && lease.shutdown(self.shutdown_grace).await.is_err()
@@ -1902,9 +1946,7 @@ impl ServiceRuntime {
                         failed = true;
                     }
                 }
-                CustodyStep::ReconnectDrop => {
-                    drop(self.reconnect_capability.take());
-                }
+                CustodyStep::ReconnectRelease => drop(self.reconnect_lease.take()),
                 CustodyStep::Stopped => {}
             }
         }
@@ -1923,25 +1965,81 @@ fn session_needs_reconnect(admitted: usize, admission_budget: usize, force: bool
     force || admitted >= admission_budget
 }
 
-fn reconnect_hello(
+fn reconnect_custody_failure() -> ServiceFailure {
+    ServiceFailure::new(
+        ServiceFailureStage::Handshake,
+        ServiceFailureCategory::Authentication,
+    )
+}
+
+struct ReconnectHelloHeader {
+    frame_id: FrameId,
+    sent_at: UnixMillis,
+    supported_versions: VersionOffer,
+}
+
+fn reconnect_hello_header(
     frames: &mut FrameFactory,
-    capability: artisan_protocol::ReconnectCapability,
-) -> Result<WireEnvelope, ServiceFailure> {
+) -> Result<ReconnectHelloHeader, ServiceFailure> {
     let stamp = frames
         .next()
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Handshake))?;
     let supported_versions = VersionOffer::new(vec![1])
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Handshake))?;
-    Ok(WireEnvelope {
-        protocol_version: ProtocolVersion::V1,
+    Ok(ReconnectHelloHeader {
         frame_id: stamp.frame_id,
         sent_at: stamp.sent_at,
+        supported_versions,
+    })
+}
+
+fn reconnect_hello_from_header(
+    header: ReconnectHelloHeader,
+    capability: artisan_protocol::ReconnectCapability,
+) -> WireEnvelope {
+    WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: header.frame_id,
+        sent_at: header.sent_at,
         body: WireEnvelopeBody::Hello(Hello {
-            supported_versions,
+            supported_versions: header.supported_versions,
             credential: HelloCredential::Reconnect(capability),
             supports_lifecycle_control: false,
         }),
-    })
+    }
+}
+
+fn reconnect_hello_with_capability(
+    frames: &mut FrameFactory,
+    capability: artisan_protocol::ReconnectCapability,
+) -> Result<WireEnvelope, (ServiceFailure, artisan_protocol::ReconnectCapability)> {
+    let header = match reconnect_hello_header(frames) {
+        Ok(header) => header,
+        Err(failure) => return Err((failure, capability)),
+    };
+    Ok(reconnect_hello_from_header(header, capability))
+}
+
+fn reconnect_hello(
+    frames: &mut FrameFactory,
+    capability: artisan_protocol::ReconnectCapability,
+) -> Result<WireEnvelope, ServiceFailure> {
+    reconnect_hello_with_capability(frames, capability).map_err(|(failure, _)| failure)
+}
+
+fn build_reconnect_binding(
+    instance_id: [u8; 16],
+    target: LoopbackTarget,
+    pinned_identity: PinnedIdentity,
+    forge_pid: u32,
+) -> Result<ReconnectBinding, StartupError> {
+    ReconnectBinding::new(
+        instance_id,
+        target.addr().port(),
+        *pinned_identity.as_bytes(),
+        NonZeroU32::new(forge_pid).ok_or(StartupError::Stage(ServiceFailureStage::Readiness))?,
+    )
+    .map_err(|_| StartupError::Stage(ServiceFailureStage::Instance))
 }
 
 async fn start_native_service() -> Result<(ServiceRuntime, FrameFactory), StartupError> {
@@ -1969,37 +2067,38 @@ async fn start_native_service() -> Result<(ServiceRuntime, FrameFactory), Startu
         .await
         .map_err(|_| StartupError::Stage(ServiceFailureStage::Forge))?;
     let mut frames = FrameFactory::new();
-    let runtime = attach_to_owned_forge(lease, &config, credentials, &mut frames).await?;
+    let runtime =
+        attach_to_owned_forge(lease, &layout.root, &config, credentials, &mut frames).await?;
     Ok((runtime, frames))
 }
 
 async fn attach_to_owned_forge(
     lease: ForgeProcessLease,
+    home: &Path,
     config: &NativeInstanceConfig,
     credentials: NativeClientCredentials,
     frames: &mut FrameFactory,
 ) -> Result<ServiceRuntime, StartupError> {
-    let result = establish_session(config, &lease, credentials, frames).await;
+    let result = establish_session(home, config, &lease, credentials, frames).await;
     match result {
-        Ok((session, reconnect_capability, cancel, shutdown_grace, material)) => {
-            Ok(ServiceRuntime {
-                session: Some(session),
-                reconnect_capability: Some(reconnect_capability),
-                certificate: material.certificate,
-                target: material.target,
-                pinned_identity: material.pinned_identity,
-                limits: material.limits,
-                lease: Some(lease),
-                cancel,
-                shutdown_grace,
-                known_threads: HashSet::new(),
-                intake: IntakeState::new(),
-                custody: SubscriptionCustody::new(),
-                delivery_cancel: None,
-                delivery_join: None,
-                delivery_tx: None,
-            })
-        }
+        Ok((session, reconnect_lease, cancel, shutdown_grace, material)) => Ok(ServiceRuntime {
+            session: Some(session),
+            reconnect_lease: Some(reconnect_lease),
+            reconnect_binding: material.binding,
+            certificate: material.certificate,
+            target: material.target,
+            pinned_identity: material.pinned_identity,
+            limits: material.limits,
+            lease: Some(lease),
+            cancel,
+            shutdown_grace,
+            known_threads: HashSet::new(),
+            intake: IntakeState::new(),
+            custody: SubscriptionCustody::new(),
+            delivery_cancel: None,
+            delivery_join: None,
+            delivery_tx: None,
+        }),
         Err(error) => {
             let shutdown_grace =
                 finite_duration(config.listener().drain_timeout_ms()).unwrap_or(Duration::ZERO);
@@ -2010,6 +2109,7 @@ async fn attach_to_owned_forge(
 }
 
 async fn establish_session(
+    home: &Path,
     config: &NativeInstanceConfig,
     lease: &ForgeProcessLease,
     credentials: NativeClientCredentials,
@@ -2017,7 +2117,7 @@ async fn establish_session(
 ) -> Result<
     (
         ClientSession,
-        artisan_protocol::ReconnectCapability,
+        ReconnectSessionLease,
         CancelHandle,
         Duration,
         SessionMaterial,
@@ -2038,6 +2138,8 @@ async fn establish_session(
         &expected_pin,
     )
     .map_err(|_| StartupError::Stage(ServiceFailureStage::Readiness))?;
+    let binding =
+        build_reconnect_binding(config.instance_id(), target, pinned_identity, lease.pid())?;
 
     let hello_stamp = frames.next()?;
     let hello = WireEnvelope {
@@ -2066,9 +2168,27 @@ async fn establish_session(
         ClientSession::connect(target, certificate, pinned_identity, hello, limits, &cancel)
             .await
             .map_err(|_| StartupError::Stage(ServiceFailureStage::Handshake))?;
+    let reconnect_store = match ReconnectCapabilityStore::from_home(home) {
+        Ok(store) => store,
+        Err(_) => {
+            let _ = session.shutdown(&cancel).await;
+            return Err(StartupError::Stage(ServiceFailureStage::Credentials));
+        }
+    };
+    let reconnect_lease = match reconnect_store.initialize_owner_lease(
+        binding,
+        welcome.welcome.reconnect_capability,
+        RECONNECT_LOCK_TIMEOUT,
+    ) {
+        Ok(lease) => lease,
+        Err(_) => {
+            let _ = session.shutdown(&cancel).await;
+            return Err(StartupError::Stage(ServiceFailureStage::Credentials));
+        }
+    };
     Ok((
         session,
-        welcome.welcome.reconnect_capability,
+        reconnect_lease,
         cancel,
         limits.shutdown,
         SessionMaterial {
@@ -2076,6 +2196,7 @@ async fn establish_session(
             target,
             pinned_identity,
             limits,
+            binding,
         },
     ))
 }
@@ -2402,7 +2523,7 @@ async fn handle_delivery_lost_reconnect(
 ) -> Result<(), ServiceFailure> {
     // Publish the loss first so application can observe
     publish(events, NativeTransportEvent::DeliveryLost(failure))?;
-    // Perform cancel->join->drop->connect->take_delivery->new task
+    // Perform cancel->join->lease checkout->connect->publish->take_delivery->new task.
     // The application owns the one recovery Subscribe from its mounted host cursor.
     runtime.reconnect(frames, false).await
 }
@@ -3437,12 +3558,12 @@ mod tests {
         COMMAND_CAPACITY, ExpectedResponse, FrameFactory, IntakeRetry, NativeTransportCommand,
         PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
         ServiceFailureCategory, StartupError, ThreadSelectionDecision, attach_mutation,
-        contains_exact_project, contains_exact_thread, create_command_values, create_mutation,
-        engine_config_stable_mutation, finite_duration, first_message_stable_mutation,
-        known_thread_for_queue, make_request_frame, payload_health_decision, project_request,
-        reconnect_hello, session_needs_reconnect, snapshot_request, thread_engine_settings_request,
-        thread_selection_decision, threads_request, try_send_command, validate_readiness,
-        validate_response_family,
+        build_reconnect_binding, contains_exact_project, contains_exact_thread,
+        create_command_values, create_mutation, engine_config_stable_mutation, finite_duration,
+        first_message_stable_mutation, known_thread_for_queue, make_request_frame,
+        payload_health_decision, project_request, reconnect_hello, session_needs_reconnect,
+        snapshot_request, thread_engine_settings_request, thread_selection_decision,
+        threads_request, try_send_command, validate_readiness, validate_response_family,
     };
     use artisan_domain::{
         AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
@@ -3461,9 +3582,9 @@ mod tests {
     };
     use artisan_transport::{
         ClientRequestError, DeadlineError, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
-        FrameError, OperationKind,
+        FrameError, LoopbackTarget, OperationKind, PinnedIdentity,
     };
-    use std::time::Duration;
+    use std::{num::NonZeroU32, time::Duration};
 
     fn project(value: &str, name: &str) -> ProjectSummary {
         ProjectSummary {
@@ -4229,13 +4350,25 @@ mod tests {
         let capability = ReconnectCapability::from_bytes([0xA5; RECONNECT_CAPABILITY_BYTES]);
         let mut frames = FrameFactory::new();
         let hello = reconnect_hello(&mut frames, capability).expect("reconnect hello");
-        assert!(matches!(
-            hello.body,
-            WireEnvelopeBody::Hello(artisan_protocol::Hello {
-                credential: HelloCredential::Reconnect(_),
-                ..
-            })
-        ));
+        let WireEnvelopeBody::Hello(message) = hello.body else {
+            panic!("reconnect hello body");
+        };
+        assert!(matches!(message.credential, HelloCredential::Reconnect(_)));
+        assert!(!message.supports_lifecycle_control);
+    }
+
+    #[test]
+    fn reconnect_binding_uses_validated_target_pin_and_owned_pid() {
+        let target = LoopbackTarget::new("127.0.0.1:40_123".parse().expect("socket address"))
+            .expect("loopback target");
+        let pinned_identity = PinnedIdentity::from_digest([0xB6; 32]);
+        let binding = build_reconnect_binding([0xC7; 16], target, pinned_identity, 4_242)
+            .expect("reconnect binding");
+        assert_eq!(binding.instance_id, [0xC7; 16]);
+        assert_eq!(binding.endpoint_port, 40_123);
+        assert_eq!(binding.certificate_sha256, [0xB6; 32]);
+        assert_eq!(binding.pid, NonZeroU32::new(4_242).expect("pid"));
+        assert!(build_reconnect_binding([0xC7; 16], target, pinned_identity, 0).is_err());
     }
 
     #[test]
@@ -4259,13 +4392,14 @@ mod tests {
     }
 
     #[test]
-    fn custody_trace_is_session_then_lease_then_capability() {
+    fn custody_trace_is_session_then_quarantine_then_lease_then_release() {
         assert_eq!(
             super::custody_trace(),
             vec![
                 super::CustodyStep::SessionShutdown,
+                super::CustodyStep::ReconnectQuarantine,
                 super::CustodyStep::LeaseShutdown,
-                super::CustodyStep::ReconnectDrop,
+                super::CustodyStep::ReconnectRelease,
                 super::CustodyStep::Stopped,
             ]
         );

@@ -619,7 +619,19 @@ fn parse_native_run_prompt_delivery(
 
 fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {
     let credential_paths = ForgeCredentialPaths::from_home(&layout.root)?;
-    let config = NativeInstanceConfig::new(
+    let instance_path = layout.native_instance_path();
+    let instance_id = match fs::symlink_metadata(&instance_path) {
+        Ok(_) => NativeInstanceConfig::load(&instance_path)?.instance_id(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => instance::mint_instance_id()?,
+        Err(source) => {
+            return Err(CliError::Io {
+                context: "inspect native Forge instance",
+                source,
+            });
+        }
+    };
+    let config = NativeInstanceConfig::new_with_instance_id(
+        instance_id,
         values.database_path,
         values.custody_path,
         values.readiness_path,
@@ -1879,6 +1891,74 @@ mod tests {
         assert_eq!(config.native_run().prompt_delivery(), "queue");
         assert_eq!(config.native_run().stream_after(), 0);
         assert!(layout.native_instance_path().is_file());
+
+        let instance_id = config.instance_id();
+        setup_native(
+            &layout,
+            NativeSetupValues {
+                database_path: layout.root.join("data").join("replacement.sqlite3"),
+                custody_path: layout.root.join("custody").join("replacement.lock"),
+                readiness_path: layout.root.join("readiness").join("replacement.json"),
+                listener: NativeListenerConfig::new(
+                    111,
+                    222,
+                    333,
+                    444,
+                    NonZeroU32::new(5).unwrap(),
+                    NonZeroU32::new(6).unwrap(),
+                ),
+                native_run: NativeRunConfig::new(NativeRunConfigInput {
+                    claim_lease_ms: 555,
+                    poll_interval_ms: 556,
+                    retry_backoff_ms: 557,
+                    shutdown_budget_ms: 558,
+                    queue_capacity: 11,
+                    max_command_retries: 12,
+                    prompt_delivery: "replacement".to_owned(),
+                    stream_after: 1,
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_native_instance(&layout).unwrap().instance_id(),
+            instance_id
+        );
+
+        let instance_path = layout.native_instance_path();
+        let malformed = br#"{"schema":"artisan-instance-v2","version":1}"#;
+        fs::write(&instance_path, malformed).unwrap();
+        let before = fs::read(&instance_path).unwrap();
+        let result = setup_native(
+            &layout,
+            NativeSetupValues {
+                database_path: layout.root.join("data").join("refused.sqlite3"),
+                custody_path: layout.root.join("custody").join("refused.lock"),
+                readiness_path: layout.root.join("readiness").join("refused.json"),
+                listener: NativeListenerConfig::new(
+                    1,
+                    2,
+                    3,
+                    4,
+                    NonZeroU32::new(1).unwrap(),
+                    NonZeroU32::new(1).unwrap(),
+                ),
+                native_run: NativeRunConfig::new(NativeRunConfigInput {
+                    claim_lease_ms: 1,
+                    poll_interval_ms: 2,
+                    retry_backoff_ms: 3,
+                    shutdown_budget_ms: 4,
+                    queue_capacity: 1,
+                    max_command_retries: 1,
+                    prompt_delivery: "queue".to_owned(),
+                    stream_after: 0,
+                })
+                .unwrap(),
+            },
+        );
+        assert!(matches!(result, Err(CliError::NativeInstance(_))));
+        assert_eq!(fs::read(&instance_path).unwrap(), before);
     }
 
     #[test]

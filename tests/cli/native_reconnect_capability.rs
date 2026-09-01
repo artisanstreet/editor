@@ -1,5 +1,5 @@
 use artisan_editor_cli::credentials::{
-    ForgeCredentialError, ReconnectBinding, ReconnectCapabilityStore,
+    ForgeCredentialError, RECONNECT_LOCK_TIMEOUT, ReconnectBinding, ReconnectCapabilityStore,
     load_existing_client_identity, provision_or_load,
 };
 use artisan_protocol::{RECONNECT_CAPABILITY_BYTES, ReconnectCapability};
@@ -176,6 +176,19 @@ fn assert_no_temporary_records(store: &ReconnectCapabilityStore) {
 }
 
 #[test]
+fn zero_instance_identity_is_rejected_at_binding_boundary() {
+    assert!(matches!(
+        ReconnectBinding::new(
+            [0; 16],
+            47_321,
+            [0x44; 32],
+            NonZeroU32::new(41).expect("nonzero test pid"),
+        ),
+        Err(ForgeCredentialError::ReconnectInvalidBinding)
+    ));
+}
+
+#[test]
 fn consuming_transfer_preserves_secret_fencing_traits() {
     let bytes = capability(0x5a).into_zeroizing_bytes();
     assert_eq!(bytes.as_ref(), &[0x5a; RECONNECT_CAPABILITY_BYTES]);
@@ -190,6 +203,14 @@ fn assert_invalid_reconnect_record_states(
     let mut zero_generation = original.to_vec();
     zero_generation[GENERATION_OFFSET..GENERATION_OFFSET + 8].fill(0);
     write_record(store, &zero_generation);
+    assert!(matches!(
+        checkout_error(store, owner),
+        ForgeCredentialError::ReconnectRecordMalformed
+    ));
+
+    let mut zero_instance = original.to_vec();
+    zero_instance[INSTANCE_OFFSET..INSTANCE_OFFSET + 16].fill(0);
+    write_record(store, &zero_instance);
     assert!(matches!(
         checkout_error(store, owner),
         ForgeCredentialError::ReconnectRecordMalformed
@@ -338,6 +359,142 @@ fn checkout_is_ready_to_in_flight_and_excludes_second_checkout() {
     drop(attempt);
     assert_eq!(read_record(&store)[STATE_OFFSET], 2);
     fs::remove_dir_all(home).expect("remove busy fixture");
+}
+
+#[test]
+fn owner_lease_initializes_missing_and_retains_exclusive_lock() {
+    let home = temp_home("owner-lease");
+    provision_or_load(&home).expect("provision identity fixture");
+    let store = store(&home);
+    let owner = binding(0x31);
+    let lease = store
+        .initialize_owner_lease(owner, capability(0xe1), RECONNECT_LOCK_TIMEOUT)
+        .expect("initialize owner lease");
+    let ready = read_record(&store);
+    assert_record_header_and_binding(&ready, 0, 1, owner);
+    assert_eq!(&ready[CAPABILITY_OFFSET..], &[0xe1; 32]);
+
+    let second_store = store.clone();
+    let second = thread::spawn(move || {
+        second_store.initialize_owner_lease(binding(0x32), capability(0xe2), RECONNECT_LOCK_TIMEOUT)
+    });
+    assert!(matches!(
+        second.join().expect("owner lease contention thread"),
+        Err(ForgeCredentialError::CapabilityBusy)
+    ));
+
+    drop(lease);
+    fs::remove_dir_all(home).expect("remove owner-lease fixture");
+}
+
+#[test]
+fn owner_lease_same_binding_fails_and_different_binding_rebinds_generation() {
+    let home = temp_home("owner-rebind");
+    provision_or_load(&home).expect("provision identity fixture");
+    let store = store(&home);
+    let first = binding(0x41);
+    let second = binding(0x42);
+    let third = binding(0x43);
+
+    let lease = store
+        .initialize_owner_lease(first, capability(0xf1), RECONNECT_LOCK_TIMEOUT)
+        .expect("initialize first owner lease");
+    drop(lease);
+    assert!(matches!(
+        store.initialize_owner_lease(first, capability(0xf2), RECONNECT_LOCK_TIMEOUT),
+        Err(ForgeCredentialError::ReconnectRecordExists)
+    ));
+    assert_eq!(&read_record(&store)[CAPABILITY_OFFSET..], &[0xf1; 32]);
+
+    let lease = store
+        .initialize_owner_lease(second, capability(0xf3), RECONNECT_LOCK_TIMEOUT)
+        .expect("rebind second owner lease");
+    let rebound = read_record(&store);
+    assert_record_header_and_binding(&rebound, 0, 2, second);
+    assert_eq!(&rebound[CAPABILITY_OFFSET..], &[0xf3; 32]);
+    drop(lease);
+
+    let mut released_in_flight = read_record(&store);
+    released_in_flight[STATE_OFFSET] = 1;
+    released_in_flight[OWNER_NONCE_OFFSET..CAPABILITY_OFFSET].fill(0x99);
+    released_in_flight[CAPABILITY_OFFSET..].fill(0);
+    write_record(&store, &released_in_flight);
+    let lease = store
+        .initialize_owner_lease(third, capability(0xf4), RECONNECT_LOCK_TIMEOUT)
+        .expect("rebind released in-flight record");
+    let rebound = read_record(&store);
+    assert_record_header_and_binding(&rebound, 0, 3, third);
+    assert_eq!(&rebound[CAPABILITY_OFFSET..], &[0xf4; 32]);
+    drop(lease);
+
+    let attempt = store
+        .checkout(third, RECONNECT_LOCK_TIMEOUT)
+        .expect("checkout rebound capability");
+    drop(attempt);
+    assert_eq!(read_record(&store)[STATE_OFFSET], 2);
+
+    let fourth = binding(0x44);
+    let lease = store
+        .initialize_owner_lease(fourth, capability(0xf5), RECONNECT_LOCK_TIMEOUT)
+        .expect("rebind released lost record");
+    let rebound = read_record(&store);
+    assert_record_header_and_binding(&rebound, 0, 4, fourth);
+    assert_eq!(&rebound[CAPABILITY_OFFSET..], &[0xf5; 32]);
+    lease.quarantine().expect("quarantine owner lease");
+    assert_eq!(read_record(&store)[STATE_OFFSET], 2);
+
+    fs::remove_dir_all(home).expect("remove owner-rebind fixture");
+}
+
+#[test]
+fn owner_lease_rebind_generation_overflow_fails_closed() {
+    let home = temp_home("owner-overflow");
+    provision_or_load(&home).expect("provision identity fixture");
+    let store = store(&home);
+    let first = binding(0x51);
+    let second = binding(0x52);
+    let lease = store
+        .initialize_owner_lease(first, capability(0xf5), RECONNECT_LOCK_TIMEOUT)
+        .expect("initialize overflow owner lease");
+    drop(lease);
+    let mut maximum = read_record(&store);
+    maximum[GENERATION_OFFSET..GENERATION_OFFSET + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    write_record(&store, &maximum);
+
+    assert!(matches!(
+        store.initialize_owner_lease(second, capability(0xf6), RECONNECT_LOCK_TIMEOUT),
+        Err(ForgeCredentialError::ReconnectGenerationOverflow)
+    ));
+    assert_eq!(read_record(&store), maximum);
+    fs::remove_dir_all(home).expect("remove owner-overflow fixture");
+}
+
+#[test]
+fn owner_lease_quarantine_keeps_lock_until_release() {
+    let home = temp_home("owner-shutdown");
+    provision_or_load(&home).expect("provision identity fixture");
+    let store = store(&home);
+    let owner = binding(0x61);
+    let lease = store
+        .initialize_owner_lease(owner, capability(0xf7), RECONNECT_LOCK_TIMEOUT)
+        .expect("initialize shutdown owner lease");
+    let lease = lease
+        .quarantine_for_shutdown()
+        .expect("quarantine before Forge shutdown");
+    assert_eq!(read_record(&store)[STATE_OFFSET], 2);
+
+    let second_store = store.clone();
+    let second = thread::spawn(move || second_store.checkout(owner, RECONNECT_LOCK_TIMEOUT));
+    assert!(matches!(
+        second.join().expect("shutdown contention thread"),
+        Err(ForgeCredentialError::CapabilityBusy)
+    ));
+    drop(lease);
+    assert!(matches!(
+        checkout_error(&store, owner),
+        ForgeCredentialError::ReconnectCapabilityUnavailable
+    ));
+    fs::remove_dir_all(home).expect("remove owner-shutdown fixture");
 }
 
 #[test]
@@ -612,5 +769,15 @@ fn reconnect_errors_are_redacted() {
     assert!(!rendered.contains("cdcd"));
     assert!(!rendered.contains("205"));
     assert!(!rendered.contains("a1a1"));
+    let binding = ReconnectBinding::new(
+        [0xab; 16],
+        47_321,
+        [0xcd; 32],
+        NonZeroU32::new(41).expect("nonzero test pid"),
+    )
+    .expect("redaction binding");
+    let binding_debug = format!("{binding:?}");
+    assert!(!binding_debug.contains("171"));
+    assert!(!binding_debug.contains("cd"));
     fs::remove_dir_all(home).expect("remove redaction fixture");
 }
