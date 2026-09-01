@@ -82,6 +82,12 @@ pub(crate) const NATIVE_RAIL_ADD_PROJECT_SELECTOR: &str = "artisan-native-rail-a
 /// Accessible name retained by the rail's icon-only add-project action.
 pub(crate) const NATIVE_RAIL_ADD_PROJECT_LABEL: &str = "Add project";
 
+/// Stable selector for the explicit first-message retry action.
+pub(crate) const NATIVE_MESSAGE_RETRY_SELECTOR: &str = "artisan-native-message-retry";
+
+/// Visible and accessible name retained by the first-message retry action.
+const NATIVE_MESSAGE_RETRY_LABEL: &str = "Retry send";
+
 const NATIVE_KEY_CONTEXT: &str = "artisan-native-application";
 const SURFACE_WIDTH: f32 = 1_024.0;
 const SURFACE_HEIGHT: f32 = 720.0;
@@ -116,6 +122,15 @@ struct NativeMessageFlight {
     request_id: RequestId,
     _body: MessageBody,
     token: SubmissionToken,
+}
+
+/// Application-owned identity for one explicitly retryable first-message
+/// queue. This type owns message text and therefore implements neither
+/// `Debug` nor `Display`.
+struct NativeMessageRetry {
+    thread_id: ThreadId,
+    request_id: RequestId,
+    body: MessageBody,
 }
 
 #[derive(Clone, Copy)]
@@ -164,10 +179,15 @@ pub struct NativeApplication {
     theme: ArtisanTheme,
     focus_handle: FocusHandle,
     add_project_focus_handle: FocusHandle,
+    message_retry_focus_handle: FocusHandle,
     service: Option<Arc<NativeTransportService>>,
     composer: Entity<NativeComposer>,
     _composer_subscription: Subscription,
+    _composer_observation: Subscription,
     message_flight: Option<NativeMessageFlight>,
+    message_retry: Option<NativeMessageRetry>,
+    message_retry_draft_matches: bool,
+    suppress_next_composer_observation: bool,
     message_receipt: Option<FirstMessageReceipt>,
     message_failure: Option<NativeMessageFailure>,
     picker: Option<Entity<ProjectPickerView>>,
@@ -220,6 +240,7 @@ impl NativeApplication {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let add_project_focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
+        let message_retry_focus_handle = cx.focus_handle().tab_index(2).tab_stop(false);
         focus_handle.focus(window);
         let state = if service.is_some() {
             NativeViewState::Loading
@@ -234,14 +255,22 @@ impl NativeApplication {
             cx.subscribe(&composer, |application, _composer, event, cx| match event {
                 NativeComposerEvent::SendRequested => application.begin_message_submission(cx),
             });
+        let composer_observation = cx.observe(&composer, |application, composer, cx| {
+            application.observe_composer_change(composer, cx);
+        });
         let mut application = Self {
             theme: ArtisanTheme::for_mode(ThemeMode::Dark),
             focus_handle,
             add_project_focus_handle,
+            message_retry_focus_handle,
             service,
             composer,
             _composer_subscription: composer_subscription,
+            _composer_observation: composer_observation,
             message_flight: None,
+            message_retry: None,
+            message_retry_draft_matches: false,
+            suppress_next_composer_observation: false,
             message_receipt: None,
             message_failure: None,
             picker: None,
@@ -370,10 +399,7 @@ impl NativeApplication {
             && self.intake_stage.is_none()
             && self.thread_switch_flight.is_none()
             && self.ordinary_unsubscribe_thread.is_none()
-            && self
-                .service
-                .as_ref()
-                .is_some_and(|service| !service.is_finished())
+            && self.command_submission_is_available()
             && !self.service_stopped
     }
 
@@ -391,6 +417,7 @@ impl NativeApplication {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
+        self.clear_message_retry();
         let submission = self
             .composer
             .update(cx, |composer, _| composer.begin_submission());
@@ -413,10 +440,6 @@ impl NativeApplication {
                 return;
             }
         };
-        let Some(service) = self.service.clone() else {
-            self.reject_message_submission(token, command_failure(CommandSendError::Stopped), cx);
-            return;
-        };
         let command = NativeTransportCommand::QueueFirstMessage(Box::new(
             artisan_domain::QueueFirstMessage {
                 request_id: request_id.clone(),
@@ -424,7 +447,7 @@ impl NativeApplication {
                 body: body.clone(),
             },
         ));
-        match service.submit(command) {
+        match self.submit_command(command) {
             Ok(()) => {
                 self.message_flight = Some(NativeMessageFlight {
                     thread_id,
@@ -435,6 +458,144 @@ impl NativeApplication {
             }
             Err(error) => {
                 self.reject_message_submission(token, command_failure(error), cx);
+            }
+        }
+        self.sync_composer_availability(cx);
+        cx.notify();
+    }
+
+    fn message_retry_context_is_admissible(&self, cx: &App) -> bool {
+        let Some(retry) = self.message_retry.as_ref() else {
+            return false;
+        };
+        self.selected_thread.as_ref() == Some(&retry.thread_id)
+            && self.message_flight.is_none()
+            && self.message_submission_is_admissible(cx)
+            && !self.composer.read(cx).is_submitting()
+    }
+
+    /// Checks the current draft through the existing composer submission seam.
+    ///
+    /// `NativeComposer` deliberately keeps its draft private in production.
+    /// Beginning and immediately retaining a probe gives this application the
+    /// validated current bytes without adding a draft getter or changing the
+    /// lower composer API. The probe token is retired like every other token;
+    /// it is never reused for the actual retry flight.
+    fn message_retry_is_admissible(&self, cx: &App) -> bool {
+        self.message_retry_context_is_admissible(cx) && self.message_retry_draft_matches
+    }
+
+    fn observe_composer_change(
+        &mut self,
+        composer: Entity<NativeComposer>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.suppress_next_composer_observation {
+            self.suppress_next_composer_observation = false;
+            return;
+        }
+        let Some(retry) = self.message_retry.as_ref() else {
+            return;
+        };
+        if self.message_flight.is_some() {
+            return;
+        }
+        let expected = retry.body.clone();
+        let submission = composer.update(cx, |composer, _| composer.begin_submission());
+        let matches = match submission {
+            Ok((body, token)) => {
+                let matches = body.as_str().as_bytes() == expected.as_str().as_bytes();
+                composer.update(cx, |composer, composer_cx| {
+                    composer.finish_submission(token, DraftDisposition::Retained, composer_cx);
+                });
+                self.suppress_next_composer_observation = true;
+                matches
+            }
+            Err(_) => false,
+        };
+        self.message_retry_draft_matches = matches;
+        cx.notify();
+    }
+
+    fn clear_message_retry(&mut self) {
+        self.message_retry = None;
+        self.message_retry_draft_matches = false;
+        self.suppress_next_composer_observation = false;
+        self.message_retry_focus_handle = self.message_retry_focus_handle.clone().tab_stop(false);
+    }
+
+    fn activate_message_retry(&mut self, cx: &mut Context<Self>) {
+        if self.service_stopped || !self.command_submission_is_available() {
+            self.service_stopped = true;
+            self.set_picker_disabled(true, cx);
+            self.set_thread_picker_disabled(true, cx);
+            self.set_failure(command_failure(CommandSendError::Stopped), cx);
+            return;
+        }
+        if !self.message_retry_context_is_admissible(cx) {
+            return;
+        }
+        let Some(retry) = self.message_retry.as_ref() else {
+            return;
+        };
+        let thread_id = retry.thread_id.clone();
+        let request_id = retry.request_id.clone();
+        let retry_body = retry.body.clone();
+        let submission = self
+            .composer
+            .update(cx, |composer, _| composer.begin_submission());
+        let (body, token) = match submission {
+            Ok(submission) => submission,
+            Err(blocked) => {
+                self.message_retry_draft_matches = false;
+                if let Some(failure) = submission_blocked_failure(blocked) {
+                    self.message_failure = Some(NativeMessageFailure { failure });
+                }
+                cx.notify();
+                return;
+            }
+        };
+        if body.as_str().as_bytes() != retry_body.as_str().as_bytes() {
+            self.message_retry_draft_matches = false;
+            self.finish_composer_submission(token, DraftDisposition::Retained, cx);
+            self.sync_composer_availability(cx);
+            cx.notify();
+            return;
+        }
+
+        self.message_receipt = None;
+        self.message_failure = None;
+        let command = NativeTransportCommand::QueueFirstMessage(Box::new(
+            artisan_domain::QueueFirstMessage {
+                request_id: request_id.clone(),
+                thread_id: thread_id.clone(),
+                body: retry_body.clone(),
+            },
+        ));
+        match self.submit_command(command) {
+            Ok(()) => {
+                self.clear_message_retry();
+                self.message_flight = Some(NativeMessageFlight {
+                    thread_id,
+                    request_id,
+                    _body: retry_body,
+                    token,
+                });
+            }
+            Err(CommandSendError::Busy) => {
+                self.finish_composer_submission(token, DraftDisposition::Retained, cx);
+                self.message_failure = Some(NativeMessageFailure {
+                    failure: command_failure(CommandSendError::Busy),
+                });
+            }
+            Err(CommandSendError::Stopped) => {
+                self.finish_composer_submission(token, DraftDisposition::Retained, cx);
+                self.clear_message_retry();
+                self.service_stopped = true;
+                self.set_picker_disabled(true, cx);
+                self.set_thread_picker_disabled(true, cx);
+                self.set_failure(command_failure(CommandSendError::Stopped), cx);
+                return;
             }
         }
         self.sync_composer_availability(cx);
@@ -468,10 +629,12 @@ impl NativeApplication {
         if let Some(flight) = self.message_flight.take() {
             self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
         }
+        self.clear_message_retry();
         self.sync_composer_availability(cx);
     }
 
     fn clear_message_presentation(&mut self) {
+        self.clear_message_retry();
         self.message_receipt = None;
         self.message_failure = None;
     }
@@ -526,6 +689,13 @@ impl NativeApplication {
             .take()
             .expect("flight was checked above");
         self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
+        self.message_retry = Some(NativeMessageRetry {
+            thread_id: flight.thread_id,
+            request_id: flight.request_id,
+            body: flight._body,
+        });
+        self.message_retry_draft_matches = false;
+        self.message_receipt = None;
         self.message_failure = Some(NativeMessageFailure { failure });
         self.sync_composer_availability(cx);
         cx.notify();
@@ -709,6 +879,7 @@ impl NativeApplication {
             self.set_failure(invalid_service_failure(), cx);
             return;
         }
+        self.clear_message_retry();
         self.pending_thread = None;
         self.pending_snapshot = None;
         let listing = empty_thread_listing();
@@ -2007,6 +2178,7 @@ impl NativeApplication {
         });
         if selected_removed {
             self.remember_switch_listing();
+            self.clear_message_retry();
         }
         self.thread_listing = Some(listing.clone());
         let selected_thread = self.selected_thread.clone();
@@ -2280,6 +2452,45 @@ impl NativeApplication {
                 application.activate_add_project(cx);
             });
         })
+    }
+
+    fn message_retry_button(&mut self, cx: &mut Context<Self>) -> Button {
+        let enabled = self.message_retry_is_admissible(cx);
+        self.message_retry_focus_handle = self.message_retry_focus_handle.clone().tab_stop(enabled);
+        let application = cx.entity().downgrade();
+        Button::new(
+            NATIVE_MESSAGE_RETRY_SELECTOR,
+            self.message_retry_focus_handle.clone(),
+            self.theme,
+            MotionPolicy::Reduced,
+            ButtonVariant::Ghost,
+            ButtonSize::Small,
+            ButtonContent::text(NATIVE_MESSAGE_RETRY_LABEL),
+        )
+        .expect("the native message retry button configuration is valid")
+        .focus_visibility(FocusVisibility::Visible)
+        .disabled(!enabled)
+        .debug_selector(NATIVE_MESSAGE_RETRY_SELECTOR)
+        .on_activate(move |_, _, app| {
+            let _ = application.update(app, |application, cx| {
+                application.activate_message_retry(cx);
+            });
+        })
+    }
+
+    fn message_status_panel(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        let mut panel = message_status_panel(
+            &self.theme,
+            self.message_receipt.as_ref(),
+            self.message_failure,
+        )?;
+        if self.message_retry.is_some()
+            && self.command_submission_is_available()
+            && !self.service_stopped
+        {
+            panel = panel.child(self.message_retry_button(cx));
+        }
+        Some(panel)
     }
 
     fn try_mount_pending_thread(&mut self, cx: &mut Context<Self>) {
@@ -2593,6 +2804,7 @@ impl NativeApplication {
     }
 
     fn set_failure(&mut self, failure: ServiceFailure, cx: &mut Context<Self>) {
+        self.clear_message_retry();
         self.state = NativeViewState::Failure(failure);
         self.sync_composer_availability(cx);
         cx.notify();
@@ -3126,7 +3338,24 @@ fn message_status_panel(
     receipt: Option<&FirstMessageReceipt>,
     failure: Option<NativeMessageFailure>,
 ) -> Option<Div> {
-    let detail = if let Some(receipt) = receipt {
+    let detail = message_status_detail(receipt, failure)?;
+    Some(
+        div()
+            .w_full()
+            .p(px(8.0))
+            .rounded(px(8.0))
+            .bg(theme.sidebar.sidebar.to_paint())
+            .text_sm()
+            .text_color(theme.colors.muted_foreground.to_paint())
+            .child(detail),
+    )
+}
+
+fn message_status_detail(
+    receipt: Option<&FirstMessageReceipt>,
+    failure: Option<NativeMessageFailure>,
+) -> Option<String> {
+    Some(if let Some(receipt) = receipt {
         let disposition = match receipt.disposition {
             artisan_domain::ReceiptDisposition::Accepted => "accepted",
             artisan_domain::ReceiptDisposition::Duplicate => "duplicate",
@@ -3141,17 +3370,7 @@ fn message_status_panel(
             "Send failed: {} ({}).",
             failure.failure.stage, failure.failure.category
         )
-    };
-    Some(
-        div()
-            .w_full()
-            .p(px(8.0))
-            .rounded(px(8.0))
-            .bg(theme.sidebar.sidebar.to_paint())
-            .text_sm()
-            .text_color(theme.colors.muted_foreground.to_paint())
-            .child(detail),
-    )
+    })
 }
 
 impl Render for NativeApplication {
@@ -3204,11 +3423,7 @@ impl Render for NativeApplication {
                     .child(div().flex_1().min_h(px(0.0)).child(host));
                 if self.message_composer_visible(cx) {
                     conversation = conversation.child(self.composer.clone());
-                    if let Some(panel) = message_status_panel(
-                        &self.theme,
-                        self.message_receipt.as_ref(),
-                        self.message_failure,
-                    ) {
+                    if let Some(panel) = self.message_status_panel(cx) {
                         conversation = conversation.child(panel);
                     }
                 }
@@ -3781,12 +3996,13 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        NATIVE_RAIL_ADD_PROJECT_LABEL, NATIVE_RAIL_ADD_PROJECT_SELECTOR, NativeApplication,
-        NativeMessageFailure, NativeMessageFlight, NativeProjectIntakeOperation,
-        NativeProjectIntakeStage, NativeTestCommandSink, NativeTransportCommand,
-        NativeTransportEvent, NativeViewState, PickerRoute, ServiceFailure, ServiceStopStatus,
-        ThreadSwitchFlight, ThreadSwitchPhase, WINDOW_TITLE, create_message_request_id,
-        intake_command, picker_route, project_options_from_listing, ready_membership_is_valid,
+        NATIVE_MESSAGE_RETRY_LABEL, NATIVE_MESSAGE_RETRY_SELECTOR, NATIVE_RAIL_ADD_PROJECT_LABEL,
+        NATIVE_RAIL_ADD_PROJECT_SELECTOR, NativeApplication, NativeMessageFailure,
+        NativeMessageFlight, NativeProjectIntakeOperation, NativeProjectIntakeStage,
+        NativeTestCommandSink, NativeTransportCommand, NativeTransportEvent, NativeViewState,
+        PickerRoute, ServiceFailure, ServiceStopStatus, ThreadSwitchFlight, ThreadSwitchPhase,
+        WINDOW_TITLE, create_message_request_id, intake_command, message_status_detail,
+        picker_route, project_options_from_listing, ready_membership_is_valid,
     };
     use crate::composer::{ComposerState, DraftDisposition};
     use crate::{
@@ -3804,10 +4020,12 @@ mod tests {
     use artisan_protocol::{
         ConversationSubscriptionStarted, ConversationSubscriptionStopped, FirstMessageReceipt,
     };
-    use artisan_ui::button::{ButtonSize, ButtonStyle, ButtonVariant};
+    use artisan_ui::button::{
+        Button, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant, FocusVisibility,
+    };
     use artisan_ui::motion::MotionPolicy;
-    use artisan_ui::theme::ThemeMode;
-    use gpui::{Context, Modifiers, TestAppContext};
+    use artisan_ui::theme::{ArtisanTheme, ThemeMode};
+    use gpui::{Context, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     fn project(id: &str, name: &str) -> ProjectSummary {
@@ -3870,6 +4088,81 @@ mod tests {
             outcomes: Rc::new(RefCell::new(outcomes.into_iter().collect::<VecDeque<_>>())),
         };
         (sink, commands)
+    }
+
+    fn message_failure() -> ServiceFailure {
+        ServiceFailure {
+            stage: super::ServiceFailureStage::Request,
+            category: super::ServiceFailureCategory::Peer,
+        }
+    }
+
+    fn install_ready_message_surface(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+        thread_id: ThreadId,
+        draft: &str,
+        sink: NativeTestCommandSink,
+    ) {
+        let host = ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx)
+            .expect("message host");
+        application.selected_thread = Some(thread_id);
+        application.state = NativeViewState::Ready;
+        application.conversation_host = Some(host);
+        application.test_command_sink = Some(sink);
+        let draft = draft.to_owned();
+        application.composer.update(cx, |composer, composer_cx| {
+            composer.set_disabled(false, composer_cx);
+            composer.set_draft(draft);
+            composer_cx.notify();
+        });
+        application.sync_composer_availability(cx);
+    }
+
+    fn admit_message_flight(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+        request_id: &str,
+    ) {
+        let (body, token) = application.composer.update(cx, |composer, _| {
+            composer
+                .begin_submission()
+                .expect("message draft admits one flight")
+        });
+        let thread_id = application
+            .selected_thread
+            .clone()
+            .expect("selected message thread");
+        application.message_flight = Some(NativeMessageFlight {
+            thread_id,
+            request_id: request(request_id),
+            _body: body,
+            token,
+        });
+    }
+
+    fn fail_active_message(
+        application: &mut NativeApplication,
+        cx: &mut Context<NativeApplication>,
+    ) {
+        let (thread_id, request_id) = {
+            let flight = application.message_flight.as_ref().expect("message flight");
+            (flight.thread_id.clone(), flight.request_id.clone())
+        };
+        application.handle_service_event(
+            NativeTransportEvent::FirstMessageFailed {
+                thread_id,
+                request_id,
+                failure: message_failure(),
+            },
+            cx,
+        );
+    }
+
+    fn complete_key_press(cx: &mut VisualTestContext, key: &'static str) {
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
+        });
     }
 
     #[test]
@@ -4618,6 +4911,634 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.as_str().starts_with("native-message-"));
         assert!(second.as_str().starts_with("native-message-"));
+    }
+
+    #[gpui::test]
+    fn correlated_failure_retains_exact_retry_identity_and_body(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("retry-thread").expect("thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id.clone(),
+                    "  exact retry body\n😀  ",
+                    sink,
+                );
+                application.begin_message_submission(application_cx);
+                let flight = application
+                    .message_flight
+                    .as_ref()
+                    .expect("admitted flight");
+                let request_id = flight.request_id.clone();
+                let body = flight._body.as_str().to_owned();
+
+                application.handle_service_event(
+                    NativeTransportEvent::FirstMessageFailed {
+                        thread_id: thread_id.clone(),
+                        request_id: request_id.clone(),
+                        failure: message_failure(),
+                    },
+                    application_cx,
+                );
+
+                assert!(application.message_flight.is_none());
+                let retry = application.message_retry.as_ref().expect("retry record");
+                assert_eq!(retry.thread_id, thread_id);
+                assert_eq!(retry.request_id, request_id);
+                assert_eq!(retry.body.as_str(), body);
+                assert_eq!(application.composer.read(application_cx).draft(), body);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(commands.borrow().len(), 1);
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(application.message_retry_draft_matches);
+            assert!(!application.composer.read(app).is_submitting());
+        });
+    }
+
+    #[gpui::test]
+    fn retry_button_is_labeled_focused_and_has_deterministic_tab_stop(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("retry-button-thread").expect("thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id,
+                    "retry button body",
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-button-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(NATIVE_MESSAGE_RETRY_LABEL, "Retry send");
+        assert!(
+            cx.debug_bounds(NATIVE_MESSAGE_RETRY_SELECTOR).is_some(),
+            "retry action must paint its stable selector"
+        );
+        let ring_visible = cx.update(|window, app| {
+            let application = view.read(app);
+            assert_eq!(application.message_retry_focus_handle.tab_index, 2);
+            assert!(application.message_retry_focus_handle.tab_stop);
+            let focus = application.message_retry_focus_handle.clone();
+            window.focus(&focus);
+            Button::new(
+                NATIVE_MESSAGE_RETRY_SELECTOR,
+                focus,
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                MotionPolicy::Reduced,
+                ButtonVariant::Ghost,
+                ButtonSize::Small,
+                ButtonContent::text(NATIVE_MESSAGE_RETRY_LABEL),
+            )
+            .expect("retry button configuration")
+            .focus_visibility(FocusVisibility::Visible)
+            .focus_ring_visible(window)
+        });
+        assert!(ring_visible, "retry action must expose visible focus");
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application
+                    .composer
+                    .update(application_cx, |composer, composer_cx| {
+                        composer.set_draft("edited retry body");
+                        composer_cx.notify();
+                    });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let application = view.read(app);
+            assert!(application.message_retry.is_some());
+            assert!(!application.message_retry_draft_matches);
+            assert!(!application.message_retry_focus_handle.tab_stop);
+        });
+    }
+
+    #[gpui::test]
+    fn pointer_enter_and_space_retry_activation_each_queue_once_with_stable_identity(
+        cx: &mut TestAppContext,
+    ) {
+        let thread_id = ThreadId::parse("retry-activation-thread").expect("thread");
+        let request_id = request("retry-stable-request");
+        let body = "retry activation body";
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(())]);
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id.clone(),
+                    body,
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-stable-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let retry_bounds = cx
+            .debug_bounds(NATIVE_MESSAGE_RETRY_SELECTOR)
+            .expect("retry action bounds");
+        cx.simulate_click(retry_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(commands.borrow().len(), 1);
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let focus = view.read(app).message_retry_focus_handle.clone();
+            window.focus(&focus);
+        });
+        cx.run_until_parked();
+        complete_key_press(&mut cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(commands.borrow().len(), 2);
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let focus = view.read(app).message_retry_focus_handle.clone();
+            window.focus(&focus);
+        });
+        cx.run_until_parked();
+        complete_key_press(&mut cx, "space");
+        cx.run_until_parked();
+
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 3);
+        for command in commands.iter() {
+            let NativeTransportCommand::QueueFirstMessage(command) = command else {
+                panic!("retry activation must queue a first message")
+            };
+            assert_eq!(command.request_id, request_id);
+            assert_eq!(command.thread_id, thread_id);
+            assert_eq!(command.body.as_str(), body);
+        }
+    }
+
+    #[gpui::test]
+    fn retry_receipts_settle_only_matching_flights_and_stale_results_are_inert(
+        cx: &mut TestAppContext,
+    ) {
+        let thread_id = ThreadId::parse("retry-receipt-thread").expect("thread");
+        let stale_thread_id = ThreadId::parse("retry-stale-thread").expect("stale thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Ok(()), Ok(())]);
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id.clone(),
+                    "accepted retry body",
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-accepted-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.activate_message_retry(application_cx);
+                assert!(application.message_flight.is_some());
+                application.handle_service_event(
+                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                        "retry-stale-request",
+                        &stale_thread_id,
+                        "message-stale",
+                        ReceiptDisposition::Accepted,
+                    )),
+                    application_cx,
+                );
+                application.handle_service_event(
+                    NativeTransportEvent::FirstMessageFailed {
+                        thread_id: stale_thread_id,
+                        request_id: request("retry-stale-request"),
+                        failure: message_failure(),
+                    },
+                    application_cx,
+                );
+                assert!(application.message_flight.is_some());
+                assert!(application.message_retry.is_none());
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "accepted retry body"
+                );
+                application.handle_service_event(
+                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                        "retry-accepted-request",
+                        &thread_id,
+                        "message-accepted",
+                        ReceiptDisposition::Accepted,
+                    )),
+                    application_cx,
+                );
+                assert!(application.message_flight.is_none());
+                assert_eq!(application.composer.read(application_cx).draft(), "");
+
+                application
+                    .composer
+                    .update(application_cx, |composer, composer_cx| {
+                        composer.set_disabled(false, composer_cx);
+                        composer.set_draft("duplicate retry body");
+                        composer_cx.notify();
+                    });
+                application.message_receipt = None;
+                application.message_failure = None;
+                admit_message_flight(application, application_cx, "retry-duplicate-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.activate_message_retry(application_cx);
+                application.handle_service_event(
+                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                        "retry-duplicate-request",
+                        &thread_id,
+                        "message-duplicate",
+                        ReceiptDisposition::Duplicate,
+                    )),
+                    application_cx,
+                );
+                assert!(application.message_flight.is_none());
+                assert_eq!(application.composer.read(application_cx).draft(), "");
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(commands.borrow().len(), 2);
+    }
+
+    #[gpui::test]
+    fn edited_retry_is_suppressed_while_fresh_send_mints_a_new_request(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("retry-edited-thread").expect("thread");
+        let original_request = request("retry-edited-request");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id.clone(),
+                    "original retry body",
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-edited-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application
+                    .composer
+                    .update(application_cx, |composer, composer_cx| {
+                        composer.set_draft("edited fresh body");
+                        composer_cx.notify();
+                    });
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.activate_message_retry(application_cx);
+                assert_eq!(commands.borrow().len(), 0);
+                assert!(application.message_flight.is_none());
+                assert!(application.message_retry.is_some());
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "edited fresh body"
+                );
+
+                application.begin_message_submission(application_cx);
+                assert!(application.message_retry.is_none());
+                let flight = application.message_flight.as_ref().expect("fresh flight");
+                assert_ne!(flight.request_id, original_request);
+                assert_eq!(flight.thread_id, thread_id);
+                assert_eq!(flight._body.as_str(), "edited fresh body");
+            });
+        });
+
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 1);
+        let NativeTransportCommand::QueueFirstMessage(command) = &commands[0] else {
+            panic!("fresh send must queue a first message")
+        };
+        assert_ne!(command.request_id, original_request);
+        assert_eq!(command.thread_id, thread_id);
+        assert_eq!(command.body.as_str(), "edited fresh body");
+    }
+
+    #[gpui::test]
+    fn busy_retry_admission_retains_identity_and_draft_without_a_flight(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("retry-busy-thread").expect("thread");
+        let request_id = request("retry-busy-request");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Err(super::CommandSendError::Busy)]);
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id.clone(),
+                    "busy retry body",
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-busy-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.activate_message_retry(application_cx);
+                let retry = application.message_retry.as_ref().expect("retained retry");
+                assert_eq!(retry.thread_id, thread_id);
+                assert_eq!(retry.request_id, request_id);
+                assert_eq!(retry.body.as_str(), "busy retry body");
+                assert!(application.message_flight.is_none());
+                assert!(!application.composer.read(application_cx).is_submitting());
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "busy retry body"
+                );
+                assert!(matches!(
+                    application.message_failure,
+                    Some(NativeMessageFailure { failure })
+                        if failure.stage == super::ServiceFailureStage::EventBridge
+                            && failure.category == super::ServiceFailureCategory::Backpressure
+                ));
+            });
+        });
+        assert_eq!(commands.borrow().len(), 1);
+    }
+
+    #[gpui::test]
+    fn stopped_retry_admission_fails_closed_and_removes_the_affordance(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("retry-stopped-thread").expect("thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id,
+                    "stopped retry body",
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-stopped-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.activate_message_retry(application_cx);
+                assert!(application.message_retry.is_none());
+                assert!(application.message_flight.is_none());
+                assert!(application.service_stopped);
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "stopped retry body"
+                );
+                assert!(!application.message_retry_focus_handle.tab_stop);
+            });
+        });
+        assert_eq!(commands.borrow().len(), 1);
+    }
+
+    #[gpui::test]
+    fn service_stop_event_clears_retry_while_retaining_the_draft(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("retry-stop-event-thread").expect("thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id,
+                    "stop event draft",
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-stop-event-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                assert!(application.message_retry.is_some());
+                application.handle_service_event(
+                    NativeTransportEvent::Stopped(ServiceStopStatus::Clean),
+                    application_cx,
+                );
+                assert!(application.message_retry.is_none());
+                assert!(application.service_stopped);
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "stop event draft"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn thread_transition_clears_retry_while_retaining_the_draft(cx: &mut TestAppContext) {
+        let project_id = ProjectId::parse("retry-transition-project").expect("project");
+        let source = ThreadId::parse("retry-transition-source").expect("source");
+        let target = ThreadId::parse("retry-transition-target").expect("target");
+        let listing = ThreadListing::new(vec![
+            thread(source.as_str(), "retry-transition-project", "Source"),
+            thread(target.as_str(), "retry-transition-project", "Target"),
+        ])
+        .expect("listing");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _) = command_sink([Ok(())]);
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    source.clone(),
+                    "thread transition draft",
+                    sink,
+                );
+                application.selected_project = Some(project_id.clone());
+                application.thread_listing = Some(listing.clone());
+                admit_message_flight(application, application_cx, "retry-transition-request");
+                fail_active_message(application, application_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                application.begin_thread_switch(target, application_cx);
+                assert!(application.message_retry.is_none());
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "thread transition draft"
+                );
+                assert!(application.thread_switch_flight.is_some());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn project_transition_clears_retry_without_losing_draft(cx: &mut TestAppContext) {
+        let old_project = ProjectId::parse("retry-old-project").expect("old project");
+        let new_project = ProjectId::parse("retry-new-project").expect("new project");
+        let thread_id = ThreadId::parse("retry-project-thread").expect("thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id.clone(),
+                    "project transition draft",
+                    sink,
+                );
+                application.selected_project = Some(old_project.clone());
+                admit_message_flight(application, application_cx, "retry-project-request");
+                fail_active_message(application, application_cx);
+                application.conversation_host = None;
+                let projects =
+                    ProjectListing::new(vec![project("retry-new-project", "New project")])
+                        .expect("project listing");
+                application.handle_projects(&projects, application_cx);
+                assert!(application.message_retry.is_none());
+                assert_eq!(application.selected_project, Some(new_project));
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "project transition draft"
+                );
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn host_retirement_clears_retry_without_losing_draft(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("retry-host-thread").expect("thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id,
+                    "host retirement draft",
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-host-request");
+                fail_active_message(application, application_cx);
+                application.retire_host(application_cx);
+                assert!(application.message_retry.is_none());
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "host retirement draft"
+                );
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn shutdown_clears_retry_while_preserving_the_draft(cx: &mut TestAppContext) {
+        let thread_id = ThreadId::parse("retry-shutdown-thread").expect("thread");
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
+        cx.update(|app| {
+            view.update(app, |application, application_cx| {
+                install_ready_message_surface(
+                    application,
+                    application_cx,
+                    thread_id,
+                    "shutdown retry draft",
+                    sink,
+                );
+                admit_message_flight(application, application_cx, "retry-shutdown-request");
+                fail_active_message(application, application_cx);
+                application.prepare_shutdown(application_cx);
+                assert!(application.message_retry.is_none());
+                assert_eq!(
+                    application.composer.read(application_cx).draft(),
+                    "shutdown retry draft"
+                );
+                assert!(!application.message_retry_focus_handle.tab_stop);
+            });
+        });
+    }
+
+    #[test]
+    fn message_failure_presentation_contains_only_redacted_stage_and_category() {
+        let detail = message_status_detail(
+            None,
+            Some(NativeMessageFailure {
+                failure: message_failure(),
+            }),
+        )
+        .expect("failure detail");
+        assert_eq!(detail, "Send failed: request (peer).");
+        for secret in [
+            "body text",
+            "retry-request-id",
+            "https://forge.invalid",
+            "credential-value",
+            "peer detail",
+        ] {
+            assert!(!detail.contains(secret), "failure detail leaked {secret}");
+        }
     }
 
     #[gpui::test]
