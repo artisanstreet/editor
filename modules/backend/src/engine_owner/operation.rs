@@ -195,6 +195,19 @@ pub(crate) enum Job {
         observations: mpsc::Sender<EngineObservation>,
         respond: oneshot::Sender<TurnResult>,
     },
+    /// Test-only configured fixture turn. Mirrors `Turn` but carries an
+    /// explicitly supplied fixture program/version/profile instead of a
+    /// verified capability. `#[cfg(test)]` only.
+    #[cfg(test)]
+    FixtureTurn {
+        input: Box<super::FixtureTurnInput>,
+        deadline: Instant,
+        control: Arc<CancelHandle>,
+        prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+        authorize: oneshot::Receiver<()>,
+        observations: mpsc::Sender<EngineObservation>,
+        respond: oneshot::Sender<TurnResult>,
+    },
 }
 
 /// Single-owner future for one admitted launch.
@@ -480,6 +493,10 @@ async fn run_owner_loop(
                     job @ Job::Turn { .. } => {
                         Box::pin(execute_configured_job(job, &shutdown)).await
                     }
+                    #[cfg(test)]
+                    job @ Job::FixtureTurn { .. } => {
+                        Box::pin(execute_fixture_job(job, &shutdown)).await
+                    }
                 };
                 match execution {
                     Execution::Completed => {}
@@ -501,12 +518,16 @@ async fn run_owner_loop(
 fn job_control(job: &Job) -> &Arc<CancelHandle> {
     match job {
         Job::Legacy { control, .. } | Job::Turn { control, .. } => control,
+        #[cfg(test)]
+        Job::FixtureTurn { control, .. } => control,
     }
 }
 
 fn job_deadline(job: &Job) -> Instant {
     match job {
         Job::Legacy { deadline, .. } | Job::Turn { deadline, .. } => *deadline,
+        #[cfg(test)]
+        Job::FixtureTurn { deadline, .. } => *deadline,
     }
 }
 
@@ -516,6 +537,13 @@ fn reject_job(job: Job, error: EngineOperationError) {
             let _ = respond.send(Err(error));
         }
         Job::Turn {
+            prepared, respond, ..
+        } => {
+            let _ = prepared.send(Err(error.clone()));
+            let _ = respond.send(Err(error));
+        }
+        #[cfg(test)]
+        Job::FixtureTurn {
             prepared, respond, ..
         } => {
             let _ = prepared.send(Err(error.clone()));
@@ -761,17 +789,8 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         Err(error) => return request.fail(error),
     };
     let selection = request.input.settings.config().selection().as_opencode2();
-    #[cfg(not(test))]
-    {
-        if request.input.launch.profile_id() != selection.profile_id() {
-            return request.fail(EngineOperationError::Configuration);
-        }
-    }
-    #[cfg(test)]
-    {
-        if request.input.launch.profile_id() != selection.profile_id().as_str() {
-            return request.fail(EngineOperationError::Configuration);
-        }
+    if request.input.launch.profile_id() != selection.profile_id() {
+        return request.fail(EngineOperationError::Configuration);
     }
     if shutdown.is_cancelled() {
         return request.fail(EngineOperationError::Shutdown);
@@ -781,6 +800,461 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
     }
 
     Box::pin(execute_configured_turn(request, runtime, shutdown)).await
+}
+
+#[cfg(test)]
+async fn execute_fixture_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execution {
+    let Job::FixtureTurn {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+    } = job
+    else {
+        unreachable!("fixture executor received non-fixture job");
+    };
+
+    let request = FixtureTurnRequest {
+        input: *input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+    };
+    let runtime = match configured_runtime(&request.input.settings, request.input.control_capacity)
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return request.fail(error),
+    };
+    let selection = request.input.settings.config().selection().as_opencode2();
+    if request.input.fixture.profile_id.as_str() != selection.profile_id().as_str() {
+        return request.fail(EngineOperationError::Configuration);
+    }
+    if shutdown.is_cancelled() {
+        return request.fail(EngineOperationError::Shutdown);
+    }
+    if request.control.is_cancelled() {
+        return request.fail(EngineOperationError::Cancelled);
+    }
+
+    Box::pin(execute_fixture_turn(request, runtime, shutdown)).await
+}
+
+#[cfg(test)]
+struct FixtureTurnRequest {
+    input: super::FixtureTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+}
+
+#[cfg(test)]
+impl FixtureTurnRequest {
+    fn fail(self, error: EngineOperationError) -> Execution {
+        let _ = self.prepared.send(Err(error.clone()));
+        let _ = self.respond.send(Err(error));
+        Execution::Completed
+    }
+}
+
+#[cfg(test)]
+struct FixtureProcess {
+    request: FixtureTurnRequest,
+    runtime: ConfiguredRuntime,
+    secret: HealthSecret,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+}
+
+#[cfg(test)]
+struct PreparedFixtureSession {
+    input: super::FixtureTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+    secret: HealthSecret,
+    runtime: ConfiguredRuntime,
+    session: String,
+}
+
+#[cfg(test)]
+struct FixtureSession {
+    input: super::FixtureTurnInput,
+    deadline: Instant,
+    control: Arc<CancelHandle>,
+    authorize: oneshot::Receiver<()>,
+    observations: mpsc::Sender<EngineObservation>,
+    respond: oneshot::Sender<TurnResult>,
+    parts: ChildParts,
+    endpoint: ValidatedEndpoint,
+    secret: HealthSecret,
+    runtime: ConfiguredRuntime,
+    session: String,
+}
+
+#[cfg(test)]
+impl FixtureSession {
+    async fn abort(self, shutdown: &Arc<CancelHandle>, cause: EngineOperationError) -> Execution {
+        let FixtureSession {
+            input,
+            deadline,
+            control: _,
+            authorize: _,
+            observations,
+            respond,
+            parts,
+            endpoint,
+            secret,
+            runtime,
+            session,
+        } = self;
+        abort_after_session(AbortAfterSession {
+            parts,
+            endpoint: &endpoint,
+            secret: &secret,
+            runtime: &runtime,
+            session: &session,
+            run_id: &input.run_id,
+            stream_after: input.stream_after,
+            observations,
+            respond,
+            shutdown,
+            cause,
+            attempt_deadline: deadline,
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+async fn execute_fixture_turn(
+    request: FixtureTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let process = match prepare_fixture_process(request, runtime, shutdown).await {
+        Ok(process) => process,
+        Err(execution) => return execution,
+    };
+    Box::pin(execute_fixture_session(process, shutdown)).await
+}
+
+#[cfg(test)]
+async fn prepare_fixture_process(
+    request: FixtureTurnRequest,
+    runtime: ConfiguredRuntime,
+    shutdown: &Arc<CancelHandle>,
+) -> Result<FixtureProcess, Execution> {
+    let Ok(secret) = HealthSecret::generate() else {
+        return Err(request.fail(EngineOperationError::EntropyFailed));
+    };
+    let Ok(mut child) = crate::engine_owner::process::spawn_configured_fixture_engine(
+        &request.input.fixture.program,
+        request.input.fixture.scenario,
+        secret.as_str(),
+    ) else {
+        return Err(request.fail(EngineOperationError::SpawnFailed));
+    };
+    let lifeline = LifelineWriter::take(&mut child);
+    let maybe_stdout = child.stdout.take();
+    let stderr_counter = StderrCounter::new(child.stderr.take(), runtime.bounds.stderr_cap_bytes);
+    let Some(mut stdout) = maybe_stdout else {
+        let parts = ChildParts {
+            child,
+            lifeline,
+            stdout: None,
+            stderr_counter,
+        };
+        let error = EngineOperationError::ReadinessFailed(ReadinessError::Io);
+        return Err(finish_fixture_start(request, parts, error, runtime.limits.close).await);
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let endpoint = match drive_readiness(
+        &mut stdout,
+        &mut parts,
+        phase_deadline(runtime.limits.readiness, request.deadline),
+        shutdown,
+        &request.control,
+        runtime.bounds.max_readiness_line,
+    )
+    .await
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            drop(stdout);
+            let error = map_readiness_error(error);
+            return Err(finish_fixture_start(request, parts, error, runtime.limits.close).await);
+        }
+    };
+    drop(stdout);
+    if let Err(error) = super::http::perform_health(
+        &endpoint,
+        &secret,
+        &runtime.bounds,
+        phase_deadline(runtime.limits.health, request.deadline),
+        &request.control,
+        shutdown,
+        Some(request.input.fixture.version),
+    )
+    .await
+    {
+        let error = map_health_error(error);
+        return Err(finish_fixture_start(request, parts, error, runtime.limits.close).await);
+    }
+    Ok(FixtureProcess {
+        request,
+        runtime,
+        secret,
+        parts,
+        endpoint,
+    })
+}
+
+#[cfg(test)]
+async fn finish_fixture_start(
+    request: FixtureTurnRequest,
+    parts: ChildParts,
+    error: EngineOperationError,
+    close_budget: Duration,
+) -> Execution {
+    let FixtureTurnRequest {
+        prepared, respond, ..
+    } = request;
+    let _ = prepared.send(Err(error.clone()));
+    finish_turn_result(parts, Err(error), respond, close_budget).await
+}
+
+#[cfg(test)]
+async fn execute_fixture_session(
+    process: FixtureProcess,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let state = match create_fixture_session(process, shutdown).await {
+        Ok(state) => state,
+        Err(execution) => return execution,
+    };
+    authorize_fixture_session(state, shutdown).await
+}
+
+#[cfg(test)]
+async fn create_fixture_session(
+    process: FixtureProcess,
+    shutdown: &Arc<CancelHandle>,
+) -> Result<PreparedFixtureSession, Execution> {
+    let FixtureProcess {
+        request,
+        runtime,
+        secret,
+        parts,
+        endpoint,
+    } = process;
+    let FixtureTurnRequest {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+    } = request;
+    let selection = input.settings.config().selection().as_opencode2();
+    let permission = selection.permission();
+    let create_input = CreateSessionInput {
+        directory: input.project_root.as_str(),
+        profile_id: selection.profile_id().as_str(),
+        model_id: selection.model_id().as_str(),
+        route_id: selection.route_id().as_str(),
+        variant_id: selection
+            .variant_id()
+            .map(artisan_domain::EngineVariantId::as_str),
+        permission_id: permission.permission_id().as_str(),
+        agent_id: permission.agent_id().as_str(),
+        approval: permission.approval().as_str(),
+        filesystem: permission.filesystem().as_str(),
+        network: permission.network().as_str(),
+        web_search: permission.web_search().as_str(),
+    };
+    let session_receipt = match perform_create_session(
+        &endpoint,
+        &secret,
+        &runtime.bounds,
+        phase_deadline(runtime.limits.prompt, deadline),
+        &control,
+        shutdown,
+        create_input,
+    )
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let error = map_prompt_error(error);
+            return Err(finish_fixture_start(
+                FixtureTurnRequest {
+                    input,
+                    deadline,
+                    control,
+                    prepared,
+                    authorize,
+                    observations,
+                    respond,
+                },
+                parts,
+                error,
+                runtime.limits.close,
+            )
+            .await);
+        }
+    };
+    Ok(PreparedFixtureSession {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session: session_receipt.session().to_owned(),
+    })
+}
+
+#[cfg(test)]
+async fn authorize_fixture_session(
+    state: PreparedFixtureSession,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let PreparedFixtureSession {
+        input,
+        deadline,
+        control,
+        prepared,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session,
+    } = state;
+    let session_state = FixtureSession {
+        input,
+        deadline,
+        control,
+        authorize,
+        observations,
+        respond,
+        parts,
+        endpoint,
+        secret,
+        runtime,
+        session,
+    };
+    if prepared
+        .send(Ok(PreparedSession::new(session_state.session.clone())))
+        .is_err()
+    {
+        return session_state
+            .abort(shutdown, EngineOperationError::Cancelled)
+            .await;
+    }
+    execute_authorized_fixture_turn(session_state, shutdown).await
+}
+
+#[cfg(test)]
+async fn execute_authorized_fixture_turn(
+    mut session: FixtureSession,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    if let Err(error) = wait_for_authorization(
+        &mut session.parts,
+        &mut session.authorize,
+        session.deadline,
+        shutdown,
+        &session.control,
+    )
+    .await
+    {
+        return session.abort(shutdown, error).await;
+    }
+    let files: [PromptFile; 0] = [];
+    if let Err(error) = perform_prompt(
+        &session.endpoint,
+        &session.secret,
+        &session.runtime.bounds,
+        phase_deadline(session.runtime.limits.prompt, session.deadline),
+        &session.control,
+        shutdown,
+        PromptInput::new(
+            &session.session,
+            &session.input.prompt_delivery,
+            &files,
+            &session.input.prompt_id,
+            false,
+            session.input.prompt_text.as_str(),
+        ),
+    )
+    .await
+    {
+        return session.abort(shutdown, map_prompt_error(error)).await;
+    }
+    let stream_result = follow_stream_for_run(
+        StreamInput::new((
+            &session.endpoint,
+            &session.secret,
+            &session.runtime.bounds,
+            phase_deadline(session.runtime.limits.sse, session.deadline),
+            &session.control,
+            shutdown,
+            &session.session,
+            session.input.stream_after,
+            session.observations.clone(),
+        )),
+        &session.input.run_id,
+    )
+    .await;
+    match stream_result {
+        Ok(receipt) => {
+            let terminal = receipt.state();
+            let FixtureSession {
+                parts,
+                runtime,
+                observations,
+                respond,
+                ..
+            } = session;
+            drop(observations);
+            finish_turn_result(
+                parts,
+                Ok(EngineTurnResult { terminal }),
+                respond,
+                runtime.limits.close,
+            )
+            .await
+        }
+        Err(error) => session.abort(shutdown, map_stream_error(error)).await,
+    }
 }
 
 struct ConfiguredTurnRequest {
@@ -891,30 +1365,11 @@ async fn prepare_configured_process(
     let Ok(secret) = HealthSecret::generate() else {
         return Err(request.fail(EngineOperationError::EntropyFailed));
     };
-    #[cfg(not(test))]
     let Ok(mut child) = spawn_configured_engine(
         &request.input.launch,
         &request.input.project_root,
         secret.as_str(),
     ) else {
-        return Err(request.fail(EngineOperationError::SpawnFailed));
-    };
-    #[cfg(test)]
-    let Ok(mut child) = ({
-        let launch = &request.input.launch;
-        match launch {
-            crate::engine_owner::ConfiguredLaunch::Verified(verified) => {
-                spawn_configured_engine(verified, &request.input.project_root, secret.as_str())
-            }
-            crate::engine_owner::ConfiguredLaunch::Fixture(fixture) => {
-                crate::engine_owner::process::spawn_configured_fixture_engine(
-                    &fixture.program,
-                    fixture.scenario,
-                    secret.as_str(),
-                )
-            }
-        }
-    }) else {
         return Err(request.fail(EngineOperationError::SpawnFailed));
     };
     let lifeline = LifelineWriter::take(&mut child);

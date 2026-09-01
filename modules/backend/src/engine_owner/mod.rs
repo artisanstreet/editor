@@ -75,7 +75,6 @@ use process::LaunchRecipe;
 /// The dispatcher constructs this only after reading the durable settings and
 /// resolving the exact registered profile.  The owner never rereads the
 /// thread, registry, or environment while this value is live.
-#[cfg(not(test))]
 pub(crate) struct EngineTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) project_root: RootPath,
@@ -88,7 +87,6 @@ pub(crate) struct EngineTurnInput {
     pub(crate) control_capacity: usize,
 }
 
-#[cfg(not(test))]
 impl std::fmt::Debug for EngineTurnInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("EngineTurnInput { <redacted> }")
@@ -117,57 +115,27 @@ impl std::fmt::Debug for FixtureConfiguredLaunch {
     }
 }
 
+/// Test-only input for the configured fixture turn.
+///
+/// Mirrors `EngineTurnInput` but replaces the verified capability with an
+/// explicitly supplied fixture program/version/profile. `#[cfg(test)]` only.
 #[cfg(test)]
-pub(crate) enum ConfiguredLaunch {
-    Verified(VerifiedOpenCode2ProfileLaunch),
-    Fixture(FixtureConfiguredLaunch),
-}
-
-#[cfg(test)]
-impl std::fmt::Debug for ConfiguredLaunch {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ConfiguredLaunch { <redacted> }")
-    }
-}
-
-#[cfg(test)]
-impl ConfiguredLaunch {
-    pub(crate) fn profile_id(&self) -> &str {
-        match self {
-            Self::Verified(verified) => verified.profile_id().as_str(),
-            Self::Fixture(fixture) => fixture.profile_id.as_str(),
-        }
-    }
-
-    pub(crate) fn version(&self) -> &str {
-        match self {
-            Self::Verified(verified) => verified.version(),
-            Self::Fixture(fixture) => fixture.version,
-        }
-    }
-
-    pub(crate) fn is_fixture(&self) -> bool {
-        matches!(self, Self::Fixture(_))
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct EngineTurnInput {
+pub(crate) struct FixtureTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) project_root: RootPath,
     pub(crate) prompt_id: String,
     pub(crate) prompt_text: MessageBody,
     pub(crate) settings: ThreadEngineSettings,
-    pub(crate) launch: ConfiguredLaunch,
+    pub(crate) fixture: FixtureConfiguredLaunch,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
 }
 
 #[cfg(test)]
-impl std::fmt::Debug for EngineTurnInput {
+impl std::fmt::Debug for FixtureTurnInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("EngineTurnInput { <redacted> }")
+        formatter.write_str("FixtureTurnInput { <redacted> }")
     }
 }
 
@@ -600,6 +568,63 @@ impl EngineOwner {
         let (respond, receiver) = oneshot::channel();
         let (observations, observation_receiver) = mpsc::channel(observation_capacity);
         let job = Job::Turn {
+            input: Box::new(input),
+            deadline,
+            control: Arc::clone(&control),
+            prepared,
+            authorize: authorize_receiver,
+            observations,
+            respond,
+        };
+        match self.jobs.try_send(job) {
+            Ok(()) => Ok(operation::AcceptedTurn::from_parts(
+                prepared_receiver,
+                authorize,
+                observation_receiver,
+                receiver,
+                control,
+            )),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
+        }
+    }
+
+    /// Test-only fixture admission. Mirrors `admit_turn` but carries an
+    /// explicitly supplied fixture program/version/profile instead of a
+    /// verified capability. `#[cfg(test)]` only.
+    #[cfg(test)]
+    pub(crate) fn admit_fixture_turn(
+        &self,
+        input: FixtureTurnInput,
+        budget: Duration,
+    ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
+        if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
+            return Err(LaunchAdmissionError::Unavailable);
+        }
+        if budget == Duration::ZERO {
+            return Err(LaunchAdmissionError::InvalidDeadline);
+        }
+        let Some(deadline) = tokio::time::Instant::now().checked_add(budget) else {
+            return Err(LaunchAdmissionError::InvalidDeadline);
+        };
+        let observation_capacity = usize::try_from(
+            input
+                .settings
+                .config()
+                .runtime()
+                .observation_capacity()
+                .get(),
+        )
+        .map_err(|_| LaunchAdmissionError::InvalidCapacity)?;
+        if observation_capacity == 0 || observation_capacity > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(LaunchAdmissionError::InvalidCapacity);
+        }
+        let control = Arc::new(CancelHandle::new());
+        let (prepared, prepared_receiver) = oneshot::channel();
+        let (authorize, authorize_receiver) = oneshot::channel();
+        let (respond, receiver) = oneshot::channel();
+        let (observations, observation_receiver) = mpsc::channel(observation_capacity);
+        let job = Job::FixtureTurn {
             input: Box::new(input),
             deadline,
             control: Arc::clone(&control),

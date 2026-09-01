@@ -122,31 +122,23 @@ pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<Ch
 ///
 /// This spawns the existing `prompt_text_then_terminal` fixture binary as the
 /// configured child, using the same secret-derived `Basic` credential as the
-/// production path. It is `#[cfg(test)]` only and never reachable in a normal
-/// production build.
+/// production path via `HealthSecret::basic_auth`. It is `#[cfg(test)]` only
+/// and never reachable in a normal production build.
 #[cfg(test)]
 pub(crate) fn spawn_configured_fixture_engine(
     program: &Path,
     scenario: &'static str,
     secret: &str,
 ) -> io::Result<Child> {
-    use base64::Engine as _;
     let mut command = tokio::process::Command::new(program);
     command
         .env_clear()
         .env("ARTISAN_ENGINE_OWNER_TEST_SCENARIO", scenario)
         .env("OPENCODE_PASSWORD", secret)
         .env("OPENCODE_SERVER_PASSWORD", "");
-    let credentials = format!("opencode:{secret}");
-    let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
-    let mut credential_bytes = credentials.into_bytes();
-    {
-        use zeroize::Zeroize as _;
-        credential_bytes.zeroize();
-    }
-    let auth_value = format!("Basic {encoded}");
+    let secret_obj = crate::engine_owner::http::HealthSecret::from_raw_for_tests(secret.to_owned());
+    let auth_value = secret_obj.basic_auth();
     command.env("ARTISAN_ENGINE_OWNER_TEST_AUTHORIZATION", auth_value);
-    // Preserve SYSTEMROOT on Windows so the fixture can spawn.
     if let Ok(value) = std::env::var("SYSTEMROOT") {
         command.env("SYSTEMROOT", value);
     }
