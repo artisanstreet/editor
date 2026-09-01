@@ -1183,28 +1183,42 @@ mod lifecycle_response_ack_tests {
             }
         }
 
-        fn join_server_thread(&mut self) {
-            let client = self
-                .client
-                .take()
-                .expect("acknowledgement test client endpoint should remain owned");
-            client.close(VarInt::from_u32(0), b"acknowledgement test complete");
-            drop(client);
-
+        fn request_server_stop(&mut self) {
             if let Some(stop) = self.stop_server.take() {
                 let _sent = stop.send(());
             }
+        }
+
+        fn join_server_thread(&mut self) {
+            self.request_server_stop();
             if let Some(thread) = self.server_thread.take() {
                 thread
                     .join()
                     .expect("acknowledgement test server thread should finish");
             }
         }
+
+        async fn shutdown(mut self) {
+            let client = self
+                .client
+                .take()
+                .expect("acknowledgement test client endpoint should remain owned");
+            client.close(VarInt::from_u32(0), b"acknowledgement test complete");
+            tokio::time::timeout(ACK_TIMEOUT, client.wait_idle())
+                .await
+                .expect("acknowledgement test client endpoint should become idle");
+            drop(client);
+            self.join_server_thread();
+        }
     }
 
     impl Drop for AckLoopback {
         fn drop(&mut self) {
-            self.join_server_thread();
+            if let Some(client) = self.client.take() {
+                client.close(VarInt::from_u32(0), b"acknowledgement test complete");
+                drop(client);
+            }
+            self.request_server_stop();
         }
     }
 
@@ -1323,7 +1337,7 @@ mod lifecycle_response_ack_tests {
         drop(streams);
         drop(server);
         drop(client);
-        drop(loopback);
+        loopback.shutdown().await;
     }
 
     #[tokio::test]
@@ -1380,6 +1394,6 @@ mod lifecycle_response_ack_tests {
         drop(streams);
         drop(server);
         drop(client);
-        drop(loopback);
+        loopback.shutdown().await;
     }
 }
