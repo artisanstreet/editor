@@ -58,6 +58,49 @@ fn scene(items: Vec<SceneItem>, narration_value: TurnNarration) -> ConversationS
     .expect("conversation scene is valid")
 }
 
+fn markdown_replacement_scenes() -> (ConversationScene, ConversationScene) {
+    let initial = scene(
+        vec![item(
+            "old-user",
+            "turn_a",
+            1,
+            SceneItemKind::UserMessage {
+                body: "old authoritative body".to_owned(),
+            },
+            None,
+        )],
+        TurnNarration::Quiet,
+    );
+    let replacement = scene(
+        vec![
+            item(
+                "new-assistant",
+                "turn_a",
+                1,
+                SceneItemKind::AssistantMessage {
+                    body: "new authoritative body with `code`".to_owned(),
+                    phase: AssistantPhase::Final,
+                },
+                None,
+            ),
+            item(
+                "replacement-change",
+                "turn_a",
+                2,
+                SceneItemKind::ChangeSet {
+                    files: vec![
+                        SceneFileChange::new("src/replacement.rs", FileChangeStatus::Modified)
+                            .expect("replacement path is valid"),
+                    ],
+                },
+                Some(SceneDisclosure::Open),
+            ),
+        ],
+        TurnNarration::Quiet,
+    );
+    (initial, replacement)
+}
+
 struct SurfaceWindowHost {
     surface: gpui::Entity<ConversationSurface>,
 }
@@ -718,45 +761,7 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     const NEW_MARKDOWN: &str =
         "artisan-conversation-surface-turn-turn_a-block-assistant-new-assistant-markdown";
     const DISCLOSURE_TRIGGER: &str = "artisan-conversation-surface-turn-turn_a-block-change-replacement-change-disclosure-trigger";
-    let initial = scene(
-        vec![item(
-            "old-user",
-            "turn_a",
-            1,
-            SceneItemKind::UserMessage {
-                body: "old authoritative body".to_owned(),
-            },
-            None,
-        )],
-        TurnNarration::Quiet,
-    );
-    let replacement = scene(
-        vec![
-            item(
-                "new-assistant",
-                "turn_a",
-                1,
-                SceneItemKind::AssistantMessage {
-                    body: "new authoritative body with `code`".to_owned(),
-                    phase: AssistantPhase::Final,
-                },
-                None,
-            ),
-            item(
-                "replacement-change",
-                "turn_a",
-                2,
-                SceneItemKind::ChangeSet {
-                    files: vec![
-                        SceneFileChange::new("src/replacement.rs", FileChangeStatus::Modified)
-                            .expect("replacement path is valid"),
-                    ],
-                },
-                Some(SceneDisclosure::Open),
-            ),
-        ],
-        TurnNarration::Quiet,
-    );
+    let (initial, replacement) = markdown_replacement_scenes();
     let (surface, cx) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(initial, ThemeMode::Dark, surface_cx)
     });
