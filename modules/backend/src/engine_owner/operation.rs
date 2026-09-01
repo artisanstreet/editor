@@ -156,6 +156,61 @@ pub(crate) enum EngineOperationError {
     },
 }
 
+/// Observed cleanup mode for a successful configured-engine preflight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreflightReap {
+    /// The child exited after stdin was closed without a termination request.
+    WithoutKill,
+    /// The child exited only after the bounded cleanup requested termination.
+    AfterKill,
+}
+
+/// Small, payload-safe receipt for a completed configured-engine preflight.
+///
+/// The stable profile and version are available to the caller, while the
+/// `Debug` representation redacts their bytes. No endpoint, executable,
+/// process identity, secret, headers, or provider payload is retained.
+pub(crate) struct PreflightReceipt {
+    profile_id: String,
+    version: String,
+    reap: PreflightReap,
+}
+
+impl PreflightReceipt {
+    fn new(profile_id: String, version: String, reap: PreflightReap) -> Self {
+        Self {
+            profile_id,
+            version,
+            reap,
+        }
+    }
+
+    pub(crate) fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    pub(crate) fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub(crate) const fn reap(&self) -> PreflightReap {
+        self.reap
+    }
+}
+
+impl std::fmt::Debug for PreflightReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreflightReceipt")
+            .field("profile_id", &"<redacted>")
+            .field("version", &"<redacted>")
+            .field("reap", &self.reap)
+            .finish()
+    }
+}
+
+pub(crate) type PreflightResult = Result<PreflightReceipt, EngineOperationError>;
+
 /// Honest spawn and exit observation of one launch.
 ///
 /// Reports only actually observed spawn and exit facts — observed generation
@@ -183,6 +238,13 @@ pub(crate) enum Job {
         deadline: Instant,
         control: Arc<CancelHandle>,
         respond: oneshot::Sender<LaunchResult>,
+    },
+    /// Configured spawn/readiness/health/observed-reap preflight that stops
+    /// before provider session creation.
+    Preflight {
+        input: Box<super::InternalPreflightInput>,
+        control: Arc<CancelHandle>,
+        respond: oneshot::Sender<PreflightResult>,
     },
     /// A fully immutable configured turn handed to the owner after durable
     /// launch. Carries the single internal input so production and `#[cfg(test)]`
@@ -240,6 +302,50 @@ impl std::future::Future for AcceptedLaunch {
 }
 
 impl Drop for AcceptedLaunch {
+    fn drop(&mut self) {
+        self.control.cancel();
+    }
+}
+
+/// Single-owner future for one configured-engine preflight.
+pub(crate) struct AcceptedPreflight {
+    receiver: oneshot::Receiver<PreflightResult>,
+    control: Arc<CancelHandle>,
+}
+
+impl AcceptedPreflight {
+    /// Creates an accepted preflight from its owner-only response parts.
+    pub(crate) fn from_parts(
+        receiver: oneshot::Receiver<PreflightResult>,
+        control: Arc<CancelHandle>,
+    ) -> Self {
+        Self { receiver, control }
+    }
+
+    /// Cancels this preflight explicitly.
+    pub(crate) fn cancel(&self) {
+        self.control.cancel();
+    }
+}
+
+impl std::future::Future for AcceptedPreflight {
+    type Output = PreflightResult;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        use std::pin::Pin;
+        use std::task::Poll;
+        match Pin::new(&mut self.receiver).poll(context) {
+            Poll::Ready(Ok(result)) => Poll::Ready(result),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(EngineOperationError::ReapUnresolved)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for AcceptedPreflight {
     fn drop(&mut self) {
         self.control.cancel();
     }
@@ -478,6 +584,9 @@ async fn run_owner_loop(
                         )
                         .await
                     }
+                    job @ Job::Preflight { .. } => {
+                        Box::pin(execute_preflight_job(job, &shutdown)).await
+                    }
                     job @ Job::Turn { .. } => {
                         Box::pin(execute_configured_job(job, &shutdown)).await
                     }
@@ -501,19 +610,25 @@ async fn run_owner_loop(
 
 fn job_control(job: &Job) -> &Arc<CancelHandle> {
     match job {
-        Job::Legacy { control, .. } | Job::Turn { control, .. } => control,
+        Job::Legacy { control, .. }
+        | Job::Preflight { control, .. }
+        | Job::Turn { control, .. } => control,
     }
 }
 
 fn job_deadline(job: &Job) -> Instant {
     match job {
         Job::Legacy { deadline, .. } | Job::Turn { deadline, .. } => *deadline,
+        Job::Preflight { input, .. } => input.deadlines.admission,
     }
 }
 
 fn reject_job(job: Job, error: EngineOperationError) {
     match job {
         Job::Legacy { respond, .. } => {
+            let _ = respond.send(Err(error));
+        }
+        Job::Preflight { respond, .. } => {
             let _ = respond.send(Err(error));
         }
         Job::Turn {
@@ -629,6 +744,217 @@ async fn handle_health_phase(
             finish_aborted(parts, mapped, respond, ctx.limits.close).await
         }
     }
+}
+
+struct PreflightRequest {
+    input: super::InternalPreflightInput,
+    control: Arc<CancelHandle>,
+    respond: oneshot::Sender<PreflightResult>,
+}
+
+impl PreflightRequest {
+    fn fail(self, error: EngineOperationError) -> Execution {
+        let _ = self.respond.send(Err(error));
+        Execution::Completed
+    }
+}
+
+/// Executes the bounded configured-engine preflight. This branch deliberately
+/// stops after authenticated version health and observed child cleanup; the
+/// configured-turn session, prompt, and stream executors are not reachable.
+async fn execute_preflight_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execution {
+    let Job::Preflight {
+        input,
+        control,
+        respond,
+    } = job
+    else {
+        unreachable!("preflight executor received a non-preflight job");
+    };
+    let request = PreflightRequest {
+        input: *input,
+        control,
+        respond,
+    };
+    if shutdown.is_cancelled() {
+        return request.fail(EngineOperationError::Shutdown);
+    }
+    if request.control.is_cancelled() {
+        return request.fail(EngineOperationError::Cancelled);
+    }
+    if Instant::now() >= request.input.deadlines.admission {
+        return request.fail(EngineOperationError::Deadline);
+    }
+    if !preflight_bounds_are_valid(&request.input.bounds) {
+        return request.fail(EngineOperationError::Configuration);
+    }
+
+    let PreflightRequest {
+        input,
+        control,
+        respond,
+    } = request;
+    let profile_id = input.launch.profile_id().to_owned();
+    let version = input.launch.version().to_owned();
+    let bounds = input.bounds;
+    let deadlines = input.deadlines;
+    let secret = match HealthSecret::generate() {
+        Ok(secret) => secret,
+        Err(HealthError::EntropyFailed) => {
+            let _ = respond.send(Err(EngineOperationError::EntropyFailed));
+            return Execution::Completed;
+        }
+        Err(_) => unreachable!("health secret generation has one failure mode"),
+    };
+    let child_result = match &input.launch {
+        super::InternalLaunch::Verified(verified) => {
+            spawn_configured_engine(verified.as_ref(), &input.project_root, secret.as_str())
+        }
+        #[cfg(test)]
+        super::InternalLaunch::Fixture(fixture) => super::process::spawn_configured_fixture_engine(
+            &fixture.program,
+            fixture.scenario,
+            secret.as_str(),
+        ),
+    };
+    let Ok(mut child) = child_result else {
+        return finish_preflight_without_child(respond, EngineOperationError::SpawnFailed);
+    };
+    let lifeline = LifelineWriter::take(&mut child);
+    let maybe_stdout = child.stdout.take();
+    let stderr_counter = StderrCounter::new(child.stderr.take(), bounds.stderr_cap_bytes);
+    let Some(mut stdout) = maybe_stdout else {
+        drop(secret);
+        let parts = ChildParts {
+            child,
+            lifeline,
+            stdout: None,
+            stderr_counter,
+        };
+        return finish_preflight_failure(
+            parts,
+            EngineOperationError::ReadinessFailed(ReadinessError::Io),
+            respond,
+            deadlines.close,
+        )
+        .await;
+    };
+    let mut parts = ChildParts {
+        child,
+        lifeline,
+        stdout: None,
+        stderr_counter,
+    };
+    let endpoint = match drive_readiness(
+        &mut stdout,
+        &mut parts,
+        deadlines.readiness.min(deadlines.admission),
+        shutdown,
+        &control,
+        bounds.max_readiness_line,
+    )
+    .await
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            drop(stdout);
+            drop(secret);
+            return finish_preflight_failure(
+                parts,
+                map_readiness_error(error),
+                respond,
+                deadlines.close,
+            )
+            .await;
+        }
+    };
+    drop(stdout);
+    let health_version = match super::http::perform_health(
+        &endpoint,
+        &secret,
+        &bounds,
+        deadlines.health.min(deadlines.admission),
+        &control,
+        shutdown,
+        Some(&version),
+    )
+    .await
+    {
+        Ok(health_version) => health_version,
+        Err(error) => {
+            drop(secret);
+            return finish_preflight_failure(
+                parts,
+                map_health_error(error),
+                respond,
+                deadlines.close,
+            )
+            .await;
+        }
+    };
+    drop(secret);
+    finish_preflight_success(parts, profile_id, health_version, respond, deadlines.close).await
+}
+
+fn preflight_bounds_are_valid(bounds: &EngineBounds) -> bool {
+    bounds.max_json_body > 0
+        && bounds.max_readiness_line > 0
+        && bounds.max_headers > 0
+        && bounds.max_buf_bytes >= 8192
+        && bounds.stderr_cap_bytes > 0
+}
+
+fn remaining_until(deadline: Instant) -> Duration {
+    deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or(Duration::ZERO)
+}
+
+fn finish_preflight_without_child(
+    respond: oneshot::Sender<PreflightResult>,
+    error: EngineOperationError,
+) -> Execution {
+    let _ = respond.send(Err(error));
+    Execution::Completed
+}
+
+async fn finish_preflight_failure(
+    parts: ChildParts,
+    cause: EngineOperationError,
+    respond: oneshot::Sender<PreflightResult>,
+    close_deadline: Instant,
+) -> Execution {
+    match cleanup_after_abort(parts, remaining_until(close_deadline)).await {
+        CleanupObservation::ReapedWithoutKill(_) | CleanupObservation::ReapedAfterKill(_) => {
+            let _ = respond.send(Err(cause));
+            Execution::Completed
+        }
+        CleanupObservation::Retained(engine) => {
+            let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring {
+                primary: Box::new(cause),
+            }));
+            Execution::Quarantined(engine)
+        }
+    }
+}
+
+async fn finish_preflight_success(
+    parts: ChildParts,
+    profile_id: String,
+    version: String,
+    respond: oneshot::Sender<PreflightResult>,
+    close_deadline: Instant,
+) -> Execution {
+    let reap = match cleanup_after_abort(parts, remaining_until(close_deadline)).await {
+        CleanupObservation::ReapedWithoutKill(_) => PreflightReap::WithoutKill,
+        CleanupObservation::ReapedAfterKill(_) => PreflightReap::AfterKill,
+        CleanupObservation::Retained(engine) => {
+            let _ = respond.send(Err(EngineOperationError::ReapUnresolved));
+            return Execution::Quarantined(engine);
+        }
+    };
+    let _ = respond.send(Ok(PreflightReceipt::new(profile_id, version, reap)));
+    Execution::Completed
 }
 
 /// Executes one legacy readiness/health job end to end.  This path remains
