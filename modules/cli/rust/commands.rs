@@ -2137,11 +2137,13 @@ mod tests {
 
     #[test]
     fn lifecycle_hello_advertises_control_with_only_reconnect_credential() {
-        let hello =
+        let Ok(hello) =
             lifecycle_hello_with_capability(artisan_protocol::ReconnectCapability::from_bytes(
                 [0xa5; artisan_protocol::RECONNECT_CAPABILITY_BYTES],
             ))
-            .unwrap();
+        else {
+            panic!("lifecycle hello construction failed");
+        };
         let WireEnvelopeBody::Hello(hello) = hello.body else {
             panic!("lifecycle hello body");
         };
