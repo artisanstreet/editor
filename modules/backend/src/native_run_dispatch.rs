@@ -600,6 +600,15 @@ async fn run_final_recovery_page(
     let _ = perform_live_recovery_page(repository, config, operated_at).await;
 }
 
+async fn shutdown_owner_until_settled(owner: &mut EngineOwner) -> EngineOwnerShutdown {
+    loop {
+        let outcome = owner.shutdown().await;
+        if !matches!(outcome, EngineOwnerShutdown::Quarantined) {
+            return outcome;
+        }
+    }
+}
+
 async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
     let DispatchLoopContext {
         repository,
@@ -701,12 +710,7 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
 
     run_final_recovery_page(&repository, &config, &origin).await;
 
-    let owner_shutdown = loop {
-        let outcome = owner.shutdown().await;
-        if !matches!(outcome, EngineOwnerShutdown::Quarantined) {
-            break outcome;
-        }
-    };
+    let owner_shutdown = shutdown_owner_until_settled(&mut owner).await;
     // The owner shutdown loop above does not complete while unresolved child
     // custody remains, so releasing these leases is safe at this boundary.
     drop(retained_activity);
