@@ -565,7 +565,7 @@ fn ordinary_directory_exists(path: &Path) -> Result<bool> {
 
 fn create_owned_file(path: &Path) -> Result<File> {
     let expected = owned_file_identity(path)?;
-    let file = if let Some(_) = expected {
+    let file = if expected.is_some() {
         open_for_update(path).map_err(|_| InstallerError::UnsafeOwnedPath)?
     } else {
         let mut options = OpenOptions::new();
@@ -858,7 +858,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             &existing_release,
             &manifest,
             &options,
-            ActivationIntegrations {
+            &ActivationIntegrations {
                 stable_ae: &stable_ae,
                 protocol: protocol.as_ref(),
                 launchers: &activation_launchers,
@@ -941,7 +941,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             &release,
             &manifest,
             &options,
-            ActivationIntegrations {
+            &ActivationIntegrations {
                 stable_ae: &stable_ae,
                 protocol: protocol.as_ref(),
                 launchers: &activation_launchers,
@@ -1131,7 +1131,7 @@ fn activate(
     release: &Path,
     manifest: &crate::manifest::ReleaseManifest,
     options: &InstallOptions,
-    integrations: ActivationIntegrations<'_>,
+    integrations: &ActivationIntegrations<'_>,
 ) -> Result<()> {
     lock.fence()?;
     let next = root.join(".installation.json.tmp");
