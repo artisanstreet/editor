@@ -1062,11 +1062,11 @@ fn authenticated_lifecycle(
         .map_err(|_| CliError::LifecycleService {
             reason: "create lifecycle runtime",
         })?;
-    let store =
-        ReconnectCapabilityStore::from_home(&layout.root).map_err(lifecycle_credential_error)?;
+    let store = ReconnectCapabilityStore::from_home(&layout.root)
+        .map_err(|error| lifecycle_credential_error(&error))?;
     let attempt = store
         .checkout(material.binding, credentials::RECONNECT_LOCK_TIMEOUT)
-        .map_err(lifecycle_credential_error)?;
+        .map_err(|error| lifecycle_credential_error(&error))?;
     runtime.block_on(authenticated_lifecycle_session(
         material, operation, attempt,
     ))
@@ -1078,7 +1078,7 @@ fn lifecycle_material(
     readiness: &process::ForgeReadiness,
 ) -> Result<LifecycleMaterial> {
     let identity = credentials::load_existing_client_identity(&layout.root)
-        .map_err(lifecycle_credential_error)?;
+        .map_err(|error| lifecycle_credential_error(&error))?;
     if config.credentials_manifest() != identity.paths().manifest_path() {
         return Err(CliError::LifecycleCredentialState {
             reason: "credential manifest does not match the instance",
@@ -1115,7 +1115,7 @@ fn lifecycle_material(
         *pinned_identity.as_bytes(),
         pid,
     )
-    .map_err(lifecycle_credential_error)?;
+    .map_err(|error| lifecycle_credential_error(&error))?;
     let listener = config.listener();
     let limits = ClientSessionLimits {
         connect: lifecycle_duration(listener.admission_timeout_ms())?,
@@ -1156,10 +1156,10 @@ async fn authenticated_lifecycle_session(
     let capability = match attempt.take_credential() {
         Ok(capability) => capability,
         Err(error) => {
-            let primary = lifecycle_credential_error(error);
+            let primary = lifecycle_credential_error(&error);
             return match attempt.quarantine() {
                 Ok(()) => Err(primary),
-                Err(custody) => Err(lifecycle_credential_error(custody)),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
             };
         }
     };
@@ -1168,7 +1168,7 @@ async fn authenticated_lifecycle_session(
         Err((failure, capability)) => {
             return match attempt.restore_before_handshake(capability) {
                 Ok(_) => Err(failure),
-                Err(custody) => Err(lifecycle_credential_error(custody)),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
             };
         }
     };
@@ -1185,10 +1185,10 @@ async fn authenticated_lifecycle_session(
     let (session, welcome) = match connected {
         Ok(connected) => connected,
         Err(error) => {
-            let failure = lifecycle_connect_error(error);
+            let failure = lifecycle_connect_error(&error);
             return match attempt.quarantine() {
                 Ok(()) => Err(failure),
-                Err(custody) => Err(lifecycle_credential_error(custody)),
+                Err(custody) => Err(lifecycle_credential_error(&custody)),
             };
         }
     };
@@ -1197,7 +1197,7 @@ async fn authenticated_lifecycle_session(
             Ok(lease) => lease,
             Err(error) => {
                 let _ = session.shutdown(&cancel).await;
-                return Err(lifecycle_credential_error(error));
+                return Err(lifecycle_credential_error(&error));
             }
         };
 
@@ -1222,11 +1222,11 @@ async fn authenticated_lifecycle_session(
         Ok(response) => response,
         Err(error) => {
             let quarantine = lifecycle_request_requires_quarantine(&error);
-            let failure = lifecycle_request_error(error);
+            let failure = lifecycle_request_error(&error);
             if quarantine {
                 return match reconnect_lease.quarantine() {
                     Ok(()) => Err(failure),
-                    Err(custody) => Err(lifecycle_credential_error(custody)),
+                    Err(custody) => Err(lifecycle_credential_error(&custody)),
                 };
             }
             drop(reconnect_lease);
@@ -1241,7 +1241,7 @@ async fn authenticated_lifecycle_session(
     if lifecycle_response_requires_quarantine(&expected_request_id, &resolved, &result) {
         return match reconnect_lease.quarantine() {
             Ok(()) => result,
-            Err(custody) => Err(lifecycle_credential_error(custody)),
+            Err(custody) => Err(lifecycle_credential_error(&custody)),
         };
     }
     drop(reconnect_lease);
@@ -1255,16 +1255,13 @@ fn lifecycle_hello_with_capability(
         Ok(stamp) => stamp,
         Err(error) => return Err((error, capability)),
     };
-    let supported_versions = match VersionOffer::new(vec![1]) {
-        Ok(versions) => versions,
-        Err(_) => {
-            return Err((
-                CliError::LifecycleService {
-                    reason: "build protocol version offer",
-                },
-                capability,
-            ));
-        }
+    let Ok(supported_versions) = VersionOffer::new(vec![1]) else {
+        return Err((
+            CliError::LifecycleService {
+                reason: "build protocol version offer",
+            },
+            capability,
+        ));
     };
     Ok(WireEnvelope {
         protocol_version: ProtocolVersion::V1,
@@ -1410,7 +1407,7 @@ fn classify_lifecycle_failure(
     }
 }
 
-fn lifecycle_connect_error(error: ClientSessionError) -> CliError {
+fn lifecycle_connect_error(error: &ClientSessionError) -> CliError {
     if matches!(error, ClientSessionError::Handshake(_)) {
         CliError::LifecycleAmbiguous
     } else {
@@ -1420,7 +1417,7 @@ fn lifecycle_connect_error(error: ClientSessionError) -> CliError {
     }
 }
 
-fn lifecycle_request_error(error: ClientRequestError) -> CliError {
+fn lifecycle_request_error(error: &ClientRequestError) -> CliError {
     match error {
         ClientRequestError::UnsupportedFeature => CliError::UnsupportedLifecycleControl,
         ClientRequestError::Exchange(_) => CliError::LifecycleService {
@@ -1458,7 +1455,7 @@ fn lifecycle_response_requires_quarantine(
     matches!(resolved.outcome(), RequestOutcome::Response(_)) && result.is_err()
 }
 
-fn lifecycle_credential_error(error: ForgeCredentialError) -> CliError {
+fn lifecycle_credential_error(error: &ForgeCredentialError) -> CliError {
     match error {
         ForgeCredentialError::CapabilityBusy
         | ForgeCredentialError::ReconnectCapabilityUnavailable
@@ -1514,7 +1511,7 @@ fn print_stop_receipt(receipt: &LifecycleStopReceipt) {
     match receipt.disposition {
         LifecycleStopDisposition::Accepted => println!("stop accepted (draining)"),
         LifecycleStopDisposition::Duplicate | LifecycleStopDisposition::AlreadyStopping => {
-            println!("stop already in progress (draining)")
+            println!("stop already in progress (draining)");
         }
     }
 }
@@ -2103,7 +2100,7 @@ mod tests {
             1
         );
         assert_eq!(
-            lifecycle_connect_error(ClientSessionError::DeliveryAlreadyTaken).exit_code(),
+            lifecycle_connect_error(&ClientSessionError::DeliveryAlreadyTaken).exit_code(),
             72
         );
     }
@@ -2114,13 +2111,13 @@ mod tests {
             operation: OperationKind::Handshake,
             limit: Duration::from_millis(10),
         });
-        assert_eq!(lifecycle_connect_error(handshake_timeout).exit_code(), 75);
+        assert_eq!(lifecycle_connect_error(&handshake_timeout).exit_code(), 75);
 
         let connect_timeout = ClientSessionError::Connect(DeadlineError::Timeout {
             operation: OperationKind::Connect,
             limit: Duration::from_millis(10),
         });
-        assert_eq!(lifecycle_connect_error(connect_timeout).exit_code(), 72);
+        assert_eq!(lifecycle_connect_error(&connect_timeout).exit_code(), 72);
 
         let acknowledgement_timeout = ClientRequestError::Exchange(DeadlineError::Timeout {
             operation: OperationKind::Receive,
@@ -2129,7 +2126,7 @@ mod tests {
         assert!(lifecycle_request_requires_quarantine(
             &acknowledgement_timeout
         ));
-        let failure = lifecycle_request_error(acknowledgement_timeout);
+        let failure = lifecycle_request_error(&acknowledgement_timeout);
         assert_eq!(failure.exit_code(), 72);
         assert!(!failure.to_string().contains("10ms"));
 
@@ -2155,23 +2152,23 @@ mod tests {
     #[test]
     fn lifecycle_custody_states_keep_missing_malformed_and_stale_fences_distinct() {
         assert_eq!(
-            lifecycle_credential_error(ForgeCredentialError::ReconnectRecordMissing).exit_code(),
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectRecordMissing).exit_code(),
             64
         );
         assert_eq!(
-            lifecycle_credential_error(ForgeCredentialError::ReconnectRecordMalformed).exit_code(),
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectRecordMalformed).exit_code(),
             64
         );
         assert_eq!(
-            lifecycle_credential_error(ForgeCredentialError::CapabilityBusy).exit_code(),
+            lifecycle_credential_error(&ForgeCredentialError::CapabilityBusy).exit_code(),
             75
         );
         assert_eq!(
-            lifecycle_credential_error(ForgeCredentialError::ReconnectStaleWriter).exit_code(),
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectStaleWriter).exit_code(),
             75
         );
         assert_eq!(
-            lifecycle_credential_error(ForgeCredentialError::ReconnectBindingMismatch).exit_code(),
+            lifecycle_credential_error(&ForgeCredentialError::ReconnectBindingMismatch).exit_code(),
             75
         );
     }
