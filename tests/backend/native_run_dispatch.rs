@@ -1,6 +1,6 @@
 //! Focused checks for the explicit configured-run scheduler boundary.
 
-use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
 
 use artisan_database::{RepositoryError, RunLaunchError, SqliteConfig, connect};
 use artisan_domain::MessageId;
@@ -225,14 +225,29 @@ use artisan_database::{
 };
 use artisan_domain::ThreadId as DomainThreadId;
 use artisan_domain::{
-    ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, CountLimit, EngineAgentId,
-    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageBody, NetworkAccess,
-    OpenCode2Selection, PatchId, ProjectId, RequestId, RunId, ThreadId, TurnId, UnixMillis,
-    WebSearchAccess,
+    ApprovalMode, AssistantBody, AssistantMessagePhase, ByteLimit, ConversationCursor,
+    ConversationItem, ConversationLifecycle, ConversationPatch, ConversationRequest,
+    ConversationSubscribe, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
+    FiniteMillis, ItemId, MessageBody, NetworkAccess, OpenCode2Selection, PatchBatch, PatchId,
+    ProjectId, RequestId, RunId, ThreadId, TurnId, UnixMillis, WebSearchAccess,
 };
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
+
+use crate::{ForgeListener, ListenerLimits, RequestHandler, RequestTermination};
+use artisan_database::ConversationPatchReplay;
+use artisan_protocol::{
+    APPLICATION_PROTOCOL_VERSION, ClientRequest, ConversationSubscriptionStarted, FrameId, Hello,
+    HelloCredential, LocalCapability, ProtocolVersion, ResponsePayload, VersionOffer, WireEnvelope,
+    WireEnvelopeBody,
+};
+use artisan_transport::{
+    DeadlineError, LOOPBACK_SERVER_NAME, OperationKind, PinnedIdentity, bind_loopback_client,
+    client_config, client_handshake, receive_envelope, send_envelope,
+};
+use quinn::{ClientConfig, Connection, Endpoint, ServerConfig};
+use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -1240,6 +1255,7 @@ async fn dispatch_fixture_composes_claim_through_durable_settlement() {
         .await
         .expect("one fixture message should queue");
     assert_queued_fixture_message(&fetch_all(&database).await, &message_id);
+    assert_queued_fixture_message(&fetch_all(&database).await, &message_id);
 
     let notifier = ConversationCommitNotifier::new();
     let mut subscription = notifier
@@ -1316,4 +1332,667 @@ async fn dispatch_fixture_composes_claim_through_durable_settlement() {
     assert_fixture_transcript(&after, &thread_id);
     assert_fixture_batch_durability(&database).await;
     assert_fixture_custody();
+}
+
+// ---------------------------------------------------------------------------
+// Forge delivery and restart proof
+// ---------------------------------------------------------------------------
+
+const FORGE_RESTART_CAPABILITY: [u8; 32] = [0x6e; 32];
+
+struct FixtureForgePki {
+    certificate: CertificateDer<'static>,
+    private_key: PrivatePkcs8KeyDer<'static>,
+    pinned_identity: PinnedIdentity,
+}
+
+fn fixture_forge_pki() -> FixtureForgePki {
+    let certified_key =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("valid SAN");
+    let certificate = certified_key.cert.der().clone();
+    FixtureForgePki {
+        pinned_identity: PinnedIdentity::from_certificate(&certificate),
+        private_key: PrivatePkcs8KeyDer::from(certified_key.signing_key.serialize_der()),
+        certificate,
+    }
+}
+
+fn fixture_forge_server_config(pki: &FixtureForgePki) -> ServerConfig {
+    artisan_transport::server_config(vec![pki.certificate.clone()], pki.private_key.clone_key())
+        .expect("Forge server configuration")
+}
+
+fn fixture_forge_client_config(pki: &FixtureForgePki) -> ClientConfig {
+    artisan_transport::client_config(pki.certificate.clone(), pki.pinned_identity)
+        .expect("Forge client configuration")
+}
+
+fn fixture_forge_listener_limits() -> ListenerLimits {
+    ListenerLimits {
+        admission: Duration::from_secs(2),
+        handshake: Duration::from_secs(2),
+        next_request: Duration::from_secs(2),
+        drain: Duration::from_secs(2),
+    }
+}
+
+fn bind_fixture_forge_listener(
+    repository: Repository,
+    notifier: ConversationCommitNotifier,
+    pki: &FixtureForgePki,
+) -> (ForgeListener, RequestHandler, Arc<CancelHandle>, SocketAddr) {
+    let handler =
+        RequestHandler::with_subscriptions(repository).with_conversation_commit_notifier(notifier);
+    let listener = ForgeListener::bind(
+        fixture_forge_server_config(pki),
+        LocalCapability::from_bytes(FORGE_RESTART_CAPABILITY),
+        Box::new(crate::SystemCommandOrigin),
+        fixture_forge_listener_limits(),
+        std::num::NonZeroU32::new(1).expect("one listener admission slot"),
+        std::num::NonZeroU32::new(4).expect("bounded request capacity"),
+    )
+    .expect("Forge listener should bind");
+    let address = listener.local_addr().expect("Forge listener address");
+    (listener, handler, Arc::new(CancelHandle::new()), address)
+}
+
+async fn serve_fixture_forge_listener(
+    listener: ForgeListener,
+    handler: RequestHandler,
+    cancel: Arc<CancelHandle>,
+) {
+    let (listener, report) = listener
+        .serve_one(&handler, cancel.as_ref())
+        .await
+        .expect("Forge listener should return reusable custody");
+    assert_eq!(report.completed_requests, 1);
+    assert!(matches!(
+        report.termination,
+        RequestTermination::Failed {
+            source: DeadlineError::Cancelled {
+                operation: OperationKind::Receive
+            }
+        }
+    ));
+    listener.drain().await.expect("Forge listener should drain");
+}
+
+struct FixtureForgeClient {
+    endpoint: Endpoint,
+    connection: Connection,
+}
+
+fn fixture_hello_envelope() -> WireEnvelope {
+    WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse("fixture-forge-hello").expect("hello frame id"),
+        sent_at: UnixMillis::from_millis(1),
+        body: WireEnvelopeBody::Hello(Hello {
+            supported_versions: VersionOffer::new(vec![APPLICATION_PROTOCOL_VERSION])
+                .expect("version offer"),
+            credential: HelloCredential::Initial(LocalCapability::from_bytes(
+                FORGE_RESTART_CAPABILITY,
+            )),
+            supports_lifecycle_control: false,
+        }),
+    }
+}
+
+fn fixture_resume_envelope(thread_id: ThreadId, cursor: ConversationCursor) -> WireEnvelope {
+    WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse("fixture-forge-subscribe").expect("subscription frame id"),
+        sent_at: UnixMillis::from_millis(2),
+        body: WireEnvelopeBody::Request(ClientRequest::Conversation(
+            ConversationRequest::Subscribe(ConversationSubscribe::resume(thread_id, cursor)),
+        )),
+    }
+}
+
+async fn connect_fixture_forge_client(
+    pki: &FixtureForgePki,
+    address: SocketAddr,
+) -> FixtureForgeClient {
+    let endpoint = bind_loopback_client(fixture_forge_client_config(pki))
+        .expect("Forge client endpoint should bind");
+    let connecting = endpoint
+        .connect(address, LOOPBACK_SERVER_NAME)
+        .expect("Forge client should connect");
+    let connection = tokio::time::timeout(TEST_DEADLINE, connecting)
+        .await
+        .unwrap_or_else(|_| panic!("Forge client connection exceeded the test deadline"))
+        .unwrap_or_else(|_| panic!("Forge client connection failed"));
+    let (mut control_send, mut control_recv) = connection
+        .open_bi()
+        .await
+        .expect("Forge control stream should open");
+    let _welcome = tokio::time::timeout(
+        TEST_DEADLINE,
+        client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            fixture_hello_envelope(),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("Forge client handshake exceeded the test deadline"))
+    .unwrap_or_else(|_| panic!("Forge client handshake failed"));
+    drop(control_send);
+    drop(control_recv);
+    FixtureForgeClient {
+        endpoint,
+        connection,
+    }
+}
+
+async fn subscribe_fixture_forge_client(
+    connection: &Connection,
+    thread_id: ThreadId,
+    cursor: ConversationCursor,
+) -> ConversationSubscriptionStarted {
+    let (mut request_send, mut request_recv) = connection
+        .open_bi()
+        .await
+        .expect("Forge subscription stream should open");
+    send_envelope(
+        &mut request_send,
+        &fixture_resume_envelope(thread_id, cursor),
+    )
+    .await
+    .expect("Forge subscription request should cross the wire");
+    drop(request_send);
+    let response = tokio::time::timeout(TEST_DEADLINE, receive_envelope(&mut request_recv))
+        .await
+        .unwrap_or_else(|_| panic!("Forge subscription response exceeded the test deadline"))
+        .unwrap_or_else(|_| panic!("Forge subscription response could not be received"));
+    drop(request_recv);
+    let WireEnvelopeBody::Response(response) = response.body else {
+        panic!("Forge subscription should receive a response");
+    };
+    assert!(
+        response.request_id.as_str() == "fixture-forge-subscribe",
+        "Forge subscription response correlation must be preserved"
+    );
+    let ResponsePayload::ConversationSubscriptionStarted(started) = response.payload else {
+        panic!("Forge subscription should acknowledge its start");
+    };
+    started
+}
+
+fn assert_fixture_resumed_subscription(
+    started: ConversationSubscriptionStarted,
+    expected_thread_id: &ThreadId,
+    expected_cursor: ConversationCursor,
+) {
+    let ConversationSubscriptionStarted::Resumed { thread_id, cursor } = started else {
+        panic!("Forge subscription should resume from its requested cursor");
+    };
+    assert!(
+        thread_id == *expected_thread_id,
+        "Forge subscription resumed the requested thread"
+    );
+    assert_eq!(cursor, expected_cursor);
+}
+
+async fn accept_fixture_delivery(connection: &Connection) -> quinn::RecvStream {
+    tokio::time::timeout(TEST_DEADLINE, connection.accept_uni())
+        .await
+        .unwrap_or_else(|_| panic!("Forge delivery stream did not open before the deadline"))
+        .unwrap_or_else(|_| panic!("Forge delivery stream could not be accepted"))
+}
+
+async fn receive_fixture_patch_batch(stream: &mut quinn::RecvStream) -> PatchBatch {
+    let envelope = tokio::time::timeout(TEST_DEADLINE, receive_envelope(stream))
+        .await
+        .unwrap_or_else(|_| panic!("Forge delivery batch exceeded the test deadline"))
+        .unwrap_or_else(|_| panic!("Forge delivery batch could not be received"));
+    let WireEnvelopeBody::PatchBatch(batch) = envelope.body else {
+        panic!("Forge delivery stream should carry a patch batch");
+    };
+    batch
+}
+
+async fn shutdown_fixture_forge_client(client: FixtureForgeClient, reason: &'static [u8]) {
+    let FixtureForgeClient {
+        endpoint,
+        connection,
+    } = client;
+    drop(connection);
+    artisan_transport::shutdown(&endpoint, quinn::VarInt::from_u32(0), reason, TEST_DEADLINE)
+        .await
+        .expect("Forge client endpoint should shut down");
+    drop(endpoint);
+}
+
+async fn fixture_durable_replay(
+    repository: &Repository,
+    thread_id: &ThreadId,
+    cursor: ConversationCursor,
+) -> PatchBatch {
+    let replay = repository
+        .read_conversation_patch_replay(thread_id, cursor)
+        .await
+        .unwrap_or_else(|_| panic!("durable conversation replay should be readable"));
+    match replay {
+        ConversationPatchReplay::Batch(batch) => batch,
+        ConversationPatchReplay::Current { .. }
+        | ConversationPatchReplay::ResnapshotRequired { .. } => {
+            panic!("durable conversation replay should contain the requested patches");
+        }
+    }
+}
+
+async fn fixture_durable_replay_prefix(
+    repository: &Repository,
+    thread_id: &ThreadId,
+    from_cursor: ConversationCursor,
+    to_cursor: ConversationCursor,
+) -> PatchBatch {
+    // The terminal commit may already be durable by the time this read runs;
+    // the delivered cursor range is therefore selected from the authoritative
+    // replay rather than reconstructed from wire payloads.
+    let complete = fixture_durable_replay(repository, thread_id, from_cursor).await;
+    let count = usize::try_from(
+        to_cursor
+            .get()
+            .checked_sub(from_cursor.get())
+            .expect("replay cursor should advance forwards"),
+    )
+    .expect("replay prefix should fit in usize");
+    assert!(count > 0, "replay prefix should contain patches");
+    assert!(
+        count <= complete.patches().len(),
+        "durable replay should reach the delivered cursor"
+    );
+    PatchBatch::new(
+        thread_id.clone(),
+        from_cursor,
+        to_cursor,
+        complete.patches()[..count].to_vec(),
+    )
+    .unwrap_or_else(|_| panic!("durable replay prefix should remain contiguous"))
+}
+
+fn assert_fixture_stream_batch(batch: &PatchBatch) {
+    assert_eq!(batch.thread_id().as_str(), "fixture-thread");
+    assert_eq!(batch.from_cursor(), ConversationCursor::default());
+    assert_eq!(batch.to_cursor(), ConversationCursor::new(4));
+    assert_eq!(batch.patches().len(), 4);
+    assert_eq!(
+        batch
+            .patches()
+            .iter()
+            .map(|patch| patch.sequence().get())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert!(
+        batch.patches().iter().any(|patch| {
+            patch.sequence().get() == 4
+                && matches!(
+                    patch,
+                    ConversationPatch::ItemUpsert {
+                        item: ConversationItem::AssistantMessage(_),
+                        ..
+                    }
+                )
+        }),
+        "first Forge batch should contain the assistant stream item"
+    );
+}
+
+fn assert_fixture_terminal_batch(batch: &PatchBatch, from_cursor: ConversationCursor) {
+    assert_eq!(batch.thread_id().as_str(), "fixture-thread");
+    assert_eq!(batch.from_cursor(), from_cursor);
+    assert_eq!(batch.to_cursor(), ConversationCursor::new(6));
+    assert_eq!(batch.patches().len(), 2);
+    assert_eq!(
+        batch
+            .patches()
+            .iter()
+            .map(|patch| patch.sequence().get())
+            .collect::<Vec<_>>(),
+        vec![5, 6]
+    );
+    assert!(
+        batch.patches().iter().any(|patch| matches!(
+            patch,
+            ConversationPatch::ItemLifecycle {
+                lifecycle: ConversationLifecycle::Completed,
+                ..
+            }
+        )),
+        "terminal Forge batch should complete the assistant item"
+    );
+    assert!(
+        batch.patches().iter().any(|patch| matches!(
+            patch,
+            ConversationPatch::TurnLifecycle {
+                lifecycle: ConversationLifecycle::Completed,
+                ..
+            }
+        )),
+        "terminal Forge batch should complete the turn"
+    );
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FixtureIdentitySnapshot {
+    project_id: String,
+    thread_id: String,
+    request_id: String,
+    message_id: String,
+    run_id: String,
+    turn_id: String,
+    assistant_item_id: String,
+}
+
+async fn fixture_identity_snapshot(database: &DatabaseConnection) -> FixtureIdentitySnapshot {
+    let projects = entities::attached_project::Entity::find()
+        .all(database)
+        .await
+        .expect("attached project rows should be readable");
+    assert_eq!(projects.len(), 1);
+    let project = projects.into_iter().next().expect("attached project row");
+    assert!(
+        project.project_id == "project-1",
+        "the one attached project identity must remain stable"
+    );
+
+    let threads = entities::thread::Entity::find()
+        .all(database)
+        .await
+        .expect("thread rows should be readable");
+    assert_eq!(threads.len(), 1);
+    let thread = threads.into_iter().next().expect("thread row");
+    assert!(
+        thread.thread_id == "fixture-thread" && thread.project_id == "project-1",
+        "the one thread must retain its project identity"
+    );
+
+    let request = entities::command_receipt::Entity::find_by_id("fixture-request")
+        .one(database)
+        .await
+        .expect("queue request receipt should be readable")
+        .expect("queue request receipt should exist");
+    assert!(
+        request.command_kind == entities::CommandKind::QueueFirstMessage
+            && request.thread_id.as_deref() == Some("fixture-thread")
+            && request.message_id.as_deref() == Some("fixture-message")
+            && request.body.as_deref() == Some("hello world"),
+        "the queued request must retain its durable message identity"
+    );
+
+    let messages = entities::message::Entity::find()
+        .all(database)
+        .await
+        .expect("message rows should be readable");
+    assert_eq!(messages.len(), 1);
+    let message = messages.into_iter().next().expect("message row");
+    assert!(
+        message.message_id == "fixture-message"
+            && message.thread_id == "fixture-thread"
+            && message.body == "hello world",
+        "the one durable prompt message must retain its identity"
+    );
+
+    let dispatches = entities::message_dispatch::Entity::find()
+        .all(database)
+        .await
+        .expect("dispatch rows should be readable");
+    assert_eq!(dispatches.len(), 1);
+    let dispatch = dispatches.into_iter().next().expect("dispatch row");
+    assert!(
+        dispatch.message_id == "fixture-message" && dispatch.correlation_id == "fixture-request",
+        "the one dispatch must retain request and message correlation"
+    );
+
+    let runs = entities::assistant_run::Entity::find()
+        .all(database)
+        .await
+        .expect("run rows should be readable");
+    assert_eq!(runs.len(), 1);
+    let run = runs.into_iter().next().expect("run row");
+    assert!(
+        run.run_id == "fixture-run"
+            && run.thread_id == "fixture-thread"
+            && run.origin_message_id == "fixture-message"
+            && run.origin_turn_id == "fixture-turn"
+            && run.generation == 1,
+        "the one run must retain its durable prompt and generation"
+    );
+
+    let turns = entities::conversation_turn::Entity::find()
+        .all(database)
+        .await
+        .expect("turn rows should be readable");
+    assert_eq!(turns.len(), 1);
+    let turn = turns.into_iter().next().expect("turn row");
+    assert!(
+        turn.turn_id == "fixture-turn" && turn.thread_id == "fixture-thread",
+        "the one turn must retain its thread identity"
+    );
+
+    let items = entities::conversation_item::Entity::find()
+        .all(database)
+        .await
+        .expect("conversation item rows should be readable");
+    assert_eq!(items.len(), 2);
+    let assistant_items: Vec<_> = items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::AssistantMessage)
+        .collect();
+    assert_eq!(assistant_items.len(), 1);
+    let user_items: Vec<_> = items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::UserMessage)
+        .collect();
+    assert_eq!(user_items.len(), 1);
+    assert!(
+        user_items[0].source_message_id.as_deref() == Some("fixture-message"),
+        "the prompt item must retain the durable message identity"
+    );
+    let assistant = assistant_items[0];
+    assert!(
+        assistant.item_id != "fixture-user-item"
+            && assistant.turn_id == "fixture-turn"
+            && assistant.run_id.as_deref() == Some("fixture-run"),
+        "the one assistant item must retain its run and turn identity"
+    );
+
+    FixtureIdentitySnapshot {
+        project_id: project.project_id,
+        thread_id: thread.thread_id,
+        request_id: request.request_id,
+        message_id: message.message_id,
+        run_id: run.run_id,
+        turn_id: turn.turn_id,
+        assistant_item_id: assistant.item_id.clone(),
+    }
+}
+
+async fn reopen_fixture_repository(path: &Path) -> (DatabaseConnection, Repository) {
+    let database = connect(
+        SqliteConfig::file(path)
+            .min_connections(1)
+            .max_connections(4)
+            .sqlx_logging(false),
+    )
+    .await
+    .expect("same file-backed repository should reopen");
+    migrate_to_current(&database)
+        .await
+        .expect("reopened repository should be current");
+    (database.clone(), Repository::new(database))
+}
+
+fn assert_fixture_single_engine_pass() {
+    let counts = crate::engine_owner::witness_counts();
+    assert_eq!(counts.spawned, 1);
+    assert_eq!(counts.reaps_observed, 1);
+    assert_eq!(counts.kills_requested, 0);
+    assert_eq!(counts.watchdog_failures_seen, 0);
+    // The configured fixture has one successful health driver and one
+    // successful prompt driver. A reconnect never reaches the engine owner.
+    assert_eq!(counts.control_driver_joined, 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart() {
+    let fixture = registered_fixture_program();
+    let (database, repository, temp) = temp_repository("dispatch-forge-restart").await;
+    let thread_id = ThreadId::parse("fixture-thread").expect("thread id");
+    let message_id = MessageId::parse("fixture-message").expect("message id");
+    seed_project_and_thread_with_profile(
+        &database,
+        &repository,
+        thread_id.as_str(),
+        "fixture-test",
+        30_000,
+        5_000,
+        2_000,
+    )
+    .await;
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("fixture-request").expect("request id"),
+            message_id: message_id.clone(),
+            thread_id: thread_id.clone(),
+            body: MessageBody::parse("hello world").expect("message body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("one fixture message should queue");
+
+    let pki = fixture_forge_pki();
+    let notifier = ConversationCommitNotifier::new();
+    let (listener, handler, listener_cancel, listener_address) =
+        bind_fixture_forge_listener(repository.clone(), notifier.clone(), &pki);
+    let listener_task = tokio::spawn(serve_fixture_forge_listener(
+        listener,
+        handler,
+        Arc::clone(&listener_cancel),
+    ));
+    let first_client = connect_fixture_forge_client(&pki, listener_address).await;
+    let started = subscribe_fixture_forge_client(
+        &first_client.connection,
+        thread_id.clone(),
+        ConversationCursor::default(),
+    )
+    .await;
+    assert_fixture_resumed_subscription(started, &thread_id, ConversationCursor::default());
+
+    crate::engine_owner::reset_witnesses();
+    let config = config_for_fixture_dispatch(notifier.clone()).expect("fixture dispatch policy");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start_with_fixture_for_tests(
+        repository.clone(),
+        temp.path().to_owned(),
+        config,
+        Arc::clone(&process_cancel),
+        ActivityGateImpl::new(),
+        &tokio::runtime::Handle::current(),
+        fixture,
+    );
+
+    let mut delivery_stream = accept_fixture_delivery(&first_client.connection).await;
+    let first_batch = receive_fixture_patch_batch(&mut delivery_stream).await;
+    assert_fixture_stream_batch(&first_batch);
+    let expected_first = fixture_durable_replay_prefix(
+        &repository,
+        &thread_id,
+        first_batch.from_cursor(),
+        first_batch.to_cursor(),
+    )
+    .await;
+    assert!(
+        first_batch == expected_first,
+        "the first Forge batch must equal the durable replay at its cursor"
+    );
+
+    let first_cursor = first_batch.to_cursor();
+    let second_batch = receive_fixture_patch_batch(&mut delivery_stream).await;
+    assert_eq!(second_batch.from_cursor(), first_cursor);
+    assert_fixture_terminal_batch(&second_batch, first_cursor);
+    let expected_terminal = fixture_durable_replay(&repository, &thread_id, first_cursor).await;
+    assert!(
+        second_batch == expected_terminal,
+        "the terminal Forge batch must equal the durable replay"
+    );
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    assert_fixture_single_engine_pass();
+    listener_cancel.cancel();
+    listener_task
+        .await
+        .expect("first Forge listener should shut down cleanly");
+    drop(delivery_stream);
+    shutdown_fixture_forge_client(first_client, b"fixture delivery client complete").await;
+
+    let before_restart = fetch_all(&database).await;
+    assert_fixture_dispatch(&before_restart, &message_id);
+    assert_fixture_run(&before_restart);
+    assert_fixture_transcript(&before_restart, &thread_id);
+    assert_fixture_batch_durability(&database).await;
+    let identity_before = fixture_identity_snapshot(&database).await;
+
+    drop(repository);
+    database
+        .close()
+        .await
+        .expect("original repository should close before restart");
+
+    let (reopened_database, reopened_repository) = reopen_fixture_repository(temp.path()).await;
+    let (restarted_listener, restarted_handler, restarted_cancel, restarted_address) =
+        bind_fixture_forge_listener(reopened_repository.clone(), notifier, &pki);
+    let restarted_listener_task = tokio::spawn(serve_fixture_forge_listener(
+        restarted_listener,
+        restarted_handler,
+        Arc::clone(&restarted_cancel),
+    ));
+    let resumed_client = connect_fixture_forge_client(&pki, restarted_address).await;
+    let restarted =
+        subscribe_fixture_forge_client(&resumed_client.connection, thread_id.clone(), first_cursor)
+            .await;
+    assert_fixture_resumed_subscription(restarted, &thread_id, first_cursor);
+    let mut resumed_stream = accept_fixture_delivery(&resumed_client.connection).await;
+    let resumed_batch = receive_fixture_patch_batch(&mut resumed_stream).await;
+    let final_replay = fixture_durable_replay(&reopened_repository, &thread_id, first_cursor).await;
+    assert!(
+        resumed_batch == final_replay,
+        "restart delivery must be the exact final replay from the first cursor"
+    );
+
+    restarted_cancel.cancel();
+    restarted_listener_task
+        .await
+        .expect("restarted Forge listener should shut down cleanly");
+    drop(resumed_stream);
+    shutdown_fixture_forge_client(resumed_client, b"fixture restart client complete").await;
+
+    let after_restart = fetch_all(&reopened_database).await;
+    assert!(
+        after_restart == before_restart,
+        "listener restart must not mutate or requeue completed durable work"
+    );
+    assert_fixture_dispatch(&after_restart, &message_id);
+    assert_fixture_run(&after_restart);
+    assert_fixture_transcript(&after_restart, &thread_id);
+    assert_fixture_batch_durability(&reopened_database).await;
+    let identity_after = fixture_identity_snapshot(&reopened_database).await;
+    assert!(
+        identity_after == identity_before,
+        "restart must preserve project, thread, request, message, run, turn, and assistant identity"
+    );
+
+    drop(reopened_repository);
+    reopened_database
+        .close()
+        .await
+        .expect("restarted repository should close cleanly");
+    assert_fixture_single_engine_pass();
 }
