@@ -1191,6 +1191,28 @@ fn assert_fixture_custody() {
     assert_eq!(counts.kills_requested, 0);
 }
 
+async fn sample_fixture_activity(
+    activity: ActivityGateImpl,
+    observed_active: Arc<AtomicBool>,
+    sample_cancel: Arc<CancelHandle>,
+) {
+    loop {
+        if activity
+            .snapshot()
+            .expect("fixture activity should remain readable")
+            .active_work_count()
+            != 0
+        {
+            observed_active.store(true, Ordering::Relaxed);
+        }
+        tokio::select! {
+            biased;
+            () = sample_cancel.wait() => break,
+            () = tokio::task::yield_now() => {},
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_fixture_composes_claim_through_durable_settlement() {
     let fixture = registered_fixture_program();
@@ -1229,28 +1251,11 @@ async fn dispatch_fixture_composes_claim_through_durable_settlement() {
     let activity = ActivityGateImpl::new();
     let observed_active = Arc::new(AtomicBool::new(false));
     let sample_cancel = Arc::new(CancelHandle::new());
-    let sampler = {
-        let activity = activity.clone();
-        let observed_active = Arc::clone(&observed_active);
-        let sample_cancel = Arc::clone(&sample_cancel);
-        tokio::spawn(async move {
-            loop {
-                if activity
-                    .snapshot()
-                    .expect("fixture activity should remain readable")
-                    .active_work_count()
-                    != 0
-                {
-                    observed_active.store(true, Ordering::Relaxed);
-                }
-                tokio::select! {
-                    biased;
-                    () = sample_cancel.wait() => break,
-                    () = tokio::task::yield_now() => {},
-                }
-            }
-        })
-    };
+    let sampler = tokio::spawn(sample_fixture_activity(
+        activity.clone(),
+        Arc::clone(&observed_active),
+        Arc::clone(&sample_cancel),
+    ));
     let mut dispatcher = NativeRunDispatcher::start_with_fixture_for_tests(
         repository.clone(),
         temp.path().to_owned(),
