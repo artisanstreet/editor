@@ -363,6 +363,7 @@ pub struct ConversationSurface {
     pending_viewport_observation: Option<ViewportObservation>,
     last_viewport_geometry: Option<ViewportGeometry>,
     viewport_observation_scheduled: bool,
+    viewport_next_frame_scheduled: bool,
     actions: Vec<ConversationSurfaceAction>,
 }
 
@@ -410,6 +411,7 @@ impl ConversationSurface {
             pending_viewport_observation: None,
             last_viewport_geometry: None,
             viewport_observation_scheduled: false,
+            viewport_next_frame_scheduled: false,
             actions: Vec::new(),
         }
     }
@@ -589,42 +591,57 @@ impl ConversationSurface {
         true
     }
 
-    fn schedule_viewport_observation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.viewport_observation_scheduled {
+    fn observe_current_viewport(&mut self, cx: &mut Context<Self>) {
+        self.retry_pending_viewport_observation(cx);
+
+        let offset = self.scroll_handle.offset();
+        let bounds = self.scroll_handle.bounds();
+        let max_offset = self.scroll_handle.max_offset();
+        let scroll_top = -f64::from(offset.y);
+        let viewport_height = f64::from(bounds.size.height);
+        let scroll_height = viewport_height + f64::from(max_offset.height);
+        let geometry = ViewportGeometry {
+            scroll_top,
+            viewport_height,
+            scroll_height,
+        };
+        if self.last_viewport_geometry == Some(geometry) {
             return;
         }
-        self.viewport_observation_scheduled = true;
 
+        self.last_viewport_geometry = Some(geometry);
+        let observation = ViewportObservation {
+            first_visible: None,
+            last_visible: None,
+            at_bottom: conversation_is_following(scroll_top, scroll_height, viewport_height),
+        };
+        let _ = self.observe_viewport(observation, cx);
+    }
+
+    fn schedule_viewport_observation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.viewport_observation_scheduled {
+            self.viewport_observation_scheduled = true;
+            let entity = cx.entity().downgrade();
+            // Read after GPUI has painted the current layout so the initial
+            // geometry is observable even when an otherwise idle platform
+            // does not deliver a later frame callback.
+            window.defer(cx, move |_, app| {
+                let _ = entity.update(app, |surface, cx| {
+                    surface.viewport_observation_scheduled = false;
+                    surface.observe_current_viewport(cx);
+                });
+            });
+        }
+
+        if self.viewport_next_frame_scheduled {
+            return;
+        }
+        self.viewport_next_frame_scheduled = true;
         let entity = cx.entity().downgrade();
         window.on_next_frame(move |_, app| {
             let _ = entity.update(app, |surface, cx| {
-                surface.viewport_observation_scheduled = false;
-                let offset = surface.scroll_handle.offset();
-                let bounds = surface.scroll_handle.bounds();
-                let max_offset = surface.scroll_handle.max_offset();
-                let scroll_top = -f64::from(offset.y);
-                let viewport_height = f64::from(bounds.size.height);
-                let scroll_height = viewport_height + f64::from(max_offset.height);
-                let geometry = ViewportGeometry {
-                    scroll_top,
-                    viewport_height,
-                    scroll_height,
-                };
-                let geometry_changed = surface.last_viewport_geometry != Some(geometry);
-                surface.last_viewport_geometry = Some(geometry);
-                if !geometry_changed {
-                    return;
-                }
-                let observation = ViewportObservation {
-                    first_visible: None,
-                    last_visible: None,
-                    at_bottom: conversation_is_following(
-                        scroll_top,
-                        scroll_height,
-                        viewport_height,
-                    ),
-                };
-                let _ = surface.observe_viewport(observation, cx);
+                surface.viewport_next_frame_scheduled = false;
+                surface.observe_current_viewport(cx);
             });
         });
     }

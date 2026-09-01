@@ -19,7 +19,7 @@ use conversation_surface::{
     ViewportObservation, block_selector, changed_file_selector, file_change_status_label,
     format_elapsed_millis, ordered_block_kinds, steering_selector, turn_selector, turn_status_copy,
 };
-use gpui::{Modifiers, TestAppContext, point, px, size};
+use gpui::{KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
 fn scene_id(value: &str) -> SceneId {
     SceneId::parse(value).expect("scene id is valid")
@@ -120,6 +120,15 @@ fn drain_surface_actions(
     cx: &mut gpui::VisualTestContext,
 ) -> Vec<ConversationSurfaceAction> {
     cx.update(|_, app| surface.update(app, |surface, _| surface.take_actions()))
+}
+
+fn complete_key_press(cx: &mut VisualTestContext, key: &'static str) {
+    // Pinned GPUI's simulate_keystrokes sends the down half; Button's shared
+    // Enter/Space activation is synthesized from the physical key release.
+    cx.simulate_keystrokes(key);
+    cx.simulate_event(KeyUpEvent {
+        keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
+    });
 }
 
 fn tall_scene() -> ConversationScene {
@@ -692,7 +701,8 @@ fn jump_to_latest_is_an_overlay_and_pointer_keyboard_activation_is_typed(cx: &mu
         window.focus(&focus);
         window.focus_next();
     });
-    cx.simulate_keystrokes("enter space");
+    complete_key_press(cx, "enter");
+    complete_key_press(cx, "space");
     let keyboard_actions = drain_surface_actions(&surface, cx);
     assert_eq!(
         keyboard_actions
@@ -999,7 +1009,6 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
         .expect("replacement disclosure trigger must remain mounted");
     cx.simulate_click(trigger.center(), Modifiers::none());
     cx.run_until_parked();
-    let _ = drain_surface_actions(&surface, cx);
 
     cx.update(|_, app| {
         surface.update(app, |surface, surface_cx| {
