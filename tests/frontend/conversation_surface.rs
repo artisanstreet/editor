@@ -725,12 +725,12 @@ fn viewport_geometry_reports_top_near_bottom_and_detached_positions(cx: &mut Tes
     let (max_height, viewport_height) = cx.update(|_, app| {
         let surface = surface.read(app);
         (
-            f64::from(surface.scroll_handle().max_offset().height),
-            f64::from(surface.scroll_handle().bounds().size.height),
+            surface.scroll_handle().max_offset().height,
+            surface.scroll_handle().bounds().size.height,
         )
     });
-    assert!(max_height > viewport_height * 0.06 + 64.0);
-    let tolerance = (viewport_height * 0.06).max(64.0);
+    assert!(max_height > viewport_height * 0.06 + px(64.0));
+    let tolerance = (viewport_height * 0.06).max(px(64.0));
     let initial_observations = drain_surface_actions(&surface, cx);
     let initial_observation = initial_observations.iter().find_map(|action| match action {
         ConversationSurfaceAction::ViewportObserved(observation) => Some(observation),
@@ -741,12 +741,12 @@ fn viewport_geometry_reports_top_near_bottom_and_detached_positions(cx: &mut Tes
         Some(false)
     );
     let positions = [
-        (max_height - (tolerance - 1.0), true),
-        (max_height - (tolerance + 1.0), false),
+        (max_height - (tolerance - px(1.0)), true),
+        (max_height - (tolerance + px(1.0)), false),
     ];
 
     for (scroll_top, expected_at_bottom) in positions {
-        handle.set_offset(point(px(0.0), px(-(scroll_top as f32))));
+        handle.set_offset(point(px(0.0), -scroll_top));
         cx.update(|_, app| surface.update(app, |_, surface_cx| surface_cx.notify()));
         cx.run_until_parked();
         let observations = drain_surface_actions(&surface, cx);
