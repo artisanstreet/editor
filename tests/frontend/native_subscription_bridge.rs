@@ -215,9 +215,10 @@ fn started_cursor_rejects_stale_thread_and_backwards_cursor_without_mutation() {
         .expect("accepted cursor");
     custody.on_subscribe(thread.clone(), Some(pending));
 
-    let stale_started = ConversationSubscriptionStarted::Fresh(ConversationSubscriptionStart::new(
-        snapshot_for(&stale_thread, cursor(30)),
-    ));
+    let stale_started = ConversationSubscriptionStarted::Resumed {
+        thread_id: stale_thread,
+        cursor: pending,
+    };
     let before_stale = custody.clone();
     let stale_error = custody
         .on_started(Some(pending), &stale_started)
