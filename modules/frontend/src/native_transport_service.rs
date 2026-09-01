@@ -1064,8 +1064,8 @@ enum RequestAttemptError {
     },
     Terminal {
         failure: ServiceFailure,
-        /// Whether the consumed session was lost during the request
-        /// exchange and may be replaced for the durable-save retry.
+        /// Whether the consumed session was lost during the request exchange
+        /// and is eligible for the one local-session recovery owner.
         retryable_local_session_loss: bool,
     },
 }
@@ -1084,12 +1084,47 @@ struct PeerFailure {
     retryable: bool,
 }
 
-/// Redacted request failure used by the intake policy.
+/// Redacted request failure used by request and intake policies.
 #[derive(Clone, Copy)]
 struct RequestFailure {
     failure: ServiceFailure,
     peer: Option<PeerFailure>,
     retryable_local_session_loss: bool,
+}
+
+/// Subscription operation whose request failure is being routed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionRequestKind {
+    /// A new or recovery subscription request.
+    Subscribe,
+    /// Retirement of the current subscription.
+    Unsubscribe,
+}
+
+/// Command-loop disposition for a subscription request failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionFailureDisposition {
+    /// Publish one delivery loss and let the service reconnect.
+    RecoverDelivery,
+    /// Propagate the failure as terminal.
+    Terminal,
+}
+
+/// Classifies one subscription request failure without inferring retryability
+/// from its public category alone.
+pub const fn subscription_failure_disposition(
+    operation: SubscriptionRequestKind,
+    failure: ServiceFailure,
+    retryable_local_session_loss: bool,
+) -> SubscriptionFailureDisposition {
+    if matches!(operation, SubscriptionRequestKind::Subscribe)
+        && matches!(failure.category, ServiceFailureCategory::LocalSession)
+        && retryable_local_session_loss
+    {
+        SubscriptionFailureDisposition::RecoverDelivery
+    } else {
+        SubscriptionFailureDisposition::Terminal
+    }
 }
 
 impl RequestFailure {
@@ -2167,7 +2202,7 @@ async fn handle_subscribe(
     events: &SyncSender<NativeTransportEvent>,
     thread_id: ThreadId,
     after: Option<ConversationCursor>,
-) -> Result<(), ServiceFailure> {
+) -> Result<(), RequestFailure> {
     // Thread switch tombstones old thread but does not restart the session delivery receiver.
     // Do not create an empty projection authority; the ConversationHost is the authority.
     runtime.custody.on_subscribe(thread_id.clone(), after);
@@ -2180,9 +2215,10 @@ async fn handle_subscribe(
         .session
         .as_ref()
         .map(ClientSession::protocol_version)
-        .ok_or(ServiceFailure::local_session())?;
-    let (envelope, request_id) = make_request_frame(frames, protocol_version, request)
-        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+        .ok_or(ServiceFailure::local_session())
+        .map_err(RequestFailure::terminal)?;
+    let (envelope, request_id) =
+        make_request_frame(frames, protocol_version, request).map_err(RequestFailure::terminal)?;
     let expected = ExpectedResponse::ConversationSubscriptionStarted {
         thread_id: thread_id.clone(),
         request_id: request_id.clone(),
@@ -2190,7 +2226,8 @@ async fn handle_subscribe(
     let session = runtime
         .session
         .take()
-        .ok_or(ServiceFailure::local_session())?;
+        .ok_or(ServiceFailure::local_session())
+        .map_err(RequestFailure::terminal)?;
     let attempt = request_envelope_payload(
         session,
         envelope,
@@ -2206,7 +2243,7 @@ async fn handle_subscribe(
                     ServiceFailureStage::Request,
                     ServiceFailureCategory::Integrity,
                 );
-                return Err(failure);
+                return Err(RequestFailure::terminal(failure));
             }
             // Do not install into a second projection; emit directly.
             // Cursor will be advanced only after explicit AcknowledgePatch from application.
@@ -2218,9 +2255,12 @@ async fn handle_subscribe(
                     started,
                 },
             )
+            .map_err(RequestFailure::terminal)
         }
-        Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
-        Err(error) => Err(error.into()),
+        Ok(_) => Err(RequestFailure::terminal(ServiceFailure::invalid(
+            ServiceFailureStage::Request,
+        ))),
+        Err(error) => Err(error),
     }
 }
 
@@ -2343,12 +2383,23 @@ async fn command_loop_with_delivery(
                     }
                     Some(NativeTransportCommand::Subscribe { thread_id, after }) => {
                         if let Err(failure) = handle_subscribe(runtime, frames, events, thread_id, after).await {
-                            // Only a real local-session loss owns delivery recovery. All other
-                            // request failures are terminal and must not trigger a retry storm.
-                            if failure.category == ServiceFailureCategory::LocalSession {
-                                handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
-                            } else {
-                                return Err(failure);
+                            match subscription_failure_disposition(
+                                SubscriptionRequestKind::Subscribe,
+                                failure.failure,
+                                failure.retryable_local_session_loss,
+                            ) {
+                                SubscriptionFailureDisposition::RecoverDelivery => {
+                                    handle_delivery_lost_reconnect(
+                                        runtime,
+                                        frames,
+                                        events,
+                                        failure.failure,
+                                    )
+                                    .await?;
+                                }
+                                SubscriptionFailureDisposition::Terminal => {
+                                    return Err(failure.failure);
+                                }
                             }
                         }
                     }

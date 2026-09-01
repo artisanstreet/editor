@@ -7,8 +7,9 @@ use artisan_domain::{
 };
 use artisan_frontend::native_transport_service::{
     CommandSendError, NativeTransportCommand, NativeTransportEvent, ServiceFailure,
-    ServiceFailureCategory, ServiceFailureStage, SubscriptionCustody, try_send_command,
-    validate_started_correlation, validate_uni_envelope,
+    ServiceFailureCategory, ServiceFailureStage, SubscriptionCustody,
+    SubscriptionFailureDisposition, SubscriptionRequestKind, subscription_failure_disposition,
+    try_send_command, validate_started_correlation, validate_uni_envelope,
 };
 use artisan_protocol::{
     ConversationSubscriptionStart, ConversationSubscriptionStarted, FrameId, ProtocolVersion,
@@ -195,18 +196,40 @@ fn delivery_loss_reconnect_leaves_one_subscribe_to_the_mounted_host() {
 }
 
 #[test]
-fn non_retryable_request_failure_is_terminal_not_recoverable_loss() {
-    let failure = ServiceFailure {
+fn subscription_failure_classifier_requires_a_true_local_loss_bit() {
+    let local_session = ServiceFailure {
         stage: ServiceFailureStage::Request,
-        category: ServiceFailureCategory::Peer,
+        category: ServiceFailureCategory::LocalSession,
     };
-    let terminal = NativeTransportEvent::Failed(failure);
-    assert!(matches!(&terminal, NativeTransportEvent::Failed(actual) if *actual == failure));
-    assert!(!matches!(&terminal, NativeTransportEvent::DeliveryLost(_)));
+    assert_eq!(
+        subscription_failure_disposition(SubscriptionRequestKind::Subscribe, local_session, true,),
+        SubscriptionFailureDisposition::RecoverDelivery
+    );
+    assert_eq!(
+        subscription_failure_disposition(SubscriptionRequestKind::Subscribe, local_session, false,),
+        SubscriptionFailureDisposition::Terminal
+    );
+
+    for category in [
+        ServiceFailureCategory::Peer,
+        ServiceFailureCategory::Integrity,
+    ] {
+        assert_eq!(
+            subscription_failure_disposition(
+                SubscriptionRequestKind::Subscribe,
+                ServiceFailure {
+                    stage: ServiceFailureStage::Request,
+                    category,
+                },
+                true,
+            ),
+            SubscriptionFailureDisposition::Terminal
+        );
+    }
 }
 
 #[test]
-fn unsubscribe_failure_retires_custody_without_a_recovery_subscribe() {
+fn unsubscribe_failure_is_terminal_after_custody_retirement() {
     let mut custody = SubscriptionCustody::new();
     let thread = thread_id("thread-unsubscribe");
     let accepted = cursor(12);
@@ -221,16 +244,19 @@ fn unsubscribe_failure_retires_custody_without_a_recovery_subscribe() {
     assert_eq!(custody.pending_after(), None);
     assert_eq!(custody.last_accepted_cursor(), None);
 
-    // A failed retirement is terminal and therefore cannot produce the one
-    // recovery command reserved for an actual delivery/session reconnect.
-    let failure = ServiceFailure {
-        stage: ServiceFailureStage::Request,
-        category: ServiceFailureCategory::LocalSession,
-    };
-    let terminal = NativeTransportEvent::Failed(failure);
-    assert!(matches!(terminal, NativeTransportEvent::Failed(_)));
-    let recovery_commands: Vec<NativeTransportCommand> = Vec::new();
-    assert!(recovery_commands.is_empty());
+    // The production decision keeps every unsubscribe failure terminal even if
+    // a request were incorrectly marked as a local-session loss.
+    assert_eq!(
+        subscription_failure_disposition(
+            SubscriptionRequestKind::Unsubscribe,
+            ServiceFailure {
+                stage: ServiceFailureStage::Request,
+                category: ServiceFailureCategory::LocalSession,
+            },
+            true,
+        ),
+        SubscriptionFailureDisposition::Terminal
+    );
 }
 
 #[test]
