@@ -431,16 +431,16 @@ impl NativeRunDispatcher {
         let shutdown_budget = config.shutdown_budget;
         let stop = Arc::new(CancelHandle::new());
         let owner = EngineOwner::start_configured(config.queue_capacity, runtime);
-        let join = runtime.spawn(dispatch_loop(
+        let join = runtime.spawn(dispatch_loop(DispatchLoopContext {
             repository,
             database_path,
             config,
-            Arc::clone(&stop),
+            stop: Arc::clone(&stop),
             process_cancel,
             owner,
             activity,
             launch_mode,
-        ));
+        }));
         Self {
             stop,
             shutdown_budget,
@@ -492,6 +492,17 @@ impl Drop for NativeRunDispatcher {
 
 struct DispatchLoopExit {
     owner: EngineOwnerShutdown,
+}
+
+struct DispatchLoopContext {
+    repository: Repository,
+    database_path: PathBuf,
+    config: NativeRunDispatcherConfig,
+    stop: Arc<CancelHandle>,
+    process_cancel: Arc<CancelHandle>,
+    owner: EngineOwner,
+    activity: ActivityGateImpl,
+    launch_mode: DispatchLaunchMode,
 }
 
 struct LiveRecoveryPatchSource {
@@ -589,16 +600,17 @@ async fn run_final_recovery_page(
     let _ = perform_live_recovery_page(repository, config, operated_at).await;
 }
 
-async fn dispatch_loop(
-    repository: Repository,
-    database_path: PathBuf,
-    config: NativeRunDispatcherConfig,
-    stop: Arc<CancelHandle>,
-    process_cancel: Arc<CancelHandle>,
-    mut owner: EngineOwner,
-    activity: ActivityGateImpl,
-    mut launch_mode: DispatchLaunchMode,
-) -> DispatchLoopExit {
+async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
+    let DispatchLoopContext {
+        repository,
+        database_path,
+        config,
+        stop,
+        process_cancel,
+        mut owner,
+        activity,
+        mut launch_mode,
+    } = context;
     let origin = SystemCommandOrigin;
     // `AcceptedTurn::finish` can report an unresolved reap while the owner
     // quarantines a retained child. Keep its activity lease until owner
@@ -859,9 +871,7 @@ async fn execute_claim(
         context.requeue("dispatcher stopping").await;
         return None;
     }
-    let Some(loaded) = load_claim(context, launch_mode).await else {
-        return None;
-    };
+    let loaded = load_claim(context, launch_mode).await?;
     let ids = match mint_claim_ids(
         loaded.context.origin,
         loaded.context.claimed.updated_at,
@@ -873,9 +883,7 @@ async fn execute_claim(
             return None;
         }
     };
-    let Some(launched) = launch_claim(loaded, ids).await else {
-        return None;
-    };
+    let launched = launch_claim(loaded, ids).await?;
     let (prepared, custody) = admit_claim(launched).await;
     let Some(prepared) = prepared else {
         return match custody {
@@ -1110,16 +1118,13 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
     let Ok(mut turn) = turn_result else {
         return (None, ClaimCustody::Released);
     };
-    let session = match turn.prepare().await {
-        Ok(session) => session,
-        Err(_) => {
-            let custody = if is_unresolved_reap(&turn.finish().await) {
-                ClaimCustody::Retained
-            } else {
-                ClaimCustody::Released
-            };
-            return (None, custody);
-        }
+    let Ok(session) = turn.prepare().await else {
+        let custody = if is_unresolved_reap(&turn.finish().await) {
+            ClaimCustody::Retained
+        } else {
+            ClaimCustody::Released
+        };
+        return (None, custody);
     };
     (
         Some(PreparedClaim {
