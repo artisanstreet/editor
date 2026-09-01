@@ -9,7 +9,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use artisan_domain::RequestId;
 use artisan_protocol::{
@@ -37,6 +37,156 @@ const PENDING_STATE_DETAIL: &str = "native lifecycle control is settling another
 pub struct LifecycleController {
     state: Arc<Mutex<ControlState>>,
     activity: Option<Arc<dyn ActivityGate>>,
+}
+
+/// The one process-wide activity boundary shared by lifecycle control and the
+/// native dispatcher.
+///
+/// The mutex is deliberately synchronous: every operation on the gate is a
+/// short, non-awaiting linearization point. The gate owns no operation data;
+/// the lease is the only custody that represents one active dispatch.
+#[derive(Clone)]
+pub(crate) struct ActivityGateImpl {
+    state: Arc<StdMutex<ActivityState>>,
+}
+
+/// RAII custody for one admitted unit of native work.
+///
+/// This value is intentionally linear. In particular, cloning a gate shares
+/// admission state, but cloning a lease could release the same unit twice.
+#[must_use]
+pub(crate) struct ActivityLease {
+    gate: ActivityGateImpl,
+}
+
+struct ActivityState {
+    active_work_count: u32,
+    admission: ActivityAdmission,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivityAdmission {
+    Open,
+    ProvisionalStop,
+    Sealed,
+}
+
+impl ActivityGateImpl {
+    /// Creates an open gate with no active native work.
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Arc::new(StdMutex::new(ActivityState {
+                active_work_count: 0,
+                admission: ActivityAdmission::Open,
+            })),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_active_work_count(active_work_count: u32) -> Self {
+        Self {
+            state: Arc::new(StdMutex::new(ActivityState {
+                active_work_count,
+                admission: ActivityAdmission::Open,
+            })),
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ActivityState> {
+        match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Atomically admits one unit of work.
+    pub(crate) fn acquire(&self) -> Result<ActivityLease, ActivityGateError> {
+        let mut state = self.lock_state();
+        if !matches!(state.admission, ActivityAdmission::Open) {
+            return Err(ActivityGateError::Unavailable);
+        }
+        let active_work_count = state
+            .active_work_count
+            .checked_add(1)
+            .ok_or(ActivityGateError::CountOutOfRange)?;
+        state.active_work_count = active_work_count;
+        drop(state);
+        Ok(ActivityLease { gate: self.clone() })
+    }
+
+    fn release(&self) {
+        let mut state = self.lock_state();
+        state.active_work_count = state
+            .active_work_count
+            .checked_sub(1)
+            .expect("an activity lease must release an admitted unit");
+    }
+
+    fn rollback_stop(&self) {
+        let mut state = self.lock_state();
+        debug_assert_eq!(state.admission, ActivityAdmission::ProvisionalStop);
+        state.admission = ActivityAdmission::Open;
+    }
+
+    fn commit_stop(&self) {
+        let mut state = self.lock_state();
+        debug_assert_eq!(state.admission, ActivityAdmission::ProvisionalStop);
+        state.admission = ActivityAdmission::Sealed;
+    }
+}
+
+impl Drop for ActivityLease {
+    fn drop(&mut self) {
+        self.gate.release();
+    }
+}
+
+struct ActivityStopReservationImpl {
+    gate: Option<ActivityGateImpl>,
+}
+
+impl ActivityGate for ActivityGateImpl {
+    fn snapshot(&self) -> Result<ActivitySnapshot, ActivityGateError> {
+        let state = self.lock_state();
+        Ok(ActivitySnapshot::new(state.active_work_count))
+    }
+
+    fn begin_stop(&self, require_idle: bool) -> Result<StopAdmission, ActivityGateError> {
+        let mut state = self.lock_state();
+        if require_idle && state.active_work_count != 0 {
+            return Ok(StopAdmission::Busy {
+                active_work_count: state.active_work_count,
+            });
+        }
+        if !matches!(state.admission, ActivityAdmission::Open) {
+            return Err(ActivityGateError::Unavailable);
+        }
+        state.admission = ActivityAdmission::ProvisionalStop;
+        drop(state);
+        Ok(StopAdmission::Accepted {
+            reservation: Box::new(ActivityStopReservationImpl {
+                gate: Some(self.clone()),
+            }),
+        })
+    }
+}
+
+impl ActivityStopReservation for ActivityStopReservationImpl {
+    fn commit(mut self: Box<Self>) {
+        let gate = self
+            .gate
+            .take()
+            .expect("an activity stop reservation commits at most once");
+        gate.commit_stop();
+    }
+}
+
+impl Drop for ActivityStopReservationImpl {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.rollback_stop();
+        }
+    }
 }
 
 /// The narrow activity seam owned by the lifecycle activity packet.

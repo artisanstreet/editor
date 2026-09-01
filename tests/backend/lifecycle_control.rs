@@ -1,15 +1,15 @@
 //! Focused state-machine tests for the backend lifecycle controller.
 
 use std::sync::{
-    Arc,
+    Arc, Barrier,
     atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 };
 
 use super::{
-    ActivityGate, ActivityGateError, ActivitySnapshot, ActivityStopReservation, CancelHandle,
-    ErrorCode, LifecycleControlReceipt, LifecycleController, LifecycleDispatch, LifecycleRequest,
-    LifecycleResponse, LifecycleState, LifecycleStatus, LifecycleStopDisposition, RequestId,
-    StopAdmission,
+    ActivityGate, ActivityGateError, ActivityGateImpl, ActivitySnapshot, ActivityStopReservation,
+    CancelHandle, ErrorCode, LifecycleControlReceipt, LifecycleController, LifecycleDispatch,
+    LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus, LifecycleStopDisposition,
+    RequestId, StopAdmission,
 };
 use artisan_protocol::ProtocolValueError;
 
@@ -440,4 +440,205 @@ async fn activity_errors_are_payload_free_and_bounded() {
     assert_eq!(failure.code, ErrorCode::Internal);
     assert!(!failure.retryable);
     assert!(!format!("{out_of_range:?}").contains("count-error"));
+}
+
+#[test]
+fn concrete_activity_gate_counts_and_rejects_overflow_without_mutation() {
+    let gate = ActivityGateImpl::new();
+    assert_eq!(
+        gate.snapshot()
+            .expect("a new activity gate should be readable")
+            .active_work_count(),
+        0
+    );
+
+    let lease = gate.acquire().expect("open activity should admit work");
+    assert_eq!(
+        gate.snapshot()
+            .expect("an admitted activity gate should be readable")
+            .active_work_count(),
+        1
+    );
+    drop(lease);
+    assert_eq!(
+        gate.snapshot()
+            .expect("released activity should be readable")
+            .active_work_count(),
+        0
+    );
+
+    let full = ActivityGateImpl::with_active_work_count(u32::MAX);
+    assert!(matches!(
+        full.acquire(),
+        Err(ActivityGateError::CountOutOfRange)
+    ));
+    assert_eq!(
+        full.snapshot()
+            .expect("overflow must not poison the activity gate")
+            .active_work_count(),
+        u32::MAX
+    );
+}
+
+#[test]
+fn concrete_activity_gate_rolls_back_and_commits_stop_reservations() {
+    let gate = ActivityGateImpl::new();
+    let reservation = match gate
+        .begin_stop(true)
+        .expect("an open idle gate should accept a stop")
+    {
+        StopAdmission::Accepted { reservation } => reservation,
+        StopAdmission::Busy { active_work_count } => {
+            panic!("new gate unexpectedly reported {active_work_count} active units")
+        }
+    };
+    assert!(matches!(
+        gate.acquire(),
+        Err(ActivityGateError::Unavailable)
+    ));
+    drop(reservation);
+
+    let lease = gate
+        .acquire()
+        .expect("dropping a provisional stop should reopen admission");
+    drop(lease);
+
+    let reservation = match gate
+        .begin_stop(true)
+        .expect("the reopened idle gate should accept another stop")
+    {
+        StopAdmission::Accepted { reservation } => reservation,
+        StopAdmission::Busy { active_work_count } => {
+            panic!("reopened gate unexpectedly reported {active_work_count} active units")
+        }
+    };
+    reservation.commit();
+    assert!(matches!(
+        gate.acquire(),
+        Err(ActivityGateError::Unavailable)
+    ));
+    assert_eq!(
+        gate.snapshot()
+            .expect("a sealed gate should remain readable")
+            .active_work_count(),
+        0
+    );
+}
+
+#[test]
+fn concrete_activity_gate_forced_stop_seals_around_existing_work() {
+    let gate = ActivityGateImpl::new();
+    let lease = gate.acquire().expect("existing work should be admitted");
+    match gate
+        .begin_stop(true)
+        .expect("idle stop should have a concrete busy result")
+    {
+        StopAdmission::Busy { active_work_count } => assert_eq!(active_work_count, 1),
+        StopAdmission::Accepted { reservation } => {
+            drop(reservation);
+            panic!("idle stop unexpectedly reserved active work");
+        }
+    }
+    let reservation = match gate
+        .begin_stop(false)
+        .expect("forced stop should reserve an active gate")
+    {
+        StopAdmission::Accepted { reservation } => reservation,
+        StopAdmission::Busy { active_work_count } => {
+            panic!("forced stop unexpectedly reported {active_work_count} active units")
+        }
+    };
+    assert_eq!(
+        gate.snapshot()
+            .expect("forced reservation should preserve active work")
+            .active_work_count(),
+        1
+    );
+    assert!(matches!(
+        gate.acquire(),
+        Err(ActivityGateError::Unavailable)
+    ));
+    reservation.commit();
+    drop(lease);
+    assert_eq!(
+        gate.snapshot()
+            .expect("sealed forced stop should remain readable")
+            .active_work_count(),
+        0
+    );
+    assert!(matches!(
+        gate.acquire(),
+        Err(ActivityGateError::Unavailable)
+    ));
+}
+
+#[test]
+fn concrete_activity_gate_idle_stop_and_acquire_have_one_linearized_winner() {
+    for _ in 0..16 {
+        let gate = Arc::new(ActivityGateImpl::new());
+        let barrier = Arc::new(Barrier::new(2));
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        let acquire_gate = Arc::clone(&gate);
+        let acquire_barrier = Arc::clone(&barrier);
+        let acquire_sender = sender.clone();
+        let acquire_thread = std::thread::spawn(move || {
+            let lease = acquire_gate.acquire();
+            acquire_barrier.wait();
+            let acquired = match lease {
+                Ok(lease) => {
+                    acquire_sender
+                        .send(true)
+                        .expect("linearization receiver should remain open");
+                    drop(lease);
+                    true
+                }
+                Err(ActivityGateError::Unavailable) => {
+                    acquire_sender
+                        .send(false)
+                        .expect("linearization receiver should remain open");
+                    false
+                }
+                Err(error) => panic!("unexpected acquisition error: {error:?}"),
+            };
+            acquired
+        });
+
+        let stop_gate = Arc::clone(&gate);
+        let stop_barrier = Arc::clone(&barrier);
+        let stop_thread = std::thread::spawn(move || {
+            let admission = stop_gate
+                .begin_stop(true)
+                .expect("the concurrent stop should have a gate result");
+            stop_barrier.wait();
+            let accepted = matches!(&admission, StopAdmission::Accepted { .. });
+            sender
+                .send(accepted)
+                .expect("linearization receiver should remain open");
+            drop(admission);
+            accepted
+        });
+
+        let acquire_won = acquire_thread
+            .join()
+            .expect("acquisition race thread should finish");
+        let stop_won = stop_thread.join().expect("stop race thread should finish");
+        let mut observed = vec![
+            receiver.recv().expect("first race result should arrive"),
+            receiver.recv().expect("second race result should arrive"),
+        ];
+        observed.sort_unstable();
+        assert_eq!(observed, vec![false, true]);
+        assert_ne!(acquire_won, stop_won);
+        assert_eq!(
+            gate.snapshot()
+                .expect("rolled-back race should be readable")
+                .active_work_count(),
+            0
+        );
+        let lease = gate
+            .acquire()
+            .expect("the losing stop or released acquisition should leave the gate open");
+        drop(lease);
+    }
 }

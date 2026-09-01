@@ -45,11 +45,14 @@ use artisan_domain::{
 };
 use artisan_native_engine::NativeOpenCode2Authority;
 use artisan_protocol::{
-    APPLICATION_PROTOCOL_VERSION, FrameId, Hello, HelloCredential, LOCAL_CAPABILITY_BYTES,
-    LocalCapability, ProtocolVersion, VersionOffer, WireEnvelope, WireEnvelopeBody,
+    APPLICATION_PROTOCOL_VERSION, ClientRequest, FrameId, Hello, HelloCredential,
+    LOCAL_CAPABILITY_BYTES, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
+    LifecycleStopDisposition, LocalCapability, ProtocolVersion, ResponsePayload, ServerResponse,
+    VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
-    CancelHandle, LOOPBACK_SERVER_NAME, PinnedIdentity, client_config, client_handshake,
+    CancelHandle, EnvelopeReceiveError, FrameError, LOOPBACK_SERVER_NAME, PinnedIdentity,
+    client_config, client_handshake, receive_envelope, send_envelope,
 };
 use quinn::{Connection, Endpoint, VarInt};
 use rustls_pki_types::CertificateDer;
@@ -614,7 +617,7 @@ fn client_endpoint(credentials: &Credentials) -> Endpoint {
     artisan_transport::bind_loopback_client(client).expect("test client should bind")
 }
 
-fn hello_envelope() -> WireEnvelope {
+fn hello_envelope_with_lifecycle(supports_lifecycle_control: bool) -> WireEnvelope {
     WireEnvelope {
         protocol_version: ProtocolVersion::V1,
         frame_id: FrameId::parse("forge-test-hello").expect("test frame id should be valid"),
@@ -623,12 +626,20 @@ fn hello_envelope() -> WireEnvelope {
             supported_versions: VersionOffer::new(vec![APPLICATION_PROTOCOL_VERSION])
                 .expect("test version offer should be valid"),
             credential: HelloCredential::Initial(LocalCapability::from_bytes(TEST_CAPABILITY)),
-            supports_lifecycle_control: false,
+            supports_lifecycle_control,
         }),
     }
 }
 
-async fn authenticate_client(client: &Endpoint, address: SocketAddr) -> Connection {
+fn hello_envelope() -> WireEnvelope {
+    hello_envelope_with_lifecycle(false)
+}
+
+async fn authenticate_client_with_offer(
+    client: &Endpoint,
+    address: SocketAddr,
+    supports_lifecycle_control: bool,
+) -> (Connection, bool) {
     let connecting = client
         .connect(address, LOOPBACK_SERVER_NAME)
         .expect("test client should begin connecting");
@@ -640,16 +651,72 @@ async fn authenticate_client(client: &Endpoint, address: SocketAddr) -> Connecti
         .open_bi()
         .await
         .expect("test control stream should open");
-    tokio::time::timeout(
+    let hello = if supports_lifecycle_control {
+        hello_envelope_with_lifecycle(true)
+    } else {
+        hello_envelope()
+    };
+    let welcome = tokio::time::timeout(
         FUTURE_WAIT,
-        client_handshake(&mut send, &mut receive, hello_envelope()),
+        client_handshake(&mut send, &mut receive, hello),
     )
     .await
     .expect("test handshake should settle")
     .expect("test handshake should succeed");
+    let lifecycle_supported = welcome.welcome.lifecycle_control_supported;
     drop(send);
     drop(receive);
+    (connection, lifecycle_supported)
+}
+
+async fn authenticate_client(client: &Endpoint, address: SocketAddr) -> Connection {
+    let (connection, supported) = authenticate_client_with_offer(client, address, false).await;
+    assert!(
+        !supported,
+        "lifecycle control must not be advertised without a client offer"
+    );
     connection
+}
+
+async fn authenticate_lifecycle_client(
+    client: &Endpoint,
+    address: SocketAddr,
+) -> (Connection, bool) {
+    authenticate_client_with_offer(client, address, true).await
+}
+
+async fn lifecycle_request(
+    connection: &Connection,
+    frame: &str,
+    request: LifecycleRequest,
+) -> WireEnvelope {
+    let (mut send, mut receive) = connection
+        .open_bi()
+        .await
+        .expect("lifecycle request stream should open");
+    let envelope = WireEnvelope {
+        protocol_version: ProtocolVersion::V1,
+        frame_id: FrameId::parse(frame).expect("lifecycle frame id should be valid"),
+        sent_at: UnixMillis::from_millis(2),
+        body: WireEnvelopeBody::Request(ClientRequest::Lifecycle(request)),
+    };
+    tokio::time::timeout(FUTURE_WAIT, send_envelope(&mut send, &envelope))
+        .await
+        .expect("lifecycle request send should settle")
+        .expect("lifecycle request should be written");
+    send.finish().expect("lifecycle request FIN should succeed");
+    let response = tokio::time::timeout(FUTURE_WAIT, receive_envelope(&mut receive))
+        .await
+        .expect("lifecycle response should settle")
+        .expect("lifecycle response should be readable");
+    let end_of_stream = tokio::time::timeout(FUTURE_WAIT, receive_envelope(&mut receive))
+        .await
+        .expect("lifecycle response FIN should settle");
+    assert!(matches!(
+        end_of_stream,
+        Err(EnvelopeReceiveError::Frame(FrameError::Truncated { .. }))
+    ));
+    response
 }
 
 async fn connect_without_auth(client: &Endpoint, address: SocketAddr) -> Connection {
@@ -1435,6 +1502,114 @@ fn readiness_is_exact_and_shutdown_removes_only_this_receipt() {
         })
         .await
         .expect("reopened database future should be bounded");
+    });
+}
+
+#[test]
+fn lifecycle_offer_reports_idle_status_and_stops_after_correlated_finished_reply() {
+    let directory = TemporaryDirectory::new("lifecycle-runtime");
+    let credentials = credentials(&directory);
+    let cancel = Arc::new(CancelHandle::new());
+    let mut worker = Some(spawn_runtime(config(
+        &directory,
+        &credentials,
+        Arc::clone(&cancel),
+    )));
+    let (_, value) =
+        wait_for_readiness_or_stop(&directory.path("forge.ready"), &cancel, &mut worker);
+    let address = readiness_endpoint(&value);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("lifecycle client runtime should build");
+    let client = {
+        let _entered = runtime.enter();
+        client_endpoint(&credentials)
+    };
+    let (connection, supported) = runtime.block_on(authenticate_lifecycle_client(&client, address));
+    assert!(
+        supported,
+        "an offered lifecycle feature should be advertised"
+    );
+
+    let status = runtime.block_on(lifecycle_request(
+        &connection,
+        "runtime-status",
+        LifecycleRequest::Status,
+    ));
+    let WireEnvelopeBody::Response(ServerResponse {
+        request_id,
+        payload,
+    }) = status.body
+    else {
+        panic!("idle lifecycle status should be a correlated response");
+    };
+    assert_eq!(request_id.as_str(), "runtime-status");
+    let ResponsePayload::Lifecycle(LifecycleResponse::Status(status)) = payload else {
+        panic!("idle lifecycle status should carry its lifecycle payload");
+    };
+    assert_eq!(
+        status,
+        LifecycleStatus::new(LifecycleState::Ready, 0)
+            .expect("the idle lifecycle status should be representable")
+    );
+    assert!(!cancel.is_cancelled(), "status must not cancel the runtime");
+
+    let stop = runtime.block_on(lifecycle_request(
+        &connection,
+        "runtime-stop",
+        LifecycleRequest::Stop { require_idle: true },
+    ));
+    let WireEnvelopeBody::Response(ServerResponse {
+        request_id,
+        payload,
+    }) = stop.body
+    else {
+        panic!("accepted lifecycle stop should be a correlated response");
+    };
+    assert_eq!(request_id.as_str(), "runtime-stop");
+    let ResponsePayload::Lifecycle(LifecycleResponse::Stop(receipt)) = payload else {
+        panic!("accepted lifecycle stop should carry its lifecycle payload");
+    };
+    assert_eq!(receipt.disposition, LifecycleStopDisposition::Accepted);
+    assert_eq!(receipt.state, LifecycleState::Draining);
+    assert!(
+        cancel.is_cancelled(),
+        "runtime cancellation follows the finished stop response"
+    );
+    drop(connection);
+
+    let result = join_within(
+        worker
+            .take()
+            .expect("lifecycle worker should still be owned"),
+        SHUTDOWN_WAIT,
+    );
+    assert!(
+        result.is_ok(),
+        "accepted lifecycle stop should be a clean shutdown: {result:?}"
+    );
+    assert!(
+        !directory.path("forge.ready").exists(),
+        "lifecycle shutdown should remove its readiness receipt"
+    );
+    let custody = ForgeProcessCustody::acquire(directory.path("forge.custody"))
+        .expect("custody should be reacquirable after lifecycle shutdown");
+    drop(custody);
+
+    runtime.block_on(async {
+        tokio::time::timeout(FUTURE_WAIT, async {
+            let app = ForgeApp::start(ForgeConfig::new(SqliteConfig::file(
+                directory.path("forge.sqlite3"),
+            )))
+            .await
+            .expect("database should reopen after lifecycle shutdown");
+            app.shutdown()
+                .await
+                .expect("reopened lifecycle database should close");
+        })
+        .await
+        .expect("reopened lifecycle database future should be bounded");
     });
 }
 
