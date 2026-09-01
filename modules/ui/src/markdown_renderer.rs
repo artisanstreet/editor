@@ -171,7 +171,8 @@ fn render_code(parent_selector: &str, fence: &CodeFence, theme: ArtisanTheme) ->
         .unwrap_or_default()
         .iter()
         .filter_map(|token| valid_code_range(token, source.as_ref()))
-        .map(|(range, kind)| (range, code_token_style(theme, kind)));
+        .map(|(range, kind)| (range, code_token_style(theme, kind)))
+        .collect::<Vec<_>>();
     let text = StyledText::new(source).with_highlights(highlights);
     let selector = format!("{parent_selector}-code");
     let mut code = body_container(theme)
