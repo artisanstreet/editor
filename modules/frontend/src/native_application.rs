@@ -2125,7 +2125,7 @@ impl NativeApplication {
     fn handle_threads_without_switch(
         &mut self,
         listing_is_valid: bool,
-        project_id: &ProjectId,
+        _project_id: &ProjectId,
         listing: &ThreadListing,
         cx: &mut Context<Self>,
     ) {
@@ -4893,7 +4893,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, commands) = command_sink([Ok(())]);
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -4943,7 +4943,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5013,7 +5013,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(())]);
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5035,7 +5035,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(commands.borrow().len(), 1);
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 fail_active_message(application, application_cx);
             });
@@ -5050,7 +5050,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(commands.borrow().len(), 2);
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 fail_active_message(application, application_cx);
             });
@@ -5085,7 +5085,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, commands) = command_sink([Ok(()), Ok(())]);
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5100,7 +5100,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.activate_message_retry(application_cx);
                 assert!(application.message_flight.is_some());
@@ -5154,7 +5154,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.activate_message_retry(application_cx);
                 application.handle_service_event(
@@ -5181,7 +5181,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, commands) = command_sink([Ok(())]);
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5196,7 +5196,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application
                     .composer
@@ -5208,7 +5208,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.activate_message_retry(application_cx);
                 assert_eq!(commands.borrow().len(), 0);
@@ -5245,7 +5245,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, commands) = command_sink([Err(super::CommandSendError::Busy)]);
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5260,7 +5260,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.activate_message_retry(application_cx);
                 let retry = application.message_retry.as_ref().expect("retained retry");
@@ -5290,7 +5290,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5305,7 +5305,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.activate_message_retry(application_cx);
                 assert!(application.message_retry.is_none());
@@ -5327,7 +5327,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5342,7 +5342,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 assert!(application.message_retry.is_some());
                 application.handle_service_event(
@@ -5372,7 +5372,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, _) = command_sink([Ok(())]);
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5389,7 +5389,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.begin_thread_switch(target, application_cx);
                 assert!(application.message_retry.is_none());
@@ -5410,7 +5410,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5444,7 +5444,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
@@ -5472,7 +5472,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
-        cx.update(|app| {
+        cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 install_ready_message_surface(
                     application,
