@@ -34,7 +34,6 @@ const SEPARATOR_HORIZONTAL_MARGIN: f32 = -4.0;
 const SEPARATOR_VERTICAL_MARGIN: f32 = 4.0;
 const VIEWPORT_MARGIN: f32 = 8.0;
 const DISABLED_OPACITY: f32 = 0.5;
-const DEFERRED_PRIORITY: usize = 20;
 
 /// One selectable dropdown item.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,7 +197,7 @@ impl TypeaheadBuffer {
 }
 
 /// Pure deterministic interaction state for a dropdown menu.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DropdownMenuState {
     entries: Vec<DropdownMenuEntry>,
     open: bool,
@@ -206,19 +205,6 @@ pub struct DropdownMenuState {
     highlighted: Option<usize>,
     actions: Vec<DropdownMenuAction>,
     typeahead: TypeaheadBuffer,
-}
-
-impl Default for DropdownMenuState {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            open: false,
-            disabled: false,
-            highlighted: None,
-            actions: Vec::new(),
-            typeahead: TypeaheadBuffer::default(),
-        }
-    }
 }
 
 impl DropdownMenuState {
@@ -501,7 +487,7 @@ impl DropdownMenuState {
     #[must_use]
     pub fn activate_highlighted(&mut self) -> bool {
         self.highlighted
-            .map_or(false, |index| self.activate_index(index))
+            .is_some_and(|index| self.activate_index(index))
     }
 
     /// Activates an enabled item by entry index.
@@ -614,33 +600,23 @@ impl DropdownMenuState {
 }
 
 /// Preferred side for the anchored menu.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DropdownMenuSide {
     /// Place below the trigger unless collision handling flips it.
+    #[default]
     Bottom,
     /// Place above the trigger unless collision handling flips it.
     Top,
 }
 
-impl Default for DropdownMenuSide {
-    fn default() -> Self {
-        Self::Bottom
-    }
-}
-
 /// Horizontal alignment against the trigger.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DropdownMenuAlign {
     /// Align leading edges.
+    #[default]
     Start,
     /// Align trailing edges.
     End,
-}
-
-impl Default for DropdownMenuAlign {
-    fn default() -> Self {
-        Self::Start
-    }
 }
 
 /// Geometry policy shared by the state-independent placement engine and the
@@ -977,8 +953,7 @@ impl DropdownMenuSeparatorStyle {
 fn typeahead_now_ms() -> u64 {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |elapsed| elapsed.as_millis());
     u64::try_from(millis.min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
 }
 
@@ -989,7 +964,7 @@ fn dropdown_content_height(style: &DropdownMenuStyle, entries: &[DropdownMenuEnt
         height += match entry {
             DropdownMenuEntry::Item(_) => f32::from(style.item.height()),
             DropdownMenuEntry::Label(_) => {
-                f32::from(LABEL_LINE_HEIGHT) + f32::from(LABEL_VERTICAL_PADDING) * 2.0
+                LABEL_LINE_HEIGHT + LABEL_VERTICAL_PADDING * 2.0
             }
             DropdownMenuEntry::Separator => {
                 f32::from(style.separator.height) + f32::from(style.separator.vertical_margin) * 2.0
@@ -1110,7 +1085,7 @@ impl DropdownMenu {
         let handled = match key {
             "escape" => self.state.dismiss(),
             "enter" | "return" | "space" => {
-                self.state.press_trigger();
+                let _ = self.state.press_trigger();
                 true
             }
             "down" => {
@@ -1156,7 +1131,7 @@ impl DropdownMenu {
         let key = event.keystroke.key.as_str();
         let handled = match key {
             "escape" => {
-                self.state.dismiss();
+                let _ = self.state.dismiss();
                 window.focus(&self.trigger_focus);
                 true
             }
@@ -1298,7 +1273,7 @@ impl Render for DropdownMenu {
         }
         self.item_focus.resize_with(self.entries.len(), || None);
         for (index, entry) in self.entries.iter().enumerate() {
-            if entry.as_item().is_some_and(|item| item.is_enabled()) {
+            if entry.as_item().is_some_and(DropdownMenuItem::is_enabled) {
                 if self.item_focus[index].is_none() {
                     self.item_focus[index] = Some(cx.focus_handle());
                 }
