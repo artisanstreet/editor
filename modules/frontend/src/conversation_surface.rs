@@ -435,11 +435,11 @@ impl ScrollAnchorRegistry<'_> {
     fn attach(
         &mut self,
         element: Div,
-        scene_id: &Option<SceneId>,
-        item_id: &Option<ItemId>,
+        scene_id: Option<&SceneId>,
+        item_id: Option<&ItemId>,
     ) -> Stateful<Div> {
-        let scene_id = scene_id.as_ref().cloned();
-        let item_id = item_id.as_ref().cloned();
+        let scene_id = scene_id.cloned();
+        let item_id = item_id.cloned();
         let previous = self
             .previous
             .iter()
@@ -999,8 +999,8 @@ impl ConversationSurface {
         );
         let turn_element = anchors.attach(
             turn_element,
-            &SceneId::parse(turn.turn_id.as_str()).ok(),
-            &None,
+            SceneId::parse(turn.turn_id.as_str()).ok().as_ref(),
+            None,
         );
         let mut turn_element = turn_element.debug_selector(move || selector.clone());
 
@@ -1224,7 +1224,7 @@ impl ConversationSurface {
 
         let Some(group_id) = group_id else {
             let fallback_selector = selector.clone();
-            let mut card = anchors.attach(compact_card(style).w_full(), &None, &None);
+            let mut card = anchors.attach(compact_card(style).w_full(), None, None);
             card = card.debug_selector(move || fallback_selector.clone());
             return card
                 .child(compact_card_content(style).child(card_heading(title, theme)))
@@ -1268,7 +1268,7 @@ impl ConversationSurface {
             .gap(theme.spacing.steps(1.0));
         if mounted {
             let mut item_element =
-                anchors.attach(item_element, &None, &item_id_for_scene_id(id));
+                anchors.attach(item_element, None, item_id_for_scene_id(id).as_ref());
             item_element = item_element.debug_selector(move || selector.clone());
             item_element = item_element
                 .child(card_heading(title, theme))
@@ -1551,7 +1551,7 @@ impl ConversationSurface {
             .text_color(theme.colors.muted_foreground.to_paint())
             .whitespace_normal()
             .child(block.label.clone());
-        let label = anchors.attach(label, &Some(block.id.clone()), &None);
+        let label = anchors.attach(label, Some(&block.id), None);
         let label = label.debug_selector(move || selector.clone());
         if let Some((anchor, painted)) = user_message_anchor {
             anchors.register_item_alias(block.anchor.clone(), anchor, painted);
@@ -1635,7 +1635,7 @@ impl ConversationSurface {
         }
 
         let card = compact_card(style).w_full();
-        let card = anchors.attach(card, &Some(id.clone()), &item_id);
+        let card = anchors.attach(card, Some(&id), item_id.as_ref());
         let card = card.debug_selector(move || selector.clone());
         card.child(collapsible).into_any_element()
     }
