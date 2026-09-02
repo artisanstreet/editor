@@ -1873,7 +1873,9 @@ impl Render for ConversationSurface {
         }
         root
     }
+}
 
+impl ConversationSurface {
     /// Prunes navigator focus handles and paints the loaded-turn rail.
     ///
     /// Pruning runs on every render, even when the replacement scene has no
