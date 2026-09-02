@@ -1910,8 +1910,9 @@ impl Render for ConversationSurface {
                     "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
                     navigator_target_slug(&marker.target)
                 );
+                let surface_handle = navigator_surface.clone();
                 let button = Button::new(
-                    control_selector.as_str(),
+                    SharedString::from(control_selector.as_str()),
                     handle,
                     theme,
                     MotionPolicy::Reduced,
@@ -1923,7 +1924,7 @@ impl Render for ConversationSurface {
                 .focus_visibility(FocusVisibility::Visible)
                 .debug_selector(control_selector)
                 .on_activate(move |_, _, app| {
-                    let _ = navigator_surface.update(app, |surface, cx| {
+                    let _ = surface_handle.update(app, |surface, cx| {
                         surface.request_scroll(target.clone(), cx);
                     });
                 });
