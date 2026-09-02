@@ -13,9 +13,9 @@ use super::{
     conversation_commit_notifier::{ConversationCommitNotifier, ConversationCommitSubscription},
 };
 use crate::native_run_dispatch::{
-    LaunchAuthority, NativeRunDispatcher, NativeRunDispatcherShutdown, PromptAuthorization,
-    SettingsLoadDecision, classify_launch_result, classify_settings_load, notify_after_commit,
-    prompt_authorization_after_binding,
+    FixtureScenarioLaunch, LaunchAuthority, NativeRunDispatcher, NativeRunDispatcherShutdown,
+    PromptAuthorization, SettingsLoadDecision, classify_launch_result, classify_settings_load,
+    notify_after_commit, prompt_authorization_after_binding,
 };
 use crate::{
     CommandOrigin,
@@ -2377,14 +2377,16 @@ async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
     crate::engine_owner::reset_witnesses();
     let process_cancel = Arc::new(CancelHandle::new());
     let mut dispatcher = NativeRunDispatcher::start_with_fixture_scenario_for_tests(
-        repository.clone(),
-        temp.path().to_owned(),
-        config,
-        Arc::clone(&process_cancel),
-        ActivityGateImpl::new(),
-        &tokio::runtime::Handle::current(),
-        fixture.clone(),
-        MIDTURN_LOSS_SCENARIO,
+        FixtureScenarioLaunch {
+            repository: repository.clone(),
+            database_path: temp.path().to_owned(),
+            config,
+            process_cancel: Arc::clone(&process_cancel),
+            activity: ActivityGateImpl::new(),
+            runtime: &tokio::runtime::Handle::current(),
+            fixture_program: fixture.clone(),
+            scenario: MIDTURN_LOSS_SCENARIO,
+        },
     );
 
     // Deterministic hold witness: the first assistant delta must become
@@ -2648,14 +2650,16 @@ async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
         config_for_fixture_dispatch(restart_notifier).expect("restart dispatch policy");
     let restart_cancel = Arc::new(CancelHandle::new());
     let mut restarted = NativeRunDispatcher::start_with_fixture_scenario_for_tests(
-        reopened_repository.clone(),
-        temp.path().to_owned(),
-        restart_config,
-        Arc::clone(&restart_cancel),
-        ActivityGateImpl::new(),
-        &tokio::runtime::Handle::current(),
-        fixture,
-        MIDTURN_LOSS_SCENARIO,
+        FixtureScenarioLaunch {
+            repository: reopened_repository.clone(),
+            database_path: temp.path().to_owned(),
+            config: restart_config,
+            process_cancel: Arc::clone(&restart_cancel),
+            activity: ActivityGateImpl::new(),
+            runtime: &tokio::runtime::Handle::current(),
+            fixture_program: fixture,
+            scenario: MIDTURN_LOSS_SCENARIO,
+        },
     );
     tokio::time::sleep(MIDTURN_RESTART_QUIESCE).await;
     restart_cancel.cancel();

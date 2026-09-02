@@ -312,6 +312,23 @@ pub enum NativeRunDispatcherShutdown {
     TaskLost,
 }
 
+/// Test-only bundled parameters for the one-shot fixture pipeline.
+///
+/// Groups the eight fixture-launch inputs so the scenario helper stays
+/// within the argument budget without a lint suppression. No production
+/// path uses this type.
+#[cfg(test)]
+pub(crate) struct FixtureScenarioLaunch<'a> {
+    pub(crate) repository: Repository,
+    pub(crate) database_path: PathBuf,
+    pub(crate) config: NativeRunDispatcherConfig,
+    pub(crate) process_cancel: Arc<CancelHandle>,
+    pub(crate) activity: ActivityGateImpl,
+    pub(crate) runtime: &'a Handle,
+    pub(crate) fixture_program: PathBuf,
+    pub(crate) scenario: &'static str,
+}
+
 /// One running configured first-message dispatcher.
 #[allow(clippy::module_name_repetitions)]
 pub struct NativeRunDispatcher {
@@ -403,7 +420,7 @@ impl NativeRunDispatcher {
         runtime: &Handle,
         fixture_program: PathBuf,
     ) -> Self {
-        Self::start_with_fixture_scenario_for_tests(
+        Self::start_with_fixture_scenario_for_tests(FixtureScenarioLaunch {
             repository,
             database_path,
             config,
@@ -411,8 +428,8 @@ impl NativeRunDispatcher {
             activity,
             runtime,
             fixture_program,
-            "prompt_text_then_terminal",
-        )
+            scenario: "prompt_text_then_terminal",
+        })
     }
 
     /// Starts the same one-shot fixture pipeline with an explicit frozen
@@ -420,17 +437,19 @@ impl NativeRunDispatcher {
     /// variant). Test-only; production always uses [`Self::start`].
     #[cfg(test)]
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_with_fixture_scenario_for_tests(
-        repository: Repository,
-        database_path: PathBuf,
-        config: NativeRunDispatcherConfig,
-        process_cancel: Arc<CancelHandle>,
-        activity: ActivityGateImpl,
-        runtime: &Handle,
-        fixture_program: PathBuf,
-        scenario: &'static str,
+        params: FixtureScenarioLaunch<'_>,
     ) -> Self {
+        let FixtureScenarioLaunch {
+            repository,
+            database_path,
+            config,
+            process_cancel,
+            activity,
+            runtime,
+            fixture_program,
+            scenario,
+        } = params;
         Self::start_with_mode(
             repository,
             database_path,
