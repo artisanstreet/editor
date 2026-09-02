@@ -377,6 +377,14 @@ pub struct ConversationSurface {
     viewport_next_frame_scheduled: bool,
     actions: Vec<ConversationSurfaceAction>,
     pending_scroll_targets: Vec<ConversationSurfaceTarget>,
+    /// Targets matched against painted anchors by the latest render.
+    ///
+    /// Render drains these from the FIFO queue and executes the GPUI anchor
+    /// scroll. The same-frame prepaint listeners consume this handoff to
+    /// write the exact anchor-equivalent offset synchronously, which is the
+    /// only write the test harness pumps. Entries are render-local: each
+    /// render clears leftovers, and retirement clears them with the queue.
+    executed_scroll_targets: Vec<ConversationSurfaceTarget>,
     scroll_anchors: Vec<RenderedScrollAnchor>,
     scroll_anchor_paint_token: Option<Rc<()>>,
 }
@@ -474,6 +482,62 @@ fn item_id_for_scene_id(id: &SceneId) -> Option<ItemId> {
     ItemId::parse(id.as_str()).ok()
 }
 
+/// Returns the scene identity that owns the transcript position of one work
+/// group card. This is the single source for the group-card anchor identity
+/// shared by rendering and scroll-target resolution.
+fn work_group_anchor_id(turn_id: &TurnId, block: &WorkGroupBlock) -> Option<SceneId> {
+    block
+        .items
+        .first()
+        .map(work_item_id)
+        .cloned()
+        .or_else(|| SceneId::parse(turn_id.as_str()).ok())
+}
+
+fn text_block_scroll_identity(id: &SceneId) -> (Option<SceneId>, Option<ItemId>) {
+    (Some(id.clone()), item_id_for_scene_id(id))
+}
+
+/// Returns the anchor identity pair painted for one transcript child.
+///
+/// The pair mirrors the exact arguments passed to
+/// [`ScrollAnchorRegistry::attach`] for that child, so prepaint listeners can
+/// resolve executed scroll targets against measured child bounds. Unanchored
+/// rows report no identity and never match.
+fn block_scroll_identity(turn_id: &TurnId, block: &TurnBlock) -> (Option<SceneId>, Option<ItemId>) {
+    match block {
+        TurnBlock::UserMessage(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::AssistantMessage(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::WorkGroup(block) => (work_group_anchor_id(turn_id, block), None),
+        TurnBlock::Compaction(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::ChangeSet(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Plan(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Approval(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Question(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Error(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::UsageInterruption(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::ModelTransition(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::NativeFact(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::SteeringLabel(block) => (Some(block.id.clone()), None),
+        TurnBlock::TurnStatus(_) | TurnBlock::TurnFooter(_) => (None, None),
+    }
+}
+
+/// Returns whether a queued scroll target addresses one measured identity.
+///
+/// This mirrors [`RenderedScrollAnchor::matches`] for the transient
+/// render-to-prepaint handoff, which carries plain identity pairs instead of
+/// anchor objects.
+fn scroll_target_matches_identity(
+    target: &ConversationSurfaceTarget,
+    identity: &(Option<SceneId>, Option<ItemId>),
+) -> bool {
+    match target {
+        ConversationSurfaceTarget::Scene(scene_id) => identity.0.as_ref() == Some(scene_id),
+        ConversationSurfaceTarget::Item(item_id) => identity.1.as_ref() == Some(item_id),
+    }
+}
+
 struct TextBlockRender<'a> {
     id: &'a SceneId,
     disclosure: Option<SceneDisclosure>,
@@ -515,6 +579,7 @@ impl ConversationSurface {
             viewport_next_frame_scheduled: false,
             actions: Vec::new(),
             pending_scroll_targets: Vec::with_capacity(CONVERSATION_SURFACE_MAX_SCROLL_TARGETS),
+            executed_scroll_targets: Vec::new(),
             scroll_anchors: Vec::new(),
             scroll_anchor_paint_token: None,
         }
@@ -691,8 +756,65 @@ impl ConversationSurface {
     /// host ownership or revive a replacement surface.
     pub(crate) fn release_transient_scroll_custody(&mut self) {
         self.pending_scroll_targets.clear();
+        self.executed_scroll_targets.clear();
         self.scroll_anchors.clear();
         self.scroll_anchor_paint_token = None;
+    }
+
+    /// Writes the exact anchor-equivalent offset for one executed target.
+    ///
+    /// GPUI records each anchor origin during Div prepaint as
+    /// `bounds.origin - window.element_offset()` (gpui-0.2.2
+    /// `src/elements/div.rs:1368-1369`) and `ScrollAnchor::scroll_to`
+    /// applies `viewport_bounds.origin - last_origin` from an
+    /// `on_next_frame` callback (`div.rs:3029-3037`). Only the ScrollArea
+    /// viewport pushes a nonzero element offset on this path
+    /// (`src/window.rs:2410-2412`), so subtracting the listener-observed
+    /// offset from the measured child origin reproduces that private origin
+    /// exactly. The write lands inside the test-harness dirty draw
+    /// (`src/app.rs:1247`), where `on_next_frame` callbacks never run
+    /// (`src/platform/test/window.rs:235`).
+    fn apply_painted_scroll_offset(
+        &self,
+        child_origin: gpui::Point<gpui::Pixels>,
+        window: &Window,
+    ) {
+        let viewport_origin = self.scroll_handle.bounds().origin;
+        let content_origin = child_origin - window.element_offset();
+        let max_offset = self.scroll_handle.max_offset();
+        let mut offset = viewport_origin - content_origin;
+        offset.x = offset.x.clamp(-max_offset.width, px(0.0));
+        offset.y = offset.y.clamp(-max_offset.height, px(0.0));
+        self.scroll_handle.set_offset(offset);
+    }
+
+    /// Applies and retires the handoff against one listener's children.
+    ///
+    /// Targets apply in queue order so the last queued target wins, exactly
+    /// like the equivalent chain of `ScrollAnchor::scroll_to` callbacks.
+    /// Targets with no identity at this level stay queued for the remaining
+    /// levels of the same frame; render clears any true orphans.
+    fn apply_executed_scroll_targets(
+        &mut self,
+        identities: &[(Option<SceneId>, Option<ItemId>)],
+        children_bounds: &[gpui::Bounds<gpui::Pixels>],
+        window: &Window,
+    ) {
+        if self.executed_scroll_targets.is_empty() {
+            return;
+        }
+        let stashed = std::mem::take(&mut self.executed_scroll_targets);
+        for target in stashed {
+            let Some((_, bounds)) = identities
+                .iter()
+                .zip(children_bounds.iter())
+                .find(|(identity, _)| scroll_target_matches_identity(&target, identity))
+            else {
+                self.executed_scroll_targets.push(target);
+                continue;
+            };
+            self.apply_painted_scroll_offset(bounds.origin, window);
+        }
     }
 
     /// Retries one geometry observation retained when the action queue was
@@ -792,6 +914,32 @@ impl ConversationSurface {
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(4.0));
+        // Identities mirror the children pushed below in block order. A
+        // suppressed status row paints no child, so it contributes no slot.
+        let child_identities: Vec<(Option<SceneId>, Option<ItemId>)> = turn
+            .blocks()
+            .iter()
+            .filter_map(|block| {
+                if let TurnBlock::TurnStatus(status) = block
+                    && turn_status_copy(status.narration).is_none()
+                {
+                    return None;
+                }
+                Some(block_scroll_identity(&turn.turn_id, block))
+            })
+            .collect();
+        let surface = entity.downgrade();
+        let turn_element = turn_element.on_children_prepainted(
+            move |children_bounds, window, app| {
+                let _ = surface.update(app, |surface, _| {
+                    surface.apply_executed_scroll_targets(
+                        &child_identities,
+                        &children_bounds,
+                        window,
+                    );
+                });
+            },
+        );
         let turn_element = anchors.attach(
             turn_element,
             SceneId::parse(turn.turn_id.as_str()).ok(),
@@ -981,12 +1129,7 @@ impl ConversationSurface {
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let style = CardStyle::resolve(*theme);
-        let group_id = block
-            .items
-            .first()
-            .map(work_item_id)
-            .cloned()
-            .or_else(|| SceneId::parse(turn_id.as_str()).ok());
+        let group_id = work_group_anchor_id(turn_id, block);
         let title = block
             .label
             .map_or_else(|| "Work".to_owned(), format_work_group_label);
@@ -1006,6 +1149,21 @@ impl ConversationSurface {
                 items_mounted,
             ));
         }
+        let item_identities: Vec<(Option<SceneId>, Option<ItemId>)> = block
+            .items
+            .iter()
+            .map(|item| (None, item_id_for_scene_id(work_item_id(item))))
+            .collect();
+        let surface = entity.downgrade();
+        items = items.on_children_prepainted(move |children_bounds, window, app| {
+            let _ = surface.update(app, |surface, _| {
+                surface.apply_executed_scroll_targets(
+                    &item_identities,
+                    &children_bounds,
+                    window,
+                );
+            });
+        });
 
         let Some(group_id) = group_id else {
             let fallback_selector = selector.clone();
@@ -1450,6 +1608,9 @@ impl Render for ConversationSurface {
         }
 
         let pending_targets = std::mem::take(&mut self.pending_scroll_targets);
+        // The handoff is render-local: leftovers from a draw whose prepaint
+        // never resolved them must not leak into a later frame.
+        self.executed_scroll_targets.clear();
         let mut retained_targets = Vec::with_capacity(pending_targets.len());
         let mut waiting_for_paint = false;
         let mut scroll_executed = false;
@@ -1465,6 +1626,7 @@ impl Render for ConversationSurface {
             {
                 Some(rendered) if rendered.painted => {
                     rendered.anchor.scroll_to(window, cx);
+                    self.executed_scroll_targets.push(target);
                     scroll_executed = true;
                 }
                 Some(_) => {
@@ -1493,7 +1655,7 @@ impl Render for ConversationSurface {
         // each retained anchor origin during Div prepaint, and this listener
         // runs after the transcript children are prepainted. A defer marker
         // is not paint evidence and must never mint painted custody.
-        transcript = transcript.on_children_prepainted(move |_, _, app| {
+        transcript = transcript.on_children_prepainted(move |children_bounds, window, app| {
             let _ = surface.update(app, |surface, cx| {
                 let current = surface
                     .scroll_anchor_paint_token
@@ -1512,6 +1674,22 @@ impl Render for ConversationSurface {
                 }
                 if newly_painted && !surface.pending_scroll_targets.is_empty() {
                     cx.notify();
+                }
+                // Turn roots are the transcript's direct children in scene
+                // order, so executed turn targets resolve here exactly like
+                // block and item targets resolve one level down.
+                if !surface.executed_scroll_targets.is_empty() {
+                    let turn_identities: Vec<(Option<SceneId>, Option<ItemId>)> = surface
+                        .scene
+                        .turn_scenes()
+                        .iter()
+                        .map(|turn| (SceneId::parse(turn.turn_id.as_str()).ok(), None))
+                        .collect();
+                    surface.apply_executed_scroll_targets(
+                        &turn_identities,
+                        &children_bounds,
+                        window,
+                    );
                 }
             });
         });
