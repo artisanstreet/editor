@@ -13,9 +13,9 @@ use super::{
     conversation_commit_notifier::{ConversationCommitNotifier, ConversationCommitSubscription},
 };
 use crate::native_run_dispatch::{
-    LaunchAuthority, NativeRunDispatcher, NativeRunDispatcherShutdown, PromptAuthorization,
-    SettingsLoadDecision, classify_launch_result, classify_settings_load, notify_after_commit,
-    prompt_authorization_after_binding,
+    FixtureScenarioLaunch, LaunchAuthority, NativeRunDispatcher, NativeRunDispatcherShutdown,
+    PromptAuthorization, SettingsLoadDecision, classify_launch_result, classify_settings_load,
+    notify_after_commit, prompt_authorization_after_binding,
 };
 use crate::{
     CommandOrigin,
@@ -2290,4 +2290,527 @@ async fn dispatch_fixture_streams_over_forge_delivery_and_resumes_after_restart(
         identity_before,
     })
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// Configured-engine mid-turn loss and recovery proof
+// ---------------------------------------------------------------------------
+
+struct MidturnLossPatchSource {
+    notifier: ConversationCommitNotifier,
+}
+
+impl crate::startup_reconciliation_sweep::StartupReconciliationPatchSource
+    for MidturnLossPatchSource
+{
+    fn patch_ids_for(
+        &mut self,
+        candidate: &artisan_database::StartupReconciliationCandidate,
+    ) -> Result<
+        crate::startup_reconciliation_sweep::StartupReconciliationPatches,
+        crate::startup_reconciliation_sweep::PatchSourceError,
+    > {
+        use artisan_domain::PatchId;
+        let turn_patch_id = PatchId::parse(candidate.run_id.as_str())
+            .map_err(|_| crate::startup_reconciliation_sweep::PatchSourceError)?;
+        let item_patch_id = candidate
+            .assistant_item_id
+            .as_ref()
+            .map(|item_id| {
+                PatchId::parse(item_id.as_str())
+                    .map_err(|_| crate::startup_reconciliation_sweep::PatchSourceError)
+            })
+            .transpose()?;
+        Ok(
+            crate::startup_reconciliation_sweep::StartupReconciliationPatches::new(
+                turn_patch_id,
+                item_patch_id,
+            ),
+        )
+    }
+
+    fn on_durable_disposition(
+        &mut self,
+        candidate: &artisan_database::StartupReconciliationCandidate,
+    ) {
+        let _ = self.notifier.publish(&candidate.thread_id);
+    }
+}
+
+const MIDTURN_LOSS_SCENARIO: &str = "prompt_text_then_hold_after_first_delta";
+const MIDTURN_LOSS_DEADLINE: Duration = Duration::from_secs(20);
+const MIDTURN_RESTART_QUIESCE: Duration = Duration::from_millis(500);
+
+struct MidturnLossSeed {
+    database: DatabaseConnection,
+    repository: Repository,
+    temp: TempDatabase,
+    thread_id: ThreadId,
+    message_id: MessageId,
+    fixture: PathBuf,
+}
+
+async fn seed_midturn_loss() -> MidturnLossSeed {
+    let fixture = registered_fixture_program();
+    let (database, repository, temp) = temp_repository("dispatch-midturn-loss").await;
+    let thread_id = ThreadId::parse("fixture-midturn-thread").expect("thread id");
+    let message_id = MessageId::parse("fixture-midturn-message").expect("message id");
+    seed_project_and_thread_with_profile(
+        &database,
+        &repository,
+        thread_id.as_str(),
+        "fixture-test",
+        125_000,
+        30_000,
+        5_000,
+    )
+    .await;
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("fixture-midturn-request").expect("request id"),
+            message_id: message_id.clone(),
+            thread_id: thread_id.clone(),
+            body: MessageBody::parse("hello world").expect("message body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("one fixture message should queue");
+    assert_queued_fixture_message(&fetch_all(&database).await, &message_id);
+    MidturnLossSeed {
+        database,
+        repository,
+        temp,
+        thread_id,
+        message_id,
+        fixture,
+    }
+}
+
+async fn await_first_durable_delta(
+    database: &DatabaseConnection,
+    subscription: &mut ConversationCommitSubscription,
+) {
+    // Deterministic hold witness: the first assistant delta must become
+    // durable through the run-dispatch/repository path. Event-driven commit
+    // wakes drive this wait; no timing sleep stands in for the hold.
+    tokio::time::timeout(MIDTURN_LOSS_DEADLINE, async {
+        loop {
+            let items = entities::conversation_item::Entity::find()
+                .all(database)
+                .await
+                .expect("conversation items should be readable");
+            let assistant_delta = items.iter().any(|item| {
+                item.item_kind == ConversationItemKind::AssistantMessage
+                    && item.body == "hello world"
+            });
+            let receipts = entities::run_batch_receipt::Entity::find()
+                .all(database)
+                .await
+                .expect("batch receipts should be readable");
+            if assistant_delta && !receipts.is_empty() {
+                return;
+            }
+            subscription
+                .wait()
+                .await
+                .expect("mid-turn commit notifier should remain open");
+        }
+    })
+    .await
+    .expect("first assistant delta should become durable before the deadline");
+}
+
+fn assert_midturn_hold_state(held: &AllRows, message_id: &MessageId) -> u64 {
+    assert_eq!(held.dispatches.len(), 1);
+    assert_eq!(held.runs.len(), 1);
+    let held_dispatch = held
+        .dispatches
+        .iter()
+        .find(|dispatch| dispatch.message_id == message_id.as_str())
+        .expect("mid-turn dispatch");
+    assert_eq!(held_dispatch.state, DispatchState::Running);
+    let held_run = held
+        .runs
+        .iter()
+        .find(|run| run.run_id == "fixture-run")
+        .expect("mid-turn run");
+    assert_eq!(held_run.lifecycle, AssistantRunLifecycle::Running);
+    assert_eq!(held_run.generation, 1);
+    assert!(held_run.terminal_at_ms.is_none());
+    assert!(held_run.error_code.is_none());
+    assert_eq!(held_run.provider_binding_version, Some(1));
+    let held_binding: serde_json::Value = serde_json::from_slice(
+        held_run
+            .provider_binding
+            .as_ref()
+            .expect("mid-turn provider binding")
+            .as_slice(),
+    )
+    .expect("mid-turn provider binding JSON");
+    assert_eq!(
+        held_binding,
+        serde_json::json!({
+            "engine": "opencode2",
+            "profile_id": "fixture-test",
+            "session_id": "test-session",
+        })
+    );
+    let held_assistant: Vec<_> = held
+        .items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::AssistantMessage)
+        .collect();
+    assert_eq!(held_assistant.len(), 1);
+    assert_eq!(held_assistant[0].body, "hello world");
+    assert_eq!(held_assistant[0].run_id.as_deref(), Some("fixture-run"));
+    let held_counts = crate::engine_owner::witness_counts();
+    assert_eq!(held_counts.spawned, 1);
+    assert_eq!(held_counts.reaps_observed, 0);
+    assert_eq!(held_counts.watchdog_failures_seen, 0);
+    held_counts.control_driver_joined
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
+    let MidturnLossSeed {
+        database,
+        repository,
+        temp,
+        thread_id,
+        message_id,
+        fixture,
+    } = seed_midturn_loss().await;
+
+    let notifier = ConversationCommitNotifier::new();
+    let mut subscription = notifier
+        .subscribe(thread_id.clone())
+        .expect("mid-turn thread subscription");
+    let config = config_for_fixture_dispatch(notifier.clone()).expect("fixture dispatch policy");
+    crate::engine_owner::reset_witnesses();
+    let process_cancel = Arc::new(CancelHandle::new());
+    let mut dispatcher = NativeRunDispatcher::start_with_fixture_scenario_for_tests(
+        FixtureScenarioLaunch {
+            repository: repository.clone(),
+            database_path: temp.path().to_owned(),
+            config,
+            process_cancel: Arc::clone(&process_cancel),
+            activity: ActivityGateImpl::new(),
+            runtime: &tokio::runtime::Handle::current(),
+            fixture_program: fixture.clone(),
+            scenario: MIDTURN_LOSS_SCENARIO,
+        },
+    );
+    await_first_durable_delta(&database, &mut subscription).await;
+
+    // Exactly one run was admitted and the owning engine is deterministically
+    // alive in its hold: one child spawned, none reaped yet.
+    let held = fetch_all(&database).await;
+    let drivers_at_hold = assert_midturn_hold_state(&held, &message_id);
+
+    // Stop the owning engine process through the existing custody boundary.
+    // The fixture holds its log connection open with no terminal event, so
+    // this cancellation is the deterministic engine-loss witness.
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    let loss_counts = crate::engine_owner::witness_counts();
+    assert_eq!(loss_counts.spawned, 1);
+    assert_eq!(loss_counts.reaps_observed, 1);
+    // Mid-turn abort custody: `cleanup_after_abort` closes the lifeline and
+    // then requests whole-job termination before its bounded reap wait for
+    // configured launches (`engine_owner/process.rs`), so one kill with one
+    // reap is the designed stop for the held log connection.
+    assert_eq!(loss_counts.kills_requested, 1);
+    assert_eq!(loss_counts.watchdog_failures_seen, 0);
+    assert!(format!("{dispatcher:?}").contains("payload-free"));
+
+    // The interrupted run, turn, and assistant item reach the existing
+    // terminal/interrupted disposition with the durable first delta intact:
+    // no second origin row, no invented success.
+    let after = fetch_all(&database).await;
+    assert_midturn_interrupted_dispatch_run(&after, &message_id);
+    assert_midturn_interrupted_items(&after);
+    assert_midturn_replay_contiguity(&after, &database, &thread_id).await;
+
+    // Run the existing startup-reconciliation path against the same file-backed
+    // repository: nothing remains to interrupt, nothing is requeued, and the
+    // durable rows are byte-stable.
+    assert_midturn_quiescent_sweep(&repository, &notifier, &database, &after, &message_id).await;
+
+    // Restart against the reopened file-backed repository: no second fixture
+    // child spawn, session creation, or prompt, and no durable mutation.
+    let settled_counts = crate::engine_owner::witness_counts();
+    let (reopened_database, reopened_repository) =
+        restart_midturn_dispatcher(repository, database, temp, fixture).await;
+    let restart_counts = crate::engine_owner::witness_counts();
+    assert_eq!(restart_counts.spawned, settled_counts.spawned);
+    assert_eq!(restart_counts.reaps_observed, settled_counts.reaps_observed);
+    assert_eq!(
+        restart_counts.control_driver_joined,
+        settled_counts.control_driver_joined
+    );
+    assert_eq!(restart_counts.watchdog_failures_seen, 0);
+    assert!(drivers_at_hold <= settled_counts.control_driver_joined);
+    let after_restart = fetch_all(&reopened_database).await;
+    assert_eq!(after_restart.dispatches.len(), 1);
+    assert_eq!(after_restart.runs.len(), 1);
+    assert_eq!(after_restart.turns.len(), 1);
+    assert_eq!(after_restart.patches, after.patches);
+    assert_midturn_restart_replay(&reopened_repository, &after, &thread_id).await;
+    drop(reopened_repository);
+    reopened_database
+        .close()
+        .await
+        .expect("restarted repository should close cleanly");
+}
+
+fn assert_midturn_interrupted_dispatch_run(after: &AllRows, message_id: &MessageId) {
+    // The interrupted run, turn, and assistant item reach the existing
+    // terminal/interrupted disposition with the durable first delta intact:
+    // no second origin row, no invented success.
+    assert_eq!(after.dispatches.len(), 1);
+    assert_eq!(after.runs.len(), 1);
+    assert_eq!(after.turns.len(), 1);
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|dispatch| dispatch.message_id == message_id.as_str())
+        .expect("interrupted dispatch");
+    assert_eq!(dispatch.state, DispatchState::Failed);
+    assert_eq!(dispatch.attempt_count, 1);
+    assert!(dispatch.lease_owner.is_none());
+    assert!(dispatch.lease_expires_at_ms.is_none());
+    assert_eq!(
+        dispatch.last_error.as_deref(),
+        Some("OpenCode2 provider turn interrupted")
+    );
+    let run = after
+        .runs
+        .iter()
+        .find(|run| run.run_id == "fixture-run")
+        .expect("interrupted run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
+    assert_eq!(run.generation, 1);
+    assert_eq!(run.error_code.as_deref(), Some("provider_interrupted"));
+    assert_eq!(
+        run.error_message.as_deref(),
+        Some("OpenCode2 provider turn interrupted")
+    );
+    assert!(run.terminal_at_ms.is_none());
+    assert!(run.owner.is_none());
+    assert!(run.lease.is_none());
+    assert!(run.claim_token.is_none());
+    assert_eq!(run.provider_binding_version, Some(1));
+    let binding: serde_json::Value = serde_json::from_slice(
+        run.provider_binding
+            .as_ref()
+            .expect("provider binding")
+            .as_slice(),
+    )
+    .expect("provider binding JSON");
+    assert_eq!(
+        binding,
+        serde_json::json!({
+            "engine": "opencode2",
+            "profile_id": "fixture-test",
+            "session_id": "test-session",
+        })
+    );
+}
+
+fn assert_midturn_interrupted_items(after: &AllRows) {
+    let turn = after
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == "fixture-turn")
+        .expect("interrupted turn");
+    assert_eq!(turn.lifecycle, EntityLifecycle::Interrupted);
+    let assistant_items: Vec<_> = after
+        .items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::AssistantMessage)
+        .collect();
+    assert_eq!(assistant_items.len(), 1);
+    assert_eq!(assistant_items[0].lifecycle, EntityLifecycle::Interrupted);
+    assert_eq!(assistant_items[0].body, "hello world");
+    assert_eq!(assistant_items[0].run_id.as_deref(), Some("fixture-run"));
+    let user_items: Vec<_> = after
+        .items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::UserMessage)
+        .collect();
+    assert_eq!(user_items.len(), 1);
+    assert_eq!(user_items[0].body, "hello world");
+}
+
+async fn assert_midturn_replay_contiguity(
+    after: &AllRows,
+    database: &DatabaseConnection,
+    thread_id: &ThreadId,
+) {
+    // Replay stays bounded and contiguous with no duplicated origin rows.
+    assert!(!after.patches.is_empty());
+    assert!(after.patches.len() <= 16);
+    let sequences: Vec<i64> = after.patches.iter().map(|patch| patch.sequence).collect();
+    let patch_total = i64::try_from(sequences.len()).expect("patch count fits i64");
+    let expected: Vec<i64> = (1..=patch_total).collect();
+    assert_eq!(sequences, expected);
+    assert!(
+        after
+            .patches
+            .iter()
+            .any(|patch| patch.body.as_deref() == Some("hello world")
+                && patch.item_kind == Some(ConversationItemKind::AssistantMessage))
+    );
+    assert!(
+        after
+            .patches
+            .iter()
+            .any(|patch| matches!(patch.kind, ConversationPatchKind::ItemLifecycle))
+    );
+    let state = after
+        .states
+        .iter()
+        .find(|state| state.thread_id == thread_id.as_str())
+        .expect("conversation state");
+    assert_eq!(state.last_patch_sequence, patch_total);
+    let checkpoints = entities::run_checkpoint::Entity::find()
+        .all(database)
+        .await
+        .expect("checkpoint rows");
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].run_id, "fixture-run");
+    assert_eq!(checkpoints[0].generation, 1);
+    let receipts = entities::run_batch_receipt::Entity::find()
+        .all(database)
+        .await
+        .expect("batch receipt rows");
+    assert!(!receipts.is_empty());
+    for receipt in &receipts {
+        assert_eq!(receipt.run_id, "fixture-run");
+        assert_eq!(receipt.generation, 1);
+        assert!(receipt.committed);
+    }
+}
+
+async fn assert_midturn_quiescent_sweep(
+    repository: &Repository,
+    notifier: &ConversationCommitNotifier,
+    database: &DatabaseConnection,
+    after: &AllRows,
+    message_id: &MessageId,
+) {
+    let operated_at = crate::SystemCommandOrigin
+        .acceptance_instant()
+        .expect("recovery clock should succeed");
+    let mut patch_source = MidturnLossPatchSource {
+        notifier: notifier.clone(),
+    };
+    let report = crate::startup_reconciliation_sweep::sweep_startup_reconciliation(
+        repository,
+        crate::startup_reconciliation_sweep::StartupReconciliationSweepInput::new(operated_at, 64)
+            .expect("bounded sweep input"),
+        &mut patch_source,
+    )
+    .await
+    .expect("startup reconciliation sweep should succeed");
+    assert_eq!(report.discovered, 0);
+    assert_eq!(report.attempted, 0);
+    assert_eq!(report.interrupted, 0);
+    assert_eq!(report.already_interrupted, 0);
+    let after_sweep = fetch_all(database).await;
+    assert_eq!(after_sweep, *after);
+    let redispatch = after_sweep
+        .dispatches
+        .iter()
+        .find(|dispatch| dispatch.message_id == message_id.as_str())
+        .expect("dispatch after sweep");
+    assert_eq!(redispatch.state, DispatchState::Failed);
+}
+
+async fn restart_midturn_dispatcher(
+    repository: Repository,
+    database: DatabaseConnection,
+    temp: TempDatabase,
+    fixture: PathBuf,
+) -> (DatabaseConnection, Repository) {
+    drop(repository);
+    database
+        .close()
+        .await
+        .expect("original repository should close before restart");
+    let (reopened_database, reopened_repository) = reopen_fixture_repository(temp.path()).await;
+    let restart_notifier = ConversationCommitNotifier::new();
+    let restart_config =
+        config_for_fixture_dispatch(restart_notifier).expect("restart dispatch policy");
+    let restart_cancel = Arc::new(CancelHandle::new());
+    let mut restarted = NativeRunDispatcher::start_with_fixture_scenario_for_tests(
+        FixtureScenarioLaunch {
+            repository: reopened_repository.clone(),
+            database_path: temp.path().to_owned(),
+            config: restart_config,
+            process_cancel: Arc::clone(&restart_cancel),
+            activity: ActivityGateImpl::new(),
+            runtime: &tokio::runtime::Handle::current(),
+            fixture_program: fixture,
+            scenario: MIDTURN_LOSS_SCENARIO,
+        },
+    );
+    tokio::time::sleep(MIDTURN_RESTART_QUIESCE).await;
+    restart_cancel.cancel();
+    assert_eq!(
+        restarted.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    assert_eq!(
+        restarted.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    (reopened_database, reopened_repository)
+}
+
+async fn assert_midturn_restart_replay(
+    reopened_repository: &Repository,
+    after: &AllRows,
+    thread_id: &ThreadId,
+) {
+    let restarted_run = after
+        .runs
+        .iter()
+        .find(|run| run.run_id == "fixture-run")
+        .expect("restarted run");
+    assert_eq!(restarted_run.lifecycle, AssistantRunLifecycle::Interrupted);
+    assert_eq!(restarted_run.generation, 1);
+    let replay = reopened_repository
+        .read_conversation_patch_replay(thread_id, ConversationCursor::default())
+        .await
+        .expect("restart replay should be readable");
+    match replay {
+        ConversationPatchReplay::Batch(batch) => {
+            assert_eq!(batch.from_cursor(), ConversationCursor::default());
+            assert_eq!(batch.patches().len(), after.patches.len());
+            let mut cursor = ConversationCursor::default();
+            for patch in batch.patches() {
+                let expected_sequence = cursor
+                    .checked_next_sequence()
+                    .expect("restart replay sequence should not overflow");
+                assert_eq!(patch.sequence(), expected_sequence);
+                cursor = ConversationCursor::from(patch.sequence());
+            }
+            assert_eq!(
+                usize::try_from(cursor.get()).expect("replay cursor fits usize"),
+                batch.patches().len()
+            );
+        }
+        ConversationPatchReplay::Current { .. }
+        | ConversationPatchReplay::ResnapshotRequired { .. } => {
+            panic!("restart replay should contain the interrupted patches");
+        }
+    }
 }

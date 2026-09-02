@@ -1,12 +1,16 @@
 //! TEST-ONLY engine-owner protocol child fixture.
 //!
 //! One ordinary `main` in a `testonly` Bazel `rust_binary`: no libtest
-//! harness, no banner, never shipped. It implements eight frozen scenarios:
+//! harness, no banner, never shipped. It implements nine frozen scenarios:
 //! six P0 first-wave readiness/health cases, one finite P4 transport
 //! prerequisite `prompt_text_then_terminal` that serves a bounded
 //! `GET /api/health` → `POST /api/session/test-session/prompt` →
 //! `GET /api/experimental/session/test-session/log?after=0&follow=true` SSE
-//! sequence, and one child-custody proof scenario. No product module is
+//! sequence, one deterministic mid-turn hold variant
+//! `prompt_text_then_hold_after_first_delta` that serves the same health /
+//! session / prompt prefix but streams only the first assistant delta and
+//! then holds its log connection open until lifeline EOF (never a terminal
+//! event), and one child-custody proof scenario. No product module is
 //! imported; the only non-`std` dependency is the pinned
 //! `@crates//:serde_json` (1.0.151).
 //!
@@ -107,6 +111,7 @@ fn main() {
         "hang_until_lifeline" => run_hang_until_lifeline(),
         "abrupt_child_exit_nonzero" => process::exit(ABRUPT_EXIT_CODE),
         "prompt_text_then_terminal" => run_prompt_text_then_terminal(),
+        "prompt_text_then_hold_after_first_delta" => run_prompt_text_then_hold_after_first_delta(),
         "descendant_holds_sentinel" => run_descendant_holds_sentinel(),
         _ => process::exit(SCENARIO_REFUSED_EXIT),
     }
@@ -184,6 +189,25 @@ fn run_prompt_text_then_terminal() -> ! {
         .name("engine-owner-fixture-p4".to_owned())
         .spawn(move || p4_server_loop(&listener, &expected_auth))
         .expect("p4 thread should spawn");
+    wait_for_lifeline_eof();
+}
+
+fn run_prompt_text_then_hold_after_first_delta() -> ! {
+    let expected_auth = get_expected_auth_or_exit();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let port = listener.local_addr().expect("local_addr").port();
+    assert!(port != 0, "advertised port must be nonzero");
+    let readiness = build_readiness_line(port);
+    debug_assert!(readiness.len() <= READINESS_LIMIT);
+    {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{readiness}").expect("readiness write");
+        out.flush().expect("readiness flush");
+    }
+    std::thread::Builder::new()
+        .name("engine-owner-fixture-p4-hold".to_owned())
+        .spawn(move || p4_hold_server_loop(&listener, &expected_auth))
+        .expect("p4 hold thread should spawn");
     wait_for_lifeline_eof();
 }
 
@@ -877,6 +901,73 @@ fn serve_p4_log_phase(listener: &TcpListener, expected_auth: &str) {
     }
 }
 
+fn p4_hold_server_loop(listener: &TcpListener, expected_auth: &str) {
+    if !serve_p4_health_phase(listener, expected_auth) {
+        return;
+    }
+    if !serve_p4_prompt_phase(listener, expected_auth) {
+        return;
+    }
+    serve_p4_log_hold_phase(listener, expected_auth);
+}
+
+fn sse_hold_first_delta_bytes() -> Vec<u8> {
+    // Same first assistant delta as the finite P4 stream, without the
+    // terminal succeeded event. The parent proves the durable delta, then
+    // stops the engine through the custody boundary; this connection holds
+    // open until lifeline EOF kills the fixture process.
+    let mut s = String::new();
+    s.push_str(": keepalive\n");
+    s.push('\n');
+    s.push_str(
+        "data: {\"run_id\":\"fixture-run\",\"session_id\":\"test-session\",\"sequence\":1,\n",
+    );
+    s.push_str("data: \"delta\":\"hello world\"}\n");
+    s.push('\n');
+    s.into_bytes()
+}
+
+fn serve_p4_log_hold_phase(listener: &TcpListener, expected_auth: &str) {
+    // Next: GET /api/experimental/session/test-session/log?after=0&follow=true
+    let Ok((mut stream, _)) = listener.accept() else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let Ok(raw) = read_bounded_headers(&mut stream) else {
+        send_error(&mut stream, 400);
+        return;
+    };
+    if validate_log_request(&raw, expected_auth).is_err() {
+        send_error(&mut stream, 400);
+        return;
+    }
+    // Close-delimited SSE framing: no Content-Length, the one delta flushes
+    // incrementally, and the connection holds open with no terminal event.
+    let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    if stream.write_all(header.as_bytes()).is_err() {
+        return;
+    }
+    if stream.write_all(&sse_hold_first_delta_bytes()).is_err() {
+        return;
+    }
+    if stream.flush().is_err() {
+        return;
+    }
+    // Deterministic hold: block on the held connection until the client
+    // closes it or lifeline EOF terminates the fixture process. The 5s read
+    // timeout only wakes the wait; the loop re-enters without any terminal
+    // event, so the hold is witnessed by the durable delta, never by time.
+    let mut buf = [0_u8; 1];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => return,
+        }
+    }
+}
+
 fn health_body(pid: u32, version: &str) -> String {
     format!(r#"{{"healthy":true,"pid":{pid},"version":"{version}"}}"#)
 }
@@ -922,6 +1013,7 @@ fn is_known_scenario(name: &str) -> bool {
             | "hang_until_lifeline"
             | "abrupt_child_exit_nonzero"
             | "prompt_text_then_terminal"
+            | "prompt_text_then_hold_after_first_delta"
             | "descendant_holds_sentinel"
     )
 }
@@ -1013,6 +1105,7 @@ mod tests {
             "hang_until_lifeline",
             "abrupt_child_exit_nonzero",
             "prompt_text_then_terminal",
+            "prompt_text_then_hold_after_first_delta",
             "descendant_holds_sentinel",
         ] {
             assert!(is_known_scenario(s), "{s} should be known");
@@ -1649,6 +1742,39 @@ mod tests {
         assert!(v1.get("delta").and_then(Value::as_str).is_some());
         assert_eq!(v2.get("state").and_then(Value::as_str), Some("succeeded"));
         assert_ne!(first_json, second_json);
+    }
+
+    #[test]
+    fn hold_variant_streams_only_first_delta_without_terminal() {
+        let body = String::from_utf8(sse_hold_first_delta_bytes()).unwrap();
+        assert!(body.starts_with(": keepalive\n"));
+        let events: Vec<&str> = body.split("\n\n").filter(|s| s.contains("data:")).collect();
+        assert_eq!(events.len(), 1, "hold variant should stream one data event");
+        let data_lines: Vec<&str> = events[0]
+            .lines()
+            .filter(|l| l.starts_with("data:"))
+            .collect();
+        assert_eq!(data_lines.len(), 2, "hold delta should stay multiline");
+        let json = data_lines
+            .iter()
+            .map(|l| {
+                l.strip_prefix("data: ")
+                    .unwrap_or(l.strip_prefix("data:").unwrap_or(""))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value.get("run_id").and_then(Value::as_str),
+            Some(FIXTURE_RUN_ID)
+        );
+        assert_eq!(value.get("sequence").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            value.get("delta").and_then(Value::as_str),
+            Some("hello world")
+        );
+        assert!(value.get("state").is_none());
+        assert!(!body.contains("succeeded"));
     }
 
     #[test]

@@ -312,6 +312,23 @@ pub enum NativeRunDispatcherShutdown {
     TaskLost,
 }
 
+/// Test-only bundled parameters for the one-shot fixture pipeline.
+///
+/// Groups the eight fixture-launch inputs so the scenario helper stays
+/// within the argument budget without a lint suppression. No production
+/// path uses this type.
+#[cfg(test)]
+pub(crate) struct FixtureScenarioLaunch<'a> {
+    pub(crate) repository: Repository,
+    pub(crate) database_path: PathBuf,
+    pub(crate) config: NativeRunDispatcherConfig,
+    pub(crate) process_cancel: Arc<CancelHandle>,
+    pub(crate) activity: ActivityGateImpl,
+    pub(crate) runtime: &'a Handle,
+    pub(crate) fixture_program: PathBuf,
+    pub(crate) scenario: &'static str,
+}
+
 /// One running configured first-message dispatcher.
 #[allow(clippy::module_name_repetitions)]
 pub struct NativeRunDispatcher {
@@ -403,6 +420,36 @@ impl NativeRunDispatcher {
         runtime: &Handle,
         fixture_program: PathBuf,
     ) -> Self {
+        Self::start_with_fixture_scenario_for_tests(FixtureScenarioLaunch {
+            repository,
+            database_path,
+            config,
+            process_cancel,
+            activity,
+            runtime,
+            fixture_program,
+            scenario: "prompt_text_then_terminal",
+        })
+    }
+
+    /// Starts the same one-shot fixture pipeline with an explicit frozen
+    /// fixture scenario (for example the deterministic hold-after-first-delta
+    /// variant). Test-only; production always uses [`Self::start`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn start_with_fixture_scenario_for_tests(
+        params: FixtureScenarioLaunch<'_>,
+    ) -> Self {
+        let FixtureScenarioLaunch {
+            repository,
+            database_path,
+            config,
+            process_cancel,
+            activity,
+            runtime,
+            fixture_program,
+            scenario,
+        } = params;
         Self::start_with_mode(
             repository,
             database_path,
@@ -414,7 +461,7 @@ impl NativeRunDispatcher {
                 program: fixture_program,
                 version: "0.0.0-fixture",
                 profile_id: "fixture-test".to_owned(),
-                scenario: "prompt_text_then_terminal",
+                scenario,
             })),
         )
     }
@@ -1580,20 +1627,35 @@ async fn consume_turn(
     };
     let mut state = TurnConsumptionState::new(scope);
 
+    let mut cancel_signalled = false;
     loop {
-        tokio::select! {
-            biased;
-            () = context.stop.wait() => {
-                state.forced_interrupted = true;
-                turn.cancel();
-            }
-            () = context.process_cancel.wait() => {
-                state.forced_interrupted = true;
-                turn.cancel();
-            }
-            observation = turn.next_observation() => {
-                let Some(observation) = observation else { break; };
-                handle_observation(&context, &mut state, &mut turn, observation).await;
+        if cancel_signalled {
+            // Cancellation was already delivered to the turn: drain the
+            // remaining observations to the driver's terminal close. The
+            // fired cancel branches stay ready forever once cancelled, so
+            // re-selecting them under `biased` would starve
+            // `next_observation()` on a held stream that never emits a
+            // terminal event.
+            let observation = turn.next_observation().await;
+            let Some(observation) = observation else { break; };
+            handle_observation(&context, &mut state, &mut turn, observation).await;
+        } else {
+            tokio::select! {
+                biased;
+                () = context.stop.wait() => {
+                    cancel_signalled = true;
+                    state.forced_interrupted = true;
+                    turn.cancel();
+                }
+                () = context.process_cancel.wait() => {
+                    cancel_signalled = true;
+                    state.forced_interrupted = true;
+                    turn.cancel();
+                }
+                observation = turn.next_observation() => {
+                    let Some(observation) = observation else { break; };
+                    handle_observation(&context, &mut state, &mut turn, observation).await;
+                }
             }
         }
         if state.terminal.is_some() {
