@@ -468,8 +468,8 @@ impl DropdownMenuState {
 
             (
                 normalized.clone(),
-                self.find_prefix_from(&normalized, start)
-                    .or_else(|| self.find_prefix_from(&normalized, 0)),
+                self.find_enabled_prefix_from(&normalized, start)
+                    .or_else(|| self.find_enabled_prefix_from(&normalized, 0)),
             )
         } else {
             let mut extended = previous;
@@ -572,6 +572,26 @@ impl DropdownMenuState {
             };
 
             self.is_item_enabled(index).then_some(index)
+        })
+    }
+
+    fn find_enabled_prefix_from(&self, prefix: &str, start: usize) -> Option<usize> {
+        let len = self.entries.len();
+        if len == 0 {
+            return None;
+        }
+
+        (0..len).find_map(|offset| {
+            let index = (start + offset) % len;
+            let item = self.item_at(index)?;
+            if !item.is_enabled() {
+                return None;
+            }
+            item.label
+                .as_ref()
+                .to_lowercase()
+                .starts_with(prefix)
+                .then_some(index)
         })
     }
 
@@ -1303,7 +1323,7 @@ impl Render for DropdownMenu {
                 *trigger_slot.borrow_mut() = bounds.first().copied();
             });
 
-        let mut root = div().relative().child(trigger);
+        let mut root = div().relative().flex().flex_col().items_start().child(trigger);
         if self.state.is_open() {
             let viewport = window.bounds().size;
             let width = style.content.min_width;
