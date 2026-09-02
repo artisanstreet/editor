@@ -1868,7 +1868,7 @@ impl Render for ConversationSurface {
                     .child(button),
             );
         }
-        if let Some(rail) = self.render_turn_navigator(&entity, theme, window, cx) {
+        if let Some(rail) = self.render_turn_navigator(&entity, &theme, window, cx) {
             root = root.child(rail);
         }
         root
@@ -1886,7 +1886,7 @@ impl ConversationSurface {
     fn render_turn_navigator(
         &mut self,
         entity: &Entity<Self>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -1939,7 +1939,7 @@ impl ConversationSurface {
             let button = Button::new(
                 SharedString::from(control_selector.clone()),
                 handle,
-                theme,
+                *theme,
                 MotionPolicy::Reduced,
                 ButtonVariant::Ghost,
                 ButtonSize::Small,
