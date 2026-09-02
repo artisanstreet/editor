@@ -16,7 +16,7 @@ use conversation_scene::{
 use conversation_surface::{
     CONVERSATION_SURFACE_MAX_ACTIONS, ConversationSurface, ConversationSurfaceAction,
     ConversationSurfaceTarget, JUMP_TO_LATEST_SELECTOR, ROOT_SELECTOR, RenderedBlockKind,
-    TURN_NAVIGATOR_CONTROL_PREFIX, TURN_NAVIGATOR_SELECTOR, VIEWPORT_SELECTOR, ViewportObservation,
+    TURN_NAVIGATOR_SELECTOR, VIEWPORT_SELECTOR, ViewportObservation,
     block_selector, changed_file_selector, file_change_status_label, format_elapsed_millis,
     ordered_block_kinds, steering_selector, turn_selector, turn_status_copy,
 };
@@ -1099,9 +1099,14 @@ fn navigator_scene() -> ConversationScene {
     .expect("navigator scene is valid")
 }
 
-fn navigator_control_selector(id: &str) -> String {
-    format!("{TURN_NAVIGATOR_CONTROL_PREFIX}-{id}")
-}
+/// Stable per-control selectors under test. These spell out the production
+/// turn-navigator control prefix plus the fixture identity: `debug_bounds`
+/// requires `&'static str`, so dynamic formatting is not usable here.
+const NAV_FIRST_CONTROL: &str = "artisan-conversation-surface-turn-navigator-control-nav-first";
+const NAV_SECOND_CONTROL: &str = "artisan-conversation-surface-turn-navigator-control-nav-second";
+const NAV_ASSISTANT_CONTROL: &str =
+    "artisan-conversation-surface-turn-navigator-control-nav-assistant";
+const NAV_BLANK_CONTROL: &str = "artisan-conversation-surface-turn-navigator-control-nav-blank";
 
 fn mount_navigator_scene(
     scene: ConversationScene,
@@ -1177,16 +1182,16 @@ fn loaded_turn_navigator_renders_oldest_first_item_controls(cx: &mut TestAppCont
     let (_surface, cx) = mount_navigator_scene(navigator_scene(), cx);
     assert!(cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_some());
     let first = cx
-        .debug_bounds(navigator_control_selector("nav-first"))
+        .debug_bounds(NAV_FIRST_CONTROL)
         .expect("oldest marker must paint a stable control");
     let second = cx
-        .debug_bounds(navigator_control_selector("nav-second"))
+        .debug_bounds(NAV_SECOND_CONTROL)
         .expect("newest marker must paint a stable control");
     assert!(
         first.center().y < second.center().y,
         "oldest marker paints above the newest marker"
     );
-    assert!(cx.debug_bounds(navigator_control_selector("nav-assistant")).is_none());
+    assert!(cx.debug_bounds(NAV_ASSISTANT_CONTROL).is_none());
 }
 
 #[gpui::test]
@@ -1242,9 +1247,9 @@ fn loaded_turn_navigator_suppresses_empty_labels(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let _ = drain_surface_actions(&surface, cx);
     assert!(cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_some());
-    assert!(cx.debug_bounds(navigator_control_selector("nav-blank")).is_none());
-    assert!(cx.debug_bounds(navigator_control_selector("nav-first")).is_some());
-    assert!(cx.debug_bounds(navigator_control_selector("nav-second")).is_some());
+    assert!(cx.debug_bounds(NAV_BLANK_CONTROL).is_none());
+    assert!(cx.debug_bounds(NAV_FIRST_CONTROL).is_some());
+    assert!(cx.debug_bounds(NAV_SECOND_CONTROL).is_some());
 }
 
 #[gpui::test]
@@ -1254,7 +1259,7 @@ fn loaded_turn_navigator_pointer_activation_emits_exact_item_scroll_intent(
     let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
     let offset_before = cx.update(|_, app| surface.read(app).scroll_handle().offset());
     let button = cx
-        .debug_bounds(navigator_control_selector("nav-first"))
+        .debug_bounds(NAV_FIRST_CONTROL)
         .expect("oldest marker must paint a stable control");
     cx.simulate_click(button.center(), Modifiers::none());
     cx.run_until_parked();
@@ -1368,7 +1373,7 @@ fn loaded_turn_navigator_activation_respects_action_backpressure(cx: &mut TestAp
         });
     });
     let button = cx
-        .debug_bounds(navigator_control_selector("nav-first"))
+        .debug_bounds(NAV_FIRST_CONTROL)
         .expect("oldest marker must paint a stable control");
     cx.simulate_click(button.center(), Modifiers::none());
     cx.run_until_parked();
