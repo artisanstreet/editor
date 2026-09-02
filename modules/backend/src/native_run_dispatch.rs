@@ -1627,20 +1627,35 @@ async fn consume_turn(
     };
     let mut state = TurnConsumptionState::new(scope);
 
+    let mut cancel_signalled = false;
     loop {
-        tokio::select! {
-            biased;
-            () = context.stop.wait() => {
-                state.forced_interrupted = true;
-                turn.cancel();
-            }
-            () = context.process_cancel.wait() => {
-                state.forced_interrupted = true;
-                turn.cancel();
-            }
-            observation = turn.next_observation() => {
-                let Some(observation) = observation else { break; };
-                handle_observation(&context, &mut state, &mut turn, observation).await;
+        if cancel_signalled {
+            // Cancellation was already delivered to the turn: drain the
+            // remaining observations to the driver's terminal close. The
+            // fired cancel branches stay ready forever once cancelled, so
+            // re-selecting them under `biased` would starve
+            // `next_observation()` on a held stream that never emits a
+            // terminal event.
+            let observation = turn.next_observation().await;
+            let Some(observation) = observation else { break; };
+            handle_observation(&context, &mut state, &mut turn, observation).await;
+        } else {
+            tokio::select! {
+                biased;
+                () = context.stop.wait() => {
+                    cancel_signalled = true;
+                    state.forced_interrupted = true;
+                    turn.cancel();
+                }
+                () = context.process_cancel.wait() => {
+                    cancel_signalled = true;
+                    state.forced_interrupted = true;
+                    turn.cancel();
+                }
+                observation = turn.next_observation() => {
+                    let Some(observation) = observation else { break; };
+                    handle_observation(&context, &mut state, &mut turn, observation).await;
+                }
             }
         }
         if state.terminal.is_some() {
