@@ -1868,6 +1868,26 @@ impl Render for ConversationSurface {
                     .child(button),
             );
         }
+        if let Some(rail) = self.render_turn_navigator(&entity, theme, window, cx) {
+            root = root.child(rail);
+        }
+        root
+    }
+
+    /// Prunes navigator focus handles and paints the loaded-turn rail.
+    ///
+    /// Pruning runs on every render, even when the replacement scene has no
+    /// markers at all, so a focused control that disappears returns focus to
+    /// the transcript. The rail itself paints only for two or more loaded
+    /// user-message markers. Emitting a scroll intent never touches the GPUI
+    /// handle or scene directly.
+    fn render_turn_navigator(
+        &mut self,
+        entity: &Entity<Self>,
+        theme: ArtisanTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let markers = loaded_turn_navigator_markers(&self.scene);
         // Prune focus handles whose targets left the scene on every render,
         // even when the replacement scene has no markers at all. A focused
@@ -1889,51 +1909,51 @@ impl Render for ConversationSurface {
                 self.transcript_focus.focus(window);
             }
         }
-        if !markers.is_empty() {
-            let navigator_surface = entity.downgrade();
-            let mut rail = div()
-                .absolute()
-                .right(px(16.0))
-                .top(px(64.0))
-                .flex()
-                .flex_col()
-                .gap(theme.spacing.steps(1.0))
-                .debug_selector(|| TURN_NAVIGATOR_SELECTOR.to_owned());
-            for marker in &markers {
-                let key = navigator_focus_key(&marker.target);
-                let handle = self
-                    .navigator_focus
-                    .entry(key)
-                    .or_insert_with(|| cx.focus_handle().tab_stop(true))
-                    .clone();
-                let target = marker.target.clone();
-                let control_selector = format!(
-                    "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
-                    navigator_target_slug(&marker.target)
-                );
-                let surface_handle = navigator_surface.clone();
-                let button = Button::new(
-                    SharedString::from(control_selector.clone()),
-                    handle,
-                    theme,
-                    MotionPolicy::Reduced,
-                    ButtonVariant::Ghost,
-                    ButtonSize::Small,
-                    ButtonContent::text(marker.label.clone()),
-                )
-                .expect("turn-navigator button configuration is valid")
-                .focus_visibility(FocusVisibility::Visible)
-                .debug_selector(control_selector)
-                .on_activate(move |_, _, app| {
-                    let _ = surface_handle.update(app, |surface, cx| {
-                        surface.request_scroll(target.clone(), cx);
-                    });
-                });
-                rail = rail.child(button);
-            }
-            root = root.child(rail);
+        if markers.is_empty() {
+            return None;
         }
-        root
+        let navigator_surface = entity.downgrade();
+        let mut rail = div()
+            .absolute()
+            .right(px(16.0))
+            .top(px(64.0))
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.steps(1.0))
+            .debug_selector(|| TURN_NAVIGATOR_SELECTOR.to_owned());
+        for marker in &markers {
+            let key = navigator_focus_key(&marker.target);
+            let handle = self
+                .navigator_focus
+                .entry(key)
+                .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                .clone();
+            let target = marker.target.clone();
+            let control_selector = format!(
+                "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
+                navigator_target_slug(&marker.target)
+            );
+            let surface_handle = navigator_surface.clone();
+            let button = Button::new(
+                SharedString::from(control_selector.clone()),
+                handle,
+                theme,
+                MotionPolicy::Reduced,
+                ButtonVariant::Ghost,
+                ButtonSize::Small,
+                ButtonContent::text(marker.label.clone()),
+            )
+            .expect("turn-navigator button configuration is valid")
+            .focus_visibility(FocusVisibility::Visible)
+            .debug_selector(control_selector)
+            .on_activate(move |_, _, app| {
+                let _ = surface_handle.update(app, |surface, cx| {
+                    surface.request_scroll(target.clone(), cx);
+                });
+            });
+            rail = rail.child(button);
+        }
+        Some(rail.into_any_element())
     }
 }
 
