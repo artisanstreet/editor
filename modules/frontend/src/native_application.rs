@@ -1210,6 +1210,7 @@ impl NativeApplication {
             if self.conversation_effects.is_empty()
                 && host.read(cx).total_pending_effect_count() == 0
             {
+                Self::release_transient_scroll_custody(&host, cx);
                 self.conversation_host = None;
                 drop(self.conversation_host_subscription.take());
                 self.selected_thread = None;
@@ -1741,6 +1742,9 @@ impl NativeApplication {
         self.clear_message_presentation();
         self.pending_snapshot = None;
         self.conversation_effects.clear();
+        if let Some(host) = self.conversation_host.clone() {
+            Self::release_transient_scroll_custody(&host, cx);
+        }
         self.conversation_host = None;
         drop(self.conversation_host_subscription.take());
         self.selected_thread = None;
@@ -2617,6 +2621,7 @@ impl NativeApplication {
         };
         self.pump_host_boundary(&host, cx);
         if self.conversation_effects.is_empty() && host.read(cx).total_pending_effect_count() == 0 {
+            Self::release_transient_scroll_custody(&host, cx);
             self.conversation_host = None;
             drop(self.conversation_host_subscription.take());
             self.selected_thread = None;
@@ -2628,6 +2633,13 @@ impl NativeApplication {
             self.sync_composer_availability(cx);
             cx.notify();
         }
+    }
+
+    fn release_transient_scroll_custody(host: &Entity<ConversationHost>, cx: &mut Context<Self>) {
+        let surface = host.read(cx).surface().clone();
+        surface.update(cx, |surface, _| {
+            surface.release_transient_scroll_custody();
+        });
     }
 
     fn collect_host_effects(&mut self, host: &Entity<ConversationHost>, cx: &mut Context<Self>) {
@@ -2710,6 +2722,16 @@ impl NativeApplication {
                         effect,
                     )) => {
                         if !self.apply_viewport_effect(host, &effect, cx) {
+                            return;
+                        }
+                        self.conversation_effects.remove(0);
+                    }
+                    ConversationHostEffect::ScrollIntent { target } => {
+                        let surface = host.read(cx).surface().clone();
+                        let accepted = surface.update(cx, |surface, surface_cx| {
+                            surface.schedule_scroll_target(target, surface_cx)
+                        });
+                        if !accepted {
                             return;
                         }
                         self.conversation_effects.remove(0);
@@ -3988,7 +4010,11 @@ mod tests {
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
         conversation_host::{ConversationHost, ConversationHostEffect},
+        conversation_scene::SceneId,
         conversation_state_machine::ConversationStateEffect,
+        conversation_surface::{
+            CONVERSATION_SURFACE_MAX_SCROLL_TARGETS, ConversationSurfaceTarget,
+        },
         conversation_view_machine::{CompletionRejection, ViewportEffect, ViewportGeneration},
         project_picker::{ProjectOption, ProjectPickerAction},
     };
@@ -4765,6 +4791,127 @@ mod tests {
                 assert!(matches!(&application.state, NativeViewState::Ready));
             });
         });
+    }
+
+    #[gpui::test]
+    fn scroll_intent_pumping_preserves_controller_view_without_completion(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let thread_id = ThreadId::parse("scroll-intent-thread").expect("thread");
+        let host = cx.update(|_, app| {
+            ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host")
+        });
+        let surface = cx.update(|_, app| host.read(app).surface().clone());
+        cx.update(|_, app| {
+            host.update(app, |host, _| {
+                let _ = host.drain_effects();
+            });
+        });
+        let before = cx.update(|_, app| host.read(app).controller_view());
+        let effect = ConversationHostEffect::ScrollIntent {
+            target: ConversationSurfaceTarget::Scene(
+                SceneId::parse("scroll-target").expect("scene id"),
+            ),
+        };
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.state = NativeViewState::Ready;
+                application.conversation_host = Some(host.clone());
+                application.conversation_effects = vec![effect.clone()];
+                application.pump_host_boundary(&host, application_cx);
+
+                assert!(application.conversation_effects.is_empty());
+                assert!(matches!(&application.state, NativeViewState::Ready));
+                assert_eq!(host.read(application_cx).controller_view(), before);
+                assert!(host.read(application_cx).pending_effects().is_empty());
+                assert!(surface.read(application_cx).pending_actions().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn scroll_intent_pumping_retains_fifo_head_when_surface_is_full(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let thread_id = ThreadId::parse("scroll-backpressure-thread").expect("thread");
+        let host = cx.update(|_, app| {
+            ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host")
+        });
+        let surface = cx.update(|_, app| host.read(app).surface().clone());
+        cx.update(|_, app| {
+            host.update(app, |host, _| {
+                let _ = host.drain_effects();
+            });
+            surface.update(app, |surface, surface_cx| {
+                for index in 0..CONVERSATION_SURFACE_MAX_SCROLL_TARGETS {
+                    assert!(surface.schedule_scroll_target(
+                        ConversationSurfaceTarget::Scene(
+                            SceneId::parse(format!("queued-{index}")).expect("scene id"),
+                        ),
+                        surface_cx,
+                    ));
+                }
+            });
+        });
+        let effect = ConversationHostEffect::ScrollIntent {
+            target: ConversationSurfaceTarget::Scene(
+                SceneId::parse("backpressure-head").expect("scene id"),
+            ),
+        };
+
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.state = NativeViewState::Ready;
+                application.conversation_host = Some(host.clone());
+                application.conversation_effects = vec![effect.clone()];
+                application.pump_host_boundary(&host, application_cx);
+
+                assert_eq!(application.conversation_effects.as_slice(), &[effect]);
+                assert!(matches!(&application.state, NativeViewState::Ready));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn host_retirement_drops_pending_transient_scroll_target_with_surface(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        let thread_id = ThreadId::parse("scroll-retirement-thread").expect("thread");
+        let host = cx.update(|_, app| {
+            ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host")
+        });
+        let surface = cx.update(|_, app| host.read(app).surface().clone());
+        let weak_surface = surface.downgrade();
+        cx.update(|_, app| {
+            host.update(app, |host, _| {
+                let _ = host.drain_effects();
+            });
+            surface.update(app, |surface, surface_cx| {
+                assert!(surface.schedule_scroll_target(
+                    ConversationSurfaceTarget::Scene(
+                        SceneId::parse("retiring-target").expect("scene id"),
+                    ),
+                    surface_cx,
+                ));
+            });
+            view.update(app, |application, application_cx| {
+                application.state = NativeViewState::Ready;
+                application.conversation_host = Some(host.clone());
+                application.retire_host(application_cx);
+                assert!(application.conversation_host.is_none());
+                assert!(application.conversation_effects.is_empty());
+            });
+        });
+        drop(surface);
+        drop(host);
+        // Entity-data release runs at the end of the App update cycle:
+        // dropping the last host handle queues host removal, and only the
+        // cycle drops the host value that holds the final surface handle.
+        // Queue cleanup alone cannot release real surface custody, so run an
+        // update cycle before asserting it.
+        cx.update(|_, _| {});
+        assert!(weak_surface.upgrade().is_none());
     }
 
     #[gpui::test]
