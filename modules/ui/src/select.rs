@@ -1165,7 +1165,7 @@ impl<V: SelectValue> Select<V> {
             option_role: "option",
             expanded: self.open && !self.disabled,
             disabled: self.disabled,
-            label: SharedString::from(self.display_label()),
+            label: SharedString::from(self.display_label().to_owned()),
             placeholder: value_label.is_none(),
             value_label,
             trigger_selector: SharedString::from(self.trigger_selector()),
@@ -1251,7 +1251,7 @@ impl<V: SelectValue> RenderOnce for Select<V> {
             on_open_change,
             debug_selector,
             interaction_state,
-            root,
+            mut root,
         } = self;
 
         let caller_style = root.style().clone();
@@ -1301,7 +1301,6 @@ impl<V: SelectValue> RenderOnce for Select<V> {
         let trigger_label = selected_label.unwrap_or(placeholder);
 
         let entries_for_keys = entries.clone();
-        let state_for_keys = Rc::clone(&state);
         let focus_for_keys = focus.clone();
         let on_change_for_keys = on_change.clone();
         let on_open_for_keys = on_open_change.clone();
