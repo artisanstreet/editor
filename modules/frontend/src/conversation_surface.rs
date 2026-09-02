@@ -1452,6 +1452,7 @@ impl Render for ConversationSurface {
         let pending_targets = std::mem::take(&mut self.pending_scroll_targets);
         let mut retained_targets = Vec::with_capacity(pending_targets.len());
         let mut waiting_for_paint = false;
+        let mut scroll_executed = false;
         for target in pending_targets {
             if waiting_for_paint {
                 retained_targets.push(target);
@@ -1464,6 +1465,7 @@ impl Render for ConversationSurface {
             {
                 Some(rendered) if rendered.painted => {
                     rendered.anchor.scroll_to(window, cx);
+                    scroll_executed = true;
                 }
                 Some(_) => {
                     retained_targets.push(target);
@@ -1474,6 +1476,15 @@ impl Render for ConversationSurface {
         }
         self.pending_scroll_targets = retained_targets;
         self.scroll_anchors = rendered_anchors;
+        if scroll_executed {
+            // `ScrollAnchor::scroll_to` defers the offset write to a
+            // `window.on_next_frame` callback, which only runs when another
+            // frame is actually drawn. This render just consumed the dirty
+            // flag, so request the next frame explicitly; otherwise the
+            // callback pends forever on an idle window and the viewport
+            // never moves despite holding painted custody.
+            cx.notify();
+        }
 
         let paint_token = Rc::new(());
         self.scroll_anchor_paint_token = Some(paint_token.clone());
