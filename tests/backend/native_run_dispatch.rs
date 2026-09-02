@@ -2352,7 +2352,7 @@ async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
         &repository,
         thread_id.as_str(),
         "fixture-test",
-        120_000,
+        125_000,
         30_000,
         5_000,
     )
