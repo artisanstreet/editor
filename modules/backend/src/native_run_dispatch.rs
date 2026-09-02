@@ -403,6 +403,34 @@ impl NativeRunDispatcher {
         runtime: &Handle,
         fixture_program: PathBuf,
     ) -> Self {
+        Self::start_with_fixture_scenario_for_tests(
+            repository,
+            database_path,
+            config,
+            process_cancel,
+            activity,
+            runtime,
+            fixture_program,
+            "prompt_text_then_terminal",
+        )
+    }
+
+    /// Starts the same one-shot fixture pipeline with an explicit frozen
+    /// fixture scenario (for example the deterministic hold-after-first-delta
+    /// variant). Test-only; production always uses [`Self::start`].
+    #[cfg(test)]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_with_fixture_scenario_for_tests(
+        repository: Repository,
+        database_path: PathBuf,
+        config: NativeRunDispatcherConfig,
+        process_cancel: Arc<CancelHandle>,
+        activity: ActivityGateImpl,
+        runtime: &Handle,
+        fixture_program: PathBuf,
+        scenario: &'static str,
+    ) -> Self {
         Self::start_with_mode(
             repository,
             database_path,
@@ -414,7 +442,7 @@ impl NativeRunDispatcher {
                 program: fixture_program,
                 version: "0.0.0-fixture",
                 profile_id: "fixture-test".to_owned(),
-                scenario: "prompt_text_then_terminal",
+                scenario,
             })),
         )
     }
