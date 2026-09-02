@@ -14,7 +14,7 @@ use crate::theme::{
 };
 use gpui::{
     AnyElement, Bounds, BoxShadow, Context, Edges, FocusHandle, Hsla, InteractiveElement as _,
-    IntoElement as _, KeyDownEvent, ParentElement as _, Pixels, Render, SharedString, Size,
+    IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, SharedString, Size,
     StatefulInteractiveElement as _, Styled as _, Window, div, point, px, size, transparent_black,
 };
 
