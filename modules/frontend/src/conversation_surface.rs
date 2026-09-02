@@ -26,11 +26,14 @@ use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    AnyElement, Context, Div, Entity, FocusHandle, FontWeight, IntoElement, Render, ScrollHandle,
-    SharedString, Window, div,
-    prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
+    AnyElement, Context, Div, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Render,
+    ScrollAnchor, ScrollHandle, SharedString, Stateful, Window, div,
+    prelude::{
+        InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
+    },
     px,
 };
+use std::rc::Rc;
 
 use crate::conversation_scene::{
     ChangeSetBlock, CompactionBlock, ConversationScene, ErrorBlock, FileChangeStatus,
@@ -59,6 +62,14 @@ pub const VIEWPORT_SELECTOR: &str = CONVERSATION_VIEWPORT_SELECTOR;
 /// refused. Dropping the newest observation keeps the outbox bounded and
 /// preserves the order of observations already accepted by the controller.
 pub const CONVERSATION_SURFACE_MAX_ACTIONS: usize = 256;
+
+/// Maximum number of typed scroll targets retained until a matching painted
+/// render.
+///
+/// These commands are transient and intentionally have a separate bound from
+/// the surface action outbox. A retiring surface drops this queue with the
+/// rest of its render state.
+pub(crate) const CONVERSATION_SURFACE_MAX_SCROLL_TARGETS: usize = 64;
 
 /// A stable scene or item target used by viewport and scroll observations.
 ///
@@ -365,6 +376,17 @@ pub struct ConversationSurface {
     viewport_observation_scheduled: bool,
     viewport_next_frame_scheduled: bool,
     actions: Vec<ConversationSurfaceAction>,
+    pending_scroll_targets: Vec<ConversationSurfaceTarget>,
+    /// Targets matched against painted anchors by the latest render.
+    ///
+    /// Render drains these from the FIFO queue and executes the GPUI anchor
+    /// scroll. The same-frame prepaint listeners consume this handoff to
+    /// write the exact anchor-equivalent offset synchronously, which is the
+    /// only write the test harness pumps. Entries are render-local: each
+    /// render clears leftovers, and retirement clears them with the queue.
+    executed_scroll_targets: Vec<ConversationSurfaceTarget>,
+    scroll_anchors: Vec<RenderedScrollAnchor>,
+    scroll_anchor_paint_token: Option<Rc<()>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -372,6 +394,150 @@ struct ViewportGeometry {
     scroll_top: f64,
     viewport_height: f64,
     scroll_height: f64,
+}
+
+struct RenderedScrollAnchor {
+    scene_id: Option<SceneId>,
+    item_id: Option<ItemId>,
+    anchor: ScrollAnchor,
+    painted: bool,
+}
+
+impl RenderedScrollAnchor {
+    fn matches(&self, target: &ConversationSurfaceTarget) -> bool {
+        match target {
+            ConversationSurfaceTarget::Scene(scene_id) => self.scene_id.as_ref() == Some(scene_id),
+            ConversationSurfaceTarget::Item(item_id) => self.item_id.as_ref() == Some(item_id),
+        }
+    }
+
+    fn has_identity(&self) -> bool {
+        self.scene_id.is_some() || self.item_id.is_some()
+    }
+
+    fn same_identity(&self, scene_id: Option<&SceneId>, item_id: Option<&ItemId>) -> bool {
+        self.has_identity()
+            && self.scene_id.as_ref() == scene_id
+            && self.item_id.as_ref() == item_id
+    }
+}
+
+const SCROLL_ANCHOR_ELEMENT_PREFIX: &str = "artisan-conversation-scroll-anchor";
+
+struct ScrollAnchorRegistry<'a> {
+    handle: &'a ScrollHandle,
+    previous: &'a [RenderedScrollAnchor],
+    next_element_id: usize,
+    rendered: &'a mut Vec<RenderedScrollAnchor>,
+}
+
+impl ScrollAnchorRegistry<'_> {
+    fn attach(
+        &mut self,
+        element: Div,
+        scene_id: Option<&SceneId>,
+        item_id: Option<&ItemId>,
+    ) -> Stateful<Div> {
+        let scene_id = scene_id.cloned();
+        let item_id = item_id.cloned();
+        let previous = self
+            .previous
+            .iter()
+            .find(|rendered| rendered.same_identity(scene_id.as_ref(), item_id.as_ref()));
+        let (anchor, painted) = previous.map_or_else(
+            || (ScrollAnchor::for_handle(self.handle.clone()), false),
+            |rendered| (rendered.anchor.clone(), rendered.painted),
+        );
+        self.rendered.push(RenderedScrollAnchor {
+            scene_id: scene_id.clone(),
+            item_id: item_id.clone(),
+            anchor: anchor.clone(),
+            painted,
+        });
+        let element_id = self.next_element_id;
+        self.next_element_id = self
+            .next_element_id
+            .checked_add(1)
+            .expect("conversation scroll anchor element id space exhausted");
+        let internal_id = ElementId::named_usize(SCROLL_ANCHOR_ELEMENT_PREFIX, element_id);
+        element.id(internal_id).anchor_scroll(Some(anchor))
+    }
+
+    fn anchor_for_item(&self, item_id: &ItemId) -> Option<(ScrollAnchor, bool)> {
+        self.rendered
+            .iter()
+            .find(|rendered| rendered.item_id.as_ref() == Some(item_id))
+            .map(|rendered| (rendered.anchor.clone(), rendered.painted))
+    }
+
+    fn register_item_alias(&mut self, item_id: ItemId, anchor: ScrollAnchor, painted: bool) {
+        self.rendered.push(RenderedScrollAnchor {
+            scene_id: None,
+            item_id: Some(item_id),
+            anchor,
+            painted,
+        });
+    }
+}
+
+fn item_id_for_scene_id(id: &SceneId) -> Option<ItemId> {
+    ItemId::parse(id.as_str()).ok()
+}
+
+/// Returns the scene identity that owns the transcript position of one work
+/// group card. This is the single source for the group-card anchor identity
+/// shared by rendering and scroll-target resolution.
+fn work_group_anchor_id(turn_id: &TurnId, block: &WorkGroupBlock) -> Option<SceneId> {
+    block
+        .items
+        .first()
+        .map(work_item_id)
+        .cloned()
+        .or_else(|| SceneId::parse(turn_id.as_str()).ok())
+}
+
+fn text_block_scroll_identity(id: &SceneId) -> (Option<SceneId>, Option<ItemId>) {
+    (Some(id.clone()), item_id_for_scene_id(id))
+}
+
+/// Returns the anchor identity pair painted for one transcript child.
+///
+/// The pair mirrors the exact arguments passed to
+/// [`ScrollAnchorRegistry::attach`] for that child, so prepaint listeners can
+/// resolve executed scroll targets against measured child bounds. Unanchored
+/// rows report no identity and never match.
+fn block_scroll_identity(turn_id: &TurnId, block: &TurnBlock) -> (Option<SceneId>, Option<ItemId>) {
+    match block {
+        TurnBlock::UserMessage(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::AssistantMessage(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::WorkGroup(block) => (work_group_anchor_id(turn_id, block), None),
+        TurnBlock::Compaction(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::ChangeSet(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Plan(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Approval(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Question(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Error(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::UsageInterruption(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::ModelTransition(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::NativeFact(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::SteeringLabel(block) => (Some(block.id.clone()), None),
+        TurnBlock::TurnStatus(_) | TurnBlock::TurnFooter(_) => (None, None),
+    }
+}
+
+/// Returns whether a queued scroll target addresses one measured identity.
+///
+/// This mirrors [`RenderedScrollAnchor::matches`] for the transient
+/// render-to-prepaint handoff, which carries plain identity pairs instead of
+/// anchor objects.
+fn scroll_target_matches_identity(
+    target: &ConversationSurfaceTarget,
+    identity: &(Option<SceneId>, Option<ItemId>),
+) -> bool {
+    match target {
+        ConversationSurfaceTarget::Scene(scene_id) => identity.0.as_ref() == Some(scene_id),
+        ConversationSurfaceTarget::Item(item_id) => identity.1.as_ref() == Some(item_id),
+    }
 }
 
 struct TextBlockRender<'a> {
@@ -384,6 +550,7 @@ struct TextBlockRender<'a> {
 
 struct ControlledCardOptions {
     id: SceneId,
+    item_id: Option<ItemId>,
     disclosure: Option<SceneDisclosure>,
     selector: String,
     style: CardStyle,
@@ -413,6 +580,10 @@ impl ConversationSurface {
             viewport_observation_scheduled: false,
             viewport_next_frame_scheduled: false,
             actions: Vec::new(),
+            pending_scroll_targets: Vec::with_capacity(CONVERSATION_SURFACE_MAX_SCROLL_TARGETS),
+            executed_scroll_targets: Vec::new(),
+            scroll_anchors: Vec::new(),
+            scroll_anchor_paint_token: None,
         }
     }
 
@@ -562,6 +733,147 @@ impl ConversationSurface {
         queued
     }
 
+    /// Queues one host-owned scroll target for the next render.
+    ///
+    /// The target queue is deliberately separate from surface actions: a
+    /// host effect is acknowledged only when this bounded transient queue has
+    /// room, and execution never dispatches a controller event.
+    pub(crate) fn schedule_scroll_target(
+        &mut self,
+        target: ConversationSurfaceTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pending_scroll_targets.len() >= CONVERSATION_SURFACE_MAX_SCROLL_TARGETS {
+            return false;
+        }
+        self.pending_scroll_targets.push(target);
+        cx.notify();
+        true
+    }
+
+    /// Releases render-only scroll custody when the owning host retires.
+    ///
+    /// The queue contains only typed targets. The registry and its deferred
+    /// paint token are also transient, so neither can outlive this surface's
+    /// host ownership or revive a replacement surface.
+    pub(crate) fn release_transient_scroll_custody(&mut self) {
+        self.pending_scroll_targets.clear();
+        self.executed_scroll_targets.clear();
+        self.scroll_anchors.clear();
+        self.scroll_anchor_paint_token = None;
+    }
+
+    /// Writes the exact anchor-equivalent offset for one executed target.
+    ///
+    /// GPUI records each anchor origin during Div prepaint as
+    /// `bounds.origin - window.element_offset()` (gpui-0.2.2
+    /// `src/elements/div.rs:1368-1369`) and `ScrollAnchor::scroll_to`
+    /// applies `viewport_bounds.origin - last_origin` from an
+    /// `on_next_frame` callback (`div.rs:3029-3037`). Only the `ScrollArea`
+    /// viewport pushes a nonzero element offset on this path
+    /// (`src/window.rs:2410-2412`), so subtracting the listener-observed
+    /// offset from the measured child origin reproduces that private origin
+    /// exactly. The write lands inside the test-harness dirty draw
+    /// (`src/app.rs:1247`), where `on_next_frame` callbacks never run
+    /// (`src/platform/test/window.rs:235`).
+    fn apply_painted_scroll_offset(
+        &self,
+        child_origin: gpui::Point<gpui::Pixels>,
+        window: &Window,
+    ) {
+        let viewport_origin = self.scroll_handle.bounds().origin;
+        let content_origin = child_origin - window.element_offset();
+        let max_offset = self.scroll_handle.max_offset();
+        let mut offset = viewport_origin - content_origin;
+        offset.x = offset.x.clamp(-max_offset.width, px(0.0));
+        offset.y = offset.y.clamp(-max_offset.height, px(0.0));
+        self.scroll_handle.set_offset(offset);
+    }
+
+    /// Applies and retires the handoff against one listener's children.
+    ///
+    /// Targets apply in queue order so the last queued target wins, exactly
+    /// like the equivalent chain of `ScrollAnchor::scroll_to` callbacks.
+    /// Targets with no identity at this level stay queued for the remaining
+    /// levels of the same frame; render clears any true orphans.
+    fn apply_executed_scroll_targets(
+        &mut self,
+        identities: &[(Option<SceneId>, Option<ItemId>)],
+        children_bounds: &[gpui::Bounds<gpui::Pixels>],
+        window: &Window,
+    ) {
+        if self.executed_scroll_targets.is_empty() {
+            return;
+        }
+        let stashed = std::mem::take(&mut self.executed_scroll_targets);
+        for target in stashed {
+            let Some((_, bounds)) = identities
+                .iter()
+                .zip(children_bounds.iter())
+                .find(|(identity, _)| scroll_target_matches_identity(&target, identity))
+            else {
+                self.executed_scroll_targets.push(target);
+                continue;
+            };
+            self.apply_painted_scroll_offset(bounds.origin, window);
+        }
+    }
+
+    /// Executes queued scroll targets against freshly rendered anchors.
+    ///
+    /// Painted matches run the GPUI anchor scroll and join the prepaint
+    /// handoff; unpainted matches stay queued behind the paint gate and
+    /// unknown targets drop as no-ops. Returns whether any scroll executed.
+    fn drain_painted_scroll_targets(
+        &mut self,
+        rendered_anchors: &[RenderedScrollAnchor],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let pending_targets = std::mem::take(&mut self.pending_scroll_targets);
+        // The handoff is render-local: leftovers from a draw whose prepaint
+        // never resolved them must not leak into a later frame.
+        self.executed_scroll_targets.clear();
+        let mut retained_targets = Vec::with_capacity(pending_targets.len());
+        let mut waiting_for_paint = false;
+        let mut scroll_executed = false;
+        for target in pending_targets {
+            if waiting_for_paint {
+                retained_targets.push(target);
+                continue;
+            }
+
+            match rendered_anchors
+                .iter()
+                .find(|rendered| rendered.matches(&target))
+            {
+                Some(rendered) if rendered.painted => {
+                    rendered.anchor.scroll_to(window, cx);
+                    self.executed_scroll_targets.push(target);
+                    scroll_executed = true;
+                }
+                Some(_) => {
+                    retained_targets.push(target);
+                    waiting_for_paint = true;
+                }
+                None => {}
+            }
+        }
+        self.pending_scroll_targets = retained_targets;
+        scroll_executed
+    }
+
+    /// Returns the transcript-level identity pair for every turn root.
+    ///
+    /// Turn roots are the transcript's direct children in scene order.
+    fn turn_scroll_identities(&self) -> Vec<(Option<SceneId>, Option<ItemId>)> {
+        self.scene
+            .turn_scenes()
+            .iter()
+            .map(|turn| (SceneId::parse(turn.turn_id.as_str()).ok(), None))
+            .collect()
+    }
+
     /// Retries one geometry observation retained when the action queue was
     /// full. This is `pub(crate)` so the host can retry after draining its
     /// downstream effect queue without inventing another surface action.
@@ -651,17 +963,51 @@ impl ConversationSurface {
         turn: &TurnScene,
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let selector = turn_selector(&turn.turn_id);
-        let mut turn_element = div()
+        let turn_element = div()
             .w_full()
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(4.0));
-        turn_element = turn_element.debug_selector(move || selector.clone());
+        // Identities mirror the children pushed below in block order. A
+        // suppressed status row paints no child, so it contributes no slot.
+        let child_identities: Vec<(Option<SceneId>, Option<ItemId>)> = turn
+            .blocks()
+            .iter()
+            .filter_map(|block| {
+                if let TurnBlock::TurnStatus(status) = block
+                    && turn_status_copy(status.narration).is_none()
+                {
+                    return None;
+                }
+                Some(block_scroll_identity(&turn.turn_id, block))
+            })
+            .collect();
+        let surface = entity.downgrade();
+        let turn_element = turn_element.on_children_prepainted(
+            move |children_bounds, window, app| {
+                let _ = surface.update(app, |surface, _| {
+                    surface.apply_executed_scroll_targets(
+                        &child_identities,
+                        &children_bounds,
+                        window,
+                    );
+                });
+            },
+        );
+        let turn_element = anchors.attach(
+            turn_element,
+            SceneId::parse(turn.turn_id.as_str()).ok().as_ref(),
+            None,
+        );
+        let mut turn_element = turn_element.debug_selector(move || selector.clone());
 
         for block in turn.blocks() {
-            if let Some(element) = self.render_block(&turn.turn_id, block, entity.clone(), theme) {
+            if let Some(element) =
+                self.render_block(&turn.turn_id, block, entity, theme, anchors)
+            {
                 turn_element = turn_element.child(element);
             }
         }
@@ -673,44 +1019,51 @@ impl ConversationSurface {
         &self,
         turn_id: &TurnId,
         block: &TurnBlock,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> Option<AnyElement> {
         let selector = block_selector(turn_id, block);
         match block {
             TurnBlock::UserMessage(block) => {
-                Some(self.render_user_message(block, selector, entity, theme))
+                Some(self.render_user_message(block, selector, entity, theme, anchors))
             }
             TurnBlock::AssistantMessage(block) => {
-                Some(self.render_assistant_message(block, selector, entity, theme))
+                Some(self.render_assistant_message(block, selector, entity, theme, anchors))
             }
             TurnBlock::WorkGroup(block) => {
-                Some(self.render_work_group(turn_id, block, selector, entity, theme))
+                Some(self.render_work_group(turn_id, block, selector, entity, theme, anchors))
             }
             TurnBlock::Compaction(block) => {
-                Some(self.render_compaction(block, selector, entity, theme))
+                Some(self.render_compaction(block, selector, entity, theme, anchors))
             }
             TurnBlock::ChangeSet(block) => {
-                Some(self.render_change_set(block, selector, entity, theme))
+                Some(self.render_change_set(block, selector, entity, theme, anchors))
             }
-            TurnBlock::Plan(block) => Some(self.render_plan(block, selector, entity, theme)),
+            TurnBlock::Plan(block) => {
+                Some(self.render_plan(block, selector, entity, theme, anchors))
+            }
             TurnBlock::Approval(block) => {
-                Some(self.render_approval(block, selector, entity, theme))
+                Some(self.render_approval(block, selector, entity, theme, anchors))
             }
             TurnBlock::Question(block) => {
-                Some(self.render_question(block, selector, entity, theme))
+                Some(self.render_question(block, selector, entity, theme, anchors))
             }
-            TurnBlock::Error(block) => Some(self.render_error(block, selector, entity, theme)),
+            TurnBlock::Error(block) => {
+                Some(self.render_error(block, selector, entity, theme, anchors))
+            }
             TurnBlock::UsageInterruption(block) => {
-                Some(self.render_usage_interruption(block, selector, entity, theme))
+                Some(self.render_usage_interruption(block, selector, entity, theme, anchors))
             }
             TurnBlock::ModelTransition(block) => {
-                Some(self.render_model_transition(block, selector, entity, theme))
+                Some(self.render_model_transition(block, selector, entity, theme, anchors))
             }
             TurnBlock::NativeFact(block) => {
-                Some(self.render_native_fact(block, selector, entity, theme))
+                Some(self.render_native_fact(block, selector, entity, theme, anchors))
             }
-            TurnBlock::SteeringLabel(block) => Some(Self::render_steering(block, selector, theme)),
+            TurnBlock::SteeringLabel(block) => {
+                Some(Self::render_steering(block, selector, theme, anchors))
+            }
             TurnBlock::TurnStatus(block) => Self::render_status(block, selector, theme),
             TurnBlock::TurnFooter(block) => Some(Self::render_footer(block, selector, theme)),
         }
@@ -720,8 +1073,9 @@ impl ConversationSurface {
         &self,
         block: &UserMessageBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         self.render_markdown_text_block(
             TextBlockRender {
@@ -733,6 +1087,7 @@ impl ConversationSurface {
             },
             entity,
             theme,
+            anchors,
         )
     }
 
@@ -740,8 +1095,9 @@ impl ConversationSurface {
         &self,
         block: &crate::conversation_scene::AssistantMessageBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         self.render_markdown_text_block(
             TextBlockRender {
@@ -753,14 +1109,16 @@ impl ConversationSurface {
             },
             entity,
             theme,
+            anchors,
         )
     }
 
     fn render_text_block(
         &self,
         params: TextBlockRender<'_>,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let TextBlockRender {
             id,
@@ -773,6 +1131,7 @@ impl ConversationSurface {
         self.render_controlled_card(
             ControlledCardOptions {
                 id: id.clone(),
+                item_id: item_id_for_scene_id(id),
                 disclosure,
                 selector,
                 style,
@@ -780,14 +1139,16 @@ impl ConversationSurface {
             compact_card_content(style).child(card_heading(title, theme)),
             compact_card_content(style).child(body_text(body, theme)),
             entity,
+            anchors,
         )
     }
 
     fn render_markdown_text_block(
         &self,
         params: TextBlockRender<'_>,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let TextBlockRender {
             id,
@@ -803,6 +1164,7 @@ impl ConversationSurface {
         self.render_controlled_card(
             ControlledCardOptions {
                 id: id.clone(),
+                item_id: item_id_for_scene_id(id),
                 disclosure,
                 selector,
                 style,
@@ -810,6 +1172,7 @@ impl ConversationSurface {
             compact_card_content(style).child(card_heading(title, theme)),
             compact_card_content(style).child(rendered_body),
             entity,
+            anchors,
         )
     }
 
@@ -818,16 +1181,12 @@ impl ConversationSurface {
         turn_id: &TurnId,
         block: &WorkGroupBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let style = CardStyle::resolve(*theme);
-        let group_id = block
-            .items
-            .first()
-            .map(work_item_id)
-            .cloned()
-            .or_else(|| SceneId::parse(turn_id.as_str()).ok());
+        let group_id = work_group_anchor_id(turn_id, block);
         let title = block
             .label
             .map_or_else(|| "Work".to_owned(), format_work_group_label);
@@ -837,13 +1196,35 @@ impl ConversationSurface {
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(3.0));
+        let items_mounted = !matches!(block.disclosure, Some(SceneDisclosure::Closed));
         for item in &block.items {
-            items = items.child(Self::render_work_item(item, &selector, theme));
+            items = items.child(Self::render_work_item(
+                item,
+                &selector,
+                theme,
+                anchors,
+                items_mounted,
+            ));
         }
+        let item_identities: Vec<(Option<SceneId>, Option<ItemId>)> = block
+            .items
+            .iter()
+            .map(|item| (None, item_id_for_scene_id(work_item_id(item))))
+            .collect();
+        let surface = entity.downgrade();
+        items = items.on_children_prepainted(move |children_bounds, window, app| {
+            let _ = surface.update(app, |surface, _| {
+                surface.apply_executed_scroll_targets(
+                    &item_identities,
+                    &children_bounds,
+                    window,
+                );
+            });
+        });
 
         let Some(group_id) = group_id else {
             let fallback_selector = selector.clone();
-            let mut card = compact_card(style).w_full();
+            let mut card = anchors.attach(compact_card(style).w_full(), None, None);
             card = card.debug_selector(move || fallback_selector.clone());
             return card
                 .child(compact_card_content(style).child(card_heading(title, theme)))
@@ -854,6 +1235,7 @@ impl ConversationSurface {
         self.render_controlled_card(
             ControlledCardOptions {
                 id: group_id,
+                item_id: None,
                 disclosure: block.disclosure,
                 selector,
                 style,
@@ -861,35 +1243,53 @@ impl ConversationSurface {
             compact_card_content(style).child(card_heading(title, theme)),
             compact_card_content(style).child(items),
             entity,
+            anchors,
         )
     }
 
-    fn render_work_item(item: &WorkItem, group_selector: &str, theme: &ArtisanTheme) -> AnyElement {
+    fn render_work_item(
+        item: &WorkItem,
+        group_selector: &str,
+        theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
+        mounted: bool,
+    ) -> AnyElement {
         let (id, title, text) = match item {
             WorkItem::Reasoning { id, body, .. } => (id, "Reasoning", body.as_str()),
             WorkItem::Activity { id, body, .. } => (id, "Activity", body.as_str()),
             WorkItem::WorkSession { id, title, .. } => (id, "Work session", title.as_str()),
         };
         let selector = format!("{group_selector}-item-{}", id.as_str());
-        let mut item_element = div()
+        let item_element = div()
             .w_full()
             .min_w_0()
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(1.0));
-        item_element = item_element.debug_selector(move || selector.clone());
-        item_element = item_element
-            .child(card_heading(title, theme))
-            .child(body_text(text, theme));
-        item_element.into_any_element()
+        if mounted {
+            let mut item_element =
+                anchors.attach(item_element, None, item_id_for_scene_id(id).as_ref());
+            item_element = item_element.debug_selector(move || selector.clone());
+            item_element = item_element
+                .child(card_heading(title, theme))
+                .child(body_text(text, theme));
+            item_element.into_any_element()
+        } else {
+            let mut item_element = item_element.debug_selector(move || selector.clone());
+            item_element = item_element
+                .child(card_heading(title, theme))
+                .child(body_text(text, theme));
+            item_element.into_any_element()
+        }
     }
 
     fn render_compaction(
         &self,
         block: &CompactionBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         self.render_text_block(
             TextBlockRender {
@@ -901,6 +1301,7 @@ impl ConversationSurface {
             },
             entity,
             theme,
+            anchors,
         )
     }
 
@@ -908,8 +1309,9 @@ impl ConversationSurface {
         &self,
         block: &ChangeSetBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let style = CardStyle::resolve(*theme);
         let header = card_heading(format!("Changed files ({})", block.files.len()), theme);
@@ -930,6 +1332,7 @@ impl ConversationSurface {
         self.render_controlled_card(
             ControlledCardOptions {
                 id: block.id.clone(),
+                item_id: item_id_for_scene_id(&block.id),
                 disclosure: block.disclosure,
                 selector,
                 style,
@@ -937,6 +1340,7 @@ impl ConversationSurface {
             compact_card_content(style).child(header),
             compact_card_content(style).child(rows),
             entity,
+            anchors,
         )
     }
 
@@ -944,8 +1348,9 @@ impl ConversationSurface {
         &self,
         block: &PlanBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let style = CardStyle::resolve(*theme);
         let mut entries = div()
@@ -975,6 +1380,7 @@ impl ConversationSurface {
         self.render_controlled_card(
             ControlledCardOptions {
                 id: block.id.clone(),
+                item_id: item_id_for_scene_id(&block.id),
                 disclosure: block.disclosure,
                 selector,
                 style,
@@ -982,6 +1388,7 @@ impl ConversationSurface {
             compact_card_content(style).child(card_heading("Plan", theme)),
             compact_card_content(style).child(content),
             entity,
+            anchors,
         )
     }
 
@@ -989,8 +1396,9 @@ impl ConversationSurface {
         &self,
         block: &crate::conversation_scene::ApprovalBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         self.render_text_block(
             TextBlockRender {
@@ -1002,6 +1410,7 @@ impl ConversationSurface {
             },
             entity,
             theme,
+            anchors,
         )
     }
 
@@ -1009,8 +1418,9 @@ impl ConversationSurface {
         &self,
         block: &QuestionBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         self.render_text_block(
             TextBlockRender {
@@ -1022,6 +1432,7 @@ impl ConversationSurface {
             },
             entity,
             theme,
+            anchors,
         )
     }
 
@@ -1029,8 +1440,9 @@ impl ConversationSurface {
         &self,
         block: &ErrorBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let style = CardStyle::resolve(*theme);
         let alert = Alert::from_theme(*theme, AlertVariant::Destructive)
@@ -1040,6 +1452,7 @@ impl ConversationSurface {
         self.render_controlled_card(
             ControlledCardOptions {
                 id: block.id.clone(),
+                item_id: item_id_for_scene_id(&block.id),
                 disclosure: block.disclosure,
                 selector,
                 style,
@@ -1047,6 +1460,7 @@ impl ConversationSurface {
             compact_card_content(style).child(card_heading("Error", theme)),
             alert,
             entity,
+            anchors,
         )
     }
 
@@ -1054,8 +1468,9 @@ impl ConversationSurface {
         &self,
         block: &UsageInterruptionBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let style = CardStyle::resolve(*theme);
         let alert = Alert::from_theme(*theme, AlertVariant::Default)
@@ -1065,6 +1480,7 @@ impl ConversationSurface {
         self.render_controlled_card(
             ControlledCardOptions {
                 id: block.id.clone(),
+                item_id: item_id_for_scene_id(&block.id),
                 disclosure: block.disclosure,
                 selector,
                 style,
@@ -1072,6 +1488,7 @@ impl ConversationSurface {
             compact_card_content(style).child(card_heading("Usage interruption", theme)),
             alert,
             entity,
+            anchors,
         )
     }
 
@@ -1079,8 +1496,9 @@ impl ConversationSurface {
         &self,
         block: &ModelTransitionBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let text = format!("{} → {}", block.from_model, block.to_model);
         self.render_text_block(
@@ -1093,6 +1511,7 @@ impl ConversationSurface {
             },
             entity,
             theme,
+            anchors,
         )
     }
 
@@ -1100,8 +1519,9 @@ impl ConversationSurface {
         &self,
         block: &NativeFactBlock,
         selector: String,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         self.render_text_block(
             TextBlockRender {
@@ -1113,6 +1533,7 @@ impl ConversationSurface {
             },
             entity,
             theme,
+            anchors,
         )
     }
 
@@ -1120,15 +1541,21 @@ impl ConversationSurface {
         block: &SteeringBlock,
         selector: String,
         theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        let mut label = div()
+        let user_message_anchor = anchors.anchor_for_item(&block.anchor);
+        let label = div()
             .w_full()
             .min_w_0()
             .text_size(theme.typography.label_text)
             .text_color(theme.colors.muted_foreground.to_paint())
             .whitespace_normal()
             .child(block.label.clone());
-        label = label.debug_selector(move || selector.clone());
+        let label = anchors.attach(label, Some(&block.id), None);
+        let label = label.debug_selector(move || selector.clone());
+        if let Some((anchor, painted)) = user_message_anchor {
+            anchors.register_item_alias(block.anchor.clone(), anchor, painted);
+        }
         label.into_any_element()
     }
 
@@ -1167,10 +1594,12 @@ impl ConversationSurface {
         options: ControlledCardOptions,
         trigger: impl IntoElement,
         content: impl IntoElement,
-        entity: Entity<Self>,
+        entity: &Entity<Self>,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let ControlledCardOptions {
             id,
+            item_id,
             disclosure,
             selector,
             style,
@@ -1190,13 +1619,14 @@ impl ConversationSurface {
         .debug_selector(disclosure_selector);
 
         if !disabled {
-            let action_id = id;
+            let surface = entity.downgrade();
+            let action_id = id.clone();
             collapsible = collapsible.on_change(move |requested_open, _, _, app| {
                 let action = ConversationSurfaceAction::DisclosureToggleRequested {
                     id: action_id.clone(),
                     requested_open,
                 };
-                entity.update(app, |surface, cx| {
+                let _ = surface.update(app, |surface, cx| {
                     if surface.enqueue_action(action) {
                         cx.notify();
                     }
@@ -1204,8 +1634,9 @@ impl ConversationSurface {
             });
         }
 
-        let mut card = compact_card(style).w_full();
-        card = card.debug_selector(move || selector.clone());
+        let card = compact_card(style).w_full();
+        let card = anchors.attach(card, Some(&id), item_id.as_ref());
+        let card = card.debug_selector(move || selector.clone());
         card.child(collapsible).into_any_element()
     }
 }
@@ -1219,9 +1650,73 @@ impl Render for ConversationSurface {
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(4.0));
-        for turn in self.scene.turn_scenes() {
-            transcript = transcript.child(self.render_turn(turn, &entity, &theme));
+        let previous_anchors = std::mem::take(&mut self.scroll_anchors);
+        let mut rendered_anchors = Vec::new();
+        {
+            let mut anchors = ScrollAnchorRegistry {
+                handle: &self.scroll_handle,
+                previous: &previous_anchors,
+                next_element_id: 0,
+                rendered: &mut rendered_anchors,
+            };
+            for turn in self.scene.turn_scenes() {
+                transcript =
+                    transcript.child(self.render_turn(turn, &entity, &theme, &mut anchors));
+            }
         }
+
+        let scroll_executed = self.drain_painted_scroll_targets(&rendered_anchors, window, cx);
+        self.scroll_anchors = rendered_anchors;
+        if scroll_executed {
+            // `ScrollAnchor::scroll_to` defers the offset write to a
+            // `window.on_next_frame` callback, which only runs when another
+            // frame is actually drawn. This render just consumed the dirty
+            // flag, so request the next frame explicitly; otherwise the
+            // callback pends forever on an idle window and the viewport
+            // never moves despite holding painted custody.
+            cx.notify();
+        }
+
+        let paint_token = Rc::new(());
+        self.scroll_anchor_paint_token = Some(paint_token.clone());
+        let surface = entity.downgrade();
+        // Painted custody comes from the real prepaint boundary. GPUI writes
+        // each retained anchor origin during Div prepaint, and this listener
+        // runs after the transcript children are prepainted. A defer marker
+        // is not paint evidence and must never mint painted custody.
+        transcript = transcript.on_children_prepainted(move |children_bounds, window, app| {
+            let _ = surface.update(app, |surface, cx| {
+                let current = surface
+                    .scroll_anchor_paint_token
+                    .as_ref()
+                    .is_some_and(|current| Rc::ptr_eq(current, &paint_token));
+                if !current {
+                    return;
+                }
+
+                let mut newly_painted = false;
+                for anchor in &mut surface.scroll_anchors {
+                    if !anchor.painted {
+                        anchor.painted = true;
+                        newly_painted = true;
+                    }
+                }
+                if newly_painted && !surface.pending_scroll_targets.is_empty() {
+                    cx.notify();
+                }
+                // Turn roots are the transcript's direct children in scene
+                // order, so executed turn targets resolve here exactly like
+                // block and item targets resolve one level down.
+                if !surface.executed_scroll_targets.is_empty() {
+                    let turn_identities = surface.turn_scroll_identities();
+                    surface.apply_executed_scroll_targets(
+                        &turn_identities,
+                        &children_bounds,
+                        window,
+                    );
+                }
+            });
+        });
 
         // Deferred change cards intentionally have no transcript position in
         // the scene contract. Their aggregate owner supplies placement later;
@@ -1319,5 +1814,221 @@ fn status_color(theme: &ArtisanTheme, narration: TurnNarration) -> gpui::Hsla {
             theme.colors.destructive.to_paint()
         }
         _ => theme.colors.muted_foreground.to_paint(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use artisan_domain::{ConversationLifecycle, ItemId, TurnId};
+    use artisan_ui::theme::ThemeMode;
+    use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+
+    use crate::conversation_scene::{
+        ConversationScene, SceneDisclosure, SceneItem, SceneItemKind, SceneTurn, TurnNarration,
+        TurnNarrationEntry,
+    };
+
+    fn scene_id(value: &str) -> SceneId {
+        SceneId::parse(value).expect("scene id is valid")
+    }
+
+    fn turn_id(value: &str) -> TurnId {
+        TurnId::parse(value).expect("turn id is valid")
+    }
+
+    fn item(
+        id: &str,
+        ordinal: u64,
+        kind: SceneItemKind,
+        disclosure: Option<SceneDisclosure>,
+    ) -> SceneItem {
+        SceneItem::new(scene_id(id), turn_id("turn_a"), ordinal, kind, disclosure)
+            .expect("scene item is valid")
+    }
+
+    fn body() -> String {
+        (0..12)
+            .map(|line| format!("Transcript line {line} keeps the viewport measurable."))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn scene(items: Vec<SceneItem>) -> ConversationScene {
+        ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Completed,
+            )],
+            items,
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Quiet,
+            )],
+            Vec::new(),
+        )
+        .expect("conversation scene is valid")
+    }
+
+    fn scroll_target_scene(disclosure: SceneDisclosure) -> ConversationScene {
+        let mut items = (0..8)
+            .map(|index| {
+                item(
+                    &format!("user-{index}"),
+                    index + 1,
+                    SceneItemKind::UserMessage { body: body() },
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        items.extend([
+            item(
+                "work-first",
+                9,
+                SceneItemKind::ReasoningSummary { body: body() },
+                Some(disclosure),
+            ),
+            item(
+                "work-target",
+                10,
+                SceneItemKind::Activity { body: body() },
+                Some(disclosure),
+            ),
+        ]);
+        scene(items)
+    }
+
+    fn settle(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.run_until_parked();
+    }
+
+    fn offset(
+        surface: &Entity<ConversationSurface>,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Point<gpui::Pixels> {
+        cx.update(|_, app| surface.read(app).scroll_handle().offset())
+    }
+
+    #[gpui::test]
+    fn scene_scroll_target_executes_against_rendered_group_root(cx: &mut TestAppContext) {
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                scroll_target_scene(SceneDisclosure::Open),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        let before = offset(&surface, cx);
+
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                assert!(surface.schedule_scroll_target(
+                    ConversationSurfaceTarget::Scene(scene_id("work-first")),
+                    surface_cx,
+                ));
+            });
+        });
+        settle(cx);
+
+        let after = offset(&surface, cx);
+        assert!(
+            after.y < before.y,
+            "the rendered work group must be reached"
+        );
+        cx.update(|_, app| assert!(surface.read(app).pending_scroll_targets.is_empty()));
+    }
+
+    #[gpui::test]
+    fn item_scroll_target_executes_against_rendered_work_item_root(cx: &mut TestAppContext) {
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                scroll_target_scene(SceneDisclosure::Open),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        let before = offset(&surface, cx);
+
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                assert!(surface.schedule_scroll_target(
+                    ConversationSurfaceTarget::Item(
+                        ItemId::parse("work-target").expect("item id is valid"),
+                    ),
+                    surface_cx,
+                ));
+            });
+        });
+        settle(cx);
+
+        let after = offset(&surface, cx);
+        assert!(after.y < before.y, "the rendered work item must be reached");
+        cx.update(|_, app| assert!(surface.read(app).pending_scroll_targets.is_empty()));
+    }
+
+    #[gpui::test]
+    fn stale_or_unmounted_scroll_targets_are_benign_no_ops(cx: &mut TestAppContext) {
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(
+                scroll_target_scene(SceneDisclosure::Closed),
+                ThemeMode::Dark,
+                surface_cx,
+            )
+        });
+        cx.simulate_resize(size(px(720.0), px(240.0)));
+        settle(cx);
+        let before = offset(&surface, cx);
+
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                assert!(surface.schedule_scroll_target(
+                    ConversationSurfaceTarget::Scene(scene_id("not-rendered")),
+                    surface_cx,
+                ));
+                assert!(surface.schedule_scroll_target(
+                    ConversationSurfaceTarget::Item(
+                        ItemId::parse("work-target").expect("item id is valid"),
+                    ),
+                    surface_cx,
+                ));
+            });
+        });
+        settle(cx);
+
+        assert_eq!(offset(&surface, cx), before);
+        cx.update(|_, app| assert!(surface.read(app).pending_scroll_targets.is_empty()));
+    }
+
+    #[gpui::test]
+    fn scroll_target_queue_retains_fifo_head_at_bounded_capacity(cx: &mut TestAppContext) {
+        let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+            ConversationSurface::new(scene(Vec::new()), ThemeMode::Dark, surface_cx)
+        });
+        let first = ConversationSurfaceTarget::Scene(scene_id("queued-0"));
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                for index in 0..CONVERSATION_SURFACE_MAX_SCROLL_TARGETS {
+                    assert!(surface.schedule_scroll_target(
+                        ConversationSurfaceTarget::Scene(scene_id(&format!("queued-{index}"))),
+                        surface_cx,
+                    ));
+                }
+                assert!(!surface.schedule_scroll_target(
+                    ConversationSurfaceTarget::Scene(scene_id("refused")),
+                    surface_cx,
+                ));
+                assert_eq!(
+                    surface.pending_scroll_targets.len(),
+                    CONVERSATION_SURFACE_MAX_SCROLL_TARGETS
+                );
+                assert_eq!(surface.pending_scroll_targets.first(), Some(&first));
+            });
+        });
     }
 }
