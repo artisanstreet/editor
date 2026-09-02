@@ -2467,9 +2467,7 @@ fn assert_midturn_hold_state(held: &AllRows, message_id: &MessageId) -> u64 {
     assert_eq!(held_counts.spawned, 1);
     assert_eq!(held_counts.reaps_observed, 0);
     assert_eq!(held_counts.watchdog_failures_seen, 0);
-    let drivers_at_hold = held_counts.control_driver_joined;
-
-    drivers_at_hold
+    held_counts.control_driver_joined
 }
 
 #[tokio::test(flavor = "current_thread")]
