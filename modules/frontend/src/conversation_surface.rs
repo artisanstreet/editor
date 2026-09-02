@@ -33,6 +33,7 @@ use gpui::{
     },
     px,
 };
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::conversation_scene::{
@@ -42,6 +43,10 @@ use crate::conversation_scene::{
     UsageInterruptionBlock, UserMessageBlock, WorkGroupBlock, WorkItem,
 };
 use crate::conversation_scroll_position::conversation_is_following;
+use crate::conversation_turn_navigator::{
+    ConversationSnapshotInput, ConversationTurnInput, LoadedConversationItemInput,
+    conversation_turn_markers,
+};
 
 /// Stable debug selector for the conversation surface root.
 pub const CONVERSATION_SURFACE_SELECTOR: &str = "artisan-conversation-surface";
@@ -51,6 +56,14 @@ pub const CONVERSATION_VIEWPORT_SELECTOR: &str = "artisan-conversation-surface-v
 
 /// Stable debug selector for the detached-reader jump control.
 pub const JUMP_TO_LATEST_SELECTOR: &str = "artisan-conversation-surface-jump-to-latest";
+
+/// Stable debug selector for the loaded-turn navigator rail.
+pub const TURN_NAVIGATOR_SELECTOR: &str = "artisan-conversation-surface-turn-navigator";
+
+/// Stable debug-selector prefix for one navigator control; the target's
+/// scene or item identity is appended after a `-` separator.
+pub const TURN_NAVIGATOR_CONTROL_PREFIX: &str =
+    "artisan-conversation-surface-turn-navigator-control";
 
 /// Alias for callers that use the shorter root-selector vocabulary.
 pub const ROOT_SELECTOR: &str = CONVERSATION_SURFACE_SELECTOR;
@@ -387,6 +400,13 @@ pub struct ConversationSurface {
     executed_scroll_targets: Vec<ConversationSurfaceTarget>,
     scroll_anchors: Vec<RenderedScrollAnchor>,
     scroll_anchor_paint_token: Option<Rc<()>>,
+    /// Focus handles for loaded-turn navigator controls, keyed by stable
+    /// target identity (`item:<id>` or `scene:<id>`).
+    ///
+    /// Handles persist while their target remains in the scene and are
+    /// pruned on scene replacement; a focused control that disappears
+    /// returns focus to the transcript.
+    navigator_focus: HashMap<String, FocusHandle>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -478,6 +498,80 @@ impl ScrollAnchorRegistry<'_> {
             painted,
         });
     }
+}
+
+/// One loaded user-message control in the turn navigator rail.
+struct NavigatorMarker {
+    /// Visible policy label; never crosses the action boundary.
+    label: String,
+    /// Exact scroll target; identity only, never body text.
+    target: ConversationSurfaceTarget,
+}
+
+/// Returns the stable focus-map key for one navigator target
+/// (`item:<id>` or `scene:<id>`).
+fn navigator_focus_key(target: &ConversationSurfaceTarget) -> String {
+    match target {
+        ConversationSurfaceTarget::Item(id) => format!("item:{}", id.as_str()),
+        ConversationSurfaceTarget::Scene(id) => format!("scene:{}", id.as_str()),
+    }
+}
+
+/// Returns the raw scene or item identity carried by a navigator target.
+fn navigator_target_slug(target: &ConversationSurfaceTarget) -> &str {
+    match target {
+        ConversationSurfaceTarget::Item(id) => id.as_str(),
+        ConversationSurfaceTarget::Scene(id) => id.as_str(),
+    }
+}
+
+/// Derives the loaded-turn navigator markers from the current scene only.
+///
+/// The existing `conversation_turn_markers` policy supplies ordering,
+/// labels, and the two-marker minimum. Durable user-message identities
+/// become exact `Item` targets; anything else that survives the policy
+/// keeps its exact render-only `Scene` identity. Window markers are never
+/// supplied: this surface renders only loaded turns.
+#[must_use]
+fn loaded_turn_navigator_markers(scene: &ConversationScene) -> Vec<NavigatorMarker> {
+    let mut turns = Vec::new();
+    let mut items = Vec::new();
+    let mut ordinal: u64 = 0;
+    for turn_scene in scene.turn_scenes() {
+        turns.push(ConversationTurnInput::new(
+            turn_scene.turn_id.as_str(),
+            turn_scene.ordinal,
+        ));
+        for block in turn_scene.blocks() {
+            if let TurnBlock::UserMessage(message) = block {
+                items.push(LoadedConversationItemInput::user_message(
+                    message.id.as_str(),
+                    turn_scene.turn_id.as_str(),
+                    ordinal,
+                    message.body.clone(),
+                ));
+                ordinal = ordinal.saturating_add(1);
+            }
+        }
+    }
+    let snapshot = ConversationSnapshotInput::new(turns, items, None);
+    conversation_turn_markers(&snapshot)
+        .into_iter()
+        .filter_map(|marker| {
+            let target = ItemId::parse(marker.id.as_str())
+                .ok()
+                .map(ConversationSurfaceTarget::Item)
+                .or_else(|| {
+                    SceneId::parse(marker.id.as_str())
+                        .ok()
+                        .map(ConversationSurfaceTarget::Scene)
+                })?;
+            Some(NavigatorMarker {
+                label: marker.label,
+                target,
+            })
+        })
+        .collect()
 }
 
 fn item_id_for_scene_id(id: &SceneId) -> Option<ItemId> {
@@ -584,6 +678,7 @@ impl ConversationSurface {
             executed_scroll_targets: Vec::new(),
             scroll_anchors: Vec::new(),
             scroll_anchor_paint_token: None,
+            navigator_focus: HashMap::new(),
         }
     }
 
@@ -615,6 +710,18 @@ impl ConversationSurface {
     #[must_use]
     pub fn disclosure_focus_handle(&self) -> &FocusHandle {
         &self.disclosure_focus
+    }
+
+    /// Returns the focus handle retained for one navigator control, if its
+    /// target is currently rendered.
+    #[must_use]
+    pub fn navigator_focus_handle(
+        &self,
+        target: &ConversationSurfaceTarget,
+    ) -> Option<FocusHandle> {
+        self.navigator_focus
+            .get(&navigator_focus_key(target))
+            .cloned()
     }
 
     /// Mirrors the controller's detached-reader affordance into rendering.
@@ -1760,6 +1867,69 @@ impl Render for ConversationSurface {
                     .bottom(px(16.0))
                     .child(button),
             );
+        }
+        let markers = loaded_turn_navigator_markers(&self.scene);
+        if !markers.is_empty() {
+            // Prune focus handles whose targets left the scene. A focused
+            // control that disappears returns focus to the transcript.
+            let live: Vec<String> = markers
+                .iter()
+                .map(|marker| navigator_focus_key(&marker.target))
+                .collect();
+            let stale: Vec<String> = self
+                .navigator_focus
+                .keys()
+                .filter(|key| !live.contains(*key))
+                .cloned()
+                .collect();
+            for key in stale {
+                if let Some(handle) = self.navigator_focus.remove(&key)
+                    && handle.is_focused(window)
+                {
+                    self.transcript_focus.focus(window);
+                }
+            }
+            let navigator_surface = entity.downgrade();
+            let mut rail = div()
+                .absolute()
+                .right(px(16.0))
+                .top(px(64.0))
+                .flex()
+                .flex_col()
+                .gap(theme.spacing.steps(1.0))
+                .debug_selector(TURN_NAVIGATOR_SELECTOR);
+            for marker in &markers {
+                let key = navigator_focus_key(&marker.target);
+                let handle = self
+                    .navigator_focus
+                    .entry(key)
+                    .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                    .clone();
+                let target = marker.target.clone();
+                let control_selector = format!(
+                    "{TURN_NAVIGATOR_CONTROL_PREFIX}-{}",
+                    navigator_target_slug(&marker.target)
+                );
+                let button = Button::new(
+                    control_selector.clone(),
+                    handle,
+                    theme,
+                    MotionPolicy::Reduced,
+                    ButtonVariant::Ghost,
+                    ButtonSize::Small,
+                    ButtonContent::text(marker.label.clone()),
+                )
+                .expect("turn-navigator button configuration is valid")
+                .focus_visibility(FocusVisibility::Visible)
+                .debug_selector(control_selector)
+                .on_activate(move |_, _, app| {
+                    let _ = navigator_surface.update(app, |surface, cx| {
+                        surface.request_scroll(target.clone(), cx);
+                    });
+                });
+                rail = rail.child(button);
+            }
+            root = root.child(rail);
         }
         root
     }

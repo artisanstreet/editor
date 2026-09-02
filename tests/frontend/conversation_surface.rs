@@ -14,10 +14,11 @@ use conversation_scene::{
     TurnNarrationEntry,
 };
 use conversation_surface::{
-    ConversationSurface, ConversationSurfaceAction, ConversationSurfaceTarget,
-    JUMP_TO_LATEST_SELECTOR, ROOT_SELECTOR, RenderedBlockKind, VIEWPORT_SELECTOR,
-    ViewportObservation, block_selector, changed_file_selector, file_change_status_label,
-    format_elapsed_millis, ordered_block_kinds, steering_selector, turn_selector, turn_status_copy,
+    CONVERSATION_SURFACE_MAX_ACTIONS, ConversationSurface, ConversationSurfaceAction,
+    ConversationSurfaceTarget, JUMP_TO_LATEST_SELECTOR, ROOT_SELECTOR, RenderedBlockKind,
+    TURN_NAVIGATOR_CONTROL_PREFIX, TURN_NAVIGATOR_SELECTOR, VIEWPORT_SELECTOR, ViewportObservation,
+    block_selector, changed_file_selector, file_change_status_label, format_elapsed_millis,
+    ordered_block_kinds, steering_selector, turn_selector, turn_status_copy,
 };
 use gpui::{KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
@@ -1051,4 +1052,338 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
 
 fn item_id(value: &str) -> ItemId {
     ItemId::parse(value).expect("item id is valid")
+}
+
+fn navigator_scene() -> ConversationScene {
+    ConversationScene::build(
+        vec![
+            SceneTurn::new(turn_id("turn_a"), 0, ConversationLifecycle::Completed),
+            SceneTurn::new(turn_id("turn_b"), 1, ConversationLifecycle::Completed),
+        ],
+        vec![
+            item(
+                "nav-first",
+                "turn_a",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "first question".to_owned(),
+                },
+                None,
+            ),
+            item(
+                "nav-assistant",
+                "turn_a",
+                2,
+                SceneItemKind::AssistantMessage {
+                    body: "reply".to_owned(),
+                    phase: AssistantPhase::Final,
+                },
+                None,
+            ),
+            item(
+                "nav-second",
+                "turn_b",
+                3,
+                SceneItemKind::UserMessage {
+                    body: "second question".to_owned(),
+                },
+                None,
+            ),
+        ],
+        vec![
+            narration("turn_a", TurnNarration::Quiet),
+            narration("turn_b", TurnNarration::Quiet),
+        ],
+        Vec::new(),
+    )
+    .expect("navigator scene is valid")
+}
+
+fn navigator_control_selector(id: &str) -> String {
+    format!("{TURN_NAVIGATOR_CONTROL_PREFIX}-{id}")
+}
+
+fn mount_navigator_scene(
+    scene: ConversationScene,
+    cx: &mut TestAppContext,
+) -> (
+    gpui::Entity<ConversationSurface>,
+    &mut VisualTestContext,
+) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(scene, ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+    let _ = drain_surface_actions(&surface, cx);
+    (surface, cx)
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_hides_without_user_messages(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(
+                vec![item(
+                    "solo-assistant",
+                    "turn_a",
+                    1,
+                    SceneItemKind::AssistantMessage {
+                        body: "reply".to_owned(),
+                        phase: AssistantPhase::Final,
+                    },
+                    None,
+                )],
+                TurnNarration::Quiet,
+            ),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+    let _ = drain_surface_actions(&surface, cx);
+    assert!(cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_none());
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_hides_for_a_single_marker(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(
+                vec![item(
+                    "lone-user",
+                    "turn_a",
+                    1,
+                    SceneItemKind::UserMessage {
+                        body: "only question".to_owned(),
+                    },
+                    None,
+                )],
+                TurnNarration::Quiet,
+            ),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+    let _ = drain_surface_actions(&surface, cx);
+    assert!(cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_none());
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_renders_oldest_first_item_controls(cx: &mut TestAppContext) {
+    let (_surface, cx) = mount_navigator_scene(navigator_scene(), cx);
+    assert!(cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_some());
+    let first = cx
+        .debug_bounds(navigator_control_selector("nav-first"))
+        .expect("oldest marker must paint a stable control");
+    let second = cx
+        .debug_bounds(navigator_control_selector("nav-second"))
+        .expect("newest marker must paint a stable control");
+    assert!(
+        first.center().y < second.center().y,
+        "oldest marker paints above the newest marker"
+    );
+    assert!(cx.debug_bounds(navigator_control_selector("nav-assistant")).is_none());
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_suppresses_empty_labels(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            ConversationScene::build(
+                vec![
+                    SceneTurn::new(turn_id("turn_a"), 0, ConversationLifecycle::Completed),
+                    SceneTurn::new(turn_id("turn_b"), 1, ConversationLifecycle::Completed),
+                ],
+                vec![
+                    item(
+                        "nav-blank",
+                        "turn_a",
+                        1,
+                        SceneItemKind::UserMessage {
+                            body: "   ".to_owned(),
+                        },
+                        None,
+                    ),
+                    item(
+                        "nav-first",
+                        "turn_a",
+                        2,
+                        SceneItemKind::UserMessage {
+                            body: "first question".to_owned(),
+                        },
+                        None,
+                    ),
+                    item(
+                        "nav-second",
+                        "turn_b",
+                        3,
+                        SceneItemKind::UserMessage {
+                            body: "second question".to_owned(),
+                        },
+                        None,
+                    ),
+                ],
+                vec![
+                    narration("turn_a", TurnNarration::Quiet),
+                    narration("turn_b", TurnNarration::Quiet),
+                ],
+                Vec::new(),
+            )
+            .expect("navigator scene is valid"),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+    let _ = drain_surface_actions(&surface, cx);
+    assert!(cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_some());
+    assert!(cx.debug_bounds(navigator_control_selector("nav-blank")).is_none());
+    assert!(cx.debug_bounds(navigator_control_selector("nav-first")).is_some());
+    assert!(cx.debug_bounds(navigator_control_selector("nav-second")).is_some());
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_pointer_activation_emits_exact_item_scroll_intent(
+    cx: &mut TestAppContext,
+) {
+    let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
+    let offset_before = cx.update(|_, app| surface.read(app).scroll_handle().offset());
+    let button = cx
+        .debug_bounds(navigator_control_selector("nav-first"))
+        .expect("oldest marker must paint a stable control");
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    let offset_after = cx.update(|_, app| surface.read(app).scroll_handle().offset());
+    assert_eq!(offset_before, offset_after);
+    let intents: Vec<ConversationSurfaceTarget> = drain_surface_actions(&surface, cx)
+        .into_iter()
+        .filter_map(|action| match action {
+            ConversationSurfaceAction::ScrollIntent { target } => Some(target),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        intents,
+        [ConversationSurfaceTarget::Item(item_id("nav-first"))]
+    );
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_keyboard_activation_matches_pointer(cx: &mut TestAppContext) {
+    let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
+    let target = ConversationSurfaceTarget::Item(item_id("nav-second"));
+    cx.update(|window, app| {
+        let focus = surface
+            .read(app)
+            .navigator_focus_handle(&target)
+            .expect("navigator control retains its focus handle");
+        window.focus(&focus);
+    });
+    complete_key_press(cx, "enter");
+    complete_key_press(cx, "space");
+    let intents: Vec<ConversationSurfaceTarget> = drain_surface_actions(&surface, cx)
+        .into_iter()
+        .filter_map(|action| match action {
+            ConversationSurfaceAction::ScrollIntent { target } => Some(target),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(intents, [target.clone(), target]);
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(
+    cx: &mut TestAppContext,
+) {
+    let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
+    let first_target = ConversationSurfaceTarget::Item(item_id("nav-first"));
+    cx.update(|window, app| {
+        let focus = surface
+            .read(app)
+            .navigator_focus_handle(&first_target)
+            .expect("navigator control retains its focus handle");
+        window.focus(&focus);
+    });
+    cx.run_until_parked();
+    let mut replacement_app = (*cx).clone();
+    let (_, replacement_cx) = replacement_app.add_window_view(|_, _| SurfaceWindowHost {
+        surface: surface.clone(),
+    });
+    assert!(replacement_cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_some());
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            surface.replace_scene(
+                scene(
+                    vec![item(
+                        "nav-second",
+                        "turn_a",
+                        1,
+                        SceneItemKind::UserMessage {
+                            body: "lone survivor".to_owned(),
+                        },
+                        None,
+                    )],
+                    TurnNarration::Quiet,
+                ),
+                surface_cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(replacement_cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_none());
+    cx.update(|window, app| {
+        let surface = surface.read(app);
+        assert!(surface.navigator_focus_handle(&first_target).is_none());
+        assert!(
+            surface
+                .transcript_focus_handle()
+                .is_focused(window)
+        );
+    });
+    let _ = drain_surface_actions(&surface, cx);
+}
+
+#[gpui::test]
+fn loaded_turn_navigator_activation_respects_action_backpressure(cx: &mut TestAppContext) {
+    let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
+    cx.update(|_, app| {
+        surface.update(app, |surface, surface_cx| {
+            for _ in 0..CONVERSATION_SURFACE_MAX_ACTIONS {
+                assert!(surface.request_scroll(
+                    ConversationSurfaceTarget::Scene(scene_id("fill")),
+                    surface_cx,
+                ));
+            }
+            assert_eq!(
+                surface.pending_actions().len(),
+                CONVERSATION_SURFACE_MAX_ACTIONS
+            );
+        });
+    });
+    let button = cx
+        .debug_bounds(navigator_control_selector("nav-first"))
+        .expect("oldest marker must paint a stable control");
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        surface.update(app, |surface, _| {
+            let pending = surface.pending_actions();
+            assert_eq!(pending.len(), CONVERSATION_SURFACE_MAX_ACTIONS);
+            assert!(
+                !pending.iter().any(|action| matches!(
+                    action,
+                    ConversationSurfaceAction::ScrollIntent {
+                        target: ConversationSurfaceTarget::Item(_)
+                    }
+                ))
+            );
+        });
+    });
 }
