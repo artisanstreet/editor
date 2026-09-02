@@ -1869,26 +1869,27 @@ impl Render for ConversationSurface {
             );
         }
         let markers = loaded_turn_navigator_markers(&self.scene);
-        if !markers.is_empty() {
-            // Prune focus handles whose targets left the scene. A focused
-            // control that disappears returns focus to the transcript.
-            let live: Vec<String> = markers
-                .iter()
-                .map(|marker| navigator_focus_key(&marker.target))
-                .collect();
-            let stale: Vec<String> = self
-                .navigator_focus
-                .keys()
-                .filter(|key| !live.contains(*key))
-                .cloned()
-                .collect();
-            for key in stale {
-                if let Some(handle) = self.navigator_focus.remove(&key)
-                    && handle.is_focused(window)
-                {
-                    self.transcript_focus.focus(window);
-                }
+        // Prune focus handles whose targets left the scene on every render,
+        // even when the replacement scene has no markers at all. A focused
+        // control that disappears returns focus to the transcript.
+        let live: Vec<String> = markers
+            .iter()
+            .map(|marker| navigator_focus_key(&marker.target))
+            .collect();
+        let stale: Vec<String> = self
+            .navigator_focus
+            .keys()
+            .filter(|key| !live.contains(*key))
+            .cloned()
+            .collect();
+        for key in stale {
+            if let Some(handle) = self.navigator_focus.remove(&key)
+                && handle.is_focused(window)
+            {
+                self.transcript_focus.focus(window);
             }
+        }
+        if !markers.is_empty() {
             let navigator_surface = entity.downgrade();
             let mut rail = div()
                 .absolute()
