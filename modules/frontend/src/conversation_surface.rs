@@ -1897,7 +1897,7 @@ impl Render for ConversationSurface {
                 .flex()
                 .flex_col()
                 .gap(theme.spacing.steps(1.0))
-                .debug_selector(TURN_NAVIGATOR_SELECTOR);
+                .debug_selector(|| TURN_NAVIGATOR_SELECTOR.to_owned());
             for marker in &markers {
                 let key = navigator_focus_key(&marker.target);
                 let handle = self
@@ -1911,7 +1911,7 @@ impl Render for ConversationSurface {
                     navigator_target_slug(&marker.target)
                 );
                 let button = Button::new(
-                    control_selector.clone(),
+                    control_selector.as_str(),
                     handle,
                     theme,
                     MotionPolicy::Reduced,
