@@ -37,7 +37,7 @@ const DISABLED_OPACITY: f32 = 0.5;
 const DEFERRED_PRIORITY: usize = 20;
 
 /// One selectable dropdown item.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DropdownMenuItem {
     /// Stable action identity.
     pub id: SharedString,
@@ -117,7 +117,7 @@ impl DropdownMenuItem {
 }
 
 /// A non-selectable label, separator, or selectable item.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DropdownMenuEntry {
     /// A selectable action row.
     Item(DropdownMenuItem),
@@ -1017,6 +1017,7 @@ pub struct DropdownMenu {
     open: bool,
     selector: Option<SharedString>,
     state: DropdownMenuState,
+    applied_open: bool,
     trigger_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     item_focus: Vec<Option<FocusHandle>>,
 }
@@ -1035,10 +1036,11 @@ impl DropdownMenu {
             trigger_focus,
             theme,
             trigger: Rc::new(trigger),
-            entries,
+            entries: entries.clone(),
             open: false,
             selector: None,
-            state: DropdownMenuState::default(),
+            state: DropdownMenuState::new(entries),
+            applied_open: false,
             trigger_bounds: Rc::new(RefCell::new(None)),
             item_focus: Vec::new(),
         }
@@ -1287,8 +1289,12 @@ impl DropdownMenu {
 
 impl Render for DropdownMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.open != self.state.is_open() {
+        if self.state.entries() != self.entries.as_slice() {
+            self.state.set_entries(self.entries.clone());
+        }
+        if self.open != self.applied_open {
             self.state.set_open(self.open);
+            self.applied_open = self.open;
         }
         self.item_focus.resize_with(self.entries.len(), || None);
         for (index, entry) in self.entries.iter().enumerate() {
