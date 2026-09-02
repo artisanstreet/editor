@@ -1064,7 +1064,7 @@ fn navigator_scene() -> ConversationScene {
             item(
                 "nav-first",
                 "turn_a",
-                1,
+                2,
                 SceneItemKind::UserMessage {
                     body: "first question".to_owned(),
                 },
@@ -1073,7 +1073,7 @@ fn navigator_scene() -> ConversationScene {
             item(
                 "nav-assistant",
                 "turn_a",
-                2,
+                3,
                 SceneItemKind::AssistantMessage {
                     body: "reply".to_owned(),
                     phase: AssistantPhase::Final,
@@ -1083,7 +1083,7 @@ fn navigator_scene() -> ConversationScene {
             item(
                 "nav-second",
                 "turn_b",
-                3,
+                4,
                 SceneItemKind::UserMessage {
                     body: "second question".to_owned(),
                 },
@@ -1207,7 +1207,7 @@ fn loaded_turn_navigator_suppresses_empty_labels(cx: &mut TestAppContext) {
                     item(
                         "nav-blank",
                         "turn_a",
-                        1,
+                        2,
                         SceneItemKind::UserMessage {
                             body: "   ".to_owned(),
                         },
@@ -1216,7 +1216,7 @@ fn loaded_turn_navigator_suppresses_empty_labels(cx: &mut TestAppContext) {
                     item(
                         "nav-first",
                         "turn_a",
-                        2,
+                        3,
                         SceneItemKind::UserMessage {
                             body: "first question".to_owned(),
                         },
@@ -1225,7 +1225,7 @@ fn loaded_turn_navigator_suppresses_empty_labels(cx: &mut TestAppContext) {
                     item(
                         "nav-second",
                         "turn_b",
-                        3,
+                        4,
                         SceneItemKind::UserMessage {
                             body: "second question".to_owned(),
                         },
