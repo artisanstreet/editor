@@ -2484,7 +2484,11 @@ async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
     let loss_counts = crate::engine_owner::witness_counts();
     assert_eq!(loss_counts.spawned, 1);
     assert_eq!(loss_counts.reaps_observed, 1);
-    assert_eq!(loss_counts.kills_requested, 0);
+    // Mid-turn abort custody: `cleanup_after_abort` closes the lifeline and
+    // then requests whole-job termination before its bounded reap wait for
+    // configured launches (`engine_owner/process.rs`), so one kill with one
+    // reap is the designed stop for the held log connection.
+    assert_eq!(loss_counts.kills_requested, 1);
     assert_eq!(loss_counts.watchdog_failures_seen, 0);
     assert!(format!("{dispatcher:?}").contains("payload-free"));
 
