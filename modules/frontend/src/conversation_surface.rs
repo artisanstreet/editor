@@ -1912,7 +1912,7 @@ impl Render for ConversationSurface {
                 );
                 let surface_handle = navigator_surface.clone();
                 let button = Button::new(
-                    SharedString::from(control_selector.as_str()),
+                    SharedString::from(control_selector.clone()),
                     handle,
                     theme,
                     MotionPolicy::Reduced,
