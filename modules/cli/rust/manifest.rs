@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -8,6 +9,25 @@ use serde::Deserialize;
 use crate::{CliError, Result, instance::read_json};
 
 const ROOT_OWNERSHIP: &str = "installation manifest does not own the requested root";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InstallationFinalization {
+    Complete,
+    Pending,
+    Missing,
+    Invalid,
+}
+
+impl InstallationFinalization {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Pending => "pending",
+            Self::Missing => "missing",
+            Self::Invalid => "invalid",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct InstallationManifest {
@@ -36,11 +56,23 @@ impl InstallationManifest {
         if !same_path(&requested_path, &expected_path) {
             return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
         }
-        if !expected_path.is_file() {
-            return Err(CliError::Installation(format!(
-                "no installation manifest at {}; this Artisan home has no installation",
-                expected_path.display()
-            )));
+        let metadata = match fs::symlink_metadata(&expected_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CliError::Installation(format!(
+                    "no installation manifest at {}; this Artisan home has no installation",
+                    expected_path.display()
+                )));
+            }
+            Err(source) => {
+                return Err(CliError::Io {
+                    context: "inspect installation manifest",
+                    source,
+                });
+            }
+        };
+        if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
+            return Err(CliError::Installation(ROOT_OWNERSHIP.to_owned()));
         }
         let mut value: Self = read_json(&expected_path)?;
         let manifest_root = lexical_normalize_absolute(&value.install_root)
@@ -73,6 +105,63 @@ impl InstallationManifest {
         let stable_name = if cfg!(windows) { "ae.exe" } else { "ae" };
         value.permanent_ae_path = Some(selected_root.join("bin").join(stable_name));
         Ok(value)
+    }
+
+    /// Classifies only the canonical installation pointer. Temporary and
+    /// previous transaction files are deliberately outside this authority.
+    pub(crate) fn inspect(path: &Path) -> (InstallationFinalization, Option<Self>) {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return (InstallationFinalization::Missing, None);
+            }
+            Err(_) => return (InstallationFinalization::Invalid, None),
+        };
+        if metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
+            return (InstallationFinalization::Invalid, None);
+        }
+
+        let finalization_field = match fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(value) => match value
+                    .as_object()
+                    .and_then(|object| object.get("finalization_state"))
+                {
+                    None => Some(false),
+                    Some(value) if value.is_string() => Some(true),
+                    Some(_) => None,
+                },
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        let Some(finalization_field) = finalization_field else {
+            return (InstallationFinalization::Invalid, None);
+        };
+
+        match Self::load(path) {
+            Ok(manifest) => {
+                let finalization = if finalization_field {
+                    manifest.finalization_status()
+                } else {
+                    InstallationFinalization::Missing
+                };
+                (finalization, Some(manifest))
+            }
+            Err(_) => (InstallationFinalization::Invalid, None),
+        }
+    }
+
+    pub(crate) fn finalization_status(&self) -> InstallationFinalization {
+        match (
+            self.activation_state.as_str(),
+            self.finalization_state.as_deref(),
+        ) {
+            ("active", Some("complete")) => InstallationFinalization::Complete,
+            ("active", Some("pending")) => InstallationFinalization::Pending,
+            ("active", None) => InstallationFinalization::Missing,
+            _ => InstallationFinalization::Invalid,
+        }
     }
 
     pub fn version_root(&self) -> PathBuf {
@@ -130,6 +219,21 @@ fn is_safe_version(value: &str) -> bool {
 fn is_owned_permanent_ae_path(root: &Path, path: &Path) -> bool {
     let name = if cfg!(windows) { "ae.exe" } else { "ae" };
     same_path(path, &root.join("bin").join(name))
+}
+
+fn metadata_is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -293,6 +397,129 @@ mod tests {
                 .components()
                 .all(|component| !matches!(component, Component::CurDir | Component::ParentDir))
         );
+    }
+
+    #[test]
+    fn finalization_classifier_accepts_only_active_complete_or_pending() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Artisan Street");
+        let path = write_manifest(
+            &root,
+            &root,
+            Some("1.2.3"),
+            Some(&native_permanent_path(&root)),
+        );
+
+        let (state, manifest) = InstallationManifest::inspect(&path);
+        assert_eq!(state, InstallationFinalization::Pending);
+        assert_eq!(
+            manifest
+                .as_ref()
+                .map(InstallationManifest::finalization_status),
+            Some(InstallationFinalization::Pending)
+        );
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["finalization_state"] = json!("complete");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (state, _) = InstallationManifest::inspect(&path);
+        assert_eq!(state, InstallationFinalization::Complete);
+
+        value["finalization_state"] = json!("unknown");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (state, _) = InstallationManifest::inspect(&path);
+        assert_eq!(state, InstallationFinalization::Invalid);
+
+        value["finalization_state"] = serde_json::Value::Null;
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (state, _) = InstallationManifest::inspect(&path);
+        assert_eq!(state, InstallationFinalization::Invalid);
+
+        value.as_object_mut().unwrap().remove("finalization_state");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (state, _) = InstallationManifest::inspect(&path);
+        assert_eq!(state, InstallationFinalization::Missing);
+    }
+
+    #[test]
+    fn temporary_and_previous_pointers_never_become_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Artisan Street");
+        fs::create_dir_all(&root).unwrap();
+        let value = json!({
+            "activation_state": "active",
+            "finalization_state": "complete",
+            "active_version": "1.2.3",
+            "install_root": root,
+            "permanent_ae_path": native_permanent_path(&root),
+        });
+        fs::write(
+            root.join(".installation.json.tmp"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".installation.json.previous"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+
+        let (state, manifest) = InstallationManifest::inspect(&root.join("installation.json"));
+        assert_eq!(state, InstallationFinalization::Missing);
+        assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn malformed_root_mismatched_inactive_and_unsafe_pointers_are_invalid() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Artisan Street");
+        let path = write_manifest(
+            &root,
+            &root,
+            Some("1.2.3"),
+            Some(&native_permanent_path(&root)),
+        );
+        fs::write(&path, b"not json").unwrap();
+        assert_eq!(
+            InstallationManifest::inspect(&path).0,
+            InstallationFinalization::Invalid
+        );
+
+        for (activation_state, install_root) in [
+            ("inactive", root.clone()),
+            ("active", directory.path().join("Other")),
+        ] {
+            let value = json!({
+                "activation_state": activation_state,
+                "finalization_state": "complete",
+                "active_version": "1.2.3",
+                "install_root": install_root,
+                "permanent_ae_path": native_permanent_path(&root),
+            });
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(
+                InstallationManifest::inspect(&path).0,
+                InstallationFinalization::Invalid
+            );
+        }
+
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(
+            InstallationManifest::inspect(&path).0,
+            InstallationFinalization::Invalid
+        );
+
+        #[cfg(unix)]
+        {
+            fs::remove_dir(&path).unwrap();
+            std::os::unix::fs::symlink(directory.path().join("outside.json"), &path).unwrap();
+            assert_eq!(
+                InstallationManifest::inspect(&path).0,
+                InstallationFinalization::Invalid
+            );
+        }
     }
 
     #[test]
