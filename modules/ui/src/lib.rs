@@ -9,6 +9,7 @@ pub mod card;
 pub mod collapsible;
 pub mod command;
 pub mod dialog;
+pub mod dropdown_menu;
 pub mod fade_arc;
 pub mod icon;
 pub mod input;
