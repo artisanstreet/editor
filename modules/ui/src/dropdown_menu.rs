@@ -9,11 +9,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ShadowLayer, ThemeMode};
+use crate::theme::{
+    ArtisanTheme, RadiusStep, RadiusTokens, ShadowLayer, SurfaceStep, ThemeMode,
+};
 use gpui::{
     AnyElement, Bounds, BoxShadow, Context, Edges, FocusHandle, Hsla, InteractiveElement as _,
-    KeyDownEvent, ParentElement as _, Pixels, Render, SharedString, Size,
-    StatefulInteractiveElement as _, Styled as _, Window, div, point, px, transparent_black,
+    IntoElement as _, KeyDownEvent, ParentElement as _, Pixels, Render, SharedString, Size,
+    StatefulInteractiveElement as _, Styled as _, Window, div, point, px, size, transparent_black,
 };
 
 /// Typeahead remains active for one second after the last printable key.
