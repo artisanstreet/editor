@@ -24,7 +24,7 @@ rust_test(
     ],
     edition = "2024",
     lint_config = "//:workspace_lints",
-    size = "small",
+    size = "medium",
     visibility = ["//:__pkg__"],
 )
 
