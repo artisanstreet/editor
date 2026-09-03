@@ -1294,3 +1294,112 @@ fn fs_surface(input: SurfaceVarying) -> @location(0) vec4<f32> {
 
     return ycbcr_to_RGB * y_cb_cr;
 }
+
+// --- backdrop blur --- //
+
+// Mirrors the Rust `BlurRect` scene primitive field-for-field.
+struct BlurRect {
+    order: u32,
+    blur_radius: f32,
+    bounds: Bounds,
+    corner_radii: Corners,
+    content_mask: Bounds,
+    opacity: f32,
+    // Pads the struct to a multiple of 8 bytes to match the Rust layout.
+    pad: f32,
+}
+var<storage, read> b_blur_rects: array<BlurRect>;
+
+// Per-pass parameters for the pyramid shaders, uploaded as uniforms.
+struct BlurPyramidParams {
+    src_texel_size: vec2<f32>,
+    sample_offset: vec2<f32>,
+    clamp_min: vec2<f32>,
+    clamp_max: vec2<f32>,
+}
+var<uniform> blur_pyramid_params: BlurPyramidParams;
+
+fn blur_clamp_uv(uv: vec2<f32>) -> vec2<f32> {
+    return clamp(uv, blur_pyramid_params.clamp_min, blur_pyramid_params.clamp_max);
+}
+
+struct BlurPyramidVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+// Fullscreen triangle: vertex ids 0,1,2 map to NDC (-1,1),(3,1),(-1,-3)
+// with matching 0..2 UVs (clamped to the valid region when sampling).
+@vertex
+fn vs_blur_downsample(@builtin(vertex_index) vertex_id: u32) -> BlurPyramidVarying {
+    let ndc = vec2<f32>(f32((vertex_id << 1u) & 2u), f32(vertex_id & 2u)) * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    var out = BlurPyramidVarying();
+    out.position = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = ndc * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+    return out;
+}
+
+@fragment
+fn fs_blur_downsample(input: BlurPyramidVarying) -> @location(0) vec4<f32> {
+    let offset = blur_pyramid_params.sample_offset * blur_pyramid_params.src_texel_size;
+    let uv = input.uv;
+    var color = textureSample(t_sprite, s_sprite, blur_clamp_uv(uv)) * 4.0;
+    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(offset.x, offset.y)));
+    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(-offset.x, offset.y)));
+    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(offset.x, -offset.y)));
+    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(-offset.x, -offset.y)));
+    return color / 8.0;
+}
+
+@vertex
+fn vs_blur_upsample(@builtin(vertex_index) vertex_id: u32) -> BlurPyramidVarying {
+    let ndc = vec2<f32>(f32((vertex_id << 1u) & 2u), f32(vertex_id & 2u)) * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    var out = BlurPyramidVarying();
+    out.position = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = ndc * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+    return out;
+}
+
+@fragment
+fn fs_blur_upsample(input: BlurPyramidVarying) -> @location(0) vec4<f32> {
+    let offset = blur_pyramid_params.sample_offset * blur_pyramid_params.src_texel_size;
+    let uv = input.uv;
+    var color = textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(-offset.x, -offset.y)));
+    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(offset.x, -offset.y)));
+    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(-offset.x, offset.y)));
+    color += textureSample(t_sprite, s_sprite, blur_clamp_uv(uv + vec2<f32>(offset.x, offset.y)));
+    return color / 4.0;
+}
+
+struct BlurCompositeVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) blur_id: u32,
+    @location(1) uv: vec2<f32>,
+    @location(2) clip_distances: vec4<f32>,
+}
+
+@vertex
+fn vs_blur_composite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> BlurCompositeVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let blur = b_blur_rects[instance_id];
+
+    var out = BlurCompositeVarying();
+    out.position = to_device_position(unit_vertex, blur.bounds);
+    // Full-window UVs into the half-resolution blurred pyramid texture.
+    out.uv = (blur.bounds.origin + unit_vertex * blur.bounds.size) / globals.viewport_size;
+    out.blur_id = instance_id;
+    out.clip_distances = distance_from_clip_rect(unit_vertex, blur.bounds, blur.content_mask);
+    return out;
+}
+
+@fragment
+fn fs_blur_composite(input: BlurCompositeVarying) -> @location(0) vec4<f32> {
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    let blur = b_blur_rects[input.blur_id];
+    let distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
+    let blurred = textureSample(t_sprite, s_sprite, input.uv);
+    return blend_color(blurred, blur.opacity * saturate(0.5 - distance));
+}

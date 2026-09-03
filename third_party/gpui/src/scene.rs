@@ -549,6 +549,9 @@ pub(crate) struct BlurRect {
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub opacity: f32,
+    /// Pads the struct to a multiple of 8 bytes so its stride matches the
+    /// WGSL layout rules used by the Blade backend.
+    pub pad: f32,
 }
 
 impl From<BlurRect> for Primitive {
@@ -931,6 +934,7 @@ mod tests {
             corner_radii: Corners::default(),
             content_mask: test_mask(),
             opacity: 1.0,
+            pad: 0.0,
         }
     }
 

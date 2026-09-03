@@ -1195,6 +1195,8 @@ struct BlurRect {
     Corners corner_radii;
     Bounds content_mask;
     float opacity;
+    // Pads the struct to 64 bytes to match the Rust layout.
+    float pad;
 };
 
 // Per-pass parameters for the pyramid shaders, uploaded as a single
