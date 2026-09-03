@@ -2488,8 +2488,8 @@ async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
     let config = config_for_fixture_dispatch(notifier.clone()).expect("fixture dispatch policy");
     crate::engine_owner::reset_witnesses();
     let process_cancel = Arc::new(CancelHandle::new());
-    let mut dispatcher = NativeRunDispatcher::start_with_fixture_scenario_for_tests(
-        FixtureScenarioLaunch {
+    let mut dispatcher =
+        NativeRunDispatcher::start_with_fixture_scenario_for_tests(FixtureScenarioLaunch {
             repository: repository.clone(),
             database_path: temp.path().to_owned(),
             config,
@@ -2498,8 +2498,7 @@ async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
             runtime: &tokio::runtime::Handle::current(),
             fixture_program: fixture.clone(),
             scenario: MIDTURN_LOSS_SCENARIO,
-        },
-    );
+        });
     await_first_durable_delta(&database, &mut subscription).await;
 
     // Exactly one run was admitted and the owning engine is deterministically
@@ -2750,8 +2749,8 @@ async fn restart_midturn_dispatcher(
     let restart_config =
         config_for_fixture_dispatch(restart_notifier).expect("restart dispatch policy");
     let restart_cancel = Arc::new(CancelHandle::new());
-    let mut restarted = NativeRunDispatcher::start_with_fixture_scenario_for_tests(
-        FixtureScenarioLaunch {
+    let mut restarted =
+        NativeRunDispatcher::start_with_fixture_scenario_for_tests(FixtureScenarioLaunch {
             repository: reopened_repository.clone(),
             database_path: temp.path().to_owned(),
             config: restart_config,
@@ -2760,8 +2759,7 @@ async fn restart_midturn_dispatcher(
             runtime: &tokio::runtime::Handle::current(),
             fixture_program: fixture,
             scenario: MIDTURN_LOSS_SCENARIO,
-        },
-    );
+        });
     tokio::time::sleep(MIDTURN_RESTART_QUIESCE).await;
     restart_cancel.cancel();
     assert_eq!(

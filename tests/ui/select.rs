@@ -7,9 +7,7 @@ use artisan_ui::select::{
     item_debug_selector, stable_value_selector_suffix,
 };
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
-use gpui::{
-    Component, Context, FocusHandle, IntoElement, Render, TestAppContext, Window,
-};
+use gpui::{Component, Context, FocusHandle, IntoElement, Render, TestAppContext, Window};
 
 fn test_focus(cx: &mut TestAppContext) -> FocusHandle {
     cx.update(|app| app.focus_handle())

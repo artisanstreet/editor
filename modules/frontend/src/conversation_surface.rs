@@ -1093,8 +1093,8 @@ impl ConversationSurface {
             })
             .collect();
         let surface = entity.downgrade();
-        let turn_element = turn_element.on_children_prepainted(
-            move |children_bounds, window, app| {
+        let turn_element =
+            turn_element.on_children_prepainted(move |children_bounds, window, app| {
                 let _ = surface.update(app, |surface, _| {
                     surface.apply_executed_scroll_targets(
                         &child_identities,
@@ -1102,8 +1102,7 @@ impl ConversationSurface {
                         window,
                     );
                 });
-            },
-        );
+            });
         let turn_element = anchors.attach(
             turn_element,
             SceneId::parse(turn.turn_id.as_str()).ok().as_ref(),
@@ -1112,9 +1111,7 @@ impl ConversationSurface {
         let mut turn_element = turn_element.debug_selector(move || selector.clone());
 
         for block in turn.blocks() {
-            if let Some(element) =
-                self.render_block(&turn.turn_id, block, entity, theme, anchors)
-            {
+            if let Some(element) = self.render_block(&turn.turn_id, block, entity, theme, anchors) {
                 turn_element = turn_element.child(element);
             }
         }
@@ -1321,11 +1318,7 @@ impl ConversationSurface {
         let surface = entity.downgrade();
         items = items.on_children_prepainted(move |children_bounds, window, app| {
             let _ = surface.update(app, |surface, _| {
-                surface.apply_executed_scroll_targets(
-                    &item_identities,
-                    &children_bounds,
-                    window,
-                );
+                surface.apply_executed_scroll_targets(&item_identities, &children_bounds, window);
             });
         });
 

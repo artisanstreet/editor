@@ -16,14 +16,14 @@ use artisan_ui::{
     theme::{ArtisanTheme, ThemeMode},
 };
 use gpui::{
-    actions, div, point,
+    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler,
+    Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
+    KeyBinding, LayoutId, MouseButton, Pixels, Point, Render, SharedString, StyledText,
+    UTF16Selection, Window, actions, div, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
-    px, size, AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId,
-    ElementInputHandler, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, Pixels, Point, Render,
-    SharedString, StyledText, UTF16Selection, Window,
+    px, size,
 };
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
@@ -929,18 +929,18 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::{
-        localize_painted_point, offset_layout_bounds, replace_text_preserving_raw,
-        utf16_offset_to_utf8, utf16_range_to_utf8, utf8_offset_to_utf16, NativeComposer,
-        NativeComposerEvent, NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
-        NATIVE_COMPOSER_SEND_SELECTOR,
+        NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
+        NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer, NativeComposerEvent, localize_painted_point,
+        offset_layout_bounds, replace_text_preserving_raw, utf8_offset_to_utf16,
+        utf16_offset_to_utf8, utf16_range_to_utf8,
     };
     use crate::composer::DraftDisposition;
     use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
     use gpui::{
-        point, px, size, Bounds, Entity, EntityInputHandler as _, KeyUpEvent, Keystroke, Modifiers,
-        Subscription, TestAppContext, VisualTestContext,
+        Bounds, Entity, EntityInputHandler as _, KeyUpEvent, Keystroke, Modifiers, Subscription,
+        TestAppContext, VisualTestContext, point, px, size,
     };
 
     fn set_draft(cx: &mut VisualTestContext, view: &Entity<NativeComposer>, draft: &str) {

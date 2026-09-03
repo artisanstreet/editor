@@ -9,9 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::theme::{
-    ArtisanTheme, RadiusStep, RadiusTokens, ShadowLayer, SurfaceStep, ThemeMode,
-};
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ShadowLayer, SurfaceStep, ThemeMode};
 use gpui::{
     AnyElement, Bounds, BoxShadow, Context, Edges, FocusHandle, Hsla, InteractiveElement as _,
     IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, SharedString, Size,
@@ -746,7 +744,6 @@ impl DropdownMenuGeometry {
             flipped,
         }
     }
-
 }
 
 /// Resolved menu bounds and collision outcome.
@@ -963,9 +960,7 @@ fn dropdown_content_height(style: &DropdownMenuStyle, entries: &[DropdownMenuEnt
     for entry in entries {
         height += match entry {
             DropdownMenuEntry::Item(_) => f32::from(style.item.height()),
-            DropdownMenuEntry::Label(_) => {
-                LABEL_LINE_HEIGHT + LABEL_VERTICAL_PADDING * 2.0
-            }
+            DropdownMenuEntry::Label(_) => LABEL_LINE_HEIGHT + LABEL_VERTICAL_PADDING * 2.0,
             DropdownMenuEntry::Separator => {
                 f32::from(style.separator.height) + f32::from(style.separator.vertical_margin) * 2.0
             }
@@ -1218,8 +1213,7 @@ impl DropdownMenu {
                 } else {
                     foreground
                 };
-                let row_id =
-                    SharedString::from(format!("{base}-item-{index}"));
+                let row_id = SharedString::from(format!("{base}-item-{index}"));
                 let mut row = div()
                     .id(row_id)
                     .flex()
@@ -1233,11 +1227,7 @@ impl DropdownMenu {
                     .text_color(text)
                     .child(item.label.clone());
                 if let Some(shortcut) = item.shortcut.clone() {
-                    row = row.child(
-                        div()
-                            .text_color(style.shortcut.foreground)
-                            .child(shortcut),
-                    );
+                    row = row.child(div().text_color(style.shortcut.foreground).child(shortcut));
                 }
                 if item.is_disabled() {
                     return row.opacity(style.item.disabled_opacity).into_any_element();
@@ -1282,8 +1272,7 @@ impl Render for DropdownMenu {
             }
         }
 
-        let style =
-            DropdownMenuStyle::resolve(self.theme, DropdownMenuGeometry::default());
+        let style = DropdownMenuStyle::resolve(self.theme, DropdownMenuGeometry::default());
         let trigger_selector = self.trigger_selector();
         let content_selector = self.content_selector();
         let trigger_slot = Rc::clone(&self.trigger_bounds);
@@ -1304,7 +1293,12 @@ impl Render for DropdownMenu {
                 *trigger_slot.borrow_mut() = bounds.first().copied();
             });
 
-        let mut root = div().relative().flex().flex_col().items_start().child(trigger);
+        let mut root = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .items_start()
+            .child(trigger);
         if self.state.is_open() {
             let viewport = window.bounds().size;
             let width = style.content.min_width;
@@ -1390,4 +1384,3 @@ impl DropdownMenuStyle {
         self.geometry.available_height(viewport)
     }
 }
-
