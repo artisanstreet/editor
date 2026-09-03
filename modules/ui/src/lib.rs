@@ -22,6 +22,7 @@ pub mod motion;
 pub mod popover;
 pub mod progress;
 pub mod scroll_area;
+pub mod select;
 pub mod separator;
 pub mod shimmer_text;
 pub mod skeleton;
