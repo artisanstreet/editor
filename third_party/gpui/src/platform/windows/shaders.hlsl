@@ -1180,3 +1180,129 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+/*
+**
+**              Backdrop Blur
+**
+*/
+
+// Mirrors the Rust `BlurRect` scene primitive field-for-field.
+struct BlurRect {
+    uint order;
+    float blur_radius;
+    Bounds bounds;
+    Corners corner_radii;
+    Bounds content_mask;
+    float opacity;
+};
+
+// Per-pass parameters for the pyramid shaders, uploaded as a single
+// structured-buffer instance per fullscreen pass.
+struct BlurPyramidSprite {
+    float2 src_texel_size;
+    float2 sample_offset;
+    float2 clamp_min;
+    float2 clamp_max;
+};
+
+StructuredBuffer<BlurPyramidSprite> blur_pyramid_sprites: register(t1);
+StructuredBuffer<BlurRect> blur_rects: register(t1);
+
+float2 blur_clamp_uv(float2 uv, BlurPyramidSprite params) {
+    return clamp(uv, params.clamp_min, params.clamp_max);
+}
+
+struct BlurPyramidVertexOutput {
+    float4 position: SV_Position;
+    float2 uv: TEXCOORD0;
+};
+
+// Fullscreen triangle: vertex ids 0,1,2 map to NDC (-1,1),(3,1),(-1,-3)
+// with matching 0..2 UVs (clamped to 0..1 when sampling).
+BlurPyramidVertexOutput blur_downsample_vertex(uint vertex_id: SV_VertexID) {
+    float2 ndc = float2(float((vertex_id << 1) & 2u), float(vertex_id & 2u));
+    ndc = ndc * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    BlurPyramidVertexOutput output;
+    output.position = float4(ndc, 0.0, 1.0);
+    output.uv = ndc * float2(0.5, -0.5) + 0.5;
+    return output;
+}
+
+struct BlurPyramidFragmentInput {
+    float4 position: SV_Position;
+    float2 uv: TEXCOORD0;
+};
+
+// Five-tap Kawase downsample.
+float4 blur_downsample_fragment(BlurPyramidFragmentInput input): SV_Target {
+    BlurPyramidSprite params = blur_pyramid_sprites[0];
+    float2 offset = params.sample_offset * params.src_texel_size;
+    float2 uv = input.uv;
+    float4 color = t_sprite.Sample(s_sprite, blur_clamp_uv(uv, params)) * 4.0;
+    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(offset.x, offset.y), params));
+    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(-offset.x, offset.y), params));
+    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(offset.x, -offset.y), params));
+    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(-offset.x, -offset.y), params));
+    return color / 8.0;
+}
+
+BlurPyramidVertexOutput blur_upsample_vertex(uint vertex_id: SV_VertexID) {
+    float2 ndc = float2(float((vertex_id << 1) & 2u), float(vertex_id & 2u));
+    ndc = ndc * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    BlurPyramidVertexOutput output;
+    output.position = float4(ndc, 0.0, 1.0);
+    output.uv = ndc * float2(0.5, -0.5) + 0.5;
+    return output;
+}
+
+// Four-tap bilinear upsample.
+float4 blur_upsample_fragment(BlurPyramidFragmentInput input): SV_Target {
+    BlurPyramidSprite params = blur_pyramid_sprites[0];
+    float2 offset = params.sample_offset * params.src_texel_size;
+    float2 uv = input.uv;
+    float4 color = t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(-offset.x, -offset.y), params));
+    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(offset.x, -offset.y), params));
+    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(-offset.x, offset.y), params));
+    color += t_sprite.Sample(s_sprite, blur_clamp_uv(uv + float2(offset.x, offset.y), params));
+    return color / 4.0;
+}
+
+struct BlurCompositeVertexOutput {
+    nointerpolation uint blur_id: TEXCOORD0;
+    float4 position: SV_Position;
+    float2 uv: TEXCOORD1;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+struct BlurCompositeFragmentInput {
+    nointerpolation uint blur_id: TEXCOORD0;
+    float4 position: SV_Position;
+    float2 uv: TEXCOORD1;
+};
+
+BlurCompositeVertexOutput blur_composite_vertex(uint vertex_id: SV_VertexID, uint blur_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    BlurRect blur = blur_rects[blur_id];
+    float4 device_position = to_device_position(unit_vertex, blur.bounds);
+    float4 clip_distance = distance_from_clip_rect(unit_vertex, blur.bounds, blur.content_mask);
+    // Full-window UVs into the half-resolution blurred pyramid texture.
+    float2 uv = (blur.bounds.origin + unit_vertex * blur.bounds.size) / global_viewport_size;
+
+    BlurCompositeVertexOutput output;
+    output.position = device_position;
+    output.uv = uv;
+    output.blur_id = blur_id;
+    output.clip_distance = clip_distance;
+    return output;
+}
+
+float4 blur_composite_fragment(BlurCompositeFragmentInput input): SV_Target {
+    BlurRect blur = blur_rects[input.blur_id];
+    // Snapshot content is premultiplied, so the mask rides the alpha channel
+    // exactly like the sprite shaders.
+    float distance = quad_sdf(input.position.xy, blur.bounds, blur.corner_radii);
+    float4 blurred = t_sprite.Sample(s_sprite, input.uv);
+    blurred.a *= blur.opacity * saturate(0.5 - distance);
+    return blurred;
+}

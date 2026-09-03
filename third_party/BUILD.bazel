@@ -1,3 +1,14 @@
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["gpui-blur.patch"])
+
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+# Visual-proof demo for the D3D11 backdrop-blur pass (B2). Tri-band
+# backdrop with a 16px blurred card; run the binary and screenshot it.
+rust_binary(
+    name = "backdrop_blur_demo",
+    srcs = ["gpui/examples/backdrop_blur.rs"],
+    edition = "2024",
+    deps = ["@crates//:gpui"],
+)

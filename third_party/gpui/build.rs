@@ -295,6 +295,9 @@ mod windows {
             "underline",
             "monochrome_sprite",
             "polychrome_sprite",
+            "blur_downsample",
+            "blur_upsample",
+            "blur_composite",
         ];
 
         let rust_binding_path = format!("{}/shaders_bytes.rs", out_dir);
