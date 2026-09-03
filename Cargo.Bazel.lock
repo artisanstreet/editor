@@ -1,5 +1,5 @@
 {
-  "checksum": "7a81e9a34f9a4af92778d6c8a6ce437e62eedb59c7696249300cca9ec7298eec",
+  "checksum": "9763948520ffa1f549af610fd921b8910070b8ff28894a498d7cf13103b9943b",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -18512,7 +18512,13 @@
       "repository": {
         "Http": {
           "url": "https://static.crates.io/crates/gpui/0.2.2/download",
-          "sha256": "979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707"
+          "sha256": "979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707",
+          "patch_args": [
+            "-p1"
+          ],
+          "patches": [
+            "@@//third_party:gpui-blur.patch"
+          ]
         }
       },
       "targets": [
