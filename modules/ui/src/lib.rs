@@ -29,6 +29,7 @@ pub mod separator;
 pub mod sheet;
 pub mod shimmer_text;
 pub mod skeleton;
+pub mod slider;
 pub mod switch;
 pub mod tabs;
 pub mod theme;
