@@ -548,6 +548,7 @@ pub(crate) struct BlurRect {
     pub bounds: Bounds<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    pub opacity: f32,
 }
 
 impl From<BlurRect> for Primitive {
@@ -929,6 +930,7 @@ mod tests {
             bounds: test_bounds(x),
             corner_radii: Corners::default(),
             content_mask: test_mask(),
+            opacity: 1.0,
         }
     }
 

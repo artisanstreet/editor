@@ -109,6 +109,10 @@ name = "animation"
 path = "examples/animation.rs"
 
 [[example]]
+name = "backdrop_blur"
+path = "examples/backdrop_blur.rs"
+
+[[example]]
 name = "data_table"
 path = "examples/data_table.rs"
 

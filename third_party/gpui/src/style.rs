@@ -1511,6 +1511,7 @@ mod tests {
             assert_eq!(scene.quads.len(), 1);
             assert_eq!(scene.blur_rects[0].blur_radius, px(8.).scale(scale_factor));
             assert_eq!(scene.blur_rects[0].bounds, scene.quads[0].bounds);
+            assert_eq!(scene.blur_rects[0].opacity, 1.0);
 
             let summary: Vec<String> = scene
                 .batches()
