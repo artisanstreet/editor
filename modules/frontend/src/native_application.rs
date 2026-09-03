@@ -43,6 +43,7 @@ use gpui::{
 
 use crate::composer::{DraftDisposition, SubmissionBlocked, SubmissionToken};
 use crate::native_composer::{NativeComposer, NativeComposerEvent};
+use crate::native_route::{NativeRoute, RouteHistory};
 use crate::native_transport_service::{
     CommandSendError, EventReceiveError, NativeProjectIntakeOperation, NativeProjectIntakeStage,
     NativeTransportCommand, NativeTransportEvent, NativeTransportService, ServiceFailure,
@@ -61,7 +62,6 @@ use crate::{
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
     shell::{ShellFrameStyle, shell_rail},
 };
-use crate::native_route::{NativeRoute, RouteHistory};
 
 actions!(native_application, [Quit, NextTabStop, PreviousTabStop]);
 
@@ -3432,6 +3432,11 @@ impl Render for NativeApplication {
             .flex()
             .items_center()
             .justify_center();
+        // Route identity rides on the body so routing changes are
+        // observable in the mounted tree without disturbing any
+        // state-driven branch below.
+        let route_selector = self.route().selector_suffix();
+        body = body.debug_selector(move || route_selector.clone());
         if let Some(stage) = self.intake_stage {
             body = body.child(intake_status_panel(&self.theme, stage));
         } else if self.intake_failure_operation.is_some() {
@@ -4033,6 +4038,7 @@ mod tests {
         picker_route, project_options_from_listing, ready_membership_is_valid,
     };
     use crate::composer::{ComposerState, DraftDisposition};
+    use crate::native_route::{NativeRoute, SettingsRoute};
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
         conversation_host::{ConversationHost, ConversationHostEffect},
@@ -4304,6 +4310,36 @@ mod tests {
             cx.debug_bounds(NATIVE_RAIL_ADD_PROJECT_SELECTOR).is_some(),
             "the rail action must paint its stable debug selector"
         );
+    }
+
+    #[gpui::test]
+    fn navigation_changes_the_mounted_route_identity(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+
+        // Fresh windows mount the default route.
+        assert!(cx.debug_bounds("route-new-thread").is_some());
+
+        // Navigating swaps the mounted route identity.
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.navigate(
+                    NativeRoute::Settings(SettingsRoute::Appearance),
+                    application_cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("route-settings-appearance").is_some());
+
+        // Going back restores the default route identity.
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                assert!(application.go_back(application_cx));
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("route-new-thread").is_some());
     }
 
     #[gpui::test]
