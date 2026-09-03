@@ -16,7 +16,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -43,6 +43,9 @@ use gpui::{
 
 use crate::composer::{DraftDisposition, SubmissionBlocked, SubmissionToken};
 use crate::native_composer::{NativeComposer, NativeComposerEvent};
+use crate::native_new_thread_surface::{
+    NEW_THREAD_SURFACE_SELECTOR, NewThreadRecentRow, render_new_thread_surface,
+};
 use crate::native_route::{NativeRoute, RouteHistory};
 use crate::native_transport_service::{
     CommandSendError, EventReceiveError, NativeProjectIntakeOperation, NativeProjectIntakeStage,
@@ -59,8 +62,11 @@ use crate::{
         RegistryView, manual_configuration_template,
     },
     native_thread_picker::{NativeThreadPicker, ThreadPickerAction},
+    new_thread_sentence_policy::{PROJECT_MARKER, pick_default_new_thread_sentence},
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
     shell::{ShellFrameStyle, shell_rail},
+    thread_navigation_core::format_recent_thread_time,
+    thread_title_policy::{ThreadTitleInput, ThreadTitleMode, thread_display_title},
 };
 
 actions!(native_application, [Quit, NextTabStop, PreviousTabStop]);
@@ -376,6 +382,61 @@ impl NativeApplication {
             cx.notify();
         }
         moved
+    }
+
+    /// Maximum recent-thread rows on the new-thread surface.
+    const NEW_THREAD_MAX_ROWS: usize = 8;
+
+    /// Renders the new-thread surface for the current selection: sentence
+    /// heading plus recent rows from the retained listing, or the empty
+    /// copy when nothing is retained.
+    fn new_thread_surface_section(&self) -> Div {
+        let project_name = self
+            .selected_project
+            .as_ref()
+            .and_then(|selected| {
+                self.project_options
+                    .iter()
+                    .find(|option| &option.id == selected)
+            })
+            .map_or_else(
+                || "your project".to_owned(),
+                |option| option.name.to_string(),
+            );
+        let template = pick_default_new_thread_sentence(None, 0.0);
+        let sentence = template.replace(PROJECT_MARKER, &project_name);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(0));
+        let rows: Vec<NewThreadRecentRow> = self
+            .thread_listing
+            .iter()
+            .flat_map(ThreadListing::threads)
+            .filter(|summary| {
+                self.selected_project
+                    .as_ref()
+                    .is_none_or(|selected| &summary.project_id == selected)
+            })
+            .take(Self::NEW_THREAD_MAX_ROWS)
+            .enumerate()
+            .map(|(index, summary)| {
+                let title = thread_display_title(
+                    ThreadTitleInput {
+                        summary_title: None,
+                        title: summary.title.as_str(),
+                        title_locked: false,
+                    },
+                    ThreadTitleMode::default(),
+                )
+                .to_owned();
+                NewThreadRecentRow::new(
+                    title,
+                    format_recent_thread_time(summary.updated_at.as_millis(), now_ms),
+                    format!("row-{index}"),
+                )
+            })
+            .collect();
+        render_new_thread_surface(self.theme, &sentence, &rows, NEW_THREAD_SURFACE_SELECTOR)
     }
 
     /// Returns the host entity when a real thread is selected.
@@ -3461,6 +3522,8 @@ impl Render for NativeApplication {
                     }
                 }
                 body = body.child(conversation);
+            } else if matches!(self.route(), NativeRoute::NewThread { .. }) {
+                body = body.child(self.new_thread_surface_section());
             } else {
                 body = body.child(status_panel(&self.theme, &self.state));
             }
@@ -4028,6 +4091,7 @@ pub fn run() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use super::NATIVE_STATUS_SELECTOR;
     use super::{
         NATIVE_MESSAGE_RETRY_LABEL, NATIVE_MESSAGE_RETRY_SELECTOR, NATIVE_RAIL_ADD_PROJECT_LABEL,
         NATIVE_RAIL_ADD_PROJECT_SELECTOR, NativeApplication, NativeMessageFailure,
@@ -4038,6 +4102,9 @@ mod tests {
         picker_route, project_options_from_listing, ready_membership_is_valid,
     };
     use crate::composer::{ComposerState, DraftDisposition};
+    use crate::native_new_thread_surface::{
+        NEW_THREAD_SENTENCE_SELECTOR, NEW_THREAD_SURFACE_SELECTOR,
+    };
     use crate::native_route::{NativeRoute, SettingsRoute};
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
@@ -4340,6 +4407,37 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("route-new-thread").is_some());
+    }
+
+    #[gpui::test]
+    fn ready_without_host_mounts_surface_on_new_thread_route(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.state = NativeViewState::Ready;
+                application_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        // Default route is NewThread: the surface mounts, not the status card.
+        assert!(cx.debug_bounds(NEW_THREAD_SURFACE_SELECTOR).is_some());
+        assert!(cx.debug_bounds(NEW_THREAD_SENTENCE_SELECTOR).is_some());
+        assert!(
+            cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_none(),
+            "the Ready stub must not mount beside the surface"
+        );
+
+        // Other routes keep the status card.
+        cx.update(|_, app| {
+            view.update(app, |application, application_cx| {
+                application.navigate(NativeRoute::Settings(SettingsRoute::Models), application_cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(NEW_THREAD_SURFACE_SELECTOR).is_none());
+        assert!(cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_some());
     }
 
     #[gpui::test]
