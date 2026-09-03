@@ -1066,6 +1066,10 @@ impl<V: SelectValue> RenderOnce for Select<V> {
         let trigger_change = on_change.clone();
         let trigger_focus = focus.clone();
         let trigger_scroll = scroll_handle.clone();
+        let trigger_escape_state = Rc::clone(&state);
+        let trigger_escape_enabled = Rc::clone(&enabled);
+        let trigger_escape_open = on_open_change.clone();
+        let trigger_escape_focus = focus.clone();
         let state_for_keys = Rc::clone(&state);
         let entries_for_keys = Rc::clone(&entries);
         let enabled_for_keys = Rc::clone(&enabled);
@@ -1137,6 +1141,20 @@ impl<V: SelectValue> RenderOnce for Select<V> {
                 .on_key_down(
                     move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
                         if event.keystroke.modifiers.modified() {
+                            return;
+                        }
+                        // Escape always announces the closed state, even when
+                        // the menu is already closed: the owner may hold a
+                        // stale open value that only this announcement heals.
+                        if event.keystroke.key.as_str() == "escape" {
+                            let _ = trigger_escape_state.borrow_mut().close(&trigger_escape_enabled);
+                            window.focus(&trigger_escape_focus);
+                            if let Some(handler) = trigger_escape_open.as_ref() {
+                                handler(false, window, cx);
+                            }
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            window.refresh();
                             return;
                         }
                         handle_select_key(
