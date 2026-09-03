@@ -16,7 +16,6 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use artisan_assets::AssetId;
-use gpui::prelude::{FluentBuilder, Refineable};
 use gpui::{
     App, BoxShadow, ClickEvent, Div, ElementId, FocusHandle, FontWeight, InteractiveElement,
     IntoElement, KeyDownEvent, MouseDownEvent, ParentElement, Pixels, RenderOnce, ScrollHandle,
@@ -471,6 +470,7 @@ impl SelectState {
             selected_index,
             highlighted,
             typeahead: SelectTypeahead::default(),
+            reconciled: None,
         }
     }
 
