@@ -451,6 +451,7 @@ pub struct SelectState {
     selected_index: Option<usize>,
     highlighted: Option<usize>,
     typeahead: SelectTypeahead,
+    reconciled: Option<(bool, Option<usize>)>,
 }
 
 impl SelectState {
@@ -1032,7 +1033,17 @@ impl<V: SelectValue> RenderOnce for Select<V> {
         let state = interaction_state.unwrap_or_else(|| {
             Rc::new(RefCell::new(SelectState::new(open, selected_idx, &enabled)))
         });
-        state.borrow_mut().reconcile(open, selected_idx, &enabled);
+        // Reconcile only when the controlled props actually changed since the
+        // last reconciliation. View-initiated transitions (toggle, activation)
+        // mutate the shared state optimistically; reconciling those away on
+        // the next render would revert them before the owner applies them.
+        {
+            let mut shared = state.borrow_mut();
+            if shared.reconciled != Some((open, selected_idx)) {
+                shared.reconcile(open, selected_idx, &enabled);
+                shared.reconciled = Some((open, selected_idx));
+            }
+        }
 
         let entries = Rc::new(entries);
         let enabled = Rc::new(enabled);
