@@ -965,6 +965,21 @@ rust_test(
 )
 
 rust_test(
+    name = "new_thread_surface_test",
+    srcs = ["new_thread_surface.rs"],
+    crate_name = "new_thread_surface_test",
+    deps = [
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "notification_contract_test",
     srcs = ["notification_contract.rs"],
     crate_name = "notification_contract_test",
