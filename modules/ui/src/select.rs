@@ -1,4 +1,4 @@
-//! Controlled native select/listbox primitives for Artisan settings surfaces.
+﻿//! Controlled native select/listbox primitives for Artisan settings surfaces.
 //!
 //! SelectState is independent from GPUI. It owns highlight, controlled-open
 //! reconciliation, and printable typeahead; Select turns those transitions
@@ -60,6 +60,10 @@ pub enum SelectSize {
 }
 
 /// Whether the open list can reveal more content above or below its viewport.
+///
+/// The state is caller-owned because the pinned GPUI scroll handle does not
+/// provide a portable visibility-observer callback. It is rendered as real
+/// scroll-edge controls rather than decorative metadata.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum SelectScrollState {
     /// The viewport is at both ends, or does not overflow.
@@ -147,6 +151,10 @@ impl<V: SelectValue> SelectItem<V> {
 }
 
 /// A row in a select content layer.
+///
+/// Groups and separators are part of the same ordered list so visual order,
+/// keyboard indexes, and scroll-child indexes remain inspectable and
+/// deterministic.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SelectEntry<V: SelectValue = SharedString> {
     /// A selectable option.
@@ -219,6 +227,7 @@ impl<V: SelectValue> From<SelectItem<V>> for SelectEntry<V> {
         Self::Item(item)
     }
 }
+
 /// Theme-resolved geometry and paint for a Select.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectStyle {
@@ -317,10 +326,7 @@ impl SelectStyle {
             content_corner_radius: RadiusTokens::value(RadiusStep::X2l),
             content_background: theme.colors.popover.to_paint(),
             content_foreground: theme.colors.popover_foreground.to_paint(),
-            content_shadow: theme
-                .elevation
-                .menu_shadow
-                .map(|layer| layer.to_box_shadow()),
+            content_shadow: theme.elevation.menu_shadow.map(|layer| layer.to_box_shadow()),
             item_horizontal_padding: theme.spacing.steps(3.0),
             item_vertical_padding: theme.spacing.steps(2.0),
             item_gap: theme.spacing.steps(2.5),
@@ -344,6 +350,7 @@ impl SelectStyle {
         self.trigger_height
     }
 }
+
 /// A key understood by the select state machine.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SelectKey {
@@ -467,7 +474,17 @@ impl SelectState {
     }
 
     /// Reconciles a fresh controlled open/value render.
-    pub fn reconcile(&mut self, open: bool, selected_index: Option<usize>, enabled: &[bool]) {
+    ///
+    /// A changed controlled value or open state wins over a stale highlight;
+    /// otherwise an in-progress keyboard highlight is retained. If an item
+    /// becomes disabled or disappears, the highlight falls back to the
+    /// controlled selection and then the first enabled item.
+    pub fn reconcile(
+        &mut self,
+        open: bool,
+        selected_index: Option<usize>,
+        enabled: &[bool],
+    ) {
         let open_changed = self.open != open;
         let selection_changed = self.selected_index != selected_index;
         self.open = open;
@@ -521,8 +538,7 @@ impl SelectState {
     pub fn is_typeahead_active_at(&self, now: Duration) -> bool {
         self.typeahead.is_active_at(now)
     }
-}
-impl SelectState {
+
     /// Toggles the controlled open state.
     pub fn toggle(&mut self, enabled: &[bool]) -> SelectAction {
         if self.open {
@@ -575,6 +591,31 @@ impl SelectState {
         SelectAction::Close
     }
 
+    fn open_with_direction(&mut self, enabled: &[bool], forward: bool) -> SelectAction {
+        self.open = true;
+        self.typeahead.clear();
+        self.highlighted = if forward {
+            self.initial_open_highlight(enabled)
+        } else {
+            self
+                .selected_index
+                .filter(|index| enabled.get(*index).copied().unwrap_or(false))
+                .or_else(|| last_enabled(enabled))
+        };
+        SelectAction::Open
+    }
+
+    fn initial_open_highlight(&self, enabled: &[bool]) -> Option<usize> {
+        self.selected_index
+            .filter(|index| enabled.get(*index).copied().unwrap_or(false))
+            .or_else(|| first_enabled(enabled))
+    }
+
+    fn selected_highlight(&self, enabled: &[bool]) -> Option<usize> {
+        self.selected_index
+            .filter(|index| enabled.get(*index).copied().unwrap_or(false))
+    }
+
     /// Handles one deterministic keyboard transition at the supplied clock.
     pub fn handle_key_at<V: SelectValue>(
         &mut self,
@@ -588,162 +629,124 @@ impl SelectState {
             SelectKey::Activate => self.activate(&enabled),
             SelectKey::Escape => self.close(&enabled),
             SelectKey::ArrowDown => {
-                if self.open {
-                    self.move_highlight(next_enabled(self.highlighted, &enabled, true))
-                } else {
+                if !self.open {
                     self.open_with_direction(&enabled, true)
+                } else {
+                    match step_highlight(self.highlighted, &enabled, true) {
+                        Some(index) => {
+                            self.highlighted = Some(index);
+                            SelectAction::Highlight(index)
+                        }
+                        None => SelectAction::None,
+                    }
                 }
             }
             SelectKey::ArrowUp => {
-                if self.open {
-                    self.move_highlight(next_enabled(self.highlighted, &enabled, false))
-                } else {
+                if !self.open {
                     self.open_with_direction(&enabled, false)
+                } else {
+                    match step_highlight(self.highlighted, &enabled, false) {
+                        Some(index) => {
+                            self.highlighted = Some(index);
+                            SelectAction::Highlight(index)
+                        }
+                        None => SelectAction::None,
+                    }
                 }
             }
-            SelectKey::Home | SelectKey::PageUp => self.reach_boundary(first_enabled(&enabled)),
-            SelectKey::End | SelectKey::PageDown => self.reach_boundary(last_enabled(&enabled)),
+            SelectKey::Home | SelectKey::PageUp => {
+                if !self.open {
+                    self.open_with_direction(&enabled, true)
+                } else {
+                    match first_enabled(&enabled) {
+                        Some(index) => {
+                            self.highlighted = Some(index);
+                            SelectAction::Highlight(index)
+                        }
+                        None => SelectAction::None,
+                    }
+                }
+            }
+            SelectKey::End | SelectKey::PageDown => {
+                if !self.open {
+                    self.open_with_direction(&enabled, true)
+                } else {
+                    match last_enabled(&enabled) {
+                        Some(index) => {
+                            self.highlighted = Some(index);
+                            SelectAction::Highlight(index)
+                        }
+                        None => SelectAction::None,
+                    }
+                }
+            }
             SelectKey::Character(character) => {
-                self.handle_typeahead(character, entries, &enabled, now)
+                self.type_character(character, entries, &enabled, now)
             }
         }
     }
 
-    /// Convenience spelling for handle_key_at.
-    pub fn handle_key<V: SelectValue>(
-        &mut self,
-        key: SelectKey,
-        entries: &[SelectEntry<V>],
-        now: Duration,
-    ) -> SelectAction {
-        self.handle_key_at(key, entries, now)
-    }
-
-    fn initial_open_highlight(&self, enabled: &[bool]) -> Option<usize> {
-        self.selected_highlight(enabled)
-            .or_else(|| first_enabled(enabled))
-    }
-
-    fn selected_highlight(&self, enabled: &[bool]) -> Option<usize> {
-        self.selected_index
-            .filter(|index| enabled.get(*index).copied().unwrap_or(false))
-    }
-
-    fn open_with_direction(&mut self, enabled: &[bool], forward: bool) -> SelectAction {
-        self.open = true;
-        self.typeahead.clear();
-        self.highlighted = self.selected_highlight(enabled).or_else(|| {
-            if forward {
-                first_enabled(enabled)
-            } else {
-                last_enabled(enabled)
-            }
-        });
-        SelectAction::Open
-    }
-
-    fn move_highlight(&mut self, next: Option<usize>) -> SelectAction {
-        let Some(next) = next else {
-            return SelectAction::None;
-        };
-
-        self.typeahead.clear();
-        if self.highlighted == Some(next) {
-            SelectAction::None
-        } else {
-            self.highlighted = Some(next);
-            SelectAction::Highlight(next)
-        }
-    }
-}
-impl SelectState {
-    fn reach_boundary(&mut self, boundary: Option<usize>) -> SelectAction {
-        let was_open = self.open;
-
-        if !was_open {
-            self.open = true;
-            self.typeahead.clear();
-        }
-
-        let Some(boundary) = boundary else {
-            return if was_open {
-                SelectAction::None
-            } else {
-                SelectAction::Open
-            };
-        };
-
-        self.typeahead.clear();
-        let changed = self.highlighted != Some(boundary);
-        self.highlighted = Some(boundary);
-
-        if !was_open {
-            SelectAction::Open
-        } else if changed {
-            SelectAction::Highlight(boundary)
-        } else {
-            SelectAction::None
-        }
-    }
-
-    fn handle_typeahead<V: SelectValue>(
+    /// Handles one printable typeahead transition at the supplied clock.
+    ///
+    /// An expired buffer restarts from the typed character; otherwise the
+    /// character extends the buffer, unless it repeats the single-character
+    /// buffer, in which case navigation cycles past the current row. When the
+    /// extended buffer matches nothing, the fresh character is retried on its
+    /// own. Closed selects commit the match without opening.
+    fn type_character<V: SelectValue>(
         &mut self,
         character: char,
         entries: &[SelectEntry<V>],
         enabled: &[bool],
         now: Duration,
     ) -> SelectAction {
-        if character.is_control() {
+        let typed: String = character.to_lowercase().collect();
+        if typed.is_empty() {
             return SelectAction::None;
         }
 
-        let typed = character.to_lowercase().collect::<String>();
-        let expired = self
-            .typeahead
-            .last_input
-            .is_none_or(|last| now.saturating_sub(last) >= TYPEAHEAD_TIMEOUT);
-        let old_query = if expired {
-            String::new()
-        } else {
-            self.typeahead.query.clone()
-        };
-        let repeated = !old_query.is_empty()
-            && old_query.chars().count() == 1
-            && old_query.eq_ignore_ascii_case(&typed);
-        let mut query = if repeated {
+        let expired = !self.typeahead.is_active_at(now);
+        let repeated = !expired
+            && !self.typeahead.query.is_empty()
+            && self.typeahead.query.chars().count() == 1
+            && self.typeahead.query.eq_ignore_ascii_case(&typed);
+
+        let query = if expired {
             typed.clone()
+        } else if repeated {
+            self.typeahead.query.clone()
         } else {
-            format!("{old_query}{typed}")
+            format!("{}{typed}", self.typeahead.query)
         };
 
-        let start = if repeated {
-            next_enabled(self.highlighted, enabled, true).or_else(|| first_enabled(enabled))
-        } else {
-            self.highlighted.or_else(|| first_enabled(enabled))
-        };
-        let mut match_index = start.and_then(|start| find_prefix(entries, enabled, &query, start));
-
-        if match_index.is_none() && !repeated && !old_query.is_empty() {
-            query = typed;
-            let restart = self
+        let candidate = if repeated {
+            let start = self
                 .highlighted
-                .or_else(|| first_enabled(enabled))
-                .unwrap_or(0);
-            match_index = find_prefix(entries, enabled, &query, restart);
-        }
+                .map(|index| (index + 1) % enabled.len().max(1));
+            start.and_then(|start| find_enabled_prefix(entries, &query, start))
+        } else {
+            find_enabled_prefix(entries, &query, 0).or_else(|| {
+                if query == typed {
+                    None
+                } else {
+                    find_enabled_prefix(entries, &typed, 0)
+                }
+            })
+        };
 
         self.typeahead.query = query;
         self.typeahead.last_input = Some(now);
 
-        let Some(index) = match_index else {
-            return SelectAction::None;
-        };
-
-        self.highlighted = Some(index);
-        if self.open {
-            SelectAction::Highlight(index)
-        } else {
-            SelectAction::Commit(index)
+        match candidate {
+            Some(index) => {
+                self.highlighted = Some(index);
+                if self.open {
+                    SelectAction::Highlight(index)
+                } else {
+                    SelectAction::Commit(index)
+                }
+            }
+            None => SelectAction::None,
         }
     }
 }
@@ -756,944 +759,57 @@ fn last_enabled(enabled: &[bool]) -> Option<usize> {
     enabled.iter().rposition(|enabled| *enabled)
 }
 
-fn next_enabled(current: Option<usize>, enabled: &[bool], forward: bool) -> Option<usize> {
-    if enabled.is_empty() || !enabled.iter().any(|enabled| *enabled) {
+/// Steps the highlight one enabled row in a direction, staying at the edge
+/// when no further enabled row exists. Returns `None` only when no row is
+/// enabled at all.
+fn step_highlight(
+    current: Option<usize>,
+    enabled: &[bool],
+    forward: bool,
+) -> Option<usize> {
+    let len = enabled.len();
+    if !enabled.iter().any(|enabled| *enabled) {
         return None;
     }
 
-    let len = enabled.len();
-    let current = current
-        .map(|index| index % len)
-        .unwrap_or_else(|| if forward { len - 1 } else { 0 });
-
-    for step in 1..=len {
-        let index = if forward {
-            (current + step) % len
+    let start = current.unwrap_or(if forward { 0 } else { len.saturating_sub(1) });
+    let mut index = start;
+    loop {
+        let next = if forward {
+            index.checked_add(1).filter(|next| *next < len)
         } else {
-            (current + len - (step % len)) % len
+            index.checked_sub(1)
         };
-
-        if enabled[index] {
-            return Some(index);
+        match next {
+            Some(next) if enabled[next] => return Some(next),
+            Some(next) => index = next,
+            None => return Some(start.min(len.saturating_sub(1))),
         }
     }
-
-    None
 }
 
 fn entry_enabled_flags<V: SelectValue>(entries: &[SelectEntry<V>]) -> Vec<bool> {
     entries.iter().map(SelectEntry::is_enabled).collect()
 }
 
-fn find_prefix<V: SelectValue>(
+/// Finds the first enabled row whose label starts with `prefix`
+/// (case-insensitive) at or after `start`, without wrapping.
+fn find_enabled_prefix<V: SelectValue>(
     entries: &[SelectEntry<V>],
-    enabled: &[bool],
-    query: &str,
+    prefix: &str,
     start: usize,
 ) -> Option<usize> {
-    if entries.is_empty() || query.is_empty() {
-        return None;
-    }
-
-    let start = start.min(entries.len() - 1);
-
-    for offset in 0..entries.len() {
-        let index = (start + offset) % entries.len();
-
-        if enabled.get(index).copied().unwrap_or(false)
-            && entries[index]
+    entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .filter(|(_, entry)| entry.is_enabled())
+        .find_map(|(index, entry)| {
+            entry
                 .label()
-                .is_some_and(|label| label.to_lowercase().starts_with(query))
-        {
-            return Some(index);
-        }
-    }
-
-    None
-}
-/// Returns a deterministic value-derived selector suffix using local FNV-1a.
-#[must_use]
-pub fn stable_value_selector_suffix<V: Hash + ?Sized>(value: &V) -> String {
-    let mut hasher = SelectFnv1aHasher(0xcbf2_9ce4_8422_2325);
-    value.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-/// Builds an item selector below a select debug-selector prefix.
-#[must_use]
-pub fn item_debug_selector<V: Hash + ?Sized>(root_selector: &str, value: &V) -> String {
-    format!(
-        "{root_selector}-item-{}",
-        stable_value_selector_suffix(value)
-    )
-}
-
-/// A stable semantic snapshot for the trigger and listbox.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SelectSemanticState {
-    /// The honest role intended for the trigger seam.
-    pub trigger_role: &'static str,
-    /// The honest role intended for the open content seam.
-    pub listbox_role: &'static str,
-    /// The honest role intended for each selectable item.
-    pub option_role: &'static str,
-    /// Whether the controlled trigger is expanded.
-    pub expanded: bool,
-    /// Whether the whole control is disabled.
-    pub disabled: bool,
-    /// Visible trigger text.
-    pub label: SharedString,
-    /// Current selected visible label.
-    pub value_label: Option<SharedString>,
-    /// Whether the trigger currently presents its placeholder.
-    pub placeholder: bool,
-    /// Stable trigger selector.
-    pub trigger_selector: SharedString,
-    /// Stable content selector.
-    pub content_selector: SharedString,
-}
-
-/// Semantic snapshot for one selectable item.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SelectItemSemanticState {
-    /// The honest role intended for this row.
-    pub role: &'static str,
-    /// Visible item label.
-    pub label: SharedString,
-    /// Whether the controlled value identifies this row.
-    pub selected: bool,
-    /// Whether the interaction state highlights this row.
-    pub highlighted: bool,
-    /// Whether this row is disabled.
-    pub disabled: bool,
-    /// Stable value-derived selector.
-    pub selector: SharedString,
-}
-
-/// A controlled native GPUI select/listbox.
-#[derive(IntoElement)]
-pub struct Select<V: SelectValue = SharedString> {
-    id: ElementId,
-    focus: FocusHandle,
-    theme: ArtisanTheme,
-    selected: Option<V>,
-    open: bool,
-    placeholder: SharedString,
-    entries: Vec<SelectEntry<V>>,
-    size: SelectSize,
-    disabled: bool,
-    focus_visibility: FocusVisibility,
-    scroll_state: SelectScrollState,
-    scroll_handle: ScrollHandle,
-    on_change: Option<SelectChangeHandler<V>>,
-    on_open_change: Option<SelectOpenChangeHandler>,
-    debug_selector: Option<SharedString>,
-    interaction_state: Option<Rc<RefCell<SelectState>>>,
-    root: Div,
-}
-
-type SelectChangeHandler<V> = Rc<dyn Fn(V, &ClickEvent, &mut Window, &mut App)>;
-type SelectOpenChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
-
-impl<V: SelectValue> Select<V> {
-    /// Constructs a controlled select from an ordered collection of entries.
-    #[must_use]
-    pub fn new(
-        id: impl Into<ElementId>,
-        focus: FocusHandle,
-        theme: ArtisanTheme,
-        selected: Option<V>,
-        entries: impl IntoIterator<Item = SelectEntry<V>>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            focus,
-            theme,
-            selected,
-            open: false,
-            placeholder: SharedString::from("Select an option"),
-            entries: entries.into_iter().collect(),
-            size: SelectSize::Default,
-            disabled: false,
-            focus_visibility: FocusVisibility::Visible,
-            scroll_state: SelectScrollState::None,
-            scroll_handle: ScrollHandle::new(),
-            on_change: None,
-            on_open_change: None,
-            debug_selector: None,
-            interaction_state: None,
-            root: div(),
-        }
-    }
-
-    /// Constructs a select from item values and labels.
-    #[must_use]
-    pub fn from_items(
-        id: impl Into<ElementId>,
-        focus: FocusHandle,
-        theme: ArtisanTheme,
-        selected: Option<V>,
-        items: impl IntoIterator<Item = SelectItem<V>>,
-    ) -> Self {
-        Self::new(
-            id,
-            focus,
-            theme,
-            selected,
-            items.into_iter().map(SelectEntry::Item),
-        )
-    }
-
-    /// Adds an enabled item.
-    #[must_use]
-    pub fn item(mut self, value: V, label: impl Into<SharedString>) -> Self {
-        self.entries.push(SelectEntry::item(value, label));
-        self
-    }
-
-    /// Adds an already-built item.
-    #[must_use]
-    pub fn with_item(mut self, item: SelectItem<V>) -> Self {
-        self.entries.push(item.into());
-        self
-    }
-
-    /// Adds a group heading.
-    #[must_use]
-    pub fn group(mut self, label: impl Into<SharedString>) -> Self {
-        self.entries.push(SelectEntry::group(label));
-        self
-    }
-
-    /// Adds a separator.
-    #[must_use]
-    pub fn separator(mut self) -> Self {
-        self.entries.push(SelectEntry::separator());
-        self
-    }
-
-    /// Replaces the ordered entry list.
-    #[must_use]
-    pub fn with_entries(mut self, entries: impl IntoIterator<Item = SelectEntry<V>>) -> Self {
-        self.entries = entries.into_iter().collect();
-        self
-    }
-    /// Sets the controlled open state.
-    #[must_use]
-    pub const fn open(mut self, open: bool) -> Self {
-        self.open = open;
-        self
-    }
-
-    /// Alias for open.
-    #[must_use]
-    pub const fn is_open_controlled(self, open: bool) -> Self {
-        self.open(open)
-    }
-
-    /// Sets the trigger placeholder.
-    #[must_use]
-    pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
-        self.placeholder = placeholder.into();
-        self
-    }
-
-    /// Sets the trigger size.
-    #[must_use]
-    pub const fn size(mut self, size: SelectSize) -> Self {
-        self.size = size;
-        self
-    }
-
-    /// Disables the trigger and all item interaction.
-    #[must_use]
-    pub const fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
-
-    /// Selects whether a keyboard-visible focus ring is painted.
-    #[must_use]
-    pub const fn focus_visibility(mut self, visibility: FocusVisibility) -> Self {
-        self.focus_visibility = visibility;
-        self
-    }
-
-    /// Supplies the caller-owned scroll-edge presentation state.
-    #[must_use]
-    pub const fn scroll_state(mut self, state: SelectScrollState) -> Self {
-        self.scroll_state = state;
-        self
-    }
-
-    /// Alias for scroll_state.
-    #[must_use]
-    pub const fn scroll_edges(self, state: SelectScrollState) -> Self {
-        self.scroll_state(state)
-    }
-
-    /// Reuses a caller-owned GPUI scroll handle.
-    #[must_use]
-    pub fn scroll_handle(mut self, handle: ScrollHandle) -> Self {
-        self.scroll_handle = handle;
-        self
-    }
-
-    /// Installs the controlled selection/change callback.
-    #[must_use]
-    pub fn on_change(
-        mut self,
-        handler: impl Fn(V, &ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_change = Some(Rc::new(handler));
-        self
-    }
-
-    /// Alias for on_change.
-    #[must_use]
-    pub fn on_value_change(
-        self,
-        handler: impl Fn(V, &ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_change(handler)
-    }
-
-    /// Installs the controlled open/close callback.
-    #[must_use]
-    pub fn on_open_change(
-        mut self,
-        handler: impl Fn(bool, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_open_change = Some(Rc::new(handler));
-        self
-    }
-
-    /// Adds a stable selector prefix.
-    #[must_use]
-    pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
-        self.debug_selector = Some(selector.into());
-        self
-    }
-
-    /// Supplies retained interaction state.
-    #[must_use]
-    pub fn with_interaction_state(mut self, state: Rc<RefCell<SelectState>>) -> Self {
-        self.interaction_state = Some(state);
-        self
-    }
-
-    /// Returns the controlled value retained by this render.
-    #[must_use]
-    pub fn selected(&self) -> Option<&V> {
-        self.selected.as_ref()
-    }
-
-    /// Alias for selected.
-    #[must_use]
-    pub fn selected_value(&self) -> Option<&V> {
-        self.selected()
-    }
-
-    /// Returns the controlled open state retained by this render.
-    #[must_use]
-    pub const fn is_open(&self) -> bool {
-        self.open
-    }
-
-    /// Returns the ordered entries retained by this render.
-    #[must_use]
-    pub fn entries(&self) -> &[SelectEntry<V>] {
-        &self.entries
-    }
-
-    /// Returns the configured placeholder text.
-    #[must_use]
-    pub fn placeholder_text(&self) -> &str {
-        self.placeholder.as_ref()
-    }
-
-    /// Returns the current selected label.
-    #[must_use]
-    pub fn current_label(&self) -> Option<&str> {
-        self.selected.as_ref().and_then(|selected| {
-            self.entries.iter().find_map(|entry| match entry {
-                SelectEntry::Item(item) if item.value() == selected => Some(item.label()),
-                SelectEntry::Item(_) | SelectEntry::Group(_) | SelectEntry::Separator => None,
-            })
+                .is_some_and(|label| label.to_lowercase().starts_with(&prefix.to_lowercase()))
+                .then_some(index)
         })
-    }
-
-    /// Alias for current_label.
-    #[must_use]
-    pub fn selected_label(&self) -> Option<&str> {
-        self.current_label()
-    }
-    /// Returns the visible trigger label.
-    #[must_use]
-    pub fn display_label(&self) -> &str {
-        self.current_label().unwrap_or(self.placeholder_text())
-    }
-
-    /// Resolves the visual recipe for this render.
-    #[must_use]
-    pub fn visual_style(&self) -> SelectStyle {
-        SelectStyle::resolve(self.theme, self.size)
-    }
-
-    /// Returns the caller-provided scroll-edge state.
-    #[must_use]
-    pub const fn scroll_state_value(&self) -> SelectScrollState {
-        self.scroll_state
-    }
-
-    /// Returns the caller-owned scroll handle.
-    #[must_use]
-    pub const fn scroll_handle_ref(&self) -> &ScrollHandle {
-        &self.scroll_handle
-    }
-
-    /// Returns the semantic trigger/listbox snapshot.
-    #[must_use]
-    pub fn semantic_state(&self) -> SelectSemanticState {
-        let value_label = self
-            .current_label()
-            .map(|label| SharedString::from(label.to_owned()));
-
-        SelectSemanticState {
-            trigger_role: "combobox",
-            listbox_role: "listbox",
-            option_role: "option",
-            expanded: self.open && !self.disabled,
-            disabled: self.disabled,
-            label: SharedString::from(self.display_label().to_owned()),
-            placeholder: value_label.is_none(),
-            value_label,
-            trigger_selector: SharedString::from(self.trigger_selector()),
-            content_selector: SharedString::from(self.content_selector()),
-        }
-    }
-
-    /// Returns semantic item records in visual item order.
-    #[must_use]
-    pub fn item_semantics(&self, state: &SelectState) -> Vec<SelectItemSemanticState> {
-        let root = self.selector_root();
-
-        self.entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| match entry {
-                SelectEntry::Item(item) => Some(SelectItemSemanticState {
-                    role: "option",
-                    label: item.label.clone(),
-                    selected: self
-                        .selected
-                        .as_ref()
-                        .is_some_and(|selected| item.value() == selected),
-                    highlighted: state.highlighted_index() == Some(index),
-                    disabled: self.disabled || item.is_disabled(),
-                    selector: SharedString::from(item_debug_selector(&root, item.value())),
-                }),
-                SelectEntry::Group(_) | SelectEntry::Separator => None,
-            })
-            .collect()
-    }
-
-    fn selector_root(&self) -> String {
-        self.debug_selector.as_ref().map_or_else(
-            || "artisan-select".to_owned(),
-            |selector| selector.to_string(),
-        )
-    }
-
-    fn trigger_selector(&self) -> String {
-        self.debug_selector.as_ref().map_or_else(
-            || SELECT_TRIGGER_SELECTOR.to_owned(),
-            |selector| format!("{selector}-trigger"),
-        )
-    }
-
-    fn content_selector(&self) -> String {
-        self.debug_selector.as_ref().map_or_else(
-            || SELECT_CONTENT_SELECTOR.to_owned(),
-            |selector| format!("{selector}-content"),
-        )
-    }
-
-    fn viewport_selector(&self) -> String {
-        self.debug_selector.as_ref().map_or_else(
-            || SELECT_VIEWPORT_SELECTOR.to_owned(),
-            |selector| format!("{selector}-viewport"),
-        )
-    }
-}
-
-impl<V: SelectValue> Styled for Select<V> {
-    fn style(&mut self) -> &mut StyleRefinement {
-        self.root.style()
-    }
-}
-impl<V: SelectValue> RenderOnce for Select<V> {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let Select {
-            id,
-            focus,
-            theme,
-            selected,
-            open,
-            placeholder,
-            entries,
-            size,
-            disabled,
-            focus_visibility,
-            scroll_state,
-            scroll_handle,
-            on_change,
-            on_open_change,
-            debug_selector,
-            interaction_state,
-            mut root,
-        } = self;
-
-        let caller_style = root.style().clone();
-        let style = SelectStyle::resolve(theme, size);
-        let effective_open = open && !disabled;
-        let selected_index = selected_index(&entries, selected.as_ref());
-        let enabled = entry_enabled_flags(&entries)
-            .into_iter()
-            .map(|item_enabled| item_enabled && !disabled)
-            .collect::<Vec<_>>();
-
-        let state = interaction_state.unwrap_or_else(|| {
-            Rc::new(RefCell::new(SelectState::new(
-                effective_open,
-                selected_index,
-                &enabled,
-            )))
-        });
-        state
-            .borrow_mut()
-            .reconcile(effective_open, selected_index, &enabled);
-
-        let selector_root = debug_selector.as_ref().map_or_else(
-            || "artisan-select".to_owned(),
-            |selector| selector.to_string(),
-        );
-        let trigger_selector = debug_selector.as_ref().map_or_else(
-            || SELECT_TRIGGER_SELECTOR.to_owned(),
-            |selector| format!("{selector}-trigger"),
-        );
-        let content_selector = debug_selector.as_ref().map_or_else(
-            || SELECT_CONTENT_SELECTOR.to_owned(),
-            |selector| format!("{selector}-content"),
-        );
-        let viewport_selector = debug_selector.as_ref().map_or_else(
-            || SELECT_VIEWPORT_SELECTOR.to_owned(),
-            |selector| format!("{selector}-viewport"),
-        );
-
-        let selected_label = selected.as_ref().and_then(|selected| {
-            entries.iter().find_map(|entry| match entry {
-                SelectEntry::Item(item) if item.value() == selected => Some(item.label.clone()),
-                SelectEntry::Item(_) | SelectEntry::Group(_) | SelectEntry::Separator => None,
-            })
-        });
-        let trigger_is_placeholder = selected_label.is_none();
-        let trigger_label = selected_label.unwrap_or(placeholder);
-
-        let entries_for_keys = entries.clone();
-        let focus_for_keys = focus.clone();
-        let on_change_for_keys = on_change.clone();
-        let on_open_for_keys = on_open_change.clone();
-        let scroll_for_keys = scroll_handle.clone();
-        let enabled_for_keys = enabled.clone();
-
-        let mut trigger = div()
-            .id(ElementId::NamedChild(
-                Box::new(id.clone()),
-                "trigger".into(),
-            ))
-            .track_focus(&focus)
-            .tab_stop(!disabled)
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .min_w_0()
-            .w_full()
-            .h(style.trigger_height)
-            .gap(style.trigger_gap)
-            .px(style.trigger_horizontal_padding)
-            .py(theme.spacing.steps(2.0))
-            .rounded(style.trigger_corner_radius)
-            .border_1()
-            .border_color(style.trigger_border)
-            .bg(style.trigger_background)
-            .text_color(style.trigger_foreground)
-            .text_size(style.text_size)
-            .font_weight(FontWeight::MEDIUM)
-            .whitespace_nowrap()
-            .when(disabled, |element| element.opacity(style.disabled_opacity))
-            .debug_selector(move || trigger_selector.clone());
-
-        let label_selector = if trigger_is_placeholder {
-            format!("{selector_root}-placeholder")
-        } else {
-            format!("{selector_root}-value")
-        };
-        let label_element = div()
-            .min_w_0()
-            .flex_1()
-            .truncate()
-            .text_color(if trigger_is_placeholder {
-                style.placeholder_foreground
-            } else {
-                style.trigger_foreground
-            })
-            .debug_selector(move || label_selector.clone())
-            .child(trigger_label);
-
-        trigger = trigger
-            .child(label_element)
-            .child(div().flex_shrink_0().child(icon(IconStyle::resolve(
-                theme,
-                AssetId::TABLER_SELECTOR,
-                IconSize::Default,
-                IconTint::Muted,
-            ))));
-
-        if focus_visibility == FocusVisibility::Visible {
-            trigger = trigger.focus(move |focused| {
-                focused
-                    .border_color(style.focus_border)
-                    .shadow(vec![BoxShadow {
-                        color: style.focus_ring,
-                        offset: point(px(0.0), px(0.0)),
-                        blur_radius: px(0.0),
-                        spread_radius: style.focus_ring_width,
-                    }])
-            });
-        }
-        if !disabled {
-            let state_for_key_handler = Rc::clone(&state);
-            let entries_for_key_handler = entries_for_keys.clone();
-            let focus_for_key_handler = focus_for_keys.clone();
-            let on_change_for_key_handler = on_change_for_keys.clone();
-            let on_open_for_key_handler = on_open_for_keys.clone();
-            let scroll_for_key_handler = scroll_for_keys.clone();
-            let enabled_for_key_handler = enabled_for_keys.clone();
-
-            trigger = trigger.on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if event.keystroke.modifiers.control
-                    || event.keystroke.modifiers.alt
-                    || event.keystroke.modifiers.platform
-                    || event.keystroke.modifiers.function
-                {
-                    return;
-                }
-
-                let now = monotonic_now();
-                let key_name = event.keystroke.key.as_str();
-                let active_space = key_name.eq_ignore_ascii_case("space")
-                    && state_for_key_handler.borrow().is_typeahead_active_at(now);
-
-                let key = if active_space {
-                    Some(SelectKey::Character(' '))
-                } else {
-                    SelectKey::from_key_name(key_name).or_else(|| {
-                        event
-                            .keystroke
-                            .key_char
-                            .as_ref()
-                            .and_then(|text| text.chars().next())
-                            .filter(|character| !character.is_control())
-                            .or_else(|| {
-                                if key_name.chars().count() == 1 {
-                                    key_name.chars().next()
-                                } else {
-                                    None
-                                }
-                            })
-                            .map(SelectKey::Character)
-                    })
-                };
-
-                let Some(key) = key else {
-                    return;
-                };
-
-                if matches!(key, SelectKey::Activate) {
-                    return;
-                }
-
-                let action = state_for_key_handler.borrow_mut().handle_key_at(
-                    key,
-                    &entries_for_key_handler,
-                    now,
-                );
-
-                if active_space {
-                    window.prevent_default();
-                    cx.stop_propagation();
-
-                    if action.is_effective() {
-                        apply_action(
-                            action,
-                            &state_for_key_handler,
-                            &entries_for_key_handler,
-                            &on_change_for_key_handler,
-                            &on_open_for_key_handler,
-                            &focus_for_key_handler,
-                            &scroll_for_key_handler,
-                            &enabled_for_key_handler,
-                            false,
-                            &ClickEvent::default(),
-                            window,
-                            cx,
-                        );
-                    }
-                    return;
-                }
-
-                if !action.is_effective() {
-                    return;
-                }
-
-                window.prevent_default();
-                cx.stop_propagation();
-                apply_action(
-                    action,
-                    &state_for_key_handler,
-                    &entries_for_key_handler,
-                    &on_change_for_key_handler,
-                    &on_open_for_key_handler,
-                    &focus_for_key_handler,
-                    &scroll_for_key_handler,
-                    &enabled_for_key_handler,
-                    false,
-                    &ClickEvent::default(),
-                    window,
-                    cx,
-                );
-            });
-
-            let state_for_trigger = Rc::clone(&state);
-            let entries_for_trigger = entries.clone();
-            let on_change_for_trigger = on_change.clone();
-            let on_open_for_trigger = on_open_change.clone();
-            let focus_for_trigger = focus.clone();
-            let scroll_for_trigger = scroll_handle.clone();
-            let enabled_for_trigger = enabled.clone();
-
-            trigger = trigger.on_click(move |event, window, cx| {
-                let was_open = state_for_trigger.borrow().is_open();
-                let action = if matches!(event, ClickEvent::Keyboard(_)) {
-                    state_for_trigger
-                        .borrow_mut()
-                        .activate(&enabled_for_trigger)
-                } else {
-                    state_for_trigger.borrow_mut().toggle(&enabled_for_trigger)
-                };
-
-                if !action.is_effective() {
-                    return;
-                }
-
-                apply_action(
-                    action,
-                    &state_for_trigger,
-                    &entries_for_trigger,
-                    &on_change_for_trigger,
-                    &on_open_for_trigger,
-                    &focus_for_trigger,
-                    &scroll_for_trigger,
-                    &enabled_for_trigger,
-                    was_open,
-                    &event,
-                    window,
-                    cx,
-                );
-            });
-        }
-
-        let content_id = ElementId::NamedChild(Box::new(id.clone()), "content".into());
-        let mut root = div().id(id.clone()).relative().w_full().child(trigger);
-
-        if effective_open {
-            let viewport_id =
-                ElementId::NamedChild(Box::new(content_id.clone()), "viewport".into());
-            let mut viewport = div()
-                .id(viewport_id)
-                .w_full()
-                .max_h(style.content_max_height)
-                .overflow_y_scroll()
-                .scrollbar_width(px(0.0))
-                .track_scroll(&scroll_handle)
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                .debug_selector(move || viewport_selector.clone());
-
-            for (index, entry) in entries.iter().enumerate() {
-                let entry_selector = match entry {
-                    SelectEntry::Item(item) => item_debug_selector(&selector_root, item.value()),
-                    SelectEntry::Group(_) => format!("{selector_root}-group-{index}"),
-                    SelectEntry::Separator => format!("{selector_root}-separator-{index}"),
-                };
-
-                let mut row: Stateful<Div> = match entry {
-                    SelectEntry::Item(item) => render_item(
-                        theme,
-                        item,
-                        index,
-                        &content_id,
-                        &selector_root,
-                        selected.as_ref(),
-                        state.borrow().highlighted_index(),
-                        &style,
-                    ),
-                    SelectEntry::Group(label) => div()
-                        .id(ElementId::NamedChild(
-                            Box::new(content_id.clone()),
-                            format!("group-{index}").into(),
-                        ))
-                        .w_full()
-                        .px(theme.spacing.steps(2.0))
-                        .py(theme.spacing.steps(1.5))
-                        .text_color(style.group_label_foreground)
-                        .text_size(style.group_label_text_size)
-                        .debug_selector(move || entry_selector.clone())
-                        .child(label.clone()),
-                    SelectEntry::Separator => div()
-                        .id(ElementId::NamedChild(
-                            Box::new(content_id.clone()),
-                            format!("separator-{index}").into(),
-                        ))
-                        .mx(theme.spacing.steps(-1.0))
-                        .my(theme.spacing.steps(1.0))
-                        .h(px(1.0))
-                        .bg(style.separator_color)
-                        .debug_selector(move || entry_selector.clone()),
-                };
-
-                if matches!(entry, SelectEntry::Item(_))
-                    && enabled.get(index).copied().unwrap_or(false)
-                {
-                    let state_for_entry = Rc::clone(&state);
-                    let entries_for_entry = entries.clone();
-                    let on_change_for_entry = on_change.clone();
-                    let on_open_for_entry = on_open_change.clone();
-                    let focus_for_entry = focus.clone();
-                    let scroll_for_entry = scroll_handle.clone();
-                    let enabled_for_entry = enabled.clone();
-
-                    row = row.on_click(move |event, window, cx| {
-                        let was_open = state_for_entry.borrow().is_open();
-                        let action = state_for_entry
-                            .borrow_mut()
-                            .commit(index, &enabled_for_entry);
-
-                        if !action.is_effective() {
-                            return;
-                        }
-
-                        apply_action(
-                            action,
-                            &state_for_entry,
-                            &entries_for_entry,
-                            &on_change_for_entry,
-                            &on_open_for_entry,
-                            &focus_for_entry,
-                            &scroll_for_entry,
-                            &enabled_for_entry,
-                            was_open,
-                            event,
-                            window,
-                            cx,
-                        );
-                    });
-                }
-
-                viewport = viewport.child(row);
-            }
-
-            let mut content = div()
-                .id(content_id.clone())
-                .absolute()
-                .top(px(f32::from(style.trigger_height) + CONTENT_GAP_PX))
-                .left(px(0.0))
-                .right(px(0.0))
-                .min_w(style.content_min_width)
-                .max_h(style.content_max_height)
-                .overflow_hidden()
-                .rounded(style.content_corner_radius)
-                .bg(style.content_background)
-                .text_color(style.content_foreground)
-                .p(theme.spacing.steps(1.0))
-                .shadow(style.content_shadow.to_vec())
-                .debug_selector(move || content_selector.clone());
-
-            if scroll_state.can_scroll_up() {
-                let handle = scroll_handle.clone();
-                content = content.child(scroll_button(
-                    theme,
-                    style.scroll_button_height,
-                    AssetId::TABLER_CHEVRON_UP,
-                    format!("{selector_root}-scroll-up"),
-                    move |window| {
-                        handle.scroll_to_top_of_item(0);
-                        window.refresh();
-                    },
-                ));
-            }
-
-            content = content.child(viewport);
-
-            if scroll_state.can_scroll_down() {
-                let handle = scroll_handle.clone();
-                content = content.child(scroll_button(
-                    theme,
-                    style.scroll_button_height,
-                    AssetId::TABLER_CHEVRON_DOWN,
-                    format!("{selector_root}-scroll-down"),
-                    move |window| {
-                        handle.scroll_to_bottom();
-                        window.refresh();
-                    },
-                ));
-            }
-
-            let outside_state = Rc::clone(&state);
-            let outside_focus = focus.clone();
-            let outside_scroll = scroll_handle.clone();
-            let outside_enabled = enabled.clone();
-            let outside_open = on_open_change.clone();
-
-            root = root
-                .on_mouse_down_out(move |event: &MouseDownEvent, window, cx| {
-                    if outside_scroll.bounds().contains(&event.position) {
-                        return;
-                    }
-
-                    let action = outside_state.borrow_mut().close(&outside_enabled);
-                    if !action.is_effective() {
-                        return;
-                    }
-
-                    window.focus(&outside_focus);
-                    if let Some(handler) = outside_open.as_ref() {
-                        handler(false, window, cx);
-                    }
-                    cx.stop_propagation();
-                })
-                .child(deferred(content).with_priority(20));
-        }
-
-        if let Some(selector) = debug_selector {
-            let selector = selector.to_string();
-            root = root.debug_selector(move || selector.clone());
-        }
-
-        root.style().refine(&caller_style);
-        root
-    }
 }
 
 fn render_item<V: SelectValue>(
@@ -1709,8 +825,7 @@ fn render_item<V: SelectValue>(
     let item_selected = selected.is_some_and(|selected| item.value() == selected);
     let item_highlighted = highlighted == Some(index);
     let item_selector = item_debug_selector(selector_root, item.value());
-    let item_id =
-        ElementId::NamedChild(Box::new(content_id.clone()), format!("item-{index}").into());
+    let item_id = ElementId::NamedChild(Box::new(content_id.clone()), format!("item-{index}").into());
 
     let mut row = div()
         .id(item_id)
@@ -1770,7 +885,11 @@ fn render_item<V: SelectValue>(
     } else {
         let hover_background = style.item_highlight_background;
         let hover_foreground = style.item_highlight_foreground;
-        row = row.hover(move |hovered| hovered.bg(hover_background).text_color(hover_foreground));
+        row = row.hover(move |hovered| {
+            hovered
+                .bg(hover_background)
+                .text_color(hover_foreground)
+        });
     }
 
     row
@@ -1786,7 +905,7 @@ fn scroll_button(
     let debug_selector = selector.clone();
 
     div()
-        .id(SharedString::from(selector))
+        .id(selector)
         .flex()
         .items_center()
         .justify_center()
@@ -1808,9 +927,9 @@ fn selected_index<V: SelectValue>(
     selected: Option<&V>,
 ) -> Option<usize> {
     selected.and_then(|selected| {
-        entries
-            .iter()
-            .position(|entry| matches!(entry, SelectEntry::Item(item) if item.value() == selected))
+        entries.iter().position(|entry| {
+            matches!(entry, SelectEntry::Item(item) if item.value() == selected)
+        })
     })
 }
 
@@ -1824,7 +943,7 @@ fn apply_action<V: SelectValue>(
     scroll_handle: &ScrollHandle,
     enabled: &[bool],
     was_open: bool,
-    event: &ClickEvent,
+    event: Option<&ClickEvent>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1868,7 +987,6 @@ fn apply_action<V: SelectValue>(
         }
     }
 }
-
 fn monotonic_now() -> Duration {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed()
@@ -1888,3 +1006,624 @@ impl Hasher for SelectFnv1aHasher {
         }
     }
 }
+
+impl<V: SelectValue> RenderOnce for Select<V> {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let Select {
+            id,
+            focus,
+            theme,
+            selected,
+            open,
+            placeholder,
+            entries,
+            size,
+            disabled,
+            scroll_state,
+            scroll_handle,
+            on_change,
+            on_open_change,
+            debug_selector,
+            interaction_state,
+        } = self;
+        let style = SelectStyle::resolve(theme, size);
+        let enabled = entry_enabled_flags(&entries);
+        let selected_idx = selected_index(&entries, selected.as_ref());
+        let state = interaction_state.unwrap_or_else(|| {
+            Rc::new(RefCell::new(SelectState::new(open, selected_idx, &enabled)))
+        });
+        state.borrow_mut().reconcile(open, selected_idx, &enabled);
+
+        let entries = Rc::new(entries);
+        let enabled = Rc::new(enabled);
+        let selector_root = debug_selector.as_ref().map_or_else(
+            || "artisan-select".to_owned(),
+            |selector| selector.to_string(),
+        );
+
+        // Trigger row: committed label or placeholder plus selector glyph.
+        let trigger_label = selected_idx
+            .and_then(|index| entries.get(index))
+            .and_then(|entry| entry.as_item())
+            .map(|item| item.label.clone())
+            .unwrap_or_else(|| placeholder.clone());
+        let trigger_selector = format!("{selector_root}-trigger");
+        let trigger_state = Rc::clone(&state);
+        let trigger_entries = Rc::clone(&entries);
+        let trigger_enabled = Rc::clone(&enabled);
+        let trigger_open = on_open_change.clone();
+        let trigger_change = on_change.clone();
+        let trigger_focus = focus.clone();
+        let trigger_scroll = scroll_handle.clone();
+        let mut trigger = div()
+            .id(ElementId::NamedChild(
+                Box::new(id.clone()),
+                "trigger".into(),
+            ))
+            .track_focus(&focus)
+            .tab_index(0)
+            .flex()
+            .flex_row()
+            .items_center()
+            .w_full()
+            .h(style.trigger_height)
+            .px(style.trigger_horizontal_padding)
+            .gap(style.trigger_gap)
+            .rounded(style.trigger_corner_radius)
+            .border(px(1.0))
+            .border_color(style.trigger_border)
+            .bg(style.trigger_background)
+            .text_color(if selected_idx.is_none() {
+                style.placeholder_foreground
+            } else {
+                style.trigger_foreground
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(trigger_label),
+            )
+            .child(icon(IconStyle::resolve(
+                theme,
+                AssetId::TABLER_CHEVRON_DOWN,
+                IconSize::Compact,
+                IconTint::Muted,
+            )))
+            .debug_selector(move || trigger_selector.clone());
+        if disabled {
+            trigger = trigger.opacity(DISABLED_OPACITY);
+        } else {
+            trigger = trigger
+                .on_click(move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let was_open = trigger_state.borrow().is_open();
+                    let action = trigger_state.borrow_mut().toggle(&trigger_enabled);
+                    apply_action(
+                        action,
+                        &trigger_state,
+                        &trigger_entries,
+                        &trigger_change,
+                        &trigger_open,
+                        &trigger_focus,
+                        &trigger_scroll,
+                        &trigger_enabled,
+                        was_open,
+                        Some(event),
+                        window,
+                        cx,
+                    );
+                    window.refresh();
+                })
+                .on_key_down(
+                    move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
+                        if event.keystroke.modifiers.modified() {
+                            return;
+                        }
+                        handle_select_key(
+                            &SelectKeyContext {
+                                state: Rc::clone(&state_for_keys),
+                                entries: Rc::clone(&entries_for_keys),
+                                enabled: Rc::clone(&enabled_for_keys),
+                                on_change: on_change_for_keys.clone(),
+                                on_open_change: on_open_change_for_keys.clone(),
+                                focus: focus_for_keys.clone(),
+                                scroll_handle: scroll_for_keys.clone(),
+                            },
+                            event.keystroke.key.as_str(),
+                            window,
+                            cx,
+                        );
+                    },
+                );
+        }
+
+        // Viewport rows.
+        let content_id =
+            ElementId::NamedChild(Box::new(id.clone()), "content".into());
+        let viewport_id = ElementId::NamedChild(Box::new(content_id.clone()), "viewport".into());
+        let highlighted = state.borrow().highlighted_index();
+        let viewport_selector = format!("{selector_root}-viewport");
+        let mut viewport = div()
+            .id(viewport_id)
+            .w_full()
+            .max_h(style.content_max_height)
+            .overflow_y_scroll()
+            .track_scroll(&scroll_handle)
+            .debug_selector(move || viewport_selector.clone());
+        for (index, entry) in entries.iter().enumerate() {
+            match entry {
+                SelectEntry::Group(heading) => {
+                    viewport = viewport.child(
+                        div()
+                            .px(style.item_horizontal_padding)
+                            .py(style.item_vertical_padding)
+                            .text_color(style.group_label_foreground)
+                            .child(heading.clone()),
+                    );
+                }
+                SelectEntry::Separator => {
+                    viewport = viewport.child(
+                        div().h(px(1.0)).bg(style.separator_color),
+                    );
+                }
+                SelectEntry::Item(item) => {
+                    let row = render_item(
+                        theme,
+                        item,
+                        index,
+                        &content_id,
+                        &selector_root,
+                        selected.as_ref(),
+                        highlighted,
+                        &style,
+                    );
+                    if item.is_disabled() || disabled {
+                        viewport = viewport.child(row);
+                    } else {
+                        let row_state = Rc::clone(&state);
+                        let row_entries = Rc::clone(&entries);
+                        let row_enabled = Rc::clone(&enabled);
+                        let row_change = on_change.clone();
+                        let row_open = on_open_change.clone();
+                        let row_focus = focus.clone();
+                        let row_scroll = scroll_handle.clone();
+                        viewport = viewport.child(row.on_click(
+                            move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let was_open = row_state.borrow().is_open();
+                                let action =
+                                    row_state.borrow_mut().commit(index, &row_enabled);
+                                apply_action(
+                                    action,
+                                    &row_state,
+                                    &row_entries,
+                                    &row_change,
+                                    &row_open,
+                                    &row_focus,
+                                    &row_scroll,
+                                    &row_enabled,
+                                    was_open,
+                                    Some(event),
+                                    window,
+                                    cx,
+                                );
+                                window.refresh();
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Content layer with scroll-edge affordances.
+        let content_selector = format!("{selector_root}-content");
+        let mut content = div()
+            .id(content_id)
+            .w_full()
+            .rounded(style.content_corner_radius)
+            .bg(style.content_background)
+            .text_color(style.content_foreground)
+            .shadow(style.content_shadow.to_vec())
+            .overflow_hidden()
+            .debug_selector(move || content_selector.clone());
+        if scroll_state.can_scroll_up() {
+            let handle = scroll_handle.clone();
+            content = content.child(scroll_button(
+                theme,
+                style.scroll_button_height,
+                AssetId::TABLER_CHEVRON_UP,
+                format!("{selector_root}-scroll-up"),
+                move |window| {
+                    handle.scroll_to_top_of_item(0);
+                    window.refresh();
+                },
+            ));
+        }
+        content = content.child(viewport);
+        if scroll_state.can_scroll_down() {
+            let handle = scroll_handle.clone();
+            content = content.child(scroll_button(
+                theme,
+                style.scroll_button_height,
+                AssetId::TABLER_CHEVRON_DOWN,
+                format!("{selector_root}-scroll-down"),
+                move |window| {
+                    handle.scroll_to_bottom();
+                    window.refresh();
+                },
+            ));
+        }
+
+        let mut root = div().relative().w_full().child(trigger);
+        if state.borrow().is_open() {
+            let outside_state = Rc::clone(&state);
+            let outside_focus = focus.clone();
+            let outside_scroll = scroll_handle.clone();
+            let outside_enabled = enabled.clone();
+            let outside_open = on_open_change.clone();
+            root = root
+                .on_mouse_down_out(move |event: &MouseDownEvent, window, cx| {
+                    if outside_scroll.bounds().contains(&event.position) {
+                        return;
+                    }
+                    let action = outside_state.borrow_mut().close(&outside_enabled);
+                    if !action.is_effective() {
+                        return;
+                    }
+                    window.focus(&outside_focus);
+                    if let Some(handler) = outside_open.as_ref() {
+                        handler(false, window, cx);
+                    }
+                    cx.stop_propagation();
+                })
+                .child(deferred(content).with_priority(20));
+        }
+
+        if let Some(selector) = debug_selector {
+            let selector = selector.to_string();
+            root = root.debug_selector(move || selector.clone());
+        }
+        root
+    }
+}
+
+/// Shared delivery context for trigger keystrokes.
+struct SelectKeyContext<V: SelectValue> {
+    state: Rc<RefCell<SelectState>>,
+    entries: Rc<Vec<SelectEntry<V>>>,
+    enabled: Rc<Vec<bool>>,
+    on_change: Option<SelectChangeHandler<V>>,
+    on_open_change: Option<SelectOpenChangeHandler>,
+    focus: FocusHandle,
+    scroll_handle: ScrollHandle,
+}
+
+/// Handles one trigger keystroke through the shared engine and applies the
+/// resulting action with keyboard (event-less) delivery.
+fn handle_select_key<V: SelectValue>(
+    context: &SelectKeyContext<V>,
+    key_name: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let mapped = SelectKey::from_key_name(key_name);
+    let key = match mapped {
+        Some(key) => key,
+        None => {
+            let mut chars = key_name.chars();
+            match (chars.next(), chars.next()) {
+                (Some(character), None) if !character.is_control() => {
+                    SelectKey::Character(character)
+                }
+                _ => return,
+            }
+        }
+    };
+    let was_open = context.state.borrow().is_open();
+    let action = context.state.borrow_mut().handle_key_at(
+        key,
+        &context.entries,
+        monotonic_now(),
+    );
+    if action.is_effective() {
+        apply_action(
+            action,
+            &context.state,
+            &context.entries,
+            &context.on_change,
+            &context.on_open_change,
+            &context.focus,
+            &context.scroll_handle,
+            &context.enabled,
+            was_open,
+            None,
+            window,
+            cx,
+        );
+        window.refresh();
+    }
+}
+
+/// Returns a stable hexadecimal hash suffix for one caller-owned value.
+///
+/// Hashing keeps arbitrary caller data out of selector text while remaining
+/// deterministic within one process.
+#[must_use]
+pub fn stable_value_selector_suffix<V: Hash + ?Sized>(value: &V) -> String {
+    let mut hasher = SelectFnv1aHasher(0xcbf2_9ce4_8422_2325);
+    value.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// Returns the stable debug selector for one item value under a root.
+#[must_use]
+pub fn item_debug_selector<V: Hash + ?Sized>(root_selector: &str, value: &V) -> String {
+    format!(
+        "{root_selector}-item-{}",
+        stable_value_selector_suffix(value)
+    )
+}
+
+/// Change notification for a committed select value.
+pub type SelectChangeHandler<V> = Rc<dyn Fn(V, Option<&ClickEvent>, &mut Window, &mut App)>;
+
+/// Change notification for controlled open updates.
+pub type SelectOpenChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+/// Semantic trigger/listbox snapshot for inspectable metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectSemanticState {
+    /// Fixed trigger role name.
+    pub trigger_role: &'static str,
+    /// Fixed listbox role name.
+    pub listbox_role: &'static str,
+    /// Fixed option role name.
+    pub option_role: &'static str,
+    /// Whether the listbox is currently expanded.
+    pub expanded: bool,
+    /// Whether the whole control is disabled.
+    pub disabled: bool,
+    /// Visible trigger text.
+    pub label: SharedString,
+    /// Whether the trigger shows the placeholder.
+    pub placeholder: bool,
+    /// Visible label of the committed value, if any.
+    pub value_label: Option<SharedString>,
+    /// Stable trigger selector.
+    pub trigger_selector: String,
+    /// Stable content selector.
+    pub content_selector: String,
+}
+
+/// Semantic record for one rendered option row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectItemSemanticState {
+    /// Fixed option role name.
+    pub role: &'static str,
+    /// Visible option label.
+    pub label: SharedString,
+    /// Whether this row holds the committed value.
+    pub selected: bool,
+    /// Whether this row holds the roving highlight.
+    pub highlighted: bool,
+    /// Whether this row can be activated.
+    pub disabled: bool,
+    /// Stable per-value selector.
+    pub selector: String,
+}
+
+/// A controlled native select/listbox view.
+///
+/// The caller owns `open` and the committed value; interaction state flows
+/// through an optional shared [`SelectState`]. Rendering reconciles the
+/// shared state with the controlled props every frame, so owner-applied
+/// updates always win while in-progress keyboard motion survives renders
+/// that change nothing.
+pub struct Select<V: SelectValue = SharedString> {
+    id: ElementId,
+    focus: FocusHandle,
+    theme: ArtisanTheme,
+    selected: Option<V>,
+    open: bool,
+    placeholder: SharedString,
+    entries: Vec<SelectEntry<V>>,
+    size: SelectSize,
+    disabled: bool,
+    scroll_state: SelectScrollState,
+    scroll_handle: ScrollHandle,
+    on_change: Option<SelectChangeHandler<V>>,
+    on_open_change: Option<SelectOpenChangeHandler>,
+    debug_selector: Option<SharedString>,
+    interaction_state: Option<Rc<RefCell<SelectState>>>,
+}
+
+impl<V: SelectValue> Select<V> {
+    /// Creates a select with an explicit committed value.
+    pub fn new(
+        id: impl Into<ElementId>,
+        focus: FocusHandle,
+        theme: ArtisanTheme,
+        selected: Option<V>,
+        entries: Vec<SelectEntry<V>>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            focus,
+            theme,
+            selected,
+            open: false,
+            placeholder: SharedString::from(String::new()),
+            entries,
+            size: SelectSize::default(),
+            disabled: false,
+            scroll_state: SelectScrollState::default(),
+            scroll_handle: ScrollHandle::new(),
+            on_change: None,
+            on_open_change: None,
+            debug_selector: None,
+            interaction_state: None,
+        }
+    }
+
+    /// Sets the controlled open state.
+    #[must_use]
+    pub fn open(mut self, open: bool) -> Self {
+        self.open = open;
+        self
+    }
+
+    /// Sets the placeholder shown without a committed value.
+    #[must_use]
+    pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Adds a stable selector; trigger, content, and viewport derive
+    /// `{selector}-trigger`, `{selector}-content`, and `{selector}-viewport`.
+    #[must_use]
+    pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
+    }
+
+    /// Selects the trigger size.
+    #[must_use]
+    pub fn size(mut self, size: SelectSize) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Sets the whole-control disabled state.
+    #[must_use]
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Sets the caller-owned scroll-edge state.
+    #[must_use]
+    pub fn scroll_state(mut self, scroll_state: SelectScrollState) -> Self {
+        self.scroll_state = scroll_state;
+        self
+    }
+
+    /// Shares deterministic interaction state across renders.
+    #[must_use]
+    pub fn with_interaction_state(mut self, state: Rc<RefCell<SelectState>>) -> Self {
+        self.interaction_state = Some(state);
+        self
+    }
+
+    /// Installs the committed-value notification.
+    #[must_use]
+    pub fn on_change(
+        mut self,
+        handler: impl Fn(V, Option<&ClickEvent>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_change = Some(Rc::new(handler));
+        self
+    }
+
+    /// Installs the controlled open-update notification.
+    #[must_use]
+    pub fn on_open_change(
+        mut self,
+        handler: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_open_change = Some(Rc::new(handler));
+        self
+    }
+
+    /// Returns the committed entries.
+    #[must_use]
+    pub fn entries(&self) -> &[SelectEntry<V>] {
+        &self.entries
+    }
+
+    /// Returns the committed value's visible label, if a row holds it.
+    #[must_use]
+    pub fn current_label(&self) -> Option<&str> {
+        selected_index(&self.entries, self.selected.as_ref())
+            .and_then(|index| self.entries.get(index))
+            .and_then(|entry| entry.as_item())
+            .map(|item| item.label())
+    }
+
+    /// Returns the trigger text: committed label or placeholder.
+    #[must_use]
+    pub fn display_label(&self) -> String {
+        self.current_label()
+            .unwrap_or_else(|| self.placeholder.as_ref())
+            .to_owned()
+    }
+
+    /// Resolves the trigger recipe for the requested size.
+    #[must_use]
+    pub fn visual_style(&self) -> SelectStyle {
+        SelectStyle::resolve(self.theme, self.size)
+    }
+
+    /// Returns the caller-owned scroll-edge state.
+    #[must_use]
+    pub const fn scroll_state_value(&self) -> SelectScrollState {
+        self.scroll_state
+    }
+
+    /// Returns the semantic trigger/listbox snapshot.
+    #[must_use]
+    pub fn semantic_state(&self) -> SelectSemanticState {
+        let value_label = self
+            .current_label()
+            .map(|label| SharedString::from(label.to_owned()));
+        let root = self.selector_root();
+        SelectSemanticState {
+            trigger_role: "combobox",
+            listbox_role: "listbox",
+            option_role: "option",
+            expanded: self.open && !self.disabled,
+            disabled: self.disabled,
+            label: SharedString::from(self.display_label()),
+            placeholder: value_label.is_none(),
+            value_label,
+            trigger_selector: format!("{root}-trigger"),
+            content_selector: format!("{root}-content"),
+        }
+    }
+
+    /// Returns semantic item records in visual item order.
+    #[must_use]
+    pub fn item_semantics(&self, state: &SelectState) -> Vec<SelectItemSemanticState> {
+        let root = self.selector_root();
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                SelectEntry::Item(item) => Some(SelectItemSemanticState {
+                    role: "option",
+                    label: item.label.clone(),
+                    selected: self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|selected| item.value() == selected),
+                    highlighted: state.highlighted_index().is_some_and(|highlighted| {
+                        self.entries.get(highlighted).is_some_and(|row| {
+                            matches!(row, SelectEntry::Item(row) if row.value() == item.value())
+                        })
+                    }),
+                    disabled: self.disabled || item.is_disabled(),
+                    selector: item_debug_selector(&root, item.value()),
+                }),
+                SelectEntry::Group(_) | SelectEntry::Separator => None,
+            })
+            .collect()
+    }
+
+    fn selector_root(&self) -> String {
+        self.debug_selector.as_ref().map_or_else(
+            || "artisan-select".to_owned(),
+            |selector| selector.to_string(),
+        )
+    }
+}
+
