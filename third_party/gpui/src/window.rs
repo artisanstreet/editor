@@ -2850,6 +2850,7 @@ impl Window {
             content_mask: content_mask.scale(scale_factor),
             corner_radii: corner_radii.scale(scale_factor),
             opacity: self.element_opacity(),
+            pad: 0.0,
         });
     }
 
