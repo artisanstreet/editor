@@ -1125,6 +1125,8 @@ impl NativeApplication {
         stopped: &artisan_protocol::ConversationSubscriptionStopped,
         cx: &mut Context<Self>,
     ) {
+        // A stale ack is ignored: unknown requests return here without
+        // submitting Unsubscribe, and no host retirement runs on this path.
         let known_request = self
             .retained_switch_request_ids
             .iter()
