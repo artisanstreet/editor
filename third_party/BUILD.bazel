@@ -12,3 +12,23 @@ rust_binary(
     edition = "2024",
     deps = ["@crates//:gpui"],
 )
+
+# Visual-proof harness: mock transcript screen for screenshots. Renders
+# two turns through the real ConversationSurface with hardcoded scene
+# data (no Forge). NOT shipped in any payload.
+rust_binary(
+    name = "screen_demo",
+    srcs = ["screen_demo.rs"],
+    compile_data = [
+        "fonts/JetBrainsMono-Bold.ttf",
+        "fonts/JetBrainsMono-Italic.ttf",
+        "fonts/JetBrainsMono-Regular.ttf",
+    ],
+    edition = "2024",
+    deps = [
+        "//modules/domain:domain",
+        "//modules/frontend:frontend",
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+)
