@@ -133,6 +133,20 @@ rust_test(
 )
 
 rust_test(
+    name = "input_group_test",
+    srcs = ["input_group.rs"],
+    crate_name = "input_group_test",
+    deps = [
+        "//modules/ui:ui",
+        "@crates//:gpui",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "motion_policy_test",
     srcs = ["motion_policy.rs"],
     crate_name = "motion_policy_test",
