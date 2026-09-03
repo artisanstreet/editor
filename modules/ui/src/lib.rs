@@ -16,6 +16,7 @@ pub mod icon;
 pub mod input;
 pub mod input_state;
 pub mod lip_card;
+pub mod link_preview;
 pub mod list_row;
 pub mod markdown;
 pub mod markdown_renderer;
