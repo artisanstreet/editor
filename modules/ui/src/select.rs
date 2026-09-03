@@ -905,7 +905,7 @@ fn scroll_button(
     let debug_selector = selector.clone();
 
     div()
-        .id(selector)
+        .id(SharedString::from(selector))
         .flex()
         .items_center()
         .justify_center()
@@ -1055,6 +1055,13 @@ impl<V: SelectValue> RenderOnce for Select<V> {
         let trigger_change = on_change.clone();
         let trigger_focus = focus.clone();
         let trigger_scroll = scroll_handle.clone();
+        let state_for_keys = Rc::clone(&state);
+        let entries_for_keys = Rc::clone(&entries);
+        let enabled_for_keys = Rc::clone(&enabled);
+        let on_change_for_keys = on_change.clone();
+        let on_open_change_for_keys = on_open_change.clone();
+        let focus_for_keys = focus.clone();
+        let scroll_for_keys = scroll_handle.clone();
         let mut trigger = div()
             .id(ElementId::NamedChild(
                 Box::new(id.clone()),
