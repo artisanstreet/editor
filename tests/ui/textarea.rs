@@ -459,7 +459,10 @@ fn styled_refinement_and_debug_selector_alias_work(cx: &mut TestAppContext) {
     // Render a textarea with explicit custom selector to verify bounds.
     let (_view2, cx2) = cx.add_window_view(|_, cx| CustomProbe::new(cx));
     assert!(cx2.debug_bounds(CUSTOM_PROBE_SELECTOR).is_some());
-    assert!(cx2.debug_bounds(CUSTOM_PROBE_PLACEHOLDER_SELECTOR).is_some());
+    assert!(
+        cx2.debug_bounds(CUSTOM_PROBE_PLACEHOLDER_SELECTOR)
+            .is_some()
+    );
 }
 
 struct CustomProbe {

@@ -2,16 +2,14 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use artisan_ui::context_menu::{
-    context_menu_geometry, resolve_context_menu_geometry, ContextMenu, ContextMenuEntry,
+    CONTEXT_MENU_CONTENT_SELECTOR, CONTEXT_MENU_TRIGGER_SELECTOR, ContextMenu, ContextMenuEntry,
     ContextMenuFutureExtension, ContextMenuGroup, ContextMenuItem, ContextMenuPhase,
     ContextMenuPlacement, ContextMenuState, ContextMenuStyle, ContextMenuTransition,
-    CONTEXT_MENU_CONTENT_SELECTOR, CONTEXT_MENU_TRIGGER_SELECTOR,
+    context_menu_geometry, resolve_context_menu_geometry,
 };
 use artisan_ui::motion::{MotionPlan, MotionPolicy};
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
-use gpui::{
-    Modifiers, MouseButton, ParentElement, Styled, TestAppContext, div, point, px, size,
-};
+use gpui::{Modifiers, MouseButton, ParentElement, Styled, TestAppContext, div, point, px, size};
 
 #[test]
 fn entries_preserve_actions_and_name_the_unsupported_extension_boundary() {
@@ -23,10 +21,7 @@ fn entries_preserve_actions_and_name_the_unsupported_extension_boundary() {
 
     assert_eq!(item.id().as_ref(), "settle");
     assert_eq!(item.label().as_ref(), "Settle");
-    assert_eq!(
-        item.shortcut_text().map(AsRef::as_ref),
-        Some("Enter")
-    );
+    assert_eq!(item.shortcut_text().map(AsRef::as_ref), Some("Enter"));
     assert!(!item.is_enabled());
     assert!(item.is_destructive());
     assert!(item.is_inset());
@@ -222,12 +217,7 @@ fn native_render_opens_on_secondary_press_activates_by_keyboard_and_dismisses_ou
             cx,
         )
         .motion_policy(MotionPolicy::Reduced)
-        .trigger(|| {
-            div()
-                .w(px(240.0))
-                .h(px(64.0))
-                .child("thread target")
-        })
+        .trigger(|| div().w(px(240.0)).h(px(64.0)).child("thread target"))
         .item(
             ContextMenuItem::new("settle", "Settle")
                 .shortcut("Enter")
@@ -245,11 +235,7 @@ fn native_render_opens_on_secondary_press_activates_by_keyboard_and_dismisses_ou
         .debug_bounds(CONTEXT_MENU_TRIGGER_SELECTOR)
         .expect("the composed trigger must paint a test bound");
 
-    cx.simulate_mouse_down(
-        trigger.center(),
-        MouseButton::Right,
-        Modifiers::none(),
-    );
+    cx.simulate_mouse_down(trigger.center(), MouseButton::Right, Modifiers::none());
     cx.run_until_parked();
 
     cx.update(|_, app| {
@@ -269,11 +255,7 @@ fn native_render_opens_on_secondary_press_activates_by_keyboard_and_dismisses_ou
     });
     assert_eq!(activations.get(), 1);
 
-    cx.simulate_mouse_down(
-        trigger.center(),
-        MouseButton::Right,
-        Modifiers::none(),
-    );
+    cx.simulate_mouse_down(trigger.center(), MouseButton::Right, Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds(CONTEXT_MENU_CONTENT_SELECTOR).is_some());
 
@@ -281,11 +263,7 @@ fn native_render_opens_on_secondary_press_activates_by_keyboard_and_dismisses_ou
     cx.run_until_parked();
     cx.update(|_, app| assert!(!view.read(app).state().is_open()));
 
-    cx.simulate_mouse_down(
-        trigger.center(),
-        MouseButton::Right,
-        Modifiers::none(),
-    );
+    cx.simulate_mouse_down(trigger.center(), MouseButton::Right, Modifiers::none());
     cx.run_until_parked();
 
     cx.simulate_mouse_down(

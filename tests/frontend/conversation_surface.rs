@@ -16,9 +16,9 @@ use conversation_scene::{
 use conversation_surface::{
     CONVERSATION_SURFACE_MAX_ACTIONS, ConversationSurface, ConversationSurfaceAction,
     ConversationSurfaceTarget, JUMP_TO_LATEST_SELECTOR, ROOT_SELECTOR, RenderedBlockKind,
-    TURN_NAVIGATOR_SELECTOR, VIEWPORT_SELECTOR, ViewportObservation,
-    block_selector, changed_file_selector, file_change_status_label, format_elapsed_millis,
-    ordered_block_kinds, steering_selector, turn_selector, turn_status_copy,
+    TURN_NAVIGATOR_SELECTOR, VIEWPORT_SELECTOR, ViewportObservation, block_selector,
+    changed_file_selector, file_change_status_label, format_elapsed_millis, ordered_block_kinds,
+    steering_selector, turn_selector, turn_status_copy,
 };
 use gpui::{KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 
@@ -1111,10 +1111,7 @@ const NAV_BLANK_CONTROL: &str = "artisan-conversation-surface-turn-navigator-con
 fn mount_navigator_scene(
     scene: ConversationScene,
     cx: &mut TestAppContext,
-) -> (
-    gpui::Entity<ConversationSurface>,
-    &mut VisualTestContext,
-) {
+) -> (gpui::Entity<ConversationSurface>, &mut VisualTestContext) {
     let (surface, cx) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(scene, ThemeMode::Dark, surface_cx)
     });
@@ -1302,9 +1299,7 @@ fn loaded_turn_navigator_keyboard_activation_matches_pointer(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(
-    cx: &mut TestAppContext,
-) {
+fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(cx: &mut TestAppContext) {
     let (surface, cx) = mount_navigator_scene(navigator_scene(), cx);
     let first_target = ConversationSurfaceTarget::Item(item_id("nav-first"));
     cx.update(|window, app| {
@@ -1319,7 +1314,11 @@ fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(
     let (_, replacement_cx) = replacement_app.add_window_view(|_, _| SurfaceWindowHost {
         surface: surface.clone(),
     });
-    assert!(replacement_cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_some());
+    assert!(
+        replacement_cx
+            .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+            .is_some()
+    );
 
     cx.update(|_, app| {
         surface.update(app, |surface, surface_cx| {
@@ -1342,15 +1341,15 @@ fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(
     });
     cx.run_until_parked();
 
-    assert!(replacement_cx.debug_bounds(TURN_NAVIGATOR_SELECTOR).is_none());
+    assert!(
+        replacement_cx
+            .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+            .is_none()
+    );
     cx.update(|window, app| {
         let surface = surface.read(app);
         assert!(surface.navigator_focus_handle(&first_target).is_none());
-        assert!(
-            surface
-                .transcript_focus_handle()
-                .is_focused(window)
-        );
+        assert!(surface.transcript_focus_handle().is_focused(window));
     });
     let _ = drain_surface_actions(&surface, cx);
 }
@@ -1381,14 +1380,12 @@ fn loaded_turn_navigator_activation_respects_action_backpressure(cx: &mut TestAp
         surface.update(app, |surface, _| {
             let pending = surface.pending_actions();
             assert_eq!(pending.len(), CONVERSATION_SURFACE_MAX_ACTIONS);
-            assert!(
-                !pending.iter().any(|action| matches!(
-                    action,
-                    ConversationSurfaceAction::ScrollIntent {
-                        target: ConversationSurfaceTarget::Item(_)
-                    }
-                ))
-            );
+            assert!(!pending.iter().any(|action| matches!(
+                action,
+                ConversationSurfaceAction::ScrollIntent {
+                    target: ConversationSurfaceTarget::Item(_)
+                }
+            )));
         });
     });
 }
