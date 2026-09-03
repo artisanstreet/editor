@@ -15,6 +15,7 @@ pub mod dropdown_menu;
 pub mod fade_arc;
 pub mod icon;
 pub mod input;
+pub mod input_group;
 pub mod input_state;
 pub mod lip_card;
 pub mod link_preview;
