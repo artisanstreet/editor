@@ -34,4 +34,10 @@ crate.from_cargo(
     lockfile = "//:Cargo.Bazel.lock",
     manifests = ["//:Cargo.toml"],
 )
+crate.annotation(
+    crate = "gpui",
+    version = "0.2.2",
+    patch_args = ["-p1"],
+    patches = ["//third_party:gpui-blur.patch"],
+)
 use_repo(crate, "crates")

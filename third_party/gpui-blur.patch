@@ -1,0 +1,520 @@
+diff --git a/src/scene.rs b/src/scene.rs
+index 758d06e5..249d1897 100644
+--- a/src/scene.rs
++++ b/src/scene.rs
+@@ -26,6 +26,7 @@ pub(crate) struct Scene {
+     primitive_bounds: BoundsTree<ScaledPixels>,
+     layer_stack: Vec<DrawOrder>,
+     pub(crate) shadows: Vec<Shadow>,
++    pub(crate) blur_rects: Vec<BlurRect>,
+     pub(crate) quads: Vec<Quad>,
+     pub(crate) paths: Vec<Path<ScaledPixels>>,
+     pub(crate) underlines: Vec<Underline>,
+@@ -41,6 +42,7 @@ impl Scene {
+         self.layer_stack.clear();
+         self.paths.clear();
+         self.shadows.clear();
++        self.blur_rects.clear();
+         self.quads.clear();
+         self.underlines.clear();
+         self.monochrome_sprites.clear();
+@@ -84,6 +86,10 @@ impl Scene {
+                 shadow.order = order;
+                 self.shadows.push(shadow.clone());
+             }
++            Primitive::BlurRect(blur) => {
++                blur.order = order;
++                self.blur_rects.push(blur.clone());
++            }
+             Primitive::Quad(quad) => {
+                 quad.order = order;
+                 self.quads.push(quad.clone());
+@@ -126,6 +132,7 @@ impl Scene {
+ 
+     pub fn finish(&mut self) {
+         self.shadows.sort_by_key(|shadow| shadow.order);
++        self.blur_rects.sort_by_key(|blur| blur.order);
+         self.quads.sort_by_key(|quad| quad.order);
+         self.paths.sort_by_key(|path| path.order);
+         self.underlines.sort_by_key(|underline| underline.order);
+@@ -148,6 +155,9 @@ impl Scene {
+             shadows: &self.shadows,
+             shadows_start: 0,
+             shadows_iter: self.shadows.iter().peekable(),
++            blur_rects: &self.blur_rects,
++            blur_rects_start: 0,
++            blur_rects_iter: self.blur_rects.iter().peekable(),
+             quads: &self.quads,
+             quads_start: 0,
+             quads_iter: self.quads.iter().peekable(),
+@@ -180,6 +190,7 @@ impl Scene {
+ )]
+ pub(crate) enum PrimitiveKind {
+     Shadow,
++    BlurRect,
+     #[default]
+     Quad,
+     Path,
+@@ -198,6 +209,7 @@ pub(crate) enum PaintOperation {
+ #[derive(Clone)]
+ pub(crate) enum Primitive {
+     Shadow(Shadow),
++    BlurRect(BlurRect),
+     Quad(Quad),
+     Path(Path<ScaledPixels>),
+     Underline(Underline),
+@@ -210,6 +222,7 @@ impl Primitive {
+     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
+         match self {
+             Primitive::Shadow(shadow) => &shadow.bounds,
++            Primitive::BlurRect(blur) => &blur.bounds,
+             Primitive::Quad(quad) => &quad.bounds,
+             Primitive::Path(path) => &path.bounds,
+             Primitive::Underline(underline) => &underline.bounds,
+@@ -222,6 +235,7 @@ impl Primitive {
+     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
+         match self {
+             Primitive::Shadow(shadow) => &shadow.content_mask,
++            Primitive::BlurRect(blur) => &blur.content_mask,
+             Primitive::Quad(quad) => &quad.content_mask,
+             Primitive::Path(path) => &path.content_mask,
+             Primitive::Underline(underline) => &underline.content_mask,
+@@ -243,6 +257,9 @@ struct BatchIterator<'a> {
+     shadows: &'a [Shadow],
+     shadows_start: usize,
+     shadows_iter: Peekable<slice::Iter<'a, Shadow>>,
++    blur_rects: &'a [BlurRect],
++    blur_rects_start: usize,
++    blur_rects_iter: Peekable<slice::Iter<'a, BlurRect>>,
+     quads: &'a [Quad],
+     quads_start: usize,
+     quads_iter: Peekable<slice::Iter<'a, Quad>>,
+@@ -272,6 +289,10 @@ impl<'a> Iterator for BatchIterator<'a> {
+                 self.shadows_iter.peek().map(|s| s.order),
+                 PrimitiveKind::Shadow,
+             ),
++            (
++                self.blur_rects_iter.peek().map(|b| b.order),
++                PrimitiveKind::BlurRect,
++            ),
+             (self.quads_iter.peek().map(|q| q.order), PrimitiveKind::Quad),
+             (self.paths_iter.peek().map(|q| q.order), PrimitiveKind::Path),
+             (
+@@ -318,6 +339,22 @@ impl<'a> Iterator for BatchIterator<'a> {
+                     &self.shadows[shadows_start..shadows_end],
+                 ))
+             }
++            PrimitiveKind::BlurRect => {
++                let blur_rects_start = self.blur_rects_start;
++                let mut blur_rects_end = blur_rects_start + 1;
++                self.blur_rects_iter.next();
++                while self
++                    .blur_rects_iter
++                    .next_if(|blur| (blur.order, batch_kind) < max_order_and_kind)
++                    .is_some()
++                {
++                    blur_rects_end += 1;
++                }
++                self.blur_rects_start = blur_rects_end;
++                Some(PrimitiveBatch::BlurRects(
++                    &self.blur_rects[blur_rects_start..blur_rects_end],
++                ))
++            }
+             PrimitiveKind::Quad => {
+                 let quads_start = self.quads_start;
+                 let mut quads_end = quads_start + 1;
+@@ -434,6 +471,7 @@ impl<'a> Iterator for BatchIterator<'a> {
+ )]
+ pub(crate) enum PrimitiveBatch<'a> {
+     Shadows(&'a [Shadow]),
++    BlurRects(&'a [BlurRect]),
+     Quads(&'a [Quad]),
+     Paths(&'a [Path<ScaledPixels>]),
+     Underlines(&'a [Underline]),
+@@ -502,6 +540,22 @@ impl From<Shadow> for Primitive {
+     }
+ }
+ 
++#[derive(Debug, Clone)]
++#[repr(C)]
++pub(crate) struct BlurRect {
++    pub order: DrawOrder,
++    pub blur_radius: ScaledPixels,
++    pub bounds: Bounds<ScaledPixels>,
++    pub corner_radii: Corners<ScaledPixels>,
++    pub content_mask: ContentMask<ScaledPixels>,
++}
++
++impl From<BlurRect> for Primitive {
++    fn from(blur: BlurRect) -> Self {
++        Primitive::BlurRect(blur)
++    }
++}
++
+ /// The style of a border.
+ #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+ #[repr(C)]
+@@ -831,3 +885,134 @@ impl PathVertex<Pixels> {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{Background, BorderStyle, point, size};
++
++    fn scaled(value: f32) -> ScaledPixels {
++        ScaledPixels::from(value)
++    }
++
++    fn test_bounds(x: f32) -> Bounds<ScaledPixels> {
++        Bounds::new(
++            point(scaled(x), scaled(0.)),
++            size(scaled(100.), scaled(100.)),
++        )
++    }
++
++    fn test_mask() -> ContentMask<ScaledPixels> {
++        ContentMask {
++            bounds: Bounds::new(
++                point(scaled(-1000.), scaled(-1000.)),
++                size(scaled(100_000.), scaled(100_000.)),
++            ),
++        }
++    }
++
++    fn test_shadow(x: f32) -> Shadow {
++        Shadow {
++            order: 0,
++            blur_radius: scaled(4.),
++            bounds: test_bounds(x),
++            corner_radii: Corners::default(),
++            content_mask: test_mask(),
++            color: Hsla::default(),
++        }
++    }
++
++    fn test_blur(x: f32, radius: f32) -> BlurRect {
++        BlurRect {
++            order: 0,
++            blur_radius: scaled(radius),
++            bounds: test_bounds(x),
++            corner_radii: Corners::default(),
++            content_mask: test_mask(),
++        }
++    }
++
++    fn test_quad(x: f32) -> Quad {
++        Quad {
++            order: 0,
++            border_style: BorderStyle::default(),
++            bounds: test_bounds(x),
++            content_mask: test_mask(),
++            background: Background::default(),
++            border_color: Hsla::default(),
++            corner_radii: Corners::default(),
++            border_widths: Edges::default(),
++        }
++    }
++
++    fn batch_summary(scene: &Scene) -> Vec<String> {
++        scene
++            .batches()
++            .map(|batch| match batch {
++                PrimitiveBatch::Shadows(shadows) => format!("shadows:{}", shadows.len()),
++                PrimitiveBatch::BlurRects(blurs) => {
++                    let radii: Vec<String> = blurs
++                        .iter()
++                        .map(|blur| format!("{:?}", blur.blur_radius))
++                        .collect();
++                    format!("blurs:{}:{}", blurs.len(), radii.join(","))
++                }
++                PrimitiveBatch::Quads(quads) => format!("quads:{}", quads.len()),
++                batch => panic!("unexpected batch in blur ordering test: {batch:?}"),
++            })
++            .collect()
++    }
++
++    #[test]
++    fn blur_rects_sort_after_shadows_and_before_quads_in_draw_order() {
++        let mut scene = Scene::default();
++
++        // First layer takes draw order 1.
++        scene.push_layer(test_bounds(0.));
++        scene.insert_primitive(test_shadow(0.));
++        scene.insert_primitive(test_blur(0., 4.));
++        scene.insert_primitive(test_quad(0.));
++        scene.pop_layer();
++
++        // Overlapping second layer takes draw order 2.
++        scene.push_layer(test_bounds(50.));
++        scene.insert_primitive(test_blur(50., 12.));
++        scene.insert_primitive(test_quad(50.));
++        scene.pop_layer();
++
++        scene.finish();
++
++        assert_eq!(scene.blur_rects.len(), 2);
++        assert!(scene.blur_rects[0].order < scene.blur_rects[1].order);
++
++        assert_eq!(
++            batch_summary(&scene),
++            vec![
++                "shadows:1".to_string(),
++                format!("blurs:1:{:?}", scaled(4.)),
++                "quads:1".to_string(),
++                format!("blurs:1:{:?}", scaled(12.)),
++                "quads:1".to_string(),
++            ]
++        );
++    }
++
++    #[test]
++    fn blur_rects_with_empty_clipped_bounds_are_skipped() {
++        let mut scene = Scene::default();
++
++        let mut clipped = test_blur(0., 8.);
++        clipped.content_mask = ContentMask {
++            bounds: test_bounds(1000.),
++        };
++        scene.insert_primitive(clipped);
++
++        assert_eq!(scene.len(), 0);
++        assert!(scene.blur_rects.is_empty());
++
++        scene.insert_primitive(test_blur(0., 8.));
++        assert_eq!(scene.len(), 1);
++        assert_eq!(scene.blur_rects.len(), 1);
++        assert_eq!(scene.blur_rects[0].blur_radius, scaled(8.));
++    }
++}
+diff --git a/src/window.rs b/src/window.rs
+index 6d74a0e1..e6d7b43d 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -2,8 +2,8 @@
+ use crate::Inspector;
+ use crate::{
+     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
+-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
+-    Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
++    AsyncWindowContext, AvailableSpace, Background, BlurRect, BorderStyle, Bounds, BoxShadow,
++    Capslock, Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
+     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
+     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
+     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
+@@ -2827,6 +2827,31 @@ impl Window {
+         }
+     }
+ 
++    /// Paint a backdrop-blur region into the scene for the next frame at the current z-index.
++    ///
++    /// The blur applies to content painted behind `bounds` and is clipped to `corner_radii`.
++    /// Renderers without blur support skip these primitives without failing the frame.
++    ///
++    /// This method should only be called as part of the paint phase of element drawing.
++    pub fn paint_backdrop_blur(
++        &mut self,
++        bounds: Bounds<Pixels>,
++        corner_radii: Corners<Pixels>,
++        blur_radius: Pixels,
++    ) {
++        self.invalidator.debug_assert_paint();
++
++        let scale_factor = self.scale_factor();
++        let content_mask = self.content_mask();
++        self.next_frame.scene.insert_primitive(BlurRect {
++            order: 0,
++            blur_radius: blur_radius.scale(scale_factor),
++            bounds: bounds.scale(scale_factor),
++            content_mask: content_mask.scale(scale_factor),
++            corner_radii: corner_radii.scale(scale_factor),
++        });
++    }
++
+     /// Paint one or more quads into the scene for the next frame at the current stacking context.
+     /// Quads are colored rectangular regions with an optional background, border, and corner radius.
+     /// see [`fill`], [`outline`], and [`quad`] to construct this type.
+diff --git a/src/style.rs b/src/style.rs
+index 42f8f25e..0fc7c37b 100644
+--- a/src/style.rs
++++ b/src/style.rs
+@@ -251,6 +251,11 @@ pub struct Style {
+     /// Box shadow of the element
+     pub box_shadow: Vec<BoxShadow>,
+ 
++    /// Backdrop blur radius applied behind the element, painted before its background.
++    ///
++    /// Corners come from the element's own clamped corner radii.
++    pub backdrop_blur: Option<Pixels>,
++
+     /// The text style of this element
+     pub text: TextStyleRefinement,
+ 
+@@ -626,6 +631,10 @@ impl Style {
+ 
+         window.paint_shadows(bounds, corner_radii, &self.box_shadow);
+ 
++        if let Some(blur_radius) = self.backdrop_blur {
++            window.paint_backdrop_blur(bounds, corner_radii, blur_radius);
++        }
++
+         let background_color = self.background.as_ref().and_then(Fill::color);
+         if background_color.is_some_and(|color| !color.is_transparent()) {
+             let mut border_color = match background_color {
+@@ -766,6 +775,7 @@ impl Default for Style {
+             border_style: BorderStyle::default(),
+             corner_radii: Corners::default(),
+             box_shadow: Default::default(),
++            backdrop_blur: None,
+             text: TextStyleRefinement::default(),
+             mouse_cursor: None,
+             opacity: None,
+@@ -1290,7 +1300,7 @@ impl From<Position> for taffy::style::Position {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use crate::{blue, green, px, red, yellow};
++    use crate::{TestAppContext, blue, green, px, red, yellow};
+ 
+     use super::*;
+ 
+@@ -1469,4 +1479,48 @@ mod tests {
+             ]
+         );
+     }
++
++    #[gpui::test]
++    async fn style_paint_emits_blur_before_the_background_quad(cx: &mut TestAppContext) {
++        use crate::{AvailableSpace, PrimitiveBatch, div, point, size};
++
++        let cx = cx.add_empty_window();
++        cx.draw(
++            point(px(0.), px(0.)),
++            size(
++                AvailableSpace::Definite(px(200.)),
++                AvailableSpace::Definite(px(200.)),
++            ),
++            |_, _| {
++                div()
++                    .w(px(200.))
++                    .h(px(200.))
++                    .bg(red())
++                    .backdrop_blur(px(8.))
++            },
++        );
++
++        cx.update(|window, _| {
++            // `draw` above leaves the window dirty, so its own update cycle
++            // runs a full frame: the painted scene is finished and swapped
++            // into `rendered_frame` while `next_frame` is cleared.
++            let scale_factor = window.scale_factor();
++            let scene = &window.rendered_frame.scene;
++
++            assert_eq!(scene.blur_rects.len(), 1);
++            assert_eq!(scene.quads.len(), 1);
++            assert_eq!(scene.blur_rects[0].blur_radius, px(8.).scale(scale_factor));
++            assert_eq!(scene.blur_rects[0].bounds, scene.quads[0].bounds);
++
++            let summary: Vec<String> = scene
++                .batches()
++                .map(|batch| match batch {
++                    PrimitiveBatch::BlurRects(blurs) => format!("blurs:{}", blurs.len()),
++                    PrimitiveBatch::Quads(quads) => format!("quads:{}", quads.len()),
++                    batch => panic!("unexpected batch in backdrop blur paint test: {batch:?}"),
++                })
++                .collect();
++            assert_eq!(summary, vec!["blurs:1".to_string(), "quads:1".to_string()]);
++        });
++    }
+ }
+diff --git a/src/styled.rs b/src/styled.rs
+index 44757186..8f9b6bdd 100644
+--- a/src/styled.rs
++++ b/src/styled.rs
+@@ -1,8 +1,9 @@
+ use crate::{
+     self as gpui, AbsoluteLength, AlignContent, AlignItems, BorderStyle, CursorStyle,
+     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontStyle, FontWeight,
+-    GridPlacement, Hsla, JustifyContent, Length, SharedString, StrikethroughStyle, StyleRefinement,
+-    TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
++    GridPlacement, Hsla, JustifyContent, Length, Pixels, SharedString, StrikethroughStyle,
++    StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px,
++    relative, rems,
+ };
+ pub use gpui_macros::{
+     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
+@@ -654,6 +655,14 @@ pub trait Styled: Sized {
+         self
+     }
+ 
++    /// Sets a backdrop blur applied behind this element, painted before its background.
++    ///
++    /// Corners come from the element's own corner radii.
++    fn backdrop_blur(mut self, radius: impl Into<Pixels>) -> Self {
++        self.style().backdrop_blur = Some(radius.into());
++        self
++    }
++
+     /// Sets the grid columns of this element.
+     fn grid_cols(mut self, cols: u16) -> Self {
+         self.style().grid_cols = Some(cols);
+@@ -764,3 +773,18 @@ pub trait Styled: Sized {
+         self
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::px;
++
++    #[test]
++    fn backdrop_blur_sets_the_style_field() {
++        let refined = StyleRefinement::default().backdrop_blur(px(8.));
++        assert_eq!(refined.backdrop_blur, Some(px(8.)));
++
++        let refined = StyleRefinement::default().backdrop_blur(12.5);
++        assert_eq!(refined.backdrop_blur, Some(px(12.5)));
++    }
++}
+diff --git a/src/platform/windows/directx_renderer.rs b/src/platform/windows/directx_renderer.rs
+index 2baa237c..5c289c6c 100644
+--- a/src/platform/windows/directx_renderer.rs
++++ b/src/platform/windows/directx_renderer.rs
+@@ -288,6 +288,8 @@ impl DirectXRenderer {
+         for batch in scene.batches() {
+             match batch {
+                 PrimitiveBatch::Shadows(shadows) => self.draw_shadows(shadows),
++                // Backdrop blur is not implemented on DirectX yet; skip without failing the frame.
++                PrimitiveBatch::BlurRects(_) => Ok(()),
+                 PrimitiveBatch::Quads(quads) => self.draw_quads(quads),
+                 PrimitiveBatch::Paths(paths) => {
+                     self.draw_paths_to_intermediate(paths)?;
+diff --git a/src/platform/blade/blade_renderer.rs b/src/platform/blade/blade_renderer.rs
+index d00fbdc7..329499c0 100644
+--- a/src/platform/blade/blade_renderer.rs
++++ b/src/platform/blade/blade_renderer.rs
+@@ -702,6 +702,8 @@ impl BladeRenderer {
+                     );
+                     encoder.draw(0, 4, 0, shadows.len() as u32);
+                 }
++                // Backdrop blur is not implemented on Blade yet; skip without failing the frame.
++                PrimitiveBatch::BlurRects(_) => {}
+                 PrimitiveBatch::Paths(paths) => {
+                     let Some(first_path) = paths.first() else {
+                         continue;
+diff --git a/src/platform/mac/metal_renderer.rs b/src/platform/mac/metal_renderer.rs
+index 9e5d6ec5..6596baed 100644
+--- a/src/platform/mac/metal_renderer.rs
++++ b/src/platform/mac/metal_renderer.rs
+@@ -447,6 +447,8 @@ impl MetalRenderer {
+                     viewport_size,
+                     command_encoder,
+                 ),
++                // Backdrop blur is not implemented on Metal yet; skip without failing the frame.
++                PrimitiveBatch::BlurRects(_) => true,
+                 PrimitiveBatch::Quads(quads) => self.draw_quads(
+                     quads,
+                     instance_buffer,
