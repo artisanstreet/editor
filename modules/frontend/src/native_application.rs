@@ -61,6 +61,7 @@ use crate::{
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
     shell::{ShellFrameStyle, shell_rail},
 };
+use crate::native_route::{NativeRoute, RouteHistory};
 
 actions!(native_application, [Quit, NextTabStop, PreviousTabStop]);
 
@@ -217,6 +218,7 @@ pub struct NativeApplication {
     conversation_effects: Vec<ConversationHostEffect>,
     last_picker_action: Option<ProjectPickerAction>,
     state: NativeViewState,
+    route_history: RouteHistory,
     intake_stage: Option<NativeProjectIntakeStage>,
     intake_failure_operation: Option<NativeProjectIntakeOperation>,
     intake_retry_available: bool,
@@ -294,6 +296,7 @@ impl NativeApplication {
             conversation_effects: Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
             last_picker_action: None,
             state,
+            route_history: RouteHistory::new(),
             intake_stage: None,
             intake_failure_operation: None,
             intake_retry_available: false,
@@ -352,6 +355,27 @@ impl NativeApplication {
     #[must_use]
     pub fn selected_thread(&self) -> Option<&ThreadId> {
         self.selected_thread.as_ref()
+    }
+
+    /// Returns the current navigation route.
+    #[must_use]
+    pub const fn route(&self) -> &NativeRoute {
+        self.route_history.current()
+    }
+
+    /// Navigates to `route`, retaining history, and rerenders.
+    pub fn navigate(&mut self, route: NativeRoute, cx: &mut Context<Self>) {
+        self.route_history.navigate(route);
+        cx.notify();
+    }
+
+    /// Returns to the previous route when history exists, then rerenders.
+    pub fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
+        let moved = self.route_history.go_back();
+        if moved {
+            cx.notify();
+        }
+        moved
     }
 
     /// Returns the host entity when a real thread is selected.
