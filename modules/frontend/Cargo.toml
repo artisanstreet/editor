@@ -456,6 +456,10 @@ name = "shell_layout"
 path = "../../tests/frontend/shell_layout.rs"
 
 [[test]]
+name = "shell_presentation_preferences_policy"
+path = "../../tests/frontend/shell_presentation_preferences_policy.rs"
+
+[[test]]
 name = "shell_presentation_state"
 path = "../../tests/frontend/shell_presentation_state.rs"
 
