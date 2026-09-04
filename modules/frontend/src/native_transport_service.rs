@@ -2124,11 +2124,14 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
     // Provisioning first means the first dev run creates the credential
     // files the manually started backend needs; the readiness wait below
     // then fails honestly until that backend is up.
-    let credentials = load_client_credentials(home)
-        .map_err(|_| StartupError::Stage(ServiceFailureStage::Credentials))?;
+    let credentials = load_client_credentials(home).map_err(|error| {
+        eprintln!("artisan dev forge: credential load failed: {error}");
+        StartupError::Stage(ServiceFailureStage::Credentials)
+    })?;
     let ready_path =
         dev_endpoint::dev_ready_path(home, dev_endpoint::dev_ready_override_from_env().as_deref());
     let readiness = wait_for_dev_readiness(&ready_path).await?;
+    eprintln!("artisan dev forge: readiness ok ({})", readiness.endpoint());
     let (certificate, capability) = credentials.into_parts();
     let pinned_identity = PinnedIdentity::from_certificate(&certificate);
     if readiness.certificate_sha256() != pinned_identity.to_hex() {
@@ -2176,7 +2179,10 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
     let (session, welcome) =
         ClientSession::connect(target, certificate, pinned_identity, hello, limits, &cancel)
             .await
-            .map_err(|_| StartupError::Stage(ServiceFailureStage::Handshake))?;
+            .map_err(|error| {
+                eprintln!("artisan dev forge: connect failed: {error}");
+                StartupError::Stage(ServiceFailureStage::Handshake)
+            })?;
     let reconnect_store = ReconnectCapabilityStore::from_home(home)
         .map_err(|_| StartupError::Stage(ServiceFailureStage::Credentials))?;
     let reconnect_lease = reconnect_store
