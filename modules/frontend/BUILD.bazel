@@ -147,6 +147,7 @@ rust_library(
         "src/thread_read_tracker.rs",
         "src/thread_retention_settings_policy.rs",
         "src/thread_route_gate_policy.rs",
+        "src/thread_screen.rs",
         "src/thread_title_policy.rs",
         "src/thread_title_settings_policy.rs",
         "src/transcript.rs",
