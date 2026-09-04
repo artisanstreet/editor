@@ -62,6 +62,7 @@ rust_library(
         "src/engine_usage_cache.rs",
         "src/file_icon.rs",
         "src/forge_endpoint_policy.rs",
+        "src/forge_dev_endpoint.rs",
         "src/forge_recovery_health.rs",
         "src/forge_repair_request.rs",
         "src/gradient_avatar.rs",
