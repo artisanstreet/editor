@@ -87,6 +87,7 @@ rust_library(
         "src/motion_spring.rs",
         "src/native_application.rs",
         "src/native_composer.rs",
+        "src/native_composer_visuals.rs",
         "src/native_new_thread_surface.rs",
         "src/native_route.rs",
         "src/native_settings.rs",
