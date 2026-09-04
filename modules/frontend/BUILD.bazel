@@ -31,6 +31,7 @@ rust_library(
         "src/conversation_checklist.rs",
         "src/conversation_delivery_machine.rs",
         "src/conversation_diff_stat.rs",
+        "src/conversation_duration.rs",
         "src/conversation_error_card_policy.rs",
         "src/conversation_host.rs",
         "src/conversation_presentation.rs",
