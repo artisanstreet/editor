@@ -45,6 +45,8 @@ use gpui::{
     px, relative,
 };
 
+use crate::onboarding_screen::brand_asset_for;
+
 /// Debug selector for the surface root.
 pub const NEW_THREAD_SURFACE_SELECTOR: &str = "native-new-thread-surface";
 /// Debug selector for the sentence heading.
@@ -257,6 +259,20 @@ pub fn render_activity_grid(theme: ArtisanTheme, days: &[CalendarActivityDay]) -
     grid
 }
 
+/// Resolves the provider mark for one engine id, reusing the harness table
+/// shared with onboarding.
+///
+/// The mapping mirrors `EngineMarkFor` (`lib/engine/presentation.ts`): Codex
+/// wears the `OpenAI` mark, Claude/Cursor/Grok wear their product marks, and
+/// `OpenCode`/`Hermes` wear their brand marks. Unknown ids fall back to the
+/// neutral question-mark placeholder, matching `unknown_engine_mark`. The
+/// table itself lives in [`brand_asset_for`] so the two surfaces can never
+/// diverge; this alias names the recent-row slot.
+#[must_use]
+pub fn engine_mark_asset(engine_id: &str) -> AssetId {
+    brand_asset_for(engine_id)
+}
+
 /// One caller-formatted recent-thread row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewThreadRecentRow {
@@ -267,11 +283,11 @@ pub struct NewThreadRecentRow {
     pub detail: SharedString,
     /// Stable per-row selector suffix.
     pub selector_suffix: String,
-    /// Engine-mark label for the leading mark (the thread's engine identity
-    /// as display text). `None` renders no mark: the domain
-    /// `ThreadSummary` projection carries no engine identity, so the
+    /// Engine-mark asset for the leading mark (the thread's engine identity
+    /// resolved through [`engine_mark_asset`]). `None` renders no mark: the
+    /// domain `ThreadSummary` projection carries no engine identity, so the
     /// application cannot supply one yet.
-    pub engine_mark: Option<SharedString>,
+    pub engine_mark: Option<AssetId>,
 }
 
 impl NewThreadRecentRow {
@@ -290,11 +306,12 @@ impl NewThreadRecentRow {
         }
     }
 
-    /// Attaches the engine-mark label, naming the same thing the legacy row
-    /// names with its engine icon (`new-thread-route.svelte:394-395`).
+    /// Attaches the engine mark, resolving the engine id to its provider
+    /// asset exactly like the legacy row's `EngineMarkFor(thread.engine_id)`
+    /// (`new-thread-route.svelte:385,395`).
     #[must_use]
-    pub fn with_engine_mark(mut self, mark: impl Into<SharedString>) -> Self {
-        self.engine_mark = Some(mark.into());
+    pub fn with_engine_mark(mut self, engine_id: &str) -> Self {
+        self.engine_mark = Some(engine_mark_asset(engine_id));
         self
     }
 }
@@ -317,20 +334,22 @@ fn render_recent_row(
 ) -> Div {
     let selector = recent_row_selector(root_selector, &row.selector_suffix);
     let mut slots = ListRowSlots::new().trailing_caption(row.detail.clone());
-    if let Some(mark) = &row.engine_mark {
-        slots = slots.leading(
-            div()
-                .size(px(NEW_THREAD_ENGINE_MARK_EDGE_PX))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(theme.colors.muted.to_paint())
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(theme.typography.label_text)
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(mark.clone()),
-        );
+    if let Some(asset) = &row.engine_mark {
+        // The legacy row always paints the mark at `size-4`
+        // (`EngineMarkClass(thread_mark, "size-4 shrink-0")`); only the
+        // unknown-engine fallback wears the muted tone
+        // (`unknown_engine_mark.muted`), everything else inherits.
+        let tint = if *asset == AssetId::TABLER_QUESTION_MARK {
+            IconTint::Muted
+        } else {
+            IconTint::Inherit
+        };
+        slots = slots.leading(icon(IconStyle::resolve(
+            *theme,
+            *asset,
+            IconSize::Default,
+            tint,
+        )));
     }
     list_row(
         row_style,
@@ -350,7 +369,11 @@ fn render_recent_row(
 /// the send control is the ghost icon control with the `ArrowUp` face and the
 /// `Send message` name (`composer/controls.svelte`, `SendButtonStill`).
 /// The trigger keeps the legacy `h-8 px-2` shape with the `Select model`
-/// action label; the bar owns no draft, focus, or submission behavior.
+/// action label plus the trailing `Selector` chevron at `size-3.5` in the
+/// muted tone (`model-selector/view.svelte:483-511`); the trigger's engine
+/// mark stays out because with no session policy resolved here there is no
+/// honest model to name it for. The bar owns no draft, focus, or submission
+/// behavior.
 #[must_use]
 pub fn render_new_thread_composer_bar(theme: ArtisanTheme) -> Div {
     let card_radius = RadiusTokens::value(RadiusStep::X2l);
@@ -396,10 +419,17 @@ pub fn render_new_thread_composer_bar(theme: ArtisanTheme) -> Div {
                         .items_center()
                         .h(theme.spacing.steps(8.0))
                         .px(theme.spacing.steps(2.0))
+                        .gap(theme.spacing.steps(2.0))
                         .rounded(nested_radius)
                         .text_size(theme.typography.control_text)
                         .text_color(theme.colors.muted_foreground.to_paint())
-                        .child(NEW_THREAD_MODEL_TRIGGER_LABEL),
+                        .child(NEW_THREAD_MODEL_TRIGGER_LABEL)
+                        .child(icon(IconStyle::resolve(
+                            theme,
+                            AssetId::TABLER_SELECTOR,
+                            IconSize::Compact,
+                            IconTint::Muted,
+                        ))),
                 )
                 .child(
                     div()
@@ -544,9 +574,22 @@ mod tests {
     }
 
     #[test]
-    fn engine_mark_builder_names_legacy_icon_slot() {
-        let row = NewThreadRecentRow::new("Title", "2h", "row-0").with_engine_mark("C");
-        assert!(row.engine_mark.is_some_and(|mark| mark.as_ref() == "C"));
+    fn engine_mark_builder_resolves_provider_marks() {
+        let row = NewThreadRecentRow::new("Title", "2h", "row-0").with_engine_mark("codex");
+        assert_eq!(row.engine_mark, Some(AssetId::SVGL_OPENAI));
+        let row = NewThreadRecentRow::new("Title", "2h", "row-0").with_engine_mark("mystery");
+        assert_eq!(row.engine_mark, Some(AssetId::TABLER_QUESTION_MARK));
+    }
+
+    #[test]
+    fn engine_mark_assets_cover_the_legacy_engine_table() {
+        assert_eq!(engine_mark_asset("codex"), AssetId::SVGL_OPENAI);
+        assert_eq!(engine_mark_asset("claude"), AssetId::SVGL_CLAUDE_AI);
+        assert_eq!(engine_mark_asset("cursor"), AssetId::SVGL_CURSOR);
+        assert_eq!(engine_mark_asset("grok"), AssetId::SVGL_GROK);
+        assert_eq!(engine_mark_asset("opencode2"), AssetId::BRANDS_OPENCODE);
+        assert_eq!(engine_mark_asset("hermes"), AssetId::BRANDS_HERMES);
+        assert_eq!(engine_mark_asset("unknown"), AssetId::TABLER_QUESTION_MARK);
     }
 
     #[test]
