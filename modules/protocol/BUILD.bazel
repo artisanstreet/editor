@@ -15,8 +15,9 @@ capnp_codegen(
 )
 
 # Product application protocol (Phase 2): `schema/artisan.capnp`.
-# Same declared-tool action as the proof; generated output stays out of
-# source control.
+# Same declared-tool action as the proof. Cargo compiles checked-in mirrors
+# of these outputs (`src/*_capnp.rs`); the glob below excludes that pattern
+# so Bazel keeps compiling fresh action outputs.
 capnp_codegen(
     name = "artisan_protocol_codegen",
     compiler = "@capnp_tools_windows_x86_64//:capnp.exe",
@@ -29,8 +30,9 @@ rust_library(
     name = "protocol",
     srcs = glob(
         ["src/**/*.rs"],
-        # Generated bindings arrive as action outputs, never as source-tree
-        # files; excluding the pattern keeps provisioning unambiguous.
+        # Bazel-side bindings arrive as action outputs; the same pattern also
+        # matches the checked-in Cargo mirrors, so excluding it keeps Bazel
+        # on fresh action outputs while Cargo compiles the mirrors.
         exclude = ["src/*_capnp.rs"],
     ) + [
         ":phase1_proof_codegen",
