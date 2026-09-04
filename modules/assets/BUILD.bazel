@@ -132,12 +132,12 @@ LICENSE_DOCS = [
 # Embedded variable typefaces (see fonts/FONTS.md for the manifest). Kept in
 # a separate list from ASSET_SOURCES/LICENSE_DOCS on purpose: the
 # //tests/assets bijection pins those two lists at exactly 104/9 entries, and
-# fonts are binary WOFF2, not SVG catalog rows.
+# fonts are binary TrueType, not SVG catalog rows.
 FONT_FILES = [
-    "fonts/artisan-neo-variable.woff2",
-    "fonts/cal-sans-variable.woff2",
-    "fonts/jetbrains-mono-variable.woff2",
-    "fonts/sigurd-artisan.woff2",
+    "fonts/artisan-neo-variable.ttf",
+    "fonts/cal-sans-variable.ttf",
+    "fonts/jetbrains-mono-variable.ttf",
+    "fonts/sigurd-artisan.ttf",
 ]
 
 FONT_LICENSES = [

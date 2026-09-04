@@ -6,14 +6,15 @@
 //! up with the library's unit tests.
 //!
 //! What is proven here, and what is not: byte-identity pins
-//! (`artisan_assets::fonts` lengths, WOFF2 magic) prove the exact legacy
-//! `@font-face` bytes ship; the registration test proves those bytes flow
+//! (`artisan_assets::fonts` lengths, TrueType sfnt magic) prove the exact
+//! legacy bytes ship — TrueType throughout, because DirectWrite's in-memory
+//! loader rejects WOFF2 on Windows (`DWRITE_E_FILEFORMAT`, observed at
+//! startup as `0x88985000`); the registration test proves those bytes flow
 //! through `TextSystem::add_fonts` without error on the test platform (whose
-//! text system is a no-op stub, so DirectWrite parsing of WOFF2 on Windows
-//! remains a native-gate observation, with the Artisan Neo TTF in the legacy
-//! tree as the documented fallback); the render test proves the gradient
-//! faces paint on a real GPUI window via the native `linear_gradient`
-//! primitive.
+//! text system is a no-op stub, so DirectWrite parsing of the TTF set on
+//! Windows remains a native-gate observation); the render test proves the
+//! gradient faces paint on a real GPUI window via the native
+//! `linear_gradient` primitive.
 
 use artisan_assets::fonts as bundled_fonts;
 

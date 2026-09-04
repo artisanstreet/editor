@@ -3,6 +3,6 @@
 # checked-in bytes hold on every platform. Subtree-scoped by design.
 svg/**/*.svg text eol=lf
 manifest.toml text eol=lf
-# WOFF2 binaries must never see line-ending conversion.
-fonts/**/*.woff2 binary
+# TrueType binaries must never see line-ending conversion.
+fonts/**/*.ttf binary
 fonts/FONTS.md text eol=lf

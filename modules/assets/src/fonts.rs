@@ -10,9 +10,12 @@
 //! `artisan_ui::fonts::register_bundled_fonts` — because this crate is
 //! dependency-free by design and must not name GPUI.
 //!
-//! Family names and weight ranges here must stay identical to the
-//! `artisan_ui::theme::TypographyTokens` roles; the `typography_gradient`
-//! suite pins both sides.
+//! Windows format note: DirectWrite's in-memory loader rejects WOFF2
+//! (`DWRITE_E_FILEFORMAT`), so the vendored bytes are TrueType (the legacy
+//! TTF where the tree ships one, otherwise a lossless WOFF2 decompression —
+//! see `fonts/FONTS.md`). Family names and weight ranges here must stay
+//! identical to the `artisan_ui::theme::TypographyTokens` roles; the
+//! `typography_gradient` suite pins both sides.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -22,8 +25,12 @@ use std::borrow::Cow;
 pub struct BundledFont {
     /// File name under `modules/assets/fonts/`.
     pub file_name: &'static str,
-    /// Family name exactly as declared in the legacy `@font-face` block and
-    /// therefore as GPUI must resolve it (e.g. `"Artisan Neo"`).
+    /// Family name exactly as declared in the legacy `@font-face` block, and
+    /// therefore the name the theme roles request (e.g. `"Artisan Neo"`).
+    /// Three faces resolve under this name in DirectWrite; the Sigurd file's
+    /// internal name table reads `"Sigurd Variable Light"` (see
+    /// `fonts/FONTS.md`), so that face registers but the `"Sigurd Variable"`
+    /// role falls back until a follow-up aligns the role string.
     pub family: &'static str,
     /// Inclusive variable-weight range from the `@font-face` declaration.
     pub weights: (u16, u16),
@@ -31,7 +38,9 @@ pub struct BundledFont {
     pub license_path: &'static str,
     /// Embedded license or provenance note contents.
     pub license_text: &'static str,
-    /// Embedded font bytes, bit-identical to the legacy `@font-face` source.
+    /// Embedded font bytes: the legacy source where the tree ships TrueType,
+    /// otherwise the lossless WOFF2 decompression of that source (provenance
+    /// per file in `fonts/FONTS.md`).
     pub bytes: &'static [u8],
 }
 
@@ -56,36 +65,36 @@ impl std::error::Error for UnknownFont {}
 /// Every bundled typeface, ordered by family name so lookups binary search.
 pub const ALL: &[BundledFont] = &[
     BundledFont {
-        file_name: "artisan-neo-variable.woff2",
+        file_name: "artisan-neo-variable.ttf",
         family: "Artisan Neo",
         weights: (100, 900),
         license_path: "licenses/artisan-neo-OFL.txt",
         license_text: include_str!("../licenses/artisan-neo-OFL.txt"),
-        bytes: include_bytes!("../fonts/artisan-neo-variable.woff2"),
+        bytes: include_bytes!("../fonts/artisan-neo-variable.ttf"),
     },
     BundledFont {
-        file_name: "cal-sans-variable.woff2",
+        file_name: "cal-sans-variable.ttf",
         family: "Cal Sans",
         weights: (100, 1000),
         license_path: "licenses/cal-sans-OFL.txt",
         license_text: include_str!("../licenses/cal-sans-OFL.txt"),
-        bytes: include_bytes!("../fonts/cal-sans-variable.woff2"),
+        bytes: include_bytes!("../fonts/cal-sans-variable.ttf"),
     },
     BundledFont {
-        file_name: "jetbrains-mono-variable.woff2",
+        file_name: "jetbrains-mono-variable.ttf",
         family: "JetBrains Mono",
         weights: (100, 800),
         license_path: "licenses/jetbrains-mono-OFL.txt",
         license_text: include_str!("../licenses/jetbrains-mono-OFL.txt"),
-        bytes: include_bytes!("../fonts/jetbrains-mono-variable.woff2"),
+        bytes: include_bytes!("../fonts/jetbrains-mono-variable.ttf"),
     },
     BundledFont {
-        file_name: "sigurd-artisan.woff2",
+        file_name: "sigurd-artisan.ttf",
         family: "Sigurd Variable",
         weights: (300, 900),
         license_path: "licenses/sigurd-artisan-NOTES.md",
         license_text: include_str!("../licenses/sigurd-artisan-NOTES.md"),
-        bytes: include_bytes!("../fonts/sigurd-artisan.woff2"),
+        bytes: include_bytes!("../fonts/sigurd-artisan.ttf"),
     },
 ];
 
@@ -121,10 +130,10 @@ mod tests {
     /// re-encode of a vendored binary fails here before it can reach a
     /// renderer and silently fall back to a system face.
     const EXPECTED_LENGTHS: [(&str, usize); 4] = [
-        ("artisan-neo-variable.woff2", 354_924),
-        ("cal-sans-variable.woff2", 210_520),
-        ("jetbrains-mono-variable.woff2", 113_672),
-        ("sigurd-artisan.woff2", 18_812),
+        ("artisan-neo-variable.ttf", 879_868),
+        ("cal-sans-variable.ttf", 773_004),
+        ("jetbrains-mono-variable.ttf", 299_920),
+        ("sigurd-artisan.ttf", 35_216),
     ];
 
     #[test]
@@ -152,9 +161,12 @@ mod tests {
     }
 
     #[test]
-    fn embedded_bytes_are_woff2_containers() {
-        // WOFF2 magic `wOF2` (RFC 9839 §3): catches text-encoding damage
-        // (e.g. line-ending conversion) at compile-test time.
+    fn embedded_bytes_are_truetype_sfnt_containers() {
+        // TrueType sfnt version `00 01 00 00`: catches text-encoding damage
+        // (e.g. line-ending conversion) at compile-test time, and pins the
+        // DirectWrite-loadable container — WOFF2 (`wOF2`) is rejected by the
+        // in-memory loader on Windows (`DWRITE_E_FILEFORMAT`) and must never
+        // be vendored here again.
         for font in ALL {
             assert!(
                 font.bytes.len() > 48,
@@ -163,8 +175,8 @@ mod tests {
             );
             assert_eq!(
                 &font.bytes[0..4],
-                b"wOF2",
-                "{}: missing WOFF2 magic; the binary is damaged or substituted",
+                b"\x00\x01\x00\x00",
+                "{}: missing TrueType sfnt magic; the binary is damaged or substituted",
                 font.file_name
             );
         }
