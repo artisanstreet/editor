@@ -130,6 +130,7 @@ rust_library(
         "src/shell_command.rs",
         "src/shell_layout.rs",
         "src/shell_presentation_state.rs",
+        "src/shell_rail_model.rs",
         "src/setup_label_transition_policy.rs",
         "src/speed_presentation.rs",
         "src/steering_pending_lip.rs",
