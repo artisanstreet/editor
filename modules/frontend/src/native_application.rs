@@ -31,12 +31,14 @@ use artisan_protocol::{ConversationSubscriptionStarted, FirstMessageReceipt};
 use artisan_ui::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
 };
+use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::motion::MotionPolicy;
+use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
     App, AppContext as _, Application, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FocusHandle, KeyBinding, Render, Stateful, StatefulInteractiveElement, Subscription, Task,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
+    FocusHandle, FontWeight, KeyBinding, Render, Stateful, StatefulInteractiveElement,
+    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
@@ -3377,7 +3379,7 @@ fn suppress_conversation_tab_stops(
 }
 
 fn status_panel(theme: &ArtisanTheme, state: &NativeViewState) -> Div {
-    let (heading, detail): (&str, String) = match state {
+    let (heading, detail): (&'static str, String) = match state {
         NativeViewState::Loading => (
             "Loading Artisan data",
             "Connecting to the owned local Forge.".to_owned(),
@@ -3403,23 +3405,7 @@ fn status_panel(theme: &ArtisanTheme, state: &NativeViewState) -> Div {
             format!("Service state: {failure}"),
         ),
     };
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p(px(24.0))
-        .rounded(px(8.0))
-        .bg(theme.sidebar.sidebar.to_paint())
-        .text_color(theme.colors.foreground.to_paint())
-        .debug_selector(|| NATIVE_STATUS_SELECTOR.to_string())
-        .child(heading)
-        .child(
-            div()
-                .text_sm()
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(detail),
-        )
+    status_panel_with_text(theme, heading, detail)
 }
 
 fn message_status_panel(
@@ -3428,15 +3414,21 @@ fn message_status_panel(
     failure: Option<NativeMessageFailure>,
 ) -> Option<Div> {
     let detail = message_status_detail(receipt, failure)?;
+    let style = CardStyle::resolve(*theme);
     Some(
-        div()
+        compact_card(style)
             .w_full()
-            .p(px(8.0))
-            .rounded(px(8.0))
-            .bg(theme.sidebar.sidebar.to_paint())
-            .text_sm()
-            .text_color(theme.colors.muted_foreground.to_paint())
-            .child(detail),
+            // The retry action is appended by the owning method as a second
+            // card child, so the content-band inset lives on the root: both
+            // the detail line and the action share one audited 16 px inset
+            // and the root gap spaces them.
+            .px(style.content_horizontal_padding)
+            .child(
+                div()
+                    .text_size(theme.typography.control_text)
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(detail),
+            ),
     )
 }
 
@@ -3608,22 +3600,29 @@ fn intake_failure_panel(theme: &ArtisanTheme, retryable: bool) -> Div {
 }
 
 fn status_panel_with_text(theme: &ArtisanTheme, heading: &'static str, detail: String) -> Div {
-    div()
+    let style = CardStyle::resolve(*theme);
+    compact_card(style)
         .w_full()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p(px(24.0))
-        .rounded(px(8.0))
-        .bg(theme.sidebar.sidebar.to_paint())
-        .text_color(theme.colors.foreground.to_paint())
         .debug_selector(|| NATIVE_STATUS_SELECTOR.to_string())
-        .child(heading)
         .child(
-            div()
-                .text_sm()
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(detail),
+            compact_card_content(style).child(
+                div()
+                    .text_size(theme.typography.dialog_title_text)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(heading),
+            ),
+        )
+        .child(separator(
+            theme.colors.border.to_paint(),
+            SeparatorAxis::Horizontal,
+        ))
+        .child(
+            compact_card_content(style).child(
+                div()
+                    .text_size(theme.typography.control_text)
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(detail),
+            ),
         )
 }
 
