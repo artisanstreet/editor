@@ -21,6 +21,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::{Refineable as _, Styled};
 use gpui::{
@@ -777,7 +778,7 @@ impl RenderOnce for Popover {
             .child(trigger)
             .child(trigger_probe)
             .id(ElementId::NamedChild(
-                Box::new(id.clone()),
+                Arc::new(id.clone()),
                 SharedString::from("trigger"),
             ));
 

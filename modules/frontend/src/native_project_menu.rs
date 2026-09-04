@@ -60,10 +60,10 @@ use artisan_ui::{
     theme::{ArtisanTheme, ThemeMode},
 };
 use gpui::{
-    AnyElement, ClickEvent, Context, Corner, Div, FocusHandle, FontWeight, InteractiveElement as _,
-    KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _, Window, anchored,
-    canvas, deferred, div, point,
+    Anchor, AnyElement, App, ClickEvent, Context, Div, FocusHandle, FontWeight,
+    InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point,
+    Render, ScrollHandle, SharedString, Size, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, anchored, canvas, deferred, div, point,
     prelude::{FluentBuilder as _, IntoElement},
     px,
 };
@@ -501,7 +501,7 @@ impl NativeProjectMenu {
         }
         self.suppress_trigger_release = false;
         self.state.press_trigger();
-        self.sync_focus_after_transition(window);
+        self.sync_focus_after_transition(window, cx);
         cx.notify();
     }
 
@@ -542,13 +542,13 @@ impl NativeProjectMenu {
             }
             "enter" | "space" if !keystroke.modifiers.modified() => {
                 self.state.activate_highlighted();
-                self.sync_focus_after_transition(window);
+                self.sync_focus_after_transition(window, cx);
                 self.suppress_trigger_release = true;
                 true
             }
             "escape" => {
                 self.state.dismiss();
-                window.focus(&self.trigger_focus);
+                window.focus(&self.trigger_focus, cx);
                 true
             }
             _ => false,
@@ -572,19 +572,19 @@ impl NativeProjectMenu {
             return;
         }
         self.state.dismiss();
-        window.focus(&self.trigger_focus);
+        window.focus(&self.trigger_focus, cx);
         cx.notify();
     }
 
     fn choose_row(&mut self, row: ProjectMenuRow, window: &mut Window, cx: &mut Context<Self>) {
         self.state.activate_row(row);
-        self.sync_focus_after_transition(window);
+        self.sync_focus_after_transition(window, cx);
         cx.notify();
     }
 
-    fn sync_focus_after_transition(&mut self, window: &mut Window) {
+    fn sync_focus_after_transition(&mut self, window: &mut Window, cx: &mut App) {
         if self.state.is_open() {
-            window.focus(&self.menu_focus);
+            window.focus(&self.menu_focus, cx);
             let flat = self
                 .state
                 .highlighted_row()
@@ -593,7 +593,7 @@ impl NativeProjectMenu {
             self.reveal_highlight();
         } else {
             self.initial_reveal_flat.borrow_mut().take();
-            window.focus(&self.trigger_focus);
+            window.focus(&self.trigger_focus, cx);
         }
     }
 
@@ -700,7 +700,7 @@ impl NativeProjectMenu {
 
         Some(
             anchored()
-                .anchor(Corner::BottomLeft)
+                .anchor(Anchor::BottomLeft)
                 .position(trigger_origin)
                 .offset(point(px(0.0), px(-MENU_GAP_PX)))
                 .child(body)

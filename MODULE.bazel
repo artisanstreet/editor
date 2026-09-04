@@ -34,10 +34,19 @@ crate.from_cargo(
     lockfile = "//:Cargo.Bazel.lock",
     manifests = ["//:Cargo.toml"],
 )
-crate.annotation(
-    crate = "gpui",
-    version = "0.2.2",
-    patch_args = ["-p1"],
-    patches = ["//third_party:gpui-blur.patch"],
-)
+# NOTE (wave3-vendor): the workspace now consumes gpui-ce via the
+# vendor/gpui-ce submodule (path dependency), not crates.io gpui 0.2.2, so
+# the old `crate.annotation(crate = "gpui", version = "0.2.2", patches =
+# ["//third_party:gpui-blur.patch"])` is removed: its version selector no
+# longer matches anything in Cargo.lock and the patch targets 0.2.2's
+# scene.rs, which does not exist in the fork (no BlurRect there).
+# Remaining Bazel work (no bazel binary on this host to verify):
+# 1. Repin Cargo.Bazel.lock against the new Cargo.lock on a Bazel host.
+# 2. Confirm crate_universe label mapping for the renamed package
+#    (gpui-ce): every `@crates//:gpui` reference in BUILD files may need to
+#    become the sanitized package label.
+# 3. The backdrop-blur scene primitive is owned by the blur lane: it must
+#    re-port third_party/gpui-blur.patch onto vendor/gpui-ce (or upstream it
+#    to artisanstreet/gpui-ce) and re-add an annotation for crate
+#    "gpui-ce" if Bazel still needs the patch at repin time.
 use_repo(crate, "crates")

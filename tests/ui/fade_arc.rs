@@ -14,7 +14,10 @@ use artisan_ui::fade_arc::{
 };
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, Oklch, ThemeMode};
-use gpui::{Context, IntoElement, ParentElement, Render, Styled, TestAppContext, Window, div, px};
+use gpui::{
+    ColorExt as _, Context, IntoElement, ParentElement, Render, Styled, TestAppContext, Window,
+    div, px,
+};
 
 const RENDER_SELECTOR: &str = "fade-arc-render-probe";
 

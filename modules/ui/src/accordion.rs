@@ -21,6 +21,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -673,7 +674,7 @@ fn render_accordion_trigger(frame: AccordionTriggerFrame<'_>) -> Stateful<Div> {
 
     if item_disabled {
         trigger.id(ElementId::NamedChild(
-            Box::new(id.clone()),
+            Arc::new(id.clone()),
             format!("trigger-{item_value}-disabled").into(),
         ))
     } else {
@@ -684,7 +685,7 @@ fn render_accordion_trigger(frame: AccordionTriggerFrame<'_>) -> Stateful<Div> {
         let handler = on_change.clone();
         let focus_for_trigger = item_focus.clone();
         let trigger = trigger.id(ElementId::NamedChild(
-            Box::new(id.clone()),
+            Arc::new(id.clone()),
             format!("trigger-{value_for_handler}").into(),
         ));
         trigger

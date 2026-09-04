@@ -36,8 +36,8 @@ use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    AnyElement, App, AppContext as _, Application, Bounds, ClickEvent, ClipboardItem, Context, Div,
-    Entity, FocusHandle, FontWeight, KeyBinding, Render, Stateful, StatefulInteractiveElement,
+    AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
+    FocusHandle, FontWeight, KeyBinding, Render, Stateful, StatefulInteractiveElement,
     Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
@@ -267,7 +267,7 @@ impl NativeApplication {
         let focus_handle = cx.focus_handle();
         let add_project_focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
         let message_retry_focus_handle = cx.focus_handle().tab_index(2).tab_stop(false);
-        focus_handle.focus(window);
+        focus_handle.focus(window, cx);
         let state = if service.is_some() {
             NativeViewState::Loading
         } else {
@@ -3496,8 +3496,8 @@ impl Render for NativeApplication {
         div()
             .track_focus(&self.focus_handle)
             .key_context(NATIVE_KEY_CONTEXT)
-            .on_action(|_: &NextTabStop, window, _| window.focus_next())
-            .on_action(|_: &PreviousTabStop, window, _| window.focus_prev())
+            .on_action(|_: &NextTabStop, window, cx| window.focus_next(cx))
+            .on_action(|_: &PreviousTabStop, window, cx| window.focus_prev(cx))
             .size_full()
             .debug_selector(|| NATIVE_ROOT_SELECTOR.to_string())
             .child(legacy_shell_frame(props, content))
@@ -4081,6 +4081,27 @@ fn prepare_application_shutdown(
     }
 }
 
+/// Logs which GPU renderer backs the opened window.
+///
+/// Compile-time half of the renderer guard: `Window::gpu_context` only
+/// exists when the `gpui/wgpu-surfaces` feature rides the workspace
+/// `gpui_platform/wgpu` chain, so dropping that feature fails the build here
+/// instead of silently running the DirectX backend. The runtime half is the
+/// `eprintln!` below plus gpui_wgpu's own `Selected GPU adapter` log line.
+#[cfg(target_os = "windows")]
+fn report_renderer(window: &mut Window) {
+    let wgpu_active = window.gpu_context().is_some();
+    let device = window
+        .gpu_specs()
+        .map(|specs| specs.device_name)
+        .unwrap_or_else(|| String::from("<unknown>"));
+    eprintln!("artisan editor renderer: wgpu active = {wgpu_active}, device = {device}");
+}
+
+/// Non-Windows builds have no wgpu-shipping contract to guard.
+#[cfg(not(target_os = "windows"))]
+fn report_renderer(_window: &mut Window) {}
+
 /// Launches the real native application window.
 #[must_use]
 pub fn run() -> ExitCode {
@@ -4090,7 +4111,7 @@ pub fn run() -> ExitCode {
     let launch_flag = Rc::clone(&launched);
     let application_view = Rc::new(RefCell::new(None));
 
-    Application::new()
+    gpui_platform::application()
         .with_assets(artisan_ui::asset_seam::CatalogAssetSource)
         .run(move |cx: &mut App| {
             // Register the vendored legacy typefaces before any window opens;
@@ -4112,7 +4133,7 @@ pub fn run() -> ExitCode {
             let service_for_close = service.clone();
             let shutdown_for_close = Arc::clone(&shutdown_started);
             let view_for_close = Rc::clone(&application_view);
-            cx.on_window_closed(move |cx| {
+            cx.on_window_closed(move |cx, _window_id| {
                 if cx.windows().is_empty() {
                     prepare_application_shutdown(&view_for_close, cx);
                     request_app_shutdown(cx, service_for_close.clone(), &shutdown_for_close);
@@ -4143,6 +4164,9 @@ pub fn run() -> ExitCode {
 
             if opened.is_ok() {
                 launch_flag.set(true);
+                if let Ok(handle) = &opened {
+                    let _ = handle.update(cx, |_, window, _| report_renderer(window));
+                }
                 cx.activate(true);
             } else {
                 request_app_shutdown(cx, service.clone(), &shutdown_started);
@@ -5378,7 +5402,7 @@ mod tests {
             assert_eq!(application.message_retry_focus_handle.tab_index, 2);
             assert!(application.message_retry_focus_handle.tab_stop);
             let focus = application.message_retry_focus_handle.clone();
-            window.focus(&focus);
+            window.focus(&focus, app);
             Button::new(
                 NATIVE_MESSAGE_RETRY_SELECTOR,
                 focus,

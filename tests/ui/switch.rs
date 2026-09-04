@@ -322,7 +322,7 @@ fn enter_and_space_activate_controlled_next_values(cx: &mut TestAppContext) {
     let state_for_view = state.clone();
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let probe = SwitchProbe::new(cx, state_for_view, false, false, SwitchSize::Default, false);
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();
@@ -369,7 +369,7 @@ fn disabled_switch_is_half_opaque_and_suppresses_pointer_keyboard(cx: &mut TestA
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
         assert!(!focus.is_focused(window));
-        window.focus(&focus);
+        window.focus(&focus, app);
         view.update(app, |_, cx| cx.notify());
     });
     cx.run_until_parked();

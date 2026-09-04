@@ -287,7 +287,7 @@ fn enter_and_space_emit_one_complete_keyboard_request_each(cx: &mut TestAppConte
                 refined: false,
             },
         );
-        window.focus(&probe.focuses[1]);
+        window.focus(&probe.focuses[1], cx);
         probe
     });
     cx.run_until_parked();
@@ -339,7 +339,7 @@ fn activation_key_down_is_inert_until_gpui_key_up_synthesis(cx: &mut TestAppCont
                 refined: false,
             },
         );
-        window.focus(&probe.focuses[0]);
+        window.focus(&probe.focuses[0], cx);
         probe
     });
     cx.run_until_parked();
@@ -348,6 +348,7 @@ fn activation_key_down_is_inert_until_gpui_key_up_synthesis(cx: &mut TestAppCont
         cx.simulate_event(KeyDownEvent {
             keystroke: Keystroke::parse(key).expect("activation key must parse"),
             is_held: false,
+            prefer_character_input: false,
         });
     }
 
@@ -399,7 +400,7 @@ fn disabled_group_and_items_block_pointer_and_keyboard_activation(cx: &mut TestA
 
     cx.update(|window, app| {
         let focus = view.read(app).focuses[1].clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.simulate_event(KeyUpEvent {
         keystroke: Keystroke::parse("enter").expect("enter is a valid keystroke"),
@@ -447,7 +448,7 @@ fn horizontal_roving_focus_skips_disabled_items_wraps_and_honors_home_end(cx: &m
 
     cx.update(|window, app| {
         let focus = view.read(app).focuses[0].clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
 
     cx.simulate_keystrokes("right");
@@ -506,7 +507,7 @@ fn vertical_roving_focus_uses_up_down_and_keeps_cross_axis_inert(cx: &mut TestAp
 
     cx.update(|window, app| {
         let focus = view.read(app).focuses[0].clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
 
     cx.simulate_keystrokes("down");

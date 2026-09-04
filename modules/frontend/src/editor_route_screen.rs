@@ -509,7 +509,7 @@ pub const fn asset_for_file_icon(icon: FileIcon) -> AssetId {
 /// Applies an alpha to a theme color while keeping its hue and lightness.
 fn alpha_paint(base: Oklch, alpha: f32) -> Hsla {
     let mut paint = base.to_paint();
-    paint.a = alpha;
+    paint.alpha = alpha;
     paint
 }
 

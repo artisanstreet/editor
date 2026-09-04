@@ -12,7 +12,8 @@ use artisan_ui::sheet::{
 };
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::{
-    Bounds, Context, FocusHandle, Hsla, InteractiveElement, IntoElement, Modifiers, ParentElement,
+    Bounds, ColorExt as _, Context, FocusHandle, Hsla, InteractiveElement, IntoElement, Modifiers,
+    ParentElement,
     Render, Styled, TestAppContext, Window, div, point, px, size,
 };
 
@@ -354,19 +355,19 @@ fn focus_intent_applies_entry_and_restore_once_per_controlled_edge(cx: &mut Test
         let intent = SheetFocusIntent::new(entry.clone(), restore.clone());
 
         assert_eq!(
-            intent.apply(false, true, window),
+            intent.apply(false, true, window, app),
             SheetFocusTransition::Enter
         );
         assert!(entry.is_focused(window));
 
         assert_eq!(
-            intent.apply(true, true, window),
+            intent.apply(true, true, window, app),
             SheetFocusTransition::Unchanged
         );
         assert!(entry.is_focused(window));
 
         assert_eq!(
-            intent.apply(true, false, window),
+            intent.apply(true, false, window, app),
             SheetFocusTransition::Restore
         );
         assert!(restore.is_focused(window));
@@ -446,7 +447,7 @@ fn overlay_and_escape_and_close_request_dismissal_without_mutating_controlled_st
     // Escape dismissal
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.simulate_keystrokes("escape");
     assert_eq!(dismissals.count.get(), 2);

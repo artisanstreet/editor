@@ -508,7 +508,7 @@ pub fn render_new_thread_surface(
                 .h_full()
                 .min_w(px(0.0))
                 .flex_basis(relative(NEW_THREAD_LIST_SHARE))
-                .flex_grow()
+                .flex_grow_1()
                 .child(recents),
         )
         .child(
@@ -518,7 +518,7 @@ pub fn render_new_thread_surface(
                 .h_full()
                 .min_w(px(0.0))
                 .flex_basis(relative(NEW_THREAD_USAGE_SHARE))
-                .flex_grow()
+                .flex_grow_1()
                 .p(theme.spacing.steps(2.0))
                 .debug_selector(|| NEW_THREAD_USAGE_SELECTOR.to_string())
                 .child(render_activity_grid(theme, &[])),

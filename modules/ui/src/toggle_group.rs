@@ -794,6 +794,7 @@ impl<V: ToggleValue> ToggleGroupRenderContext<'_, V> {
                         offset: point(px(0.0), px(0.0)),
                         blur_radius: px(0.0),
                         spread_radius: style.focus_ring_width,
+                        inset: false,
                     }])
             });
         }
@@ -808,7 +809,7 @@ impl<V: ToggleValue> ToggleGroupRenderContext<'_, V> {
             if let Some(next) =
                 navigation_target(index, &event.keystroke.key, orientation, &disabled_for_key)
             {
-                window.focus(&handles_for_key[next]);
+                window.focus(&handles_for_key[next], cx);
                 window.prevent_default();
                 cx.stop_propagation();
             }

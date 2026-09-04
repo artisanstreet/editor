@@ -77,7 +77,7 @@ fn every_public_variant_resolves_in_both_theme_modes() {
                 "{mode:?} {variant:?} foreground"
             );
             assert_eq!(style.highlight, theme.colors.highlight.to_paint());
-            assert!(style.foreground.a > 0.0);
+            assert!(style.foreground.alpha > 0.0);
         }
     }
 

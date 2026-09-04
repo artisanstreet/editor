@@ -134,7 +134,7 @@ fn compact_style_pins_exact_audited_values() {
         };
         assert_eq!(style.ring(), expected_ring);
         assert_eq!(
-            style.ring_color.a.to_bits(),
+            style.ring_color.alpha.to_bits(),
             0.10_f32.to_bits(),
             "the legacy ring is foreground at exactly 10% alpha"
         );

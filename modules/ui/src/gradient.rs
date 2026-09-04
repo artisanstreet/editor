@@ -26,8 +26,9 @@ pub const VERTICAL_ANGLE_DEGREES: f32 = 180.0;
 /// Builds a top-to-bottom two-stop gradient from legacy source colors.
 ///
 /// Stops sit at the face edges (`0.0` top, `1.0` bottom); interpolation runs
-/// in the primitive's default sRGB space, matching the CSS faces below,
-/// which declare no `color-interpolation-method`.
+/// in the primitive's Oklab space (`ColorSpace::Oklab` in gpui-ce's
+/// `linear_gradient`), which keeps the mid-stop more vibrant than the legacy
+/// sRGB-interpolated CSS faces — an intended fidelity gain, not a regression.
 #[must_use]
 pub fn vertical_gradient(top: Oklch, bottom: Oklch) -> Background {
     linear_gradient(

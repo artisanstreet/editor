@@ -289,7 +289,7 @@ fn enter_and_space_activate_controlled_next_values(cx: &mut TestAppContext) {
             ToggleContent::text("Italic"),
             false,
         );
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();
@@ -345,7 +345,7 @@ fn disabled_toggle_is_half_opaque_and_suppresses_activation(cx: &mut TestAppCont
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
         assert!(!focus.is_focused(window));
-        window.focus(&focus);
+        window.focus(&focus, app);
         view.update(app, |_, cx| cx.notify());
     });
     cx.run_until_parked();
@@ -404,7 +404,7 @@ fn focus_ring_requires_actual_focus_and_visible_intent(cx: &mut TestAppContext) 
 
     cx.update(|window, app| {
         assert!(!is_ring_visible(window, app));
-        window.focus(&view.read(app).focus);
+        window.focus(&view.read(app).focus, app);
     });
     cx.run_until_parked();
     cx.update(|window, app| {

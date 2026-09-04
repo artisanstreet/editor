@@ -434,7 +434,7 @@ fn arrow_keys_emit_step_and_keep_controlled(cx: &mut TestAppContext) {
             },
             changes_for_view,
         );
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();
@@ -442,6 +442,7 @@ fn arrow_keys_emit_step_and_keep_controlled(cx: &mut TestAppContext) {
     cx.simulate_event(KeyDownEvent {
         keystroke: Keystroke::parse("arrowright").expect("valid key"),
         is_held: false,
+        prefer_character_input: false,
     });
     cx.run_until_parked();
     assert_eq!(changes.borrow().as_slice(), &[55.0]);
@@ -459,6 +460,7 @@ fn arrow_keys_emit_step_and_keep_controlled(cx: &mut TestAppContext) {
     cx.simulate_event(KeyDownEvent {
         keystroke: Keystroke::parse("arrowleft").expect("valid key"),
         is_held: false,
+        prefer_character_input: false,
     });
     cx.run_until_parked();
     assert_eq!(changes.borrow().as_slice(), &[55.0, 50.0]);
@@ -482,7 +484,7 @@ fn home_end_page_keys_jump_to_bounds(cx: &mut TestAppContext) {
             },
             changes_for_view,
         );
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();
@@ -497,6 +499,7 @@ fn home_end_page_keys_jump_to_bounds(cx: &mut TestAppContext) {
         cx.simulate_event(KeyDownEvent {
             keystroke: Keystroke::parse(key).expect("valid key"),
             is_held: false,
+            prefer_character_input: false,
         });
         cx.run_until_parked();
         assert_eq!(
@@ -528,7 +531,7 @@ fn vertical_arrow_keys_use_up_down(cx: &mut TestAppContext) {
             },
             changes_for_view,
         );
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();
@@ -536,6 +539,7 @@ fn vertical_arrow_keys_use_up_down(cx: &mut TestAppContext) {
     cx.simulate_event(KeyDownEvent {
         keystroke: Keystroke::parse("arrowup").expect("valid key"),
         is_held: false,
+        prefer_character_input: false,
     });
     cx.run_until_parked();
     assert_eq!(changes.borrow()[0], 60.0);
@@ -544,6 +548,7 @@ fn vertical_arrow_keys_use_up_down(cx: &mut TestAppContext) {
     cx.simulate_event(KeyDownEvent {
         keystroke: Keystroke::parse("arrowdown").expect("valid key"),
         is_held: false,
+        prefer_character_input: false,
     });
     cx.run_until_parked();
     assert_eq!(changes.borrow()[0], 40.0);
@@ -567,7 +572,7 @@ fn disabled_slider_suppresses_keyboard_and_pointer(cx: &mut TestAppContext) {
             },
             changes_for_view,
         );
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();
@@ -576,6 +581,7 @@ fn disabled_slider_suppresses_keyboard_and_pointer(cx: &mut TestAppContext) {
         cx.simulate_event(KeyDownEvent {
             keystroke: Keystroke::parse(key).expect("valid key"),
             is_held: false,
+            prefer_character_input: false,
         });
     }
     // KeyUp should also be inert (GPUI synthesizes click on keyup for some components)

@@ -473,6 +473,7 @@ impl RenderOnce for Toggle {
                             offset: point(px(0.0), px(0.0)),
                             blur_radius: px(0.0),
                             spread_radius: style.focus_ring_width,
+                            inset: false,
                         }])
                 })
             })

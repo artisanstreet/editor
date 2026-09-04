@@ -110,11 +110,14 @@ fn progress_paint_resolves_from_the_exact_mode_primary_token() {
         dark_primary.with_alpha(LEGACY_TRACK_ALPHA).to_paint()
     );
     assert_eq!(
-        light.track_color.a.to_bits(),
+        light.track_color.alpha.to_bits(),
         LEGACY_TRACK_ALPHA.to_bits(),
         "the track alpha must be exactly 20%"
     );
-    assert_eq!(dark.track_color.a.to_bits(), LEGACY_TRACK_ALPHA.to_bits());
+    assert_eq!(
+        dark.track_color.alpha.to_bits(),
+        LEGACY_TRACK_ALPHA.to_bits()
+    );
 
     assert_eq!(light.fill_color, light_primary.to_paint());
     assert_eq!(dark.fill_color, dark_primary.to_paint());

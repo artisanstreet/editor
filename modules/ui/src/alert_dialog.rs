@@ -14,6 +14,7 @@
 //! mutate the caller-owned open value.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::Refineable as _;
 use gpui::{
@@ -250,6 +251,7 @@ impl AlertDialogStyle {
             offset: point(px(0.0), px(0.0)),
             blur_radius: px(0.0),
             spread_radius: self.ring_spread,
+            inset: false,
         }
     }
 
@@ -268,19 +270,9 @@ impl AlertDialogStyle {
                 let mut style =
                     ButtonStyle::resolve(*theme, ButtonVariant::Default, ButtonSize::Small, motion);
                 style.background = theme.colors.destructive.to_paint();
-                style.foreground = Hsla {
-                    h: 0.0,
-                    s: 0.0,
-                    l: 1.0,
-                    a: 1.0,
-                };
+                style.foreground = gpui::white();
                 style.hover_background = theme.colors.destructive.with_alpha(0.8).to_paint();
-                style.hover_foreground = Hsla {
-                    h: 0.0,
-                    s: 0.0,
-                    l: 1.0,
-                    a: 1.0,
-                };
+                style.hover_foreground = gpui::white();
                 style.focus_border = theme.colors.destructive.to_paint();
                 style
             }
@@ -552,7 +544,7 @@ impl RenderOnce for AlertDialog {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         if !self.state.is_open() {
             let mut closed = div()
-                .id(ElementId::NamedChild(Box::new(self.id), "closed".into()))
+                .id(ElementId::NamedChild(Arc::new(self.id), "closed".into()))
                 .absolute()
                 .w(px(0.0))
                 .h(px(0.0));

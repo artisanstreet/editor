@@ -244,28 +244,13 @@ fn bare_string_keys_misclassify_as_uris_but_explicit_embedding_resolves() {
 // ---------------------------------------------------------------------------
 
 /// Pure red used as an unambiguous parent text color.
-const RED: Hsla = Hsla {
-    h: 0.,
-    s: 1.,
-    l: 0.5,
-    a: 1.,
-};
+const RED: Hsla = gpui::hsla(0., 1., 0.5, 1.);
 
 /// Pure green, distinct from red and blue in hue.
-const GREEN: Hsla = Hsla {
-    h: 1. / 3.,
-    s: 1.,
-    l: 0.5,
-    a: 1.,
-};
+const GREEN: Hsla = gpui::hsla(1. / 3., 1., 0.5, 1.);
 
 /// Pure blue, distinct from red and green in hue.
-const BLUE: Hsla = Hsla {
-    h: 2. / 3.,
-    s: 1.,
-    l: 0.5,
-    a: 1.,
-};
+const BLUE: Hsla = gpui::hsla(2. / 3., 1., 0.5, 1.);
 
 /// Paint-phase capture of the resolved Window text-style color.
 #[derive(Clone, Default)]

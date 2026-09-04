@@ -24,9 +24,10 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
-    AnimationExt, AnyElement, App, Bounds, BoxShadow, ClickEvent, Context, Corner, Div, ElementId,
+    Anchor, AnimationExt, AnyElement, App, Bounds, BoxShadow, ClickEvent, Context, Div, ElementId,
     FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Size, Stateful,
     StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div, point,
@@ -807,6 +808,7 @@ impl ContextMenuStyle {
                 offset: point(px(0.0), px(0.0)),
                 blur_radius: px(0.0),
                 spread_radius: px(1.0),
+                inset: false,
             },
             motion: policy.resolve(MotionRecipe::MenuOpen),
             anchor_gap: px(4.0),
@@ -1091,15 +1093,15 @@ impl ContextMenu {
     }
 
     fn content_id(&self) -> ElementId {
-        ElementId::NamedChild(Box::new(self.id.clone()), "content".into())
+        ElementId::NamedChild(Arc::new(self.id.clone()), "content".into())
     }
 
     fn trigger_id(&self) -> ElementId {
-        ElementId::NamedChild(Box::new(self.id.clone()), "trigger".into())
+        ElementId::NamedChild(Arc::new(self.id.clone()), "trigger".into())
     }
 
     fn item_id(&self, index: usize) -> ElementId {
-        ElementId::NamedChild(Box::new(self.content_id()), format!("item-{index}").into())
+        ElementId::NamedChild(Arc::new(self.content_id()), format!("item-{index}").into())
     }
 
     /// Commits one enabled item, records the activation, and closes the menu.
@@ -1114,7 +1116,7 @@ impl ContextMenu {
         let id = String::from(item.id().clone());
         self.state.close();
         self.last_activation = Some(id);
-        window.focus(&self.trigger_focus);
+        window.focus(&self.trigger_focus, cx);
         if let Some(action) = action {
             action(window, cx);
         }
@@ -1140,7 +1142,7 @@ impl ContextMenu {
         let enabled = self.selectable_flags();
         self.refresh_enabled();
         self.state.open_at(event.position, &enabled);
-        window.focus(&self.menu_focus);
+        window.focus(&self.menu_focus, cx);
         cx.notify();
     }
 
@@ -1152,7 +1154,7 @@ impl ContextMenu {
     ) {
         if self.state.is_open() {
             self.state.close();
-            window.focus(&self.trigger_focus);
+            window.focus(&self.trigger_focus, cx);
             cx.notify();
         }
     }
@@ -1174,7 +1176,7 @@ impl ContextMenu {
             return;
         }
         self.state.close();
-        window.focus(&self.trigger_focus);
+        window.focus(&self.trigger_focus, cx);
         cx.notify();
     }
 
@@ -1191,7 +1193,7 @@ impl ContextMenu {
         match pressed.as_str() {
             "escape" | "esc" => {
                 self.state.close();
-                window.focus(&self.trigger_focus);
+                window.focus(&self.trigger_focus, cx);
                 cx.notify();
             }
             "arrowdown" | "down" => {
@@ -1428,7 +1430,7 @@ impl ContextMenu {
 
         Some(
             anchored()
-                .anchor(Corner::TopLeft)
+                .anchor(Anchor::TopLeft)
                 .position(anchor)
                 .offset(point(style.anchor_gap, style.anchor_gap))
                 .child(panel)

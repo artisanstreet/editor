@@ -15,14 +15,14 @@
 //! [`SheetFocusIntent`] exposes explicit focus-entry/restoration policy, and
 //! overlay occlusion is limited to GPUI pointer hit testing.
 
-use std::{rc::Rc, time::Duration};
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 use artisan_assets::AssetId;
 use gpui::prelude::Refineable as _;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, Div, ElementId, FocusHandle, FontWeight,
-    Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce,
-    SharedString, StyleRefinement, Styled, Window, div, point, px, size,
+    Animation, AnimationExt, AnyElement, App, Bounds, ColorExt as _, Div, ElementId, FocusHandle,
+    FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point,
+    RenderOnce, SharedString, StyleRefinement, Styled, Window, div, point, px, size,
 };
 
 use crate::button::{AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant};
@@ -217,12 +217,13 @@ impl SheetFocusIntent {
         previous_open: bool,
         next_open: bool,
         window: &mut Window,
+        cx: &mut App,
     ) -> SheetFocusTransition {
         let transition = sheet_focus_transition(previous_open, next_open);
         match transition {
             SheetFocusTransition::Unchanged => {}
-            SheetFocusTransition::Enter => self.entry.focus(window),
-            SheetFocusTransition::Restore => self.restore.focus(window),
+            SheetFocusTransition::Enter => self.entry.focus(window, cx),
+            SheetFocusTransition::Restore => self.restore.focus(window, cx),
         }
         transition
     }
@@ -442,7 +443,7 @@ impl SheetStyle {
     pub fn resolve(theme: ArtisanTheme, motion: MotionPolicy) -> Self {
         let padding = theme.spacing.steps(6.0);
         Self {
-            overlay: Hsla::black().opacity(SHEET_OVERLAY_OPACITY),
+            overlay: gpui::black().opacity(SHEET_OVERLAY_OPACITY),
             overlay_opacity: SHEET_OVERLAY_OPACITY,
             background: theme.colors.popover.to_paint(),
             foreground: theme.colors.popover_foreground.to_paint(),
@@ -703,7 +704,7 @@ impl Styled for Sheet {
 /// Renders the zero-sized sentinel painted for a closed sheet.
 fn render_closed_sheet(id: ElementId, debug_selector: Option<SharedString>) -> AnyElement {
     let mut closed = div()
-        .id(ElementId::NamedChild(Box::new(id), "closed".into()))
+        .id(ElementId::NamedChild(Arc::new(id), "closed".into()))
         .absolute()
         .w(px(0.0))
         .h(px(0.0));

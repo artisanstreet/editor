@@ -154,10 +154,10 @@ fn style_matches_the_shared_theme_radius_colors_shadow_and_motion_tokens() {
     assert_eq!(light.menu_shadow.blur_radius, px(50.0));
     assert_eq!(light.menu_shadow.spread_radius, px(-12.0));
     assert_eq!(light.menu_ring.spread_radius, px(1.0));
-    assert!((light.menu_ring.color.a - 0.05).abs() < 1e-6);
-    assert!((light.destructive_hover_background.a - 0.10).abs() < 1e-6);
+    assert!((light.menu_ring.color.alpha - 0.05).abs() < 1e-6);
+    assert!((light.destructive_hover_background.alpha - 0.10).abs() < 1e-6);
     assert!(matches!(light.motion, MotionPlan::Animate(_)));
-    assert!((dark.destructive_hover_background.a - 0.20).abs() < 1e-6);
+    assert!((dark.destructive_hover_background.alpha - 0.20).abs() < 1e-6);
     assert_eq!(dark.motion, MotionPlan::Immediate);
 }
 

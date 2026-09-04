@@ -204,7 +204,7 @@ fn focus_ring_requires_actual_focus_and_visibility_intent(cx: &mut TestAppContex
 
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.run_until_parked();
 
@@ -245,7 +245,7 @@ fn disabled_input_remains_visible_but_does_not_report_focus_ring(cx: &mut TestAp
 
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
 
         let input = Input::new(
             "disabled-input",

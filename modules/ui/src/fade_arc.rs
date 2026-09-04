@@ -16,13 +16,15 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::Refineable;
 use gpui::{
-    Animation, AnimationExt, App, Background, Bounds, ElementId, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Path, PathBuilder, Pixels, Point, RenderOnce, SharedString,
-    StyleRefinement, Styled, Window, canvas, div, linear_color_stop, linear_gradient, point, px,
+    Animation, AnimationExt, App, Background, Bounds, ColorExt as _, ElementId, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Path, PathBuilder, Pixels, Point,
+    RenderOnce, SharedString, StyleRefinement, Styled, Window, canvas, div, linear_color_stop,
+    linear_gradient, point, px,
 };
 
 use crate::motion::MotionPolicy;
@@ -683,5 +685,5 @@ fn finite_dimension(value: Pixels) -> f32 {
 }
 
 fn animation_element_id(id: &ElementId) -> ElementId {
-    ElementId::NamedChild(Box::new(id.clone()), "spin".into())
+    ElementId::NamedChild(Arc::new(id.clone()), "spin".into())
 }
