@@ -8,6 +8,7 @@ exports_files(
     [
         "command.rs",
         "tinted_svg.rs",
+        "typography_gradient.rs",
     ],
     visibility = ["//visibility:public"],
 )

@@ -129,10 +129,28 @@ LICENSE_DOCS = [
     "licenses/tabler-MIT.txt",
 ]
 
+# Embedded variable typefaces (see fonts/FONTS.md for the manifest). Kept in
+# a separate list from ASSET_SOURCES/LICENSE_DOCS on purpose: the
+# //tests/assets bijection pins those two lists at exactly 104/9 entries, and
+# fonts are binary WOFF2, not SVG catalog rows.
+FONT_FILES = [
+    "fonts/artisan-neo-variable.woff2",
+    "fonts/cal-sans-variable.woff2",
+    "fonts/jetbrains-mono-variable.woff2",
+    "fonts/sigurd-artisan.woff2",
+]
+
+FONT_LICENSES = [
+    "licenses/artisan-neo-OFL.txt",
+    "licenses/cal-sans-OFL.txt",
+    "licenses/jetbrains-mono-OFL.txt",
+    "licenses/sigurd-artisan-NOTES.md",
+]
+
 rust_library(
     name = "assets",
     srcs = glob(["src/**/*.rs"]),
-    compile_data = ["manifest.toml"] + ASSET_SOURCES + LICENSE_DOCS,
+    compile_data = ["manifest.toml"] + ASSET_SOURCES + LICENSE_DOCS + FONT_FILES + FONT_LICENSES,
     crate_name = "artisan_assets",
     edition = "2024",
     lint_config = "//:workspace_lints",

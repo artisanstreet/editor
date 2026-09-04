@@ -19,6 +19,8 @@
 use core::fmt;
 use core::str::FromStr;
 
+pub mod fonts;
+
 /// Stable identifier for a vendored asset.
 ///
 /// The string form is `<family>.<name>` (for example `tabler.check`) and

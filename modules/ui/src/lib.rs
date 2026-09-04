@@ -14,6 +14,8 @@ pub mod context_menu;
 pub mod dialog;
 pub mod dropdown_menu;
 pub mod fade_arc;
+pub mod fonts;
+pub mod gradient;
 pub mod icon;
 pub mod input;
 pub mod input_group;

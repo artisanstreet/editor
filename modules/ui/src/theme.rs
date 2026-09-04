@@ -7,7 +7,7 @@
 //! module defines values only: no globals, observers, widgets, or frontend
 //! wiring.
 
-use gpui::{Hsla, Pixels, px};
+use gpui::{Font, FontWeight, Hsla, Pixels, px};
 
 /// One encoded/display sRGB component triple plus alpha, all `[0, 1]`.
 ///
@@ -490,6 +490,21 @@ pub struct FontRole {
     pub weights: WeightRange,
 }
 
+impl FontRole {
+    /// Binds this role to a GPUI [`Font`] at `weight` for `.font()`/`.font_family()`.
+    ///
+    /// The family resolves to a vendored face only after
+    /// [`crate::fonts::register_bundled_fonts`] runs at startup; before that
+    /// GPUI falls back silently through its built-in stack, so the returned
+    /// value is always safe to paint with.
+    #[must_use]
+    pub fn font(&self, weight: FontWeight) -> Font {
+        let mut font = gpui::font(self.family);
+        font.weight = weight;
+        font
+    }
+}
+
 /// A known inclusive weight range for a variable font.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WeightRange {
@@ -497,6 +512,28 @@ pub struct WeightRange {
     pub min: u16,
     /// Highest declared weight.
     pub max: u16,
+}
+
+impl TypographyTokens {
+    /// Display face for headings and titles: `--font-heading`, Artisan Neo
+    /// (`fonts.css:40`).
+    #[must_use]
+    pub const fn display(&self) -> &FontRole {
+        &self.heading
+    }
+
+    /// UI face for body text: `--font-sans`, Artisan Neo (`theme.css:313`).
+    #[must_use]
+    pub const fn body(&self) -> &FontRole {
+        &self.sans
+    }
+
+    /// Mono face for code and the composer: `--font-mono`, `JetBrains Mono`
+    /// (`theme.css:315`).
+    #[must_use]
+    pub const fn code(&self) -> &FontRole {
+        &self.mono
+    }
 }
 
 /// Spacing built on the legacy 4 px base unit (Tailwind's `--spacing`
