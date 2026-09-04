@@ -32,5 +32,9 @@ name = "input_state"
 path = "../../tests/ui/input_state.rs"
 
 [[test]]
+name = "input_group"
+path = "../../tests/ui/input_group.rs"
+
+[[test]]
 name = "list_row"
 path = "../../tests/ui/list_row.rs"
