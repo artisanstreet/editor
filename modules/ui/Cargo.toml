@@ -38,3 +38,7 @@ path = "../../tests/ui/input_group.rs"
 [[test]]
 name = "list_row"
 path = "../../tests/ui/list_row.rs"
+
+[[test]]
+name = "dropdown_menu"
+path = "../../tests/ui/dropdown_menu.rs"
