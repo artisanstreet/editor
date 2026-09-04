@@ -4091,6 +4091,12 @@ pub fn run() -> ExitCode {
     let application_view = Rc::new(RefCell::new(None));
 
     Application::new().run(move |cx: &mut App| {
+        // Register the vendored legacy typefaces before any window opens;
+        // on failure keep running on system faces (typed, not swallowed).
+        if let Err(error) = artisan_ui::fonts::register_bundled_fonts(cx) {
+            eprintln!("bundled font registration failed, using system faces: {error}");
+        }
+
         bind_native_actions(cx);
 
         let service_for_action = service.clone();
