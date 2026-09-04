@@ -4090,62 +4090,64 @@ pub fn run() -> ExitCode {
     let launch_flag = Rc::clone(&launched);
     let application_view = Rc::new(RefCell::new(None));
 
-    Application::new().run(move |cx: &mut App| {
-        // Register the vendored legacy typefaces before any window opens;
-        // on failure keep running on system faces (typed, not swallowed).
-        if let Err(error) = artisan_ui::fonts::register_bundled_fonts(cx) {
-            eprintln!("bundled font registration failed, using system faces: {error}");
-        }
-
-        bind_native_actions(cx);
-
-        let service_for_action = service.clone();
-        let shutdown_for_action = Arc::clone(&shutdown_started);
-        let view_for_action = Rc::clone(&application_view);
-        cx.on_action(move |_: &Quit, cx| {
-            prepare_application_shutdown(&view_for_action, cx);
-            request_app_shutdown(cx, service_for_action.clone(), &shutdown_for_action);
-        });
-
-        let service_for_close = service.clone();
-        let shutdown_for_close = Arc::clone(&shutdown_started);
-        let view_for_close = Rc::clone(&application_view);
-        cx.on_window_closed(move |cx| {
-            if cx.windows().is_empty() {
-                prepare_application_shutdown(&view_for_close, cx);
-                request_app_shutdown(cx, service_for_close.clone(), &shutdown_for_close);
+    Application::new()
+        .with_assets(artisan_ui::asset_seam::CatalogAssetSource)
+        .run(move |cx: &mut App| {
+            // Register the vendored legacy typefaces before any window opens;
+            // on failure keep running on system faces (typed, not swallowed).
+            if let Err(error) = artisan_ui::fonts::register_bundled_fonts(cx) {
+                eprintln!("bundled font registration failed, using system faces: {error}");
             }
-        })
-        .detach();
 
-        let bounds = Bounds::centered(None, size(px(SURFACE_WIDTH), px(SURFACE_HEIGHT)), cx);
-        let service_for_view = service.clone();
-        let view_for_registration = Rc::clone(&application_view);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(WINDOW_TITLE.into()),
+            bind_native_actions(cx);
+
+            let service_for_action = service.clone();
+            let shutdown_for_action = Arc::clone(&shutdown_started);
+            let view_for_action = Rc::clone(&application_view);
+            cx.on_action(move |_: &Quit, cx| {
+                prepare_application_shutdown(&view_for_action, cx);
+                request_app_shutdown(cx, service_for_action.clone(), &shutdown_for_action);
+            });
+
+            let service_for_close = service.clone();
+            let shutdown_for_close = Arc::clone(&shutdown_started);
+            let view_for_close = Rc::clone(&application_view);
+            cx.on_window_closed(move |cx| {
+                if cx.windows().is_empty() {
+                    prepare_application_shutdown(&view_for_close, cx);
+                    request_app_shutdown(cx, service_for_close.clone(), &shutdown_for_close);
+                }
+            })
+            .detach();
+
+            let bounds = Bounds::centered(None, size(px(SURFACE_WIDTH), px(SURFACE_HEIGHT)), cx);
+            let service_for_view = service.clone();
+            let view_for_registration = Rc::clone(&application_view);
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(WINDOW_TITLE.into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let view =
-                    cx.new(|view_cx| NativeApplication::new(service_for_view, window, view_cx));
-                view_for_registration.borrow_mut().replace(view.clone());
-                view.update(cx, NativeApplication::start_polling);
-                view
-            },
-        );
+                },
+                move |window, cx| {
+                    let view =
+                        cx.new(|view_cx| NativeApplication::new(service_for_view, window, view_cx));
+                    view_for_registration.borrow_mut().replace(view.clone());
+                    view.update(cx, NativeApplication::start_polling);
+                    view
+                },
+            );
 
-        if opened.is_ok() {
-            launch_flag.set(true);
-            cx.activate(true);
-        } else {
-            request_app_shutdown(cx, service.clone(), &shutdown_started);
-        }
-    });
+            if opened.is_ok() {
+                launch_flag.set(true);
+                cx.activate(true);
+            } else {
+                request_app_shutdown(cx, service.clone(), &shutdown_started);
+            }
+        });
 
     if launched.get() {
         ExitCode::SUCCESS
