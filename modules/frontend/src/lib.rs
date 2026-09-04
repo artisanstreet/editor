@@ -77,6 +77,7 @@ pub mod latest_request_gate;
 pub mod machine_switch;
 pub mod markdown_fence_policy;
 pub mod markdown_language_registry_policy;
+pub mod markdown_streaming_words;
 pub mod markdown_test_parser_policy;
 pub mod markdown_warmup_policy;
 pub mod marketplace_fixture_policy;
