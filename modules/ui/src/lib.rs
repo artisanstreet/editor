@@ -24,6 +24,7 @@ pub mod list_row;
 pub mod markdown;
 pub mod markdown_renderer;
 pub mod motion;
+pub mod native_select;
 pub mod popover;
 pub mod progress;
 pub mod scroll_area;
