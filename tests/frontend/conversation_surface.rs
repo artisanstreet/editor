@@ -822,6 +822,10 @@ fn viewport_observations_deduplicate_and_retry_after_queue_backpressure(cx: &mut
 
 #[gpui::test]
 fn markdown_message_body_mounts_heading_paragraph_inline_code_and_fence(cx: &mut TestAppContext) {
+    // User bubbles render plain paragraphs (parity with
+    // conversation-message.svelte): no markdown subtree mounts there.
+    const USER_ITEM: &str = "artisan-conversation-surface-turn-turn_a-block-user-user";
+    const USER_BODY: &str = "artisan-conversation-surface-turn-turn_a-block-user-user-body";
     const USER_MARKDOWN: &str = "artisan-conversation-surface-turn-turn_a-block-user-user-markdown";
     const USER_HEADING: &str =
         "artisan-conversation-surface-turn-turn_a-block-user-user-markdown-block-0";
@@ -872,11 +876,20 @@ fn markdown_message_body_mounts_heading_paragraph_inline_code_and_fence(cx: &mut
     cx.simulate_resize(size(px(720.0), px(640.0)));
     cx.run_until_parked();
 
+    // Plain user paragraph mounts visibly; no markdown subtree exists there.
+    for selector in [USER_ITEM, USER_BODY] {
+        let bounds = cx
+            .debug_bounds(selector)
+            .expect("user bubble structure must paint bounds");
+        assert!(bounds.size.height > px(0.0), "{selector} must be visible");
+    }
+    for selector in [USER_MARKDOWN, USER_HEADING, USER_PARAGRAPH, USER_CODE] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "user bubbles must not mount a markdown subtree: {selector}"
+        );
+    }
     for selector in [
-        USER_MARKDOWN,
-        USER_HEADING,
-        USER_PARAGRAPH,
-        USER_CODE,
         ASSISTANT_MARKDOWN,
         ASSISTANT_HEADING,
         ASSISTANT_PARAGRAPH,
@@ -947,26 +960,35 @@ fn markdown_open_unknown_fence_and_html_are_inert(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(720.0), px(480.0)));
     cx.run_until_parked();
 
-    for selector in [OPEN_MARKDOWN, UNKNOWN_MARKDOWN, HTML_MARKDOWN, HTML_BLOCK] {
-        assert!(
-            cx.debug_bounds(selector).is_some(),
-            "inert source must remain mounted at {selector}"
-        );
-    }
-    for selector in [OPEN_CODE, UNKNOWN_CODE, HTML_CODE] {
+    // User bubbles render plain paragraphs: no markdown or highlighted
+    // code selectors mount there at all.
+    for selector in [
+        OPEN_MARKDOWN,
+        HTML_MARKDOWN,
+        HTML_BLOCK,
+        OPEN_CODE,
+        HTML_CODE,
+    ] {
         assert!(
             cx.debug_bounds(selector).is_none(),
-            "inert source must not expose a highlighted code selector: {selector}"
+            "user bubbles must not mount markdown selectors: {selector}"
         );
     }
+    assert!(
+        cx.debug_bounds(UNKNOWN_MARKDOWN).is_some(),
+        "assistant markdown must remain mounted"
+    );
+    assert!(
+        cx.debug_bounds(UNKNOWN_CODE).is_none(),
+        "inert source must not expose a highlighted code selector"
+    );
     let _ = drain_surface_actions(&surface, cx);
     cx.update(|_, app| assert!(surface.read(app).pending_actions().is_empty()));
 }
 
 #[gpui::test]
 fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppContext) {
-    const OLD_MARKDOWN: &str =
-        "artisan-conversation-surface-turn-turn_a-block-user-old-user-markdown";
+    const OLD_BODY: &str = "artisan-conversation-surface-turn-turn_a-block-user-old-user-body";
     const NEW_MARKDOWN: &str =
         "artisan-conversation-surface-turn-turn_a-block-assistant-new-assistant-markdown";
     const DISCLOSURE_TRIGGER: &str = "artisan-conversation-surface-turn-turn_a-block-change-replacement-change-disclosure-trigger";
@@ -977,13 +999,13 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     cx.simulate_resize(size(px(720.0), px(480.0)));
     cx.run_until_parked();
     let _ = drain_surface_actions(&surface, cx);
-    assert!(cx.debug_bounds(OLD_MARKDOWN).is_some());
+    assert!(cx.debug_bounds(OLD_BODY).is_some());
 
     let mut replacement_app = (*cx).clone();
     let (_, replacement_cx) = replacement_app.add_window_view(|_, _| SurfaceWindowHost {
         surface: surface.clone(),
     });
-    assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_some());
+    assert!(replacement_cx.debug_bounds(OLD_BODY).is_some());
 
     cx.update(|_, app| {
         surface.update(app, |surface, surface_cx| {
@@ -1002,7 +1024,7 @@ fn markdown_scene_replacement_preserves_authority_and_actions(cx: &mut TestAppCo
     // fresh test window painted the old scene once before replacement, so its
     // clean alternate frame is an honest current-frame retirement probe for
     // the same authoritative surface entity.
-    assert!(replacement_cx.debug_bounds(OLD_MARKDOWN).is_none());
+    assert!(replacement_cx.debug_bounds(OLD_BODY).is_none());
     assert!(replacement_cx.debug_bounds(NEW_MARKDOWN).is_some());
 
     let trigger = cx
