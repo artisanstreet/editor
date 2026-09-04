@@ -54,6 +54,7 @@ rust_library(
         "src/editor_diagnostic_mapping.rs",
         "src/editor_language.rs",
         "src/editor_route_gate_policy.rs",
+        "src/editor_route_screen.rs",
         "src/editor_view_state_policy.rs",
         "src/editor_workspace_identity.rs",
         "src/engine_section_indicator_policy.rs",

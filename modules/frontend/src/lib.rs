@@ -56,6 +56,7 @@ pub mod dropdown_highlight_settle;
 pub mod editor_diagnostic_mapping;
 pub mod editor_language;
 pub mod editor_route_gate_policy;
+pub mod editor_route_screen;
 pub mod editor_view_state_policy;
 pub mod editor_workspace_identity;
 pub mod engine_section_indicator_policy;
