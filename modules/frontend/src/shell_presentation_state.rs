@@ -106,11 +106,21 @@ impl ShellPresentationState {
     /// Decoding accepts the three required fields in any object order, but it
     /// does not coerce values: versions must be the integer `1`, and both
     /// collapsed fields must be JSON booleans.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShellPresentationDecodeError`] when the input is not a
+    /// version-1 shell presentation JSON object.
     pub fn from_json(input: &str) -> Result<Self, ShellPresentationDecodeError> {
         decode_shell_presentation_state(input)
     }
 
     /// Alias for [`Self::from_json`] at a deserializer boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShellPresentationDecodeError`] when the input is not a
+    /// version-1 shell presentation JSON object.
     pub fn deserialize(input: &str) -> Result<Self, ShellPresentationDecodeError> {
         Self::from_json(input)
     }
@@ -152,6 +162,11 @@ pub enum ShellPresentationDecodeError {
 }
 
 /// Decodes a serialized shell presentation state without performing I/O.
+///
+/// # Errors
+///
+/// Returns [`ShellPresentationDecodeError`] when the input is not a
+/// version-1 shell presentation JSON object.
 pub fn decode_shell_presentation_state(
     input: &str,
 ) -> Result<ShellPresentationState, ShellPresentationDecodeError> {

@@ -132,6 +132,7 @@ pub mod shell;
 pub mod shell_command;
 pub mod shell_layout;
 pub mod shell_presentation_state;
+pub mod shell_rail_model;
 pub mod speed_presentation;
 pub mod steering_pending_lip;
 pub mod subscription_projection;
