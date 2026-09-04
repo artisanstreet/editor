@@ -42,3 +42,7 @@ path = "../../tests/ui/list_row.rs"
 [[test]]
 name = "dropdown_menu"
 path = "../../tests/ui/dropdown_menu.rs"
+
+[[test]]
+name = "textarea"
+path = "../../tests/ui/textarea.rs"
