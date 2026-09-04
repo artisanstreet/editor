@@ -113,6 +113,7 @@ pub mod project_picker;
 pub mod proof;
 pub mod reader_attention;
 pub mod reasoning_display;
+pub mod relative_time;
 pub mod repository_mark;
 pub mod rich_link_url;
 pub mod route_navigation;

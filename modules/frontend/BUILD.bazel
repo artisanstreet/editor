@@ -112,6 +112,7 @@ rust_library(
         "src/project_picker.rs",
         "src/reader_attention.rs",
         "src/reasoning_display.rs",
+        "src/relative_time.rs",
         "src/repository_mark.rs",
         "src/rich_link_url.rs",
         "src/route_navigation.rs",

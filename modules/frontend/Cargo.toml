@@ -400,6 +400,10 @@ name = "reader_attention"
 path = "../../tests/frontend/reader_attention.rs"
 
 [[test]]
+name = "relative_time"
+path = "../../tests/frontend/relative_time.rs"
+
+[[test]]
 name = "repository_mark"
 path = "../../tests/frontend/repository_mark.rs"
 
