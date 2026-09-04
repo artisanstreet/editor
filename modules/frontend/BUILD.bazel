@@ -76,6 +76,7 @@ rust_library(
         "src/machine_switch.rs",
         "src/markdown_fence_policy.rs",
         "src/markdown_language_registry_policy.rs",
+        "src/markdown_streaming_words.rs",
         "src/markdown_test_parser_policy.rs",
         "src/markdown_warmup_policy.rs",
         "src/marketplace_fixture_policy.rs",
