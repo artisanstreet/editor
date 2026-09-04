@@ -5,10 +5,13 @@
 //! [`artisan_ui::badge`], [`artisan_ui::separator`]) and tokens from
 //! [`artisan_ui::theme`]; there is no private palette or second card design.
 
+use artisan_assets::AssetId;
+use artisan_ui::asset_seam::asset_glyph;
 use artisan_ui::badge::{BadgeStyle, outline_badge};
 use artisan_ui::card::{CardStyle, compact_card};
+use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::separator::{SeparatorAxis, separator};
-use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
 use gpui::{
     AnyElement, Div, FontWeight, Hsla, Pixels, div, prelude::InteractiveElement as _,
     prelude::ParentElement as _, prelude::Styled as _, px,
@@ -210,6 +213,10 @@ pub const LEGACY_RAIL_PILL_PADDING_PX: f32 = 4.0;
 /// 32 px.
 pub const LEGACY_RAIL_BUTTON_PX: f32 = 32.0;
 
+/// Brand-mark edge: legacy `size-7` on the rail logo swap
+/// (`sectioned-panel.svelte:205-218`) — 28 px inside the 32 px action.
+pub const LEGACY_RAIL_BRAND_MARK_PX: f32 = 28.0;
+
 /// Rail divider height: the literal `h-[2px]` hairline pair
 /// (`sectioned-panel.svelte:230`) — 2 px total.
 pub const LEGACY_RAIL_DIVIDER_PX: f32 = 2.0;
@@ -243,6 +250,12 @@ pub const LEGACY_SHELL_CONTENT_SELECTOR: &str = "legacy-shell-content";
 pub const LEGACY_SHELL_HEADER_SELECTOR: &str = "legacy-shell-header";
 /// Debug selector for the inspector surface.
 pub const LEGACY_SHELL_INSPECTOR_SELECTOR: &str = "legacy-shell-inspector";
+/// Debug selector for the rail brand action.
+pub const LEGACY_SHELL_RAIL_BRAND_SELECTOR: &str = "legacy-shell-rail-brand";
+/// Debug selector for the rail marketplace button.
+pub const LEGACY_SHELL_RAIL_MARKETPLACE_SELECTOR: &str = "legacy-shell-rail-marketplace";
+/// Debug selector for the rail account avatar.
+pub const LEGACY_SHELL_RAIL_AVATAR_SELECTOR: &str = "legacy-shell-rail-avatar";
 /// Debug selector for the pinned working-threads card.
 pub const LEGACY_SHELL_RAIL_PINNED_SELECTOR: &str = "legacy-shell-rail-pinned";
 /// Debug selector for the settled history list.
@@ -327,11 +340,12 @@ impl<'a> RailIdentity<'a> {
     }
 }
 
-/// Returns the one-character monogram painted in the rail avatar.
+/// Returns the one-character monogram painted only when the rail has no
+/// identity to seed the gradient tile with.
 ///
-/// The legacy avatar is a deterministic gradient SVG over the hostname; the
-/// native rail keeps the initial-letter reading with a flat fill until an
-/// asset seam can serve the generated artwork.
+/// The legacy avatar never shows initials (it is the dithered gradient tile
+/// below); this stays as the signed-out fallback reading, matching
+/// [`RAIL_IDENTITY_FALLBACK_LABEL`].
 #[must_use]
 pub fn rail_identity_monogram(identity: RailIdentity<'_>) -> String {
     let source = identity
@@ -342,6 +356,205 @@ pub fn rail_identity_monogram(identity: RailIdentity<'_>) -> String {
         Some(first) => first.to_uppercase().collect(),
         None => String::from(RAIL_IDENTITY_FALLBACK_LABEL),
     }
+}
+
+/// Cells across the gradient tile: 16 lands on 2 px cells at the 32 px avatar
+/// (`gradient-avatar.ts:54`).
+const GRADIENT_AVATAR_CELLS: u8 = 16;
+
+/// vsx's cap short of full density so the lit end keeps its grain instead of
+/// flattening into a solid block (`gradient-avatar.ts:61`).
+const GRADIENT_AVATAR_MAX_DENSITY: f64 = 0.9;
+
+/// vsx's threshold matrix (`gradient-avatar.ts:46-51`); each cell is normalized
+/// to mid-step at the call site, exactly like the legacy module.
+const GRADIENT_AVATAR_BAYER_4: [[u8; 4]; 4] =
+    [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// Tailwind's chromatic families only, as opaque `oklch` source colors
+/// transcribed verbatim from `gradient-avatar.ts:23-41` (the neutrals read as
+/// a disabled avatar, so legacy excludes them). Each pair ramps the hue's 600
+/// into its 400 toward the top-right corner.
+const GRADIENT_AVATAR_PALETTE: [(Oklch, Oklch); 17] = [
+    (
+        Oklch::new(0.577, 0.245, 27.325),
+        Oklch::new(0.704, 0.191, 22.216),
+    ), // red
+    (
+        Oklch::new(0.646, 0.222, 41.116),
+        Oklch::new(0.75, 0.183, 55.934),
+    ), // orange
+    (
+        Oklch::new(0.666, 0.179, 58.318),
+        Oklch::new(0.828, 0.189, 84.429),
+    ), // amber
+    (
+        Oklch::new(0.681, 0.162, 75.834),
+        Oklch::new(0.852, 0.199, 91.936),
+    ), // yellow
+    (
+        Oklch::new(0.648, 0.2, 131.684),
+        Oklch::new(0.841, 0.238, 128.85),
+    ), // lime
+    (
+        Oklch::new(0.627, 0.194, 149.214),
+        Oklch::new(0.792, 0.209, 151.711),
+    ), // green
+    (
+        Oklch::new(0.596, 0.145, 163.225),
+        Oklch::new(0.765, 0.177, 163.223),
+    ), // emerald
+    (
+        Oklch::new(0.6, 0.118, 184.704),
+        Oklch::new(0.777, 0.152, 181.912),
+    ), // teal
+    (
+        Oklch::new(0.609, 0.126, 221.723),
+        Oklch::new(0.789, 0.154, 211.53),
+    ), // cyan
+    (
+        Oklch::new(0.588, 0.158, 241.966),
+        Oklch::new(0.746, 0.16, 232.661),
+    ), // sky
+    (
+        Oklch::new(0.546, 0.245, 262.881),
+        Oklch::new(0.707, 0.165, 254.624),
+    ), // blue
+    (
+        Oklch::new(0.511, 0.262, 276.966),
+        Oklch::new(0.673, 0.182, 276.935),
+    ), // indigo
+    (
+        Oklch::new(0.541, 0.281, 293.009),
+        Oklch::new(0.702, 0.183, 293.541),
+    ), // violet
+    (
+        Oklch::new(0.558, 0.288, 302.321),
+        Oklch::new(0.714, 0.203, 305.504),
+    ), // purple
+    (
+        Oklch::new(0.591, 0.293, 322.896),
+        Oklch::new(0.74, 0.238, 322.16),
+    ), // fuchsia
+    (
+        Oklch::new(0.592, 0.249, 0.584),
+        Oklch::new(0.718, 0.202, 349.761),
+    ), // pink
+    (
+        Oklch::new(0.586, 0.253, 17.585),
+        Oklch::new(0.712, 0.194, 13.428),
+    ), // rose
+];
+
+/// FNV-1a over UTF-16 code units, matching the legacy `SeedHash`
+/// (`gradient-avatar.ts:70-77`): the avatar only needs a stable, well-spread
+/// bucket per seed, and iterating code units keeps a host's color identical
+/// between runtimes.
+fn gradient_avatar_seed_hash(seed: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    let mut units = [0_u16; 2];
+    for ch in seed.chars() {
+        for unit in ch.encode_utf16(&mut units) {
+            hash ^= u32::from(*unit);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+    }
+    hash
+}
+
+/// The palette bucket a seed resolves to (`GradientAvatarColorFor`).
+fn gradient_avatar_bucket(seed: &str) -> usize {
+    let span = GRADIENT_AVATAR_PALETTE.len() as u64;
+    let index = u64::from(gradient_avatar_seed_hash(seed)) % span;
+    usize::try_from(index).unwrap_or(0)
+}
+
+/// The identity seed for the gradient tile: the machine, not the person — one
+/// host keeps one avatar whoever is signed in (`sidebar-identity.svelte:54`).
+/// `None` means the rail has no identity at all (legacy renders its generic
+/// fallback then, not a tile).
+fn gradient_avatar_seed(identity: RailIdentity<'_>) -> Option<&str> {
+    identity
+        .hostname
+        .filter(|host| !host.is_empty())
+        .or_else(|| identity.display_name.filter(|name| !name.is_empty()))
+}
+
+/// The tile's base and lit paints for one seed, through the shared
+/// `oklch`→paint pipeline.
+fn gradient_avatar_paints(seed: &str) -> (Hsla, Hsla) {
+    let (base, lit) = GRADIENT_AVATAR_PALETTE[gradient_avatar_bucket(seed)];
+    (base.to_paint(), lit.to_paint())
+}
+
+/// Whether one tile cell paints lit: progress along the bottom-left →
+/// top-right diagonal against the Bayer threshold (`gradient-avatar.ts:91-116`).
+fn gradient_avatar_cell_lit(x: u8, y: u8) -> bool {
+    if x >= GRADIENT_AVATAR_CELLS {
+        return false;
+    }
+    let horizontal_progress = (f64::from(x) + 0.5) / f64::from(GRADIENT_AVATAR_CELLS);
+    let vertical_progress = 1.0 - (f64::from(y) + 0.5) / f64::from(GRADIENT_AVATAR_CELLS);
+    // Inputs are multiples of 1/32, so the halved sum is exact in binary and
+    // matches the legacy `(a + b) / 2` bit-for-bit without overflow risk.
+    let density = f64::midpoint(horizontal_progress, vertical_progress)
+        .clamp(0.0, 1.0)
+        .min(GRADIENT_AVATAR_MAX_DENSITY);
+    // `x` is below `GRADIENT_AVATAR_CELLS` (16), so the masked indices stay in
+    // the 4-wide matrix without a bounds check.
+    let threshold =
+        (f64::from(GRADIENT_AVATAR_BAYER_4[usize::from(y & 3)][usize::from(x & 3)]) + 0.5) / 16.0;
+    density > threshold
+}
+
+/// Returns the account avatar: the seeded dithered gradient tile from
+/// `gradient-avatar.ts`, clipped round at the legacy 40 px edge.
+///
+/// The tile fills its box and stays square; the caller clips it round (legacy
+/// `Avatar` root). With no identity at all the rail keeps the monogram
+/// fallback instead of inventing a host color.
+fn gradient_avatar(theme: &ArtisanTheme, identity: RailIdentity<'_>) -> Div {
+    let Some(seed) = gradient_avatar_seed(identity) else {
+        return div()
+            .size(px(LEGACY_IDENTITY_AVATAR_PX))
+            .rounded_full()
+            .bg(theme.colors.muted.to_paint())
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(theme.colors.foreground.to_paint())
+            .text_size(theme.typography.control_text)
+            .font_weight(FontWeight::MEDIUM)
+            .debug_selector(|| LEGACY_SHELL_RAIL_AVATAR_SELECTOR.to_string())
+            .child(rail_identity_monogram(identity));
+    };
+    let (base, lit) = gradient_avatar_paints(seed);
+    let cell_edge = px(LEGACY_IDENTITY_AVATAR_PX / f32::from(GRADIENT_AVATAR_CELLS));
+    let mut tile = div()
+        .size(px(LEGACY_IDENTITY_AVATAR_PX))
+        .rounded_full()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .bg(base)
+        .debug_selector(|| LEGACY_SHELL_RAIL_AVATAR_SELECTOR.to_string());
+    for y in 0..GRADIENT_AVATAR_CELLS {
+        let mut row = div().flex().flex_row().w_full().h(cell_edge);
+        for x in 0..GRADIENT_AVATAR_CELLS {
+            row = row.child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .bg(if gradient_avatar_cell_lit(x, y) {
+                        lit
+                    } else {
+                        base
+                    }),
+            );
+        }
+        tile = tile.child(row);
+    }
+    tile
 }
 
 /// Returns the `data-prose-width` token name carried by the frame.
@@ -461,10 +674,15 @@ pub fn shell_title_bar(
 /// Mirrors `sectioned-panel.svelte:164-303`: the `w-14` column, the top pill
 /// (`w-10 rounded-full`) holding the brand action and the marketplace button
 /// split by the 2 px hairline pair, and the account avatar pinned to the
-/// bottom. The brand PNG/SVG artwork and Tabler glyphs live in
-/// `modules/assets`, which this packet must not touch, so the buttons render
-/// as token-painted discs; the dropdown hover pill, command menu, surface
-/// cycle, and account menu are behavior owned by later packets.
+/// bottom. The brand paints the vendored `artisan.logo-gradient` artwork bound
+/// to this site by the asset manifest (`shell.logo-gradient`); the rest-state
+/// jaw-shaded monogram PNG has no catalog entry, so the gradient face stands
+/// in and the PNG is reported as missing rather than vendored here. The
+/// marketplace paints `tabler.shopping-bag` in the legacy muted tone. The
+/// avatar is the data-driven dithered gradient tile seeded by the hostname
+/// (manifest `identity.gradient-avatar` carries no vendored bytes by design).
+/// The dropdown hover pill, command menu, surface cycle, and account menu are
+/// behavior owned by later packets.
 #[must_use]
 pub fn shell_rail_column(theme: ArtisanTheme, identity: RailIdentity<'_>) -> Div {
     let style = LegacyShellStyle::resolve(theme);
@@ -473,22 +691,25 @@ pub fn shell_rail_column(theme: ArtisanTheme, identity: RailIdentity<'_>) -> Div
     let brand = div()
         .size(px(LEGACY_RAIL_BUTTON_PX))
         .rounded_full()
-        .bg(theme.colors.primary.to_paint())
+        .overflow_hidden()
         .flex()
         .items_center()
         .justify_center()
-        .text_color(theme.colors.primary_foreground.to_paint())
-        .text_size(theme.typography.control_text)
-        .child("A");
+        .debug_selector(|| LEGACY_SHELL_RAIL_BRAND_SELECTOR.to_string())
+        .child(asset_glyph(AssetId::ARTISAN_LOGO_GRADIENT).size(px(LEGACY_RAIL_BRAND_MARK_PX)));
     let marketplace = div()
         .size(px(LEGACY_RAIL_BUTTON_PX))
         .rounded_full()
         .flex()
         .items_center()
         .justify_center()
-        .text_color(theme.colors.muted_foreground.to_paint())
-        .text_size(theme.typography.control_text)
-        .child("M");
+        .debug_selector(|| LEGACY_SHELL_RAIL_MARKETPLACE_SELECTOR.to_string())
+        .child(icon(IconStyle::resolve(
+            theme,
+            AssetId::TABLER_SHOPPING_BAG,
+            IconSize::Default,
+            IconTint::Muted,
+        )));
     let pill = div()
         .w(px(LEGACY_RAIL_PILL_WIDTH_PX))
         .rounded_full()
@@ -508,17 +729,7 @@ pub fn shell_rail_column(theme: ArtisanTheme, identity: RailIdentity<'_>) -> Div
         )
         .child(marketplace);
 
-    let avatar = div()
-        .size(px(LEGACY_IDENTITY_AVATAR_PX))
-        .rounded_full()
-        .bg(theme.colors.muted.to_paint())
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(theme.colors.foreground.to_paint())
-        .text_size(theme.typography.control_text)
-        .font_weight(FontWeight::MEDIUM)
-        .child(rail_identity_monogram(identity));
+    let avatar = gradient_avatar(&theme, identity);
 
     div()
         .relative()
@@ -934,6 +1145,7 @@ pub fn legacy_shell_frame(props: LegacyShellProps<'_>, content: AnyElement) -> D
 #[cfg(test)]
 mod legacy_shell_tests {
     use super::*;
+    use gpui::{Context, IntoElement as _, Render, TestAppContext, Window};
 
     #[test]
     fn monogram_prefers_display_name_then_hostname() {
@@ -968,6 +1180,64 @@ mod legacy_shell_tests {
     }
 
     #[test]
+    fn gradient_seed_hash_matches_fnv1a_vectors() {
+        assert_eq!(gradient_avatar_seed_hash(""), 0x811c_9dc5);
+        assert_eq!(gradient_avatar_seed_hash("foobar"), 0xbf9c_f968);
+    }
+
+    #[test]
+    fn gradient_bucket_stays_inside_the_palette() {
+        for seed in ["", "forge", "sander", "host-01", "☃"] {
+            assert!(gradient_avatar_bucket(seed) < GRADIENT_AVATAR_PALETTE.len());
+        }
+        assert_eq!(
+            gradient_avatar_bucket("forge"),
+            gradient_avatar_bucket("forge")
+        );
+    }
+
+    #[test]
+    fn gradient_palette_matches_the_theme_tokens() {
+        // Independent pin: several transcribed pairs back semantic theme
+        // tokens transcribed by an earlier packet from the same legacy
+        // sources, so both transcriptions must agree exactly.
+        let light = ArtisanTheme::for_mode(ThemeMode::Light);
+        let dark = ArtisanTheme::for_mode(ThemeMode::Dark);
+        assert_eq!(GRADIENT_AVATAR_PALETTE[0].0, light.colors.destructive);
+        assert_eq!(GRADIENT_AVATAR_PALETTE[0].1, dark.colors.destructive);
+        assert_eq!(GRADIENT_AVATAR_PALETTE[13].0, light.colors.question_from);
+        assert_eq!(GRADIENT_AVATAR_PALETTE[13].1, light.colors.question_to);
+        assert_eq!(GRADIENT_AVATAR_PALETTE[3].0, light.colors.banner_warning);
+    }
+
+    #[test]
+    fn gradient_dither_runs_dark_to_light_on_the_diagonal() {
+        // Bottom-left stays the 600 base; top-right lights up; the middle is
+        // past the Bayer threshold, matching the documented ramp direction.
+        assert!(!gradient_avatar_cell_lit(0, 15));
+        assert!(gradient_avatar_cell_lit(15, 0));
+        assert!(gradient_avatar_cell_lit(8, 8));
+        assert!(!gradient_avatar_cell_lit(16, 0));
+    }
+
+    #[test]
+    fn gradient_seed_prefers_the_machine_over_the_person() {
+        assert_eq!(
+            gradient_avatar_seed(RailIdentity::new(Some("sander"), Some("forge"))),
+            Some("forge")
+        );
+        assert_eq!(
+            gradient_avatar_seed(RailIdentity::new(Some("sander"), None)),
+            Some("sander")
+        );
+        assert_eq!(
+            gradient_avatar_seed(RailIdentity::new(Some(""), Some(""))),
+            None
+        );
+        assert_eq!(gradient_avatar_seed(RailIdentity::new(None, None)), None);
+    }
+
+    #[test]
     fn trailing_spacer_replays_inspector_column_plus_gap() {
         assert_eq!(
             title_bar_trailing_spacer_px(None),
@@ -977,5 +1247,72 @@ mod legacy_shell_tests {
             title_bar_trailing_spacer_px(Some(256.0)),
             256.0 + LEGACY_INSPECTOR_TITLE_GAP_PX
         );
+    }
+
+    /// Minimal host mounting the rail column so the paint tree can be
+    /// inspected: the column is a bare recipe, not a view.
+    struct RailProbe {
+        theme: ArtisanTheme,
+        identity: RailIdentity<'static>,
+    }
+
+    impl Render for RailProbe {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> impl gpui::IntoElement {
+            shell_rail_column(self.theme, self.identity)
+        }
+    }
+
+    /// The rail lays out its brand action, marketplace button, and account
+    /// avatar for both the signed-out rail and a seeded identity: every
+    /// placeholder this packet replaces must be present in the paint tree at
+    /// its legacy geometry (32 px actions, 40 px avatar pinned 8 px above
+    /// the rail's bottom edge).
+    #[gpui::test]
+    fn rail_lays_out_brand_marketplace_and_avatar(cx: &mut TestAppContext) {
+        for identity in [
+            RailIdentity::new(None, None),
+            RailIdentity::new(Some("sander"), Some("forge")),
+        ] {
+            let (_view, cx) = cx.add_window_view(|_, _| RailProbe {
+                theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                identity,
+            });
+            cx.run_until_parked();
+            let column = cx
+                .debug_bounds(LEGACY_SHELL_RAIL_COLUMN_SELECTOR)
+                .expect("rail column lays out");
+            let brand = cx
+                .debug_bounds(LEGACY_SHELL_RAIL_BRAND_SELECTOR)
+                .expect("brand action lays out");
+            let marketplace = cx
+                .debug_bounds(LEGACY_SHELL_RAIL_MARKETPLACE_SELECTOR)
+                .expect("marketplace button lays out");
+            let avatar = cx
+                .debug_bounds(LEGACY_SHELL_RAIL_AVATAR_SELECTOR)
+                .expect("account avatar lays out");
+            for (edge, actual) in [
+                (LEGACY_RAIL_BUTTON_PX, f32::from(brand.size.width)),
+                (LEGACY_RAIL_BUTTON_PX, f32::from(brand.size.height)),
+                (LEGACY_RAIL_BUTTON_PX, f32::from(marketplace.size.width)),
+                (LEGACY_RAIL_BUTTON_PX, f32::from(marketplace.size.height)),
+                (LEGACY_IDENTITY_AVATAR_PX, f32::from(avatar.size.width)),
+                (LEGACY_IDENTITY_AVATAR_PX, f32::from(avatar.size.height)),
+            ] {
+                assert!(
+                    (actual - edge).abs() < 0.5,
+                    "expected {edge}px, laid out {actual}px"
+                );
+            }
+            let column_bottom = f32::from(column.origin.y) + f32::from(column.size.height);
+            let avatar_bottom = f32::from(avatar.origin.y) + f32::from(avatar.size.height);
+            assert!(
+                (avatar_bottom - (column_bottom - LEGACY_RAIL_CLUSTER_INSET_PX)).abs() < 1.0,
+                "avatar bottom {avatar_bottom}px should sit {LEGACY_RAIL_CLUSTER_INSET_PX}px above the column bottom {column_bottom}px"
+            );
+        }
     }
 }
