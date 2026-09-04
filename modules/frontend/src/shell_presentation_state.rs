@@ -1,17 +1,18 @@
-//! Pure durable-state policy for the native shell presentation preferences.
+//! Pure persistence policy for the shell presentation preferences.
 //!
-//! The legacy implementation stores one versioned record under a fixed key.
-//! This module keeps the record shape and the decisions around storage, while
-//! leaving encoding, persistence, and the browser/desktop storage adapter to a
-//! caller. A caller first classifies a read as a [`StorageReadObservation`],
-//! executes the returned [`StorageAction`], and feeds the write observation
-//! back to [`repair`] when the action was a repair write.
+//! The legacy implementation stores one versioned JSON record under a fixed
+//! key. This module keeps that record's shape, deterministic encoding, strict
+//! decoding, and storage-repair decisions without acquiring a store or doing
+//! any other I/O. A storage adapter classifies its read, executes the returned
+//! [`StorageAction`], and feeds the write result back to [`repair`].
 //!
 //! A malformed value and a read failure are intentionally indistinguishable to
-//! the caller of `Load`: both return the default and first try to write that
+//! the caller of `load`: both return the default and first try to write that
 //! default back. Only a failed repair write requests removal of the key. A
 //! normal save has no failure path in this policy; its storage error is
 //! deliberately absorbed, matching the legacy `Effect.result` boundary.
+
+#![allow(clippy::module_name_repetitions)]
 
 /// The only schema version understood by the shell presentation state.
 pub const SHELL_PRESENTATION_SCHEMA_VERSION: u8 = 1;
@@ -31,14 +32,75 @@ pub struct ShellPresentationState {
 }
 
 impl ShellPresentationState {
+    /// The schema version carried by every state created by [`Self::new`].
+    pub const VERSION: u8 = SHELL_PRESENTATION_SCHEMA_VERSION;
+
     /// Creates a version-1 state from the two durable presentation settings.
     #[must_use]
     pub const fn new(left_collapsed: bool, right_collapsed: bool) -> Self {
         Self {
-            version: SHELL_PRESENTATION_SCHEMA_VERSION,
+            version: Self::VERSION,
             left_collapsed,
             right_collapsed,
         }
+    }
+
+    /// Creates a state from decoded fields before version validation.
+    ///
+    /// Normal callers should use [`Self::new`]. This constructor is useful at
+    /// the adapter boundary and lets the load policy remain defensive when a
+    /// caller supplies a manually constructed unsupported version.
+    #[must_use]
+    pub const fn with_version(version: u8, left_collapsed: bool, right_collapsed: bool) -> Self {
+        Self {
+            version,
+            left_collapsed,
+            right_collapsed,
+        }
+    }
+
+    /// Returns whether this state belongs to the supported version-1 schema.
+    #[must_use]
+    pub const fn has_supported_version(self) -> bool {
+        self.version == Self::VERSION
+    }
+
+    /// Encodes this state as the canonical compact JSON object.
+    ///
+    /// Field order and boolean spelling are fixed to keep writes byte-for-byte
+    /// deterministic. The state type normally contains version `1`; this
+    /// method preserves the public `version` field so an adapter can observe a
+    /// manually constructed unsupported value before rejecting it.
+    #[must_use]
+    pub fn to_json(self) -> String {
+        let mut encoded = String::from("{\"version\":");
+        encoded.push_str(&self.version.to_string());
+        encoded.push_str(",\"left_collapsed\":");
+        encoded.push_str(boolean_literal(self.left_collapsed));
+        encoded.push_str(",\"right_collapsed\":");
+        encoded.push_str(boolean_literal(self.right_collapsed));
+        encoded.push('}');
+        encoded
+    }
+
+    /// Alias for [`Self::to_json`] at a serializer boundary.
+    #[must_use]
+    pub fn serialize(self) -> String {
+        self.to_json()
+    }
+
+    /// Decodes one canonical or whitespace-formatted JSON state object.
+    ///
+    /// Decoding accepts the three required fields in any object order, but it
+    /// does not coerce values: versions must be the integer `1`, and both
+    /// collapsed fields must be JSON booleans.
+    pub fn from_json(input: &str) -> Result<Self, ShellPresentationDecodeError> {
+        decode_shell_presentation_state(input)
+    }
+
+    /// Alias for [`Self::from_json`] at a deserializer boundary.
+    pub fn deserialize(input: &str) -> Result<Self, ShellPresentationDecodeError> {
+        Self::from_json(input)
     }
 }
 
@@ -49,6 +111,100 @@ pub const DEFAULT_SHELL_PRESENTATION_STATE: ShellPresentationState =
 impl Default for ShellPresentationState {
     fn default() -> Self {
         DEFAULT_SHELL_PRESENTATION_STATE
+    }
+}
+
+/// Why a serialized shell presentation value cannot be used.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellPresentationDecodeError {
+    /// The input is not a JSON object with valid JSON punctuation.
+    InvalidJson,
+    /// A required version field is absent.
+    MissingVersion,
+    /// A required left-collapsed field is absent.
+    MissingLeftCollapsed,
+    /// A required right-collapsed field is absent.
+    MissingRightCollapsed,
+    /// The version value is not a non-negative JSON integer.
+    InvalidVersion,
+    /// The version is an integer, but is not the supported version `1`.
+    UnsupportedVersion(u64),
+    /// The left-collapsed value is not a JSON boolean.
+    InvalidLeftCollapsed,
+    /// The right-collapsed value is not a JSON boolean.
+    InvalidRightCollapsed,
+    /// The object contains a field outside the exact persisted schema.
+    UnknownField,
+    /// A required schema field occurs more than once.
+    DuplicateField,
+}
+
+/// Decodes a serialized shell presentation state without performing I/O.
+pub fn decode_shell_presentation_state(
+    input: &str,
+) -> Result<ShellPresentationState, ShellPresentationDecodeError> {
+    let mut parser = JsonObjectParser::new(input);
+    parser.expect(b'{')?;
+
+    let mut version = None;
+    let mut left_collapsed = None;
+    let mut right_collapsed = None;
+
+    if !parser.consume(b'}') {
+        loop {
+            let field = parser.field()?;
+            parser.expect(b':')?;
+            match field {
+                JsonField::Version => {
+                    if version.is_some() {
+                        return Err(ShellPresentationDecodeError::DuplicateField);
+                    }
+                    version = Some(parser.version()?);
+                }
+                JsonField::LeftCollapsed => {
+                    if left_collapsed.is_some() {
+                        return Err(ShellPresentationDecodeError::DuplicateField);
+                    }
+                    left_collapsed =
+                        Some(parser.boolean(ShellPresentationDecodeError::InvalidLeftCollapsed)?);
+                }
+                JsonField::RightCollapsed => {
+                    if right_collapsed.is_some() {
+                        return Err(ShellPresentationDecodeError::DuplicateField);
+                    }
+                    right_collapsed =
+                        Some(parser.boolean(ShellPresentationDecodeError::InvalidRightCollapsed)?);
+                }
+            }
+
+            if parser.consume(b'}') {
+                break;
+            }
+            parser.expect(b',')?;
+        }
+    }
+
+    parser.finish()?;
+
+    let version = version.ok_or(ShellPresentationDecodeError::MissingVersion)?;
+    let left_collapsed =
+        left_collapsed.ok_or(ShellPresentationDecodeError::MissingLeftCollapsed)?;
+    let right_collapsed =
+        right_collapsed.ok_or(ShellPresentationDecodeError::MissingRightCollapsed)?;
+
+    if version != u64::from(SHELL_PRESENTATION_SCHEMA_VERSION) {
+        return Err(ShellPresentationDecodeError::UnsupportedVersion(version));
+    }
+
+    Ok(ShellPresentationState::new(left_collapsed, right_collapsed))
+}
+
+/// Classifies a serialized storage value without performing storage I/O.
+#[must_use]
+pub fn classify_serialized_shell_presentation(value: &str) -> StorageReadObservation {
+    match decode_shell_presentation_state(value) {
+        Ok(state) => StorageReadObservation::Valid(state),
+        Err(_) => StorageReadObservation::Malformed,
     }
 }
 
@@ -63,6 +219,15 @@ pub enum StorageReadObservation {
     Malformed,
     /// The storage read itself failed.
     ReadFailure,
+}
+
+impl StorageReadObservation {
+    /// Classifies one serialized value, mapping every decode failure to
+    /// [`Self::Malformed`].
+    #[must_use]
+    pub fn from_serialized(value: &str) -> Self {
+        classify_serialized_shell_presentation(value)
+    }
 }
 
 /// The result observed after requesting a storage write.
@@ -142,11 +307,13 @@ pub const fn load(observation: StorageReadObservation) -> LoadTransition {
             state: DEFAULT_SHELL_PRESENTATION_STATE,
             action: StorageAction::None,
         },
-        StorageReadObservation::Valid(state) => LoadTransition {
+        StorageReadObservation::Valid(state) if state.has_supported_version() => LoadTransition {
             state,
             action: StorageAction::None,
         },
-        StorageReadObservation::Malformed | StorageReadObservation::ReadFailure => LoadTransition {
+        StorageReadObservation::Valid(_)
+        | StorageReadObservation::Malformed
+        | StorageReadObservation::ReadFailure => LoadTransition {
             state: DEFAULT_SHELL_PRESENTATION_STATE,
             action: StorageAction::WriteDefault {
                 key: SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY,
@@ -199,5 +366,164 @@ pub const fn save(
             state,
         },
         outcome,
+    }
+}
+
+const fn boolean_literal(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+#[derive(Clone, Copy)]
+enum JsonField {
+    Version,
+    LeftCollapsed,
+    RightCollapsed,
+}
+
+struct JsonObjectParser<'input> {
+    input: &'input [u8],
+    position: usize,
+}
+
+impl<'input> JsonObjectParser<'input> {
+    const fn new(input: &'input str) -> Self {
+        Self {
+            input: input.as_bytes(),
+            position: 0,
+        }
+    }
+
+    fn field(&mut self) -> Result<JsonField, ShellPresentationDecodeError> {
+        let field = self.string()?;
+        match field.as_str() {
+            "version" => Ok(JsonField::Version),
+            "left_collapsed" => Ok(JsonField::LeftCollapsed),
+            "right_collapsed" => Ok(JsonField::RightCollapsed),
+            _ => Err(ShellPresentationDecodeError::UnknownField),
+        }
+    }
+
+    fn version(&mut self) -> Result<u64, ShellPresentationDecodeError> {
+        self.skip_whitespace();
+        let start = self.position;
+        if !self.next_is_ascii_digit() {
+            return Err(ShellPresentationDecodeError::InvalidVersion);
+        }
+        if self.input[self.position] == b'0'
+            && self
+                .input
+                .get(self.position + 1)
+                .is_some_and(u8::is_ascii_digit)
+        {
+            return Err(ShellPresentationDecodeError::InvalidJson);
+        }
+        while self.next_is_ascii_digit() {
+            self.position += 1;
+        }
+        std::str::from_utf8(&self.input[start..self.position])
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .ok_or(ShellPresentationDecodeError::InvalidVersion)
+    }
+
+    fn boolean(
+        &mut self,
+        invalid: ShellPresentationDecodeError,
+    ) -> Result<bool, ShellPresentationDecodeError> {
+        self.skip_whitespace();
+        if self.literal_is_value(b"true") {
+            self.position += 4;
+            return Ok(true);
+        }
+        if self.literal_is_value(b"false") {
+            self.position += 5;
+            return Ok(false);
+        }
+        Err(invalid)
+    }
+
+    fn string(&mut self) -> Result<String, ShellPresentationDecodeError> {
+        self.skip_whitespace();
+        if !self.consume_raw(b'"') {
+            return Err(ShellPresentationDecodeError::InvalidJson);
+        }
+
+        let start = self.position;
+        while let Some(&byte) = self.input.get(self.position) {
+            match byte {
+                b'"' => {
+                    let value = std::str::from_utf8(&self.input[start..self.position])
+                        .map_err(|_| ShellPresentationDecodeError::InvalidJson)?
+                        .to_owned();
+                    self.position += 1;
+                    if value.as_bytes().contains(&b'\\')
+                        || value.bytes().any(|character| character < 0x20)
+                    {
+                        return Err(ShellPresentationDecodeError::InvalidJson);
+                    }
+                    return Ok(value);
+                }
+                b'\\' | 0x00..=0x1f => {
+                    return Err(ShellPresentationDecodeError::InvalidJson);
+                }
+                _ => self.position += 1,
+            }
+        }
+
+        Err(ShellPresentationDecodeError::InvalidJson)
+    }
+
+    fn expect(&mut self, expected: u8) -> Result<(), ShellPresentationDecodeError> {
+        if self.consume(expected) {
+            Ok(())
+        } else {
+            Err(ShellPresentationDecodeError::InvalidJson)
+        }
+    }
+
+    fn consume(&mut self, expected: u8) -> bool {
+        self.skip_whitespace();
+        self.consume_raw(expected)
+    }
+
+    fn consume_raw(&mut self, expected: u8) -> bool {
+        if self.input.get(self.position) == Some(&expected) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn finish(&mut self) -> Result<(), ShellPresentationDecodeError> {
+        self.skip_whitespace();
+        if self.position == self.input.len() {
+            Ok(())
+        } else {
+            Err(ShellPresentationDecodeError::InvalidJson)
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(
+            self.input.get(self.position),
+            Some(b' ' | b'\t' | b'\n' | b'\r')
+        ) {
+            self.position += 1;
+        }
+    }
+
+    fn next_is_ascii_digit(&self) -> bool {
+        self.input
+            .get(self.position)
+            .is_some_and(u8::is_ascii_digit)
+    }
+
+    fn literal_is_value(&self, literal: &[u8]) -> bool {
+        self.input.get(self.position..self.position + literal.len()) == Some(literal)
+            && matches!(
+                self.input.get(self.position + literal.len()),
+                None | Some(b' ' | b'\t' | b'\n' | b'\r' | b',' | b'}')
+            )
     }
 }
