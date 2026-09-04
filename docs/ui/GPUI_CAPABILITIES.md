@@ -273,3 +273,39 @@ First-party `anyhow` remains forbidden (PLAN Error policy, lines 357–360). GPU
 - Every `src/...` citation above was opened and read in `C:\Users\sander\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gpui-0.2.2` during this session; negative claims (accessibility, reduced motion, selection, popover/menu widgets, Windows menu bar, `SetMenu*` absence, `test-support` gating) were established by targeted searches whose zero-hit results are noted inline.
 - Legacy citations reference files present in this worktree at commit `0cfb0a0` (`modules/frontend/src/routes/components/**`); Bits UI citations reference the pinned 2.18.1 install at `C:\Users\sander\Desktop\artisan-editor\modules\frontend\node_modules\bits-ui`.
 - Checks run: working tree clean before edits (`git status`), audit limited to creating this document, single commit produced afterward containing only this file. Commit SHA reported to the controller; no push, PR, stack manipulation, or merge performed.
+
+---
+
+## 7. Wave 2 seamless-title-bar findings (2026-09-04)
+
+Wave 2 implementation-worker note: what pinned gpui 0.2.2 supports on
+Windows for hiding the OS title bar, dragging via the in-app strip, and
+native caption buttons. Same extraction as §0
+(`C:\Users\sander\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gpui-0.2.2`);
+all line numbers below refer to it.
+
+| Need | Verdict | Source evidence |
+| --- | --- | --- |
+| Transparent/absent OS title bar on Windows | Directly usable: `TitlebarOptions.appears_transparent` | `platform.rs:1246-1258` (option def, "macOS and Windows only"); `platform/windows/window.rs:380-384` maps it to `hide_title_bar`; `events.rs:705-747` (`WM_NCCALCSIZE` extends the client area over the frame) and `events.rs:766-773` (`WM_CREATE` reframes) implement the borderless path |
+| Resize with hidden title bar | Preserved by the backend | Window keeps `WS_SYSMENU \| WS_THICKFRAME \| WS_MAXIMIZEBOX \| WS_MINIMIZEBOX` (`platform/windows/window.rs:394-408`); `handle_hit_test_msg` falls back to `DefWindowProcW` for all resize edges (`events.rs:889-904`) and adds a top-edge `HTTOP` grip when not maximized (`events.rs:910-920`) |
+| Drag-to-move | Directly usable via `WindowControlArea::Drag` → `HTCAPTION` | `window.rs:477-488` (enum), `div.rs:581` / `1004` (`window_control_area`), `window.rs:1133-1148` (hit-test callback resolves the first painted control hitbox under the cursor), `events.rs:874` (`Drag → HTCAPTION`). Note: `Window::start_window_move` is a Linux-only no-op on Windows (`platform.rs:536`, no Windows override) — it is NOT the drag mechanism here |
+| Minimize | Directly usable: `Window::minimize_window` | `window.rs:4116-4119` → `ShowWindowAsync(SW_MINIMIZE)` (`platform/windows/window.rs:778-780`) |
+| Maximize/restore toggle | No direct restore API; usable via the **native `Max` area** | `Window::zoom_window` only ever maximizes (`window.rs:1740-1743` → `platform/windows/window.rs:782-790`, always `SW_MAXIMIZE`); there is no `SW_RESTORE`/un-maximize on the public surface (workspace lints forbid `unsafe`, so no `HWND` escape hatch). Marking the button `WindowControlArea::Max` reports `HTMAXBUTTON` (`events.rs:876`) and the backend toggles `SW_NORMAL`/`SW_MAXIMIZE` itself on down/up inside the button (`events.rs:1033-1064`) |
+| Close | Usable via `Window::remove_window` (keyboard path) and the **native `Close` area** (mouse path) | `window.rs:1374-1377` (`remove_window`); `events.rs:877` (`Close → HTCLOSE`), `events.rs:1050-1056` (posts `WM_CLOSE`, honoring the registered `should_close` handler at `events.rs:250-262`) |
+| Clicks inside the drag region (header links) | Work without a nested opt-out | Non-client presses are forwarded to GPUI as ordinary mouse down/up (`events.rs:949-1031`), so `on_click` still fires; a press without a move never starts a drag. There is no nested `no-drag` primitive (first-hitbox-wins, `window.rs:1138-1143`, parents paint first, `div.rs:1848-1865`), so press-and-move from a link drags — the one known delta vs legacy `[-webkit-app-region:no-drag]` |
+| Custom `on_click` + native area on one button | Mutually exclusive per input kind | A mouse press on a native area runs the backend toggle AND would synthesize a GPUI click, so mouse clicks must not also act (`ClickEvent::is_keyboard`, `interactive.rs:263-269`, gates the keyboard-only fallback). Sibling layout (drag region beside, never above, the buttons) is mandatory for the same first-hitbox-wins reason |
+
+Consumed as: `TitlebarOptions { appears_transparent: true }` at window
+construction; strip root split into a `Drag` sibling plus three native
+`Min`/`Max`/`Close` caption buttons; keyboard-only `on_click` fallback via
+`is_keyboard()`.
+
+CE integration note (vendor 0b84630e, recovered after the migration):
+the table above preserves the original 0.2.2 investigation. CE still maps
+the caption areas in crates/gpui_windows/src/events.rs, but its
+PlatformWindow::zoom in crates/gpui_windows/src/window.rs now toggles
+SW_RESTORE/SW_MAXIMIZE. The recovered shell retains native mouse handling
+and uses the current zoom_window API for its keyboard fallback. Integration
+preserves the CE two-argument on_window_closed callback and the newer rail
+tests. Native Windows drag/resize and DPI behavior still require runtime
+verification beyond the geometry tests.

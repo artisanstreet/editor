@@ -13,8 +13,9 @@ use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
 use gpui::{
-    AnyElement, Div, FontWeight, Hsla, Pixels, div, prelude::InteractiveElement as _,
-    prelude::ParentElement as _, prelude::Styled as _, px,
+    AnyElement, Div, FontWeight, Hsla, Pixels, Stateful, WindowControlArea, div,
+    prelude::InteractiveElement as _, prelude::ParentElement as _,
+    prelude::StatefulInteractiveElement as _, prelude::Styled as _, px,
 };
 
 use crate::shell_layout::ProseWidth;
@@ -203,6 +204,16 @@ pub const LEGACY_TITLE_BAR_SPACER_PX: f32 = 8.0;
 /// top of the inspector column width.
 pub const LEGACY_INSPECTOR_TITLE_GAP_PX: f32 = 16.0;
 
+/// Caption-button width: the Windows caption-button standard — 46 px. The
+/// three-button cluster (minimize, maximize/restore, close) measures a fixed
+/// 138 px at the strip's trailing end, replacing the floating OS overlay the
+/// legacy strip leaves room for (`+layout.svelte:596-600`).
+pub const LEGACY_TITLE_BAR_CONTROL_WIDTH_PX: f32 = 46.0;
+
+/// Caption-glyph edge: the shared icon-button glyph size (`ButtonStyle`
+/// `icon_size`, 16 px; `image_viewer.rs:614` paints `TABLER_X` at 16 px).
+pub const LEGACY_TITLE_BAR_CONTROL_GLYPH_PX: f32 = 16.0;
+
 /// Rail pill width: legacy `w-10` (`sectioned-panel.svelte:182,256`) — 40 px.
 pub const LEGACY_RAIL_PILL_WIDTH_PX: f32 = 40.0;
 
@@ -240,6 +251,17 @@ pub const RAIL_IDENTITY_FALLBACK_LABEL: &str = "?";
 pub const LEGACY_SHELL_FRAME_SELECTOR: &str = "legacy-shell-frame";
 /// Debug selector for the title-bar strip.
 pub const LEGACY_SHELL_TITLE_BAR_SELECTOR: &str = "legacy-shell-title-bar";
+/// Debug selector for the title-bar drag region (the strip minus the caption
+/// cluster).
+pub const LEGACY_SHELL_TITLE_DRAG_SELECTOR: &str = "legacy-shell-title-drag";
+/// Debug selector for the caption-controls cluster.
+pub const LEGACY_SHELL_TITLE_CONTROLS_SELECTOR: &str = "legacy-shell-title-controls";
+/// Debug selector for the minimize caption button.
+pub const LEGACY_SHELL_TITLE_MINIMIZE_SELECTOR: &str = "legacy-shell-title-minimize";
+/// Debug selector for the maximize/restore caption button.
+pub const LEGACY_SHELL_TITLE_MAXIMIZE_SELECTOR: &str = "legacy-shell-title-maximize";
+/// Debug selector for the close caption button.
+pub const LEGACY_SHELL_TITLE_CLOSE_SELECTOR: &str = "legacy-shell-title-close";
 /// Debug selector for the title-bar identity line.
 pub const LEGACY_SHELL_TITLE_IDENTITY_SELECTOR: &str = "legacy-shell-title-identity";
 /// Debug selector for the icon rail column.
@@ -621,13 +643,120 @@ pub struct LegacyShellProps<'a> {
     pub secondary: Option<AnyElement>,
 }
 
+/// Returns the catalog glyph painted in one caption button.
+///
+/// Windows caption order drives the mapping: the dash minimizes, the square
+/// maximizes/restores, the cross closes. The sealed catalog holds no
+/// restore chevron, so the maximize square stands in for both zoom states;
+/// the native `Max` area still toggles restore (gpui `events.rs:1042-1048`).
+#[must_use]
+pub fn title_bar_caption_asset(area: WindowControlArea) -> AssetId {
+    match area {
+        WindowControlArea::Min | WindowControlArea::Drag => AssetId::TABLER_MINUS,
+        WindowControlArea::Max => AssetId::TABLER_MAXIMIZE,
+        WindowControlArea::Close => AssetId::TABLER_X,
+    }
+}
+
+/// Returns one seamless-strip caption button for a native window-control area.
+///
+/// The button is a ghost icon in `--muted-foreground`, exactly the resting
+/// treatment of the shared ghost recipe (`ButtonStyle::Ghost` foregrounds
+/// text in `--foreground`; the caption keeps the quieter muted step so three
+/// chrome buttons do not out-shout the identity line). Hover replays the
+/// ghost hover fill (`--muted`, halved in dark mode); the close button hovers
+/// the `--destructive` tint instead. The legacy strip paints no in-app
+/// buttons at all — the OS overlay floats over its right end
+/// (`+layout.svelte:596-600`) — so the destructive close hover follows the
+/// Windows caption convention for the surface being replaced, not a legacy
+/// row (the menu/dropdown destructive rows keep their own treatments).
+///
+/// Behavior is native, not scripted: the element carries
+/// [`WindowControlArea`], so the pinned backend reports `HTMINBUTTON` /
+/// `HTMAXBUTTON` / `HTCLOSE` at `WM_NCHITTEST` (gpui `events.rs:872-878`) and
+/// performs the minimize, maximize/restore toggle, and `WM_CLOSE` itself
+/// (gpui `events.rs:1033-1064`), including restore (CE also toggles restore through Window::zoom_window). The `on_click`
+/// handler therefore ignores mouse presses — the backend already consumed
+/// them — and exists only as the keyboard path (native caption buttons are
+/// not tab stops, but a focused GPUI element answers Enter/Space): minimize
+/// and close map onto `Window::minimize_window` / `remove_window`, and
+/// maximize maps onto `Window::zoom_window`.
+#[must_use]
+pub fn title_bar_caption_button(
+    theme: ArtisanTheme,
+    area: WindowControlArea,
+    selector: &'static str,
+) -> Stateful<Div> {
+    let (hover_background, hover_foreground) = match area {
+        WindowControlArea::Close => {
+            // Near-white glyph on the destructive tint, both modes — the
+            // Windows caption convention. Both arms resolve the same paper
+            // step through their mode's light-text token.
+            let light_text = match theme.mode {
+                ThemeMode::Light => theme.colors.primary_foreground,
+                ThemeMode::Dark => theme.colors.foreground_extra,
+            };
+            (theme.colors.destructive.to_paint(), light_text.to_paint())
+        }
+        WindowControlArea::Min | WindowControlArea::Max | WindowControlArea::Drag => {
+            let hover = match theme.mode {
+                ThemeMode::Light => theme.colors.muted,
+                ThemeMode::Dark => theme.colors.muted.with_alpha(0.5),
+            };
+            (hover.to_paint(), theme.colors.foreground.to_paint())
+        }
+    };
+    div()
+        .id(selector)
+        .w(px(LEGACY_TITLE_BAR_CONTROL_WIDTH_PX))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme.colors.muted_foreground.to_paint())
+        .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
+        .window_control_area(area)
+        .on_click(move |event, window, _| {
+            if !event.is_keyboard() {
+                return;
+            }
+            match area {
+                WindowControlArea::Min => window.minimize_window(),
+                WindowControlArea::Max => window.zoom_window(),
+                WindowControlArea::Close => window.remove_window(),
+                WindowControlArea::Drag => {}
+            }
+        })
+        .debug_selector(move || selector.to_string())
+        .child(
+            asset_glyph(title_bar_caption_asset(area)).size(px(LEGACY_TITLE_BAR_CONTROL_GLYPH_PX)),
+        )
+}
+
 /// Returns the desktop title-bar strip (Windows branch).
 ///
 /// Layout mirrors `+layout.svelte:582-618` on the non-mac path: `h-10` strip,
 /// `w-14` rail spacer, the identity line (`w-full min-w-0 items-center pr-6`),
-/// then the inspector replay spacer. The macOS right-aligned variant, the
-/// drag region (`-webkit-app-region`), and the `fade-edge-end` mask are
-/// web-shell concerns with no GPUI equivalent and are intentionally absent.
+/// then the inspector replay spacer — with the seamless-chrome additions the
+/// legacy leaves to the OS overlay: the strip minus the caption cluster is
+/// the native drag region (`WindowControlArea::Drag`, the GPUI counterpart of
+/// `-webkit-app-region: drag`), and a fixed 138 px cluster of working
+/// minimize / maximize-restore / close buttons closes the row.
+///
+/// The drag region is a *sibling* of the caption cluster, never its parent:
+/// gpui resolves `WM_NCHITTEST` from the first painted `window_control`
+/// hitbox under the cursor (gpui `window.rs:1133-1148`), and parents paint
+/// before children (gpui `div.rs:1848-1865`), so nesting the buttons inside
+/// the drag area would shadow their native Min/Max/Close areas with
+/// `HTCAPTION`. Header content nested inside the drag region keeps working:
+/// the backend forwards non-client presses to GPUI as ordinary mouse
+/// down/up (gpui `events.rs:949-1031`), so identity links still click — a
+/// press without a move never starts a drag — while a press-and-move drags
+/// the window. (Legacy marks its header links `no-drag`; pinned gpui offers
+/// no nested opt-out, so press-drag from a link is the one known delta.)
+///
+/// The macOS right-aligned variant and the `fade-edge-end` mask are web-shell
+/// concerns with no GPUI equivalent and remain absent.
 #[must_use]
 pub fn shell_title_bar(
     theme: ArtisanTheme,
@@ -646,12 +775,14 @@ pub fn shell_title_bar(
         line = line.child(header);
     }
 
-    div()
-        .h(style.title_bar_height)
-        .flex_shrink_0()
+    let drag = div()
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
         .flex()
-        .bg(style.window_background)
-        .debug_selector(|| LEGACY_SHELL_TITLE_BAR_SELECTOR.to_string())
+        .items_center()
+        .window_control_area(WindowControlArea::Drag)
+        .debug_selector(|| LEGACY_SHELL_TITLE_DRAG_SELECTOR.to_string())
         .child(div().w(style.rail_width).flex_shrink_0())
         .child(
             div()
@@ -666,7 +797,37 @@ pub fn shell_title_bar(
             div()
                 .w(px(title_bar_trailing_spacer_px(inspector_width_px)))
                 .flex_shrink_0(),
-        )
+        );
+
+    let controls = div()
+        .flex()
+        .h_full()
+        .flex_shrink_0()
+        .debug_selector(|| LEGACY_SHELL_TITLE_CONTROLS_SELECTOR.to_string())
+        .child(title_bar_caption_button(
+            theme,
+            WindowControlArea::Min,
+            LEGACY_SHELL_TITLE_MINIMIZE_SELECTOR,
+        ))
+        .child(title_bar_caption_button(
+            theme,
+            WindowControlArea::Max,
+            LEGACY_SHELL_TITLE_MAXIMIZE_SELECTOR,
+        ))
+        .child(title_bar_caption_button(
+            theme,
+            WindowControlArea::Close,
+            LEGACY_SHELL_TITLE_CLOSE_SELECTOR,
+        ));
+
+    div()
+        .h(style.title_bar_height)
+        .flex_shrink_0()
+        .flex()
+        .bg(style.window_background)
+        .debug_selector(|| LEGACY_SHELL_TITLE_BAR_SELECTOR.to_string())
+        .child(drag)
+        .child(controls)
 }
 
 /// Returns the icon rail column with its pill cluster and identity avatar.
@@ -1314,5 +1475,27 @@ mod legacy_shell_tests {
                 "avatar bottom {avatar_bottom}px should sit {LEGACY_RAIL_CLUSTER_INSET_PX}px above the column bottom {column_bottom}px"
             );
         }
+    }
+
+    #[test]
+    fn caption_cluster_measures_three_windows_buttons() {
+        assert_eq!(LEGACY_TITLE_BAR_CONTROL_WIDTH_PX, 46.0);
+        assert_eq!(LEGACY_TITLE_BAR_CONTROL_GLYPH_PX, 16.0);
+    }
+
+    #[test]
+    fn caption_assets_follow_windows_order() {
+        assert_eq!(
+            title_bar_caption_asset(WindowControlArea::Min),
+            AssetId::TABLER_MINUS
+        );
+        assert_eq!(
+            title_bar_caption_asset(WindowControlArea::Max),
+            AssetId::TABLER_MAXIMIZE
+        );
+        assert_eq!(
+            title_bar_caption_asset(WindowControlArea::Close),
+            AssetId::TABLER_X
+        );
     }
 }

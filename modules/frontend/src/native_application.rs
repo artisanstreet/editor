@@ -4149,6 +4149,8 @@ pub fn run() -> ExitCode {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
                         title: Some(WINDOW_TITLE.into()),
+                        // CE keeps native resizing; shell_title_bar supplies caption hit areas.
+                        appears_transparent: true,
                         ..Default::default()
                     }),
                     ..Default::default()
