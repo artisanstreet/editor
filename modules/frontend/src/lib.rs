@@ -63,6 +63,7 @@ pub mod engine_section_indicator_policy;
 pub mod engine_settings;
 pub mod engine_usage_cache;
 pub mod file_icon;
+pub mod forge_dev_endpoint;
 pub mod forge_endpoint_policy;
 pub mod forge_recovery_health;
 pub mod forge_repair_request;
