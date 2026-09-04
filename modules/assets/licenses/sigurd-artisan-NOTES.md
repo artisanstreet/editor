@@ -1,13 +1,16 @@
 # Sigurd Artisan wordmark face — provenance notes
 
-Scope: `modules/assets/fonts/sigurd-artisan.woff2` — the `"Sigurd Variable"`
+Scope: `modules/assets/fonts/sigurd-artisan.ttf` — the `"Sigurd Variable"`
 face declared in the legacy `@font-face` block
 (`modules/frontend/src/lib/styles/fonts.css:31–37`, weight range 300–900)
 and worn by the product wordmark
 (`modules/frontend/src/lib/components/artisan-logo.svelte:25`,
-`style:font-family="'Sigurd Variable', serif"`).
+`style:font-family="'Sigurd Variable', serif"`). The vendored bytes are the
+lossless WOFF2 decompression of the legacy `sigurd/sigurd-artisan.woff2`
+(DirectWrite rejects WOFF2); the file-internal family name is
+`"Sigurd Variable Light"` (see `fonts/FONTS.md`).
 
-The file name carries an `artisan` suffix (`sigurd-artisan.woff2`), which
+The file name carries an `artisan` suffix (`sigurd-artisan.ttf`), which
 attests a custom cut prepared for this product, but no in-tree license
 statement, receipt, or foundry grant was found for it in the legacy
 repository: the only references are the `@font-face` declaration and the
