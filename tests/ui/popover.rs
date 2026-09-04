@@ -310,7 +310,7 @@ fn escape_requests_controlled_dismissal_once(cx: &mut TestAppContext) {
     let changes_for_view = Rc::clone(&changes);
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let probe = PopoverProbe::new(cx, changes_for_view, true, false);
-        window.focus(&probe.focus);
+        window.focus(&probe.focus, cx);
         probe
     });
     cx.run_until_parked();

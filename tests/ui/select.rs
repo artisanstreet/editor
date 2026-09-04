@@ -352,7 +352,7 @@ fn gpui_trigger_open_close_commit_and_focus_restore(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let focus_for_window = focus.clone();
-    cx.update(|window, _| window.focus(&focus_for_window));
+    cx.update(|window, app| window.focus(&focus_for_window, app));
     cx.simulate_keystrokes("enter");
 
     assert_eq!(&*open_changes.borrow(), &[true]);

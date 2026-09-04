@@ -505,7 +505,7 @@ fn supplied_focus_keyboard_and_pointer_callbacks_activate_once(cx: &mut TestAppC
 
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.run_until_parked();
 

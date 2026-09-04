@@ -49,10 +49,10 @@ use artisan_ui::fade_arc::FadeArc;
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, Hsla, IntoElement, Render,
+    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, IntoElement, Render,
     SharedString, Window, div,
     prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
-    px, rgb,
+    px, rgb, rgb_to_hsla,
 };
 
 use crate::conversation_host::{ConversationHost, ConversationHostError};
@@ -539,14 +539,14 @@ impl ThreadScreen {
                         div()
                             .flex_shrink_0()
                             .text_size(theme.typography.control_text)
-                            .text_color(Hsla::from(rgb(ADDED_LINES_GREEN)))
+                            .text_color(rgb_to_hsla(rgb(ADDED_LINES_GREEN)))
                             .child(format!("+{}", summary.lines_added)),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_size(theme.typography.control_text)
-                            .text_color(Hsla::from(rgb(DELETED_LINES_RED)))
+                            .text_color(rgb_to_hsla(rgb(DELETED_LINES_RED)))
                             .child(format!("{MINUS_SIGN}{}", summary.lines_deleted)),
                     ),
             );

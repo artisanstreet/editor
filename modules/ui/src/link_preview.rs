@@ -11,7 +11,7 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    AnimationExt, AnyElement, App, Bounds, Corner, Div, ElementId, Hsla, InteractiveElement,
+    Anchor, AnimationExt, AnyElement, App, Bounds, Div, ElementId, Hsla, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, SharedString, Size,
     Stateful, StatefulInteractiveElement as _, Styled, Window, anchored, deferred, div, point, px,
     transparent_black,
@@ -1439,7 +1439,7 @@ impl RenderOnce for LinkPreview {
 
             if let Some(placement) = placement {
                 let anchored_content = anchored()
-                    .anchor(Corner::TopLeft)
+                    .anchor(Anchor::TopLeft)
                     .position(placement.origin)
                     .snap_to_window()
                     .child(content);

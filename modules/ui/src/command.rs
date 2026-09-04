@@ -14,6 +14,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use artisan_assets::AssetId;
 use gpui::prelude::Refineable;
@@ -519,8 +520,8 @@ fn item_element_id(
     group_id: &SharedString,
     item_id: &SharedString,
 ) -> ElementId {
-    let group_id = ElementId::NamedChild(Box::new(palette_id.clone()), group_id.clone());
-    ElementId::NamedChild(Box::new(group_id), item_id.clone())
+    let group_id = ElementId::NamedChild(Arc::new(palette_id.clone()), group_id.clone());
+    ElementId::NamedChild(Arc::new(group_id), item_id.clone())
 }
 
 fn arrow_direction(key: &str) -> Option<bool> {
@@ -1072,7 +1073,7 @@ fn render_list(
 ) -> impl IntoElement + 'static {
     let mut list = div()
         .id(ElementId::NamedChild(
-            Box::new(context.palette_id.clone()),
+            Arc::new(context.palette_id.clone()),
             SharedString::new_static("list"),
         ))
         .flex()
@@ -1247,6 +1248,7 @@ fn render_palette(parts: CommandRenderParts) -> impl IntoElement + 'static {
                 offset: point(px(0.0), px(0.0)),
                 blur_radius: px(0.0),
                 spread_radius: style.focus_ring_width,
+                inset: false,
             }])
         });
     }

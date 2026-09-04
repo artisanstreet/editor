@@ -892,8 +892,8 @@ impl ConversationSurface {
         let content_origin = child_origin - window.element_offset();
         let max_offset = self.scroll_handle.max_offset();
         let mut offset = viewport_origin - content_origin;
-        offset.x = offset.x.clamp(-max_offset.width, px(0.0));
-        offset.y = offset.y.clamp(-max_offset.height, px(0.0));
+        offset.x = offset.x.clamp(-max_offset.x, px(0.0));
+        offset.y = offset.y.clamp(-max_offset.y, px(0.0));
         self.scroll_handle.set_offset(offset);
     }
 
@@ -1018,7 +1018,7 @@ impl ConversationSurface {
         let max_offset = self.scroll_handle.max_offset();
         let scroll_top = -f64::from(offset.y);
         let viewport_height = f64::from(bounds.size.height);
-        let scroll_height = viewport_height + f64::from(max_offset.height);
+        let scroll_height = viewport_height + f64::from(max_offset.y);
         let geometry = ViewportGeometry {
             scroll_top,
             viewport_height,
@@ -1875,7 +1875,7 @@ impl ConversationSurface {
             if let Some(handle) = self.navigator_focus.remove(&key)
                 && handle.is_focused(window)
             {
-                self.transcript_focus.focus(window);
+                self.transcript_focus.focus(window, cx);
             }
         }
         if markers.is_empty() {

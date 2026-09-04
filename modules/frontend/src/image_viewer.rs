@@ -443,7 +443,7 @@ impl ImageViewerView {
         let focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
         let close_focus_handle = cx.focus_handle().tab_index(1).tab_stop(true);
         if open {
-            focus_handle.focus(window);
+            focus_handle.focus(window, cx);
         }
 
         Self {
@@ -527,9 +527,9 @@ impl ImageViewerView {
         }
 
         if open {
-            self.focus_handle.focus(window);
+            self.focus_handle.focus(window, cx);
         } else if let Some(focus_handle) = &self.restore_focus_handle {
-            focus_handle.focus(window);
+            focus_handle.focus(window, cx);
         }
         cx.notify();
         true

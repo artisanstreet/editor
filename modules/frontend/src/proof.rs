@@ -16,9 +16,9 @@ use crate::{conversation_host, project_picker};
 use artisan_domain::ThreadId;
 use artisan_ui::theme::ThemeMode;
 use gpui::{
-    App, AppContext as _, Application, Bounds, Context, Entity, FocusHandle, KeyBinding,
-    MouseButton, MouseDownEvent, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, div,
+    App, AppContext as _, Bounds, Context, Entity, FocusHandle, KeyBinding, MouseButton,
+    MouseDownEvent, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
+    div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _},
     px, relative, rgb, size,
 };
@@ -84,7 +84,7 @@ impl ProofSurface {
     /// mount the genuine host rather than a copy of its wiring.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window);
+        focus_handle.focus(window, cx);
         let (projects, current) = proof_catalog();
         let picker = cx.new(|picker_cx| {
             project_picker::ProjectPickerView::new(projects, current, ThemeMode::Dark, picker_cx)
@@ -275,8 +275,8 @@ impl Render for ProofSurface {
         div()
             .track_focus(&self.focus_handle)
             .key_context(PROOF_KEY_CONTEXT)
-            .on_action(|_: &NextTabStop, window, _| window.focus_next())
-            .on_action(|_: &PreviousTabStop, window, _| window.focus_prev())
+            .on_action(|_: &NextTabStop, window, cx| window.focus_next(cx))
+            .on_action(|_: &PreviousTabStop, window, cx| window.focus_prev(cx))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_press))
             .flex()
             .size_full()
@@ -383,11 +383,11 @@ pub fn run() -> ExitCode {
     let launched = Rc::new(Cell::new(false));
     let launch_flag = Rc::clone(&launched);
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application().run(move |cx: &mut App| {
         bind_proof_actions(cx);
         // Fallback dispatcher when no focused element handles `Quit`.
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
                 cx.quit();
             }

@@ -510,7 +510,7 @@ fn wire_slider_interactions(
         };
         // Ensure the slider actually holds focus before emitting.
         if !focus_for_key.is_focused(window) {
-            window.focus(&focus_for_key);
+            window.focus(&focus_for_key, cx);
         }
         window.prevent_default();
         cx.stop_propagation();
@@ -580,6 +580,7 @@ fn apply_slider_focus_ring(track: Div, focus: &FocusHandle, style: &SliderStyle)
                 offset: point(px(0.0), px(0.0)),
                 blur_radius: px(0.0),
                 spread_radius: focus_ring_width,
+                inset: false,
             }])
         })
         .border_1()

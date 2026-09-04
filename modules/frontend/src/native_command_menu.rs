@@ -648,7 +648,7 @@ impl NativeCommandMenu {
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state.open();
         if self.state.is_open() {
-            window.focus(&self.input_focus);
+            window.focus(&self.input_focus, cx);
         }
         cx.notify();
     }
@@ -656,7 +656,7 @@ impl NativeCommandMenu {
     /// Dismisses the dialog and drops input focus back to the window.
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state.dismiss();
-        window.focus(&self.input_focus);
+        window.focus(&self.input_focus, cx);
         cx.notify();
     }
 
@@ -664,7 +664,7 @@ impl NativeCommandMenu {
     pub fn press_toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state.press_toggle();
         if self.state.is_open() {
-            window.focus(&self.input_focus);
+            window.focus(&self.input_focus, cx);
         }
         self.reveal_highlight();
         cx.notify();
@@ -926,7 +926,7 @@ impl NativeCommandMenu {
             .debug_selector(|| format!("{COMMAND_MENU_SELECTOR}-scrim"))
             .on_click(cx.listener(|view: &mut Self, _: &ClickEvent, window, cx| {
                 view.state.dismiss();
-                window.focus(&view.input_focus.clone());
+                window.focus(&view.input_focus.clone(), cx);
                 cx.notify();
             }))
             .child(

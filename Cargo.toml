@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor/gpui-ce"]
 members = [
     "modules/assets",
     "modules/backend",
@@ -31,7 +32,8 @@ capnpc = "=0.27.0"
 command-group = { version = "=5.0.1", default-features = false, features = ["with-tokio"] }
 fs2 = "=0.4.3"
 getrandom = { version = "=0.4.3", default-features = false }
-gpui = { version = "=0.2.2", features = ["inspector", "test-support"] }
+gpui = { package = "gpui-ce", path = "vendor/gpui-ce/crates/gpui", features = ["inspector", "test-support"] }
+gpui_platform = { package = "gpui_ce_platform", path = "vendor/gpui-ce/crates/gpui_platform", features = ["wgpu"] }
 http = { version = "=1.5.0", default-features = false, features = ["std"] }
 http-body-util = { version = "=0.1.5", default-features = false }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }

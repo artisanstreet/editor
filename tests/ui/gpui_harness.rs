@@ -97,7 +97,7 @@ fn tracked_focus_and_unmodified_keystroke_reach_handlers_once(cx: &mut TestAppCo
 
     cx.update(|window, app| {
         let focus: FocusHandle = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
         assert!(focus.is_focused(window), "tracked handle must take focus");
     });
 
@@ -126,7 +126,7 @@ fn namespaced_test_action_binding_reaches_focused_element_once(cx: &mut TestAppC
     });
     cx.update(|window, app| {
         let focus: FocusHandle = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
         assert!(focus.is_focused(window), "tracked handle must take focus");
     });
 

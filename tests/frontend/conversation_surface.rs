@@ -643,7 +643,7 @@ fn mounted_surface_exposes_root_viewport_and_keyboard_focus_bounds(cx: &mut Test
 
     cx.update(|window, app| {
         let focus = surface.read(app).transcript_focus_handle().clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
         assert!(focus.is_focused(window));
     });
 }
@@ -699,8 +699,8 @@ fn jump_to_latest_is_an_overlay_and_pointer_keyboard_activation_is_typed(cx: &mu
 
     cx.update(|window, app| {
         let focus = surface.read(app).transcript_focus_handle().clone();
-        window.focus(&focus);
-        window.focus_next();
+        window.focus(&focus, app);
+        window.focus_next(app);
     });
     complete_key_press(cx, "enter");
     complete_key_press(cx, "space");
@@ -726,7 +726,7 @@ fn viewport_geometry_reports_top_near_bottom_and_detached_positions(cx: &mut Tes
     let (max_height, viewport_height) = cx.update(|_, app| {
         let surface = surface.read(app);
         (
-            surface.scroll_handle().max_offset().height,
+            surface.scroll_handle().max_offset().y,
             surface.scroll_handle().bounds().size.height,
         )
     });
@@ -1306,7 +1306,7 @@ fn loaded_turn_navigator_keyboard_activation_matches_pointer(cx: &mut TestAppCon
             .read(app)
             .navigator_focus_handle(&target)
             .expect("navigator control retains its focus handle");
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     complete_key_press(cx, "enter");
     complete_key_press(cx, "space");
@@ -1329,7 +1329,7 @@ fn loaded_turn_navigator_replacement_prunes_stale_focus_without_selection(cx: &m
             .read(app)
             .navigator_focus_handle(&first_target)
             .expect("navigator control retains its focus handle");
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.run_until_parked();
     let mut replacement_app = (*cx).clone();

@@ -17,6 +17,7 @@ artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 gpui.workspace = true
+gpui_platform.workspace = true
 rustls-pki-types.workspace = true
 statig.workspace = true
 thiserror.workspace = true

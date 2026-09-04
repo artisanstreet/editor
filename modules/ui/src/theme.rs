@@ -7,7 +7,7 @@
 //! module defines values only: no globals, observers, widgets, or frontend
 //! wiring.
 
-use gpui::{Font, FontWeight, Hsla, Pixels, px};
+use gpui::{Font, FontWeight, Hsla, Pixels, hsla, px};
 
 /// One encoded/display sRGB component triple plus alpha, all `[0, 1]`.
 ///
@@ -125,12 +125,7 @@ fn srgb_to_hsla(c: SrgbComponents) -> Hsla {
     let lightness = max.midpoint(min);
 
     if delta == 0.0 {
-        return Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: lightness,
-            a: c.a,
-        };
+        return hsla(0.0, 0.0, lightness, c.a);
     }
     let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs());
     let hue_sixth = if max == c.r {
@@ -140,12 +135,7 @@ fn srgb_to_hsla(c: SrgbComponents) -> Hsla {
     } else {
         (c.r - c.g) / delta + 4.0
     };
-    Hsla {
-        h: hue_sixth / 6.0,
-        s: saturation,
-        l: lightness,
-        a: c.a,
-    }
+    hsla(hue_sixth / 6.0, saturation, lightness, c.a)
 }
 
 /// The legacy neutral surface ramp, one variant per `--surface-*` token
@@ -617,7 +607,7 @@ impl RadiusTokens {
 
 /// One outer shadow layer, exactly what pinned GPUI can represent:
 /// `BoxShadow { color: Hsla, offset: Point<Pixels>, blur_radius: Pixels,
-/// spread_radius: Pixels }` (`gpui-0.2.2/src/style.rs:306–317`).
+/// spread_radius: Pixels, inset: bool }` (`vendor/gpui-ce/crates/gpui/src/style.rs`).
 #[derive(Clone, Copy, Debug)]
 pub struct ShadowLayer {
     /// Shadow color including alpha.
@@ -633,24 +623,20 @@ pub struct ShadowLayer {
 }
 
 impl ShadowLayer {
-    /// Maps onto GPUI's [`gpui::BoxShadow`] field-for-field; no inset
-    /// semantics are involved on either side.
+    /// Maps onto GPUI's [`gpui::BoxShadow`] field-for-field as an outer
+    /// shadow (`inset: false`); no inset semantics are involved on either
+    /// side.
     #[must_use]
     pub fn to_box_shadow(self) -> gpui::BoxShadow {
-        let Hsla { h, s, l, .. } = srgb_to_hsla(self.color);
         gpui::BoxShadow {
-            color: Hsla {
-                h,
-                s,
-                l,
-                a: self.color.a,
-            },
+            color: srgb_to_hsla(self.color),
             offset: gpui::Point {
                 x: self.offset_x,
                 y: self.offset_y,
             },
             blur_radius: self.blur_radius,
             spread_radius: self.spread_radius,
+            inset: false,
         }
     }
 }
@@ -658,10 +644,11 @@ impl ShadowLayer {
 /// One recorded inset-shadow layer from `--shadow-inset` /
 /// `--shadow-inset-artwork` (`theme.css:206–226`).
 ///
-/// Pinned GPUI's `BoxShadow` has **no inset flag** (`style.rs:306–317`), so
-/// these layers deliberately expose *no* GPUI conversion: they exist as
+/// These layers deliberately expose *no* GPUI conversion yet: they exist as
 /// source-of-truth records so a later renderer seam can honor them honestly
-/// instead of faking an outer shadow as an equivalent.
+/// instead of faking an outer shadow as an equivalent. (The gpui-ce fork
+/// has since grown a `BoxShadow::inset` flag; wiring these records through
+/// it is a later packet, not this migration.)
 #[derive(Clone, Copy, Debug)]
 pub struct InsetShadowLayer {
     /// X offset (all legacy inset sources use 0).

@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use artisan_assets::AssetId;
@@ -830,7 +830,7 @@ fn render_item<V: SelectValue>(args: &RenderItemArgs<'_, V>) -> Stateful<Div> {
     let item_highlighted = highlighted == Some(index);
     let item_selector = item_debug_selector(selector_root, item.value());
     let item_id =
-        ElementId::NamedChild(Box::new(content_id.clone()), format!("item-{index}").into());
+        ElementId::NamedChild(Arc::new(content_id.clone()), format!("item-{index}").into());
 
     let mut row = div()
         .id(item_id)
@@ -986,7 +986,7 @@ fn apply_action<V: SelectValue>(delivery: ActionDelivery<'_, V>) {
             notify_open_change(on_open_change, true, window, cx);
         }
         SelectAction::Close => {
-            window.focus(focus);
+            window.focus(focus, cx);
             notify_open_change(on_open_change, false, window, cx);
         }
         SelectAction::Highlight(index) => {
@@ -997,7 +997,7 @@ fn apply_action<V: SelectValue>(delivery: ActionDelivery<'_, V>) {
         }
         SelectAction::Commit(index) => {
             if was_open {
-                window.focus(focus);
+                window.focus(focus, cx);
                 notify_open_change(on_open_change, false, window, cx);
             }
 
@@ -1061,7 +1061,7 @@ impl<V: SelectValue> SelectFrame<V> {
         let style = &self.style;
         div()
             .id(ElementId::NamedChild(
-                Box::new(self.id.clone()),
+                Arc::new(self.id.clone()),
                 "trigger".into(),
             ))
             .track_focus(&self.focus)
@@ -1172,7 +1172,7 @@ impl<V: SelectValue> SelectFrame<V> {
                             let _ = trigger_escape_state
                                 .borrow_mut()
                                 .close(&trigger_escape_enabled);
-                            window.focus(&trigger_escape_focus);
+                            window.focus(&trigger_escape_focus, cx);
                             if let Some(handler) = trigger_escape_open.as_ref() {
                                 handler(false, window, cx);
                             }
@@ -1215,7 +1215,7 @@ impl<V: SelectValue> SelectFrame<V> {
         let on_open_change = &self.on_open_change;
         let focus = &self.focus;
         let scroll_handle = &self.scroll_handle;
-        let viewport_id = ElementId::NamedChild(Box::new(content_id.clone()), "viewport".into());
+        let viewport_id = ElementId::NamedChild(Arc::new(content_id.clone()), "viewport".into());
         let viewport_selector = format!("{selector_root}-viewport");
         let mut viewport = div()
             .id(viewport_id)
@@ -1356,7 +1356,7 @@ impl<V: SelectValue> SelectFrame<V> {
                     if !action.is_effective() {
                         return;
                     }
-                    window.focus(&outside_focus);
+                    window.focus(&outside_focus, cx);
                     if let Some(handler) = outside_open.as_ref() {
                         handler(false, window, cx);
                     }
@@ -1416,7 +1416,7 @@ impl<V: SelectValue> RenderOnce for Select<V> {
             .as_ref()
             .map_or_else(|| "artisan-select".to_owned(), ToString::to_string);
         let highlighted = state.borrow().highlighted_index();
-        let content_id = ElementId::NamedChild(Box::new(id.clone()), "content".into());
+        let content_id = ElementId::NamedChild(Arc::new(id.clone()), "content".into());
         let frame = SelectFrame {
             id,
             focus,

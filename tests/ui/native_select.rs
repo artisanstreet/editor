@@ -475,7 +475,7 @@ fn focus_ring_requires_actual_focus_and_visibility_intent(cx: &mut TestAppContex
     let (view, cx) = cx.add_window_view(|_, cx| SelectProbe::new(cx));
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
     });
     cx.run_until_parked();
 
@@ -520,7 +520,7 @@ fn disabled_select_remains_visible_but_does_not_report_focus_ring(cx: &mut TestA
 
     cx.update(|window, app| {
         let focus = view.read(app).focus.clone();
-        window.focus(&focus);
+        window.focus(&focus, app);
         let select = NativeSelect::new(
             "disabled-select",
             focus,

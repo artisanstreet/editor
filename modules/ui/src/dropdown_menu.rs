@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ShadowLayer, SurfaceStep, ThemeMode};
 use gpui::{
-    AnyElement, Bounds, BoxShadow, Context, Edges, FocusHandle, Hsla, InteractiveElement as _,
+    AnyElement, App, Bounds, BoxShadow, Context, Edges, FocusHandle, Hsla, InteractiveElement as _,
     IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, SharedString, Size,
     StatefulInteractiveElement as _, Styled as _, Window, div, point, px, size, transparent_black,
 };
@@ -1055,17 +1055,17 @@ impl DropdownMenu {
         SharedString::from(format!("{}-content", self.base_selector()))
     }
 
-    fn focus_highlighted(&self, window: &mut Window) {
+    fn focus_highlighted(&self, window: &mut Window, cx: &mut App) {
         if let Some(index) = self.state.highlighted_index()
             && let Some(Some(handle)) = self.item_focus.get(index)
         {
-            window.focus(handle);
+            window.focus(handle, cx);
         }
     }
 
     fn activate_item(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.activate_index(index) {
-            window.focus(&self.trigger_focus);
+            window.focus(&self.trigger_focus, cx);
             cx.notify();
         }
     }
@@ -1088,7 +1088,7 @@ impl DropdownMenu {
                     self.state.set_open(true);
                 }
                 let _ = self.state.move_next();
-                self.focus_highlighted(window);
+                self.focus_highlighted(window, cx);
                 true
             }
             "up" => {
@@ -1096,13 +1096,13 @@ impl DropdownMenu {
                     self.state.set_open(true);
                 }
                 let _ = self.state.move_previous();
-                self.focus_highlighted(window);
+                self.focus_highlighted(window, cx);
                 true
             }
             _ => {
                 if !event.keystroke.modifiers.modified() && key.chars().count() == 1 {
                     let _ = self.state.handle_typeahead(key, typeahead_now_ms());
-                    self.focus_highlighted(window);
+                    self.focus_highlighted(window, cx);
                     true
                 } else {
                     false
@@ -1127,7 +1127,7 @@ impl DropdownMenu {
         let handled = match key {
             "escape" => {
                 let _ = self.state.dismiss();
-                window.focus(&self.trigger_focus);
+                window.focus(&self.trigger_focus, cx);
                 true
             }
             "enter" | "return" | "space" => {
@@ -1136,28 +1136,28 @@ impl DropdownMenu {
             }
             "down" => {
                 let _ = self.state.move_next();
-                self.focus_highlighted(window);
+                self.focus_highlighted(window, cx);
                 true
             }
             "up" => {
                 let _ = self.state.move_previous();
-                self.focus_highlighted(window);
+                self.focus_highlighted(window, cx);
                 true
             }
             "home" => {
                 let _ = self.state.move_first();
-                self.focus_highlighted(window);
+                self.focus_highlighted(window, cx);
                 true
             }
             "end" => {
                 let _ = self.state.move_last();
-                self.focus_highlighted(window);
+                self.focus_highlighted(window, cx);
                 true
             }
             _ => {
                 if !event.keystroke.modifiers.modified() && key.chars().count() == 1 {
                     let _ = self.state.handle_typeahead(key, typeahead_now_ms());
-                    self.focus_highlighted(window);
+                    self.focus_highlighted(window, cx);
                     true
                 } else {
                     false
