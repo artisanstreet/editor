@@ -120,6 +120,10 @@ name = "conversation_delivery_machine"
 path = "../../tests/frontend/conversation_delivery_machine.rs"
 
 [[test]]
+name = "conversation_duration"
+path = "../../tests/frontend/conversation_duration.rs"
+
+[[test]]
 name = "conversation_error_card_policy"
 path = "../../tests/frontend/conversation_error_card_policy.rs"
 
