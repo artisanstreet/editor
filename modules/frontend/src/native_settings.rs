@@ -2726,7 +2726,11 @@ mod settings_screen_tests {
         ] {
             assert_eq!(
                 settings_screen_selector(route),
-                NativeRoute::Settings(route).selector_suffix()
+                NativeRoute::Settings {
+                    section: route,
+                    engine: None,
+                }
+                .selector_suffix()
             );
         }
         assert_eq!(

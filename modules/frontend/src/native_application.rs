@@ -36,24 +36,34 @@ use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use gpui::{
-    App, AppContext as _, Application, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FocusHandle, FontWeight, KeyBinding, Render, Stateful, StatefulInteractiveElement,
+    AnyElement, App, AppContext as _, Application, Bounds, ClickEvent, ClipboardItem, Context, Div,
+    Entity, FocusHandle, FontWeight, KeyBinding, Render, Stateful, StatefulInteractiveElement,
     Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
 
 use crate::composer::{DraftDisposition, SubmissionBlocked, SubmissionToken};
+use crate::editor_route_screen::{EditorScreen, EditorScreenIdentity, EditorSurfaceState};
 use crate::native_composer::{NativeComposer, NativeComposerEvent};
 use crate::native_new_thread_surface::{
     NEW_THREAD_SURFACE_SELECTOR, NewThreadRecentRow, render_new_thread_surface,
 };
-use crate::native_route::{NativeRoute, RouteHistory};
+use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
+use crate::native_settings::SettingsScreen;
 use crate::native_transport_service::{
     CommandSendError, EventReceiveError, NativeProjectIntakeOperation, NativeProjectIntakeStage,
     NativeTransportCommand, NativeTransportEvent, NativeTransportService, ServiceFailure,
     ServiceFailureCategory, ServiceFailureStage, ServiceStopStatus, SettingsLoadGeneration,
 };
+use crate::onboarding_harness_presentation::{
+    HarnessCatalog, HarnessSetupAction, HarnessSetupState,
+};
+use crate::onboarding_screen::{OnboardingHarnessEntry, OnboardingScreen};
+use crate::shell::{LegacyShellProps, RailIdentity, legacy_shell_frame};
+use crate::shell_layout::ProseWidth;
+use crate::thread_screen::{ThreadScreen, ThreadScreenGate};
+use crate::workspace_tab_state::EditorViewState;
 use crate::{
     conversation_delivery_machine::{ConversationDeliveryEffect, ConversationDeliveryEvent},
     conversation_host::{CONVERSATION_HOST_MAX_EFFECTS, ConversationHost, ConversationHostEffect},
@@ -227,6 +237,13 @@ pub struct NativeApplication {
     last_picker_action: Option<ProjectPickerAction>,
     state: NativeViewState,
     route_history: RouteHistory,
+    onboarding_screen: Option<Entity<OnboardingScreen>>,
+    thread_screen: Option<Entity<ThreadScreen>>,
+    thread_screen_key: Option<(ThreadId, bool)>,
+    editor_screen: Option<Entity<EditorScreen>>,
+    editor_screen_key: Option<(ProjectId, ThreadId, Option<String>)>,
+    settings_screen: Option<Entity<SettingsScreen>>,
+    settings_screen_key: Option<(SettingsRoute, Option<String>)>,
     intake_stage: Option<NativeProjectIntakeStage>,
     intake_failure_operation: Option<NativeProjectIntakeOperation>,
     intake_retry_available: bool,
@@ -305,6 +322,13 @@ impl NativeApplication {
             last_picker_action: None,
             state,
             route_history: RouteHistory::new(),
+            onboarding_screen: None,
+            thread_screen: None,
+            thread_screen_key: None,
+            editor_screen: None,
+            editor_screen_key: None,
+            settings_screen: None,
+            settings_screen_key: None,
             intake_stage: None,
             intake_failure_operation: None,
             intake_retry_available: false,
@@ -3456,6 +3480,29 @@ fn message_status_detail(
 
 impl Render for NativeApplication {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Every route except the new-thread surface mounts inside the legacy
+        // shell frame (`+layout.svelte` port). The new-thread surface keeps
+        // its dedicated render path until its route packet lands.
+        if !matches!(self.route(), NativeRoute::NewThread { .. }) {
+            let content = self.legacy_route_surface(cx);
+            let props = LegacyShellProps {
+                theme: self.theme.clone(),
+                prose_width: ProseWidth::Tight,
+                identity: RailIdentity::new(None, None),
+                title_header: None,
+                card_header: None,
+                inspector_width_px: None,
+                secondary: None,
+            };
+            return div()
+                .track_focus(&self.focus_handle)
+                .key_context(NATIVE_KEY_CONTEXT)
+                .on_action(|_: &NextTabStop, window, _| window.focus_next())
+                .on_action(|_: &PreviousTabStop, window, _| window.focus_prev())
+                .size_full()
+                .debug_selector(|| NATIVE_ROOT_SELECTOR.to_string())
+                .child(legacy_shell_frame(props, content));
+        }
         let frame = ShellFrameStyle::resolve(self.theme);
         let add_project_button = self.add_project_button(cx);
         let mut header = div()
@@ -3561,6 +3608,115 @@ impl Render for NativeApplication {
                     .child(body)
                     .child(engine_panel),
             )
+    }
+}
+
+impl NativeApplication {
+    /// Renders the legacy shell content for every route except the
+    /// new-thread surface, mounting each route-port screen on first entry
+    /// (or when the route identity changes) and reusing it afterwards.
+    fn legacy_route_surface(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        match self.route().clone() {
+            NativeRoute::Onboarding => {
+                if self.onboarding_screen.is_none() {
+                    let theme = self.theme.clone();
+                    let entries = HarnessCatalog::new()
+                        .cards()
+                        .iter()
+                        .map(|card| {
+                            OnboardingHarnessEntry::new(
+                                card.clone(),
+                                HarnessSetupState::new(
+                                    HarnessSetupAction::default(),
+                                    false,
+                                    false,
+                                    "Unavailable",
+                                    None,
+                                    None,
+                                ),
+                            )
+                        })
+                        .collect();
+                    self.onboarding_screen =
+                        Some(cx.new(move |_| OnboardingScreen::new(theme, entries)));
+                }
+                self.onboarding_screen
+                    .clone()
+                    .expect("onboarding screen mounted")
+                    .into_any_element()
+            }
+            NativeRoute::Thread { thread, .. } => {
+                let key = Some((thread.clone(), self.conversation_host.is_some()));
+                if self.thread_screen_key != key || self.thread_screen.is_none() {
+                    let mounted = match self.conversation_host.clone() {
+                        Some(host) => {
+                            let composer = self.composer.clone();
+                            let screen = cx.new(|screen_cx| {
+                                ThreadScreen::new(host, composer, ThemeMode::Dark, screen_cx)
+                            });
+                            screen.update(cx, |screen, _| {
+                                screen.set_gate(ThreadScreenGate::Open);
+                            });
+                            Some(screen)
+                        }
+                        None => ThreadScreen::mount(thread.clone(), ThemeMode::Dark, cx).ok(),
+                    };
+                    self.thread_screen = mounted;
+                    self.thread_screen_key = key;
+                }
+                self.thread_screen
+                    .clone()
+                    .map(|screen| screen.into_any_element())
+                    .unwrap_or_else(|| status_panel(&self.theme, &self.state).into_any_element())
+            }
+            NativeRoute::Editor {
+                project, thread, ..
+            } => {
+                let key = Some((project.clone(), thread.clone(), None));
+                if self.editor_screen_key != key || self.editor_screen.is_none() {
+                    let display_name = self
+                        .project_options
+                        .iter()
+                        .find(|option| option.id == project)
+                        .map_or_else(|| "Workspace".to_owned(), |option| option.name.to_string());
+                    let identity = EditorScreenIdentity::new(
+                        project.clone(),
+                        display_name,
+                        thread,
+                        None,
+                        None,
+                    );
+                    let screen = EditorScreen::new(
+                        identity,
+                        Vec::new(),
+                        EditorSurfaceState::NoFile { recent: Vec::new() },
+                        EditorViewState::default(),
+                        self.theme.clone(),
+                    );
+                    self.editor_screen = Some(cx.new(|_| screen));
+                    self.editor_screen_key = key;
+                }
+                self.editor_screen
+                    .clone()
+                    .expect("editor screen mounted")
+                    .into_any_element()
+            }
+            NativeRoute::Settings { section, engine } => {
+                let key = Some((section, engine.clone()));
+                if self.settings_screen_key != key || self.settings_screen.is_none() {
+                    let screen = cx.new(|screen_cx| {
+                        SettingsScreen::new(section, engine, ThemeMode::Dark, screen_cx)
+                    });
+                    self.settings_screen = Some(screen);
+                    self.settings_screen_key = key;
+                }
+                self.settings_screen
+                    .clone()
+                    .expect("settings screen mounted")
+                    .into_any_element()
+            }
+            NativeRoute::NewThread { .. } => self.new_thread_surface_section().into_any_element(),
+        }
     }
 }
 
@@ -4390,7 +4546,10 @@ mod tests {
         cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.navigate(
-                    NativeRoute::Settings(SettingsRoute::Appearance),
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Appearance,
+                        engine: None,
+                    },
                     application_cx,
                 );
             });
@@ -4431,7 +4590,13 @@ mod tests {
         // Other routes keep the status card.
         cx.update(|_, app| {
             view.update(app, |application, application_cx| {
-                application.navigate(NativeRoute::Settings(SettingsRoute::Models), application_cx);
+                application.navigate(
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Models,
+                        engine: None,
+                    },
+                    application_cx,
+                );
             });
         });
         cx.run_until_parked();

@@ -27,9 +27,15 @@ pub enum NativeRoute {
     Editor {
         project: ProjectId,
         thread: ThreadId,
+        /// The `?file=` deep-link target, when the route names one.
+        file: Option<String>,
     },
     /// Settings section (`/settings/...`).
-    Settings(SettingsRoute),
+    Settings {
+        section: SettingsRoute,
+        /// The `/settings/engines/[engine]` id when that section is active.
+        engine: Option<String>,
+    },
     /// Onboarding wizard (`/onboarding`).
     Onboarding,
 }
@@ -72,7 +78,7 @@ impl NativeRoute {
             }
             Self::Thread { .. } => "route-thread".to_owned(),
             Self::Editor { .. } => "route-editor".to_owned(),
-            Self::Settings(section) => format!("route-settings-{}", section.as_str()),
+            Self::Settings { section, .. } => format!("route-settings-{}", section.as_str()),
             Self::Onboarding => "route-onboarding".to_owned(),
         }
     }
@@ -174,7 +180,10 @@ mod tests {
     #[test]
     fn navigate_retains_previous_and_back_restores() {
         let mut history = RouteHistory::new();
-        history.navigate(NativeRoute::Settings(SettingsRoute::Appearance));
+        history.navigate(NativeRoute::Settings {
+            section: SettingsRoute::Appearance,
+            engine: None,
+        });
         assert!(history.can_go_back());
         assert_eq!(history.len(), 1);
         assert_eq!(
@@ -212,7 +221,10 @@ mod tests {
             SettingsRoute::Privacy,
             SettingsRoute::Threads,
         ] {
-            history.navigate(NativeRoute::Settings(section));
+            history.navigate(NativeRoute::Settings {
+                section,
+                engine: None,
+            });
         }
         // Push past the cap with distinct thread routes is unnecessary;
         // alternating two routes exercises the bound directly.
