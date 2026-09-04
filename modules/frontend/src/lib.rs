@@ -90,6 +90,7 @@ pub mod native_application;
 mod native_composer;
 pub mod native_new_thread_surface;
 pub mod native_route;
+pub mod native_settings;
 pub mod native_thread_picker;
 pub mod native_transport_service;
 pub mod new_thread_draft;
