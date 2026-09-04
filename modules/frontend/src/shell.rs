@@ -10,8 +10,8 @@ use artisan_ui::card::{CardStyle, compact_card};
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::ArtisanTheme;
 use gpui::{
-    Div, Hsla, Pixels, div, prelude::InteractiveElement as _, prelude::ParentElement as _,
-    prelude::Styled as _, px,
+    Div, FontWeight, Hsla, Pixels, div, prelude::InteractiveElement as _,
+    prelude::ParentElement as _, prelude::Styled as _, px,
 };
 
 /// Fixed placeholder-card width: a caller-side sizing refinement over the
@@ -92,14 +92,19 @@ pub fn startup_placeholder(theme: ArtisanTheme) -> Div {
                 .flex_row()
                 .child(outline_badge(badge_style, PLACEHOLDER_BADGE_LABEL)),
         )
-        .child(PLACEHOLDER_TITLE)
+        .child(
+            div()
+                .text_size(theme.typography.dialog_title_text)
+                .font_weight(FontWeight::MEDIUM)
+                .child(PLACEHOLDER_TITLE),
+        )
         .child(separator(
             theme.colors.border.to_paint(),
             SeparatorAxis::Horizontal,
         ))
         .child(
             div()
-                .text_size(theme.typography.label_text)
+                .text_size(theme.typography.control_text)
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child(PLACEHOLDER_CAPTION),
         )
