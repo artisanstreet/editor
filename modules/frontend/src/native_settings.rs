@@ -205,14 +205,14 @@ const THREADS_PRIMITIVES: [SettingsPrimitive; 3] = [
 ];
 
 impl SettingsSection {
-    /// Every section in sticky-nav order.
+    /// Every section in legacy sticky-nav order (`nav.svelte`).
     pub const ALL: [Self; 6] = [
         Self::Models,
+        Self::Threads,
         Self::Appearance,
-        Self::Engines,
         Self::Notifications,
         Self::Privacy,
-        Self::Threads,
+        Self::Engines,
     ];
 
     /// Returns the legacy route href for this section.
@@ -721,6 +721,21 @@ mod tests {
     fn primitive_recipes_resolve_for_fixture_theme() {
         assert_eq!(nav_tab_specs().len(), 6);
         assert_eq!(nav_tab_specs()[0].label(), "Models");
+        // Legacy sticky-nav order (nav.svelte): Models, Threads,
+        // Appearance, Notifications, Privacy, Engines group last.
+        let specs = nav_tab_specs();
+        let labels: Vec<&str> = specs.iter().map(TabSpec::label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Models",
+                "Threads",
+                "Appearance",
+                "Notifications",
+                "Privacy",
+                "Engines"
+            ]
+        );
         let _ = fixture_card_style();
         let _ = fixture_switch_style(true);
         let _ = fixture_switch_style(false);
