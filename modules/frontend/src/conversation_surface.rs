@@ -24,7 +24,7 @@ use artisan_ui::markdown_renderer::MarkdownRenderer;
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::separator::{SeparatorAxis, separator};
-use artisan_ui::theme::{ArtisanTheme, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, SurfaceScale, SurfaceStep, ThemeMode};
 use gpui::{
     AnyElement, Context, Div, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Render,
     ScrollAnchor, ScrollHandle, SharedString, Stateful, Window, div,
@@ -1130,7 +1130,7 @@ impl ConversationSurface {
         let selector = block_selector(turn_id, block);
         match block {
             TurnBlock::UserMessage(block) => {
-                Some(self.render_user_message(block, selector, entity, theme, anchors))
+                Some(Self::render_user_message(block, selector, theme))
             }
             TurnBlock::AssistantMessage(block) => {
                 Some(self.render_assistant_message(block, selector, entity, theme, anchors))
@@ -1174,47 +1174,54 @@ impl ConversationSurface {
     }
 
     fn render_user_message(
-        &self,
         block: &UserMessageBlock,
         selector: String,
-        entity: &Entity<Self>,
         theme: &ArtisanTheme,
-        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        self.render_markdown_text_block(
-            TextBlockRender {
-                id: &block.id,
-                disclosure: block.disclosure,
-                selector,
-                title: "User message",
-                body: &block.body,
-            },
-            entity,
-            theme,
-            anchors,
-        )
+        // Parity with conversation-message.svelte user branch: right-aligned
+        // gradient bubble (surface-850 to surface-775), rounded-2xl, plain
+        // pre-wrap paragraph, no title. GPUI has no gradient fill, so the
+        // bubble uses the solid ramp midpoint (surface-800); documented.
+        let body_selector = format!("{selector}-body");
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_end()
+            .child(
+                div()
+                    .max_w(px(576.0))
+                    .rounded(px(16.0))
+                    .bg(SurfaceScale.value(SurfaceStep::S800).to_paint())
+                    .px(px(16.0))
+                    .py(px(12.0))
+                    .debug_selector(move || selector.clone())
+                    .child(
+                        body_text(&block.body, theme).debug_selector(move || body_selector.clone()),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_assistant_message(
         &self,
         block: &crate::conversation_scene::AssistantMessageBlock,
         selector: String,
-        entity: &Entity<Self>,
+        _entity: &Entity<Self>,
         theme: &ArtisanTheme,
-        anchors: &mut ScrollAnchorRegistry<'_>,
+        _anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        self.render_markdown_text_block(
-            TextBlockRender {
-                id: &block.id,
-                disclosure: block.disclosure,
-                selector,
-                title: "Assistant message",
-                body: &block.body,
-            },
-            entity,
-            theme,
-            anchors,
-        )
+        // Parity with conversation-message.svelte assistant branch: chromeless
+        // markdown at prose width, no card, no title.
+        let rendered_body =
+            self.markdown_renderer
+                .render_source(&block.body, *theme, selector.clone());
+        div()
+            .w_full()
+            .max_w(px(672.0))
+            .debug_selector(move || selector.clone())
+            .child(rendered_body)
+            .into_any_element()
     }
 
     fn render_text_block(
@@ -1242,39 +1249,6 @@ impl ConversationSurface {
             },
             compact_card_content(style).child(card_heading(title, theme)),
             compact_card_content(style).child(body_text(body, theme)),
-            entity,
-            anchors,
-        )
-    }
-
-    fn render_markdown_text_block(
-        &self,
-        params: TextBlockRender<'_>,
-        entity: &Entity<Self>,
-        theme: &ArtisanTheme,
-        anchors: &mut ScrollAnchorRegistry<'_>,
-    ) -> AnyElement {
-        let TextBlockRender {
-            id,
-            disclosure,
-            selector,
-            title,
-            body,
-        } = params;
-        let style = CardStyle::resolve(*theme);
-        let rendered_body = self
-            .markdown_renderer
-            .render_source(body, *theme, selector.clone());
-        self.render_controlled_card(
-            ControlledCardOptions {
-                id: id.clone(),
-                item_id: item_id_for_scene_id(id),
-                disclosure,
-                selector,
-                style,
-            },
-            compact_card_content(style).child(card_heading(title, theme)),
-            compact_card_content(style).child(rendered_body),
             entity,
             anchors,
         )
