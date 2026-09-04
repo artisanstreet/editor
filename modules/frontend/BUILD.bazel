@@ -106,6 +106,7 @@ rust_library(
         "src/object_url_boundary.rs",
         "src/onboarding_harness_presentation.rs",
         "src/onboarding_route.rs",
+        "src/onboarding_screen.rs",
         "src/proof.rs",
         "src/project_catalog.rs",
         "src/project_identity_policy.rs",
