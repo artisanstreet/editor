@@ -21,6 +21,7 @@ rust_library(
         "src/composer_action_failure.rs",
         "src/composer_draft_session_policy.rs",
         "src/composer_gesture.rs",
+        "src/composer_send_readiness.rs",
         "src/context_auto_compaction.rs",
         "src/context_usage_description.rs",
         "src/context_usage_details_policy.rs",

@@ -248,6 +248,17 @@ rust_test(
 )
 
 rust_test(
+    name = "composer_send_readiness_test",
+    srcs = ["composer_send_readiness.rs"],
+    crate_name = "composer_send_readiness_test",
+    deps = ["//modules/frontend:frontend"],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    size = "small",
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
     name = "conversation_checklist_test",
     srcs = ["conversation_checklist.rs"],
     crate_name = "conversation_checklist_test",

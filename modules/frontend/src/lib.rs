@@ -24,6 +24,7 @@ pub mod composer;
 pub mod composer_action_failure;
 pub mod composer_draft_session_policy;
 pub mod composer_gesture;
+pub mod composer_send_readiness;
 pub mod context_auto_compaction;
 pub mod context_usage_description;
 pub mod context_usage_details_policy;

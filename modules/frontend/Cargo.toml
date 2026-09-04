@@ -84,6 +84,10 @@ name = "composer_gesture"
 path = "../../tests/frontend/composer_gesture.rs"
 
 [[test]]
+name = "composer_send_readiness"
+path = "../../tests/frontend/composer_send_readiness.rs"
+
+[[test]]
 name = "composer_state"
 path = "../../tests/ui/composer_state.rs"
 
