@@ -8,9 +8,11 @@
 mod shell_presentation_state;
 
 use shell_presentation_state::{
-    DEFAULT_SHELL_PRESENTATION_STATE, LoadTransition, SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY,
-    SHELL_PRESENTATION_SCHEMA_VERSION, SaveOutcome, ShellPresentationState, StorageAction,
-    StorageReadObservation, StorageWriteObservation, load, repair, save,
+    DEFAULT_SHELL_PRESENTATION_STATE, InMemoryShellPresentationStore, LoadTransition,
+    SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY, SHELL_PRESENTATION_SCHEMA_VERSION, SaveOutcome,
+    ShellPresentationSession, ShellPresentationState, ShellPresentationStore, StorageAction,
+    StorageReadObservation, StorageWriteObservation, classify_serialized_shell_presentation,
+    decode_shell_presentation_state, load, repair, save,
 };
 
 fn state(left_collapsed: bool, right_collapsed: bool) -> ShellPresentationState {
@@ -187,4 +189,193 @@ fn save_exhaustively_absorbs_both_write_outcomes_for_every_state() {
             }
         }
     }
+}
+
+/// A store seam that counts writes, mirroring the planned-eviction test
+/// double used for the composer-draft session custody tests.
+struct CountingStore {
+    inner: InMemoryShellPresentationStore,
+    writes: usize,
+}
+
+impl CountingStore {
+    fn empty() -> Self {
+        Self {
+            inner: InMemoryShellPresentationStore::new(),
+            writes: 0,
+        }
+    }
+}
+
+impl ShellPresentationStore for CountingStore {
+    fn read(&mut self, key: &str) -> Option<String> {
+        self.inner.read(key)
+    }
+
+    fn write(&mut self, key: &str, value: String) {
+        self.writes = self.writes.saturating_add(1);
+        self.inner.write(key, value);
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.inner.remove(key);
+    }
+}
+
+#[test]
+fn codec_encoding_is_the_exact_canonical_document() {
+    assert_eq!(
+        state(false, false).to_json(),
+        "{\"version\":1,\"left_collapsed\":false,\"right_collapsed\":false}"
+    );
+    assert_eq!(
+        state(false, true).to_json(),
+        "{\"version\":1,\"left_collapsed\":false,\"right_collapsed\":true}"
+    );
+    assert_eq!(
+        state(true, false).to_json(),
+        "{\"version\":1,\"left_collapsed\":true,\"right_collapsed\":false}"
+    );
+    assert_eq!(
+        state(true, true).to_json(),
+        "{\"version\":1,\"left_collapsed\":true,\"right_collapsed\":true}"
+    );
+}
+
+#[test]
+fn codec_round_trips_every_collapsed_pair() {
+    for (left_collapsed, right_collapsed) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let original = state(left_collapsed, right_collapsed);
+        let payload = original.to_json();
+        assert_eq!(
+            decode_shell_presentation_state(&payload),
+            Ok(original),
+            "payload={payload:?}"
+        );
+    }
+}
+
+#[test]
+fn decode_rejects_every_noncanonical_payload() {
+    let valid = state(true, false).to_json();
+    // The canonical codec intentionally tolerates insignificant whitespace and
+    // any field order (covered by the adjacent preferences-policy suite), so
+    // those shapes are asserted as valid here rather than rejected.
+    for payload in [
+        format!("{valid} "),
+        format!(" {valid}"),
+        "{\"version\":1,\"right_collapsed\":false,\"left_collapsed\":true}".to_owned(),
+    ] {
+        assert_eq!(
+            decode_shell_presentation_state(&payload),
+            Ok(state(true, false)),
+            "payload={payload:?}"
+        );
+        assert_eq!(
+            classify_serialized_shell_presentation(&payload),
+            StorageReadObservation::Valid(state(true, false)),
+            "payload={payload:?}"
+        );
+    }
+    let corrupt = [
+        String::new(),
+        "null".to_owned(),
+        "{}".to_owned(),
+        "[]".to_owned(),
+        "not json at all".to_owned(),
+        format!("{valid}}}"),
+        valid[1..].to_owned(),
+        valid[..valid.len().saturating_sub(1)].to_owned(),
+        "{\"version\":0,\"left_collapsed\":false,\"right_collapsed\":false}".to_owned(),
+        "{\"version\":2,\"left_collapsed\":false,\"right_collapsed\":false}".to_owned(),
+        "{\"version\":01,\"left_collapsed\":false,\"right_collapsed\":false}".to_owned(),
+        "{\"version\":\"1\",\"left_collapsed\":false,\"right_collapsed\":false}".to_owned(),
+        "{\"left_collapsed\":false,\"right_collapsed\":false}".to_owned(),
+        "{\"version\":1,\"left_collapsed\":false}".to_owned(),
+        "{\"version\":1,\"left_collapsed\":false,\"right_collapsed\":false,\"extra\":true}"
+            .to_owned(),
+        "{\"version\":1,\"left_collapsed\":True,\"right_collapsed\":false}".to_owned(),
+        "{\"version\":1,\"left_collapsed\":1,\"right_collapsed\":0}".to_owned(),
+        "{\"version\":1,\"left_collapsed\":\"false\",\"right_collapsed\":\"false\"}".to_owned(),
+        "{\"version\":1,\"left_collapsed\":null,\"right_collapsed\":false}".to_owned(),
+    ];
+
+    for payload in &corrupt {
+        assert!(
+            decode_shell_presentation_state(payload).is_err(),
+            "payload={payload:?}"
+        );
+    }
+}
+
+#[test]
+fn session_startup_on_missing_key_returns_default_without_repair() {
+    let mut store = CountingStore::empty();
+    let mut session = ShellPresentationSession::new();
+
+    assert_eq!(
+        session.startup(&mut store),
+        DEFAULT_SHELL_PRESENTATION_STATE
+    );
+    assert_eq!(session.state(), DEFAULT_SHELL_PRESENTATION_STATE);
+    assert_eq!(store.writes, 0);
+    assert!(
+        !store
+            .inner
+            .contains(SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY)
+    );
+}
+
+#[test]
+fn session_writes_on_change_and_reloads_on_startup() {
+    let mut store = CountingStore::empty();
+    let mut session = ShellPresentationSession::new();
+    assert_eq!(
+        session.startup(&mut store),
+        DEFAULT_SHELL_PRESENTATION_STATE
+    );
+
+    assert!(session.update(&mut store, true, false));
+    assert_eq!(session.state(), state(true, false));
+    assert_eq!(store.writes, 1);
+    assert_eq!(
+        store.inner.get(SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY),
+        Some(&state(true, false).to_json())
+    );
+
+    assert!(!session.update(&mut store, true, false));
+    assert_eq!(store.writes, 1);
+
+    let mut restarted = ShellPresentationSession::new();
+    assert_eq!(restarted.startup(&mut store), state(true, false));
+    assert_eq!(restarted.state(), state(true, false));
+    assert_eq!(store.writes, 1);
+}
+
+#[test]
+fn session_startup_repairs_a_corrupt_payload_to_the_default() {
+    let mut store = CountingStore::empty();
+    store.inner.write(
+        SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY,
+        "{\"version\":99,\"left_collapsed\":true}".to_owned(),
+    );
+    let mut session = ShellPresentationSession::new();
+
+    assert_eq!(
+        session.startup(&mut store),
+        DEFAULT_SHELL_PRESENTATION_STATE
+    );
+    assert_eq!(session.state(), DEFAULT_SHELL_PRESENTATION_STATE);
+    assert_eq!(
+        store.inner.get(SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY),
+        Some(&DEFAULT_SHELL_PRESENTATION_STATE.to_json())
+    );
+
+    let mut restarted = ShellPresentationSession::new();
+    assert_eq!(
+        restarted.startup(&mut store),
+        DEFAULT_SHELL_PRESENTATION_STATE
+    );
 }

@@ -11,8 +11,20 @@
 //! default back. Only a failed repair write requests removal of the key. A
 //! normal save has no failure path in this policy; its storage error is
 //! deliberately absorbed, matching the legacy `Effect.result` boundary.
+//!
+//! The native caller-side completion of that contract lives here as well:
+//! [`ShellPresentationStore`] (with [`InMemoryShellPresentationStore`]) is the
+//! synchronous host-owned store seam mirroring the composer-draft session seam,
+//! and [`ShellPresentationSession`] drives startup reload and write-on-change
+//! through the [`load`]/[`repair`]/[`save`] policy above. Payloads cross the
+//! seam through the single canonical codec
+//! ([`ShellPresentationState::to_json`] and
+//! [`classify_serialized_shell_presentation`]), so there is exactly one
+//! encoder and one decoder.
 
 #![allow(clippy::module_name_repetitions)]
+
+use std::collections::HashMap;
 
 /// The only schema version understood by the shell presentation state.
 pub const SHELL_PRESENTATION_SCHEMA_VERSION: u8 = 1;
@@ -366,6 +378,154 @@ pub const fn save(
             state,
         },
         outcome,
+    }
+}
+
+/// A synchronous settings-store seam owned by the embedding host.
+///
+/// This mirrors the composer-draft session's store seam: the session never
+/// assumes a capacity, serialization format, or backing system. The key is
+/// always [`SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY`]; it stays a
+/// parameter so the session can execute the [`StorageAction`]s returned by
+/// [`load`], [`repair`], and [`save`] verbatim.
+pub trait ShellPresentationStore {
+    /// Reads the raw payload stored under `key`, if one exists.
+    fn read(&mut self, key: &str) -> Option<String>;
+
+    /// Writes the raw payload under `key`, replacing any prior value.
+    fn write(&mut self, key: &str, value: String);
+
+    /// Removes any payload stored under `key`.
+    fn remove(&mut self, key: &str);
+}
+
+/// A small deterministic in-memory implementation of [`ShellPresentationStore`].
+///
+/// This is the settings analogue of the draft-session in-memory seam: a
+/// testable synchronous store that performs no I/O. Reads never mutate the
+/// map, so startup reloads are idempotent.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InMemoryShellPresentationStore {
+    entries: HashMap<String, String>,
+}
+
+impl InMemoryShellPresentationStore {
+    /// Creates an empty store holding no settings payload.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Returns the number of stored payloads.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether no payload is stored.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns whether a payload exists under `key` without changing the store.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Returns the payload under `key` without changing the store.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.entries.get(key)
+    }
+}
+
+impl ShellPresentationStore for InMemoryShellPresentationStore {
+    fn read(&mut self, key: &str) -> Option<String> {
+        self.entries.get(key).cloned()
+    }
+
+    fn write(&mut self, key: &str, value: String) {
+        self.entries.insert(key.to_owned(), value);
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+}
+
+/// Synchronous driver that reloads shell presentation state on startup and
+/// persists it on change through a [`ShellPresentationStore`].
+///
+/// Startup classifies the stored payload with
+/// [`classify_serialized_shell_presentation`] and applies the [`load`]
+/// policy: a missing key yields the default with no repair, a valid payload
+/// is adopted verbatim, and a malformed payload falls back to the default
+/// while the default is written back as repair. In-memory writes are
+/// infallible, so the [`repair`] removal path never triggers here; hosts with
+/// a fallible store keep using [`load`], [`repair`], and [`save`] directly.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShellPresentationSession {
+    state: ShellPresentationState,
+}
+
+impl ShellPresentationSession {
+    /// Creates a session holding the default presentation state.
+    ///
+    /// Call [`Self::startup`] before exposing [`Self::state`]; a fresh
+    /// session has not yet consulted the store.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: DEFAULT_SHELL_PRESENTATION_STATE,
+        }
+    }
+
+    /// Returns the session's current presentation state.
+    #[must_use]
+    pub const fn state(self) -> ShellPresentationState {
+        self.state
+    }
+
+    /// Reloads the session from the store, repairing a corrupt payload.
+    ///
+    /// Returns the adopted state: the stored value when it decodes, otherwise
+    /// the default.
+    pub fn startup<S: ShellPresentationStore>(&mut self, store: &mut S) -> ShellPresentationState {
+        let observation = match store.read(SHELL_PRESENTATION_PREFERENCES_STORAGE_KEY) {
+            None => StorageReadObservation::Missing,
+            Some(payload) => classify_serialized_shell_presentation(&payload),
+        };
+        let transition = load(observation);
+        self.state = transition.state;
+        if let StorageAction::WriteDefault { key, state } = transition.action {
+            store.write(key, state.to_json());
+        }
+        self.state
+    }
+
+    /// Persists one collapsed-pair change, writing only when the value differs.
+    ///
+    /// Returns whether the session state changed and a store write was issued.
+    pub fn update<S: ShellPresentationStore>(
+        &mut self,
+        store: &mut S,
+        left_collapsed: bool,
+        right_collapsed: bool,
+    ) -> bool {
+        let next = ShellPresentationState::new(left_collapsed, right_collapsed);
+        if next == self.state {
+            return false;
+        }
+        self.state = next;
+        let transition = save(next, StorageWriteObservation::Succeeded);
+        if let StorageAction::Save { key, state } = transition.action {
+            store.write(key, state.to_json());
+        }
+        true
     }
 }
 
