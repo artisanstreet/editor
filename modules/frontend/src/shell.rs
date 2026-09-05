@@ -583,7 +583,7 @@ pub(crate) fn gradient_avatar(theme: &ArtisanTheme, identity: RailIdentity<'_>) 
 pub(crate) fn profile_avatar(theme: &ArtisanTheme, identity: RailIdentity<'_>) -> Div {
     use gpui::StyledImage as _;
     let Some(seed) = gradient_avatar_seed(identity) else {
-        return gradient_avatar(theme, identity).rounded(px(10.0));
+        return gradient_avatar(theme, identity).rounded(px(8.0));
     };
     let (base, lit) = gradient_avatar_paints(seed);
     let color = |paint: Hsla| {
@@ -612,10 +612,10 @@ pub(crate) fn profile_avatar(theme: &ArtisanTheme, identity: RailIdentity<'_>) -
         gpui::ImageFormat::Svg,
         svg.into_bytes(),
     ));
-    div().size(px(40.0)).child(
+    div().size(px(32.0)).child(
         gpui::img(image)
-            .size(px(40.0))
-            .rounded(px(10.0))
+            .size(px(32.0))
+            .rounded(px(8.0))
             .object_fit(gpui::ObjectFit::Cover),
     )
 }

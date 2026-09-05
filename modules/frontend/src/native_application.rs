@@ -1015,14 +1015,14 @@ impl NativeApplication {
                 &avatar_theme,
                 crate::shell::RailIdentity::new(name.as_deref(), hostname.as_deref()),
             )
-            .rounded(px(10.0))
+            .rounded(px(8.0))
             .overflow_hidden()
             .into_any_element()
         };
         let avatar = if let Some(path) = self.profile_picture.clone() {
             gpui::img(path)
-                .size(px(40.0))
-                .rounded(px(10.0))
+                .size(px(32.0))
+                .rounded(px(8.0))
                 .object_fit(gpui::ObjectFit::Cover)
                 .with_fallback(fallback.clone())
                 .with_loading(fallback)
@@ -1036,17 +1036,17 @@ impl NativeApplication {
             .track_focus(&self.profile_focus)
             .tab_index(0)
             .cursor_pointer()
-            .rounded(px(10.0))
+            .rounded(px(8.0))
             .w_full()
-            .h(px(40.0))
+            .h(px(32.0))
             .flex()
             .items_center()
             .gap(px(10.0))
             .child(
                 div()
-                    .size(px(40.0))
+                    .size(px(32.0))
                     .flex_shrink_0()
-                    .rounded(px(10.0))
+                    .rounded(px(8.0))
                     .overflow_hidden()
                     .child(avatar),
             )
@@ -1056,11 +1056,12 @@ impl NativeApplication {
                     .min_w(px(0.0))
                     .flex()
                     .flex_col()
-                    .gap(px(1.0))
+                    .gap(px(0.0))
                     .child(
                         div()
                             .truncate()
                             .text_size(px(14.0))
+                            .line_height(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
                             .child(self.profile_name.clone().unwrap_or_else(|| "User".into())),
@@ -1069,6 +1070,7 @@ impl NativeApplication {
                         div()
                             .truncate()
                             .text_size(px(12.0))
+                            .line_height(px(14.0))
                             .text_color(theme.secondary)
                             .child(
                                 self.profile_hostname
