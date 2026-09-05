@@ -16,11 +16,13 @@ use artisan_ui::{
     motion::MotionPolicy,
     theme::{ArtisanTheme, DesktopTheme, ThemeMode},
 };
+use gpui::ColorExt;
 use gpui::StyledImage;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, ImageFormat,
-    ImageSource, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, ObjectFit,
+    AnyElement, App, Bounds, ClipboardItem, Context, DispatchPhase, Element, ElementId,
+    ElementInputHandler, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    GlobalElementId, HighlightStyle, ImageFormat, ImageSource, InspectorElementId, IntoElement,
+    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
     Pixels, Point, Render, RenderImage, SharedString, StyledText, Subscription, Task,
     UTF16Selection, Window, actions, div, img, point,
     prelude::{
@@ -28,7 +30,6 @@ use gpui::{
     },
     px, size,
 };
-use gpui::ColorExt;
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
 use crate::composer_draft_session_policy::{
@@ -63,6 +64,16 @@ actions!(
         Cut,
         Home,
         End,
+        Up,
+        Down,
+        SelectHome,
+        SelectEnd,
+        SelectUp,
+        SelectDown,
+        DocumentHome,
+        DocumentEnd,
+        SelectDocumentHome,
+        SelectDocumentEnd,
         RequestSend,
         InsertNewline,
         Undo,
@@ -172,6 +183,10 @@ pub(crate) struct NativeComposer {
     redo: Vec<(String, Range<usize>)>,
     selection: Range<usize>,
     selection_reversed: bool,
+    selection_anchor: Option<usize>,
+    vertical_goal_x: Option<Pixels>,
+    vertical_goal_column: Option<usize>,
+    selection_dragging: bool,
     marked_range: Option<Range<usize>>,
     layout: Option<gpui::TextLayout>,
     painted_bounds: Option<Bounds<Pixels>>,
@@ -220,6 +235,10 @@ impl NativeComposer {
             redo: Vec::new(),
             selection: 0..0,
             selection_reversed: false,
+            selection_anchor: None,
+            vertical_goal_x: None,
+            vertical_goal_column: None,
+            selection_dragging: false,
             marked_range: None,
             layout: None,
             painted_bounds: None,
@@ -279,8 +298,20 @@ impl NativeComposer {
         let end = self.state.draft().len();
         self.selection = end..end;
         self.selection_reversed = false;
+        self.selection_anchor = None;
+        self.clear_vertical_goal();
+        self.selection_dragging = false;
         self.marked_range = None;
         self.selection_revision = self.selection_revision.saturating_add(1);
+    }
+
+    fn clear_vertical_goal(&mut self) {
+        self.vertical_goal_x = None;
+        self.vertical_goal_column = None;
+    }
+
+    fn prune_attachment_tasks(&mut self) {
+        self.attachment_tasks.retain(|task| !task.is_ready());
     }
 
     fn advance_selection_revision(&mut self) {
@@ -385,6 +416,9 @@ impl NativeComposer {
         self.draft_generation = self.draft_generation.saturating_add(1);
         self.draft_thread = Some(thread.clone());
         self.attachment_tasks.clear();
+        self.selection_dragging = false;
+        self.selection_anchor = None;
+        self.clear_vertical_goal();
         self.active_attachment_submission = None;
         self.active_submission_draft_revision = None;
         self.viewed_attachment = None;
@@ -419,6 +453,9 @@ impl NativeComposer {
             self.draft_tokens = tokens;
             self.selection = self.state.draft().len()..self.state.draft().len();
             self.selection_reversed = false;
+            self.selection_anchor = None;
+            self.clear_vertical_goal();
+            self.selection_dragging = false;
             self.marked_range = None;
             self.undo.clear();
             self.redo.clear();
@@ -573,6 +610,12 @@ impl NativeComposer {
     }
 
     fn spawn_attachment_work(&mut self, work: AttachmentWork, cx: &mut Context<Self>) {
+        // Task handles cancel their futures when dropped. Completed handles do
+        // not need to remain in the composer, so retire them before every new
+        // piece of attachment work. The draft generation and attachment IDs
+        // below remain the authoritative completion fences for work that is
+        // still running.
+        self.prune_attachment_tasks();
         let generation = self.draft_generation;
         let thread = self.draft_thread.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -596,6 +639,7 @@ impl NativeComposer {
         cx: &mut Context<Self>,
     ) {
         if generation != self.draft_generation || thread != self.draft_thread {
+            self.prune_attachment_tasks();
             return;
         }
 
@@ -652,6 +696,7 @@ impl NativeComposer {
             self.persist_current_draft();
             cx.notify();
         }
+        self.prune_attachment_tasks();
     }
 
     fn attachment_is_duplicate(&self, index: usize, prepared: &PreparedComposerAttachment) -> bool {
@@ -670,6 +715,7 @@ impl NativeComposer {
     }
 
     fn remove_attachment(&mut self, attachment_id: &str, cx: &mut Context<Self>) {
+        self.prune_attachment_tasks();
         let Some(index) = self
             .attachments
             .iter()
@@ -992,6 +1038,9 @@ impl NativeComposer {
             let end = self.selection.end.min(self.state.draft().len());
             self.selection = end..end;
             self.selection_reversed = false;
+            self.selection_anchor = None;
+            self.clear_vertical_goal();
+            self.selection_dragging = false;
             self.marked_range = None;
             self.advance_selection_revision();
             cx.notify();
@@ -1026,6 +1075,9 @@ impl NativeComposer {
             self.draft_revision = self.draft_revision.saturating_add(1);
             self.selection = selection;
             self.selection_reversed = false;
+            self.selection_anchor = None;
+            self.clear_vertical_goal();
+            self.selection_dragging = false;
             self.advance_selection_revision();
             self.layout = None;
             self.persist_current_draft();
@@ -1044,6 +1096,9 @@ impl NativeComposer {
             self.draft_revision = self.draft_revision.saturating_add(1);
             self.selection = selection;
             self.selection_reversed = false;
+            self.selection_anchor = None;
+            self.clear_vertical_goal();
+            self.selection_dragging = false;
             self.advance_selection_revision();
             self.layout = None;
             self.persist_current_draft();
@@ -1106,6 +1161,9 @@ impl NativeComposer {
         self.advance_selection_revision();
         self.layout = None;
         self.painted_bounds = None;
+        self.selection_anchor = None;
+        self.clear_vertical_goal();
+        self.selection_dragging = false;
         let replacement_end = range.start.saturating_add(replacement.len());
         if let Some((start, end)) = selected_offsets {
             self.selection = range.start + start..range.start + end;
@@ -1142,12 +1200,7 @@ impl NativeComposer {
         self.selection.clone()
     }
 
-    fn set_selection_for_point(
-        &mut self,
-        point: Point<Pixels>,
-        extend: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn begin_selection_drag(&mut self, point: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
         let Some(byte_index) = self.byte_index_for_global_point(point) else {
             return;
         };
@@ -1156,10 +1209,34 @@ impl NativeComposer {
         } else {
             self.selection = byte_index..byte_index;
             self.selection_reversed = false;
+            self.selection_anchor = None;
+            self.advance_selection_revision();
         }
         self.marked_range = None;
-        self.advance_selection_revision();
+        self.clear_vertical_goal();
+        self.selection_dragging = true;
         cx.notify();
+    }
+
+    fn update_selection_drag(&mut self, point: Point<Pixels>, cx: &mut Context<Self>) {
+        if !self.selection_dragging {
+            return;
+        }
+        let Some(byte_index) = self.byte_index_for_drag_point(point) else {
+            return;
+        };
+        let old_selection = self.selection.clone();
+        let old_reversed = self.selection_reversed;
+        self.select_to(byte_index);
+        self.marked_range = None;
+        self.clear_vertical_goal();
+        if old_selection != self.selection || old_reversed != self.selection_reversed {
+            cx.notify();
+        }
+    }
+
+    fn end_selection_drag(&mut self) {
+        self.selection_dragging = false;
     }
 
     pub(crate) fn bind_actions(cx: &mut App) {
@@ -1189,6 +1266,48 @@ impl NativeComposer {
             KeyBinding::new("ctrl-x", Cut, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("home", Home, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("end", End, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("up", Up, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("down", Down, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("shift-home", SelectHome, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("shift-end", SelectEnd, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("shift-up", SelectUp, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("shift-down", SelectDown, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-home", DocumentHome, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-end", DocumentEnd, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new(
+                "ctrl-shift-home",
+                SelectDocumentHome,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-end",
+                SelectDocumentEnd,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new("cmd-home", DocumentHome, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("cmd-end", DocumentEnd, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new(
+                "cmd-shift-home",
+                SelectDocumentHome,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "cmd-shift-end",
+                SelectDocumentEnd,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new("cmd-up", DocumentHome, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("cmd-down", DocumentEnd, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new(
+                "cmd-shift-up",
+                SelectDocumentHome,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "cmd-shift-down",
+                SelectDocumentEnd,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
             KeyBinding::new("enter", RequestSend, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new(
                 "shift-enter",
@@ -1209,16 +1328,28 @@ impl NativeComposer {
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selection = offset..offset;
         self.selection_reversed = false;
+        self.selection_anchor = None;
+        self.clear_vertical_goal();
         self.marked_range = None;
+        self.selection_dragging = false;
         self.advance_selection_revision();
         cx.notify();
     }
 
     fn select_to(&mut self, offset: usize) {
-        let anchor = if self.selection_reversed {
-            self.selection.end
-        } else {
-            self.selection.start
+        let anchor = match self.selection_anchor {
+            Some(anchor) => anchor,
+            None => {
+                let anchor = if self.selection.is_empty() {
+                    self.cursor_offset()
+                } else if self.selection_reversed {
+                    self.selection.end
+                } else {
+                    self.selection.start
+                };
+                self.selection_anchor = Some(anchor);
+                anchor
+            }
         };
         if offset < anchor {
             self.selection = offset..anchor;
@@ -1239,6 +1370,8 @@ impl NativeComposer {
         if extend {
             self.select_to(target);
             self.marked_range = None;
+            self.clear_vertical_goal();
+            self.selection_dragging = false;
             cx.notify();
         } else {
             self.move_to(target, cx);
@@ -1254,6 +1387,8 @@ impl NativeComposer {
         if extend {
             self.select_to(target);
             self.marked_range = None;
+            self.clear_vertical_goal();
+            self.selection_dragging = false;
             cx.notify();
         } else {
             self.move_to(target, cx);
@@ -1326,6 +1461,9 @@ impl NativeComposer {
         if !self.state.is_disabled() {
             self.selection = 0..self.state.draft().len();
             self.selection_reversed = false;
+            self.selection_anchor = None;
+            self.clear_vertical_goal();
+            self.selection_dragging = false;
             self.marked_range = None;
             self.advance_selection_revision();
             cx.notify();
@@ -1335,9 +1473,7 @@ impl NativeComposer {
     fn move_home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
         if !self.state.is_disabled() {
             let cursor = self.cursor_offset();
-            let line_start = self.state.draft()[..cursor]
-                .rfind('\n')
-                .map_or(0, |index| index + 1);
+            let line_start = logical_line_start(self.state.draft(), cursor);
             self.move_to(line_start, cx);
         }
     }
@@ -1345,11 +1481,169 @@ impl NativeComposer {
     fn move_end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         if !self.state.is_disabled() {
             let cursor = self.cursor_offset();
-            let line_end = self.state.draft()[cursor..]
-                .find('\n')
-                .map_or(self.state.draft().len(), |index| cursor + index);
+            let line_end = logical_line_end(self.state.draft(), cursor);
             self.move_to(line_end, cx);
         }
+    }
+
+    fn move_up_action(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(-1, window, false, cx);
+    }
+
+    fn move_down_action(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(1, window, false, cx);
+    }
+
+    fn select_home_action(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.is_disabled() {
+            return;
+        }
+        let target = logical_line_start(self.state.draft(), self.cursor_offset());
+        self.select_to(target);
+        self.marked_range = None;
+        self.clear_vertical_goal();
+        self.selection_dragging = false;
+        cx.notify();
+    }
+
+    fn select_end_action(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.is_disabled() {
+            return;
+        }
+        let target = logical_line_end(self.state.draft(), self.cursor_offset());
+        self.select_to(target);
+        self.marked_range = None;
+        self.clear_vertical_goal();
+        self.selection_dragging = false;
+        cx.notify();
+    }
+
+    fn move_document_home_action(
+        &mut self,
+        _: &DocumentHome,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.is_disabled() {
+            self.move_to(0, cx);
+        }
+    }
+
+    fn move_document_end_action(
+        &mut self,
+        _: &DocumentEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.is_disabled() {
+            self.move_to(self.state.draft().len(), cx);
+        }
+    }
+
+    fn select_document_home_action(
+        &mut self,
+        _: &SelectDocumentHome,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.is_disabled() {
+            return;
+        }
+        self.select_to(0);
+        self.marked_range = None;
+        self.clear_vertical_goal();
+        self.selection_dragging = false;
+        cx.notify();
+    }
+
+    fn select_document_end_action(
+        &mut self,
+        _: &SelectDocumentEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.is_disabled() {
+            return;
+        }
+        self.select_to(self.state.draft().len());
+        self.marked_range = None;
+        self.clear_vertical_goal();
+        self.selection_dragging = false;
+        cx.notify();
+    }
+
+    fn select_up_action(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(-1, window, true, cx);
+    }
+
+    fn select_down_action(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(1, window, true, cx);
+    }
+
+    fn move_vertical(
+        &mut self,
+        direction: i32,
+        _window: &mut Window,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.is_disabled() {
+            return;
+        }
+
+        let cursor = self.cursor_offset();
+        let target = self.vertical_target(cursor, direction);
+        if extend {
+            self.select_to(target);
+            self.marked_range = None;
+            self.selection_dragging = false;
+            cx.notify();
+        } else {
+            // A vertical move keeps its x/column goal across repeated Up/Down
+            // presses, even when an intermediate line is shorter.
+            self.selection = target..target;
+            self.selection_reversed = false;
+            self.selection_anchor = None;
+            self.marked_range = None;
+            self.selection_dragging = false;
+            self.advance_selection_revision();
+            cx.notify();
+        }
+    }
+
+    fn vertical_target(&mut self, cursor: usize, direction: i32) -> usize {
+        let draft = self.state.draft().to_owned();
+        let goal_column = self.vertical_goal_column.unwrap_or_else(|| {
+            let line_start = logical_line_start(&draft, cursor);
+            utf8_offset_to_utf16(&draft, cursor)
+                .unwrap_or_default()
+                .saturating_sub(utf8_offset_to_utf16(&draft, line_start).unwrap_or_default())
+        });
+        self.vertical_goal_column = Some(goal_column);
+
+        if self.painted_bounds.is_some()
+            && let Some(layout) = self.layout.clone()
+            && let Some(position) = layout.position_for_index(cursor)
+        {
+            let goal_x = self.vertical_goal_x.unwrap_or(position.x);
+            self.vertical_goal_x = Some(goal_x);
+            // `TextLayout::index_for_position` treats the exact bottom edge of
+            // a row as belonging to that row. Aim at the center of the target
+            // row so Down/Up cannot accidentally resolve back to the source
+            // row at the shared line boundary.
+            let target_y =
+                position.y + layout.line_height() * direction as f32 + layout.line_height() / 2.0;
+            let layout_bounds = layout.bounds();
+            if target_y < layout_bounds.top() || target_y >= layout_bounds.bottom() {
+                return cursor;
+            }
+            let target = match layout.index_for_position(point(goal_x, target_y)) {
+                Ok(index) | Err(index) => index,
+            };
+            return previous_char_boundary(&draft, target.min(draft.len()));
+        }
+
+        logical_vertical_target(&draft, cursor, direction, goal_column)
     }
 
     fn insert_newline(&mut self, _: &InsertNewline, _: &mut Window, cx: &mut Context<Self>) {
@@ -1366,6 +1660,7 @@ impl NativeComposer {
         if self.state.is_disabled() {
             return;
         }
+        self.prune_attachment_tasks();
         let scope = PasteScope {
             thread: self.draft_thread.clone(),
             draft_generation: self.draft_generation,
@@ -1669,10 +1964,65 @@ impl NativeComposer {
 
     fn byte_index_for_global_point(&self, point: Point<Pixels>) -> Option<usize> {
         let bounds = self.painted_bounds.as_ref()?;
-        let point = localize_painted_point(bounds, point)?;
+        // TextLayout positions are already relative to the window in GPUI's
+        // prepaint pass. Keep the editor hit-test guard, but do not localize
+        // the point a second time before asking the layout for its index.
+        if !valid_bounds(bounds) || !valid_point(point) || !bounds.contains(&point) {
+            return None;
+        }
         let layout = self.layout.as_ref()?;
-        let index = match layout.index_for_position(point) {
-            Ok(index) | Err(index) => index,
+        let layout_bounds = layout.bounds();
+        let index = if point.y < layout_bounds.top() {
+            0
+        } else if point.y >= layout_bounds.bottom() {
+            self.state.draft().len()
+        } else {
+            match layout.index_for_position(point) {
+                Ok(index) | Err(index) => index,
+            }
+        };
+        (index <= self.state.draft().len())
+            .then(|| previous_char_boundary(self.state.draft(), index))
+    }
+
+    fn byte_index_for_drag_point(&self, global_point: Point<Pixels>) -> Option<usize> {
+        let bounds = self.painted_bounds.as_ref()?;
+        if !valid_bounds(bounds) || !valid_point(global_point) {
+            return None;
+        }
+
+        // Keep the endpoint inside the layout viewport while the pointer is
+        // outside the field. This gives ordinary editor behavior at the top
+        // and bottom edges without manufacturing an offset outside the text.
+        let left = bounds.left();
+        let top = bounds.top();
+        let right = bounds.right();
+        let bottom = bounds.bottom();
+        let x = if global_point.x < left {
+            left
+        } else if global_point.x >= right {
+            if right > left { right - px(0.1) } else { left }
+        } else {
+            global_point.x
+        };
+        let y = if global_point.y < top {
+            top
+        } else if global_point.y >= bottom {
+            if bottom > top { bottom - px(0.1) } else { top }
+        } else {
+            global_point.y
+        };
+        let point = point(x, y);
+        let layout = self.layout.as_ref()?;
+        let layout_bounds = layout.bounds();
+        let index = if point.y < layout_bounds.top() {
+            0
+        } else if point.y >= layout_bounds.bottom() {
+            self.state.draft().len()
+        } else {
+            match layout.index_for_position(point) {
+                Ok(index) | Err(index) => index,
+            }
         };
         (index <= self.state.draft().len())
             .then(|| previous_char_boundary(self.state.draft(), index))
@@ -1681,11 +2031,23 @@ impl NativeComposer {
 
 impl Render for NativeComposer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prune_attachment_tasks();
         let entity = cx.entity();
         let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
         let desktop_theme = DesktopTheme::neutral_dark();
         let draft = self.state.draft().to_owned();
-        let styled_text = StyledText::new(SharedString::from(draft));
+        let styled_text = if self.selection.is_empty() {
+            StyledText::new(SharedString::from(draft))
+        } else {
+            StyledText::new(SharedString::from(draft)).with_highlights([(
+                self.selection.clone(),
+                HighlightStyle {
+                    color: Some(desktop_theme.foreground),
+                    background_color: Some(desktop_theme.selected),
+                    ..Default::default()
+                },
+            )])
+        };
         self.painted_bounds = None;
         self.layout = Some(styled_text.layout().clone());
 
@@ -1723,14 +2085,6 @@ impl Render for NativeComposer {
             );
         }
 
-        let mouse_entity = entity.clone();
-        editor = editor.on_mouse_down(MouseButton::Left, move |event, _, cx| {
-            let point = event.position;
-            mouse_entity.update(cx, |composer, composer_cx| {
-                composer.set_selection_for_point(point, event.modifiers.shift, composer_cx);
-            });
-        });
-
         editor = editor
             .on_action(cx.listener(Self::undo_action))
             .on_action(cx.listener(Self::redo_action))
@@ -1743,6 +2097,16 @@ impl Render for NativeComposer {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::move_home))
             .on_action(cx.listener(Self::move_end))
+            .on_action(cx.listener(Self::move_up_action))
+            .on_action(cx.listener(Self::move_down_action))
+            .on_action(cx.listener(Self::select_home_action))
+            .on_action(cx.listener(Self::select_end_action))
+            .on_action(cx.listener(Self::select_up_action))
+            .on_action(cx.listener(Self::select_down_action))
+            .on_action(cx.listener(Self::move_document_home_action))
+            .on_action(cx.listener(Self::move_document_end_action))
+            .on_action(cx.listener(Self::select_document_home_action))
+            .on_action(cx.listener(Self::select_document_end_action))
             .on_action(cx.listener(Self::request_send_action))
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::paste))
@@ -1966,6 +2330,57 @@ impl Element for NativeComposerInputElement {
             ElementInputHandler::new(bounds, self.view.clone()),
             cx,
         );
+
+        window.on_mouse_event({
+            let view = self.view.clone();
+            let focus_handle = self.focus_handle.clone();
+            let bounds = bounds.clone();
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !bounds.contains(&event.position)
+                {
+                    return;
+                }
+
+                cx.stop_propagation();
+                window.focus(&focus_handle, cx);
+                view.update(cx, |composer, composer_cx| {
+                    composer.begin_selection_drag(
+                        event.position,
+                        event.modifiers.shift,
+                        composer_cx,
+                    );
+                });
+            }
+        });
+        window.on_mouse_event({
+            let view = self.view.clone();
+            move |event: &MouseMoveEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble || !event.dragging() {
+                    return;
+                }
+
+                let is_dragging = view.read(cx).selection_dragging;
+                if is_dragging {
+                    view.update(cx, |composer, composer_cx| {
+                        composer.update_selection_drag(event.position, composer_cx);
+                    });
+                }
+            }
+        });
+        window.on_mouse_event({
+            let view = self.view.clone();
+            move |event: &MouseUpEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                    return;
+                }
+
+                if view.read(cx).selection_dragging {
+                    view.update(cx, |composer, _| composer.end_selection_drag());
+                }
+            }
+        });
         self.child.paint(window, cx);
         self.view.update(cx, |composer, _| {
             composer.painted_bounds = valid_bounds(&bounds).then_some(bounds);
@@ -2071,7 +2486,9 @@ impl gpui::EntityInputHandler for NativeComposer {
         let layout = self.layout.as_ref()?;
         let start = layout.position_for_index(range.start)?;
         let end = layout.position_for_index(range.end)?;
-        offset_layout_bounds(painted_bounds, start, end, layout.line_height())
+        let width = (end.x - start.x).max(px(1.0));
+        let bounds = Bounds::new(start, size(width, layout.line_height()));
+        valid_bounds(&bounds).then_some(bounds)
     }
 
     fn character_index_for_point(
@@ -2104,6 +2521,7 @@ fn valid_point(point: Point<Pixels>) -> bool {
     valid_pixels(point.x) && valid_pixels(point.y)
 }
 
+#[cfg(test)]
 fn localize_painted_point(
     painted_bounds: &Bounds<Pixels>,
     global_point: Point<Pixels>,
@@ -2114,6 +2532,7 @@ fn localize_painted_point(
     painted_bounds.localize(&global_point)
 }
 
+#[cfg(test)]
 fn offset_layout_bounds(
     element_bounds: &Bounds<Pixels>,
     local_start: Point<Pixels>,
@@ -2229,17 +2648,59 @@ fn next_character_boundary(text: &str, offset: usize) -> usize {
         .map_or(text.len(), |character| offset + character.len_utf8())
 }
 
+fn logical_line_start(text: &str, offset: usize) -> usize {
+    let offset = previous_char_boundary(text, offset);
+    text[..offset].rfind('\n').map_or(0, |index| index + 1)
+}
+
+fn logical_line_end(text: &str, offset: usize) -> usize {
+    let offset = previous_char_boundary(text, offset);
+    text[offset..]
+        .find('\n')
+        .map_or(text.len(), |index| offset + index)
+}
+
+fn logical_vertical_target(text: &str, cursor: usize, direction: i32, goal_column: usize) -> usize {
+    let cursor = previous_char_boundary(text, cursor);
+    let line_start = logical_line_start(text, cursor);
+    let line_end = logical_line_end(text, cursor);
+
+    let (target_start, target_end) = if direction < 0 {
+        if line_start == 0 {
+            return cursor;
+        }
+        let previous_end = line_start - 1;
+        let previous_start = logical_line_start(text, previous_end);
+        (previous_start, previous_end)
+    } else {
+        if line_end >= text.len() {
+            return cursor;
+        }
+        let next_start = line_end + 1;
+        (next_start, logical_line_end(text, next_start))
+    };
+
+    let target_line = &text[target_start..target_end];
+    let mut target_column = goal_column.min(utf8_offset_to_utf16(target_line, target_line.len()).unwrap_or_default());
+    while target_column > 0 && utf16_offset_to_utf8(target_line, target_column).is_none() {
+        target_column -= 1;
+    }
+    let target_offset = utf16_offset_to_utf8(target_line, target_column).unwrap_or_default();
+    target_start + target_offset
+}
+
 #[cfg(test)]
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::native_composer_attachments::ComposerAttachment;
-    use super::{
-        NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR, NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR,
-        NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
-        NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer, NativeComposerEvent, localize_painted_point,
-        offset_layout_bounds, replace_text_preserving_raw, utf8_offset_to_utf16,
-        utf16_offset_to_utf8, utf16_range_to_utf8,
+    use super::{logical_vertical_target,
+        DocumentEnd, DocumentHome, NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR,
+        NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR, NATIVE_COMPOSER_PLACEHOLDER,
+        NATIVE_COMPOSER_PLACEHOLDER_SELECTOR, NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer,
+        NativeComposerEvent, SelectDocumentEnd, SelectDocumentHome, SelectEnd, SelectHome,
+        localize_painted_point, offset_layout_bounds, replace_text_preserving_raw,
+        utf8_offset_to_utf16, utf16_offset_to_utf8, utf16_range_to_utf8,
     };
     use crate::composer::DraftDisposition;
     use crate::image_policy::{ImageDimensions, ImageMediaType};
@@ -2249,7 +2710,7 @@ mod tests {
     use base64::Engine as _;
     use gpui::{
         Bounds, Entity, EntityInputHandler as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
-        Subscription, TestAppContext, VisualTestContext, point, px, size,
+        Subscription, Task, TestAppContext, VisualTestContext, point, px, size,
     };
     use std::sync::Arc;
 
@@ -2462,6 +2923,146 @@ mod tests {
 
         cx.simulate_keystrokes("enter");
         assert_eq!(requests.get(), 1);
+    }
+
+    #[gpui::test]
+    fn empty_ime_mark_is_still_a_composition_and_cannot_submit(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        bind_actions(cx);
+        focus_editor(cx, &view);
+        set_draft(cx, &view, "draft");
+        let (requests, _subscription) = observe_send_requests(cx, &view);
+
+        cx.update(|window, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.replace_and_mark_text_in_range(
+                    Some(0..0),
+                    "",
+                    Some(0..0),
+                    window,
+                    composer_cx,
+                );
+                assert!(
+                    composer
+                        .marked_range
+                        .as_ref()
+                        .is_some_and(|range| range.is_empty())
+                );
+                assert!(!composer.send_ready());
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        assert_eq!(requests.get(), 0);
+    }
+
+    #[gpui::test]
+    fn multiline_selection_actions_keep_an_anchor_when_crossing_zero(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        cx.update(|window, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_draft("one\ntwo");
+                composer.move_to(5, composer_cx);
+                composer.select_home_action(&SelectHome, window, composer_cx);
+                assert_eq!(composer.selection, 4..5);
+                assert!(composer.selection_reversed);
+
+                composer.select_end_action(&SelectEnd, window, composer_cx);
+                assert_eq!(composer.selection, 5..7);
+                assert!(!composer.selection_reversed);
+
+                composer.move_to(2, composer_cx);
+                composer.move_right(true, composer_cx);
+                composer.move_left(true, composer_cx);
+                composer.move_left(true, composer_cx);
+                assert_eq!(composer.selection, 1..2);
+                assert!(composer.selection_reversed);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn document_selection_actions_cover_ctrl_home_end_targets(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        cx.update(|window, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_draft("one\ntwo");
+                composer.move_to(5, composer_cx);
+                composer.select_document_home_action(&SelectDocumentHome, window, composer_cx);
+                assert_eq!(composer.selection, 0..5);
+                assert!(composer.selection_reversed);
+
+                composer.select_document_end_action(&SelectDocumentEnd, window, composer_cx);
+                assert_eq!(composer.selection, 5..7);
+                assert!(!composer.selection_reversed);
+
+                composer.move_document_home_action(&DocumentHome, window, composer_cx);
+                assert_eq!(composer.selection, 0..0);
+                composer.move_document_end_action(&DocumentEnd, window, composer_cx);
+                assert_eq!(composer.selection, 7..7);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn multiline_key_bindings_drive_navigation_and_selection(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        set_draft(cx, &view, "one\ntwo");
+        bind_actions(cx);
+        focus_editor(cx, &view);
+
+        cx.simulate_keystrokes("ctrl-home");
+        cx.update(|_, app| assert_eq!(view.read(app).selection, 0..0));
+
+        cx.simulate_keystrokes("down");
+        cx.update(|_, app| assert_eq!(view.read(app).selection, 4..4));
+
+        cx.simulate_keystrokes("shift-end");
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.selection, 4..7);
+            assert!(!composer.selection_reversed);
+        });
+
+        cx.simulate_keystrokes("ctrl-shift-home");
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.selection, 0..4);
+            assert!(composer.selection_reversed);
+        });
+
+        cx.simulate_keystrokes("ctrl-end");
+        cx.update(|_, app| assert_eq!(view.read(app).selection, 7..7));
+    }
+
+    #[test]
+    fn logical_vertical_navigation_preserves_column_across_short_lines_and_unicode() {
+        let text = "abcd\nx\nab😀d";
+        assert_eq!(logical_vertical_target(text, 4, 1, 4), 6);
+        assert_eq!(logical_vertical_target(text, 6, 1, 4), 13);
+        assert_eq!(logical_vertical_target(text, 13, -1, 4), 6);
+
+        let unicode = "x\n😀";
+        // UTF-16 column 1 falls inside the surrogate pair and is clamped to
+        // the preceding valid boundary rather than splitting the character.
+        assert_eq!(logical_vertical_target(unicode, 1, 1, 1), 2);
+    }
+
+    #[gpui::test]
+    fn completed_attachment_task_handles_are_pruned_without_touching_live_work(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let live_task = cx.spawn(|_| std::future::pending::<()>());
+        cx.update(|_, app| {
+            view.update(app, |composer, _| {
+                composer.attachment_tasks.push(live_task);
+                composer.attachment_tasks.push(Task::ready(()));
+                composer.attachment_tasks.push(Task::ready(()));
+                composer.prune_attachment_tasks();
+                assert_eq!(composer.attachment_tasks.len(), 1);
+                assert!(!composer.attachment_tasks[0].is_ready());
+            });
+        });
     }
 
     #[gpui::test]
