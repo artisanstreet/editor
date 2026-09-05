@@ -323,6 +323,8 @@ impl SceneFileChange {
 pub enum SceneItemKind {
     /// Canonical user message.
     UserMessage { body: String },
+    /// User input with byte-free references to persisted images.
+    MultimodalUserMessage { body: String, attachments: Vec<artisan_domain::ImageAttachmentRef> },
     /// Assistant message with caller-supplied phase.
     AssistantMessage { body: String, phase: AssistantPhase },
     /// Settled reasoning summary.
@@ -508,6 +510,8 @@ pub enum TurnBlock {
 /// User message block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserMessageBlock {
+    /// Ordered image references; encoded image data is loaded separately.
+    pub attachments: Vec<artisan_domain::ImageAttachmentRef>,
     /// Scene identity.
     pub id: SceneId,
     /// Complete bounded body.
@@ -871,7 +875,7 @@ impl ConversationScene {
         for item in &items {
             item_anchor_kinds.insert(
                 item.id.as_str(),
-                if matches!(&item.kind, SceneItemKind::UserMessage { .. }) {
+                if matches!(&item.kind, SceneItemKind::UserMessage { .. } | SceneItemKind::MultimodalUserMessage { .. }) {
                     AnchorKind::UserMessage
                 } else {
                     AnchorKind::Other
@@ -1031,6 +1035,25 @@ impl ConversationScene {
                     SceneItemKind::UserMessage { body } => {
                         let anchor_key = item.id.as_str().to_owned();
                         blocks.push(TurnBlock::UserMessage(UserMessageBlock {
+                            attachments: Vec::new(),
+                            id: item.id,
+                            body,
+                            disclosure: item.disclosure,
+                        }));
+                        if let Some(placements) = steerings_by_anchor.remove(&anchor_key) {
+                            for placement in placements {
+                                blocks.push(TurnBlock::SteeringLabel(SteeringBlock {
+                                    id: placement.id,
+                                    anchor: placement.anchor,
+                                    label: placement.label,
+                                }));
+                            }
+                        }
+                    }
+                    SceneItemKind::MultimodalUserMessage { body, attachments } => {
+                        let anchor_key = item.id.as_str().to_owned();
+                        blocks.push(TurnBlock::UserMessage(UserMessageBlock {
+                            attachments,
                             id: item.id,
                             body,
                             disclosure: item.disclosure,
@@ -1299,6 +1322,19 @@ fn validate_item_kind(kind: &SceneItemKind) -> Result<(), SceneBuildError> {
         SceneItemKind::UserMessage { body } | SceneItemKind::AssistantMessage { body, .. } => {
             validate_message_body(body)
         }
+        SceneItemKind::MultimodalUserMessage { body, attachments } => {
+            validate_message_body(body)?;
+            if attachments.is_empty() || attachments.len() > 10 {
+                return Err(SceneBuildError::InvalidImageAttachments);
+            }
+            for (index, attachment) in attachments.iter().enumerate() {
+                if attachment.index as usize != index || attachment.thread_id != attachments[0].thread_id
+                    || attachment.message_id != attachments[0].message_id {
+                    return Err(SceneBuildError::InvalidImageAttachments);
+                }
+            }
+            Ok(())
+        }
         SceneItemKind::ReasoningSummary { body } | SceneItemKind::Activity { body } => {
             validate_general_text(body)
         }
@@ -1354,6 +1390,9 @@ fn validate_item_kind(kind: &SceneItemKind) -> Result<(), SceneBuildError> {
 /// Typed atomic failure for a scene build.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SceneBuildError {
+    /// Image references were empty, unordered, mixed-owner, or over count.
+    #[error("invalid user image attachment references")]
+    InvalidImageAttachments,
     /// Two turns reused one identity.
     #[error("duplicate turn id {turn_id}")]
     DuplicateTurnId { turn_id: TurnId },
@@ -1429,4 +1468,41 @@ pub enum SceneBuildError {
     /// A compaction card was paired with a generic active-work narration.
     #[error("compaction card cannot coexist with {narration:?} narration")]
     CompactionNarrationConflict { narration: TurnNarration },
+}
+
+#[cfg(test)]
+mod multimodal_scene_tests {
+    use super::{SceneBuildError, SceneItemKind, validate_item_kind};
+    use artisan_domain::{ImageAttachmentRef, MessageId, ThreadId};
+
+    fn image(index: u32, thread: &str) -> ImageAttachmentRef {
+        ImageAttachmentRef::new(
+            MessageId::parse("message-images").expect("message"),
+            ThreadId::parse(thread).expect("thread"), index, "image/png", "capture.png", 128, [7; 32],
+        ).expect("image reference")
+    }
+
+    #[test]
+    fn image_only_scene_preserves_empty_text_and_ordered_references() {
+        let kind = SceneItemKind::MultimodalUserMessage {
+            body: String::new(),
+            attachments: vec![image(0, "thread-images"), image(1, "thread-images")],
+        };
+        assert_eq!(validate_item_kind(&kind), Ok(()));
+        let SceneItemKind::MultimodalUserMessage { body, attachments } = kind else { unreachable!() };
+        assert!(body.is_empty());
+        assert_eq!(attachments[1].index, 1);
+    }
+
+    #[test]
+    fn scene_rejects_reordered_or_cross_thread_image_references() {
+        for attachments in [
+            vec![image(1, "thread-images"), image(0, "thread-images")],
+            vec![image(0, "thread-images"), image(1, "other-thread")],
+            Vec::new(),
+        ] {
+            let kind = SceneItemKind::MultimodalUserMessage { body: String::new(), attachments };
+            assert_eq!(validate_item_kind(&kind), Err(SceneBuildError::InvalidImageAttachments));
+        }
+    }
 }

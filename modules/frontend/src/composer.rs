@@ -53,6 +53,8 @@ pub enum SubmissionBlocked {
     /// Sending is disabled on this surface, such as while it prepares or
     /// loses its session.
     Disabled,
+    /// The validated payload no longer describes the current authored text.
+    DraftChanged,
     /// Every issuable single-use flight identity has been minted exactly
     /// once: the checked counter issues `2^64 - 1` values (0 through
     /// `u64::MAX - 1`) and reserves `u64::MAX` as its exhaustion state, so
@@ -68,6 +70,7 @@ impl fmt::Display for SubmissionBlocked {
             Self::InvalidBody(error) => write!(formatter, "{error}"),
             Self::InFlight => formatter.write_str("a submission is already in flight"),
             Self::Disabled => formatter.write_str("sending is disabled on this surface"),
+            Self::DraftChanged => formatter.write_str("the draft changed before submission"),
             Self::IdentityExhausted => {
                 formatter.write_str("flight identity is exhausted; no further submission can begin")
             }
@@ -79,7 +82,7 @@ impl Error for SubmissionBlocked {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidBody(error) => Some(error),
-            Self::InFlight | Self::Disabled | Self::IdentityExhausted => None,
+            Self::InFlight | Self::Disabled | Self::DraftChanged | Self::IdentityExhausted => None,
         }
     }
 }
@@ -149,7 +152,7 @@ impl SubmissionToken {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveFlight {
     token: SubmissionToken,
-    body: MessageBody,
+    body: String,
     /// Sticky marker of any actual draft change after this flight began:
     /// set by the first differing [`ComposerState::set_draft`] write and
     /// never cleared by reverting, so an accepted send cannot discard text
@@ -270,6 +273,25 @@ impl ComposerState {
     ) -> Result<(MessageBody, SubmissionToken), SubmissionBlocked> {
         let body =
             MessageBody::parse(self.draft.clone()).map_err(SubmissionBlocked::InvalidBody)?;
+        let token = self.begin_validated_text(body.as_str())?;
+        Ok((body, token))
+    }
+
+    /// Begins custody for an already validated text/image payload. Empty text
+    /// is admitted only through the domain payload's image-only validation;
+    /// no placeholder is inserted into the authored draft.
+    pub fn begin_payload_submission(
+        &mut self,
+        payload: &artisan_domain::QueueMessagePayload,
+    ) -> Result<SubmissionToken, SubmissionBlocked> {
+        let text = payload.text().map_or("", artisan_domain::AuthoredText::as_str);
+        if text != self.draft {
+            return Err(SubmissionBlocked::DraftChanged);
+        }
+        self.begin_validated_text(text)
+    }
+
+    fn begin_validated_text(&mut self, text: &str) -> Result<SubmissionToken, SubmissionBlocked> {
         if self.flight.is_some() {
             return Err(SubmissionBlocked::InFlight);
         }
@@ -280,10 +302,10 @@ impl ComposerState {
         let token = SubmissionToken::mint().ok_or(SubmissionBlocked::IdentityExhausted)?;
         self.flight = Some(ActiveFlight {
             token,
-            body: body.clone(),
+            body: text.to_owned(),
             changed_since_begin: false,
         });
-        Ok((body, token))
+        Ok(token)
     }
 
     /// Ends exactly the flight identified by `token`, applying the given
@@ -315,5 +337,45 @@ impl ComposerState {
         {
             self.draft.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod multimodal_tests {
+    use super::*;
+    use artisan_domain::{AuthoredText, ImageAttachment, QueueMessagePayload};
+
+    fn image_payload(text: Option<AuthoredText>) -> QueueMessagePayload {
+        QueueMessagePayload::new(
+            text,
+            vec![ImageAttachment::new("image/png", vec![1], "capture.png").expect("image")],
+        )
+        .expect("payload")
+    }
+
+    #[test]
+    fn image_only_flight_never_inserts_placeholder_text() {
+        let mut composer = ComposerState::new();
+        let token = composer.begin_payload_submission(&image_payload(None)).expect("image flight");
+        assert_eq!(composer.draft(), "");
+        composer.set_draft("next message");
+        composer.finish_submission(token, DraftDisposition::Accepted);
+        assert_eq!(composer.draft(), "next message");
+    }
+
+    #[test]
+    fn stale_payload_cannot_begin_or_replace_an_active_flight() {
+        let mut composer = ComposerState::new();
+        composer.set_draft("current");
+        assert_eq!(
+            composer.begin_payload_submission(&image_payload(None)),
+            Err(SubmissionBlocked::DraftChanged)
+        );
+        assert!(!composer.is_submitting());
+        let payload = image_payload(Some(AuthoredText::parse("current").expect("text")));
+        let token = composer.begin_payload_submission(&payload).expect("flight");
+        assert_eq!(composer.begin_payload_submission(&payload), Err(SubmissionBlocked::InFlight));
+        composer.finish_submission(token, DraftDisposition::Retained);
+        assert_eq!(composer.draft(), "current");
     }
 }

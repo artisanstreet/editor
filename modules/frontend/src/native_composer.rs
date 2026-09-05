@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{ops::Range, panic};
+use std::{ops::Range, panic, sync::Arc};
 
 use artisan_assets::AssetId;
 use artisan_ui::{
@@ -16,19 +16,37 @@ use artisan_ui::{
     motion::MotionPolicy,
     theme::{ArtisanTheme, DesktopTheme, ThemeMode},
 };
+use gpui::StyledImage;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler,
-    Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
-    KeyBinding, LayoutId, MouseButton, Pixels, Point, Render, SharedString, StyledText,
-    UTF16Selection, Window, actions, div, point,
+    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, ImageFormat,
+    ImageSource, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, ObjectFit,
+    Pixels, Point, Render, RenderImage, SharedString, StyledText, Subscription, Task,
+    UTF16Selection, Window, actions, div, img, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
     px, size,
 };
+use gpui::ColorExt;
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
-use crate::composer_draft_session_policy::{ComposerDraft, ComposerDraftStore, InMemoryComposerDraftStore};
+use crate::composer_draft_session_policy::{
+    ComposerDraftDocument, ComposerDraftSession, ComposerDraftToken, InMemoryComposerDraftStore,
+};
+use crate::native_composer_controls::NativeComposerControls;
+use crate::native_model_selector::NativeModelSelector;
+
+#[path = "native_composer_attachments.rs"]
+mod native_composer_attachments;
+use self::native_composer_attachments::{
+    AttachmentPayloadError, AttachmentPreparationError, AttachmentPreparationOutcome,
+    ClipboardImageCandidate, ClipboardInput, ComposerAttachment, MAXIMUM_ATTACHMENT_COUNT,
+    MAXIMUM_ATTACHMENT_TOTAL_BYTES, MAXIMUM_RAW_ATTACHMENT_BYTES,
+    MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES, NativeComposerAttachmentSnapshot,
+    PreparedComposerAttachment, RestoredAttachmentInput, display_file_name,
+    prepare_clipboard_batch, prepare_file_batch, prepare_restored_batch, render_full_preview,
+};
 
 actions!(
     native_composer,
@@ -56,6 +74,13 @@ const NATIVE_COMPOSER_KEY_CONTEXT: &str = "artisan-native-composer";
 const NATIVE_COMPOSER_PLACEHOLDER: &str = "Do anything";
 const NATIVE_COMPOSER_PLACEHOLDER_SELECTOR: &str = "artisan-native-composer-placeholder";
 const NATIVE_COMPOSER_SEND_SELECTOR: &str = "artisan-native-composer-send";
+pub(crate) const NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR: &str =
+    "artisan-native-composer-attachment-tray";
+pub(crate) const NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR: &str =
+    "artisan-native-composer-attachment-viewer";
+pub(crate) const NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR: &str =
+    "artisan-native-composer-attachment-send-blocked";
+const NATIVE_COMPOSER_ATTACHMENT_SIZE: f32 = 72.0;
 
 /// One bounded application event emitted by the send control.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,14 +90,82 @@ pub(crate) enum NativeComposerEvent {
     ConfigureModel,
 }
 
+enum AttachmentWork {
+    Clipboard {
+        items: Vec<(String, ClipboardImageCandidate)>,
+    },
+    Files {
+        items: Vec<(String, std::path::PathBuf)>,
+    },
+    Restored {
+        items: Vec<RestoredAttachmentInput>,
+    },
+}
+
+#[derive(Clone)]
+struct PasteScope {
+    thread: Option<String>,
+    draft_generation: u64,
+    selection_revision: u64,
+    replacement_range: Option<Range<usize>>,
+}
+
+struct AttachmentPreviewState {
+    attachment_id: String,
+    draft_generation: u64,
+    request: u64,
+    image: Arc<RenderImage>,
+}
+
+struct PreviewWork {
+    format: ImageFormat,
+    bytes: Arc<Vec<u8>>,
+}
+
+impl PreviewWork {
+    fn run(self) -> Result<Arc<RenderImage>, AttachmentPreparationError> {
+        render_full_preview(self.format, self.bytes.as_ref())
+    }
+}
+
+impl AttachmentWork {
+    fn run(self) -> Vec<AttachmentPreparationOutcome> {
+        match self {
+            Self::Clipboard { items } => prepare_clipboard_batch(items, None),
+            Self::Files { items } => prepare_file_batch(items, None),
+            Self::Restored { items } => prepare_restored_batch(items, None),
+        }
+    }
+}
+
 /// Native GPUI owner of the exact composer draft and its text-service state.
 pub(crate) struct NativeComposer {
     state: ComposerState,
     focus_handle: FocusHandle,
     send_focus_handle: FocusHandle,
     model_focus_handle: FocusHandle,
+    controls: Option<Entity<NativeComposerControls>>,
+    model_selector: Option<Entity<NativeModelSelector>>,
+    controls_observation: Option<Subscription>,
+    model_selector_observation: Option<Subscription>,
     model_label: String,
     send_blocked: bool,
+    attachment_delivery_enabled: bool,
+    attachments: Vec<ComposerAttachment>,
+    viewed_attachment: Option<String>,
+    attachment_preview: Option<AttachmentPreviewState>,
+    attachment_preview_error: Option<String>,
+    attachment_preview_task: Option<Task<()>>,
+    attachment_preview_request: u64,
+    attachment_error: Option<String>,
+    draft_generation: u64,
+    draft_revision: u64,
+    selection_revision: u64,
+    draft_tokens: Vec<ComposerDraftToken>,
+    active_attachment_submission: Option<NativeComposerAttachmentSnapshot>,
+    active_submission_draft_revision: Option<u64>,
+    attachment_tasks: Vec<Task<()>>,
+    next_attachment_id: u64,
     draft_store: InMemoryComposerDraftStore,
     draft_thread: Option<String>,
     undo: Vec<(String, Range<usize>)>,
@@ -99,8 +192,28 @@ impl NativeComposer {
             focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             send_focus_handle: cx.focus_handle().tab_index(2).tab_stop(true),
             model_focus_handle: cx.focus_handle().tab_index(1).tab_stop(true),
+            controls: None,
+            model_selector: None,
+            controls_observation: None,
+            model_selector_observation: None,
             model_label: "Select model".into(),
             send_blocked: false,
+            attachment_delivery_enabled: false,
+            attachments: Vec::new(),
+            viewed_attachment: None,
+            attachment_preview: None,
+            attachment_preview_error: None,
+            attachment_preview_task: None,
+            attachment_preview_request: 0,
+            attachment_error: None,
+            draft_generation: 0,
+            draft_revision: 0,
+            selection_revision: 0,
+            draft_tokens: Vec::new(),
+            active_attachment_submission: None,
+            active_submission_draft_revision: None,
+            attachment_tasks: Vec::new(),
+            next_attachment_id: 0,
             draft_store: InMemoryComposerDraftStore::new(),
             draft_thread: None,
             undo: Vec::new(),
@@ -111,6 +224,33 @@ impl NativeComposer {
             layout: None,
             painted_bounds: None,
         }
+    }
+
+    /// Attaches the parent-owned controls and model selector entities.
+    ///
+    /// Until this setter is called with both entities, the composer keeps its
+    /// legacy model/send row so isolated composer tests and constructors stay
+    /// self-contained. The composer observes both children only to invalidate
+    /// its own layout; event routing and snapshot updates remain parent-owned.
+    pub(crate) fn set_components(
+        &mut self,
+        controls: Entity<NativeComposerControls>,
+        model_selector: Entity<NativeModelSelector>,
+        cx: &mut Context<Self>,
+    ) {
+        self.controls = Some(controls.clone());
+        self.model_selector = Some(model_selector.clone());
+        self.controls_observation = Some(cx.observe(&controls, |composer, _, cx| {
+            composer.invalidate_component_render(cx);
+        }));
+        self.model_selector_observation = Some(cx.observe(&model_selector, |composer, _, cx| {
+            composer.invalidate_component_render(cx);
+        }));
+        cx.notify();
+    }
+
+    fn invalidate_component_render(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -129,6 +269,10 @@ impl NativeComposer {
 
     #[cfg(test)]
     pub(crate) fn set_draft(&mut self, draft: impl Into<String>) {
+        let draft = draft.into();
+        if self.state.draft() != draft {
+            self.draft_revision = self.draft_revision.saturating_add(1);
+        }
         self.state.set_draft(draft);
         self.layout = None;
         self.painted_bounds = None;
@@ -136,6 +280,86 @@ impl NativeComposer {
         self.selection = end..end;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.selection_revision = self.selection_revision.saturating_add(1);
+    }
+
+    fn advance_selection_revision(&mut self) {
+        self.selection_revision = self.selection_revision.saturating_add(1);
+    }
+
+    fn paste_scope_is_current(&self, scope: &PasteScope) -> bool {
+        self.draft_thread == scope.thread
+            && self.draft_generation == scope.draft_generation
+            && self.selection_revision == scope.selection_revision
+    }
+
+    /// Returns the generation of the currently selected draft scope.
+    ///
+    /// A transport owner must carry this value with any attachment payload and
+    /// reject a completion or retry whose generation no longer matches the
+    /// mounted composer scope.
+    pub(crate) const fn draft_generation(&self) -> u64 {
+        self.draft_generation
+    }
+
+    /// Returns the number of live attachment slots, including pending reads.
+    pub(crate) fn attachment_count(&self) -> usize {
+        self.attachments.len()
+    }
+
+    /// Returns the current visible attachment failure, if any.
+    pub(crate) fn attachment_error(&self) -> Option<&str> {
+        self.attachment_error.as_deref()
+    }
+
+    /// Snapshots ready images in the exact tray order for a future typed
+    /// message-content command.
+    ///
+    /// No text marker or placeholder is created. A pending image is an
+    /// explicit refusal until its encoded bytes and tray thumbnail are ready.
+    pub(crate) fn snapshot_ordered_ready_attachments(
+        &self,
+    ) -> Result<NativeComposerAttachmentSnapshot, AttachmentPayloadError> {
+        let attachments = self
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(position, attachment)| attachment.payload(position))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(NativeComposerAttachmentSnapshot {
+            draft_generation: self.draft_generation,
+            attachments,
+        })
+    }
+
+    /// Returns a fresh payload for a retry only when the complete ordered
+    /// attachment set still matches the original generation and bytes.
+    pub(crate) fn match_retry_attachment_payload(
+        &self,
+        snapshot: &NativeComposerAttachmentSnapshot,
+    ) -> Option<NativeComposerAttachmentSnapshot> {
+        let current = self.snapshot_ordered_ready_attachments().ok()?;
+        (current == *snapshot).then_some(current)
+    }
+
+    /// Enables the future typed attachment submission path. The current
+    /// `QueueFirstMessage` caller deliberately does not invoke this seam.
+    pub(crate) fn set_attachment_delivery_enabled(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.attachment_delivery_enabled != enabled {
+            self.attachment_delivery_enabled = enabled;
+            cx.notify();
+        }
+    }
+
+    fn clear_attachment_preview(&mut self) {
+        self.attachment_preview_request = self.attachment_preview_request.saturating_add(1);
+        self.attachment_preview = None;
+        self.attachment_preview_error = None;
+        self.attachment_preview_task = None;
     }
 
     pub(crate) fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
@@ -147,29 +371,441 @@ impl NativeComposer {
         cx.notify();
     }
 
-    pub(crate) fn switch_thread(&mut self, thread: String, carry_draft: bool, cx: &mut Context<Self>) {
-        if self.draft_thread.as_ref() == Some(&thread) || self.state.is_submitting() { return; }
-        if let Some(previous) = self.draft_thread.replace(thread.clone()) {
-            self.draft_store.write(&previous, ComposerDraft {
-                text: self.state.draft().to_owned(), ..ComposerDraft::default()
-            });
-            if !carry_draft {
-                let restored = self.draft_store.read(&thread).unwrap_or_default();
-                self.state.set_draft(restored.text);
-                let end = self.state.draft().len();
-                self.selection = end..end;
-                self.selection_reversed = false;
-                self.marked_range = None;
-                self.undo.clear();
-                self.redo.clear();
-                self.layout = None;
-                self.painted_bounds = None;
+    pub(crate) fn switch_thread(
+        &mut self,
+        thread: String,
+        carry_draft: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.draft_thread.as_ref() == Some(&thread) || self.state.is_submitting() {
+            return;
+        }
+
+        self.persist_current_draft();
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        self.draft_thread = Some(thread.clone());
+        self.attachment_tasks.clear();
+        self.active_attachment_submission = None;
+        self.active_submission_draft_revision = None;
+        self.viewed_attachment = None;
+        self.clear_attachment_preview();
+
+        if carry_draft {
+            // A pending source belongs to the old generation. It is not safe
+            // to let its completion enter the newly selected thread.
+            self.attachments.retain(ComposerAttachment::is_ready);
+            self.attachment_error = None;
+            self.persist_current_draft();
+        } else {
+            self.attachments.clear();
+            self.viewed_attachment = None;
+            self.attachment_error = None;
+
+            let mut session = ComposerDraftSession::for_key(thread.clone());
+            let restoration = session.restore(&mut self.draft_store, true).restored;
+            let (text, tokens, restored_attachments) = restoration.map_or_else(
+                || (String::new(), Vec::new(), Vec::new()),
+                |restoration| {
+                    (
+                        restoration.document.text,
+                        restoration.document.tokens,
+                        restoration.attachments,
+                    )
+                },
+            );
+            self.state.set_draft(text);
+            self.draft_revision = self.draft_revision.saturating_add(1);
+            self.advance_selection_revision();
+            self.draft_tokens = tokens;
+            self.selection = self.state.draft().len()..self.state.draft().len();
+            self.selection_reversed = false;
+            self.marked_range = None;
+            self.undo.clear();
+            self.redo.clear();
+            self.layout = None;
+            self.painted_bounds = None;
+
+            let mut inputs = Vec::new();
+            for attachment in restored_attachments {
+                let id = attachment.id.clone();
+                let format = ImageFormat::from_mime_type(&attachment.mime_type);
+                self.attachments.push(ComposerAttachment::pending(
+                    id.clone(),
+                    attachment.name.clone(),
+                    format,
+                    attachment.mime_type.clone(),
+                    attachment.size_bytes,
+                ));
+                inputs.push(RestoredAttachmentInput {
+                    id,
+                    name: attachment.name,
+                    mime_type: attachment.mime_type,
+                    content_base64: attachment.content_base64,
+                    size_bytes: attachment.size_bytes,
+                    source_digest: attachment.source_digest,
+                    source_size_bytes: attachment.source_size_bytes,
+                });
+            }
+            if !inputs.is_empty() {
+                self.spawn_attachment_work(AttachmentWork::Restored { items: inputs }, cx);
             }
         }
         cx.notify();
     }
 
-    pub(crate) fn set_surface(&mut self, blocked: bool, model_label: String, cx: &mut Context<Self>) {
+    fn current_draft_document(&self) -> ComposerDraftDocument {
+        ComposerDraftDocument::new(self.state.draft().to_owned(), self.draft_tokens.clone())
+    }
+
+    fn current_draft_attachments(
+        &self,
+    ) -> Vec<crate::composer_draft_session_policy::ComposerImageAttachment> {
+        self.attachments
+            .iter()
+            .map(ComposerAttachment::draft_value)
+            .collect()
+    }
+
+    fn persist_current_draft(&mut self) {
+        let Some(thread) = self.draft_thread.clone() else {
+            return;
+        };
+        let session = ComposerDraftSession::for_key(thread);
+        let document = self.current_draft_document();
+        let attachments = self.current_draft_attachments();
+        let _ = session.persist(&mut self.draft_store, &document, &attachments);
+    }
+
+    fn next_attachment_id(&mut self) -> String {
+        let id = format!("attachment:{}", self.next_attachment_id);
+        self.next_attachment_id = self.next_attachment_id.saturating_add(1);
+        id
+    }
+
+    fn current_pending_input_total(&self) -> usize {
+        self.attachments
+            .iter()
+            .filter(|attachment| !attachment.is_ready())
+            .fold(0usize, |total, attachment| {
+                total.saturating_add(attachment.source_bytes_len())
+            })
+    }
+
+    fn enqueue_clipboard_images(
+        &mut self,
+        candidates: Vec<ClipboardImageCandidate>,
+        cx: &mut Context<Self>,
+    ) {
+        self.attachment_error = None;
+        let mut pending_input_total = self.current_pending_input_total();
+        let mut work = Vec::new();
+        for candidate in candidates {
+            if !matches!(
+                candidate.format,
+                ImageFormat::Gif | ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::Webp
+            ) {
+                self.attachment_error =
+                    Some(native_composer_attachments::ATTACHMENT_UNSUPPORTED_FORMAT_MESSAGE.into());
+                continue;
+            }
+            if candidate.bytes.len() > MAXIMUM_RAW_ATTACHMENT_BYTES {
+                self.attachment_error =
+                    Some(native_composer_attachments::ATTACHMENT_TOO_LARGE_MESSAGE.into());
+                continue;
+            }
+            if self.attachments.len() >= MAXIMUM_ATTACHMENT_COUNT {
+                self.attachment_error =
+                    Some(native_composer_attachments::ATTACHMENT_COUNT_LIMIT_MESSAGE.into());
+                break;
+            }
+            let incoming_size = candidate.bytes.len();
+            if pending_input_total.saturating_add(incoming_size)
+                > MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES
+            {
+                self.attachment_error =
+                    Some(native_composer_attachments::ATTACHMENT_TOTAL_LIMIT_MESSAGE.into());
+                continue;
+            }
+
+            let id = self.next_attachment_id();
+            let name = candidate.name.clone();
+            self.attachments.push(ComposerAttachment::pending(
+                id.clone(),
+                name,
+                Some(candidate.format),
+                candidate.format.mime_type(),
+                incoming_size,
+            ));
+            pending_input_total = pending_input_total.saturating_add(incoming_size);
+            work.push((id, candidate));
+        }
+
+        if !work.is_empty() {
+            self.spawn_attachment_work(AttachmentWork::Clipboard { items: work }, cx);
+            self.persist_current_draft();
+            cx.notify();
+        }
+    }
+
+    fn enqueue_file_drop(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        self.attachment_error = None;
+        if paths.is_empty() {
+            return;
+        }
+        if self.attachments.len().saturating_add(paths.len()) > MAXIMUM_ATTACHMENT_COUNT {
+            self.attachment_error =
+                Some(native_composer_attachments::ATTACHMENT_COUNT_LIMIT_MESSAGE.into());
+            cx.notify();
+            return;
+        }
+
+        let mut work = Vec::with_capacity(paths.len());
+        for path in paths {
+            let id = self.next_attachment_id();
+            let name = display_file_name(&path);
+            self.attachments
+                .push(ComposerAttachment::pending(id.clone(), name, None, "", 0));
+            work.push((id, path));
+        }
+        self.spawn_attachment_work(AttachmentWork::Files { items: work }, cx);
+        self.persist_current_draft();
+        cx.notify();
+    }
+
+    fn spawn_attachment_work(&mut self, work: AttachmentWork, cx: &mut Context<Self>) {
+        let generation = self.draft_generation;
+        let thread = self.draft_thread.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let outcomes = cx
+                .background_executor()
+                .spawn(async move { work.run() })
+                .await;
+            this.update(cx, |composer, composer_cx| {
+                composer.apply_attachment_outcomes(thread, generation, outcomes, composer_cx);
+            })
+            .ok();
+        });
+        self.attachment_tasks.push(task);
+    }
+
+    fn apply_attachment_outcomes(
+        &mut self,
+        thread: Option<String>,
+        generation: u64,
+        outcomes: Vec<AttachmentPreparationOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.draft_generation || thread != self.draft_thread {
+            return;
+        }
+
+        let mut changed = false;
+        for outcome in outcomes {
+            let Some(index) = self
+                .attachments
+                .iter()
+                .position(|attachment| attachment.id == outcome.id)
+            else {
+                continue;
+            };
+            changed = true;
+            match outcome.result {
+                Ok(prepared) => {
+                    if self.attachment_is_duplicate(index, &prepared) {
+                        self.attachments.remove(index);
+                        self.attachment_error = Some("That image is already attached.".into());
+                        continue;
+                    }
+                    let other_total = self
+                        .attachments
+                        .iter()
+                        .enumerate()
+                        .filter(|(other_index, attachment)| {
+                            *other_index != index && attachment.is_ready()
+                        })
+                        .fold(0usize, |total, (_, attachment)| {
+                            total.saturating_add(attachment.size_bytes)
+                        });
+                    if other_total.saturating_add(prepared.size_bytes)
+                        > MAXIMUM_ATTACHMENT_TOTAL_BYTES
+                    {
+                        self.attachments.remove(index);
+                        self.attachment_error = Some(
+                            native_composer_attachments::ATTACHMENT_TOTAL_LIMIT_MESSAGE.into(),
+                        );
+                        continue;
+                    }
+                    self.attachments[index] = ComposerAttachment::from_prepared(prepared);
+                }
+                Err(error) => {
+                    self.attachments.remove(index);
+                    self.attachment_error = Some(format!("{}: {error}", outcome.name));
+                }
+            }
+        }
+        if changed {
+            self.viewed_attachment = self.viewed_attachment.take().filter(|id| {
+                self.attachments
+                    .iter()
+                    .any(|attachment| &attachment.id == id)
+            });
+            self.persist_current_draft();
+            cx.notify();
+        }
+    }
+
+    fn attachment_is_duplicate(&self, index: usize, prepared: &PreparedComposerAttachment) -> bool {
+        self.attachments
+            .iter()
+            .enumerate()
+            .filter(|(other_index, _)| *other_index != index)
+            .any(|(_, attachment)| {
+                (attachment.is_ready()
+                    && attachment.source_digest == prepared.source_digest
+                    && attachment.source_size_bytes == prepared.source_size_bytes)
+                    || (attachment.is_ready()
+                        && attachment.encoded_digest == prepared.encoded_digest
+                        && attachment.size_bytes == prepared.size_bytes)
+            })
+    }
+
+    fn remove_attachment(&mut self, attachment_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .attachments
+            .iter()
+            .position(|attachment| attachment.id == attachment_id)
+        else {
+            return;
+        };
+        self.attachments.remove(index);
+        if self.viewed_attachment.as_deref() == Some(attachment_id) {
+            self.viewed_attachment = None;
+            self.clear_attachment_preview();
+        }
+        self.attachment_error = None;
+        self.persist_current_draft();
+        cx.notify();
+    }
+
+    fn view_attachment(&mut self, attachment_id: &str, cx: &mut Context<Self>) {
+        let Some(attachment) = self
+            .attachments
+            .iter()
+            .find(|attachment| attachment.id == attachment_id && attachment.is_ready())
+        else {
+            return;
+        };
+        let Some(format) = attachment.format else {
+            return;
+        };
+        let Some(bytes) = attachment.bytes.clone() else {
+            return;
+        };
+
+        self.viewed_attachment = Some(attachment_id.to_owned());
+        self.clear_attachment_preview();
+        let request = self.attachment_preview_request;
+        let generation = self.draft_generation;
+        let id = attachment_id.to_owned();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { PreviewWork { format, bytes }.run() })
+                .await;
+            this.update(cx, |composer, composer_cx| {
+                if composer.draft_generation != generation
+                    || composer.attachment_preview_request != request
+                    || composer.viewed_attachment.as_deref() != Some(id.as_str())
+                {
+                    return;
+                }
+                composer.attachment_preview_task = None;
+                match result {
+                    Ok(image) => {
+                        composer.attachment_preview = Some(AttachmentPreviewState {
+                            attachment_id: id,
+                            draft_generation: generation,
+                            request,
+                            image,
+                        });
+                    }
+                    Err(error) => {
+                        composer.attachment_preview_error = Some(error.to_string());
+                    }
+                }
+                composer_cx.notify();
+            })
+            .ok();
+        });
+        self.attachment_preview_task = Some(task);
+        cx.notify();
+    }
+
+    fn close_attachment_viewer(&mut self, cx: &mut Context<Self>) {
+        if self.viewed_attachment.take().is_some() {
+            self.clear_attachment_preview();
+            cx.notify();
+        }
+    }
+
+    fn clear_submitted_attachment_values(
+        &mut self,
+        snapshot: &NativeComposerAttachmentSnapshot,
+    ) -> bool {
+        if !self.attachment_snapshot_matches_current(snapshot) {
+            return false;
+        }
+        let ids = snapshot
+            .attachments
+            .iter()
+            .map(|attachment| attachment.client_token.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        if ids.is_empty() {
+            return true;
+        }
+        if self
+            .viewed_attachment
+            .as_deref()
+            .is_some_and(|id| ids.contains(id))
+        {
+            self.viewed_attachment = None;
+            self.clear_attachment_preview();
+        }
+        self.attachments
+            .retain(|attachment| !ids.contains(attachment.id.as_str()));
+        self.persist_current_draft();
+        true
+    }
+
+    fn attachment_snapshot_matches_current(
+        &self,
+        snapshot: &NativeComposerAttachmentSnapshot,
+    ) -> bool {
+        if snapshot.draft_generation != self.draft_generation {
+            return false;
+        }
+        snapshot.attachments.iter().all(|expected| {
+            let Some((position, current)) = self
+                .attachments
+                .iter()
+                .enumerate()
+                .find(|(_, attachment)| attachment.id == expected.client_token)
+            else {
+                return false;
+            };
+            position == expected.position
+                && current
+                    .payload(position)
+                    .is_ok_and(|payload| payload == expected.clone())
+        })
+    }
+
+    pub(crate) fn set_surface(
+        &mut self,
+        blocked: bool,
+        model_label: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.send_blocked != blocked || self.model_label != model_label {
             self.send_blocked = blocked;
             self.model_label = model_label;
@@ -178,7 +814,19 @@ impl NativeComposer {
     }
 
     pub(crate) fn send_ready(&self) -> bool {
-        !self.send_blocked && self.state.send_ready() && self.marked_range.is_none()
+        if self.send_blocked
+            || self.state.is_disabled()
+            || self.state.is_submitting()
+            || self.marked_range.is_some()
+        {
+            return false;
+        }
+        if self.attachments.is_empty() {
+            return self.state.send_ready();
+        }
+        self.attachment_delivery_enabled
+            && self.attachment_error.is_none()
+            && self.attachments.iter().all(ComposerAttachment::is_ready)
     }
 
     pub(crate) fn is_submitting(&self) -> bool {
@@ -188,8 +836,133 @@ impl NativeComposer {
     pub(crate) fn begin_submission(
         &mut self,
     ) -> Result<(artisan_domain::MessageBody, SubmissionToken), SubmissionBlocked> {
-        if self.send_blocked { return Err(SubmissionBlocked::Disabled); }
-        self.state.begin_submission()
+        // The existing native transport only accepts MessageBody. Keeping
+        // this path text-only prevents an attachment from being silently
+        // serialized into text or claimed as delivered.
+        if self.send_blocked || !self.attachments.is_empty() {
+            return Err(SubmissionBlocked::Disabled);
+        }
+        let submission = self.state.begin_submission()?;
+        self.active_attachment_submission = Some(NativeComposerAttachmentSnapshot {
+            draft_generation: self.draft_generation,
+            attachments: Vec::new(),
+        });
+        self.active_submission_draft_revision = Some(self.draft_revision);
+        Ok(submission)
+    }
+
+    /// Builds the exact typed queue payload owned by the current draft.
+    ///
+    /// The current draft text is parsed without trimming and each ready tray
+    /// item contributes one owned image in tray order. Image-only messages use
+    /// an empty authored-text value; no marker text is ever inserted. The
+    /// payload is returned to the application transport, while this entity
+    /// retains a byte-identical snapshot for accepted cleanup and retry
+    /// matching.
+    pub(crate) fn begin_payload_submission(
+        &mut self,
+    ) -> Result<(artisan_domain::QueueMessagePayload, SubmissionToken), SubmissionBlocked> {
+        if self.send_blocked
+            || self.state.is_disabled()
+            || self.marked_range.is_some()
+            || !self.attachment_delivery_enabled
+            || self.attachment_error.is_some()
+        {
+            return Err(SubmissionBlocked::Disabled);
+        }
+
+        let snapshot = self
+            .snapshot_ordered_ready_attachments()
+            .map_err(|_| SubmissionBlocked::Disabled)?;
+        let active_snapshot = snapshot.clone();
+        let text = artisan_domain::AuthoredText::parse(self.state.draft().to_owned()).map_err(
+            |error| match error {
+                artisan_domain::AuthoredTextError::TooLong { length, maximum } => {
+                    SubmissionBlocked::InvalidBody(artisan_domain::MessageBodyError::TooLong {
+                        length,
+                        maximum,
+                    })
+                }
+            },
+        )?;
+        let images = snapshot
+            .attachments
+            .into_iter()
+            .map(|attachment| {
+                artisan_domain::ImageAttachment::new(
+                    attachment.media_type,
+                    attachment.bytes,
+                    attachment.name,
+                )
+                .map_err(|_| SubmissionBlocked::Disabled)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let payload = artisan_domain::QueueMessagePayload::new(Some(text), images)
+            .map_err(|_| SubmissionBlocked::Disabled)?;
+        let token = self.state.begin_payload_submission(&payload)?;
+        self.active_attachment_submission = Some(active_snapshot);
+        self.active_submission_draft_revision = Some(self.draft_revision);
+        Ok((payload, token))
+    }
+
+    /// Compares a typed payload with the current authored text and complete
+    /// ordered attachment bytes without beginning a submission or allocating
+    /// a replacement snapshot.
+    pub(crate) fn draft_matches_payload(
+        &self,
+        payload: &artisan_domain::QueueMessagePayload,
+    ) -> bool {
+        let text_matches = payload
+            .text()
+            .map_or(self.state.draft().is_empty(), |text| {
+                text.as_str() == self.state.draft()
+            });
+        text_matches
+            && payload.attachments().len() == self.attachments.len()
+            && payload
+                .attachments()
+                .iter()
+                .zip(self.attachments.iter())
+                .all(|(expected, current)| {
+                    current.is_ready()
+                        && expected.mime_type_str() == current.mime_type
+                        && expected.name() == current.name
+                        && current
+                            .bytes
+                            .as_deref()
+                            .is_some_and(|bytes| expected.bytes() == bytes.as_slice())
+                })
+    }
+
+    /// Compatibility shim for callers that still require the legacy text
+    /// body. Typed message delivery must use [`Self::begin_payload_submission`].
+    pub(crate) fn begin_submission_with_attachments(
+        &mut self,
+    ) -> Result<
+        (
+            artisan_domain::MessageBody,
+            SubmissionToken,
+            NativeComposerAttachmentSnapshot,
+        ),
+        SubmissionBlocked,
+    > {
+        if self.send_blocked || !self.attachments.is_empty() {
+            return Err(SubmissionBlocked::Disabled);
+        }
+        let submission = self.state.begin_submission()?;
+        self.active_attachment_submission = Some(NativeComposerAttachmentSnapshot {
+            draft_generation: self.draft_generation,
+            attachments: Vec::new(),
+        });
+        self.active_submission_draft_revision = Some(self.draft_revision);
+        Ok((
+            submission.0,
+            submission.1,
+            NativeComposerAttachmentSnapshot {
+                draft_generation: self.draft_generation,
+                attachments: Vec::new(),
+            },
+        ))
     }
 
     pub(crate) fn finish_submission(
@@ -199,38 +972,81 @@ impl NativeComposer {
         cx: &mut Context<Self>,
     ) {
         let was_submitting = self.state.is_submitting();
+        let active_snapshot = self.active_attachment_submission.clone();
+        let clean_text = self
+            .active_submission_draft_revision
+            .is_some_and(|revision| revision == self.draft_revision);
         self.state.finish_submission(token, disposition);
         if was_submitting && !self.state.is_submitting() {
+            if disposition == DraftDisposition::Accepted
+                && clean_text
+                && let Some(snapshot) = active_snapshot.as_ref()
+            {
+                self.clear_submitted_attachment_values(snapshot);
+            }
+            self.active_attachment_submission = None;
+            self.active_submission_draft_revision = None;
+            self.persist_current_draft();
             self.layout = None;
             self.painted_bounds = None;
             let end = self.selection.end.min(self.state.draft().len());
             self.selection = end..end;
             self.selection_reversed = false;
             self.marked_range = None;
+            self.advance_selection_revision();
             cx.notify();
         }
     }
 
+    /// Completes cleanup for an accepted typed attachment payload.
+    ///
+    /// The snapshot must still belong to the current draft generation and
+    /// every submitted payload must remain byte-identical. New attachments
+    /// appended after submission are retained.
+    pub(crate) fn complete_accepted_attachment_cleanup(
+        &mut self,
+        snapshot: &NativeComposerAttachmentSnapshot,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let cleaned = self.clear_submitted_attachment_values(snapshot);
+        if cleaned {
+            cx.notify();
+        }
+        cleaned
+    }
+
     fn undo_action(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.state.is_disabled() || self.state.is_submitting() || self.marked_range.is_some() { return; }
+        if self.state.is_disabled() || self.state.is_submitting() || self.marked_range.is_some() {
+            return;
+        }
         if let Some((draft, selection)) = self.undo.pop() {
-            self.redo.push((self.state.draft().to_owned(), self.selection.clone()));
+            self.redo
+                .push((self.state.draft().to_owned(), self.selection.clone()));
             self.state.set_draft(draft);
+            self.draft_revision = self.draft_revision.saturating_add(1);
             self.selection = selection;
             self.selection_reversed = false;
+            self.advance_selection_revision();
             self.layout = None;
+            self.persist_current_draft();
             cx.notify();
         }
     }
 
     fn redo_action(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        if self.state.is_disabled() || self.state.is_submitting() || self.marked_range.is_some() { return; }
+        if self.state.is_disabled() || self.state.is_submitting() || self.marked_range.is_some() {
+            return;
+        }
         if let Some((draft, selection)) = self.redo.pop() {
-            self.undo.push((self.state.draft().to_owned(), self.selection.clone()));
+            self.undo
+                .push((self.state.draft().to_owned(), self.selection.clone()));
             self.state.set_draft(draft);
+            self.draft_revision = self.draft_revision.saturating_add(1);
             self.selection = selection;
             self.selection_reversed = false;
+            self.advance_selection_revision();
             self.layout = None;
+            self.persist_current_draft();
             cx.notify();
         }
     }
@@ -274,12 +1090,20 @@ impl NativeComposer {
             Some(_) => return,
             None => None,
         };
-        if next != self.state.draft() && self.marked_range.is_none() {
-            if self.undo.len() >= 64 { self.undo.remove(0); }
-            self.undo.push((self.state.draft().to_owned(), self.selection.clone()));
+        let changed = next != self.state.draft();
+        if changed && self.marked_range.is_none() {
+            if self.undo.len() >= 64 {
+                self.undo.remove(0);
+            }
+            self.undo
+                .push((self.state.draft().to_owned(), self.selection.clone()));
             self.redo.clear();
         }
         self.state.set_draft(next);
+        if changed {
+            self.draft_revision = self.draft_revision.saturating_add(1);
+        }
+        self.advance_selection_revision();
         self.layout = None;
         self.painted_bounds = None;
         let replacement_end = range.start.saturating_add(replacement.len());
@@ -291,6 +1115,9 @@ impl NativeComposer {
             self.selection = replacement_end..replacement_end;
             self.selection_reversed = false;
             self.marked_range = None;
+        }
+        if changed {
+            self.persist_current_draft();
         }
         cx.notify();
     }
@@ -331,6 +1158,7 @@ impl NativeComposer {
             self.selection_reversed = false;
         }
         self.marked_range = None;
+        self.advance_selection_revision();
         cx.notify();
     }
 
@@ -382,6 +1210,7 @@ impl NativeComposer {
         self.selection = offset..offset;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.advance_selection_revision();
         cx.notify();
     }
 
@@ -398,6 +1227,7 @@ impl NativeComposer {
             self.selection = anchor..offset;
             self.selection_reversed = false;
         }
+        self.advance_selection_revision();
     }
 
     fn move_left(&mut self, extend: bool, cx: &mut Context<Self>) {
@@ -497,6 +1327,7 @@ impl NativeComposer {
             self.selection = 0..self.state.draft().len();
             self.selection_reversed = false;
             self.marked_range = None;
+            self.advance_selection_revision();
             cx.notify();
         }
     }
@@ -535,13 +1366,52 @@ impl NativeComposer {
         if self.state.is_disabled() {
             return;
         }
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
+        let scope = PasteScope {
+            thread: self.draft_thread.clone(),
+            draft_generation: self.draft_generation,
+            selection_revision: self.selection_revision,
+            replacement_range: self.replacement_range(None),
         };
-        let Some(range) = self.replacement_range(None) else {
-            return;
-        };
-        self.replace_range(range, &text, None, cx);
+        let clipboard = cx.read_from_clipboard_async();
+        let task = cx.spawn(async move |this, cx| {
+            let Ok(Some(item)) = clipboard.await else {
+                return;
+            };
+            match native_composer_attachments::classify_clipboard(item) {
+                ClipboardInput::Images(candidates) => {
+                    this.update(cx, |composer, composer_cx| {
+                        if !composer.paste_scope_is_current(&scope) {
+                            return;
+                        }
+                        composer.enqueue_clipboard_images(candidates, composer_cx);
+                    })
+                    .ok();
+                }
+                ClipboardInput::Files(paths) => {
+                    this.update(cx, |composer, composer_cx| {
+                        if !composer.paste_scope_is_current(&scope) {
+                            return;
+                        }
+                        composer.enqueue_file_drop(paths, composer_cx);
+                    })
+                    .ok();
+                }
+                ClipboardInput::Text(text) => {
+                    let Some(range) = scope.replacement_range.clone() else {
+                        return;
+                    };
+                    this.update(cx, |composer, composer_cx| {
+                        if !composer.paste_scope_is_current(&scope) {
+                            return;
+                        }
+                        composer.replace_range(range, &text, None, composer_cx);
+                    })
+                    .ok();
+                }
+                ClipboardInput::Empty => {}
+            }
+        });
+        self.attachment_tasks.push(task);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -562,6 +1432,239 @@ impl NativeComposer {
         ));
         let range = self.selection.clone();
         self.replace_range(range, "", None, cx);
+    }
+
+    fn attachment_tray(&self, entity: Entity<Self>, theme: DesktopTheme) -> impl IntoElement {
+        let mut row = div()
+            .id("artisan-native-composer-attachment-tray-row")
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .overflow_x_scroll();
+
+        for (position, attachment) in self.attachments.iter().enumerate() {
+            let attachment_id = attachment.id.clone();
+            let name = attachment.name.clone();
+            let view_entity = entity.clone();
+            let mut tile = div()
+                .id(format!("artisan-native-composer-attachment-{position}"))
+                .relative()
+                .size(px(NATIVE_COMPOSER_ATTACHMENT_SIZE))
+                .flex_none()
+                .overflow_hidden()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.line)
+                .bg(theme.field)
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .aria_label(format!("View {name}"))
+                .debug_selector(|| "artisan-native-composer-attachment".to_owned())
+                .on_click(move |_, _, cx| {
+                    view_entity.update(cx, |composer, composer_cx| {
+                        composer.view_attachment(&attachment_id, composer_cx);
+                    });
+                });
+
+            if let Some(thumbnail) = attachment.thumbnail.clone() {
+                tile = tile.child(
+                    img(ImageSource::Render(thumbnail))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                );
+            } else {
+                tile = tile.child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px(px(5.0))
+                        .text_color(theme.secondary)
+                        .text_size(px(11.0))
+                        .child("Preparing…"),
+                );
+            }
+
+            let remove_click_id = attachment.id.clone();
+            let remove_key_id = attachment.id.clone();
+            let remove_click_entity = entity.clone();
+            let remove_key_entity = entity.clone();
+            let remove_label = format!("Remove {name}");
+            let remove = div()
+                .id(format!(
+                    "artisan-native-composer-attachment-remove-{position}"
+                ))
+                .absolute()
+                .top(px(3.0))
+                .right(px(3.0))
+                .size(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(theme.chrome.opacity(0.9))
+                .text_color(theme.foreground)
+                .cursor_pointer()
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .aria_label(remove_label)
+                .debug_selector(|| "artisan-native-composer-attachment-remove".to_owned())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    remove_click_entity.update(cx, |composer, composer_cx| {
+                        composer.remove_attachment(&remove_click_id, composer_cx);
+                    });
+                })
+                .on_key_down(move |event, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        remove_key_entity.update(cx, |composer, composer_cx| {
+                            composer.remove_attachment(&remove_key_id, composer_cx);
+                        });
+                    }
+                })
+                .child(asset_glyph(AssetId::TABLER_X).size(px(12.0)));
+            tile = tile.child(remove);
+            row = row.child(tile);
+        }
+
+        let mut tray = div()
+            .id(NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR)
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR.to_owned())
+            .aria_label("Attachments")
+            .child(row);
+        if let Some(error) = self.attachment_error.clone() {
+            tray = tray.child(
+                div()
+                    .text_color(theme.secondary)
+                    .text_size(px(12.0))
+                    .child(error),
+            );
+        }
+        tray.child(
+            div()
+                .id(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
+                .text_color(theme.secondary)
+                .text_size(px(12.0))
+                .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR.to_owned())
+                .child(if self.attachment_delivery_enabled {
+                    "Images are ready to send."
+                } else {
+                    "Images stay attached until image delivery is available."
+                }),
+        )
+    }
+
+    fn attachment_viewer(
+        &self,
+        entity: Entity<Self>,
+        theme: DesktopTheme,
+    ) -> Option<impl IntoElement> {
+        let viewed_id = self.viewed_attachment.as_ref()?;
+        let preview = self
+            .attachment_preview
+            .as_ref()
+            .filter(|preview| {
+                preview.attachment_id == *viewed_id
+                    && preview.draft_generation == self.draft_generation
+                    && preview.request == self.attachment_preview_request
+            })
+            .map(|preview| preview.image.clone());
+        let preview_error = self.attachment_preview_error.clone();
+
+        let dismiss_entity = entity.clone();
+        let dismiss = div()
+            .id("artisan-native-composer-attachment-viewer-dismiss")
+            .absolute()
+            .left(Pixels::ZERO)
+            .top(Pixels::ZERO)
+            .right(Pixels::ZERO)
+            .bottom(Pixels::ZERO)
+            .on_click(move |_, _, cx| {
+                dismiss_entity.update(cx, |composer, composer_cx| {
+                    composer.close_attachment_viewer(composer_cx);
+                });
+            });
+
+        let close_entity = entity.clone();
+        let close = div()
+            .id("artisan-native-composer-attachment-viewer-close")
+            .absolute()
+            .top(px(8.0))
+            .right(px(8.0))
+            .size(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(theme.chrome.opacity(0.9))
+            .text_color(theme.foreground)
+            .cursor_pointer()
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label("Close image preview")
+            .debug_selector(|| "artisan-native-composer-attachment-viewer-close".to_owned())
+            .on_click(move |_, _, cx| {
+                close_entity.update(cx, |composer, composer_cx| {
+                    composer.close_attachment_viewer(composer_cx);
+                });
+            })
+            .child(asset_glyph(AssetId::TABLER_X).size(px(16.0)));
+
+        let mut content = div()
+            .id("artisan-native-composer-attachment-viewer-content")
+            .relative()
+            .max_w(px(960.0))
+            .max_h(px(720.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(|_, _, cx| cx.stop_propagation());
+        if let Some(preview) = preview {
+            content = content.child(
+                img(ImageSource::Render(preview))
+                    .max_w(px(960.0))
+                    .max_h(px(720.0))
+                    .object_fit(ObjectFit::Contain),
+            );
+        } else if let Some(error) = preview_error {
+            content = content
+                .px(px(16.0))
+                .py(px(12.0))
+                .text_color(theme.secondary)
+                .child(format!("Preview unavailable: {error}"));
+        } else {
+            content = content
+                .px(px(16.0))
+                .py(px(12.0))
+                .text_color(theme.secondary)
+                .child("Preparing preview…");
+        }
+
+        Some(
+            div()
+                .id(NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR)
+                .absolute()
+                .left(Pixels::ZERO)
+                .top(Pixels::ZERO)
+                .right(Pixels::ZERO)
+                .bottom(Pixels::ZERO)
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.chrome.opacity(0.97))
+                .occlude()
+                .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR.to_owned())
+                .child(dismiss)
+                .child(content)
+                .child(close),
+        )
     }
 
     fn byte_index_for_global_point(&self, point: Point<Pixels>) -> Option<usize> {
@@ -648,48 +1751,102 @@ impl Render for NativeComposer {
 
         let editor =
             NativeComposerInputElement::new(editor.into_any_element(), entity.clone(), focus);
-        let send_ready = self.send_ready();
+        let mounted_controls = self.controls.clone();
+        let mounted_model_selector = self.model_selector.clone();
+        let (controls_lip, controls_failure, controls_row, jump_to_latest) = if let Some((
+            controls,
+            model_selector,
+        )) =
+            mounted_controls.zip(mounted_model_selector)
+        {
+            let controls_lip = controls.update(cx, |controls, controls_cx| {
+                controls.render_lip(theme, controls_cx)
+            });
+            let controls_failure = controls.update(cx, |controls, controls_cx| {
+                controls.render_failure(theme, controls_cx)
+            });
+            let controls_row = controls.update(cx, |controls, controls_cx| {
+                controls.render_control_row(theme, model_selector.clone(), controls_cx)
+            });
+            let jump_to_latest = controls.update(cx, |controls, controls_cx| {
+                controls.render_jump_to_latest(theme, controls_cx)
+            });
+            (
+                controls_lip,
+                controls_failure,
+                Some(controls_row),
+                jump_to_latest,
+            )
+        } else {
+            (None, None, None, None)
+        };
 
-        self.send_focus_handle = self.send_focus_handle.clone().tab_stop(send_ready);
-        let send_entity = entity.clone();
-        let send = Button::new(
-            NATIVE_COMPOSER_SEND_SELECTOR,
-            self.send_focus_handle.clone(),
-            theme,
-            MotionPolicy::Reduced,
-            ButtonVariant::Default,
-            ButtonSize::IconSmall,
-            ButtonContent::icon_only(AssetId::TABLER_ARROW_UP,
-                AccessibleLabel::new("Send message").expect("nonempty send label")),
-        )
-        .expect("the native composer send button configuration is valid")
-        .focus_visibility(FocusVisibility::Visible)
-        .disabled(!send_ready)
-        .debug_selector(NATIVE_COMPOSER_SEND_SELECTOR)
-        .on_activate(move |_, _, cx| {
-            send_entity.update(cx, NativeComposer::request_send);
-        });
+        let legacy_toolbar = if controls_row.is_none() {
+            let send_ready = self.send_ready();
+            self.send_focus_handle = self.send_focus_handle.clone().tab_stop(send_ready);
+            let send_entity = entity.clone();
+            let send = Button::new(
+                NATIVE_COMPOSER_SEND_SELECTOR,
+                self.send_focus_handle.clone(),
+                theme,
+                MotionPolicy::Reduced,
+                ButtonVariant::Default,
+                ButtonSize::IconSmall,
+                ButtonContent::icon_only(
+                    AssetId::TABLER_ARROW_UP,
+                    AccessibleLabel::new("Send message").expect("nonempty send label"),
+                ),
+            )
+            .expect("the native composer send button configuration is valid")
+            .focus_visibility(FocusVisibility::Visible)
+            .disabled(!send_ready)
+            .debug_selector(NATIVE_COMPOSER_SEND_SELECTOR)
+            .on_activate(move |_, _, cx| {
+                send_entity.update(cx, NativeComposer::request_send);
+            });
 
-        let model = div()
-            .id("artisan-composer-model")
-            .track_focus(&self.model_focus_handle)
-            .tab_index(0)
-            .h(px(32.0)).min_w(px(0.0)).px(px(8.0))
-            .flex().items_center().gap(px(6.0)).rounded(px(8.0))
-            .cursor_pointer().hover(move |style| style.bg(desktop_theme.selected))
-            .text_color(desktop_theme.secondary).text_size(px(13.0))
-            .debug_selector(|| "artisan-composer-model".to_owned())
-            .child(div().truncate().child(self.model_label.clone()))
-            .child(asset_glyph(AssetId::TABLER_CHEVRON_DOWN).size(px(14.0)))
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(NativeComposerEvent::ConfigureModel)))
-            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    cx.stop_propagation();
-                    cx.emit(NativeComposerEvent::ConfigureModel);
-                }
-            }));
+            let model = div()
+                .id("artisan-composer-model")
+                .track_focus(&self.model_focus_handle)
+                .tab_index(0)
+                .h(px(32.0))
+                .min_w(px(0.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .hover(move |style| style.bg(desktop_theme.selected))
+                .text_color(desktop_theme.secondary)
+                .text_size(px(13.0))
+                .debug_selector(|| "artisan-composer-model".to_owned())
+                .child(div().truncate().child(self.model_label.clone()))
+                .child(asset_glyph(AssetId::TABLER_CHEVRON_DOWN).size(px(14.0)))
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(NativeComposerEvent::ConfigureModel)))
+                .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        cx.emit(NativeComposerEvent::ConfigureModel);
+                    }
+                }));
 
-        div()
+            Some(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(model)
+                    .child(send),
+            )
+        } else {
+            None
+        };
+
+        let drop_entity = entity.clone();
+        let mut root = div()
+            .id("artisan-native-composer")
             .w_full()
             .flex()
             .flex_col()
@@ -700,8 +1857,46 @@ impl Render for NativeComposer {
             .border_1()
             .border_color(desktop_theme.line)
             .bg(desktop_theme.field)
-            .child(editor)
-            .child(div().w_full().flex().items_center().justify_between().child(model).child(send))
+            .relative()
+            .on_drop::<ExternalPaths>(move |paths, _, cx| {
+                let paths = paths.paths().to_vec();
+                drop_entity.update(cx, |composer, composer_cx| {
+                    composer.enqueue_file_drop(paths, composer_cx);
+                });
+            });
+
+        if !self.attachments.is_empty() {
+            root = root.child(self.attachment_tray(entity.clone(), desktop_theme));
+        } else if let Some(error) = self.attachment_error.clone() {
+            root = root.child(
+                div()
+                    .id(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
+                    .text_color(desktop_theme.secondary)
+                    .text_size(px(12.0))
+                    .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR.to_owned())
+                    .child(error),
+            );
+        }
+        if let Some(lip) = controls_lip {
+            root = root.child(lip);
+        }
+        if let Some(failure) = controls_failure {
+            root = root.child(failure);
+        }
+        root = root.child(editor);
+        if let Some(controls_row) = controls_row {
+            root = root.child(controls_row);
+        } else if let Some(legacy_toolbar) = legacy_toolbar {
+            root = root.child(legacy_toolbar);
+        }
+        if let Some(viewer) = self.attachment_viewer(entity, desktop_theme) {
+            root = root.child(viewer);
+        }
+        let mut shell = div().w_full().flex().flex_col().gap(px(8.0));
+        if let Some(jump_to_latest) = jump_to_latest {
+            shell = shell.child(jump_to_latest);
+        }
+        shell.child(root)
     }
 }
 
@@ -827,8 +2022,10 @@ impl gpui::EntityInputHandler for NativeComposer {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.marked_range = None;
-        cx.notify();
+        if self.marked_range.take().is_some() {
+            self.advance_selection_revision();
+            cx.notify();
+        }
     }
 
     fn replace_text_in_range(
@@ -1036,20 +2233,48 @@ fn next_character_boundary(text: &str, offset: usize) -> usize {
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
+    use super::native_composer_attachments::ComposerAttachment;
     use super::{
+        NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR, NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR,
         NATIVE_COMPOSER_PLACEHOLDER, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
         NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer, NativeComposerEvent, localize_painted_point,
         offset_layout_bounds, replace_text_preserving_raw, utf8_offset_to_utf16,
         utf16_offset_to_utf8, utf16_range_to_utf8,
     };
     use crate::composer::DraftDisposition;
+    use crate::image_policy::{ImageDimensions, ImageMediaType};
     use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
+    use base64::Engine as _;
     use gpui::{
         Bounds, Entity, EntityInputHandler as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
         Subscription, TestAppContext, VisualTestContext, point, px, size,
     };
+    use std::sync::Arc;
+
+    fn ready_attachment(id: &str, bytes: &[u8]) -> ComposerAttachment {
+        let bytes = Arc::new(bytes.to_vec());
+        ComposerAttachment {
+            id: id.to_owned(),
+            name: format!("{id}.png"),
+            format: Some(gpui::ImageFormat::Png),
+            mime_type: ImageMediaType::Png.as_mime_type().to_owned(),
+            bytes: Some(bytes.clone()),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
+            thumbnail: Some(Arc::new(gpui::RenderImage::new(Vec::<image::Frame>::new()))),
+            dimensions: Some(ImageDimensions {
+                width: 1.0,
+                height: 1.0,
+            }),
+            recommended_media_type: Some(ImageMediaType::Png),
+            rescale_target: None,
+            source_digest: "source-digest".to_owned(),
+            encoded_digest: "encoded-digest".to_owned(),
+            source_size_bytes: bytes.len(),
+            size_bytes: bytes.len(),
+        }
+    }
 
     fn set_draft(cx: &mut VisualTestContext, view: &Entity<NativeComposer>, draft: &str) {
         let draft = draft.to_owned();
@@ -1259,6 +2484,106 @@ mod tests {
     }
 
     #[gpui::test]
+    fn attachment_snapshot_preserves_order_and_rejects_a_new_thread_generation(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let snapshot = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("one".into(), false, composer_cx);
+                composer
+                    .attachments
+                    .push(ready_attachment("first", &[1, 2]));
+                composer
+                    .attachments
+                    .push(ready_attachment("second", &[3, 4]));
+                composer_cx.notify();
+                let snapshot = composer
+                    .snapshot_ordered_ready_attachments()
+                    .expect("ready attachment snapshot");
+                assert_eq!(snapshot.attachments[0].position, 0);
+                assert_eq!(snapshot.attachments[1].position, 1);
+                assert_eq!(
+                    composer.match_retry_attachment_payload(&snapshot),
+                    Some(snapshot.clone())
+                );
+                composer.switch_thread("two".into(), false, composer_cx);
+                assert!(composer.match_retry_attachment_payload(&snapshot).is_none());
+                snapshot
+            })
+        });
+        assert_eq!(snapshot.attachments.len(), 2);
+    }
+
+    #[gpui::test]
+    fn image_only_typed_payload_has_no_placeholder_and_cleans_after_acceptance(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let token = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer
+                    .attachments
+                    .push(ready_attachment("image", &[1, 2, 3]));
+                composer.set_attachment_delivery_enabled(true, composer_cx);
+                let (payload, token) = composer
+                    .begin_payload_submission()
+                    .expect("typed image-only payload begins");
+                assert_eq!(payload.text().expect("authored text").as_str(), "");
+                assert_eq!(payload.attachments().len(), 1);
+                assert!(composer.draft_matches_payload(&payload));
+                token
+            })
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.finish_submission(token, DraftDisposition::Accepted, composer_cx);
+                assert!(composer.attachments.is_empty());
+                assert_eq!(composer.draft(), "");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn attachment_tray_remove_action_keeps_the_text_transport_refusal_visible(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.attachments.push(ComposerAttachment::pending(
+                    "pending",
+                    "capture.png",
+                    Some(gpui::ImageFormat::Png),
+                    "image/png",
+                    0,
+                ));
+                composer_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR)
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
+                .is_some()
+        );
+        let remove = cx
+            .debug_bounds("artisan-native-composer-attachment-remove")
+            .expect("pending attachment remove action");
+        cx.simulate_click(remove.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(view.read(app).attachment_count(), 0);
+            assert!(!view.read(app).send_ready());
+        });
+    }
+
+    #[gpui::test]
     fn offline_drafting_and_undo_preserve_text_without_admitting_send(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
         cx.update(|window, app| {
@@ -1267,7 +2592,10 @@ mod tests {
                 composer.replace_range(0..0, "hello 🌍", None, cx);
                 assert_eq!(composer.state.draft(), "hello 🌍");
                 assert!(!composer.send_ready());
-                assert!(matches!(composer.begin_submission(), Err(super::SubmissionBlocked::Disabled)));
+                assert!(matches!(
+                    composer.begin_submission(),
+                    Err(super::SubmissionBlocked::Disabled)
+                ));
                 composer.undo_action(&super::Undo, window, cx);
                 assert_eq!(composer.state.draft(), "");
                 composer.redo_action(&super::Redo, window, cx);

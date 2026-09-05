@@ -24,12 +24,13 @@ use std::{
 };
 
 use crate::forge_dev_endpoint as dev_endpoint;
+use sha2::{Digest as _, Sha256};
 use artisan_domain::{
     AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor, ConversationQuery,
     ConversationQueryBounds, ConversationRequest, ConversationSnapshot, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects,
     ListProjectThreads, ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing,
-    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, ReadThreadEngineSettings, RequestId,
+    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, QueueMessage, ReadThreadEngineSettings, RequestId,
     SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
@@ -44,7 +45,7 @@ use artisan_editor_cli::{
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ConversationSubscriptionStopped, ErrorCode,
-    FirstMessageReceipt, FrameId, Hello, HelloCredential, ProtocolVersion,
+    FirstMessageReceipt, QueueMessageReceipt, FrameId, Hello, HelloCredential, ProtocolVersion,
     RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
     ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
@@ -107,6 +108,8 @@ pub enum NativeTransportCommand {
     CreateTask(ProjectId),
     /// Request a real snapshot for a host mounted on a known thread.
     RequestSnapshot(ThreadId),
+    /// Load one persisted image named by a bounded history reference.
+    ReadMessageImage(artisan_domain::ImageAttachmentRef),
     /// Load authoritative engine settings for one thread and generation.
     LoadThreadEngineSettings {
         /// Thread whose settings are being read.
@@ -120,6 +123,8 @@ pub enum NativeTransportCommand {
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
     /// Durably queue the first exact message body on one known thread.
     QueueFirstMessage(Box<QueueFirstMessage>),
+    /// Durably queue text and ordered images, including subsequent messages.
+    QueueMessage(Box<QueueMessage>),
     /// Begin or resume authoritative conversation subscription.
     Subscribe {
         /// Thread to observe.
@@ -151,10 +156,12 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::SelectProject(_) => "SelectProject",
             Self::CreateTask(_) => "CreateTask",
             Self::RequestSnapshot(_) => "RequestSnapshot",
+            Self::ReadMessageImage(_) => "ReadMessageImage",
             Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
             Self::ListRegisteredProfiles => "ListRegisteredProfiles",
             Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
             Self::QueueFirstMessage(_) => "QueueFirstMessage",
+            Self::QueueMessage(_) => "QueueMessage",
             Self::Subscribe { .. } => "Subscribe",
             Self::Unsubscribe { .. } => "Unsubscribe",
             Self::AcknowledgePatch { .. } => "AcknowledgePatch",
@@ -342,6 +349,10 @@ pub enum ServiceStopStatus {
 /// Events crossing from the service thread to the GPUI application.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeTransportEvent {
+    /// Original image data loaded for an exact history reference.
+    MessageImageLoaded { reference: artisan_domain::ImageAttachmentRef, image: artisan_domain::ImageAttachment },
+    /// An on-demand history image could not be loaded.
+    MessageImageFailed { reference: artisan_domain::ImageAttachmentRef, failure: ServiceFailure },
     /// The service thread has begun installation/session startup.
     Starting,
     /// Real attached-project rows in Forge order.
@@ -426,6 +437,14 @@ pub enum NativeTransportEvent {
         /// Exact queue request that failed.
         request_id: RequestId,
         /// Redacted failure.
+        failure: ServiceFailure,
+    },
+    /// General message accepted or replayed by Forge.
+    MessageQueued(QueueMessageReceipt),
+    /// General message failed; identity binds the retained complete payload.
+    MessageFailed {
+        thread_id: ThreadId,
+        request_id: RequestId,
         failure: ServiceFailure,
     },
     /// Authoritative thread-settings read failure with its load fence.
@@ -944,6 +963,27 @@ fn first_message_stable_mutation(
     })
 }
 
+fn message_stable_mutation(
+    command: QueueMessage,
+) -> Result<StableMutation, ServiceFailure> {
+    let request_id = command.request_id.clone();
+    let frame_id = FrameId::parse(request_id.as_str().to_owned())
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let frame_request_id = frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    if frame_request_id != request_id || command.request_id != request_id {
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+    }
+    let sent_at =
+        real_unix_millis().map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    Ok(StableMutation {
+        frame_id,
+        sent_at,
+        command: Command::QueueMessage(command),
+    })
+}
+
 fn make_request_frame(
     frames: &mut FrameFactory,
     protocol_version: ProtocolVersion,
@@ -1036,6 +1076,7 @@ enum ExpectedResponse {
     CreatedThread,
     Threads(ProjectId),
     Snapshot(ThreadId),
+    MessageImage(artisan_domain::ImageAttachmentRef),
     ThreadEngineSettings(ThreadId),
     RegisteredProfiles,
     ThreadEngineConfigSet {
@@ -1043,6 +1084,10 @@ enum ExpectedResponse {
         request_id: RequestId,
     },
     FirstMessageQueued {
+        thread_id: ThreadId,
+        request_id: RequestId,
+    },
+    MessageQueued {
         thread_id: ThreadId,
         request_id: RequestId,
     },
@@ -1378,6 +1423,12 @@ fn validate_response_family(
         ) if snapshot.thread_id() == &thread_id => {
             Ok(ResponsePayload::ConversationSnapshot(snapshot))
         }
+        (ExpectedResponse::MessageImage(expected), ResponsePayload::MessageImage(result))
+            if result.reference == expected
+                && result.bytes.len() == expected.size_bytes as usize
+                && Sha256::digest(&result.bytes).as_slice() == expected.digest => {
+            Ok(ResponsePayload::MessageImage(result))
+        }
         (
             ExpectedResponse::ThreadEngineSettings(thread_id),
             ResponsePayload::ThreadEngineSettings(result),
@@ -1403,6 +1454,15 @@ fn validate_response_family(
             ResponsePayload::FirstMessageQueued(receipt),
         ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
             Ok(ResponsePayload::FirstMessageQueued(receipt))
+        }
+        (
+            ExpectedResponse::MessageQueued {
+                thread_id,
+                request_id,
+            },
+            ResponsePayload::MessageQueued(receipt),
+        ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
+            Ok(ResponsePayload::MessageQueued(receipt))
         }
         (
             ExpectedResponse::ConversationSubscriptionStarted { thread_id },
@@ -2714,6 +2774,9 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::CreateTask(project_id)) => {
                         create_task_in_project(runtime, frames, events, project_id).await?;
                     }
+                    Some(NativeTransportCommand::ReadMessageImage(reference)) => {
+                        read_message_image(runtime, frames, events, reference).await?;
+                    }
                     Some(NativeTransportCommand::RequestSnapshot(thread_id)) => {
                         request_snapshot(runtime, frames, events, thread_id).await?;
                     }
@@ -2728,6 +2791,9 @@ async fn command_loop_with_delivery(
                     }
                     Some(NativeTransportCommand::QueueFirstMessage(command)) => {
                         queue_first_message(runtime, frames, events, *command).await?;
+                    }
+                    Some(NativeTransportCommand::QueueMessage(command)) => {
+                        queue_message(runtime, frames, events, *command).await?;
                     }
                     Some(NativeTransportCommand::Subscribe { thread_id, after }) => {
                         handle_subscribe_command(runtime, frames, events, thread_id, after).await?;
@@ -3413,6 +3479,38 @@ async fn request_snapshot(
     publish(events, NativeTransportEvent::Snapshot(snapshot))
 }
 
+async fn read_message_image(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    reference: artisan_domain::ImageAttachmentRef,
+) -> Result<(), ServiceFailure> {
+    if !runtime.known_threads.contains(&reference.thread_id) {
+        return publish(events, NativeTransportEvent::MessageImageFailed {
+            reference, failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+        });
+    }
+    let query = Query::ReadMessageImage(artisan_domain::ReadMessageImage::new(
+        reference.thread_id.clone(), reference.message_id.clone(), reference.index,
+    ));
+    let response = runtime.request(frames, query_request(query), ExpectedResponse::MessageImage(reference.clone())).await;
+    let result = match response {
+        Ok(ResponsePayload::MessageImage(result)) => result,
+        Ok(_) => return publish(events, NativeTransportEvent::MessageImageFailed {
+            reference, failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+        }),
+        Err(error) => return publish(events, NativeTransportEvent::MessageImageFailed {
+            reference, failure: error.into(),
+        }),
+    };
+    match artisan_domain::ImageAttachment::new(reference.mime_type_str(), result.bytes, reference.name.clone()) {
+        Ok(image) => publish(events, NativeTransportEvent::MessageImageLoaded { reference, image }),
+        Err(_) => publish(events, NativeTransportEvent::MessageImageFailed {
+            reference, failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+        }),
+    }
+}
+
 async fn load_thread_engine_settings(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
@@ -3590,6 +3688,86 @@ async fn queue_first_message(
     publish(events, NativeTransportEvent::FirstMessageQueued(receipt))
 }
 
+async fn queue_message(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    command: QueueMessage,
+) -> Result<(), ServiceFailure> {
+    let thread_id = command.thread_id.clone();
+    let request_id = command.request_id.clone();
+    if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
+        return publish(
+            events,
+            NativeTransportEvent::MessageFailed {
+                thread_id,
+                request_id,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    }
+    let mutation = match message_stable_mutation(command) {
+        Ok(mutation) => mutation,
+        Err(failure) => {
+            return publish(
+                events,
+                NativeTransportEvent::MessageFailed {
+                    thread_id,
+                    request_id,
+                    failure,
+                },
+            );
+        }
+    };
+    let payload = match durable_save_request(
+        runtime,
+        frames,
+        &mutation,
+        ExpectedResponse::MessageQueued {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        },
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return publish(
+                events,
+                NativeTransportEvent::MessageFailed {
+                    thread_id,
+                    request_id,
+                    failure: error.into(),
+                },
+            );
+        }
+    };
+    let ResponsePayload::MessageQueued(receipt) = payload else {
+        return publish(
+            events,
+            NativeTransportEvent::MessageFailed {
+                thread_id,
+                request_id,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
+    };
+    if receipt.thread_id != thread_id || receipt.request_id != request_id {
+        return publish(
+            events,
+            NativeTransportEvent::MessageFailed {
+                thread_id,
+                request_id,
+                failure: ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                ),
+            },
+        );
+    }
+    publish(events, NativeTransportEvent::MessageQueued(receipt))
+}
+
 fn known_thread_for_queue(
     known_threads: &HashSet<ThreadId>,
     thread_id: &ThreadId,
@@ -3755,7 +3933,7 @@ mod tests {
         ServiceFailureCategory, StartupError, ThreadSelectionDecision, attach_mutation,
         build_reconnect_binding, contains_exact_project, contains_exact_thread,
         create_command_values, create_mutation, engine_config_stable_mutation, finite_duration,
-        first_message_stable_mutation, known_thread_for_queue, make_request_frame,
+        first_message_stable_mutation, message_stable_mutation, known_thread_for_queue, make_request_frame,
         payload_health_decision, project_request, reconnect_hello, session_needs_reconnect,
         snapshot_request, thread_engine_settings_request, thread_selection_decision,
         threads_request, try_send_command, validate_readiness, validate_response_family,
@@ -3771,7 +3949,7 @@ mod tests {
     use artisan_editor_cli::payload::PayloadHealth;
     use artisan_protocol::{
         ClientRequest, DirectoryPickOutcome, ErrorCode, FirstMessageReceipt, HelloCredential,
-        ProtocolVersion, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
+        ProtocolVersion, QueueMessageReceipt, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
         RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
         WireEnvelopeBody, encode_envelope,
     };
@@ -4056,6 +4234,136 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn general_message_response_family_requires_exact_request_and_thread() {
+        let thread_id = ThreadId::parse("thread-a").expect("thread");
+        let other_thread_id = ThreadId::parse("thread-b").expect("thread");
+        let request_id = RequestId::parse("native-message-a").expect("request");
+        let other_request_id = RequestId::parse("native-message-b").expect("request");
+        let receipt = QueueMessageReceipt {
+            request_id: request_id.clone(),
+            message_id: artisan_domain::MessageId::parse("message-a").expect("message"),
+            thread_id: thread_id.clone(),
+            disposition: ReceiptDisposition::Accepted,
+        };
+        let expected = ExpectedResponse::MessageQueued {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        };
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::MessageQueued(receipt.clone())
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::MessageQueued(QueueMessageReceipt {
+                    disposition: ReceiptDisposition::Duplicate,
+                    ..receipt.clone()
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::MessageQueued(QueueMessageReceipt {
+                    request_id: other_request_id,
+                    ..receipt.clone()
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::MessageQueued(QueueMessageReceipt {
+                    thread_id: other_thread_id,
+                    ..receipt.clone()
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_response_family(
+                expected,
+                ResponsePayload::ProjectListing(
+                    ProjectListing::new(vec![project("project-a", "A")]).expect("projects"),
+                )
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn history_image_response_requires_exact_reference_and_content() {
+        use sha2::{Digest, Sha256};
+        let bytes = vec![1, 2, 3];
+        let reference = artisan_domain::ImageAttachmentRef::new(
+            artisan_domain::MessageId::parse("image-message").expect("message"),
+            ThreadId::parse("image-thread").expect("thread"),
+            0,
+            "image/png",
+            "image.png",
+            3,
+            Sha256::digest(&bytes).into(),
+        ).expect("reference");
+        let response = artisan_protocol::MessageImageResult {
+            reference: reference.clone(), bytes,
+        };
+        let expected = ExpectedResponse::MessageImage(reference);
+        assert!(validate_response_family(expected.clone(), ResponsePayload::MessageImage(response.clone())).is_ok());
+        let mut wrong_content = response.clone();
+        wrong_content.bytes[0] = 9;
+        assert!(validate_response_family(expected.clone(), ResponsePayload::MessageImage(wrong_content)).is_err());
+        let mut wrong_owner = response.clone();
+        wrong_owner.reference.thread_id = ThreadId::parse("other-thread").expect("thread");
+        assert!(validate_response_family(expected.clone(), ResponsePayload::MessageImage(wrong_owner)).is_err());
+        let mut wrong_size = response;
+        wrong_size.bytes.push(4);
+        assert!(validate_response_family(expected, ResponsePayload::MessageImage(wrong_size)).is_err());
+    }
+
+    #[test]
+    fn image_message_retry_preserves_full_payload_and_wire_identity() {
+        let request_id = RequestId::parse("native-image-stable").expect("request");
+        let thread_id = ThreadId::parse("thread-image").expect("thread");
+        let payload = artisan_domain::QueueMessagePayload::new(
+            None,
+            vec![
+                artisan_domain::ImageAttachment::new("image/png", vec![1, 2, 3], "one.png")
+                    .expect("first image"),
+                artisan_domain::ImageAttachment::new("image/webp", vec![4, 5], "two.webp")
+                    .expect("second image"),
+            ],
+        )
+        .expect("image-only payload");
+        let mutation = message_stable_mutation(artisan_domain::QueueMessage::new(
+            request_id.clone(),
+            thread_id.clone(),
+            payload.clone(),
+        ))
+        .expect("stable image mutation");
+        let (first, first_id) = mutation.envelope(ProtocolVersion::V1).expect("first");
+        let (retry, retry_id) = mutation.envelope(ProtocolVersion::V1).expect("retry");
+        assert_eq!(first_id, request_id);
+        assert_eq!(retry_id, request_id);
+        assert_eq!(
+            encode_envelope(&first).expect("first bytes"),
+            encode_envelope(&retry).expect("retry bytes")
+        );
+        let WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(command))) =
+            retry.body
+        else {
+            panic!("retry must remain a general message command");
+        };
+        assert_eq!(command.thread_id, thread_id);
+        assert_eq!(command.payload, payload);
     }
 
     #[test]

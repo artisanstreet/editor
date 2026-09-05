@@ -376,6 +376,8 @@ pub const fn file_change_status_label(status: FileChangeStatus) -> &'static str 
 /// Native GPUI transcript surface over one immutable replacement scene.
 pub struct ConversationSurface {
     scene: ConversationScene,
+    message_images: Option<Entity<crate::native_message_images::NativeMessageImages>>,
+    message_images_observation: Option<gpui::Subscription>,
     theme_mode: ThemeMode,
     markdown_renderer: MarkdownRenderer,
     scroll_handle: ScrollHandle,
@@ -657,6 +659,8 @@ impl ConversationSurface {
     pub fn new(scene: ConversationScene, theme_mode: ThemeMode, cx: &mut Context<Self>) -> Self {
         Self {
             scene,
+            message_images: None,
+            message_images_observation: None,
             theme_mode,
             markdown_renderer: MarkdownRenderer::new(),
             scroll_handle: ScrollHandle::new(),
@@ -698,6 +702,17 @@ impl ConversationSurface {
     #[must_use]
     pub fn scroll_handle(&self) -> &ScrollHandle {
         &self.scroll_handle
+    }
+
+    /// Shares the application's bounded image cache with transcript cells.
+    pub fn set_message_images(
+        &mut self,
+        images: Entity<crate::native_message_images::NativeMessageImages>,
+        cx: &mut Context<Self>,
+    ) {
+        self.message_images_observation = Some(cx.observe(&images, |_, _, cx| cx.notify()));
+        self.message_images = Some(images);
+        cx.notify();
     }
 
     /// Returns the focus handle tracked by the transcript viewport.
@@ -1071,6 +1086,7 @@ impl ConversationSurface {
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let selector = turn_selector(&turn.turn_id);
         let turn_element = div()
@@ -1111,7 +1127,7 @@ impl ConversationSurface {
         let mut turn_element = turn_element.debug_selector(move || selector.clone());
 
         for block in turn.blocks() {
-            if let Some(element) = self.render_block(&turn.turn_id, block, entity, theme, anchors) {
+            if let Some(element) = self.render_block(&turn.turn_id, block, entity, theme, anchors, cx) {
                 turn_element = turn_element.child(element);
             }
         }
@@ -1126,11 +1142,12 @@ impl ConversationSurface {
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
+        cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let selector = block_selector(turn_id, block);
         match block {
             TurnBlock::UserMessage(block) => {
-                Some(Self::render_user_message(block, selector, theme))
+                Some(self.render_user_message(block, selector, theme, cx))
             }
             TurnBlock::AssistantMessage(block) => {
                 Some(self.render_assistant_message(block, selector, entity, theme, anchors))
@@ -1174,21 +1191,33 @@ impl ConversationSurface {
     }
 
     fn render_user_message(
+        &self,
         block: &UserMessageBlock,
         selector: String,
         theme: &ArtisanTheme,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         // Parity with conversation-message.svelte user branch: right-aligned
         // gradient bubble (surface-850 to surface-775), rounded-2xl, plain
         // pre-wrap paragraph, no title. GPUI has no gradient fill, so the
         // bubble uses the solid ramp midpoint (surface-800); documented.
         let body_selector = format!("{selector}-body");
-        div()
+        let mut message = div()
             .w_full()
             .flex()
             .flex_col()
             .items_end()
-            .child(
+            .gap(px(8.0));
+        if let Some(images) = self.message_images.as_ref() {
+            let mut tray = div().flex().flex_wrap().justify_end().gap(px(8.0)).max_w(px(576.0));
+            for reference in &block.attachments {
+                let tile = images.update(cx, |images, cx| images.render_thumbnail(reference, *theme, cx).into_any_element());
+                tray = tray.child(tile);
+            }
+            if !block.attachments.is_empty() { message = message.child(tray); }
+        }
+        if !block.body.is_empty() {
+            message = message.child(
                 div()
                     .max_w(px(576.0))
                     .rounded(px(16.0))
@@ -1199,8 +1228,9 @@ impl ConversationSurface {
                     .child(
                         body_text(&block.body, theme).debug_selector(move || body_selector.clone()),
                     ),
-            )
-            .into_any_element()
+            );
+        }
+        message.into_any_element()
     }
 
     fn render_assistant_message(
@@ -1735,7 +1765,7 @@ impl Render for ConversationSurface {
             };
             for turn in self.scene.turn_scenes() {
                 transcript =
-                    transcript.child(self.render_turn(turn, &entity, &theme, &mut anchors));
+                    transcript.child(self.render_turn(turn, &entity, &theme, &mut anchors, cx));
             }
         }
 

@@ -24,10 +24,10 @@ use std::collections::VecDeque;
 
 use artisan_assets::AssetId;
 use artisan_domain::{
-    ConversationSnapshot, EngineProfileId, MessageBody, PatchBatch, ProjectId, ProjectListing,
+    ConversationSnapshot, EngineProfileId, QueueMessagePayload, PatchBatch, ProjectId, ProjectListing,
     RequestId, ThreadId, ThreadListing,
 };
-use artisan_protocol::{ConversationSubscriptionStarted, FirstMessageReceipt};
+use artisan_protocol::{ConversationSubscriptionStarted, QueueMessageReceipt};
 use artisan_ui::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
 };
@@ -57,6 +57,7 @@ use crate::native_command_menu::{
     CommandMenuAction, CommandMenuEntry, CommandMenuGroup, NativeCommandMenu,
 };
 use crate::native_composer::{NativeComposer, NativeComposerEvent};
+use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
 use crate::native_transport_service::{
@@ -137,7 +138,7 @@ enum NativeViewState {
     Failure(ServiceFailure),
 }
 
-/// Application-owned identity for one admitted first-message queue.
+/// Application-owned identity for one admitted message queue.
 ///
 /// The body is intentionally retained here until the application observes a
 /// correlated terminal result. This type owns message text and therefore
@@ -145,17 +146,17 @@ enum NativeViewState {
 struct NativeMessageFlight {
     thread_id: ThreadId,
     request_id: RequestId,
-    body: MessageBody,
+    payload: QueueMessagePayload,
     token: SubmissionToken,
 }
 
-/// Application-owned identity for one explicitly retryable first-message
+/// Application-owned identity for one explicitly retryable message
 /// queue. This type owns message text and therefore implements neither
 /// `Debug` nor `Display`.
 struct NativeMessageRetry {
     thread_id: ThreadId,
     request_id: RequestId,
-    body: MessageBody,
+    payload: QueueMessagePayload,
     draft_matches: bool,
 }
 
@@ -209,6 +210,8 @@ pub struct NativeApplication {
     message_retry_focus_handle: FocusHandle,
     service: Option<Arc<NativeTransportService>>,
     composer: Entity<NativeComposer>,
+    message_images: Entity<NativeMessageImages>,
+    _message_images_subscription: Subscription,
     _composer_subscription: Subscription,
     _composer_observation: Subscription,
     profile_menu: DropdownMenuState,
@@ -225,7 +228,7 @@ pub struct NativeApplication {
     sidebar_navigation_focus: FocusHandle,
     message_flight: Option<NativeMessageFlight>,
     message_retry: Option<NativeMessageRetry>,
-    message_receipt: Option<FirstMessageReceipt>,
+    message_receipt: Option<QueueMessageReceipt>,
     message_failure: Option<NativeMessageFailure>,
     picker: Option<Entity<ProjectPickerView>>,
     picker_subscription: Option<Subscription>,
@@ -296,6 +299,18 @@ impl NativeApplication {
             })
         };
         let composer = cx.new(NativeComposer::new);
+        let message_images = cx.new(NativeMessageImages::new);
+        let message_images_subscription = cx.subscribe(&message_images, |application, images, event, cx| {
+            let NativeMessageImagesEvent::RequestImage(reference) = event;
+            if let Err(error) = application.submit_command(NativeTransportCommand::ReadMessageImage(reference.clone())) {
+                images.update(cx, |images, cx| {
+                    images.fail_image(reference.clone(), command_failure(error), cx);
+                });
+            }
+        });
+        composer.update(cx, |composer, cx| {
+            composer.set_attachment_delivery_enabled(true, cx);
+        });
         let composer_subscription =
             cx.subscribe(&composer, |application, _composer, event, cx| match event {
                 NativeComposerEvent::SendRequested => application.begin_message_submission(cx),
@@ -320,6 +335,8 @@ impl NativeApplication {
             service,
             composer,
             _composer_subscription: composer_subscription,
+            message_images,
+            _message_images_subscription: message_images_subscription,
             _composer_observation: composer_observation,
             profile_menu: DropdownMenuState::new([
                 DropdownMenuEntry::item(DropdownMenuItem::new("settings", "Settings")),
@@ -1358,12 +1375,17 @@ impl NativeApplication {
     }
 
     fn sync_composer_availability(&mut self, cx: &mut Context<Self>) {
+        let image_thread = self.conversation_host.as_ref().map(|host| host.read(cx).controller_view().delivery.thread_id);
+        if self.message_images.update(cx, |images, cx| images.set_current_thread(image_thread, cx)).is_err() {
+            self.state = NativeViewState::Failure(invalid_service_failure());
+        }
         let disabled = !self.message_submission_is_admissible(cx);
         let model_label = self.engine_settings.authoritative_config().map(|config| {
             let artisan_domain::EngineSelection::OpenCode2(selection) = config.selection();
             selection.model_id().as_str().to_owned()
         }).unwrap_or_else(|| "Select model".into());
         self.composer.update(cx, |composer, composer_cx| {
+            composer.set_attachment_delivery_enabled(true, composer_cx);
             composer.set_surface(disabled, model_label, composer_cx);
         });
     }
@@ -1378,7 +1400,7 @@ impl NativeApplication {
         self.clear_message_retry();
         let submission = self
             .composer
-            .update(cx, |composer, _| composer.begin_submission());
+            .update(cx, |composer, _| composer.begin_payload_submission());
         let (body, token) = match submission {
             Ok(submission) => submission,
             Err(blocked) => {
@@ -1398,11 +1420,11 @@ impl NativeApplication {
                 return;
             }
         };
-        let command = NativeTransportCommand::QueueFirstMessage(Box::new(
-            artisan_domain::QueueFirstMessage {
+        let command = NativeTransportCommand::QueueMessage(Box::new(
+            artisan_domain::QueueMessage {
                 request_id: request_id.clone(),
                 thread_id: thread_id.clone(),
-                body: body.clone(),
+                payload: body.clone(),
             },
         ));
         match self.submit_command(command) {
@@ -1410,7 +1432,7 @@ impl NativeApplication {
                 self.message_flight = Some(NativeMessageFlight {
                     thread_id,
                     request_id,
-                    body,
+                    payload: body,
                     token,
                 });
             }
@@ -1451,7 +1473,7 @@ impl NativeApplication {
         if self.message_flight.is_some() {
             return;
         }
-        let matches = composer.read(cx).draft_matches_body(&retry.body);
+        let matches = composer.read(cx).draft_matches_payload(&retry.payload);
         retry.draft_matches = matches;
         cx.notify();
     }
@@ -1477,10 +1499,10 @@ impl NativeApplication {
         };
         let thread_id = retry.thread_id.clone();
         let request_id = retry.request_id.clone();
-        let retry_body = retry.body.clone();
+        let retry_body = retry.payload.clone();
         let submission = self
             .composer
-            .update(cx, |composer, _| composer.begin_submission());
+            .update(cx, |composer, _| composer.begin_payload_submission());
         let (body, token) = match submission {
             Ok(submission) => submission,
             Err(blocked) => {
@@ -1494,7 +1516,7 @@ impl NativeApplication {
                 return;
             }
         };
-        if body.as_str().as_bytes() != retry_body.as_str().as_bytes() {
+        if body != retry_body {
             if let Some(retry) = self.message_retry.as_mut() {
                 retry.draft_matches = false;
             }
@@ -1506,11 +1528,11 @@ impl NativeApplication {
 
         self.message_receipt = None;
         self.message_failure = None;
-        let command = NativeTransportCommand::QueueFirstMessage(Box::new(
-            artisan_domain::QueueFirstMessage {
+        let command = NativeTransportCommand::QueueMessage(Box::new(
+            artisan_domain::QueueMessage {
                 request_id: request_id.clone(),
                 thread_id: thread_id.clone(),
-                body: retry_body.clone(),
+                payload: retry_body.clone(),
             },
         ));
         match self.submit_command(command) {
@@ -1519,7 +1541,7 @@ impl NativeApplication {
                 self.message_flight = Some(NativeMessageFlight {
                     thread_id,
                     request_id,
-                    body: retry_body,
+                    payload: retry_body,
                     token,
                 });
             }
@@ -1580,9 +1602,9 @@ impl NativeApplication {
         self.message_failure = None;
     }
 
-    fn handle_first_message_receipt(
+    fn handle_message_receipt(
         &mut self,
-        receipt: FirstMessageReceipt,
+        receipt: QueueMessageReceipt,
         cx: &mut Context<Self>,
     ) {
         let Some(flight) = self.message_flight.as_ref() else {
@@ -1610,7 +1632,7 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn handle_first_message_failure(
+    fn handle_message_failure(
         &mut self,
         thread_id: &ThreadId,
         request_id: &RequestId,
@@ -1633,7 +1655,7 @@ impl NativeApplication {
         self.message_retry = Some(NativeMessageRetry {
             thread_id: flight.thread_id,
             request_id: flight.request_id,
-            body: flight.body,
+            payload: flight.payload,
             draft_matches: false,
         });
         self.message_receipt = None;
@@ -1701,6 +1723,12 @@ impl NativeApplication {
             return;
         }
         match event {
+            NativeTransportEvent::MessageImageLoaded { reference, image } => {
+                self.message_images.update(cx, |images, cx| { images.accept_image(reference, image, cx); });
+            }
+            NativeTransportEvent::MessageImageFailed { reference, failure } => {
+                self.message_images.update(cx, |images, cx| { images.fail_image(reference, failure, cx); });
+            }
             NativeTransportEvent::Starting => {
                 self.state = NativeViewState::Loading;
                 self.sync_composer_availability(cx);
@@ -1772,15 +1800,19 @@ impl NativeApplication {
             } => {
                 self.handle_engine_settings_failed(thread_id, generation, failure, cx);
             }
-            NativeTransportEvent::FirstMessageQueued(receipt) => {
-                self.handle_first_message_receipt(receipt, cx);
+            // The shipping composer uses QueueMessage. Legacy first-message results
+            // cannot settle a flight from the newer command family.
+            NativeTransportEvent::FirstMessageQueued(_)
+            | NativeTransportEvent::FirstMessageFailed { .. } => {}
+            NativeTransportEvent::MessageQueued(receipt) => {
+                self.handle_message_receipt(receipt, cx);
             }
-            NativeTransportEvent::FirstMessageFailed {
+            NativeTransportEvent::MessageFailed {
                 thread_id,
                 request_id,
                 failure,
             } => {
-                self.handle_first_message_failure(&thread_id, &request_id, failure, cx);
+                self.handle_message_failure(&thread_id, &request_id, failure, cx);
             }
             NativeTransportEvent::ConversationSubscriptionStarted {
                 thread_id,
@@ -3498,6 +3530,8 @@ impl NativeApplication {
             application.pump_host_boundary(&host, cx);
         });
         self.conversation_host = Some(host.clone());
+        let images = self.message_images.clone();
+        host.read(cx).surface().clone().update(cx, |surface, cx| surface.set_message_images(images, cx));
         drop(self.conversation_host_subscription.replace(subscription));
         suppress_conversation_tab_stops(&host, cx);
         self.collect_host_effects(&host, cx);
@@ -4136,7 +4170,7 @@ fn submission_blocked_failure(blocked: SubmissionBlocked) -> Option<ServiceFailu
             stage: ServiceFailureStage::Request,
             category: ServiceFailureCategory::Integrity,
         }),
-        SubmissionBlocked::InFlight | SubmissionBlocked::Disabled => None,
+        SubmissionBlocked::InFlight | SubmissionBlocked::Disabled | SubmissionBlocked::DraftChanged => None,
     }
 }
 
@@ -4273,7 +4307,7 @@ fn status_panel(theme: &ArtisanTheme, state: &NativeViewState) -> Div {
 
 fn message_status_panel(
     theme: &ArtisanTheme,
-    receipt: Option<&FirstMessageReceipt>,
+    receipt: Option<&QueueMessageReceipt>,
     failure: Option<NativeMessageFailure>,
 ) -> Option<Div> {
     let detail = message_status_detail(receipt, failure)?;
@@ -4296,7 +4330,7 @@ fn message_status_panel(
 }
 
 fn message_status_detail(
-    receipt: Option<&FirstMessageReceipt>,
+    receipt: Option<&QueueMessageReceipt>,
     failure: Option<NativeMessageFailure>,
 ) -> Option<String> {
     Some(if let Some(receipt) = receipt {
@@ -4343,7 +4377,9 @@ impl Render for NativeApplication {
             .on_action(cx.listener(Self::activate_command_menu))
             .size_full()
             .debug_selector(|| NATIVE_ROOT_SELECTOR.to_string())
+            .relative()
             .child(shell)
+            .child(self.message_images.clone())
     }
 }
 
@@ -5053,7 +5089,7 @@ mod tests {
         ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
     };
     use artisan_protocol::{
-        ConversationSubscriptionStarted, ConversationSubscriptionStopped, FirstMessageReceipt,
+        ConversationSubscriptionStarted, ConversationSubscriptionStopped, QueueMessageReceipt,
     };
     use artisan_ui::button::{
         Button, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant, FocusVisibility,
@@ -5274,7 +5310,7 @@ mod tests {
     ) {
         let (body, token) = application.composer.update(cx, |composer, _| {
             composer
-                .begin_submission()
+                .begin_payload_submission()
                 .expect("message draft admits one flight")
         });
         let thread_id = application
@@ -5284,7 +5320,7 @@ mod tests {
         application.message_flight = Some(NativeMessageFlight {
             thread_id,
             request_id: request(request_id),
-            body,
+            payload: body,
             token,
         });
     }
@@ -5298,7 +5334,7 @@ mod tests {
             (flight.thread_id.clone(), flight.request_id.clone())
         };
         application.handle_service_event(
-            NativeTransportEvent::FirstMessageFailed {
+            NativeTransportEvent::MessageFailed {
                 thread_id,
                 request_id,
                 failure: message_failure(),
@@ -6368,8 +6404,8 @@ mod tests {
         thread_id: &ThreadId,
         message_id: &str,
         disposition: ReceiptDisposition,
-    ) -> FirstMessageReceipt {
-        FirstMessageReceipt {
+    ) -> QueueMessageReceipt {
+        QueueMessageReceipt {
             request_id: artisan_domain::RequestId::parse(request_id).expect("request"),
             message_id: artisan_domain::MessageId::parse(message_id).expect("message"),
             thread_id: thread_id.clone(),
@@ -6423,10 +6459,10 @@ mod tests {
                     .as_ref()
                     .expect("admitted flight");
                 let request_id = flight.request_id.clone();
-                let body = flight.body.as_str().to_owned();
+                let body = flight.payload.text().expect("text payload").as_str().to_owned();
 
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageFailed {
+                    NativeTransportEvent::MessageFailed {
                         thread_id: thread_id.clone(),
                         request_id: request_id.clone(),
                         failure: message_failure(),
@@ -6438,7 +6474,7 @@ mod tests {
                 let retry = application.message_retry.as_ref().expect("retry record");
                 assert_eq!(retry.thread_id, thread_id);
                 assert_eq!(retry.request_id, request_id);
-                assert_eq!(retry.body.as_str(), body);
+                assert_eq!(retry.payload.text().expect("text payload").as_str(), body);
                 assert_eq!(application.composer.read(application_cx).draft(), body);
             });
         });
@@ -6608,12 +6644,12 @@ mod tests {
         let commands = commands.borrow();
         assert_eq!(commands.len(), 3);
         for command in commands.iter() {
-            let NativeTransportCommand::QueueFirstMessage(command) = command else {
+            let NativeTransportCommand::QueueMessage(command) = command else {
                 panic!("retry activation must queue a first message")
             };
             assert_eq!(command.request_id, request_id);
             assert_eq!(command.thread_id, thread_id);
-            assert_eq!(command.body.as_str(), body);
+            assert_eq!(command.payload.text().expect("text payload").as_str(), body);
         }
     }
 
@@ -6646,7 +6682,7 @@ mod tests {
                 application.activate_message_retry(application_cx);
                 assert!(application.message_flight.is_some());
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                    NativeTransportEvent::MessageQueued(first_receipt(
                         "retry-stale-request",
                         &stale_thread_id,
                         "message-stale",
@@ -6655,7 +6691,7 @@ mod tests {
                     application_cx,
                 );
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageFailed {
+                    NativeTransportEvent::MessageFailed {
                         thread_id: stale_thread_id,
                         request_id: request("retry-stale-request"),
                         failure: message_failure(),
@@ -6669,7 +6705,7 @@ mod tests {
                     "accepted retry body"
                 );
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                    NativeTransportEvent::MessageQueued(first_receipt(
                         "retry-accepted-request",
                         &thread_id,
                         "message-accepted",
@@ -6699,7 +6735,7 @@ mod tests {
             view.update(app, |application, application_cx| {
                 application.activate_message_retry(application_cx);
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                    NativeTransportEvent::MessageQueued(first_receipt(
                         "retry-duplicate-request",
                         &thread_id,
                         "message-duplicate",
@@ -6765,18 +6801,18 @@ mod tests {
                 let flight = application.message_flight.as_ref().expect("fresh flight");
                 assert_ne!(flight.request_id, original_request);
                 assert_eq!(flight.thread_id, thread_id);
-                assert_eq!(flight.body.as_str(), "edited fresh body");
+                assert_eq!(flight.payload.text().expect("text payload").as_str(), "edited fresh body");
             });
         });
 
         let commands = commands.borrow();
         assert_eq!(commands.len(), 1);
-        let NativeTransportCommand::QueueFirstMessage(command) = &commands[0] else {
+        let NativeTransportCommand::QueueMessage(command) = &commands[0] else {
             panic!("fresh send must queue a first message")
         };
         assert_ne!(command.request_id, original_request);
         assert_eq!(command.thread_id, thread_id);
-        assert_eq!(command.body.as_str(), "edited fresh body");
+        assert_eq!(command.payload.text().expect("text payload").as_str(), "edited fresh body");
     }
 
     #[gpui::test]
@@ -6807,7 +6843,7 @@ mod tests {
                 let retry = application.message_retry.as_ref().expect("retained retry");
                 assert_eq!(retry.thread_id, thread_id);
                 assert_eq!(retry.request_id, request_id);
-                assert_eq!(retry.body.as_str(), "busy retry body");
+                assert_eq!(retry.payload.text().expect("text payload").as_str(), "busy retry body");
                 assert!(application.message_flight.is_none());
                 assert!(!application.composer.read(application_cx).is_submitting());
                 assert_eq!(
@@ -7079,7 +7115,7 @@ mod tests {
                         .update(application_cx, |composer, composer_cx| {
                             composer.set_disabled(false, composer_cx);
                             composer.set_draft(draft.clone());
-                            composer.begin_submission()
+                            composer.begin_payload_submission()
                         })
                         .expect("begin");
                     application.reject_message_submission(
@@ -7109,17 +7145,17 @@ mod tests {
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft("first exact body");
-                        composer.begin_submission()
+                        composer.begin_payload_submission()
                     })
                     .expect("first begin");
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-first").expect("request"),
-                    body,
+                    payload: body,
                     token,
                 });
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                    NativeTransportEvent::MessageQueued(first_receipt(
                         "request-first",
                         &thread_id,
                         "message-first",
@@ -7142,21 +7178,21 @@ mod tests {
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft("second exact body");
-                        composer.begin_submission()
+                        composer.begin_payload_submission()
                     })
                     .expect("second begin");
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-second")
                         .expect("request"),
-                    body,
+                    payload: body,
                     token,
                 });
                 application.composer.update(application_cx, |composer, _| {
                     composer.set_draft("newer draft while duplicate is pending");
                 });
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                    NativeTransportEvent::MessageQueued(first_receipt(
                         "request-second",
                         &thread_id,
                         "message-second",
@@ -7194,17 +7230,17 @@ mod tests {
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft("newer draft");
-                        composer.begin_submission()
+                        composer.begin_payload_submission()
                     })
                     .expect("begin");
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-newer").expect("request"),
-                    body,
+                    payload: body,
                     token,
                 });
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageQueued(first_receipt(
+                    NativeTransportEvent::MessageQueued(first_receipt(
                         "request-stale",
                         &thread_id,
                         "message-stale",
@@ -7235,18 +7271,18 @@ mod tests {
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft("retained queue body");
-                        composer.begin_submission()
+                        composer.begin_payload_submission()
                     })
                     .expect("begin");
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-failure")
                         .expect("request"),
-                    body,
+                    payload: body,
                     token,
                 });
                 application.handle_service_event(
-                    NativeTransportEvent::FirstMessageFailed {
+                    NativeTransportEvent::MessageFailed {
                         thread_id: thread_id.clone(),
                         request_id: artisan_domain::RequestId::parse("request-failure")
                             .expect("request"),
@@ -7269,13 +7305,13 @@ mod tests {
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft("retained on stop");
-                        composer.begin_submission()
+                        composer.begin_payload_submission()
                     })
                     .expect("second begin");
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: thread_id.clone(),
                     request_id: artisan_domain::RequestId::parse("request-stop").expect("request"),
-                    body,
+                    payload: body,
                     token,
                 });
                 application.handle_service_event(
@@ -7307,14 +7343,14 @@ mod tests {
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft("transition body");
-                        composer.begin_submission()
+                        composer.begin_payload_submission()
                     })
                     .expect("begin");
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: old_thread.clone(),
                     request_id: artisan_domain::RequestId::parse("request-transition")
                         .expect("request"),
-                    body,
+                    payload: body,
                     token,
                 });
                 application.message_receipt = Some(first_receipt(
@@ -7346,14 +7382,14 @@ mod tests {
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft("shutdown body");
-                        composer.begin_submission()
+                        composer.begin_payload_submission()
                     })
                     .expect("shutdown begin");
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: old_thread,
                     request_id: artisan_domain::RequestId::parse("request-shutdown")
                         .expect("request"),
-                    body,
+                    payload: body,
                     token,
                 });
                 application.prepare_shutdown(application_cx);
@@ -7443,14 +7479,15 @@ mod tests {
             .composer
             .update(application_cx, |composer, composer_cx| {
                 composer.set_disabled(false, composer_cx);
+                composer.switch_thread(source.as_str().to_owned(), false, composer_cx);
                 composer.set_draft("retained switch draft");
-                composer.begin_submission()
+                composer.begin_payload_submission()
             })
             .expect("message flight");
         application.message_flight = Some(NativeMessageFlight {
             thread_id: source.clone(),
             request_id: request("message-switch"),
-            body,
+            payload: body,
             token,
         });
 
@@ -7554,10 +7591,8 @@ mod tests {
                 .has_snapshot
         );
         assert_eq!(commands.borrow().len(), 2);
-        assert_eq!(
-            application.composer.read(application_cx).draft(),
-            "retained switch draft"
-        );
+        // Each thread owns its draft; A's pending text must not leak into B.
+        assert_eq!(application.composer.read(application_cx).draft(), "");
         stop_request
     }
 
@@ -7672,6 +7707,10 @@ mod tests {
         assert_eq!(application.conversation_host.as_ref(), Some(&returned_host));
         assert_eq!(application.selected_thread.as_ref(), Some(source));
         assert_eq!(commands.borrow().len(), 4);
+        assert_eq!(
+            application.composer.read(application_cx).draft(),
+            "retained switch draft"
+        );
     }
 
     #[gpui::test]
@@ -7760,13 +7799,13 @@ mod tests {
                     .update(application_cx, |composer, composer_cx| {
                         composer.set_disabled(false, composer_cx);
                         composer.set_draft("refused switch draft");
-                        composer.begin_submission()
+                        composer.begin_payload_submission()
                     })
                     .expect("message flight");
                 application.message_flight = Some(NativeMessageFlight {
                     thread_id: source.clone(),
                     request_id: request("message-stopped"),
-                    body,
+                    payload: body,
                     token,
                 });
                 let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);

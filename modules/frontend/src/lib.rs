@@ -178,3 +178,4 @@ pub fn run() -> std::process::ExitCode {
 }
 pub mod native_model_catalog;
 pub mod native_model_selector;
+pub mod native_message_images;

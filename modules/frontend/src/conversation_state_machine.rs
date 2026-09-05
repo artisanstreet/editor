@@ -1535,7 +1535,7 @@ impl ConversationStateController {
                 anchor: item_id.clone(),
             });
         };
-        if !matches!(item, ConversationItem::UserMessage(_)) {
+        if !matches!(item, ConversationItem::UserMessage(_) | ConversationItem::MultimodalUserMessage(_)) {
             return Err(ConversationStateError::NonUserSteeringAnchor {
                 anchor: item_id.clone(),
             });
@@ -1724,6 +1724,14 @@ impl ConversationStateController {
                     body: message.body.as_str().to_owned(),
                 },
             ),
+            ConversationItem::MultimodalUserMessage(message) => (
+                message.turn_id.clone(),
+                message.ordinal.get(),
+                SceneItemKind::MultimodalUserMessage {
+                    body: message.text.as_ref().map_or_else(String::new, |text| text.as_str().to_owned()),
+                    attachments: message.attachments.clone(),
+                },
+            ),
             ConversationItem::AssistantMessage(message) => (
                 message.turn_id.clone(),
                 message.ordinal.get(),
@@ -1853,7 +1861,7 @@ fn snapshot_has_user_item(snapshot: &ConversationSnapshot, item_id: &ItemId) -> 
     snapshot
         .items()
         .iter()
-        .any(|item| item.item_id() == item_id && matches!(item, ConversationItem::UserMessage(_)))
+        .any(|item| item.item_id() == item_id && matches!(item, ConversationItem::UserMessage(_) | ConversationItem::MultimodalUserMessage(_)))
 }
 
 fn scene_narration(narration: &TurnNarration) -> SceneTurnNarration {

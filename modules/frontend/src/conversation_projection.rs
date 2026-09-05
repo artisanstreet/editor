@@ -560,9 +560,7 @@ fn apply_item_upsert(
     item: &ConversationItem,
 ) -> Result<(), ProjectionError> {
     if let Some(index) = item_index(staged_items, item.item_id()) {
-        let previous_kind_is_user = matches!(staged_items[index], ConversationItem::UserMessage(_));
-        let next_kind_is_user = matches!(item, ConversationItem::UserMessage(_));
-        if previous_kind_is_user != next_kind_is_user {
+        if std::mem::discriminant(&staged_items[index]) != std::mem::discriminant(item) {
             return Err(ProjectionError::IdentityConflict);
         }
         if let (
@@ -571,6 +569,10 @@ fn apply_item_upsert(
         ) = (&staged_items[index], item)
             && previous.run_id != next.run_id
         {
+            return Err(ProjectionError::IdentityConflict);
+        }
+        if let (ConversationItem::MultimodalUserMessage(previous), ConversationItem::MultimodalUserMessage(next)) = (&staged_items[index], item)
+            && previous.attachments != next.attachments {
             return Err(ProjectionError::IdentityConflict);
         }
         let previous_revision = entity_revision(&staged_items[index]);
@@ -652,14 +654,18 @@ fn apply_item_append(
     }
     ensure_nondecreasing(entity_updated_at(&staged_items[index]), updated_at)?;
     let previous_len = item_body_len(&staged_items[index]);
-    let joined_len = previous_len
+    let previous_text_len = match &staged_items[index] {
+        ConversationItem::MultimodalUserMessage(message) => message.text.as_ref().map_or(0, |text| text.as_str().len()),
+        _ => previous_len,
+    };
+    let joined_len = previous_text_len
         .checked_add(fragment.len())
         .ok_or(ProjectionError::BodyBoundExceeded)?;
     if joined_len > max_body_bytes(&staged_items[index]) {
         return Err(ProjectionError::BodyBoundExceeded);
     }
     retention
-        .replace_body(previous_len, joined_len)
+        .replace_body(previous_len, previous_len.saturating_add(fragment.len()))
         .map_err(|_| ProjectionError::RetentionExceeded)?;
     match &mut staged_items[index] {
         ConversationItem::UserMessage(message) => {
@@ -668,6 +674,15 @@ fn apply_item_append(
             joined.push_str(fragment);
             message.body =
                 MessageBody::parse(joined).map_err(|_| ProjectionError::BodyBoundExceeded)?;
+            message.revision = next_revision;
+            message.updated_at = updated_at;
+        }
+        ConversationItem::MultimodalUserMessage(message) => {
+            let mut joined = String::with_capacity(joined_len);
+            if let Some(text) = &message.text { joined.push_str(text.as_str()); }
+            joined.push_str(fragment);
+            message.text = Some(artisan_domain::AuthoredText::parse(joined)
+                .map_err(|_| ProjectionError::BodyBoundExceeded)?);
             message.revision = next_revision;
             message.updated_at = updated_at;
         }
@@ -704,6 +719,11 @@ fn apply_item_lifecycle(
         .map_err(ProjectionError::Lifecycle)?;
     match &mut staged_items[index] {
         ConversationItem::UserMessage(message) => {
+            message.revision = next_revision;
+            message.lifecycle = lifecycle;
+            message.updated_at = updated_at;
+        }
+        ConversationItem::MultimodalUserMessage(message) => {
             message.revision = next_revision;
             message.lifecycle = lifecycle;
             message.updated_at = updated_at;
@@ -788,9 +808,7 @@ fn validate_common_item(
     previous: &ConversationItem,
     next: &ConversationItem,
 ) -> Result<(), ProjectionError> {
-    let previous_kind_is_user = matches!(previous, ConversationItem::UserMessage(_));
-    let next_kind_is_user = matches!(next, ConversationItem::UserMessage(_));
-    if previous_kind_is_user != next_kind_is_user {
+    if std::mem::discriminant(previous) != std::mem::discriminant(next) {
         return Err(ProjectionError::IdentityConflict);
     }
     if let (
@@ -799,6 +817,10 @@ fn validate_common_item(
     ) = (previous, next)
         && previous_message.run_id != next_message.run_id
     {
+        return Err(ProjectionError::IdentityConflict);
+    }
+    if let (ConversationItem::MultimodalUserMessage(previous), ConversationItem::MultimodalUserMessage(next)) = (previous, next)
+        && previous.attachments != next.attachments {
         return Err(ProjectionError::IdentityConflict);
     }
     if next.item_id() != previous.item_id()
@@ -877,7 +899,7 @@ fn ensure_nondecreasing(previous: UnixMillis, next: UnixMillis) -> Result<(), Pr
 
 const fn max_body_bytes(item: &ConversationItem) -> usize {
     match item {
-        ConversationItem::UserMessage(_) => MESSAGE_BODY_MAX_BYTES,
+        ConversationItem::UserMessage(_) | ConversationItem::MultimodalUserMessage(_) => MESSAGE_BODY_MAX_BYTES,
         ConversationItem::AssistantMessage(_) => AssistantBody::MAX_BYTES,
     }
 }
@@ -885,6 +907,7 @@ const fn max_body_bytes(item: &ConversationItem) -> usize {
 const fn entity_created_at(item: &ConversationItem) -> UnixMillis {
     match item {
         ConversationItem::UserMessage(message) => message.created_at,
+        ConversationItem::MultimodalUserMessage(message) => message.created_at,
         ConversationItem::AssistantMessage(message) => message.created_at,
     }
 }
@@ -892,6 +915,7 @@ const fn entity_created_at(item: &ConversationItem) -> UnixMillis {
 const fn entity_updated_at(item: &ConversationItem) -> UnixMillis {
     match item {
         ConversationItem::UserMessage(message) => message.updated_at,
+        ConversationItem::MultimodalUserMessage(message) => message.updated_at,
         ConversationItem::AssistantMessage(message) => message.updated_at,
     }
 }
@@ -899,6 +923,7 @@ const fn entity_updated_at(item: &ConversationItem) -> UnixMillis {
 const fn entity_revision(item: &ConversationItem) -> Revision {
     match item {
         ConversationItem::UserMessage(message) => message.revision,
+        ConversationItem::MultimodalUserMessage(message) => message.revision,
         ConversationItem::AssistantMessage(message) => message.revision,
     }
 }
@@ -906,6 +931,7 @@ const fn entity_revision(item: &ConversationItem) -> Revision {
 const fn entity_lifecycle(item: &ConversationItem) -> ConversationLifecycle {
     match item {
         ConversationItem::UserMessage(message) => message.lifecycle,
+        ConversationItem::MultimodalUserMessage(message) => message.lifecycle,
         ConversationItem::AssistantMessage(message) => message.lifecycle,
     }
 }

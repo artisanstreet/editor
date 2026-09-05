@@ -36,3 +36,7 @@ path = "../../tests/protocol/engine_run_config.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "composer_message"
+path = "../../tests/protocol/composer_message.rs"
