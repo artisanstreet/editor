@@ -1201,10 +1201,9 @@ impl NativeCommandMenu {
         .min_w(px(0.0))
         .flex_1()
         .rounded(px(6.0))
-        .border_1()
-        .border_color(self.desktop_theme.field_line)
-        .bg(self.desktop_theme.field)
-        .px(px(8.0))
+        .border_0()
+        .bg(gpui::transparent_black())
+        .px(px(0.0))
         .py(px(5.0))
         .text_color(self.desktop_theme.foreground)
         .text_size(px(13.0))
@@ -1222,6 +1221,11 @@ impl NativeCommandMenu {
             .flex()
             .items_center()
             .gap(px(8.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(self.desktop_theme.field_line)
+            .bg(self.desktop_theme.field)
             .child(
                 asset_glyph(AssetId::TABLER_SEARCH)
                     .size(px(15.0))
@@ -1238,7 +1242,7 @@ impl NativeCommandMenu {
                     .border_color(self.desktop_theme.shortcut_line)
                     .text_size(px(11.0))
                     .text_color(self.desktop_theme.secondary)
-                    .child("Ctrl K"),
+                    .child("Ctrl+K"),
             )
             .into_any_element()
     }

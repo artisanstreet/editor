@@ -169,18 +169,28 @@ pub fn desktop_shell(
                 .flex()
                 .items_center()
                 .px(px(14.0))
+                .overflow_hidden()
                 .child(identity),
         )
         .child(
             div()
                 .w(px(360.0))
+                .max_w(gpui::relative(0.4))
+                .flex_shrink_0()
                 .min_w(px(0.0))
                 .h_full()
                 .flex()
                 .items_center()
-                .justify_end()
-                .pr(px(14.0))
                 .child(search),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h_full()
+                .flex()
+                .justify_end()
+                .child(controls),
         );
 
     let titlebar = div()
@@ -194,8 +204,7 @@ pub fn desktop_shell(
         .border_b_1()
         .border_color(theme.line)
         .debug_selector(|| DESKTOP_TITLEBAR_SELECTOR.to_string())
-        .child(drag)
-        .child(controls);
+        .child(drag);
 
     let main = div()
         .relative()
