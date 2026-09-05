@@ -1172,7 +1172,7 @@ impl NativeApplication {
                     .min_w(px(0.0))
                     .flex()
                     .flex_col()
-                    .gap(px(3.0))
+                    .gap(px(1.0))
                     .child(
                         div()
                             .truncate()
