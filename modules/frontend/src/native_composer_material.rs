@@ -9,7 +9,7 @@
 
 use artisan_ui::theme::{ArtisanTheme, Oklch, SurfaceStep};
 use gpui::{
-    Background, BoxShadow, Div, Pixels, Styled as _, div, linear_color_stop, linear_gradient,
+    Background, BoxShadow, Div, Hsla, Pixels, Styled as _, div, linear_color_stop, linear_gradient,
     point, px,
 };
 
@@ -110,6 +110,16 @@ pub(crate) fn glass_highlight_layer(strength: GlassStrength, radius: Pixels) -> 
         .size_full()
         .rounded(radius)
         .bg(glass_highlight(strength))
+}
+
+/// Applies the small native-only foreground lift requested for dark canvases.
+///
+/// This is a translucent base below the source material, not a replacement for
+/// the material gradient. Keeping the value here gives the picker and composer
+/// one tuneable 5% adjustment while preserving the backdrop and source stops.
+#[must_use]
+pub(crate) fn glass_foreground_base(theme: ArtisanTheme) -> Hsla {
+    theme.colors.foreground.with_alpha(0.05).to_paint()
 }
 
 /// Returns the source `card` shadow stack used by engine and option cards.

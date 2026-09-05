@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 use artisan_assets::AssetId;
 use artisan_ui::{
@@ -23,21 +23,27 @@ use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Bounds, ClickEvent,
     Context, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight, ImageSource,
     InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point,
-    Render, RenderImage, ScrollHandle, Size, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, anchored, canvas, deferred, div, img, point, prelude::FluentBuilder as _,
-    prelude::IntoElement, px,
+    Render, RenderImage, ScrollHandle, ScrollWheelEvent, Size, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, anchored, canvas, deferred, div,
+    img, point, prelude::FluentBuilder as _, prelude::IntoElement, px,
 };
 
 use crate::engine_section_indicator_policy::{
     EngineSectionIndicatorMeasurement, EngineSectionIndicatorPolicy,
 };
 use crate::native_composer_material::{
-    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_highlight_layer,
-    glass_material_layer,
+    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
 };
 use crate::native_model_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeModelView,
     NativeOptionValue, NativePolicyValidationError, NativeThinkingCapability,
+};
+
+#[path = "native_picker_motion.rs"]
+mod native_picker_motion;
+use self::native_picker_motion::{
+    HoverRect, PickerMenuMotion, PickerMenuPhase, PickerScrollState, SlidingHoverState,
 };
 
 /// Stable selector painted on the compact composer trigger.
@@ -62,6 +68,8 @@ const MODEL_PREVIEW_WIDTH_PX: f32 = 224.0;
 const MODEL_ROW_HEIGHT_PX: f32 = 48.0;
 const COMPACT_CONTROL_HEIGHT_PX: f32 = 32.0;
 const POLICY_CONTROL_HEIGHT_PX: f32 = 24.0;
+const PICKER_MENU_MOTION_DURATION_MS: u64 = 100;
+const PICKER_HOVER_MOTION_DURATION_MS: u64 = 250;
 
 /// The policy payload emitted after a model or policy control is committed.
 pub type SelectPolicy = NativeModelPolicy;
@@ -818,6 +826,7 @@ pub struct NativeModelSelector {
     trigger_focus: FocusHandle,
     menu_focus: FocusHandle,
     menu_scroll: ScrollHandle,
+    axis_menu_scroll: ScrollHandle,
     trigger_origin: Rc<RefCell<Option<Point<Pixels>>>>,
     menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     trigger_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
@@ -825,6 +834,16 @@ pub struct NativeModelSelector {
     engine_surface_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     engine_indicator_transition: Rc<RefCell<Option<EngineIndicatorTransition>>>,
     engine_indicator_animation_generation: Rc<RefCell<u64>>,
+    menu_motion: Rc<RefCell<PickerMenuMotion>>,
+    menu_motion_task: Option<Task<()>>,
+    model_hover: Rc<RefCell<SlidingHoverState>>,
+    model_hover_surface_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    axis_hover: Rc<RefCell<SlidingHoverState>>,
+    axis_hover_surface_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    model_scroll: PickerScrollState,
+    model_scroll_frame_scheduled: bool,
+    axis_scroll: PickerScrollState,
+    axis_scroll_frame_scheduled: bool,
     axis_trigger_bounds: Rc<RefCell<[Option<Bounds<Pixels>>; 5]>>,
     axis_menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     highlighted_axis_option: Option<String>,
@@ -852,6 +871,7 @@ impl NativeModelSelector {
             trigger_focus: cx.focus_handle().tab_index(1).tab_stop(true),
             menu_focus: cx.focus_handle(),
             menu_scroll: ScrollHandle::new(),
+            axis_menu_scroll: ScrollHandle::new(),
             trigger_origin: Rc::new(RefCell::new(None)),
             menu_bounds: Rc::new(RefCell::new(None)),
             trigger_bounds: Rc::new(RefCell::new(None)),
@@ -859,6 +879,16 @@ impl NativeModelSelector {
             engine_surface_bounds: Rc::new(RefCell::new(None)),
             engine_indicator_transition: Rc::new(RefCell::new(None)),
             engine_indicator_animation_generation: Rc::new(RefCell::new(0)),
+            menu_motion: Rc::new(RefCell::new(PickerMenuMotion::default())),
+            menu_motion_task: None,
+            model_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
+            model_hover_surface_bounds: Rc::new(RefCell::new(None)),
+            axis_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
+            axis_hover_surface_bounds: Rc::new(RefCell::new(None)),
+            model_scroll: PickerScrollState::default(),
+            model_scroll_frame_scheduled: false,
+            axis_scroll: PickerScrollState::default(),
+            axis_scroll_frame_scheduled: false,
             axis_trigger_bounds: Rc::new(RefCell::new([None; 5])),
             axis_menu_bounds: Rc::new(RefCell::new(None)),
             highlighted_axis_option: None,
@@ -893,14 +923,202 @@ impl NativeModelSelector {
         cx.notify();
     }
 
+    fn menu_is_interactive(&self) -> bool {
+        self.state.is_open() && self.menu_motion.borrow().phase() != PickerMenuPhase::Closing
+    }
+
+    fn schedule_menu_motion_settle(
+        &mut self,
+        generation: u64,
+        opening: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_motion_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(PICKER_MENU_MOTION_DURATION_MS))
+                .await;
+            let _ = this.update(cx, |selector, cx| {
+                let settled = if opening {
+                    selector.menu_motion.borrow_mut().finish_open(generation)
+                } else {
+                    selector.menu_motion.borrow_mut().finish_close(generation)
+                };
+                if settled {
+                    selector.menu_motion_task = None;
+                    if !opening {
+                        selector.menu_bounds.borrow_mut().take();
+                        selector.axis_menu_bounds.borrow_mut().take();
+                        selector.model_hover.borrow_mut().clear();
+                        selector.axis_hover.borrow_mut().clear();
+                    }
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn begin_menu_open(&mut self, cx: &mut Context<Self>) {
+        let generation = self.menu_motion.borrow_mut().begin_open();
+        if cx.reduce_motion() {
+            self.menu_motion.borrow_mut().finish_open(generation);
+            self.menu_motion_task = None;
+        } else {
+            self.schedule_menu_motion_settle(generation, true, cx);
+        }
+    }
+
+    fn begin_menu_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.dismiss();
+        self.highlighted_axis_option = None;
+        self.axis_menu_bounds.borrow_mut().take();
+        self.model_hover.borrow_mut().clear();
+        self.axis_hover.borrow_mut().clear();
+        self.model_scroll.cancel_to(
+            f32::from(self.menu_scroll.offset().y),
+            f32::from(self.menu_scroll.max_offset().y),
+        );
+        self.axis_scroll.cancel_to(
+            f32::from(self.axis_menu_scroll.offset().y),
+            f32::from(self.axis_menu_scroll.max_offset().y),
+        );
+        let generation = self.menu_motion.borrow_mut().begin_close();
+        if cx.reduce_motion() {
+            self.menu_motion.borrow_mut().finish_close(generation);
+            self.menu_motion_task = None;
+        } else {
+            self.schedule_menu_motion_settle(generation, false, cx);
+        }
+        window.focus(&self.trigger_focus, cx);
+    }
+
+    fn handle_model_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_picker_scroll(event, window, cx, true);
+    }
+
+    fn handle_axis_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_picker_scroll(event, window, cx, false);
+    }
+
+    fn handle_picker_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        model_list: bool,
+    ) {
+        // The content wrapper is the first bubble listener inside the GPUI
+        // scroll container. Stopping propagation there prevents its default
+        // immediate offset update from being applied a second time.
+        cx.stop_propagation();
+        if !self.menu_is_interactive() {
+            return;
+        }
+
+        let delta = event.delta.pixel_delta(window.line_height()).y;
+        let delta = f32::from(delta);
+        if delta.abs() <= f32::EPSILON {
+            return;
+        }
+
+        let handle = if model_list {
+            self.menu_scroll.clone()
+        } else {
+            // Keep policy-menu scrolling independent so a future long option
+            // list cannot fight model-list inertia.
+            self.axis_menu_scroll.clone()
+        };
+        let offset = handle.offset();
+        let current = f32::from(offset.y);
+        let maximum = f32::from(handle.max_offset().y).max(0.0);
+
+        if event.delta.precise() {
+            let next = (current + delta).clamp(-maximum, 0.0);
+            handle.set_offset(point(offset.x, px(next)));
+            if model_list {
+                self.model_scroll.cancel_to(next, maximum);
+            } else {
+                self.axis_scroll.cancel_to(next, maximum);
+            }
+            cx.notify();
+            return;
+        }
+
+        if model_list {
+            self.model_scroll.push(current, delta, maximum);
+            self.schedule_model_scroll_frame(window, cx);
+        } else {
+            self.axis_scroll.push(current, delta, maximum);
+            self.schedule_axis_scroll_frame(window, cx);
+        }
+    }
+
+    fn schedule_model_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model_scroll.active() || self.model_scroll_frame_scheduled {
+            return;
+        }
+        self.model_scroll_frame_scheduled = true;
+        cx.on_next_frame(window, |selector, window, cx| {
+            selector.advance_model_scroll(window, cx);
+        });
+    }
+
+    fn schedule_axis_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.axis_scroll.active() || self.axis_scroll_frame_scheduled {
+            return;
+        }
+        self.axis_scroll_frame_scheduled = true;
+        cx.on_next_frame(window, |selector, window, cx| {
+            selector.advance_axis_scroll(window, cx);
+        });
+    }
+
+    fn advance_model_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_scroll_frame_scheduled = false;
+        let offset = self.menu_scroll.offset();
+        let maximum = f32::from(self.menu_scroll.max_offset().y).max(0.0);
+        if let Some(next) = self.model_scroll.step(f32::from(offset.y), maximum) {
+            self.menu_scroll.set_offset(point(offset.x, px(next)));
+            cx.notify();
+        }
+        self.schedule_model_scroll_frame(window, cx);
+    }
+
+    fn advance_axis_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.axis_scroll_frame_scheduled = false;
+        let offset = self.axis_menu_scroll.offset();
+        let maximum = f32::from(self.axis_menu_scroll.max_offset().y).max(0.0);
+        if let Some(next) = self.axis_scroll.step(f32::from(offset.y), maximum) {
+            self.axis_menu_scroll.set_offset(point(offset.x, px(next)));
+            cx.notify();
+        }
+        self.schedule_axis_scroll_frame(window, cx);
+    }
+
     fn handle_trigger_click(
         &mut self,
         _: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.press_trigger();
-        self.sync_focus_after_transition(window, cx);
+        if self.state.is_open() {
+            self.begin_menu_close(window, cx);
+        } else {
+            self.state.press_trigger();
+            self.model_hover.borrow_mut().clear();
+            self.axis_hover.borrow_mut().clear();
+            self.begin_menu_open(cx);
+            self.sync_focus_after_transition(window, cx);
+        }
         cx.notify();
     }
 
@@ -913,6 +1131,10 @@ impl NativeModelSelector {
         let Some(key) = selector_key_from_event(event) else {
             return;
         };
+        if !self.menu_is_interactive() {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(axis) = self.state.open_axis {
             let options = self
                 .axis_options(axis, &self.preview_view())
@@ -941,12 +1163,21 @@ impl NativeModelSelector {
                 }
                 NativeModelSelectorKey::Escape | NativeModelSelectorKey::Tab => {
                     self.state.open_axis = None;
+                    self.axis_hover.borrow_mut().clear();
+                    self.axis_menu_bounds.borrow_mut().take();
+                    self.axis_scroll.cancel_to(
+                        f32::from(self.axis_menu_scroll.offset().y),
+                        f32::from(self.axis_menu_scroll.max_offset().y),
+                    );
                     None
                 }
                 _ => None,
             };
             if let Some(index) = next {
                 self.highlighted_axis_option = Some(options[index].id.clone());
+                self.axis_hover
+                    .borrow_mut()
+                    .set_active(options[index].id.clone());
             }
             cx.stop_propagation();
             cx.notify();
@@ -958,8 +1189,19 @@ impl NativeModelSelector {
             cx.emit(event);
         }
         if was_open && !self.state.is_open() {
-            window.focus(&self.trigger_focus, cx);
+            self.begin_menu_close(window, cx);
         } else if self.state.is_open() {
+            if matches!(
+                key,
+                NativeModelSelectorKey::ArrowDown
+                    | NativeModelSelectorKey::ArrowUp
+                    | NativeModelSelectorKey::Home
+                    | NativeModelSelectorKey::End
+            ) {
+                if let Some(model_id) = self.state.highlighted_model_id().map(str::to_owned) {
+                    self.model_hover.borrow_mut().set_active(model_id);
+                }
+            }
             self.reveal_highlight();
         }
         cx.notify();
@@ -991,21 +1233,30 @@ impl NativeModelSelector {
         {
             return;
         }
-        self.state.dismiss();
-        window.focus(&self.trigger_focus, cx);
+        self.begin_menu_close(window, cx);
         cx.notify();
     }
 
     fn choose_model(&mut self, model_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.menu_is_interactive() {
+            return;
+        }
         let emitted = self.state.select_model(&model_id);
         if let Some(event) = emitted {
             cx.emit(event);
         }
-        self.sync_focus_after_transition(window, cx);
+        if self.state.is_open() {
+            self.sync_focus_after_transition(window, cx);
+        } else {
+            self.begin_menu_close(window, cx);
+        }
         cx.notify();
     }
 
     fn toggle_favorite(&mut self, model_id: String, cx: &mut Context<Self>) {
+        if !self.menu_is_interactive() {
+            return;
+        }
         if let Some(event) = self.state.toggle_favorite(&model_id) {
             cx.emit(event);
         }
@@ -1019,26 +1270,42 @@ impl NativeModelSelector {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.menu_is_interactive() {
+            return;
+        }
         match self.state.choose_option(axis, &option_id) {
             Ok(Some(event)) => cx.emit(event),
             Ok(None) => {}
             Err(error) => self.state.set_local_error(Some(error.to_string())),
         }
+        self.axis_hover.borrow_mut().clear();
         if !self.state.is_open() {
-            window.focus(&self.trigger_focus, cx);
+            self.begin_menu_close(window, cx);
         }
         cx.notify();
     }
 
     fn toggle_axis(&mut self, axis: NativePolicyAxis, cx: &mut Context<Self>) {
+        if !self.menu_is_interactive() {
+            return;
+        }
         self.highlighted_axis_option = None;
         self.axis_menu_bounds.borrow_mut().take();
+        self.axis_hover.borrow_mut().clear();
+        self.axis_menu_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.axis_scroll.cancel_to(0.0, 0.0);
         self.state.toggle_axis(axis);
         cx.notify();
     }
 
     fn switch_engine(&mut self, engine_id: String, cx: &mut Context<Self>) {
+        if !self.menu_is_interactive() {
+            return;
+        }
         self.state.set_active_engine(engine_id);
+        self.model_hover.borrow_mut().clear();
+        self.menu_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.model_scroll.cancel_to(0.0, 0.0);
         cx.notify();
     }
 
@@ -1131,7 +1398,7 @@ impl NativeModelSelector {
     }
 
     fn render_menu(&self, viewport: Size<Pixels>, cx: &Context<Self>) -> Option<AnyElement> {
-        if !self.state.is_open() {
+        if self.menu_motion.borrow().phase() == PickerMenuPhase::Hidden {
             self.menu_bounds.borrow_mut().take();
             return None;
         }
@@ -1165,6 +1432,7 @@ impl NativeModelSelector {
             .gap(px(8.0))
             .rounded(px(22.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+            .bg(glass_foreground_base(self.theme))
             .text_color(self.theme.colors.foreground.to_paint())
             .shadow(source_menu_shadows(self.theme));
         panel = panel.child(glass_material_layer(GlassStrength::Strong, px(22.0)));
@@ -1180,12 +1448,13 @@ impl NativeModelSelector {
                 .child(self.render_model_list(cx))
                 .child(self.render_preview(viewport, cx)),
         );
+        let motion = *self.menu_motion.borrow();
         Some(
             anchored()
                 .anchor(Anchor::BottomLeft)
                 .position(origin)
                 .offset(point(px(0.0), px(-MENU_GAP_PX)))
-                .child(panel)
+                .child(animate_picker_menu(panel, self.menu_motion.clone(), motion))
                 .into_any_element(),
         )
     }
@@ -1350,8 +1619,36 @@ impl NativeModelSelector {
 
     fn render_model_list(&self, cx: &Context<Self>) -> Stateful<Div> {
         let groups = self.state.model_groups();
+        let visible_ids = groups
+            .iter()
+            .flat_map(|group| group.models.iter().map(|model| model.id.clone()))
+            .collect::<Vec<_>>();
+        self.model_hover.borrow_mut().clear_if_missing(&visible_ids);
+        let model_surface_bounds = Rc::clone(&self.model_hover_surface_bounds);
+        let surface_probe = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let changed = {
+                    let mut surface = model_surface_bounds.borrow_mut();
+                    if *surface == Some(bounds) {
+                        false
+                    } else {
+                        *surface = Some(bounds);
+                        true
+                    }
+                };
+                if changed {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         let mut list = div()
             .id("artisan-native-model-selector-model-list")
+            .relative()
             .flex()
             .flex_col()
             .w_full()
@@ -1361,12 +1658,27 @@ impl NativeModelSelector {
             .overflow_y_scroll()
             .scrollbar_width(px(0.0))
             .track_scroll(&self.menu_scroll)
+            .child(surface_probe)
+            .child(render_picker_hover_pill(
+                self.theme,
+                Rc::clone(&self.model_hover),
+                "model",
+            ))
             .gap(px(3.0));
         if groups.is_empty() {
             return list;
         }
         let show_group_headers =
             groups.len() > 1 || groups.first().is_some_and(|group| group.id != "default");
+        let mut content = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w(px(0.0))
+            .flex_shrink_0()
+            .gap(px(3.0))
+            .on_scroll_wheel(cx.listener(Self::handle_model_scroll_wheel));
         for group in groups {
             let mut section = div().flex().flex_col().gap(px(2.0));
             if show_group_headers {
@@ -1395,8 +1707,9 @@ impl NativeModelSelector {
             for model in group.models {
                 section = section.child(self.render_model_row(model, cx));
             }
-            list = list.child(section);
+            content = content.child(section);
         }
+        list = list.child(content);
         let scroll = self.menu_scroll.clone();
         let top = self
             .theme
@@ -1447,15 +1760,35 @@ impl NativeModelSelector {
     }
 
     fn render_model_row(&self, model: NativeModelView, cx: &Context<Self>) -> Stateful<Div> {
-        let selected = model.selected;
-        let highlighted = self.state.highlighted_model_id() == Some(model.id.as_str());
         let definition_disabled = self.state.model_definition_disabled(&model.id);
         let disabled_reason = self.state.model_definition_disabled_reason(&model.id);
         let model_id = model.id.clone();
         let hover_model_id = model.id.clone();
         let favorite_id = model.id.clone();
-        let hover_shadow = source_hover_highlight_shadow(self.theme);
-        let selected_shadow = hover_shadow.clone();
+        let measured_model_id = model.id.clone();
+        let model_hover = Rc::clone(&self.model_hover);
+        let model_surface_bounds = Rc::clone(&self.model_hover_surface_bounds);
+        let row_probe = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let Some(surface) = *model_surface_bounds.borrow() else {
+                    return;
+                };
+                let rect = HoverRect {
+                    left: f32::from(bounds.left() - surface.left()),
+                    top: f32::from(bounds.top() - surface.top()),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                };
+                if model_hover.borrow_mut().measure(&measured_model_id, rect) {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         let mut row = div()
             .id(format!(
                 "{NATIVE_MODEL_SELECTOR_ROW_SELECTOR_PREFIX}-{}",
@@ -1465,30 +1798,20 @@ impl NativeModelSelector {
                 let selector = format!("{NATIVE_MODEL_SELECTOR_ROW_SELECTOR_PREFIX}-{}", model.id);
                 move || selector.clone()
             })
+            .relative()
             .flex()
             .items_center()
             .gap(px(8.0))
             .h(px(MODEL_ROW_HEIGHT_PX))
             .px(px(10.0))
             .rounded(px(14.0))
-            .hover({
-                move |style| {
-                    style
-                        .bg(hover_fill_gradient(self.theme))
-                        .shadow(hover_shadow.clone())
-                }
-            })
-            .when(
-                highlighted || (selected && self.state.highlighted_model_id().is_none()),
-                move |row| {
-                    row.bg(hover_fill_gradient(self.theme))
-                        .shadow(selected_shadow.clone())
-                },
-            )
             .when(definition_disabled, |row| row.opacity(0.58));
         row = row.on_hover(cx.listener(move |view: &mut Self, hovered: &bool, _, cx| {
-            if *hovered {
+            if *hovered && view.menu_is_interactive() {
                 view.state.preview_model(&hover_model_id);
+                view.model_hover
+                    .borrow_mut()
+                    .set_active(hover_model_id.clone());
                 cx.notify();
             }
         }));
@@ -1499,6 +1822,7 @@ impl NativeModelSelector {
                 }),
             );
         }
+        row = row.child(row_probe);
         row = row.child(
             icon(IconStyle::resolve(
                 self.theme,
@@ -1817,28 +2141,66 @@ impl NativeModelSelector {
                 .max_h(dropdown_max_height_for_viewport(viewport, trigger_bounds))
                 .overflow_y_scroll()
                 .scrollbar_width(px(0.0))
+                .track_scroll(&self.axis_menu_scroll)
                 .p(px(4.0))
                 .rounded(px(18.0))
                 .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+                .bg(glass_foreground_base(self.theme))
                 .shadow(glass_card_shadows());
             options = options.child(glass_material_layer(GlassStrength::Strong, px(18.0)));
             options = options.child(glass_highlight_layer(GlassStrength::Strong, px(18.0)));
+            let axis_surface_bounds = Rc::clone(&self.axis_hover_surface_bounds);
+            let content_probe = canvas(
+                |_, _, _| {},
+                move |bounds, (), window, cx| {
+                    let changed = {
+                        let mut surface = axis_surface_bounds.borrow_mut();
+                        if *surface == Some(bounds) {
+                            false
+                        } else {
+                            *surface = Some(bounds);
+                            true
+                        }
+                    };
+                    if changed {
+                        window.defer(cx, |window, _| window.refresh());
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full();
+            let mut content = div()
+                .relative()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w(px(0.0))
+                .flex_shrink_0()
+                .on_scroll_wheel(cx.listener(Self::handle_axis_scroll_wheel))
+                .child(content_probe)
+                .child(render_picker_hover_pill(
+                    self.theme,
+                    Rc::clone(&self.axis_hover),
+                    "axis",
+                ));
             let mut current_thinking_group: Option<String> = None;
             for option in self.axis_options(axis, &self.preview_view()) {
                 let group = option.group.clone();
                 if axis == NativePolicyAxis::Thinking && group != current_thinking_group {
                     if current_thinking_group.is_some() {
-                        options = options.child(
+                        content = content.child(
                             div().mx(px(8.0)).my(px(4.0)).h(px(1.0)).bg(self
                                 .theme
                                 .colors
                                 .border
-                                .with_alpha(0.4)
+                                .with_alpha(self.theme.colors.border.a * 0.4)
                                 .to_paint()),
                         );
                     }
                     if let Some(group) = group.as_deref() {
-                        options = options.child(
+                        content = content.child(
                             div()
                                 .px(px(12.0))
                                 .pt(px(6.0))
@@ -1857,8 +2219,9 @@ impl NativeModelSelector {
                     }
                     current_thinking_group = group;
                 }
-                options = options.child(self.render_axis_option(axis, option, cx));
+                content = content.child(self.render_axis_option(axis, option, cx));
             }
+            options = options.child(content);
             control = control.child(
                 deferred(
                     anchored()
@@ -1882,12 +2245,33 @@ impl NativeModelSelector {
         let option_id = option.id.clone();
         let option_disabled = option.disabled;
         let option_label = option.label.clone();
-        let highlighted = self.highlighted_axis_option.as_ref() == Some(&option.id);
         let option_selector = format!("artisan-model-policy-option-{axis:?}-{}", option.id);
         let option_description = option.description.clone();
         let option_advisory = option.advisory.clone();
-        let hover_shadow = source_hover_highlight_shadow(self.theme);
-        let selected_shadow = hover_shadow.clone();
+        let measured_option_id = option.id.clone();
+        let axis_hover = Rc::clone(&self.axis_hover);
+        let axis_surface_bounds = Rc::clone(&self.axis_hover_surface_bounds);
+        let row_probe = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let Some(surface) = *axis_surface_bounds.borrow() else {
+                    return;
+                };
+                let rect = HoverRect {
+                    left: f32::from(bounds.left() - surface.left()),
+                    top: f32::from(bounds.top() - surface.top()),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                };
+                if axis_hover.borrow_mut().measure(&measured_option_id, rect) {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         let tooltip_description =
             option_tooltip_text(option_advisory.as_deref(), option_description.as_deref());
         let mut row = div()
@@ -1911,18 +2295,25 @@ impl NativeModelSelector {
             .rounded(px(14.0))
             .text_size(px(14.0))
             .line_height(px(20.0))
-            .hover({
-                move |row| {
-                    row.bg(hover_fill_gradient(self.theme))
-                        .shadow(hover_shadow.clone())
-                }
-            })
-            .when(highlighted, move |row| {
-                row.bg(hover_fill_gradient(self.theme))
-                    .shadow(selected_shadow.clone())
-            })
             .when(option.disabled, |row| row.opacity(0.5))
+            .child(row_probe)
             .child(div().flex_1().min_w(px(0.0)).truncate().child(option_label));
+        if !option_disabled {
+            let hover_option_id = option.id.clone();
+            row = row.on_hover(cx.listener(move |view: &mut Self, hovered: &bool, _, cx| {
+                if !view.menu_is_interactive() {
+                    return;
+                }
+                if *hovered {
+                    view.axis_hover
+                        .borrow_mut()
+                        .set_active(hover_option_id.clone());
+                } else if view.axis_hover.borrow().active_id() == Some(hover_option_id.as_str()) {
+                    view.axis_hover.borrow_mut().clear();
+                }
+                cx.notify();
+            }));
+        }
         if let Some(tooltip_description) = tooltip_description {
             let tooltip_advisory = option_advisory.clone();
             let tooltip_copy = option_description.clone();
@@ -2162,6 +2553,7 @@ impl Render for NativeModelSelectorOptionTooltip {
             .py(px(8.0))
             .rounded(px(18.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+            .bg(glass_foreground_base(self.theme))
             .shadow(glass_card_shadows())
             .text_size(px(12.0))
             .line_height(px(16.0))
@@ -2183,6 +2575,92 @@ impl Render for NativeModelSelectorOptionTooltip {
         }
         tooltip
     }
+}
+
+fn render_picker_hover_pill(
+    theme: ArtisanTheme,
+    hover: Rc<RefCell<SlidingHoverState>>,
+    surface: &'static str,
+) -> AnyElement {
+    let (rect, visible, transition) = {
+        let hover = hover.borrow();
+        (hover.visual_rect(), hover.visible(), hover.transition())
+    };
+    let mut pill = div()
+        .id(format!("artisan-native-model-picker-hover-{surface}"))
+        .absolute()
+        .left(px(rect.left))
+        .top(px(rect.top))
+        .w(px(rect.width))
+        .h(px(rect.height))
+        .rounded(px(14.0))
+        .bg(hover_fill_gradient(theme))
+        .shadow(source_hover_highlight_shadow(theme))
+        .opacity(if visible { 1.0 } else { 0.0 });
+    if let Some(transition) = transition {
+        let motion = Rc::clone(&hover);
+        let from = transition.from;
+        let to = transition.to;
+        let generation = transition.generation;
+        let animation_id = ElementId::Name(
+            format!("artisan-native-model-picker-hover-{surface}-{generation}").into(),
+        );
+        return pill
+            .with_animation(
+                animation_id,
+                Animation::new(Duration::from_millis(PICKER_HOVER_MOTION_DURATION_MS))
+                    .with_easing(engine_light_smooth_out),
+                move |pill, progress| {
+                    let rect = from.lerp(to, progress);
+                    motion.borrow_mut().apply_progress(generation, progress);
+                    pill.left(px(rect.left))
+                        .top(px(rect.top))
+                        .w(px(rect.width))
+                        .h(px(rect.height))
+                },
+            )
+            .into_any_element();
+    }
+    pill.into_any_element()
+}
+
+fn animate_picker_menu(
+    panel: Stateful<Div>,
+    motion: Rc<RefCell<PickerMenuMotion>>,
+    snapshot: PickerMenuMotion,
+) -> AnyElement {
+    let Some((from_opacity, from_offset, to_opacity, to_offset, generation)) =
+        snapshot.transition()
+    else {
+        return panel.into_any_element();
+    };
+    let phase = snapshot.phase();
+    let animation_id = ElementId::Name(
+        format!(
+            "artisan-native-model-selector-menu-{}-{generation}",
+            match phase {
+                PickerMenuPhase::Opening => "opening",
+                PickerMenuPhase::Closing => "closing",
+                PickerMenuPhase::Hidden | PickerMenuPhase::Open => "settled",
+            }
+        )
+        .into(),
+    );
+    panel
+        .top(px(from_offset))
+        .opacity(from_opacity)
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(PICKER_MENU_MOTION_DURATION_MS))
+                .with_easing(engine_light_smooth_out),
+            move |panel, progress| {
+                motion.borrow_mut().apply_progress(generation, progress);
+                panel
+                    .top(px(from_offset + (to_offset - from_offset) * progress))
+                    .opacity(from_opacity + (to_opacity - from_opacity) * progress)
+            },
+        )
+        .into_any_element()
 }
 
 #[derive(Clone, Debug)]
