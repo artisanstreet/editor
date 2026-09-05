@@ -36,6 +36,9 @@ impl NativeApplication {
         policy: &crate::native_model_selector::SelectPolicy,
         cx: &mut Context<Self>,
     ) {
+        self.composer_model_choice = Some((self.selected_thread.clone(), policy.clone()));
+        self.composer_model_run_error = None;
+        self.sync_composer_controls(cx);
         if self.selected_thread.is_none()
             || self.engine_settings.pending_save_request_id().is_some()
         {
@@ -58,7 +61,9 @@ impl NativeApplication {
                     self.sync_composer_model_policy(cx);
                 }
             }
-            Err(message) => self.set_model_selector_error(message, cx),
+            // The choice stays local until its engine can persist a run config.
+            // Report configuration failure only if the user tries to send.
+            Err(_) => {},
         }
     }
 
@@ -208,6 +213,10 @@ impl NativeApplication {
     }
 
     pub(super) fn sync_composer_model_policy(&mut self, cx: &mut Context<Self>) {
+        if self.composer_model_choice.as_ref().is_some_and(|(thread, _)| thread != &self.selected_thread) {
+            self.composer_model_choice = None;
+            self.composer_model_run_error = None;
+        }
         let snapshot = self.model_selector.read(cx).state().snapshot();
         let policy = self
             .engine_settings
@@ -239,6 +248,11 @@ impl NativeApplication {
                 });
                 Some(policy)
             });
+        let saved_policy = policy;
+        let policy = self.composer_model_choice.as_ref()
+            .and_then(|(_, choice)| snapshot.rebase_policy(choice))
+            .or_else(|| saved_policy.clone());
+        let authoritative = policy.is_some() && policy == saved_policy;
         let pending_save = self.engine_settings.pending_save_request_id().is_some();
         let saving = pending_save
             || self.catalog_controller.catalog_loading()
@@ -265,7 +279,7 @@ impl NativeApplication {
                 NativeModelSelectorStatus {
                     saving,
                     error,
-                    authoritative: policy.is_some(),
+                    authoritative,
                 },
                 cx,
             );

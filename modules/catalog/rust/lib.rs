@@ -749,6 +749,36 @@ impl NativeModelCatalog {
         self.preview_policy_for_model(model_id)
     }
 
+    /// Builds a user choice without requiring an installed or connected engine.
+    /// Execution must still pass [`Self::admit_policy`].
+    pub fn selection_policy_for_model(
+        &self,
+        model_id: &str,
+    ) -> Result<NativeModelPolicy, NativePolicyValidationError> {
+        let policy = self.preview_policy_for_model(model_id)?;
+        self.validate_selection_policy(&policy)?;
+        Ok(policy)
+    }
+
+    /// Checks catalog identity, options, and explicit model retirement only.
+    pub fn validate_selection_policy(
+        &self,
+        policy: &NativeModelPolicy,
+    ) -> Result<(), NativePolicyValidationError> {
+        self.validate_policy(policy)?;
+        if let Some(disabled) = self
+            .manifest
+            .model(&policy.model_id)
+            .and_then(|model| model.disabled.as_ref())
+        {
+            return Err(NativePolicyValidationError::UnavailableModel {
+                model_id: policy.model_id.clone(),
+                reason: disabled.reason.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// Builds a policy-shaped preview from capability and persisted defaults
     /// without requiring a runtime harness. This powers disconnected preview
     /// controls; callers must use [`Self::policy_for_model`] or
@@ -1876,7 +1906,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_models_are_readable_but_not_selectable() {
+    fn offline_models_are_readable_but_not_runnable() {
         let catalog = offline();
         let row = catalog
             .models_for_engine("codex", "sol", None)
@@ -1889,6 +1919,16 @@ mod tests {
             Some("codex is not configured in this runtime.")
         );
         assert!(catalog.policy_for_model("codex-sol").is_err());
+    }
+
+    #[test]
+    fn offline_model_choice_is_valid_but_execution_still_requires_runtime() {
+        let catalog = offline();
+        let mut policy = catalog.selection_policy_for_model("codex-sol").unwrap();
+        assert!(catalog.validate_selection_policy(&policy).is_ok());
+        assert!(catalog.admit_policy(&policy).is_err());
+        policy.native_model_id = "wrong-model".to_owned();
+        assert!(catalog.validate_selection_policy(&policy).is_err());
     }
 
     #[test]

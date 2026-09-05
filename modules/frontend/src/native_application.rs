@@ -235,6 +235,8 @@ pub struct NativeApplication {
     composer_queue: composer_queue_application::QueueApplicationState,
     composer_controls: Entity<NativeComposerControls>,
     model_selector: Entity<NativeModelSelector>,
+    composer_model_choice: Option<(Option<ThreadId>, crate::native_model_catalog::NativeModelPolicy)>,
+    composer_model_run_error: Option<&'static str>,
     catalog_controller: NativeCatalogController,
     _composer_controls_subscription: Subscription,
     _composer_model_subscription: Subscription,
@@ -423,6 +425,8 @@ impl NativeApplication {
             composer_queue: composer_queue_application::QueueApplicationState::new(cx),
             composer_controls,
             model_selector,
+            composer_model_choice: None,
+            composer_model_run_error: None,
             catalog_controller: NativeCatalogController::new(),
             _composer_controls_subscription: composer_controls_subscription,
             _composer_model_subscription: composer_model_subscription,
@@ -1505,6 +1509,11 @@ impl NativeApplication {
                     && self.command_submission_is_available(),
             )
         });
+        if let Some(message) = self.composer_model_run_error {
+            snapshot.failure = Some(crate::native_composer_controls::NativeComposerFailure::new(
+                0, "Could not start with this model", message, false,
+            ));
+        }
         self.composer_controls
             .update(cx, |controls, cx| controls.set_snapshot(snapshot, cx));
     }
@@ -1542,6 +1551,20 @@ impl NativeApplication {
     fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
         if !self.message_submission_is_admissible(cx) || self.message_flight.is_some() {
             return;
+        }
+        if let Some((thread, policy)) = &self.composer_model_choice
+            && thread == &self.selected_thread
+        {
+            self.composer_model_run_error = crate::composer_model_config::validate_run_choice(
+                self.model_selector.read(cx).state().snapshot(),
+                policy,
+                self.engine_settings.authoritative_config(),
+            ).err();
+            if self.composer_model_run_error.is_some() {
+                self.sync_composer_controls(cx);
+                cx.notify();
+                return;
+            }
         }
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
@@ -5833,6 +5856,34 @@ mod tests {
             composer_cx.notify();
         });
         application.sync_composer_availability(cx);
+    }
+
+    #[gpui::test]
+    fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(application, cx, ThreadId::parse("picker-task").unwrap(), "keep my draft", sink);
+                let policy = application.model_selector.read(cx).state().snapshot()
+                    .selection_policy_for_model("codex-sol").unwrap();
+                application.handle_composer_model_event(
+                    &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(policy.clone()), cx);
+                application.sync_composer_model_policy(cx);
+                assert_eq!(application.model_selector.read(cx).state().policy(), Some(&policy));
+                assert!(application.model_selector.read(cx).state().status().error.is_none());
+                assert!(application.composer_model_run_error.is_none());
+                application.begin_message_submission(cx);
+                assert!(commands.borrow().is_empty());
+                assert_eq!(application.composer.read(cx).draft(), "keep my draft");
+                assert!(!application.composer.read(cx).is_submitting());
+                assert!(application.composer_model_run_error.is_some());
+                application.selected_thread = None;
+                application.sync_composer_model_policy(cx);
+                assert!(application.composer_model_choice.is_none());
+                assert!(application.composer_model_run_error.is_none());
+            });
+        });
     }
 
     #[gpui::test]

@@ -2,6 +2,24 @@
 use artisan_catalog::{NativeModelCatalog, NativeModelPolicy};
 use artisan_domain::*;
 
+/// A displayed choice must never silently run the previous saved model.
+pub(crate) fn validate_run_choice(
+    catalog: &NativeModelCatalog,
+    policy: &NativeModelPolicy,
+    saved: Option<&EngineRunConfig>,
+) -> Result<(), &'static str> {
+    catalog.admit_policy(policy).map_err(
+        |_| "Connect and configure this model's engine before running. Your draft is preserved.",
+    )?;
+    let expected = config_for_policy(catalog, policy, saved)?;
+    if saved != Some(&expected) {
+        return Err(
+            "This model's settings have not been saved yet. Your draft is preserved; try again once saving finishes.",
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn config_for_policy(
     catalog: &NativeModelCatalog,
     policy: &NativeModelPolicy,
@@ -131,5 +149,13 @@ mod tests {
         let runtime = default_runtime().unwrap();
         assert!(runtime.max_json_body_bytes().get() > 12 * 1024 * 1024 / 3 * 4);
         assert_eq!(runtime.stream_budget().get(), 3_600_000);
+    }
+
+    #[test]
+    fn offline_choice_cannot_fall_back_to_another_run_configuration() {
+        let catalog = NativeModelCatalog::offline().unwrap();
+        let policy = catalog.selection_policy_for_model("codex-sol").unwrap();
+        assert!(validate_run_choice(&catalog, &policy, None).is_err());
+        assert!(catalog.validate_selection_policy(&policy).is_ok());
     }
 }
