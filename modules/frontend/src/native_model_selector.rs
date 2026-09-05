@@ -17,7 +17,7 @@ use artisan_ui::{
     theme::{ArtisanTheme, ThemeMode},
 };
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, Div, EventEmitter, FocusHandle, Focusable,
+    Anchor, AnyElement, App, Bounds, ClickEvent, Context, Div, EventEmitter, FocusHandle, Focusable,
     FontWeight, InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels,
     Point, Render, ScrollHandle, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
     Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder as _,
@@ -684,6 +684,8 @@ pub struct NativeModelSelector {
     menu_focus: FocusHandle,
     menu_scroll: ScrollHandle,
     trigger_origin: Rc<RefCell<Option<Point<Pixels>>>>,
+    menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    trigger_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
 }
 
 impl EventEmitter<NativeModelSelectorEvent> for NativeModelSelector {}
@@ -710,6 +712,8 @@ impl NativeModelSelector {
             menu_focus: cx.focus_handle(),
             menu_scroll: ScrollHandle::new(),
             trigger_origin: Rc::new(RefCell::new(None)),
+            menu_bounds: Rc::new(RefCell::new(None)),
+            trigger_bounds: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -780,7 +784,7 @@ impl NativeModelSelector {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.state.is_open() || self.menu_scroll.bounds().contains(&event.position) {
+        if !self.state.is_open() || self.menu_bounds.borrow().as_ref().is_some_and(|bounds| bounds.contains(&event.position)) || self.trigger_bounds.borrow().as_ref().is_some_and(|bounds| bounds.contains(&event.position)) {
             return;
         }
         self.state.dismiss();
@@ -919,11 +923,21 @@ impl NativeModelSelector {
 
     fn render_menu(&self, viewport: Size<Pixels>, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.state.is_open() {
+            self.menu_bounds.borrow_mut().take();
             return None;
         }
+        let bounds = Rc::clone(&self.menu_bounds);
+        let bounds_probe = canvas(
+            |_, _, _| {},
+            move |painted, (), _, _| { *bounds.borrow_mut() = Some(painted); },
+        ).absolute().top_0().left_0().size_full();
         let origin = self.trigger_origin.borrow().as_ref().copied()?;
         let mut panel = div()
             .id("artisan-native-model-selector-menu")
+            .on_mouse_down_out(cx.listener(Self::handle_outside_press))
+            .occlude()
+            .relative()
+            .child(bounds_probe)
             .track_focus(&self.menu_focus)
             .debug_selector(|| NATIVE_MODEL_SELECTOR_MENU_SELECTOR.to_owned())
             .on_key_down(cx.listener(Self::handle_menu_key))
@@ -969,6 +983,7 @@ impl NativeModelSelector {
         };
         div()
             .id("artisan-native-model-selector-search")
+            .debug_selector(|| "artisan-native-model-selector-search".to_owned())
             .flex()
             .items_center()
             .gap(px(7.0))
@@ -1012,11 +1027,13 @@ impl NativeModelSelector {
         for harness in &self.state.snapshot().manifest.harnesses {
             let selected = harness.id == self.state.active_engine();
             let engine_id = harness.id.clone();
+            let selector = format!("{NATIVE_MODEL_SELECTOR_ENGINE_SELECTOR_PREFIX}-{}", harness.id);
             let mut tab = div()
                 .id(format!(
                     "{NATIVE_MODEL_SELECTOR_ENGINE_SELECTOR_PREFIX}-{}",
                     harness.id
                 ))
+                .debug_selector(move || selector.clone())
                 .on_click(cx.listener(move |view: &mut Self, _: &ClickEvent, _, cx| {
                     view.switch_engine(engine_id.clone(), cx);
                 }))
@@ -1771,10 +1788,12 @@ impl Render for NativeModelSelector {
         let menu = self.render_menu(viewport, cx);
         let trigger = self.render_trigger(cx);
         let origin = Rc::clone(&self.trigger_origin);
+        let trigger_bounds = Rc::clone(&self.trigger_bounds);
         let scroll = self.menu_scroll.clone();
         let probe = canvas(
             move |_, _, _| {},
             move |bounds, (), window, cx| {
+                *trigger_bounds.borrow_mut() = Some(bounds);
                 let moved = *origin.borrow_mut() != Some(bounds.origin);
                 *origin.borrow_mut() = Some(bounds.origin);
                 if moved {
@@ -1791,7 +1810,6 @@ impl Render for NativeModelSelector {
         div()
             .id("artisan-native-model-selector-root")
             .tab_group()
-            .on_mouse_down_out(cx.listener(Self::handle_outside_press))
             .flex()
             .flex_col()
             .child(
@@ -1972,6 +1990,36 @@ fn provider_asset(provider_id: &str, engine_id: &str) -> AssetId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn clicks_in_search_tabs_and_preview_do_not_dismiss_the_menu(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeModelSelector::new(
+            NativeModelCatalog::offline().unwrap(), None, ThemeMode::Dark, cx,
+        ));
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR).unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let search = cx.debug_bounds("artisan-native-model-selector-search").unwrap();
+        cx.simulate_click(search.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(view.read(app).state.is_open()));
+        let tab = cx.debug_bounds("artisan-native-model-selector-engine-claude").unwrap();
+        cx.simulate_click(tab.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(view.read(app).state.is_open());
+            assert_eq!(view.read(app).state.active_engine(), "claude");
+        });
+        let menu = cx.debug_bounds(NATIVE_MODEL_SELECTOR_MENU_SELECTOR).unwrap();
+        cx.simulate_click(point(menu.right() - px(15.0), menu.center().y), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(view.read(app).state.is_open()));
+        cx.simulate_click(point(menu.right() + px(15.0), menu.center().y), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!view.read(app).state.is_open()));
+    }
 
     fn state_with_codex_runtime() -> NativeModelSelectorState {
         let mut catalog =
