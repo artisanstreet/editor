@@ -245,3 +245,12 @@ fn millis(value: UnixMillis) -> i64 {
 
 mod model_favorites;
 pub use model_favorites::{ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult};
+
+mod run_usage;
+pub use run_usage::{RecordRunUsage,RecordRunUsageInput,RunUsageWriteReceipt,RecordRunUsageOutcome,RunUsageRepositoryError};
+
+mod queued_message;
+pub use queued_message::{QueuedMessageRepositoryError};
+
+mod session_continuation;
+pub use session_continuation::{PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint, SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup, SessionContinuationQuery, SessionContinuationSequence, SessionContinuationUnavailable, SessionContinuationUnavailableReason};

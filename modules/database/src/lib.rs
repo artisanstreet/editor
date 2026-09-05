@@ -4,6 +4,9 @@
 //! owns the connection policy and, as the native schema lands, its entities,
 //! repositories, and transaction boundaries.
 
+#[cfg(test)]
+extern crate self as artisan_database;
+
 mod connection;
 mod engine_run_config;
 pub mod entities;
@@ -35,3 +38,9 @@ pub use repository::{
 };
 
 pub use repository::{ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult};
+
+pub use repository::{RecordRunUsage,RecordRunUsageInput,RunUsageWriteReceipt,RecordRunUsageOutcome,RunUsageRepositoryError};
+
+pub use repository::{QueuedMessageRepositoryError};
+
+pub use repository::{PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint, SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup, SessionContinuationQuery, SessionContinuationSequence, SessionContinuationUnavailable, SessionContinuationUnavailableReason};

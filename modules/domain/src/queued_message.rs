@@ -1,0 +1,355 @@
+//! Bounded native composer state for messages that have not been claimed.
+//!
+//! A queued-message listing is deliberately a projection, not a second copy
+//! of the accepted message payload. It carries the original queue request and
+//! message identities, authored-text presence, ordered byte-free image
+//! references, and the acceptance time. The separate withdrawal result is a
+//! durable command acknowledgement; it never embeds authored text or image
+//! bytes. An editor that successfully recalls a message asks the ownership-
+//! checked database read seam for the original [`crate::QueueMessagePayload`].
+
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "public queued-message values retain their packet context at crate boundaries"
+)]
+
+use std::collections::HashSet;
+
+use thiserror::Error;
+
+use crate::{
+    AuthoredText, CommandReceipt, ImageAttachmentRef, MessageId, RequestId, ThreadId, UnixMillis,
+};
+
+/// Maximum number of queued-message summaries returned by one read.
+///
+/// The bound applies to either direction. `total_count` remains the exact
+/// number of currently eligible rows, while `has_more` says whether the
+/// finite page omitted any of them.
+pub const QUEUED_MESSAGE_LIST_MAX: usize = 32;
+
+/// Stable direction for a bounded queued-message page.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum QueuedMessageListOrder {
+    /// Oldest accepted messages first.
+    OldestFirst,
+    /// Newest accepted messages first.
+    LatestFirst,
+}
+
+/// Read query for exactly one existing thread's still-unclaimed messages.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ListQueuedMessages {
+    /// Authenticated thread to read.
+    pub thread_id: ThreadId,
+    /// Stable page direction.
+    pub order: QueuedMessageListOrder,
+    /// Requested page size, in the inclusive range `1..=32`.
+    pub limit: usize,
+}
+
+impl ListQueuedMessages {
+    /// Creates a bounded queued-message query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueuedMessageListError`] when the requested limit is zero or
+    /// exceeds [`QUEUED_MESSAGE_LIST_MAX`].
+    pub fn new(
+        thread_id: ThreadId,
+        order: QueuedMessageListOrder,
+        limit: usize,
+    ) -> Result<Self, QueuedMessageListError> {
+        validate_limit(limit)?;
+        Ok(Self {
+            thread_id,
+            order,
+            limit,
+        })
+    }
+}
+
+/// A queued-message page was requested outside its finite bound.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum QueuedMessageListError {
+    /// A page must contain at least one row.
+    #[error("queued-message list limit must be at least one")]
+    Empty,
+    /// A page cannot exceed the native queued-message bound.
+    #[error("queued-message list limit is {limit}; the maximum is {maximum}")]
+    TooLarge {
+        /// Requested row count.
+        limit: usize,
+        /// Native maximum row count.
+        maximum: usize,
+    },
+}
+
+/// One byte-free projection of an eligible queued message.
+///
+/// `text: Some("")` is intentionally distinct from `text: None`, including
+/// for image-only messages. Attachment order is the authored order and each
+/// reference contains metadata and digest only.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct QueuedMessageSummary {
+    /// Forge-minted immutable message identity.
+    pub message_id: MessageId,
+    /// Authenticated thread owning the message.
+    pub thread_id: ThreadId,
+    /// Client request identity that originally queued the message.
+    pub original_request_id: RequestId,
+    /// Optional authored text with exact presence preserved.
+    pub text: Option<AuthoredText>,
+    /// Ordered byte-free image metadata.
+    pub attachments: Vec<ImageAttachmentRef>,
+    /// Original queue acceptance instant.
+    pub accepted_at: UnixMillis,
+}
+
+/// A bounded, truthfully countable queued-message page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedMessageListing {
+    thread_id: ThreadId,
+    order: QueuedMessageListOrder,
+    limit: usize,
+    messages: Vec<QueuedMessageSummary>,
+    total_count: u64,
+    has_more: bool,
+}
+
+impl QueuedMessageListing {
+    /// Builds a page after checking its finite and ownership invariants.
+    ///
+    /// The repository supplies `total_count` from the same eligibility
+    /// predicate as the page query. `has_more` is derived here instead of
+    /// trusting a separately supplied flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns a listing error when the page exceeds its limit, its count is
+    /// too small, or one row violates thread or identity uniqueness.
+    pub fn new(
+        thread_id: ThreadId,
+        order: QueuedMessageListOrder,
+        limit: usize,
+        total_count: u64,
+        messages: Vec<QueuedMessageSummary>,
+    ) -> Result<Self, QueuedMessageListingError> {
+        validate_limit(limit).map_err(QueuedMessageListingError::InvalidLimit)?;
+        if messages.len() > limit {
+            return Err(QueuedMessageListingError::TooManyMessages {
+                count: messages.len(),
+                maximum: limit,
+            });
+        }
+        let message_count =
+            u64::try_from(messages.len()).map_err(|_| QueuedMessageListingError::Invariant {
+                reason: "queued-message page length does not fit its count type",
+            })?;
+        if total_count < message_count {
+            return Err(QueuedMessageListingError::CountBelowPage {
+                total_count,
+                page_count: message_count,
+            });
+        }
+
+        let mut seen = HashSet::with_capacity(messages.len());
+        for message in &messages {
+            if message.thread_id != thread_id {
+                return Err(QueuedMessageListingError::WrongThread {
+                    message_id: message.message_id.clone(),
+                });
+            }
+            if !seen.insert(&message.message_id) {
+                return Err(QueuedMessageListingError::DuplicateMessageId {
+                    message_id: message.message_id.clone(),
+                });
+            }
+        }
+
+        Ok(Self {
+            thread_id,
+            order,
+            limit,
+            messages,
+            total_count,
+            has_more: total_count > message_count,
+        })
+    }
+
+    /// Returns the exact thread named by the query.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the stable page direction.
+    #[must_use]
+    pub const fn order(&self) -> QueuedMessageListOrder {
+        self.order
+    }
+
+    /// Returns the requested page size.
+    #[must_use]
+    pub const fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Returns the byte-free rows in stable requested order.
+    #[must_use]
+    pub fn messages(&self) -> &[QueuedMessageSummary] {
+        &self.messages
+    }
+
+    /// Returns the exact eligible-row count at read time.
+    #[must_use]
+    pub const fn total_count(&self) -> u64 {
+        self.total_count
+    }
+
+    /// Whether another bounded page is needed to see every eligible row.
+    #[must_use]
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
+/// Failure while validating or constructing a queued-message page.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum QueuedMessageListingError {
+    /// The query limit was outside its finite bound.
+    #[error("invalid queued-message list limit: {0}")]
+    InvalidLimit(QueuedMessageListError),
+    /// The repository returned more rows than the requested page size.
+    #[error("queued-message page contains {count} rows; the maximum is {maximum}")]
+    TooManyMessages {
+        /// Returned row count.
+        count: usize,
+        /// Requested page size.
+        maximum: usize,
+    },
+    /// The count query and page query disagree.
+    #[error("queued-message total count {total_count} is below page count {page_count}")]
+    CountBelowPage {
+        /// Count reported by SQLite.
+        total_count: u64,
+        /// Number of rows returned in the page.
+        page_count: u64,
+    },
+    /// A page row belongs to another thread.
+    #[error("queued-message `{message_id}` belongs to another thread")]
+    WrongThread {
+        /// Unexpected message identity.
+        message_id: MessageId,
+    },
+    /// A page repeated one message identity.
+    #[error("queued-message page repeats message `{message_id}`")]
+    DuplicateMessageId {
+        /// Repeated message identity.
+        message_id: MessageId,
+    },
+    /// A local page invariant failed.
+    #[error("queued-message page invariant failed: {reason}")]
+    Invariant {
+        /// Stable invariant description.
+        reason: &'static str,
+    },
+}
+
+/// Exact authenticated input for one discard/edit withdrawal command.
+///
+/// `original_request_id` and `message_id` are both required so a caller
+/// cannot withdraw a message by a loosely related identity. The new
+/// `withdrawal_request_id` is the idempotency key for this command itself.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct WithdrawQueuedMessage {
+    /// Existing authenticated thread containing the original message.
+    pub thread_id: ThreadId,
+    /// Original Forge-minted message identity.
+    pub message_id: MessageId,
+    /// Request identity that originally accepted the message.
+    pub original_request_id: RequestId,
+    /// Client request identity for this withdrawal command.
+    pub withdrawal_request_id: RequestId,
+    /// Authoritative withdrawal acceptance instant.
+    pub accepted_at: UnixMillis,
+}
+
+impl WithdrawQueuedMessage {
+    /// Creates an exact withdrawal command input.
+    #[must_use]
+    pub const fn new(
+        thread_id: ThreadId,
+        message_id: MessageId,
+        original_request_id: RequestId,
+        withdrawal_request_id: RequestId,
+        accepted_at: UnixMillis,
+    ) -> Self {
+        Self {
+            thread_id,
+            message_id,
+            original_request_id,
+            withdrawal_request_id,
+            accepted_at,
+        }
+    }
+}
+
+/// Result of the withdrawal fence.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum QueuedMessageWithdrawalOutcome {
+    /// The still-queued, never-claimed dispatch was durably withdrawn.
+    Withdrawn,
+    /// Dispatch had already been claimed, started, or otherwise settled.
+    TooLate,
+    /// No eligible queued dispatch exists for the exact supplied target.
+    NotQueued,
+}
+
+/// Payload-free receipt and outcome of one withdrawal request.
+///
+/// `receipt.disposition == Duplicate` means the exact command was replayed;
+/// the outcome and acceptance time still describe the original command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawQueuedMessageResult {
+    /// Idempotency receipt for the withdrawal request.
+    pub receipt: CommandReceipt,
+    /// Authenticated thread named by the original command.
+    pub thread_id: ThreadId,
+    /// Original message identity.
+    pub message_id: MessageId,
+    /// Original queue request identity.
+    pub original_request_id: RequestId,
+    /// Acceptance instant persisted in the withdrawal receipt.
+    pub accepted_at: UnixMillis,
+    /// Durable fence outcome.
+    pub outcome: QueuedMessageWithdrawalOutcome,
+}
+
+impl WithdrawQueuedMessageResult {
+    /// Returns the withdrawal request identity answered by this result.
+    #[must_use]
+    pub const fn withdrawal_request_id(&self) -> &RequestId {
+        &self.receipt.request_id
+    }
+
+    /// Returns whether this call newly recorded or replayed its result.
+    #[must_use]
+    pub const fn disposition(&self) -> crate::ReceiptDisposition {
+        self.receipt.disposition
+    }
+}
+
+/// Validates a queued-message page limit at the domain boundary.
+fn validate_limit(limit: usize) -> Result<(), QueuedMessageListError> {
+    if limit == 0 {
+        return Err(QueuedMessageListError::Empty);
+    }
+    if limit > QUEUED_MESSAGE_LIST_MAX {
+        return Err(QueuedMessageListError::TooLarge {
+            limit,
+            maximum: QUEUED_MESSAGE_LIST_MAX,
+        });
+    }
+    Ok(())
+}

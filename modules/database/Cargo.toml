@@ -109,3 +109,15 @@ workspace = true
 [[test]]
 name = "model_favorites"
 path = "../../tests/database/model_favorites.rs"
+
+[[test]]
+name = "run_usage"
+path = "../../tests/database/run_usage.rs"
+
+[[test]]
+name = "queued_message"
+path = "../../tests/database/queued_message.rs"
+
+[[test]]
+name = "session_continuation"
+path = "../../tests/database/session_continuation.rs"
