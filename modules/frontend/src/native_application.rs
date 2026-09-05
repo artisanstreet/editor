@@ -1184,7 +1184,7 @@ impl NativeApplication {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(14.0))
+                            .text_size(px(12.0))
                             .text_color(theme.secondary)
                             .child(
                                 self.profile_hostname
