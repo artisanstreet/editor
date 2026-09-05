@@ -579,6 +579,47 @@ pub(crate) fn gradient_avatar(theme: &ArtisanTheme, identity: RailIdentity<'_>) 
     tile
 }
 
+/// Render the dither as one image so rounded image clipping applies to every cell.
+pub(crate) fn profile_avatar(theme: &ArtisanTheme, identity: RailIdentity<'_>) -> Div {
+    use gpui::StyledImage as _;
+    let Some(seed) = gradient_avatar_seed(identity) else {
+        return gradient_avatar(theme, identity).rounded(px(10.0));
+    };
+    let (base, lit) = gradient_avatar_paints(seed);
+    let color = |paint: Hsla| {
+        let rgb = gpui::hsla_to_rgba(paint);
+        format!(
+            "rgb({}%, {}%, {}%)",
+            rgb.red * 100.0,
+            rgb.green * 100.0,
+            rgb.blue * 100.0
+        )
+    };
+    let mut svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 16 16"><rect width="16" height="16" fill="{}"/><g fill="{}">"#,
+        color(base),
+        color(lit)
+    );
+    for y in 0..GRADIENT_AVATAR_CELLS {
+        for x in 0..GRADIENT_AVATAR_CELLS {
+            if gradient_avatar_cell_lit(x, y) {
+                svg.push_str(&format!(r#"<rect x="{x}" y="{y}" width="1" height="1"/>"#));
+            }
+        }
+    }
+    svg.push_str("</g></svg>");
+    let image = std::sync::Arc::new(gpui::Image::from_bytes(
+        gpui::ImageFormat::Svg,
+        svg.into_bytes(),
+    ));
+    div().size(px(40.0)).child(
+        gpui::img(image)
+            .size(px(40.0))
+            .rounded(px(10.0))
+            .object_fit(gpui::ObjectFit::Cover),
+    )
+}
+
 /// Returns the `data-prose-width` token name carried by the frame.
 ///
 /// GPUI renders no DOM, so there is no `data-*` attribute to set; the

@@ -212,7 +212,7 @@ pub struct NativeApplication {
     _composer_observation: Subscription,
     profile_menu: DropdownMenuState,
     profile_focus: FocusHandle,
-    profile_origin: Rc<Cell<gpui::Point<gpui::Pixels>>>,
+    profile_origin: Rc<Cell<Bounds<gpui::Pixels>>>,
     profile_picture: Option<std::path::PathBuf>,
     profile_name: Option<String>,
     profile_hostname: Option<String>,
@@ -321,7 +321,7 @@ impl NativeApplication {
                 DropdownMenuEntry::item(DropdownMenuItem::new("add-project", "Add project")),
             ]),
             profile_focus: cx.focus_handle(),
-            profile_origin: Rc::new(Cell::new(gpui::point(px(0.0), px(0.0)))),
+            profile_origin: Rc::new(Cell::new(Bounds::default())),
             profile_picture: None,
             profile_name: std::env::var("USERNAME")
                 .ok()
@@ -1127,16 +1127,18 @@ impl NativeApplication {
         let name = self.profile_name.clone();
         let hostname = self.profile_hostname.clone();
         let fallback = move || {
-            crate::shell::gradient_avatar(
+            crate::shell::profile_avatar(
                 &avatar_theme,
                 crate::shell::RailIdentity::new(name.as_deref(), hostname.as_deref()),
             )
+            .rounded(px(10.0))
+            .overflow_hidden()
             .into_any_element()
         };
         let avatar = if let Some(path) = self.profile_picture.clone() {
             gpui::img(path)
                 .size(px(40.0))
-                .rounded_full()
+                .rounded(px(10.0))
                 .object_fit(gpui::ObjectFit::Cover)
                 .with_fallback(fallback.clone())
                 .with_loading(fallback)
@@ -1150,9 +1152,46 @@ impl NativeApplication {
             .track_focus(&self.profile_focus)
             .tab_index(0)
             .cursor_pointer()
-            .rounded_full()
-            .size(px(40.0))
-            .child(avatar)
+            .rounded(px(10.0))
+            .w_full()
+            .h(px(48.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .size(px(40.0))
+                    .flex_shrink_0()
+                    .rounded(px(10.0))
+                    .overflow_hidden()
+                    .child(avatar),
+            )
+            .children((!self.sidebar_collapsed).then(|| {
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .text_color(theme.foreground)
+                            .child(self.profile_name.clone().unwrap_or_else(|| "User".into())),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(theme.secondary)
+                            .child(
+                                self.profile_hostname
+                                    .clone()
+                                    .unwrap_or_else(|| "This computer".into()),
+                            ),
+                    )
+            }))
             .on_click(cx.listener(|app, _, window, cx| {
                 cx.stop_propagation();
                 let _ = app.profile_menu.press_trigger();
@@ -1201,7 +1240,7 @@ impl NativeApplication {
                 .child(trigger)
                 .on_children_prepainted(move |bounds, _, _| {
                     if let Some(bounds) = bounds.first() {
-                        origin.set(bounds.origin);
+                        origin.set(*bounds);
                     }
                 }),
         );
@@ -1219,7 +1258,7 @@ impl NativeApplication {
                 .flex_col()
                 .block_mouse_except_scroll()
                 .on_mouse_down_out(cx.listener(|app, event: &gpui::MouseDownEvent, _, cx| {
-                    let trigger = Bounds::new(app.profile_origin.get(), size(px(40.0), px(40.0)));
+                    let trigger = app.profile_origin.get();
                     if !trigger.contains(&event.position) {
                         let _ = app.profile_menu.dismiss();
                         cx.notify();
@@ -1284,7 +1323,7 @@ impl NativeApplication {
             root = root.child(gpui::deferred(
                 gpui::anchored()
                     .anchor(gpui::Anchor::BottomLeft)
-                    .position(self.profile_origin.get())
+                    .position(self.profile_origin.get().origin)
                     .offset(gpui::point(px(0.0), px(-10.0)))
                     .child(panel),
             ));
