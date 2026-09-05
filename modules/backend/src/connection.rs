@@ -61,7 +61,7 @@ use artisan_transport::{
     dispatch_server_request_with_receipt, receive_client_hello, run_with_deadline,
     send_server_welcome,
 };
-use quinn::{ClosedStream, Connection, RecvStream, SendStream, VarInt};
+use quinn::{ClosedStream, Connection, ConnectionError, RecvStream, SendStream, VarInt};
 use thiserror::Error;
 
 use crate::conversation_delivery_driver::ConversationDeliveryDriver;
@@ -83,6 +83,19 @@ const CONNECTION_CLOSE_CODE: VarInt = VarInt::from_u32(0x01);
 /// Fixed secret-free reason paired with [`CONNECTION_CLOSE_CODE`]. It
 /// carries no credential, identifier, or peer-controlled detail.
 const CONNECTION_CLOSE_REASON: &[u8] = b"forge connection released";
+
+/// The native client uses this exact application close when a session is
+/// abandoned during reconnect or ordinary teardown. The reason is matched as
+/// well as the code because application close codes are otherwise opaque to
+/// this boundary and may be reused by another failure path.
+const CLIENT_SESSION_ABANDON_CODE: VarInt = VarInt::from_u32(0x01);
+const CLIENT_SESSION_ABANDON_REASON: &[u8] = b"artisan client session abandoned";
+
+/// The native client uses this exact application close after its awaited
+/// shutdown drain. Both native client close forms are safe to treat as an
+/// idle disconnect only when they arrive through the accept stage below.
+const CLIENT_SESSION_SHUTDOWN_CODE: VarInt = VarInt::from_u32(0x02);
+const CLIENT_SESSION_SHUTDOWN_REASON: &[u8] = b"artisan client session shutdown";
 
 /// Fixed `STOP_SENDING` code discarding the inbound direction of a stream
 /// this leaf stops reading.
@@ -256,6 +269,34 @@ pub enum RequestStageError {
     /// A serialized conversation delivery stage failed.
     #[error("conversation delivery failed")]
     Delivery(#[from] DeliveryStageError),
+}
+
+/// Returns whether a request-stage failure is the native client's known idle
+/// disconnect.
+///
+/// `RequestStageError::Accept` is produced while waiting for the next
+/// bidirectional request stream, after the preceding request or delivery
+/// stage has returned. The exact application close code and reason are then
+/// required to identify the two close forms emitted by
+/// `transport::client_session`; every other connection error, including an
+/// arbitrary application close, remains terminal. Errors from a request,
+/// response, delivery, lifecycle, or mutation stage never qualify.
+pub(crate) fn is_orderly_peer_disconnect(source: &DeadlineError<RequestStageError>) -> bool {
+    let DeadlineError::Peer {
+        operation: OperationKind::Receive,
+        error:
+            RequestStageError::Accept {
+                source: ConnectionError::ApplicationClosed(close),
+            },
+    } = source
+    else {
+        return false;
+    };
+
+    (close.error_code == CLIENT_SESSION_ABANDON_CODE
+        && close.reason.as_ref() == CLIENT_SESSION_ABANDON_REASON)
+        || (close.error_code == CLIENT_SESSION_SHUTDOWN_CODE
+            && close.reason.as_ref() == CLIENT_SESSION_SHUTDOWN_REASON)
 }
 
 /// One admitted, authenticated Forge connection owned exclusively by its

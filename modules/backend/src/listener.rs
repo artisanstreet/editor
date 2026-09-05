@@ -41,11 +41,13 @@
 //! An idle [`OperationKind::Connect`] timeout is nonterminal and continues
 //! with the same endpoint without consuming admission capacity. A
 //! connection-local authentication failure after the accepted guard closes the
-//! peer is nonterminal. All other pre-ready exhaustion, metadata, and
-//! non-timeout admission failures, plus non-cancellation request-stage
-//! failures, are terminal service failures. A terminal primary remains
-//! classified as a service failure even when the best-effort drain also
-//! fails; both typed causes are preserved.
+//! peer is nonterminal. After a ready connection ends, only the exact native
+//! client idle application close observed while accepting the next request is
+//! nonterminal; every other pre-ready exhaustion, metadata, and non-timeout
+//! admission failure, plus every other request-stage failure, is terminal
+//! service failure. A terminal primary remains classified as a service
+//! failure even when the best-effort drain also fails; both typed causes are
+//! preserved.
 //!
 //! [`Drop`] remains the synchronous local-close proof; [`Self::drain`] is the
 //! awaited idle proof.
@@ -74,7 +76,7 @@ use thiserror::Error;
 use crate::command_admission::{CommandOrigin, CommandOriginClockError, CommandOriginEntropyError};
 use crate::connection::{
     AuthenticationStageError, ConnectionLimits, ForgeConnection, RequestStageError,
-    ServerFrameStamp, WelcomeMetadata,
+    ServerFrameStamp, WelcomeMetadata, is_orderly_peer_disconnect,
 };
 use crate::credential_authority::{CredentialAuthenticationError, CredentialAuthority};
 use crate::lifecycle_control::LifecycleController;
@@ -552,9 +554,10 @@ impl ForgeListener {
     /// service failure because mutation may have occurred or recoverability is
     /// unproven. Admission-capacity exhaustion, local metadata/origin failure,
     /// non-timeout admission transport failure, and non-cancellation
-    /// request-stage failure are terminal service failures; a terminal
-    /// primary remains a service failure even when the best-effort drain also
-    /// fails. Cancellation with a drain failure is the cleanup-only error.
+    /// request-stage failure other than the exact native idle disconnect are
+    /// terminal service failures; a terminal primary remains a service failure
+    /// even when the best-effort drain also fails. Cancellation with a drain
+    /// failure is the cleanup-only error.
     ///
     /// Preserves lifetime admission counting and per-connection request
     /// capacity exactly; idle timeouts neither consume nor refund an
@@ -591,6 +594,15 @@ impl ForgeListener {
                                 Ok(()) => Ok(()),
                                 Err(drain) => Err(ServeUntilCancelError::drain(drain)),
                             };
+                        }
+                        if is_orderly_peer_disconnect(&source) {
+                            // `serve_attempt` has already run the connection
+                            // failure cleanup before returning this report:
+                            // delivery subscriptions are cleared, unfinished
+                            // output is reset, and the owned connection drops.
+                            // The listener's lifetime admission remains
+                            // consumed; only endpoint custody continues.
+                            continue;
                         }
                         let cause = ServiceCause::Request(source);
                         return match listener.drain().await {

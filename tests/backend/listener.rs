@@ -60,6 +60,14 @@ const RELEASE_CLOSE_CODE: u32 = 0x01;
 /// Reason carried by the owned connection drop — the connection boundary,
 /// distinct from the listener endpoint/guard boundary below.
 const CONNECTION_RELEASE_REASON: &[u8] = b"forge connection released";
+
+/// The exact clean-close forms emitted by the native transport client's
+/// `ClientSession` drop and awaited shutdown paths. The backend must not infer
+/// recoverability from either code without also checking its reason.
+const CLIENT_SESSION_ABANDON_CODE: u32 = 0x01;
+const CLIENT_SESSION_ABANDON_REASON: &[u8] = b"artisan client session abandoned";
+const CLIENT_SESSION_SHUTDOWN_CODE: u32 = 0x02;
+const CLIENT_SESSION_SHUTDOWN_REASON: &[u8] = b"artisan client session shutdown";
 /// Reason carried by the listener's endpoint/pre-metadata-guard boundary.
 const LISTENER_CLOSE_REASON: &[u8] = b"forge listener released";
 
@@ -1792,6 +1800,64 @@ async fn until_cancel_rejected_client_does_not_terminate() {
 }
 
 #[tokio::test]
+async fn until_cancel_orderly_idle_disconnect_reconnects_without_refunding_admission() {
+    let limits = default_limits(Duration::from_secs(2));
+    // Two lifetime admissions cover exactly the first client and its
+    // reconnect. Closing both while idle must then expose exhaustion rather
+    // than refund either admission and leave the service waiting forever.
+    let (mut broker, pki) =
+        start_until_cancel_broker("until-orderly-reconnect", limits, capacity(2), capacity(4))
+            .await;
+    let client_ep = client_endpoint(&pki);
+    let addr = broker.addr();
+
+    let first = admit(&client_ep, addr, initial_credential()).await;
+    let rotated = first.welcome.welcome.reconnect_capability;
+    // This is the exact wire close used by the native client's ordinary
+    // drop/reconnect path. The server sees it as ApplicationClosed while its
+    // request accept is idle.
+    first.connection.close(
+        VarInt::from_u32(CLIENT_SESSION_ABANDON_CODE),
+        CLIENT_SESSION_ABANDON_REASON,
+    );
+
+    // The same listener endpoint must accept the rotated credential after the
+    // first orderly disconnect, without restarting Forge or its authority.
+    let second = admit(&client_ep, addr, HelloCredential::Reconnect(rotated)).await;
+    assert_eq!(second.welcome.frame_id.as_str(), "forge-meta-4");
+    assert_eq!(second.welcome.sent_at, UnixMillis::from_millis(1002));
+    exchange_response(
+        &second,
+        &list_projects_request("frame-after-orderly-reconnect"),
+        "forge-meta-5",
+        UnixMillis::from_millis(1003),
+    )
+    .await;
+
+    // No successful request is required for the second close to be
+    // recoverable; this is another idle accept after the response above.
+    second.connection.close(
+        VarInt::from_u32(CLIENT_SESSION_SHUTDOWN_CODE),
+        CLIENT_SESSION_SHUTDOWN_REASON,
+    );
+    drop(second);
+
+    let error = broker
+        .await_result()
+        .await
+        .expect_err("the two consumed lifetime admissions must terminate on exhaustion");
+    assert!(error.is_service_failure());
+    assert!(matches!(
+        error.as_listener_error(),
+        Some(ListenerError::AdmissionCapacityExhausted)
+    ));
+    assert_connect_fails(&client_ep, addr).await;
+    broker
+        .complete("until-orderly-reconnect")
+        .expect("bounded completion");
+}
+
+#[tokio::test]
 async fn until_cancel_cancellation_before_admission_drains() {
     let limits = ListenerLimits {
         admission: Duration::from_secs(30),
@@ -1896,8 +1962,9 @@ async fn until_cancel_request_failure_is_terminal_with_primary() {
     let client_ep = client_endpoint(&pki);
     let addr = broker.addr();
     let client = admit(&client_ep, addr, initial_credential()).await;
-    // Cause a non-cancellation request failure: peer closes, server's next
-    // accept fails with Peer.
+    // Cause a non-cancellation request failure: this uses the shutdown code
+    // with an arbitrary reason, so the server's next accept fails with Peer
+    // and must remain terminal. Code alone is not enough for recovery.
     client
         .connection
         .close(VarInt::from_u32(0x02), b"peer done");
