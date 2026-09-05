@@ -21,11 +21,11 @@ use artisan_ui::{
 };
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Bounds, ClickEvent,
-    Context, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight, ImageSource,
-    InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point,
-    Render, RenderImage, ScrollHandle, ScrollWheelEvent, Size, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, anchored, canvas, deferred, div,
-    img, point, prelude::FluentBuilder as _, prelude::IntoElement, px,
+    Context, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
+    ImageSource, InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels,
+    Point, Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, Size, Stateful,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Task, Window, anchored, canvas,
+    deferred, div, img, point, prelude::FluentBuilder as _, prelude::IntoElement, px,
 };
 
 use crate::engine_section_indicator_policy::{
@@ -70,6 +70,9 @@ const COMPACT_CONTROL_HEIGHT_PX: f32 = 32.0;
 const POLICY_CONTROL_HEIGHT_PX: f32 = 24.0;
 const PICKER_MENU_MOTION_DURATION_MS: u64 = 100;
 const PICKER_HOVER_MOTION_DURATION_MS: u64 = 250;
+const PICKER_TOOLTIP_SHOW_DELAY_MS: u64 = 500;
+const OPTION_TOOLTIP_WIDTH_PX: f32 = 320.0;
+const OPTION_TOOLTIP_GAP_PX: f32 = 8.0;
 
 /// The policy payload emitted after a model or policy control is committed.
 pub type SelectPolicy = NativeModelPolicy;
@@ -819,6 +822,20 @@ struct EngineIndicatorTransition {
     generation: u64,
 }
 
+/// One policy-option tooltip waiting to be shown or already mounted.
+///
+/// The row bounds are measured in window coordinates by a canvas probe. The
+/// tooltip is then rendered as a deferred anchored element, so the dropdown's
+/// overflow mask cannot clip a long paragraph.
+#[derive(Clone, Debug)]
+struct PickerTooltipTarget {
+    key: String,
+    advisory: Option<String>,
+    description: Option<String>,
+    row_bounds: Option<Bounds<Pixels>>,
+    visible: bool,
+}
+
 /// A GPUI entity that paints the model trigger and bounded selector popover.
 pub struct NativeModelSelector {
     state: NativeModelSelectorState,
@@ -836,6 +853,10 @@ pub struct NativeModelSelector {
     engine_indicator_animation_generation: Rc<RefCell<u64>>,
     menu_motion: Rc<RefCell<PickerMenuMotion>>,
     menu_motion_task: Option<Task<()>>,
+    axis_menu_motion: Rc<RefCell<PickerMenuMotion>>,
+    axis_menu_motion_task: Option<Task<()>>,
+    axis_menu_motion_axis: Option<NativePolicyAxis>,
+    axis_menu_pending_axis: Option<NativePolicyAxis>,
     model_hover: Rc<RefCell<SlidingHoverState>>,
     model_hover_surface_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     axis_hover: Rc<RefCell<SlidingHoverState>>,
@@ -846,6 +867,9 @@ pub struct NativeModelSelector {
     axis_scroll_frame_scheduled: bool,
     axis_trigger_bounds: Rc<RefCell<[Option<Bounds<Pixels>>; 5]>>,
     axis_menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    option_tooltip: Rc<RefCell<Option<PickerTooltipTarget>>>,
+    option_tooltip_task: Option<Task<()>>,
+    option_tooltip_generation: u64,
     highlighted_axis_option: Option<String>,
 }
 
@@ -881,6 +905,10 @@ impl NativeModelSelector {
             engine_indicator_animation_generation: Rc::new(RefCell::new(0)),
             menu_motion: Rc::new(RefCell::new(PickerMenuMotion::default())),
             menu_motion_task: None,
+            axis_menu_motion: Rc::new(RefCell::new(PickerMenuMotion::default())),
+            axis_menu_motion_task: None,
+            axis_menu_motion_axis: None,
+            axis_menu_pending_axis: None,
             model_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             model_hover_surface_bounds: Rc::new(RefCell::new(None)),
             axis_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
@@ -891,6 +919,9 @@ impl NativeModelSelector {
             axis_scroll_frame_scheduled: false,
             axis_trigger_bounds: Rc::new(RefCell::new([None; 5])),
             axis_menu_bounds: Rc::new(RefCell::new(None)),
+            option_tooltip: Rc::new(RefCell::new(None)),
+            option_tooltip_task: None,
+            option_tooltip_generation: 0,
             highlighted_axis_option: None,
         }
     }
@@ -903,7 +934,13 @@ impl NativeModelSelector {
 
     /// Replaces the complete static-plus-runtime catalog snapshot.
     pub fn set_snapshot(&mut self, snapshot: NativeModelCatalog, cx: &mut Context<Self>) {
+        let closing_axis = self.axis_menu_motion_axis.or(self.state.open_axis);
         self.state.set_snapshot(snapshot);
+        self.axis_menu_pending_axis = None;
+        self.clear_option_tooltip();
+        if let Some(axis) = closing_axis {
+            self.begin_axis_menu_close(axis, cx);
+        }
         cx.notify();
     }
 
@@ -925,6 +962,75 @@ impl NativeModelSelector {
 
     fn menu_is_interactive(&self) -> bool {
         self.state.is_open() && self.menu_motion.borrow().phase() != PickerMenuPhase::Closing
+    }
+
+    fn axis_is_interactive(&self, axis: NativePolicyAxis) -> bool {
+        self.menu_is_interactive()
+            && self.state.is_axis_open(axis)
+            && self.axis_menu_motion_axis == Some(axis)
+            && self.axis_menu_motion.borrow().phase() != PickerMenuPhase::Closing
+    }
+
+    fn clear_option_tooltip(&mut self) {
+        self.option_tooltip_generation = self.option_tooltip_generation.wrapping_add(1);
+        self.option_tooltip.borrow_mut().take();
+        self.option_tooltip_task = None;
+    }
+
+    fn clear_option_tooltip_for(&mut self, key: &str) {
+        let matches = self
+            .option_tooltip
+            .borrow()
+            .as_ref()
+            .is_some_and(|target| target.key == key);
+        if matches {
+            self.clear_option_tooltip();
+        }
+    }
+
+    fn begin_option_tooltip(
+        &mut self,
+        axis: NativePolicyAxis,
+        option: &SelectorOption,
+        cx: &mut Context<Self>,
+    ) {
+        let key = option_tooltip_key(axis, &option.id);
+        if option_tooltip_text(option.advisory.as_deref(), option.description.as_deref()).is_none()
+        {
+            self.clear_option_tooltip();
+            return;
+        }
+
+        self.option_tooltip_generation = self.option_tooltip_generation.wrapping_add(1);
+        let generation = self.option_tooltip_generation;
+        *self.option_tooltip.borrow_mut() = Some(PickerTooltipTarget {
+            key: key.clone(),
+            advisory: option.advisory.clone(),
+            description: option.description.clone(),
+            row_bounds: None,
+            visible: false,
+        });
+        self.option_tooltip_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(PICKER_TOOLTIP_SHOW_DELAY_MS))
+                .await;
+            let _ = this.update(cx, |selector, cx| {
+                if selector.option_tooltip_generation == generation
+                    && selector.axis_is_interactive(axis)
+                    && selector
+                        .option_tooltip
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|target| target.key == key)
+                {
+                    if let Some(target) = selector.option_tooltip.borrow_mut().as_mut() {
+                        target.visible = true;
+                    }
+                    selector.option_tooltip_task = None;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn schedule_menu_motion_settle(
@@ -957,7 +1063,64 @@ impl NativeModelSelector {
         }));
     }
 
+    fn schedule_axis_menu_motion_settle(
+        &mut self,
+        generation: u64,
+        opening: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.axis_menu_motion_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(PICKER_MENU_MOTION_DURATION_MS))
+                .await;
+            let _ = this.update(cx, |selector, cx| {
+                let settled = if opening {
+                    selector
+                        .axis_menu_motion
+                        .borrow_mut()
+                        .finish_open(generation)
+                } else {
+                    selector
+                        .axis_menu_motion
+                        .borrow_mut()
+                        .finish_close(generation)
+                };
+                if settled {
+                    selector.axis_menu_motion_task = None;
+                    if !opening {
+                        selector.axis_menu_bounds.borrow_mut().take();
+                        selector.axis_hover_surface_bounds.borrow_mut().take();
+                        selector.axis_hover.borrow_mut().clear();
+                        selector.clear_option_tooltip();
+                        if let Some(axis) = selector.axis_menu_pending_axis.take() {
+                            if selector.state.is_open()
+                                && selector.menu_motion.borrow().phase() != PickerMenuPhase::Closing
+                            {
+                                selector.state.open_axis = Some(axis);
+                                selector.begin_axis_menu_open(axis, cx);
+                            } else {
+                                selector.axis_menu_motion_axis = None;
+                            }
+                        } else {
+                            selector.axis_menu_motion_axis = None;
+                        }
+                    }
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
     fn begin_menu_open(&mut self, cx: &mut Context<Self>) {
+        if self.axis_menu_motion.borrow().phase() == PickerMenuPhase::Closing {
+            self.axis_menu_motion.borrow_mut().hide();
+            self.axis_menu_motion_axis = None;
+            self.axis_menu_pending_axis = None;
+            self.axis_menu_motion_task = None;
+            self.axis_menu_bounds.borrow_mut().take();
+            self.axis_hover_surface_bounds.borrow_mut().take();
+            self.axis_hover.borrow_mut().clear();
+        }
         let generation = self.menu_motion.borrow_mut().begin_open();
         if cx.reduce_motion() {
             self.menu_motion.borrow_mut().finish_open(generation);
@@ -967,10 +1130,58 @@ impl NativeModelSelector {
         }
     }
 
-    fn begin_menu_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.dismiss();
+    fn begin_axis_menu_open(&mut self, axis: NativePolicyAxis, cx: &mut Context<Self>) {
+        self.axis_menu_motion_axis = Some(axis);
+        self.axis_menu_pending_axis = None;
+        let generation = self.axis_menu_motion.borrow_mut().begin_open();
+        if cx.reduce_motion() {
+            self.axis_menu_motion.borrow_mut().finish_open(generation);
+            self.axis_menu_motion_task = None;
+        } else {
+            self.schedule_axis_menu_motion_settle(generation, true, cx);
+        }
+    }
+
+    fn begin_axis_menu_close(&mut self, axis: NativePolicyAxis, cx: &mut Context<Self>) {
+        self.axis_menu_motion_axis = Some(axis);
+        self.clear_option_tooltip();
         self.highlighted_axis_option = None;
         self.axis_menu_bounds.borrow_mut().take();
+        self.axis_hover_surface_bounds.borrow_mut().take();
+        self.axis_hover.borrow_mut().clear();
+        self.axis_scroll.cancel_to(
+            f32::from(self.axis_menu_scroll.offset().y),
+            f32::from(self.axis_menu_scroll.max_offset().y),
+        );
+        let generation = self.axis_menu_motion.borrow_mut().begin_close();
+        if cx.reduce_motion() {
+            self.axis_menu_motion.borrow_mut().finish_close(generation);
+            self.axis_menu_motion_task = None;
+            if let Some(next_axis) = self.axis_menu_pending_axis.take() {
+                if self.state.is_open()
+                    && self.menu_motion.borrow().phase() != PickerMenuPhase::Closing
+                {
+                    self.state.open_axis = Some(next_axis);
+                    self.begin_axis_menu_open(next_axis, cx);
+                } else {
+                    self.axis_menu_motion_axis = None;
+                }
+            } else {
+                self.axis_menu_motion_axis = None;
+            }
+        } else {
+            self.schedule_axis_menu_motion_settle(generation, false, cx);
+        }
+    }
+
+    fn begin_menu_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let closing_axis = self.axis_menu_motion_axis.or(self.state.open_axis);
+        self.state.dismiss();
+        self.axis_menu_pending_axis = None;
+        self.clear_option_tooltip();
+        self.highlighted_axis_option = None;
+        self.axis_menu_bounds.borrow_mut().take();
+        self.axis_hover_surface_bounds.borrow_mut().take();
         self.model_hover.borrow_mut().clear();
         self.axis_hover.borrow_mut().clear();
         self.model_scroll.cancel_to(
@@ -981,6 +1192,9 @@ impl NativeModelSelector {
             f32::from(self.axis_menu_scroll.offset().y),
             f32::from(self.axis_menu_scroll.max_offset().y),
         );
+        if let Some(axis) = closing_axis {
+            self.begin_axis_menu_close(axis, cx);
+        }
         let generation = self.menu_motion.borrow_mut().begin_close();
         if cx.reduce_motion() {
             self.menu_motion.borrow_mut().finish_close(generation);
@@ -1020,7 +1234,7 @@ impl NativeModelSelector {
         // scroll container. Stopping propagation there prevents its default
         // immediate offset update from being applied a second time.
         cx.stop_propagation();
-        if !self.menu_is_interactive() {
+        if !self.menu_is_interactive() || (!model_list && self.state.open_axis.is_none()) {
             return;
         }
 
@@ -1028,6 +1242,9 @@ impl NativeModelSelector {
         let delta = f32::from(delta);
         if delta.abs() <= f32::EPSILON {
             return;
+        }
+        if !model_list {
+            self.clear_option_tooltip();
         }
 
         let handle = if model_list {
@@ -1163,12 +1380,7 @@ impl NativeModelSelector {
                 }
                 NativeModelSelectorKey::Escape | NativeModelSelectorKey::Tab => {
                     self.state.open_axis = None;
-                    self.axis_hover.borrow_mut().clear();
-                    self.axis_menu_bounds.borrow_mut().take();
-                    self.axis_scroll.cancel_to(
-                        f32::from(self.axis_menu_scroll.offset().y),
-                        f32::from(self.axis_menu_scroll.max_offset().y),
-                    );
+                    self.begin_axis_menu_close(axis, cx);
                     None
                 }
                 _ => None,
@@ -1178,6 +1390,7 @@ impl NativeModelSelector {
                 self.axis_hover
                     .borrow_mut()
                     .set_active(options[index].id.clone());
+                self.begin_option_tooltip(axis, &options[index], cx);
             }
             cx.stop_propagation();
             cx.notify();
@@ -1241,9 +1454,13 @@ impl NativeModelSelector {
         if !self.menu_is_interactive() {
             return;
         }
+        let closing_axis = self.axis_menu_motion_axis.or(self.state.open_axis);
         let emitted = self.state.select_model(&model_id);
         if let Some(event) = emitted {
             cx.emit(event);
+        }
+        if let Some(axis) = closing_axis.filter(|_| self.state.open_axis.is_none()) {
+            self.begin_axis_menu_close(axis, cx);
         }
         if self.state.is_open() {
             self.sync_focus_after_transition(window, cx);
@@ -1270,31 +1487,54 @@ impl NativeModelSelector {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.menu_is_interactive() {
+        if !self.axis_is_interactive(axis) {
             return;
         }
+        let axis_was_open = self.state.is_axis_open(axis);
         match self.state.choose_option(axis, &option_id) {
             Ok(Some(event)) => cx.emit(event),
             Ok(None) => {}
             Err(error) => self.state.set_local_error(Some(error.to_string())),
         }
-        self.axis_hover.borrow_mut().clear();
+        if axis_was_open && !self.state.is_axis_open(axis) {
+            self.begin_axis_menu_close(axis, cx);
+        }
         if !self.state.is_open() {
             self.begin_menu_close(window, cx);
         }
         cx.notify();
     }
 
-    fn toggle_axis(&mut self, axis: NativePolicyAxis, cx: &mut Context<Self>) {
+    fn toggle_axis(
+        &mut self,
+        axis: NativePolicyAxis,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.menu_is_interactive() {
             return;
         }
         self.highlighted_axis_option = None;
         self.axis_menu_bounds.borrow_mut().take();
+        self.axis_hover_surface_bounds.borrow_mut().take();
+        self.clear_option_tooltip();
         self.axis_hover.borrow_mut().clear();
         self.axis_menu_scroll.set_offset(point(px(0.0), px(0.0)));
         self.axis_scroll.cancel_to(0.0, 0.0);
-        self.state.toggle_axis(axis);
+        if let Some(open_axis) = self.state.open_axis {
+            if open_axis == axis {
+                self.state.open_axis = None;
+                self.axis_menu_pending_axis = None;
+                self.begin_axis_menu_close(axis, cx);
+            } else {
+                self.state.open_axis = None;
+                self.axis_menu_pending_axis = Some(axis);
+                self.begin_axis_menu_close(open_axis, cx);
+            }
+        } else {
+            self.state.toggle_axis(axis);
+            self.begin_axis_menu_open(axis, cx);
+        }
         cx.notify();
     }
 
@@ -1302,7 +1542,13 @@ impl NativeModelSelector {
         if !self.menu_is_interactive() {
             return;
         }
+        let closing_axis = self.axis_menu_motion_axis.or(self.state.open_axis);
         self.state.set_active_engine(engine_id);
+        self.axis_menu_pending_axis = None;
+        self.clear_option_tooltip();
+        if let Some(axis) = closing_axis {
+            self.begin_axis_menu_close(axis, cx);
+        }
         self.model_hover.borrow_mut().clear();
         self.menu_scroll.set_offset(point(px(0.0), px(0.0)));
         self.model_scroll.cancel_to(0.0, 0.0);
@@ -1454,7 +1700,12 @@ impl NativeModelSelector {
                 .anchor(Anchor::BottomLeft)
                 .position(origin)
                 .offset(point(px(0.0), px(-MENU_GAP_PX)))
-                .child(animate_picker_menu(panel, self.menu_motion.clone(), motion))
+                .child(animate_picker_menu(
+                    panel,
+                    self.menu_motion.clone(),
+                    motion,
+                    "main",
+                ))
                 .into_any_element(),
         )
     }
@@ -2107,19 +2358,44 @@ impl NativeModelSelector {
                 .size(px(14.0)),
             );
         if !disabled {
-            trigger =
-                trigger.on_click(cx.listener(move |view: &mut Self, _: &ClickEvent, _, cx| {
-                    view.toggle_axis(axis, cx);
-                }));
+            trigger = trigger.on_click(cx.listener(
+                move |view: &mut Self, _: &ClickEvent, window, cx| {
+                    view.toggle_axis(axis, window, cx);
+                },
+            ));
         }
         control = control.child(trigger);
-        if axis_open && let Some(trigger_bounds) = self.axis_trigger_bounds.borrow()[axis as usize]
+        let axis_popup_visible = self.axis_menu_motion_axis == Some(axis)
+            && self.axis_menu_motion.borrow().phase() != PickerMenuPhase::Hidden;
+        if axis_popup_visible
+            && let Some(trigger_bounds) = self.axis_trigger_bounds.borrow()[axis as usize]
         {
             let popup_bounds = Rc::clone(&self.axis_menu_bounds);
+            let axis_surface_bounds = Rc::clone(&self.axis_hover_surface_bounds);
             let popup_probe = canvas(
                 |_, _, _| {},
-                move |bounds, (), _, _| {
-                    *popup_bounds.borrow_mut() = Some(bounds);
+                move |bounds, (), window, cx| {
+                    let popup_changed = {
+                        let mut popup = popup_bounds.borrow_mut();
+                        if *popup == Some(bounds) {
+                            false
+                        } else {
+                            *popup = Some(bounds);
+                            true
+                        }
+                    };
+                    let surface_changed = {
+                        let mut surface = axis_surface_bounds.borrow_mut();
+                        if *surface == Some(bounds) {
+                            false
+                        } else {
+                            *surface = Some(bounds);
+                            true
+                        }
+                    };
+                    if popup_changed || surface_changed {
+                        window.defer(cx, |window, _| window.refresh());
+                    }
                 },
             )
             .absolute()
@@ -2138,39 +2414,35 @@ impl NativeModelSelector {
                 .min_w(px(DROPDOWN_MIN_WIDTH_PX))
                 .flex()
                 .flex_col()
-                .max_h(dropdown_max_height_for_viewport(viewport, trigger_bounds))
-                .overflow_y_scroll()
-                .scrollbar_width(px(0.0))
-                .track_scroll(&self.axis_menu_scroll)
                 .p(px(4.0))
+                .max_h(dropdown_max_height_for_viewport(viewport, trigger_bounds))
+                .overflow_hidden()
                 .rounded(px(18.0))
                 .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
                 .bg(glass_foreground_base(self.theme))
                 .shadow(glass_card_shadows());
             options = options.child(glass_material_layer(GlassStrength::Strong, px(18.0)));
             options = options.child(glass_highlight_layer(GlassStrength::Strong, px(18.0)));
-            let axis_surface_bounds = Rc::clone(&self.axis_hover_surface_bounds);
-            let content_probe = canvas(
-                |_, _, _| {},
-                move |bounds, (), window, cx| {
-                    let changed = {
-                        let mut surface = axis_surface_bounds.borrow_mut();
-                        if *surface == Some(bounds) {
-                            false
-                        } else {
-                            *surface = Some(bounds);
-                            true
-                        }
-                    };
-                    if changed {
-                        window.defer(cx, |window, _| window.refresh());
-                    }
-                },
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full();
+            options = options.child(render_picker_hover_pill(
+                self.theme,
+                Rc::clone(&self.axis_hover),
+                "axis",
+            ));
+            let dropdown_max_height = dropdown_max_height_for_viewport(viewport, trigger_bounds);
+            let viewport_max_height = px((f32::from(dropdown_max_height) - 8.0).max(0.0));
+            let mut viewport = div()
+                .id(format!(
+                    "artisan-native-model-selector-axis-viewport-{axis:?}"
+                ))
+                .relative()
+                .w_full()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .flex_shrink_0()
+                .max_h(viewport_max_height)
+                .overflow_y_scroll()
+                .scrollbar_width(px(0.0))
+                .track_scroll(&self.axis_menu_scroll);
             let mut content = div()
                 .relative()
                 .flex()
@@ -2182,18 +2454,21 @@ impl NativeModelSelector {
                 .on_hover(cx.listener(|view: &mut Self, hovered: &bool, _, cx| {
                     if !*hovered {
                         view.axis_hover.borrow_mut().clear();
+                        view.clear_option_tooltip();
                         cx.notify();
                     }
                 }))
-                .on_scroll_wheel(cx.listener(Self::handle_axis_scroll_wheel))
-                .child(content_probe)
-                .child(render_picker_hover_pill(
-                    self.theme,
-                    Rc::clone(&self.axis_hover),
-                    "axis",
-                ));
+                .on_scroll_wheel(cx.listener(Self::handle_axis_scroll_wheel));
             let mut current_thinking_group: Option<String> = None;
-            for option in self.axis_options(axis, &self.preview_view()) {
+            let axis_options = self.axis_options(axis, &self.preview_view());
+            let visible_option_ids = axis_options
+                .iter()
+                .map(|option| option.id.clone())
+                .collect::<Vec<_>>();
+            self.axis_hover
+                .borrow_mut()
+                .clear_if_missing(&visible_option_ids);
+            for option in axis_options {
                 let group = option.group.clone();
                 if axis == NativePolicyAxis::Thinking && group != current_thinking_group {
                     if current_thinking_group.is_some() {
@@ -2228,14 +2503,20 @@ impl NativeModelSelector {
                 }
                 content = content.child(self.render_axis_option(axis, option, cx));
             }
-            options = options.child(content);
+            viewport = viewport.child(content);
+            options = options.child(viewport);
             control = control.child(
                 deferred(
                     anchored()
                         .anchor(Anchor::BottomLeft)
                         .position(trigger_bounds.origin)
                         .offset(point(px(0.0), px(-DROPDOWN_GAP_PX)))
-                        .child(options),
+                        .child(animate_picker_menu(
+                            options,
+                            self.axis_menu_motion.clone(),
+                            *self.axis_menu_motion.borrow(),
+                            "axis-options",
+                        )),
                 )
                 .with_priority(2),
             );
@@ -2256,8 +2537,10 @@ impl NativeModelSelector {
         let option_description = option.description.clone();
         let option_advisory = option.advisory.clone();
         let measured_option_id = option.id.clone();
+        let measured_tooltip_key = option_tooltip_key(axis, &option.id);
         let axis_hover = Rc::clone(&self.axis_hover);
         let axis_surface_bounds = Rc::clone(&self.axis_hover_surface_bounds);
+        let option_tooltip = Rc::clone(&self.option_tooltip);
         let row_probe = canvas(
             |_, _, _| {},
             move |bounds, (), window, cx| {
@@ -2273,6 +2556,23 @@ impl NativeModelSelector {
                 if axis_hover.borrow_mut().measure(&measured_option_id, rect) {
                     window.defer(cx, |window, _| window.refresh());
                 }
+                let tooltip_changed = {
+                    let mut tooltip = option_tooltip.borrow_mut();
+                    tooltip.as_mut().is_some_and(|target| {
+                        if target.key != measured_tooltip_key {
+                            return false;
+                        }
+                        if target.row_bounds == Some(bounds) {
+                            false
+                        } else {
+                            target.row_bounds = Some(bounds);
+                            true
+                        }
+                    })
+                };
+                if tooltip_changed {
+                    window.defer(cx, |window, _| window.refresh());
+                }
             },
         )
         .absolute()
@@ -2281,6 +2581,8 @@ impl NativeModelSelector {
         .size_full();
         let tooltip_description =
             option_tooltip_text(option_advisory.as_deref(), option_description.as_deref());
+        let tooltip_key = option_tooltip_key(axis, &option.id);
+        let tooltip_option = option.clone();
         let mut row = div()
             .id(format!(
                 "artisan-native-model-selector-option-{axis:?}-{}",
@@ -2305,36 +2607,24 @@ impl NativeModelSelector {
             .when(option.disabled, |row| row.opacity(0.5))
             .child(row_probe)
             .child(div().flex_1().min_w(px(0.0)).truncate().child(option_label));
-        if !option_disabled {
-            let hover_option_id = option.id.clone();
-            row = row.on_hover(cx.listener(move |view: &mut Self, hovered: &bool, _, cx| {
-                if !view.menu_is_interactive() {
+        row = row.on_hover(cx.listener(move |view: &mut Self, hovered: &bool, _, cx| {
+            if *hovered {
+                if !view.axis_is_interactive(axis) {
                     return;
                 }
-                if *hovered {
+                if !option_disabled {
                     view.axis_hover
                         .borrow_mut()
-                        .set_active(hover_option_id.clone());
+                        .set_active(tooltip_option.id.clone());
                 }
-                cx.notify();
-            }));
-        }
+                view.begin_option_tooltip(axis, &tooltip_option, cx);
+            } else {
+                view.clear_option_tooltip_for(&tooltip_key);
+            }
+            cx.notify();
+        }));
         if let Some(tooltip_description) = tooltip_description {
-            let tooltip_advisory = option_advisory.clone();
-            let tooltip_copy = option_description.clone();
-            let tooltip_theme = self.theme;
-            row = row
-                .aria_description(tooltip_description.clone())
-                .tooltip(move |_, cx| {
-                    let advisory = tooltip_advisory.clone();
-                    let description = tooltip_copy.clone();
-                    cx.new(move |_| NativeModelSelectorOptionTooltip {
-                        theme: tooltip_theme,
-                        advisory,
-                        description,
-                    })
-                    .into()
-                });
+            row = row.aria_description(tooltip_description);
         }
         if !option_disabled {
             row = row.on_click(
@@ -2503,6 +2793,7 @@ impl Render for NativeModelSelector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let viewport = window.viewport_size();
         let menu = self.render_menu(viewport, cx);
+        let option_tooltip = self.render_option_tooltip(viewport);
         let trigger = self.render_trigger(cx);
         let origin = Rc::clone(&self.trigger_origin);
         let trigger_bounds = Rc::clone(&self.trigger_bounds);
@@ -2538,48 +2829,109 @@ impl Render for NativeModelSelector {
                     .children(menu.map(deferred))
                     .child(trigger),
             )
+            .children(option_tooltip)
     }
 }
 
-struct NativeModelSelectorOptionTooltip {
+impl NativeModelSelector {
+    fn render_option_tooltip(&self, viewport: Size<Pixels>) -> Option<AnyElement> {
+        let target = self.option_tooltip.borrow().clone()?;
+        let row_bounds = target.row_bounds?;
+        if !target.visible {
+            return None;
+        }
+
+        let viewport_width = f32::from(viewport.width).max(1.0);
+        let right_space = viewport_width - f32::from(row_bounds.right()) - OPTION_TOOLTIP_GAP_PX;
+        let left_space = f32::from(row_bounds.left()) - OPTION_TOOLTIP_GAP_PX;
+        let show_right = right_space >= OPTION_TOOLTIP_WIDTH_PX || right_space >= left_space;
+        let available_width = if show_right { right_space } else { left_space };
+        let width = OPTION_TOOLTIP_WIDTH_PX.min(available_width.max(1.0));
+        let (anchor, position, offset) = if show_right {
+            (
+                Anchor::LeftCenter,
+                point(row_bounds.right(), row_bounds.center().y),
+                point(px(OPTION_TOOLTIP_GAP_PX), px(0.0)),
+            )
+        } else {
+            (
+                Anchor::RightCenter,
+                point(row_bounds.left(), row_bounds.center().y),
+                point(px(-OPTION_TOOLTIP_GAP_PX), px(0.0)),
+            )
+        };
+        Some(
+            deferred(
+                anchored()
+                    .anchor(anchor)
+                    .position(position)
+                    .offset(offset)
+                    .child(render_option_tooltip_surface(
+                        self.theme,
+                        width,
+                        target.advisory,
+                        target.description,
+                    )),
+            )
+            .with_priority(3)
+            .into_any_element(),
+        )
+    }
+}
+
+fn render_option_tooltip_surface(
     theme: ArtisanTheme,
+    width: f32,
     advisory: Option<String>,
     description: Option<String>,
-}
-
-impl Render for NativeModelSelectorOptionTooltip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        let mut tooltip = div()
-            .flex()
-            .flex_col()
-            .max_w(px(320.0))
-            .gap(px(2.0))
-            .px(px(12.0))
-            .py(px(8.0))
-            .rounded(px(18.0))
-            .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
-            .bg(glass_foreground_base(self.theme))
-            .shadow(glass_card_shadows())
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_color(self.theme.colors.muted_foreground.to_paint())
-            .relative()
-            .overflow_hidden()
-            .child(glass_material_layer(GlassStrength::Strong, px(18.0)))
-            .child(glass_highlight_layer(GlassStrength::Strong, px(18.0)));
-        if let Some(advisory) = self.advisory.clone() {
-            tooltip = tooltip.child(
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(self.theme.colors.destructive.to_paint())
-                    .child(advisory),
-            );
+) -> AnyElement {
+    let advisory = advisory.filter(|text| !text.is_empty());
+    let description = description.filter(|text| !text.is_empty());
+    let mut text = String::new();
+    let mut advisory_end = 0;
+    if let Some(advisory) = advisory {
+        text.push_str(&advisory);
+        advisory_end = text.len();
+        if description.is_some() {
+            text.push(' ');
         }
-        if let Some(description) = self.description.clone() {
-            tooltip = tooltip.child(div().child(description));
-        }
-        tooltip
     }
+    if let Some(description) = description {
+        text.push_str(&description);
+    }
+    let body = if advisory_end == 0 {
+        StyledText::new(SharedString::from(text))
+    } else {
+        StyledText::new(SharedString::from(text)).with_highlights([(
+            0..advisory_end,
+            HighlightStyle {
+                color: Some(theme.colors.destructive.to_paint()),
+                font_weight: Some(FontWeight::MEDIUM),
+                ..Default::default()
+            },
+        )])
+    };
+    div()
+        .id("artisan-native-model-selector-option-tooltip")
+        .debug_selector(|| "artisan-native-model-selector-option-tooltip".to_owned())
+        .w(px(width))
+        .max_w(px(OPTION_TOOLTIP_WIDTH_PX))
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(18.0))
+        .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+        .bg(glass_foreground_base(theme))
+        .shadow(glass_card_shadows())
+        .text_size(px(12.0))
+        .line_height(px(16.0))
+        .whitespace_normal()
+        .text_color(theme.colors.muted_foreground.to_paint())
+        .relative()
+        .overflow_hidden()
+        .child(glass_material_layer(GlassStrength::Strong, px(18.0)))
+        .child(glass_highlight_layer(GlassStrength::Strong, px(18.0)))
+        .child(body)
+        .into_any_element()
 }
 
 fn render_picker_hover_pill(
@@ -2633,6 +2985,7 @@ fn animate_picker_menu(
     panel: Stateful<Div>,
     motion: Rc<RefCell<PickerMenuMotion>>,
     snapshot: PickerMenuMotion,
+    surface: &'static str,
 ) -> AnyElement {
     let Some((from_opacity, from_offset, to_opacity, to_offset, generation)) =
         snapshot.transition()
@@ -2642,7 +2995,7 @@ fn animate_picker_menu(
     let phase = snapshot.phase();
     let animation_id = ElementId::Name(
         format!(
-            "artisan-native-model-selector-menu-{}-{generation}",
+            "artisan-native-model-selector-menu-{surface}-{}-{generation}",
             match phase {
                 PickerMenuPhase::Opening => "opening",
                 PickerMenuPhase::Closing => "closing",
@@ -2691,6 +3044,10 @@ fn option_tooltip_text(advisory: Option<&str>, description: Option<&str>) -> Opt
         text.push_str(description);
     }
     (!text.is_empty()).then_some(text)
+}
+
+fn option_tooltip_key(axis: NativePolicyAxis, option_id: &str) -> String {
+    format!("{axis:?}:{option_id}")
 }
 
 fn selector_key_from_event(event: &KeyDownEvent) -> Option<NativeModelSelectorKey> {
@@ -3399,6 +3756,13 @@ mod tests {
             menu
         );
         let popup = cx.debug_bounds("artisan-model-policy-options").unwrap();
+        cx.update(|_, app| {
+            assert_eq!(
+                f32::from(view.read(app).axis_menu_scroll.max_offset().y),
+                0.0,
+                "fitting policy options must not gain scroll extent from visual layers"
+            );
+        });
         let ids = cx.update(|_, app| {
             view.read(app)
                 .axis_options(NativePolicyAxis::Thinking, &view.read(app).preview_view())
@@ -3436,5 +3800,202 @@ mod tests {
                 id
             );
         });
+    }
+
+    #[gpui::test]
+    fn policy_option_tooltip_is_a_full_side_overlay(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| app.set_reduce_motion(true));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            NativeModelSelector::new(
+                NativeModelCatalog::offline().expect("real catalog"),
+                None,
+                ThemeMode::Dark,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+            .unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let thinking = cx.debug_bounds("artisan-model-policy-Thinking").unwrap();
+        cx.simulate_click(thinking.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        let option_id = cx.update(|_, app| {
+            view.read(app)
+                .axis_options(NativePolicyAxis::Thinking, &view.read(app).preview_view())
+                .into_iter()
+                .find(|option| option.id == "ultra")
+                .map(|option| option.id)
+                .expect("the catalog fixture has a described policy option")
+        });
+        let option = cx
+            .debug_bounds(Box::leak(
+                format!("artisan-model-policy-option-Thinking-{option_id}").into_boxed_str(),
+            ))
+            .expect("described option is painted");
+        cx.update(|_, app| app.set_reduce_motion(false));
+        cx.simulate_mouse_move(option.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(Duration::from_millis(PICKER_TOOLTIP_SHOW_DELAY_MS));
+        cx.run_until_parked();
+
+        let tooltip = cx
+            .debug_bounds("artisan-native-model-selector-option-tooltip")
+            .expect("tooltip is mounted after the source delay");
+        assert!(
+            tooltip.left() >= option.right() + px(OPTION_TOOLTIP_GAP_PX)
+                || tooltip.right() <= option.left() - px(OPTION_TOOLTIP_GAP_PX),
+            "tooltip should be side-anchored with the source 8px gap"
+        );
+        assert!(
+            tooltip.size.height >= px(96.0),
+            "wrapped advisory/description must not be clipped to one line"
+        );
+        assert!(tooltip.size.width <= px(OPTION_TOOLTIP_WIDTH_PX));
+    }
+
+    #[gpui::test]
+    fn settings_exit_can_be_reopened_and_switched_before_completion(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| app.set_reduce_motion(true));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            NativeModelSelector::new(
+                NativeModelCatalog::offline().unwrap(),
+                None,
+                ThemeMode::Dark,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+            .unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            view.update(app, |picker, cx| {
+                picker.toggle_axis(NativePolicyAxis::Thinking, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| app.set_reduce_motion(false));
+        cx.update(|window, app| {
+            view.update(app, |picker, cx| {
+                picker.toggle_axis(NativePolicyAxis::Thinking, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let picker = view.read(app);
+            assert!(picker.state.open_axis.is_none());
+            assert_eq!(
+                picker.axis_menu_motion.borrow().phase(),
+                PickerMenuPhase::Closing
+            );
+            assert!(!picker.axis_is_interactive(NativePolicyAxis::Thinking));
+        });
+        assert!(
+            cx.debug_bounds("artisan-model-policy-options").is_some(),
+            "exit remains mounted"
+        );
+        cx.update(|window, app| {
+            view.update(app, |picker, cx| {
+                picker.toggle_axis(NativePolicyAxis::Thinking, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(
+                view.read(app)
+                    .state
+                    .is_axis_open(NativePolicyAxis::Thinking)
+            )
+        });
+        cx.executor().advance_clock(Duration::from_millis(110));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                view.read(app).axis_menu_motion.borrow().phase(),
+                PickerMenuPhase::Open
+            )
+        });
+        cx.update(|window, app| {
+            view.update(app, |picker, cx| {
+                picker.toggle_axis(NativePolicyAxis::Thinking, window, cx)
+            })
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            view.update(app, |picker, cx| {
+                picker.toggle_axis(NativePolicyAxis::Speed, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(110));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let picker = view.read(app);
+            assert!(picker.state.is_axis_open(NativePolicyAxis::Speed));
+            assert_eq!(
+                picker.axis_menu_motion.borrow().phase(),
+                PickerMenuPhase::Open
+            );
+        });
+        cx.update(|window, app| {
+            view.update(app, |picker, cx| {
+                picker.toggle_axis(NativePolicyAxis::Speed, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(110));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("artisan-model-policy-options").is_none(),
+            "finished exit unmounts"
+        );
+    }
+
+    #[gpui::test]
+    fn settings_scroll_only_when_the_real_options_exceed_the_viewport(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| app.set_reduce_motion(true));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            NativeModelSelector::new(
+                NativeModelCatalog::offline().unwrap(),
+                None,
+                ThemeMode::Dark,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+            .unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let thinking = cx.debug_bounds("artisan-model-policy-Thinking").unwrap();
+        cx.simulate_click(thinking.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(view.read(app).axis_menu_scroll.max_offset().y, px(0.0)));
+        cx.simulate_resize(gpui::size(px(1000.0), px(280.0)));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(
+                view.read(app).axis_menu_scroll.max_offset().y > px(0.0),
+                "short windows retain real scrolling"
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(view.read(app).axis_menu_scroll.max_offset().y, px(0.0)));
     }
 }

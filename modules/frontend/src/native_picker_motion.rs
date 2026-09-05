@@ -287,6 +287,19 @@ impl PickerMenuMotion {
         self.phase = PickerMenuPhase::Hidden;
         true
     }
+
+    /// Invalidates a retained surface when its parent is reopened after the
+    /// surface has already been removed from the visual tree.
+    pub(crate) fn hide(&mut self) {
+        self.phase = PickerMenuPhase::Hidden;
+        self.current_opacity = 0.0;
+        self.current_offset = 8.0;
+        self.from_opacity = 0.0;
+        self.from_offset = 8.0;
+        self.to_opacity = 0.0;
+        self.to_offset = 8.0;
+        self.generation = self.generation.wrapping_add(1);
+    }
 }
 
 /// Bounded target state for picker wheel smoothing.
