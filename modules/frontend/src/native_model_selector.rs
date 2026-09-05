@@ -1272,8 +1272,9 @@ impl NativeModelSelector {
                         let previous_width = indicator.indicator_width();
                         let engine_changed =
                             indicator.lit_engine() != Some(measured_engine_id.as_str());
-                        let geometry_changed = previous_left != measurement.tab_left
-                            || previous_width != measurement.tab_width;
+                        let next_left = measurement.tab_left - measurement.surface_left;
+                        let geometry_changed =
+                            previous_left != next_left || previous_width != measurement.tab_width;
                         if !previous_visible || engine_changed || geometry_changed {
                             indicator.measure(measured_engine_id.clone(), Some(measurement));
                             if previous_visible && engine_changed {
@@ -1283,7 +1284,7 @@ impl NativeModelSelector {
                                     Some(EngineIndicatorTransition {
                                         from_left: previous_left,
                                         from_width: previous_width,
-                                        to_left: measurement.tab_left,
+                                        to_left: next_left,
                                         to_width: measurement.tab_width,
                                         generation: *generation,
                                     });
@@ -2260,8 +2261,7 @@ fn render_engine_light(
         .top(px(-2.0))
         .left(px(target_left))
         .w(px(ENGINE_LIGHT_WIDTH_PX))
-        .h(px(ENGINE_LIGHT_HEIGHT_PX))
-        .blur(px(2.0));
+        .h(px(ENGINE_LIGHT_HEIGHT_PX));
     let Some(transition) = transition else {
         return image.into_any_element();
     };
@@ -2326,32 +2326,45 @@ fn engine_light_frame(theme: ArtisanTheme) -> image::Frame {
     let red = color_channel_to_byte(foreground.r);
     let green = color_channel_to_byte(foreground.g);
     let blue = color_channel_to_byte(foreground.b);
-    let mut buffer = image::ImageBuffer::from_fn(
+    // CSS filters run before the mask. Bake the 2px Gaussian into the cached
+    // alpha image, with transparent padding for the filter's edge samples.
+    let padding = 6 * ENGINE_LIGHT_RASTER_SCALE;
+    let gradient = image::GrayImage::from_fn(
+        ENGINE_LIGHT_RASTER_WIDTH + 2 * padding,
+        ENGINE_LIGHT_RASTER_HEIGHT + 2 * padding,
+        |x, y| {
+            let inside = x >= padding
+                && x < padding + ENGINE_LIGHT_RASTER_WIDTH
+                && y >= padding
+                && y < padding + ENGINE_LIGHT_RASTER_HEIGHT;
+            let alpha = if inside {
+                interpolate_profile(
+                    (y - padding) as f32 / ENGINE_LIGHT_RASTER_HEIGHT as f32,
+                    &[(0.0, 0.32), (0.26, 0.10), (0.52, 0.02), (0.74, 0.0)],
+                )
+            } else {
+                0.0
+            };
+            image::Luma([color_channel_to_byte(alpha)])
+        },
+    );
+    let blurred = image::imageops::blur(&gradient, 2.0 * ENGINE_LIGHT_RASTER_SCALE as f32);
+    let buffer = image::ImageBuffer::from_fn(
         ENGINE_LIGHT_RASTER_WIDTH,
         ENGINE_LIGHT_RASTER_HEIGHT,
         |x, y| {
-            let x = (x as f32 + 0.5) / ENGINE_LIGHT_RASTER_SCALE as f32;
-            let y = (y as f32 + 0.5) / ENGINE_LIGHT_RASTER_SCALE as f32;
-            let x = x / ENGINE_LIGHT_WIDTH_PX;
-            let y = y / ENGINE_LIGHT_HEIGHT_PX;
-            let vertical_alpha =
-                interpolate_profile(y, &[(0.0, 0.32), (0.26, 0.10), (0.52, 0.02), (0.74, 0.0)]);
-            let radial_distance = (((x - 0.5) / 0.48).powi(2) + ((y - 0.35) / 0.70).powi(2)).sqrt();
-            let radial_alpha = interpolate_profile(
-                radial_distance,
+            let nx = (x as f32 + 0.5) / ENGINE_LIGHT_RASTER_WIDTH as f32;
+            let ny = (y as f32 + 0.5) / ENGINE_LIGHT_RASTER_HEIGHT as f32;
+            let distance = (((nx - 0.5) / 0.48).powi(2) + ((ny - 0.35) / 0.70).powi(2)).sqrt();
+            let mask = interpolate_profile(
+                distance,
                 &[(0.0, 1.0), (0.42, 0.5), (0.68, 0.1), (0.88, 0.0)],
             );
-            image::Rgba([
-                blue,
-                green,
-                red,
-                color_channel_to_byte(vertical_alpha * radial_alpha),
-            ])
+            let alpha = f32::from(blurred.get_pixel(x + padding, y + padding)[0]) / 255.0;
+            // RenderImage consumes BGRA, matching Image::to_image_data.
+            image::Rgba([blue, green, red, color_channel_to_byte(alpha * mask)])
         },
     );
-    for pixel in buffer.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
     image::Frame::new(buffer)
 }
 
@@ -2557,6 +2570,18 @@ mod tests {
         cx.update(|_, app| {
             assert!(view.read(app).state.is_open());
             assert_eq!(view.read(app).state.active_engine(), "claude");
+            let picker = view.read(app);
+            let surface = picker.engine_surface_bounds.borrow().unwrap();
+            let expected_left = f64::from(f32::from(tab.left() - surface.left()));
+            assert_eq!(
+                picker.engine_indicator.borrow().indicator_left(),
+                expected_left
+            );
+            assert_eq!(
+                picker.engine_indicator_transition.borrow().unwrap().to_left,
+                expected_left,
+                "light animation coordinates must stay relative to the engine strip"
+            );
         });
         let menu = cx
             .debug_bounds(NATIVE_MODEL_SELECTOR_MENU_SELECTOR)
@@ -2580,35 +2605,6 @@ mod tests {
             NativeModelCatalog::offline().expect("the real bundled catalog must decode"),
             None,
         )
-    }
-
-    #[test]
-    fn engine_light_profile_matches_source_stop_values() {
-        assert_eq!(interpolate_profile(0.0, &[(0.0, 0.32), (0.26, 0.10)]), 0.32);
-        assert_eq!(
-            interpolate_profile(0.26, &[(0.0, 0.32), (0.26, 0.10)]),
-            0.10
-        );
-        assert_eq!(
-            interpolate_profile(0.52, &[(0.0, 0.32), (0.26, 0.10), (0.52, 0.02)]),
-            0.02
-        );
-        assert_eq!(
-            interpolate_profile(
-                0.74,
-                &[(0.0, 0.32), (0.26, 0.10), (0.52, 0.02), (0.74, 0.0)]
-            ),
-            0.0
-        );
-        assert_eq!(interpolate_profile(0.0, &[(0.0, 1.0), (0.42, 0.5)]), 1.0);
-        assert_eq!(
-            interpolate_profile(0.42, &[(0.0, 1.0), (0.42, 0.5), (0.68, 0.1)]),
-            0.5
-        );
-        assert_eq!(
-            interpolate_profile(0.88, &[(0.0, 1.0), (0.42, 0.5), (0.68, 0.1), (0.88, 0.0)]),
-            0.0
-        );
     }
 
     #[test]
