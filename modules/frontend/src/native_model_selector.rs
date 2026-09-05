@@ -2178,6 +2178,13 @@ impl NativeModelSelector {
                 .w_full()
                 .min_w(px(0.0))
                 .flex_shrink_0()
+                .id("artisan-model-policy-hover-surface")
+                .on_hover(cx.listener(|view: &mut Self, hovered: &bool, _, cx| {
+                    if !*hovered {
+                        view.axis_hover.borrow_mut().clear();
+                        cx.notify();
+                    }
+                }))
                 .on_scroll_wheel(cx.listener(Self::handle_axis_scroll_wheel))
                 .child(content_probe)
                 .child(render_picker_hover_pill(
@@ -2308,8 +2315,6 @@ impl NativeModelSelector {
                     view.axis_hover
                         .borrow_mut()
                         .set_active(hover_option_id.clone());
-                } else if view.axis_hover.borrow().active_id() == Some(hover_option_id.as_str()) {
-                    view.axis_hover.borrow_mut().clear();
                 }
                 cx.notify();
             }));
@@ -3172,6 +3177,53 @@ mod tests {
             assert_eq!(f32::from(picker.menu_scroll.offset().y), expected_pixel);
             assert!(!picker.model_scroll.active());
         });
+    }
+    #[gpui::test]
+    fn option_hover_slides_across_rows_and_clears_on_surface_departure(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| app.set_reduce_motion(true));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            NativeModelSelector::new(
+                NativeModelCatalog::offline().unwrap(),
+                None,
+                ThemeMode::Dark,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+            .unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let thinking = cx.debug_bounds("artisan-model-policy-Thinking").unwrap();
+        cx.simulate_click(thinking.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| app.set_reduce_motion(false));
+        let light = cx
+            .debug_bounds("artisan-model-policy-option-Thinking-light")
+            .unwrap();
+        let medium = cx
+            .debug_bounds("artisan-model-policy-option-Thinking-medium")
+            .unwrap();
+        cx.simulate_mouse_move(light.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(medium.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let picker = view.read(app);
+            let hover = picker.axis_hover.borrow();
+            assert_eq!(hover.active_id(), Some("medium"));
+            assert!(
+                hover.transition().is_some(),
+                "sibling row departure must not reset the slide"
+            );
+        });
+        cx.simulate_mouse_move(point(px(950.0), px(750.0)), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(!view.read(app).axis_hover.borrow().visible()));
     }
     fn state_with_offline_catalog() -> NativeModelSelectorState {
         NativeModelSelectorState::new(
