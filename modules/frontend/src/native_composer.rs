@@ -2428,7 +2428,7 @@ impl Render for NativeComposer {
             .p(px(8.0))
             .rounded(px(18.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-            .bg(glass_foreground_base(desktop_theme))
+            .bg(glass_foreground_base(theme))
             .shadow(glass_card_shadows())
             .relative()
             .child(glass_material_layer(GlassStrength::Quiet, px(18.0)))

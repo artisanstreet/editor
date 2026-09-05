@@ -1041,7 +1041,7 @@ impl NativeModelSelector {
         let current = f32::from(offset.y);
         let maximum = f32::from(handle.max_offset().y).max(0.0);
 
-        if event.delta.precise() {
+        if event.delta.precise() || cx.reduce_motion() {
             let next = (current + delta).clamp(-maximum, 0.0);
             handle.set_offset(point(offset.x, px(next)));
             if model_list {
