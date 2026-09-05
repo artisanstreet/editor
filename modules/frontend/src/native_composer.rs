@@ -37,8 +37,8 @@ use crate::composer_draft_session_policy::{
 };
 use crate::native_composer_controls::NativeComposerControls;
 use crate::native_composer_material::{
-    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_highlight_layer,
+    glass_material_layer,
 };
 use crate::native_model_selector::NativeModelSelector;
 
@@ -2428,7 +2428,6 @@ impl Render for NativeComposer {
             .p(px(8.0))
             .rounded(px(18.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-            .bg(glass_foreground_base(theme))
             .shadow(glass_card_shadows())
             .relative()
             .child(glass_material_layer(GlassStrength::Quiet, px(18.0)))

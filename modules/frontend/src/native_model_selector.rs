@@ -32,8 +32,8 @@ use crate::engine_section_indicator_policy::{
     EngineSectionIndicatorMeasurement, EngineSectionIndicatorPolicy,
 };
 use crate::native_composer_material::{
-    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
+    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_highlight_layer,
+    glass_material_layer,
 };
 use crate::native_model_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeModelView,
@@ -55,6 +55,8 @@ const MENU_MAX_HEIGHT_PX: f32 = 320.0;
 const MENU_VIEWPORT_INSET_X_PX: f32 = 32.0;
 const MENU_VIEWPORT_INSET_Y_PX: f32 = 24.0;
 const MENU_GAP_PX: f32 = 8.0;
+const DROPDOWN_GAP_PX: f32 = 4.0;
+const DROPDOWN_MIN_WIDTH_PX: f32 = 144.0;
 const MODEL_PANEL_HEIGHT_PX: f32 = 192.0;
 const MODEL_PREVIEW_WIDTH_PX: f32 = 224.0;
 const MODEL_ROW_HEIGHT_PX: f32 = 48.0;
@@ -1078,6 +1080,7 @@ impl NativeModelSelector {
             .px(px(8.0))
             .rounded(px(10.0))
             .hover(move |style| style.bg(hover_fill_gradient(self.theme)))
+            .focus_visible(move |style| style.shadow(source_focus_ring(self.theme)))
             .text_color(foreground);
         trigger = trigger.child(
             icon(IconStyle::resolve(
@@ -1162,7 +1165,6 @@ impl NativeModelSelector {
             .gap(px(8.0))
             .rounded(px(22.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
-            .bg(glass_foreground_base(self.theme))
             .text_color(self.theme.colors.foreground.to_paint())
             .shadow(source_menu_shadows(self.theme));
         panel = panel.child(glass_material_layer(GlassStrength::Strong, px(22.0)));
@@ -1176,7 +1178,7 @@ impl NativeModelSelector {
                 .flex_shrink_0()
                 .gap(px(8.0))
                 .child(self.render_model_list(cx))
-                .child(self.render_preview(cx)),
+                .child(self.render_preview(viewport, cx)),
         );
         Some(
             anchored()
@@ -1586,7 +1588,7 @@ impl NativeModelSelector {
         row
     }
 
-    fn render_preview(&self, cx: &Context<Self>) -> Stateful<Div> {
+    fn render_preview(&self, viewport: Size<Pixels>, cx: &Context<Self>) -> Stateful<Div> {
         let mut preview = div()
             .id("artisan-native-model-selector-preview")
             .flex()
@@ -1650,12 +1652,17 @@ impl NativeModelSelector {
         }
         preview = preview.child(summary);
         if self.state.preview_policy().is_some() {
-            preview = preview.child(self.render_policy_controls(&view, cx));
+            preview = preview.child(self.render_policy_controls(&view, viewport, cx));
         }
         preview
     }
 
-    fn render_policy_controls(&self, model: &NativeModelView, cx: &Context<Self>) -> Div {
+    fn render_policy_controls(
+        &self,
+        model: &NativeModelView,
+        viewport: Size<Pixels>,
+        cx: &Context<Self>,
+    ) -> Div {
         let mut controls = div().flex().flex_col().gap(px(6.0));
         for (axis, label) in [
             (NativePolicyAxis::Variant, "Variant"),
@@ -1684,6 +1691,7 @@ impl NativeModelSelector {
                 label,
                 value,
                 self.state.model_definition_disabled(&model.id),
+                viewport,
                 cx,
             ));
         }
@@ -1696,6 +1704,7 @@ impl NativeModelSelector {
         label: &str,
         value: String,
         disabled: bool,
+        viewport: Size<Pixels>,
         cx: &Context<Self>,
     ) -> Div {
         let axis_bounds = Rc::clone(&self.axis_trigger_bounds);
@@ -1709,6 +1718,7 @@ impl NativeModelSelector {
         .top_0()
         .left_0()
         .size_full();
+        let axis_open = self.state.is_axis_open(axis);
         let mut control = div()
             .relative()
             .flex()
@@ -1728,7 +1738,20 @@ impl NativeModelSelector {
             .rounded(px(8.0))
             .bg(source_control_gradient(self.theme))
             .shadow(source_card_shadows(self.theme))
+            .focus_visible(move |style| {
+                let mut shadows = source_card_shadows(self.theme);
+                shadows.extend(source_focus_ring(self.theme));
+                style
+                    .border_1()
+                    .border_color(self.theme.colors.ring.to_paint())
+                    .shadow(shadows)
+            })
             .when(disabled, |trigger| trigger.opacity(0.58))
+            .when(axis_open, |trigger| {
+                let mut shadows = source_card_shadows(self.theme);
+                shadows.extend(source_focus_ring(self.theme));
+                trigger.shadow(shadows)
+            })
             .child(
                 icon(IconStyle::resolve(
                     self.theme,
@@ -1765,12 +1788,8 @@ impl NativeModelSelector {
                     view.toggle_axis(axis, cx);
                 }));
         }
-        if self.state.is_axis_open(axis) {
-            trigger = trigger.bg(hover_fill_gradient(self.theme));
-        }
         control = control.child(trigger);
-        if self.state.is_axis_open(axis)
-            && let Some(trigger_bounds) = self.axis_trigger_bounds.borrow()[axis as usize]
+        if axis_open && let Some(trigger_bounds) = self.axis_trigger_bounds.borrow()[axis as usize]
         {
             let popup_bounds = Rc::clone(&self.axis_menu_bounds);
             let popup_probe = canvas(
@@ -1792,16 +1811,15 @@ impl NativeModelSelector {
                 .occlude()
                 .child(popup_probe)
                 .w(trigger_bounds.size.width)
+                .min_w(px(DROPDOWN_MIN_WIDTH_PX))
                 .flex()
                 .flex_col()
-                .max_h(px(220.0))
+                .max_h(dropdown_max_height_for_viewport(viewport, trigger_bounds))
                 .overflow_y_scroll()
                 .scrollbar_width(px(0.0))
                 .p(px(4.0))
-                .gap(px(2.0))
                 .rounded(px(18.0))
                 .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
-                .bg(glass_foreground_base(self.theme))
                 .shadow(glass_card_shadows());
             options = options.child(glass_material_layer(GlassStrength::Strong, px(18.0)));
             options = options.child(glass_highlight_layer(GlassStrength::Strong, px(18.0)));
@@ -1811,7 +1829,7 @@ impl NativeModelSelector {
                 if axis == NativePolicyAxis::Thinking && group != current_thinking_group {
                     if current_thinking_group.is_some() {
                         options = options.child(
-                            div().mx(px(8.0)).my(px(3.0)).h(px(1.0)).bg(self
+                            div().mx(px(8.0)).my(px(4.0)).h(px(1.0)).bg(self
                                 .theme
                                 .colors
                                 .border
@@ -1822,9 +1840,9 @@ impl NativeModelSelector {
                     if let Some(group) = group.as_deref() {
                         options = options.child(
                             div()
-                                .px(px(9.0))
+                                .px(px(12.0))
                                 .pt(px(6.0))
-                                .pb(px(3.0))
+                                .pb(px(4.0))
                                 .text_size(px(10.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(
@@ -1844,11 +1862,9 @@ impl NativeModelSelector {
             control = control.child(
                 deferred(
                     anchored()
-                        .anchor(Anchor::TopLeft)
-                        .position(point(
-                            trigger_bounds.left(),
-                            trigger_bounds.bottom() + px(4.0),
-                        ))
+                        .anchor(Anchor::BottomLeft)
+                        .position(trigger_bounds.origin)
+                        .offset(point(px(0.0), px(-DROPDOWN_GAP_PX)))
                         .child(options),
                 )
                 .with_priority(2),
@@ -1882,33 +1898,31 @@ impl NativeModelSelector {
             .debug_selector(move || option_selector.clone())
             .role(gpui::Role::Button)
             .aria_label(format!("{axis:?}: {option_label}"))
+            .relative()
             .flex()
-            .flex_col()
-            .gap(px(1.0))
-            .p(px(6.0))
+            .flex_row()
+            .items_center()
+            .w_full()
+            .min_w(px(0.0))
+            .gap(px(10.0))
+            .pl(px(12.0))
+            .pr(px(32.0))
+            .py(px(8.0))
             .rounded(px(14.0))
-            .text_size(px(11.0))
+            .text_size(px(14.0))
+            .line_height(px(20.0))
             .hover({
                 move |row| {
                     row.bg(hover_fill_gradient(self.theme))
                         .shadow(hover_shadow.clone())
                 }
             })
-            .when(
-                highlighted || (option.selected && self.highlighted_axis_option.is_none()),
-                move |row| {
-                    row.bg(hover_fill_gradient(self.theme))
-                        .shadow(selected_shadow.clone())
-                },
-            )
+            .when(highlighted, move |row| {
+                row.bg(hover_fill_gradient(self.theme))
+                    .shadow(selected_shadow.clone())
+            })
             .when(option.disabled, |row| row.opacity(0.5))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(option_label),
-            );
+            .child(div().flex_1().min_w(px(0.0)).truncate().child(option_label));
         if let Some(tooltip_description) = tooltip_description {
             let tooltip_advisory = option_advisory.clone();
             let tooltip_copy = option_description.clone();
@@ -1935,16 +1949,24 @@ impl NativeModelSelector {
         }
         if option.selected {
             row = row.child(
-                icon(IconStyle::resolve(
-                    self.theme,
-                    AssetId::TABLER_CHECK,
-                    IconSize::Compact,
-                    IconTint::Muted,
-                ))
-                .size(px(12.0))
-                .absolute()
-                .right(px(5.0))
-                .top(px(5.0)),
+                div()
+                    .absolute()
+                    .right(px(8.0))
+                    .top_0()
+                    .bottom(px(0.0))
+                    .w(px(14.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        icon(IconStyle::resolve(
+                            self.theme,
+                            AssetId::TABLER_CHECK,
+                            IconSize::Compact,
+                            IconTint::Muted,
+                        ))
+                        .size(px(14.0)),
+                    ),
             );
         }
         row
@@ -2140,7 +2162,6 @@ impl Render for NativeModelSelectorOptionTooltip {
             .py(px(8.0))
             .rounded(px(18.0))
             .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
-            .bg(glass_foreground_base(self.theme))
             .shadow(glass_card_shadows())
             .text_size(px(12.0))
             .line_height(px(16.0))
@@ -2215,6 +2236,16 @@ fn menu_max_height_for_viewport(viewport: Size<Pixels>) -> Pixels {
     px(MENU_MAX_HEIGHT_PX.min(available.max(0.0)))
 }
 
+fn dropdown_max_height_for_viewport(
+    viewport: Size<Pixels>,
+    trigger_bounds: Bounds<Pixels>,
+) -> Pixels {
+    let viewport_height = f32::from(viewport.height);
+    let available_above = f32::from(trigger_bounds.top()) - DROPDOWN_GAP_PX;
+    let available_below = viewport_height - f32::from(trigger_bounds.bottom()) - DROPDOWN_GAP_PX;
+    px(available_above.max(available_below).max(0.0))
+}
+
 fn source_control_gradient(theme: ArtisanTheme) -> gpui::Background {
     let (top, bottom) = match theme.mode {
         ThemeMode::Light => (SurfaceStep::S225, SurfaceStep::S200),
@@ -2238,6 +2269,16 @@ fn source_hover_highlight_shadow(theme: ArtisanTheme) -> Vec<gpui::BoxShadow> {
         blur_radius: px(0.0),
         spread_radius: px(0.5),
         inset: true,
+    }]
+}
+
+fn source_focus_ring(theme: ArtisanTheme) -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow {
+        color: theme.interaction.focus_ring_color.to_paint(),
+        offset: point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: theme.interaction.focus_ring_width,
+        inset: false,
     }]
 }
 
@@ -2425,7 +2466,7 @@ fn format_context_tokens(tokens: u64) -> String {
 
 fn humanize_variant(value: &str) -> String {
     match value {
-        "xhigh" => "X-High".to_owned(),
+        "xhigh" => "Extra High".to_owned(),
         "minimal" => "Minimal".to_owned(),
         "medium" => "Medium".to_owned(),
         "high" => "High".to_owned(),
@@ -2688,6 +2729,12 @@ mod tests {
             state.choose_option(NativePolicyAxis::Variant, "not-in-the-catalog"),
             Err(NativePolicyValidationError::UnknownModel(model_id)) if model_id == "not-in-the-catalog"
         ));
+    }
+
+    #[test]
+    fn xhigh_thinking_value_uses_source_label() {
+        let wire_id = "xhigh";
+        assert_eq!(humanize_variant(wire_id), "Extra High");
     }
 
     #[test]

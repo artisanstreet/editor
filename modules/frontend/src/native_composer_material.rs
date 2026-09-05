@@ -9,7 +9,7 @@
 
 use artisan_ui::theme::{ArtisanTheme, Oklch, SurfaceStep};
 use gpui::{
-    Background, BoxShadow, Div, Hsla, Pixels, Styled as _, div, linear_color_stop, linear_gradient,
+    Background, BoxShadow, Div, Pixels, Styled as _, div, linear_color_stop, linear_gradient,
     point, px,
 };
 
@@ -38,18 +38,6 @@ pub(crate) fn glass_blur_radius(strength: GlassStrength) -> Pixels {
         GlassStrength::Quiet => GLASS_QUIET_BLUR_RADIUS_PX,
         GlassStrength::Strong => GLASS_STRONG_BLUR_RADIUS_PX,
     })
-}
-
-/// Native-only foreground lift requested for the dark canvas.
-///
-/// Electron's shader-glass material does not add this base layer. Native uses
-/// the theme foreground at 10% opacity underneath the translucent source
-/// gradient so dark details remain legible while the backdrop stays visible.
-/// This is deliberately local to glass surfaces and does not alter the global
-/// theme palette.
-#[must_use]
-pub(crate) fn glass_foreground_base(theme: ArtisanTheme) -> Hsla {
-    theme.colors.foreground.with_alpha(0.10).to_paint()
 }
 
 /// Builds the source `shader-glass-material` diagonal face.
