@@ -1,13 +1,4 @@
-//! Startup registration of the bundled legacy typefaces.
-//!
-//! [`artisan_assets::fonts`] embeds the four legacy `@font-face` sources as
-//! compile-time bytes; this module is the one call that feeds them to the
-//! platform text system. Registration must happen before any window paints
-//! text in a bundled family, i.e. first inside
-//! `Application::new().run(|cx| …)` in `native_application.rs` (a forbidden
-//! path for this wave, so the orchestrator wires the call; see the report).
-//! Until then every `.font_family("Artisan Neo")` refinement resolves
-//! through GPUI's fallback stack instead of the vendored faces.
+//! Register the two bundled Spline variable fonts before any window paints.
 
 use gpui::{App, SharedString};
 

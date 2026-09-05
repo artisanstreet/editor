@@ -244,7 +244,12 @@ pub fn desktop_shell(
         .flex_col()
         .bg(theme.workspace)
         .text_color(theme.foreground)
-        .font_family("Segoe UI")
+        .font_family(
+            ArtisanTheme::for_mode(ThemeMode::Dark)
+                .typography
+                .sans
+                .family,
+        )
         .text_size(px(14.0))
         .debug_selector(|| DESKTOP_ROOT_SELECTOR.to_string())
         .child(titlebar)

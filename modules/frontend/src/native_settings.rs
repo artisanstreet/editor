@@ -822,10 +822,10 @@ pub const SETTINGS_NAV_CONTENT_GAP_PX: f32 = 56.0;
 pub const SETTINGS_UNKNOWN_ENGINE_TITLE: &str = "Unknown engine";
 
 /// Default text font: `typography.ts` `default_typography_preferences.text`.
-pub const APPEARANCE_DEFAULT_TEXT_FONT: &str = "Artisan Neo";
+pub const APPEARANCE_DEFAULT_TEXT_FONT: &str = "Spline Sans";
 
 /// Default code font: `typography.ts` `default_typography_preferences.code`.
-pub const APPEARANCE_DEFAULT_CODE_FONT: &str = "JetBrains Mono";
+pub const APPEARANCE_DEFAULT_CODE_FONT: &str = "Spline Sans Mono";
 
 /// Default desktop app icon value (`default_desktop_app_icon`).
 pub const APPEARANCE_APP_ICON_DEFAULT: &str = "plastic-jaw-shading";
@@ -2786,8 +2786,8 @@ mod settings_screen_tests {
         assert_eq!(AppearancePathSeparator::Backslash.character(), "\\");
         assert_eq!(AppearancePathSeparator::ForwardSlash.character(), "/");
         assert_eq!(AppearancePathSeparator::Backslash.label(), "Backslash");
-        assert_eq!(APPEARANCE_DEFAULT_TEXT_FONT, "Artisan Neo");
-        assert_eq!(APPEARANCE_DEFAULT_CODE_FONT, "JetBrains Mono");
+        assert_eq!(APPEARANCE_DEFAULT_TEXT_FONT, "Spline Sans");
+        assert_eq!(APPEARANCE_DEFAULT_CODE_FONT, "Spline Sans Mono");
         assert_eq!(AGENT_NAME_DATASET_DEFAULT, "norwegian");
         assert_eq!(AGENT_NAME_DATASETS.len(), 2);
         assert_eq!(ProseWidth::Balanced.as_str(), "balanced");

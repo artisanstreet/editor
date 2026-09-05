@@ -381,20 +381,14 @@ fn typography_spacing_density_and_interaction_pin_their_sources() {
 
     let theme = ArtisanTheme::for_mode(ThemeMode::Light);
     let t = &theme.typography;
-    assert_eq!(t.sans.family, "Artisan Neo");
-    assert_eq!(t.sans.weights, WeightRange { min: 100, max: 900 });
-    assert_eq!(t.mono.family, "JetBrains Mono");
-    assert_eq!(t.mono.weights, WeightRange { min: 100, max: 800 });
-    assert_eq!(t.logo.family, "Cal Sans");
-    assert_eq!(
-        t.logo.weights,
-        WeightRange {
-            min: 100,
-            max: 1000
-        }
-    );
-    assert_eq!(t.wordmark.family, "Sigurd Variable");
-    assert_eq!(t.wordmark.weights, WeightRange { min: 300, max: 900 });
+    assert_eq!(t.sans.family, "Spline Sans");
+    assert_eq!(t.sans.weights, WeightRange { min: 300, max: 700 });
+    assert_eq!(t.mono.family, "Spline Sans Mono");
+    assert_eq!(t.mono.weights, WeightRange { min: 300, max: 700 });
+    assert_eq!(t.logo.family, "Spline Sans");
+    assert_eq!(t.logo.weights, WeightRange { min: 300, max: 700 });
+    assert_eq!(t.wordmark.family, "Spline Sans");
+    assert_eq!(t.wordmark.weights, WeightRange { min: 300, max: 700 });
     assert_eq!(
         (
             f32::from(t.control_text),

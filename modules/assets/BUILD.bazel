@@ -134,17 +134,13 @@ LICENSE_DOCS = [
 # //tests/assets bijection pins those two lists at exactly 104/9 entries, and
 # fonts are binary TrueType, not SVG catalog rows.
 FONT_FILES = [
-    "fonts/artisan-neo-variable.ttf",
-    "fonts/cal-sans-variable.ttf",
-    "fonts/jetbrains-mono-variable.ttf",
-    "fonts/sigurd-artisan.ttf",
+    "fonts/spline-sans-variable.ttf",
+    "fonts/spline-sans-mono-variable.ttf",
 ]
 
 FONT_LICENSES = [
-    "licenses/artisan-neo-OFL.txt",
-    "licenses/cal-sans-OFL.txt",
-    "licenses/jetbrains-mono-OFL.txt",
-    "licenses/sigurd-artisan-NOTES.md",
+    "licenses/spline-sans-OFL.txt",
+    "licenses/spline-sans-mono-OFL.txt",
 ]
 
 rust_library(

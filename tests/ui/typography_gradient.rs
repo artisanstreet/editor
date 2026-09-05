@@ -7,7 +7,7 @@
 //!
 //! What is proven here, and what is not: byte-identity pins
 //! (`artisan_assets::fonts` lengths, TrueType sfnt magic) prove the exact
-//! legacy bytes ship — TrueType throughout, because DirectWrite's in-memory
+//! bundled bytes ship — TrueType throughout, because DirectWrite's in-memory
 //! loader rejects WOFF2 on Windows (`DWRITE_E_FILEFORMAT`, observed at
 //! startup as `0x88985000`); the registration test proves those bytes flow
 //! through `TextSystem::add_fonts` without error on the test platform (whose
@@ -59,13 +59,13 @@ impl Render for GradientSurfaceProbe {
 
 #[test]
 fn bundled_catalog_matches_the_theme_declarations_on_both_sides() {
-    assert_eq!(bundled_fonts::ALL.len(), 4);
+    assert_eq!(bundled_fonts::ALL.len(), 2);
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
         let typography = ArtisanTheme::for_mode(mode).typography;
         // Role aliases resolve to the declared faces.
-        assert_eq!(typography.display().family, "Artisan Neo");
-        assert_eq!(typography.body().family, "Artisan Neo");
-        assert_eq!(typography.code().family, "JetBrains Mono");
+        assert_eq!(typography.display().family, "Spline Sans");
+        assert_eq!(typography.body().family, "Spline Sans");
+        assert_eq!(typography.code().family, "Spline Sans Mono");
         // Every theme face ships in the catalog with the same weight range.
         for role in [
             typography.sans,
@@ -84,7 +84,7 @@ fn bundled_catalog_matches_the_theme_declarations_on_both_sides() {
             );
         }
     }
-    // The catalog carries exactly the four `@font-face` ranges, verbatim.
+    // The catalog carries the two verified variable-weight ranges.
     let ranges: Vec<((u16, u16), &str)> = bundled_fonts::ALL
         .iter()
         .map(|font| (font.weights, font.family))
@@ -92,10 +92,8 @@ fn bundled_catalog_matches_the_theme_declarations_on_both_sides() {
     assert_eq!(
         ranges,
         vec![
-            ((100, 900), "Artisan Neo"),
-            ((100, 1000), "Cal Sans"),
-            ((100, 800), "JetBrains Mono"),
-            ((300, 900), "Sigurd Variable"),
+            ((300, 700), "Spline Sans"),
+            ((300, 700), "Spline Sans Mono")
         ]
     );
 }
@@ -104,24 +102,18 @@ fn bundled_catalog_matches_the_theme_declarations_on_both_sides() {
 fn theme_roles_bind_gpui_fonts_with_family_and_weight() {
     let typography = ArtisanTheme::for_mode(ThemeMode::Dark).typography;
     let medium = typography.body().font(FontWeight::MEDIUM);
-    assert_eq!(medium.family.as_ref(), "Artisan Neo");
+    assert_eq!(medium.family.as_ref(), "Spline Sans");
     assert_eq!(medium.weight, FontWeight::MEDIUM);
     let mono = typography.code().font(FontWeight::NORMAL);
-    assert_eq!(mono.family.as_ref(), "JetBrains Mono");
+    assert_eq!(mono.family.as_ref(), "Spline Sans Mono");
     assert_eq!(mono.weight, FontWeight::NORMAL);
     let display = typography.display().font(FontWeight::BOLD);
-    assert_eq!(display.family.as_ref(), "Artisan Neo");
+    assert_eq!(display.family.as_ref(), "Spline Sans");
     assert_eq!(display.weight, FontWeight::BOLD);
-    assert_eq!(
-        typography.logo.weights,
-        WeightRange {
-            min: 100,
-            max: 1000
-        }
-    );
+    assert_eq!(typography.logo.weights, WeightRange { min: 300, max: 700 });
     assert_eq!(
         typography.wordmark.weights,
-        WeightRange { min: 300, max: 900 }
+        WeightRange { min: 300, max: 700 }
     );
 }
 

@@ -1,46 +1,28 @@
-//! Bundled legacy typefaces, embedded as compile-time bytes.
+//! Bundled Spline Sans and Spline Sans Mono variable TrueType fonts.
 //!
-//! The four `@font-face` families the legacy editor declares
-//! (`modules/frontend/src/lib/styles/fonts.css:7–37`); provenance, digests,
-//! and the exclusion rationale for the remaining legacy font files live in
-//! `fonts/FONTS.md`. Consumers never touch the files on disk: [`ALL`]
-//! carries the embedded bytes, and [`bundled_fonts`] shapes them for
-//! `gpui::TextSystem::add_fonts` (DirectWrite in-memory references on
-//! Windows). Registration itself belongs at app startup — see
-//! `artisan_ui::fonts::register_bundled_fonts` — because this crate is
-//! dependency-free by design and must not name GPUI.
-//!
-//! Windows format note: DirectWrite's in-memory loader rejects WOFF2
-//! (`DWRITE_E_FILEFORMAT`), so the vendored bytes are TrueType (the legacy
-//! TTF where the tree ships one, otherwise a lossless WOFF2 decompression —
-//! see `fonts/FONTS.md`). Family names and weight ranges here must stay
-//! identical to the `artisan_ui::theme::TypographyTokens` roles; the
-//! `typography_gradient` suite pins both sides.
+//! Files are embedded at compile time and registered once through
+//! `artisan_ui::fonts::register_bundled_fonts`. Family names and weight ranges
+//! match the fonts' internal name/fvar tables. See `fonts/FONTS.md` for
+//! upstream sources, licenses and SHA-256 hashes. TrueType is required by
+//! DirectWrite's in-memory loader; WOFF2 is not supported there.
 
 use core::fmt;
 use std::borrow::Cow;
 
-/// One vendored variable typeface: its legacy identity plus embedded bytes.
+/// One vendored variable typeface: its family identity plus embedded bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct BundledFont {
     /// File name under `modules/assets/fonts/`.
     pub file_name: &'static str,
-    /// Family name exactly as declared in the legacy `@font-face` block, and
-    /// therefore the name the theme roles request (e.g. `"Artisan Neo"`).
-    /// Three faces resolve under this name in DirectWrite; the Sigurd file's
-    /// internal name table reads `"Sigurd Variable Light"` (see
-    /// `fonts/FONTS.md`), so that face registers but the `"Sigurd Variable"`
-    /// role falls back until a follow-up aligns the role string.
+    /// Internal family name used by the native text system.
     pub family: &'static str,
-    /// Inclusive variable-weight range from the `@font-face` declaration.
+    /// Inclusive variable-weight range verified from the font’s fvar table.
     pub weights: (u16, u16),
     /// Path of the license or provenance note under `modules/assets/`.
     pub license_path: &'static str,
     /// Embedded license or provenance note contents.
     pub license_text: &'static str,
-    /// Embedded font bytes: the legacy source where the tree ships TrueType,
-    /// otherwise the lossless WOFF2 decompression of that source (provenance
-    /// per file in `fonts/FONTS.md`).
+    /// Unmodified upstream TrueType bytes (provenance in `fonts/FONTS.md`).
     pub bytes: &'static [u8],
 }
 
@@ -65,36 +47,20 @@ impl std::error::Error for UnknownFont {}
 /// Every bundled typeface, ordered by family name so lookups binary search.
 pub const ALL: &[BundledFont] = &[
     BundledFont {
-        file_name: "artisan-neo-variable.ttf",
-        family: "Artisan Neo",
-        weights: (100, 900),
-        license_path: "licenses/artisan-neo-OFL.txt",
-        license_text: include_str!("../licenses/artisan-neo-OFL.txt"),
-        bytes: include_bytes!("../fonts/artisan-neo-variable.ttf"),
+        file_name: "spline-sans-variable.ttf",
+        family: "Spline Sans",
+        weights: (300, 700),
+        license_path: "licenses/spline-sans-OFL.txt",
+        license_text: include_str!("../licenses/spline-sans-OFL.txt"),
+        bytes: include_bytes!("../fonts/spline-sans-variable.ttf"),
     },
     BundledFont {
-        file_name: "cal-sans-variable.ttf",
-        family: "Cal Sans",
-        weights: (100, 1000),
-        license_path: "licenses/cal-sans-OFL.txt",
-        license_text: include_str!("../licenses/cal-sans-OFL.txt"),
-        bytes: include_bytes!("../fonts/cal-sans-variable.ttf"),
-    },
-    BundledFont {
-        file_name: "jetbrains-mono-variable.ttf",
-        family: "JetBrains Mono",
-        weights: (100, 800),
-        license_path: "licenses/jetbrains-mono-OFL.txt",
-        license_text: include_str!("../licenses/jetbrains-mono-OFL.txt"),
-        bytes: include_bytes!("../fonts/jetbrains-mono-variable.ttf"),
-    },
-    BundledFont {
-        file_name: "sigurd-artisan.ttf",
-        family: "Sigurd Variable",
-        weights: (300, 900),
-        license_path: "licenses/sigurd-artisan-NOTES.md",
-        license_text: include_str!("../licenses/sigurd-artisan-NOTES.md"),
-        bytes: include_bytes!("../fonts/sigurd-artisan.ttf"),
+        file_name: "spline-sans-mono-variable.ttf",
+        family: "Spline Sans Mono",
+        weights: (300, 700),
+        license_path: "licenses/spline-sans-mono-OFL.txt",
+        license_text: include_str!("../licenses/spline-sans-mono-OFL.txt"),
+        bytes: include_bytes!("../fonts/spline-sans-mono-variable.ttf"),
     },
 ];
 
@@ -107,7 +73,7 @@ pub fn bundled_fonts() -> Vec<Cow<'static, [u8]>> {
     ALL.iter().map(|font| Cow::Borrowed(font.bytes)).collect()
 }
 
-/// Resolves a family name (exactly as declared, e.g. `"Artisan Neo"`) to its
+/// Resolves a family name (exactly as declared, e.g. `"Spline Sans"`) to its
 /// bundled typeface.
 ///
 /// # Errors
@@ -129,25 +95,18 @@ mod tests {
     /// Expected `(file name, byte length)` pins: any truncation or
     /// re-encode of a vendored binary fails here before it can reach a
     /// renderer and silently fall back to a system face.
-    const EXPECTED_LENGTHS: [(&str, usize); 4] = [
-        ("artisan-neo-variable.ttf", 879_868),
-        ("cal-sans-variable.ttf", 773_004),
-        ("jetbrains-mono-variable.ttf", 299_920),
-        ("sigurd-artisan.ttf", 35_216),
+    const EXPECTED_LENGTHS: [(&str, usize); 2] = [
+        ("spline-sans-variable.ttf", 146_896),
+        ("spline-sans-mono-variable.ttf", 118_744),
     ];
 
     #[test]
-    fn catalog_carries_exactly_the_four_declared_faces() {
-        assert_eq!(ALL.len(), 4, "four legacy @font-face families");
+    fn catalog_carries_exactly_the_two_declared_faces() {
+        assert_eq!(ALL.len(), 2, "two Spline families");
         let families: Vec<&str> = ALL.iter().map(|font| font.family).collect();
         assert_eq!(
             families,
-            vec![
-                "Artisan Neo",
-                "Cal Sans",
-                "JetBrains Mono",
-                "Sigurd Variable"
-            ],
+            vec!["Spline Sans", "Spline Sans Mono"],
             "catalog order is by family name for binary search"
         );
         for (font, (file_name, length)) in ALL.iter().zip(EXPECTED_LENGTHS) {

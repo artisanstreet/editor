@@ -100,7 +100,7 @@ fn menu_geometry_pins_exact_audited_picker_values() {
             "the arbitrary-size utility sets no leading, so the 20 px \
              `text-sm` leading is inherited"
         );
-        assert_eq!(style.supporting_family, "JetBrains Mono");
+        assert_eq!(style.supporting_family, "Spline Sans Mono");
         assert_eq!(style.supporting_family, theme.typography.mono.family);
     }
 }
@@ -136,7 +136,7 @@ fn rail_geometry_pins_exact_audited_thread_values() {
         assert_eq!(style.supporting_size, px(LEGACY_XS_PX));
         assert_eq!(style.supporting_size, theme.typography.label_text);
         assert_eq!(style.supporting_line_height, px(LEGACY_XS_LEADING_PX));
-        assert_eq!(style.supporting_family, "Artisan Neo");
+        assert_eq!(style.supporting_family, "Spline Sans");
         assert_eq!(style.supporting_family, theme.typography.sans.family);
         // The recent rows' trailing time shares the `text-xs` role.
         assert_eq!(style.caption_size, px(LEGACY_XS_PX));

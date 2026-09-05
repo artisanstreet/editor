@@ -444,15 +444,15 @@ pub struct SidebarColors {
 /// `global.css:48–54`).
 #[derive(Clone, Copy, Debug)]
 pub struct TypographyTokens {
-    /// `--font-sans`: `"Artisan Neo"`, weights 100–900.
+    /// `--font-sans`: `"Spline Sans"`, weights 300–700.
     pub sans: FontRole,
-    /// `--font-mono`: `"JetBrains Mono"`, weights 100–800.
+    /// `--font-mono`: `"Spline Sans Mono"`, weights 300–700.
     pub mono: FontRole,
-    /// `--font-heading`: `"Artisan Neo"` again (`fonts.css:40`).
+    /// `--font-heading`: `"Spline Sans"` for headings.
     pub heading: FontRole,
-    /// `--font-logo`: `"Cal Sans"`, weights 100–1000.
+    /// `--font-logo`: `"Spline Sans"`, weights 300–700.
     pub logo: FontRole,
-    /// The wordmark face `"Sigurd Variable"`, weights 300–900.
+    /// The wordmark face `"Spline Sans"`, weights 300–700.
     pub wordmark: FontRole,
     /// Control text: Tailwind `text-sm`, 14 px (INVENTORY §5.5).
     pub control_text: Pixels,
@@ -505,20 +505,20 @@ pub struct WeightRange {
 }
 
 impl TypographyTokens {
-    /// Display face for headings and titles: `--font-heading`, Artisan Neo
+    /// Display face for headings and titles: `--font-heading`, Spline Sans
     /// (`fonts.css:40`).
     #[must_use]
     pub const fn display(&self) -> &FontRole {
         &self.heading
     }
 
-    /// UI face for body text: `--font-sans`, Artisan Neo (`theme.css:313`).
+    /// UI face for body text: `--font-sans`, Spline Sans (`theme.css:313`).
     #[must_use]
     pub const fn body(&self) -> &FontRole {
         &self.sans
     }
 
-    /// Mono face for code and the composer: `--font-mono`, `JetBrains Mono`
+    /// Mono face for code and the composer: `--font-mono`, `Spline Sans Mono`
     /// (`theme.css:315`).
     #[must_use]
     pub const fn code(&self) -> &FontRole {
@@ -837,27 +837,24 @@ impl ArtisanTheme {
             sidebar,
             typography: TypographyTokens {
                 sans: FontRole {
-                    family: "Artisan Neo",
-                    weights: WeightRange { min: 100, max: 900 },
+                    family: "Spline Sans",
+                    weights: WeightRange { min: 300, max: 700 },
                 },
                 mono: FontRole {
-                    family: "JetBrains Mono",
-                    weights: WeightRange { min: 100, max: 800 },
+                    family: "Spline Sans Mono",
+                    weights: WeightRange { min: 300, max: 700 },
                 },
                 heading: FontRole {
-                    family: "Artisan Neo",
-                    weights: WeightRange { min: 100, max: 900 },
+                    family: "Spline Sans",
+                    weights: WeightRange { min: 300, max: 700 },
                 },
                 logo: FontRole {
-                    family: "Cal Sans",
-                    weights: WeightRange {
-                        min: 100,
-                        max: 1000,
-                    },
+                    family: "Spline Sans",
+                    weights: WeightRange { min: 300, max: 700 },
                 },
                 wordmark: FontRole {
-                    family: "Sigurd Variable",
-                    weights: WeightRange { min: 300, max: 900 },
+                    family: "Spline Sans",
+                    weights: WeightRange { min: 300, max: 700 },
                 },
                 control_text: px(14.0),
                 editor_text_base: px(16.0),
