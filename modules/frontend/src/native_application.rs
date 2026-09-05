@@ -37,6 +37,7 @@ use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::tabs::{TabSpec, Tabs};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
     FocusHandle, FontWeight, KeyBinding, Render, SharedString, Stateful,
@@ -890,6 +891,8 @@ impl NativeApplication {
                 app.select_sidebar_tab(value.as_ref() == "editor", cx)
             });
         });
+        let mut nav_theme = theme;
+        nav_theme.secondary = self.theme.colors.muted_foreground.to_paint();
         let nav = div()
             .id("artisan-workspace-navigation")
             .track_focus(&self.sidebar_navigation_focus)
@@ -910,7 +913,7 @@ impl NativeApplication {
                 } else {
                     AssetId::TABLER_EDIT
                 },
-                theme,
+                nav_theme,
             ))
             .child(
                 div()
@@ -949,7 +952,30 @@ impl NativeApplication {
             .gap(px(12.0))
             .p(px(10.0))
             .child(tabs)
-            .child(nav)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(nav)
+                    .when(!self.sidebar_editor, |navigation| {
+                        navigation.child(
+                            div()
+                                .id("artisan-marketplace-navigation")
+                                .w_full()
+                                .h(px(34.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .px(px(8.0))
+                                .rounded(px(6.0))
+                                .debug_selector(|| "artisan-marketplace-navigation".to_owned())
+                                .child(desktop_nav_glyph(AssetId::TABLER_SHOPPING_BAG, nav_theme))
+                                .child(div().text_size(px(14.0)).text_color(theme.foreground).child("Marketplace")),
+                        )
+                    }),
+            )
             .child(div().flex_1().min_h(px(0.0)))
             .child(self.desktop_profile(cx))
     }
