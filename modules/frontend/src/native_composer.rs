@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{ops::Range, panic, sync::Arc};
+use std::{collections::HashSet, ops::Range, panic, sync::Arc};
 
 use artisan_assets::AssetId;
 use artisan_ui::{
@@ -45,8 +45,9 @@ use self::native_composer_attachments::{
     ClipboardImageCandidate, ClipboardInput, ComposerAttachment, MAXIMUM_ATTACHMENT_COUNT,
     MAXIMUM_ATTACHMENT_TOTAL_BYTES, MAXIMUM_RAW_ATTACHMENT_BYTES,
     MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES, NativeComposerAttachmentSnapshot,
-    PreparedComposerAttachment, RestoredAttachmentInput, display_file_name,
-    prepare_clipboard_batch, prepare_file_batch, prepare_restored_batch, render_full_preview,
+    PreparedComposerAttachment, RecalledAttachmentInput, RestoredAttachmentInput,
+    display_file_name, prepare_clipboard_batch, prepare_file_batch, prepare_recalled_batch,
+    prepare_restored_batch, render_full_preview,
 };
 
 actions!(
@@ -111,6 +112,9 @@ enum AttachmentWork {
     Restored {
         items: Vec<RestoredAttachmentInput>,
     },
+    Recalled {
+        items: Vec<RecalledAttachmentInput>,
+    },
 }
 
 #[derive(Clone)]
@@ -145,8 +149,25 @@ impl AttachmentWork {
             Self::Clipboard { items } => prepare_clipboard_batch(items, None),
             Self::Files { items } => prepare_file_batch(items, None),
             Self::Restored { items } => prepare_restored_batch(items, None),
+            Self::Recalled { items } => prepare_recalled_batch(items),
         }
     }
+}
+
+/// Exact identity of an empty composer that is eligible to receive one
+/// withdrawn queued payload.
+///
+/// Fields remain private intentionally: the owner may pass this value back to
+/// [`NativeComposer::restore_recalled_payload`], but cannot manufacture or
+/// partially compare a recall target outside this component.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct ComposerRecallTarget {
+    thread: String,
+    draft_generation: u64,
+    draft_revision: u64,
+    selection_revision: u64,
+    selection: Range<usize>,
+    selection_reversed: bool,
 }
 
 /// Native GPUI owner of the exact composer draft and its text-service state.
@@ -161,6 +182,13 @@ pub(crate) struct NativeComposer {
     model_selector_observation: Option<Subscription>,
     model_label: String,
     send_blocked: bool,
+    /// Whether the authored text field is present in the typed payload.
+    ///
+    /// Ordinary editing uses `Some(text)`, including an authored empty string
+    /// alongside images. Recall additionally preserves an image-only payload
+    /// whose wire text was absent (`None`), since the editor's visible draft
+    /// string alone cannot represent that distinction.
+    authored_text_present: bool,
     attachment_delivery_enabled: bool,
     attachments: Vec<ComposerAttachment>,
     viewed_attachment: Option<String>,
@@ -213,6 +241,7 @@ impl NativeComposer {
             model_selector_observation: None,
             model_label: "Select model".into(),
             send_blocked: false,
+            authored_text_present: true,
             attachment_delivery_enabled: false,
             attachments: Vec::new(),
             viewed_attachment: None,
@@ -293,6 +322,7 @@ impl NativeComposer {
             self.draft_revision = self.draft_revision.saturating_add(1);
         }
         self.state.set_draft(draft);
+        self.authored_text_present = true;
         self.layout = None;
         self.painted_bounds = None;
         let end = self.state.draft().len();
@@ -331,6 +361,166 @@ impl NativeComposer {
     /// mounted composer scope.
     pub(crate) const fn draft_generation(&self) -> u64 {
         self.draft_generation
+    }
+
+    /// Captures the exact empty-composer scope that may receive one queued
+    /// message after the owning UI withdraws it.
+    ///
+    /// The target is deliberately unavailable while the surface is disabled,
+    /// composing, submitting, or already holding authored input. A caller may
+    /// keep the queued payload and retry the restore only with the returned
+    /// target; a later edit or route transition invalidates it.
+    pub(crate) fn capture_recall_target(&self) -> Option<ComposerRecallTarget> {
+        let thread = self
+            .draft_thread
+            .as_ref()
+            .filter(|thread| !thread.is_empty())?
+            .clone();
+        if self.send_blocked
+            || self.state.is_disabled()
+            || self.state.is_submitting()
+            || !self.state.draft().is_empty()
+            || !self.attachments.is_empty()
+            || self.marked_range.is_some()
+        {
+            return None;
+        }
+
+        Some(ComposerRecallTarget {
+            thread,
+            draft_generation: self.draft_generation,
+            draft_revision: self.draft_revision,
+            selection_revision: self.selection_revision,
+            selection: self.selection.clone(),
+            selection_reversed: self.selection_reversed,
+        })
+    }
+
+    fn recall_target_is_current(&self, target: &ComposerRecallTarget) -> bool {
+        self.draft_thread.as_deref() == Some(target.thread.as_str())
+            && self.draft_generation == target.draft_generation
+            && self.draft_revision == target.draft_revision
+            && self.selection_revision == target.selection_revision
+            && self.selection == target.selection
+            && self.selection_reversed == target.selection_reversed
+            && self.state.draft().is_empty()
+            && self.attachments.is_empty()
+            && self.marked_range.is_none()
+            && !self.state.is_submitting()
+            && !self.state.is_disabled()
+            && !self.send_blocked
+    }
+
+    /// Restores one withdrawn, already validated queue payload into an empty
+    /// composer.
+    ///
+    /// A failed precondition returns the same owned payload so the caller can
+    /// keep recovery available after a typing, thread, or lifecycle race. On
+    /// success the text/`None` distinction is retained for the next typed
+    /// submission, while image decoding and thumbnail work stays bounded and
+    /// off the UI thread.
+    pub(crate) fn restore_recalled_payload(
+        &mut self,
+        target: &ComposerRecallTarget,
+        payload: artisan_domain::QueueMessagePayload,
+        cx: &mut Context<Self>,
+    ) -> Result<(), artisan_domain::QueueMessagePayload> {
+        if !self.recall_target_is_current(target)
+            || payload.attachments().len() > MAXIMUM_ATTACHMENT_COUNT
+            || payload.total_attachment_bytes() > MAXIMUM_ATTACHMENT_TOTAL_BYTES
+            || payload.attachments().iter().any(|attachment| {
+                attachment.byte_len() > native_composer_attachments::MAXIMUM_ATTACHMENT_BYTES
+            })
+        {
+            return Err(payload);
+        }
+
+        let text_present = payload.text().is_some();
+        let text = payload
+            .text()
+            .map_or_else(String::new, |text| text.as_str().to_owned());
+        let formats = payload
+            .attachments()
+            .iter()
+            .map(|attachment| ImageFormat::from_mime_type(attachment.mime_type_str()))
+            .collect::<Option<Vec<_>>>();
+        let Some(formats) = formats else {
+            return Err(payload);
+        };
+        let mut reserved_ids = HashSet::with_capacity(payload.attachments().len());
+        let mut ids = Vec::with_capacity(payload.attachments().len());
+        for _ in 0..payload.attachments().len() {
+            let Some(id) = self.next_unique_attachment_id(&mut reserved_ids) else {
+                return Err(payload);
+            };
+            ids.push(id);
+        }
+        let mut pending_attachments = Vec::with_capacity(payload.attachments().len());
+        let mut work = Vec::with_capacity(payload.attachments().len());
+        for ((attachment, format), id) in payload.attachments().iter().zip(formats).zip(ids) {
+            let bytes = attachment.bytes().to_vec();
+            pending_attachments.push(ComposerAttachment::pending(
+                id.clone(),
+                attachment.name().to_owned(),
+                Some(format),
+                attachment.mime_type_str(),
+                bytes.len(),
+            ));
+            work.push(RecalledAttachmentInput {
+                id,
+                name: attachment.name().to_owned(),
+                mime_type: attachment.mime_type_str().to_owned(),
+                bytes,
+            });
+        }
+
+        // The target proves that no current attachment work can be useful to
+        // this restore, but dropping the handles also cancels any clipboard
+        // read that was still pending while the composer was empty.
+        self.attachment_tasks.clear();
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        self.draft_revision = self.draft_revision.saturating_add(1);
+        self.selection_revision = self.selection_revision.saturating_add(1);
+        self.state.set_draft(text);
+        self.authored_text_present = text_present;
+        self.attachments = pending_attachments;
+        self.viewed_attachment = None;
+        self.clear_attachment_preview();
+        self.attachment_error = None;
+        self.draft_tokens.clear();
+        self.undo.clear();
+        self.redo.clear();
+        self.active_attachment_submission = None;
+        self.active_submission_draft_revision = None;
+        self.selection = self.state.draft().len()..self.state.draft().len();
+        self.selection_reversed = false;
+        self.selection_anchor = None;
+        self.clear_vertical_goal();
+        self.selection_dragging = false;
+        self.marked_range = None;
+        self.layout = None;
+        self.painted_bounds = None;
+        self.persist_current_draft();
+        if !work.is_empty() {
+            self.spawn_attachment_work(AttachmentWork::Recalled { items: work }, cx);
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    fn next_unique_attachment_id(&mut self, reserved: &mut HashSet<String>) -> Option<String> {
+        for _ in 0..=MAXIMUM_ATTACHMENT_COUNT {
+            let id = self.next_attachment_id();
+            if !self
+                .attachments
+                .iter()
+                .any(|attachment| attachment.id == id)
+                && reserved.insert(id.clone())
+            {
+                return Some(id);
+            }
+        }
+        None
     }
 
     /// Returns the number of live attachment slots, including pending reads.
@@ -448,6 +638,7 @@ impl NativeComposer {
                 },
             );
             self.state.set_draft(text);
+            self.authored_text_present = true;
             self.draft_revision = self.draft_revision.saturating_add(1);
             self.advance_selection_revision();
             self.draft_tokens = tokens;
@@ -900,11 +1091,11 @@ impl NativeComposer {
     /// Builds the exact typed queue payload owned by the current draft.
     ///
     /// The current draft text is parsed without trimming and each ready tray
-    /// item contributes one owned image in tray order. Image-only messages use
-    /// an empty authored-text value; no marker text is ever inserted. The
-    /// payload is returned to the application transport, while this entity
-    /// retains a byte-identical snapshot for accepted cleanup and retry
-    /// matching.
+    /// item contributes one owned image in tray order. Image-only messages
+    /// preserve whether authored text was absent or explicitly empty; no
+    /// marker text is ever inserted. The payload is returned to the
+    /// application transport, while this entity retains a byte-identical
+    /// snapshot for accepted cleanup and retry matching.
     pub(crate) fn begin_payload_submission(
         &mut self,
     ) -> Result<(artisan_domain::QueueMessagePayload, SubmissionToken), SubmissionBlocked> {
@@ -921,16 +1112,21 @@ impl NativeComposer {
             .snapshot_ordered_ready_attachments()
             .map_err(|_| SubmissionBlocked::Disabled)?;
         let active_snapshot = snapshot.clone();
-        let text = artisan_domain::AuthoredText::parse(self.state.draft().to_owned()).map_err(
-            |error| match error {
-                artisan_domain::AuthoredTextError::TooLong { length, maximum } => {
-                    SubmissionBlocked::InvalidBody(artisan_domain::MessageBodyError::TooLong {
-                        length,
-                        maximum,
-                    })
-                }
-            },
-        )?;
+        let text = if self.authored_text_present {
+            Some(
+                artisan_domain::AuthoredText::parse(self.state.draft().to_owned()).map_err(
+                    |error| match error {
+                        artisan_domain::AuthoredTextError::TooLong { length, maximum } => {
+                            SubmissionBlocked::InvalidBody(
+                                artisan_domain::MessageBodyError::TooLong { length, maximum },
+                            )
+                        }
+                    },
+                )?,
+            )
+        } else {
+            None
+        };
         let images = snapshot
             .attachments
             .into_iter()
@@ -943,7 +1139,7 @@ impl NativeComposer {
                 .map_err(|_| SubmissionBlocked::Disabled)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let payload = artisan_domain::QueueMessagePayload::new(Some(text), images)
+        let payload = artisan_domain::QueueMessagePayload::new(text, images)
             .map_err(|_| SubmissionBlocked::Disabled)?;
         let token = self.state.begin_payload_submission(&payload)?;
         self.active_attachment_submission = Some(active_snapshot);
@@ -958,11 +1154,11 @@ impl NativeComposer {
         &self,
         payload: &artisan_domain::QueueMessagePayload,
     ) -> bool {
-        let text_matches = payload
-            .text()
-            .map_or(self.state.draft().is_empty(), |text| {
-                text.as_str() == self.state.draft()
-            });
+        let text_matches = match (payload.text(), self.authored_text_present) {
+            (Some(text), true) => text.as_str() == self.state.draft(),
+            (None, false) => self.state.draft().is_empty(),
+            _ => false,
+        };
         text_matches
             && payload.attachments().len() == self.attachments.len()
             && payload
@@ -1038,6 +1234,7 @@ impl NativeComposer {
             let end = self.selection.end.min(self.state.draft().len());
             self.selection = end..end;
             self.selection_reversed = false;
+            self.authored_text_present = true;
             self.selection_anchor = None;
             self.clear_vertical_goal();
             self.selection_dragging = false;
@@ -1155,6 +1352,9 @@ impl NativeComposer {
             self.redo.clear();
         }
         self.state.set_draft(next);
+        if !replacement.is_empty() || !range.is_empty() {
+            self.authored_text_present = true;
+        }
         if changed {
             self.draft_revision = self.draft_revision.saturating_add(1);
         }
@@ -2681,7 +2881,8 @@ fn logical_vertical_target(text: &str, cursor: usize, direction: i32, goal_colum
     };
 
     let target_line = &text[target_start..target_end];
-    let mut target_column = goal_column.min(utf8_offset_to_utf16(target_line, target_line.len()).unwrap_or_default());
+    let mut target_column =
+        goal_column.min(utf8_offset_to_utf16(target_line, target_line.len()).unwrap_or_default());
     while target_column > 0 && utf16_offset_to_utf8(target_line, target_column).is_none() {
         target_column -= 1;
     }
@@ -2694,16 +2895,18 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::native_composer_attachments::ComposerAttachment;
-    use super::{logical_vertical_target,
+    use super::{
         DocumentEnd, DocumentHome, NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR,
         NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR, NATIVE_COMPOSER_PLACEHOLDER,
         NATIVE_COMPOSER_PLACEHOLDER_SELECTOR, NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer,
         NativeComposerEvent, SelectDocumentEnd, SelectDocumentHome, SelectEnd, SelectHome,
-        localize_painted_point, offset_layout_bounds, replace_text_preserving_raw,
-        utf8_offset_to_utf16, utf16_offset_to_utf8, utf16_range_to_utf8,
+        localize_painted_point, logical_vertical_target, offset_layout_bounds,
+        replace_text_preserving_raw, utf8_offset_to_utf16, utf16_offset_to_utf8,
+        utf16_range_to_utf8,
     };
     use crate::composer::DraftDisposition;
     use crate::image_policy::{ImageDimensions, ImageMediaType};
+    use artisan_domain::{AuthoredText, ImageAttachment, QueueMessagePayload};
     use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
@@ -2735,6 +2938,32 @@ mod tests {
             source_size_bytes: bytes.len(),
             size_bytes: bytes.len(),
         }
+    }
+
+    const RECALL_PRIMARY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8,
+        0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x72, 0x9c, 0x52, 0x67, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    const RECALL_SECONDARY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    fn recalled_image_payload(text: Option<AuthoredText>) -> QueueMessagePayload {
+        let secondary = base64::engine::general_purpose::STANDARD
+            .decode(RECALL_SECONDARY_PNG_BASE64)
+            .expect("secondary PNG fixture");
+        QueueMessagePayload::new(
+            text,
+            vec![
+                ImageAttachment::new("image/png", RECALL_PRIMARY_PNG.to_vec(), "first.png")
+                    .expect("primary image"),
+                ImageAttachment::new("image/png", secondary, "second.png")
+                    .expect("secondary image"),
+            ],
+        )
+        .expect("recall payload")
     }
 
     fn set_draft(cx: &mut VisualTestContext, view: &Entity<NativeComposer>, draft: &str) {
@@ -3114,6 +3343,235 @@ mod tests {
             })
         });
         assert_eq!(snapshot.attachments.len(), 2);
+    }
+
+    #[gpui::test]
+    fn recalled_text_restores_into_the_exact_empty_thread(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let payload = QueueMessagePayload::text_only("queued\nmessage").expect("text payload");
+        let target = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-text".into(), false, composer_cx);
+                composer
+                    .capture_recall_target()
+                    .expect("real empty thread is recallable")
+            })
+        });
+
+        let result = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.restore_recalled_payload(&target, payload.clone(), composer_cx)
+            })
+        });
+        assert_eq!(result, Ok(()));
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.draft(), "queued\nmessage");
+            assert_eq!(composer.attachment_count(), 0);
+            assert!(composer.draft_matches_payload(&payload));
+        });
+    }
+
+    #[gpui::test]
+    fn recall_race_returns_the_full_payload_after_typing_without_overwrite(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let payload = QueueMessagePayload::text_only("queued message").expect("text payload");
+        let target = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-typing".into(), false, composer_cx);
+                composer
+                    .capture_recall_target()
+                    .expect("real empty thread is recallable")
+            })
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.replace_range(0..0, "user started typing", None, composer_cx);
+                assert!(composer.capture_recall_target().is_none());
+            });
+        });
+        let result = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.restore_recalled_payload(&target, payload.clone(), composer_cx)
+            })
+        });
+        assert_eq!(result, Err(payload));
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.draft(), "user started typing");
+            assert_eq!(composer.attachment_count(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn recall_race_returns_the_full_payload_after_thread_change(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let payload = QueueMessagePayload::text_only("queued message").expect("text payload");
+        let target = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-old-thread".into(), false, composer_cx);
+                composer
+                    .capture_recall_target()
+                    .expect("real empty thread is recallable")
+            })
+        });
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-new-thread".into(), false, composer_cx);
+            });
+        });
+
+        let result = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.restore_recalled_payload(&target, payload.clone(), composer_cx)
+            })
+        });
+        assert_eq!(result, Err(payload));
+        cx.update(|_, app| {
+            let composer = view.read(app);
+            assert_eq!(composer.draft(), "");
+            assert_eq!(composer.attachment_count(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn existing_draft_never_offers_a_recall_target(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-existing".into(), false, composer_cx);
+                composer.replace_range(0..0, "keep this draft", None, composer_cx);
+                assert!(composer.capture_recall_target().is_none());
+                assert_eq!(composer.draft(), "keep this draft");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn image_only_recall_preserves_absent_text_order_and_exact_bytes(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let payload = recalled_image_payload(None);
+        let expected = payload
+            .attachments()
+            .iter()
+            .map(|attachment| (attachment.name().to_owned(), attachment.bytes().to_vec()))
+            .collect::<Vec<_>>();
+        let target = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-images".into(), false, composer_cx);
+                composer
+                    .capture_recall_target()
+                    .expect("real empty thread is recallable")
+            })
+        });
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer
+                    .restore_recalled_payload(&target, payload, composer_cx)
+                    .expect("valid queued image payload restores");
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_attachment_delivery_enabled(true, composer_cx);
+                assert_eq!(composer.attachments.len(), expected.len());
+                assert!(
+                    composer
+                        .attachments
+                        .iter()
+                        .all(ComposerAttachment::is_ready)
+                );
+                let (restored, token) = composer
+                    .begin_payload_submission()
+                    .expect("prepared recalled images submit");
+                assert!(restored.text().is_none());
+                assert_eq!(
+                    restored
+                        .attachments()
+                        .iter()
+                        .map(|attachment| {
+                            (attachment.name().to_owned(), attachment.bytes().to_vec())
+                        })
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                composer.finish_submission(token, DraftDisposition::Retained, composer_cx);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn image_only_recall_preserves_present_empty_text(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let payload = recalled_image_payload(Some(AuthoredText::empty()));
+        let target = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-empty-text".into(), false, composer_cx);
+                composer
+                    .capture_recall_target()
+                    .expect("real empty thread is recallable")
+            })
+        });
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer
+                    .restore_recalled_payload(&target, payload, composer_cx)
+                    .expect("valid queued image payload restores");
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.set_attachment_delivery_enabled(true, composer_cx);
+                let (restored, token) = composer
+                    .begin_payload_submission()
+                    .expect("prepared recalled images submit");
+                assert_eq!(restored.text().map(AuthoredText::as_str), Some(""));
+                composer.finish_submission(token, DraftDisposition::Retained, composer_cx);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn recalled_attachment_work_is_fenced_after_thread_change(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        let payload = recalled_image_payload(None);
+        let target = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-pending".into(), false, composer_cx);
+                composer
+                    .capture_recall_target()
+                    .expect("real empty thread is recallable")
+            })
+        });
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer
+                    .restore_recalled_payload(&target, payload.clone(), composer_cx)
+                    .expect("valid queued image payload restores");
+            });
+        });
+        cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                composer.switch_thread("recall-after-switch".into(), false, composer_cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let result = cx.update(|_, app| {
+            view.update(app, |composer, composer_cx| {
+                assert_eq!(composer.draft(), "");
+                assert_eq!(composer.attachment_count(), 0);
+                composer.restore_recalled_payload(&target, payload, composer_cx)
+            })
+        });
+        assert!(result.is_err());
     }
 
     #[gpui::test]

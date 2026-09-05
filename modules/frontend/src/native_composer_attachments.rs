@@ -362,6 +362,19 @@ pub(super) struct RestoredAttachmentInput {
     pub(super) source_size_bytes: usize,
 }
 
+/// One already-validated encoded image being recalled from a queued message.
+///
+/// Unlike draft-session restoration this input already owns the exact bytes
+/// accepted by the queue. The preparation worker only decodes them to build a
+/// bounded thumbnail; it never resizes or re-encodes the message payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RecalledAttachmentInput {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) mime_type: String,
+    pub(super) bytes: Vec<u8>,
+}
+
 /// Prepares a batch of clipboard images sequentially on a background worker.
 pub(super) fn prepare_clipboard_batch(
     items: Vec<(String, ClipboardImageCandidate)>,
@@ -433,6 +446,37 @@ pub(super) fn prepare_restored_batch(
                 &mut output_total,
             );
             AttachmentPreparationOutcome { id, name, result }
+        })
+        .collect()
+}
+
+/// Prepares recalled queue bytes on a background worker while preserving the
+/// exact encoded payload accepted by Forge.
+pub(super) fn prepare_recalled_batch(
+    items: Vec<RecalledAttachmentInput>,
+) -> Vec<AttachmentPreparationOutcome> {
+    let mut output_total = 0;
+    items
+        .into_iter()
+        .map(|item| {
+            let RecalledAttachmentInput {
+                id,
+                name,
+                mime_type,
+                bytes,
+            } = item;
+            let outcome_id = id.clone();
+            let outcome_name = name.clone();
+            let result = ImageFormat::from_mime_type(&mime_type).map_or_else(
+                || Err(AttachmentPreparationError::UnsupportedFormat),
+                |format| prepare_preserved_encoded(id, name, format, bytes, String::new(), 0),
+            );
+            let result = limit_batch_output(result, &mut output_total);
+            AttachmentPreparationOutcome {
+                id: outcome_id,
+                name: outcome_name,
+                result,
+            }
         })
         .collect()
 }
@@ -557,7 +601,7 @@ fn read_and_prepare_file(
 
 fn decode_and_prepare_restored(
     item: RestoredAttachmentInput,
-    engine_id: Option<&str>,
+    _engine_id: Option<&str>,
 ) -> Result<PreparedComposerAttachment, AttachmentPreparationError> {
     let format = ImageFormat::from_mime_type(&item.mime_type)
         .ok_or(AttachmentPreparationError::UnsupportedFormat)?;
@@ -595,14 +639,80 @@ fn decode_and_prepare_restored(
         return Err(AttachmentPreparationError::DigestMismatch);
     }
 
-    let mut prepared = prepare_image_bytes(item.id, item.name, format, bytes, engine_id)?;
-    if !item.source_digest.is_empty() {
-        prepared.source_digest = item.source_digest;
-    }
-    if item.source_size_bytes != 0 {
-        prepared.source_size_bytes = item.source_size_bytes;
-    }
-    Ok(prepared)
+    let source_digest = item.source_digest;
+    let source_size_bytes = item.source_size_bytes;
+    prepare_preserved_encoded(
+        item.id,
+        item.name,
+        format,
+        bytes,
+        source_digest,
+        source_size_bytes,
+    )
+}
+
+/// Decodes an encoded image only for metadata and preview generation.
+///
+/// The byte vector is the already accepted queue/draft representation. It is
+/// retained byte-for-byte, so a recall or restart cannot silently introduce a
+/// second resize or a lossy quality change.
+fn prepare_preserved_encoded(
+    id: String,
+    name: String,
+    format: ImageFormat,
+    bytes: Vec<u8>,
+    source_digest: String,
+    source_size_bytes: usize,
+) -> Result<PreparedComposerAttachment, AttachmentPreparationError> {
+    let recommended_media_type = match format {
+        ImageFormat::Gif => ImageMediaType::Gif,
+        ImageFormat::Jpeg => ImageMediaType::Jpeg,
+        ImageFormat::Png => ImageMediaType::Png,
+        ImageFormat::Webp => ImageMediaType::Webp,
+        ImageFormat::Svg
+        | ImageFormat::Bmp
+        | ImageFormat::Tiff
+        | ImageFormat::Ico
+        | ImageFormat::Pnm => return Err(AttachmentPreparationError::UnsupportedFormat),
+    };
+    let encoded_size = bytes.len();
+    validate_encoded_size(encoded_size)?;
+    let bytes = Arc::new(bytes);
+    let encoded_digest = sha256_hex(bytes.as_ref());
+    let (decoded, source_dimensions) = decode_bounded(bytes.as_ref(), format)?;
+    let thumbnail_bytes = encode_image(&decoded.thumbnail(256, 256), EncodedImageFormat::Png)
+        .map_err(|_| AttachmentPreparationError::InvalidImage)?;
+    let thumbnail = render_preview(ImageFormat::Png, thumbnail_bytes)?;
+    let source_digest = if source_digest.is_empty() {
+        encoded_digest.clone()
+    } else {
+        source_digest
+    };
+    let source_size_bytes = if source_size_bytes == 0 {
+        encoded_size
+    } else {
+        source_size_bytes
+    };
+
+    Ok(PreparedComposerAttachment {
+        id,
+        name,
+        format,
+        mime_type: format.mime_type().to_owned(),
+        content_base64: BASE64.encode(bytes.as_ref()),
+        bytes,
+        thumbnail,
+        dimensions: ImageDimensions {
+            width: f64::from(source_dimensions.0),
+            height: f64::from(source_dimensions.1),
+        },
+        recommended_media_type,
+        rescale_target: None,
+        source_digest,
+        encoded_digest,
+        source_size_bytes,
+        size_bytes: encoded_size,
+    })
 }
 
 fn validate_format(format: ImageFormat) -> Result<(), AttachmentPreparationError> {
@@ -876,6 +986,28 @@ mod tests {
         assert_eq!(prepared.source_digest, sha256_hex(ONE_BY_ONE_PNG));
         assert_eq!(prepared.encoded_digest, sha256_hex(prepared.bytes.as_ref()));
         assert!(prepared.size_bytes <= MAXIMUM_ATTACHMENT_BYTES);
+    }
+
+    #[test]
+    fn recalled_preparation_preserves_exact_encoded_bytes() {
+        let outcomes = prepare_recalled_batch(vec![RecalledAttachmentInput {
+            id: "attachment:recall".into(),
+            name: "recalled.png".into(),
+            mime_type: "image/png".into(),
+            bytes: ONE_BY_ONE_PNG.to_vec(),
+        }]);
+        let prepared = outcomes
+            .into_iter()
+            .next()
+            .expect("one recall outcome")
+            .result
+            .expect("PNG fixture decodes");
+
+        assert_eq!(prepared.bytes.as_ref(), ONE_BY_ONE_PNG);
+        assert_eq!(prepared.content_base64, BASE64.encode(ONE_BY_ONE_PNG));
+        assert_eq!(prepared.encoded_digest, sha256_hex(ONE_BY_ONE_PNG));
+        assert_eq!(prepared.source_digest, sha256_hex(ONE_BY_ONE_PNG));
+        assert!(prepared.rescale_target.is_none());
     }
 
     #[test]
