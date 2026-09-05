@@ -784,13 +784,6 @@ impl NativeApplication {
     }
 
     fn desktop_identity(&self) -> Div {
-        static PORTRAIT: std::sync::OnceLock<Arc<gpui::Image>> = std::sync::OnceLock::new();
-        let portrait = PORTRAIT.get_or_init(|| {
-            Arc::new(gpui::Image::from_bytes(
-                gpui::ImageFormat::Png,
-                artisan_assets::ARTISAN_PORTRAIT_PNG.to_vec(),
-            ))
-        });
         let mut identity = div()
             .flex()
             .items_center()
@@ -798,16 +791,10 @@ impl NativeApplication {
             .min_w(px(0.0))
             .overflow_hidden()
             .child(
-                gpui::img(portrait.clone())
-                    .size(px(32.0))
-                    .flex_shrink_0()
-                    .object_fit(gpui::ObjectFit::Contain),
-            )
-            .child(
                 div()
                     .flex_shrink_0()
                     .text_size(px(16.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::EXTRA_BOLD)
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
             );
