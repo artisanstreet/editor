@@ -519,3 +519,22 @@ async fn newer_unbound_failure_does_not_fall_back_to_an_old_session() {
         },)
     );
 }
+
+#[tokio::test]
+async fn long_thread_history_does_not_block_latest_session_continuation() {
+    let (database, repository) = migrated_memory_database().await;
+    for index in 0..66 {
+        seed_run(
+            &database, &format!("run-history-{index:03}"), 100 + index,
+            AssistantRunLifecycle::Completed, "profile-fixture",
+            Some("retained-session"), None,
+        ).await;
+    }
+    let lookup = repository.read_session_continuation(query("profile-fixture", None))
+        .await.expect("long history should remain readable");
+    let SessionContinuationLookup::Usable(continuation) = lookup else {
+        panic!("the newest valid session must remain usable after 64 runs");
+    };
+    assert_eq!(continuation.session_id.as_str(), "retained-session");
+    assert_eq!(continuation.prior_run.run_id.as_str(), "run-history-065");
+}

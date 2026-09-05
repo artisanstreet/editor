@@ -7,7 +7,7 @@
 //! repair rows, create a side table, or expose provider binding bytes.
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
     TransactionTrait,
 };
 use serde::Deserialize;
@@ -22,7 +22,6 @@ use super::{Repository, RepositoryError, corrupt_data, database_error};
 const PROVIDER_BINDING_VERSION: i64 = 1;
 const PROVIDER_BINDING_ENGINE: &str = "opencode2";
 const SESSION_ID_MAX_BYTES: usize = 256;
-const MAX_CANDIDATES: u64 = 64;
 
 /// Exact scope used to select a continuation.  The caller supplies the
 /// current run id only when it has already persisted a new run and wants that
@@ -268,36 +267,19 @@ async fn read_session_continuation<C: ConnectionTrait>(
         candidates =
             candidates.filter(entities::assistant_run::Column::RunId.ne(exclude_run_id.as_str()));
     }
-    let rows = candidates
+    // Only the newest non-excluded run may decide continuation. Reading
+    // older rows adds no authority and must not cap the thread's lifetime.
+    let candidate = candidates
         .order_by_desc(entities::assistant_run::Column::CreatedAtMs)
         .order_by_desc(entities::assistant_run::Column::RunId)
-        .limit(MAX_CANDIDATES + 1)
-        .all(database)
+        .one(database)
         .await
-        .map_err(|source| database_error("read session-continuation candidates", source))?;
-
-    let Some(first) = rows.first() else {
+        .map_err(|source| database_error("read session-continuation candidate", source))?;
+    let Some(row) = candidate else {
         return Ok(SessionContinuationLookup::NoHistory);
     };
-    let first_run_id = parse_run_id(&first.run_id)?;
-    if rows.len() as u64 > MAX_CANDIDATES {
-        return Ok(SessionContinuationLookup::Unavailable(
-            SessionContinuationUnavailable {
-                run_id: first_run_id,
-                reason: SessionContinuationUnavailableReason::CandidateLimit,
-            },
-        ));
-    }
-
-    for row in rows {
-        let run_id = parse_run_id(&row.run_id)?;
-        if query.exclude_run_id.as_ref() == Some(&run_id) {
-            continue;
-        }
-        return inspect_candidate(database, query, row, run_id).await;
-    }
-
-    Ok(SessionContinuationLookup::NoHistory)
+    let run_id = parse_run_id(&row.run_id)?;
+    inspect_candidate(database, query, row, run_id).await
 }
 
 async fn inspect_candidate<C: ConnectionTrait>(
