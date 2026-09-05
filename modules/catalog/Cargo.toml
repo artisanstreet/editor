@@ -1,0 +1,16 @@
+[package]
+name = "artisan-catalog"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+path = "rust/lib.rs"
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

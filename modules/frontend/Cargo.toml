@@ -11,14 +11,19 @@ path = "src/main.rs"
 
 [dependencies]
 artisan-assets = { path = "../assets" }
+artisan-catalog = { path = "../catalog" }
 artisan-domain = { path = "../domain" }
 artisan-editor-cli = { path = "../cli" }
 artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
+base64.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 rustls-pki-types.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 statig.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

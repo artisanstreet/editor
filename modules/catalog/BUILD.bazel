@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "catalog",
+    srcs = ["rust/lib.rs"],
+    compile_data = ["rust/native_model_catalog.json"],
+    crate_name = "artisan_catalog",
+    crate_root = "rust/lib.rs",
+    deps = [
+        "@crates//:serde_json",
+        "@crates//:thiserror",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    visibility = ["//visibility:public"],
+)

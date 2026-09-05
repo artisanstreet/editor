@@ -3,6 +3,7 @@ exclude = ["vendor/gpui-ce"]
 members = [
     "modules/assets",
     "modules/backend",
+    "modules/catalog",
     "modules/cli",
     "modules/database",
     "modules/domain",

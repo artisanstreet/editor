@@ -487,6 +487,7 @@ dependencies = [
 name = "artisan-backend"
 version = "0.0.0"
 dependencies = [
+ "artisan-catalog",
  "artisan-database",
  "artisan-domain",
  "artisan-migrations",
@@ -520,6 +521,14 @@ version = "0.0.0"
 dependencies = [
  "capnp",
  "capnpc",
+]
+
+[[package]]
+name = "artisan-catalog"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -580,14 +589,19 @@ name = "artisan-frontend"
 version = "0.0.0"
 dependencies = [
  "artisan-assets",
+ "artisan-catalog",
  "artisan-domain",
  "artisan-editor-cli",
  "artisan-protocol",
  "artisan-transport",
  "artisan-ui",
+ "base64 0.22.1",
  "gpui-ce",
  "gpui_ce_platform",
+ "image",
  "rustls-pki-types",
+ "serde_json",
+ "sha2 0.11.0",
  "statig",
  "thiserror 2.0.20",
  "tokio",

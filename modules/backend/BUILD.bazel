@@ -18,6 +18,7 @@ rust_library(
         "src/agent_name_catalog_policy.rs",
         "src/agent_orchestrator_start_failure_policy.rs",
         "src/app.rs",
+        "src/run_cancellation.rs",
         "src/builtin_tool_capabilities_policy.rs",
         "src/connection.rs",
         "src/conversation_commit_notifier.rs",
@@ -88,6 +89,7 @@ rust_library(
     ],
     crate_name = "artisan_backend",
     deps = [
+        "//modules/catalog:catalog",
         "//modules/database:database",
         "//modules/domain:domain",
         "//modules/migrations:migrations",
