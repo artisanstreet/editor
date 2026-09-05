@@ -182,6 +182,8 @@ pub struct NativeComposerControlsSnapshot {
     pub show_jump_to_latest: bool,
     /// Pending steering rows. Rows leave only when this projection changes.
     pub pending_steering: Vec<PendingSteeringRow>,
+    pub queue_status: Option<String>,
+    pub queue_retry: Option<String>,
     /// Last actionable failure, if any.
     pub failure: Option<NativeComposerFailure>,
     /// Actual usage reported by a run, if one is available.
@@ -211,6 +213,7 @@ impl NativeComposerControlsSnapshot {
 /// One bounded intent emitted by pointer or keyboard activation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeComposerControlsEvent {
+    RetryQueue,
     /// Request a new message submission. There is no run identity yet; the
     /// parent owns the draft/thread identity and mints the next run id.
     SendRequested,
@@ -262,6 +265,7 @@ pub struct NativeComposerControls {
     jump_focus: FocusHandle,
     context_focus: FocusHandle,
     failure_retry_focus: FocusHandle,
+    queue_retry_focus: FocusHandle,
     failure_dismiss_focus: FocusHandle,
     steering_focus: HashMap<SteeringFocusKey, FocusHandle>,
 }
@@ -285,6 +289,7 @@ impl NativeComposerControls {
             jump_focus: cx.focus_handle().tab_index(0).tab_stop(false),
             context_focus: cx.focus_handle().tab_index(48).tab_stop(false),
             failure_retry_focus: cx.focus_handle().tab_index(10).tab_stop(false),
+            queue_retry_focus: cx.focus_handle().tab_index(9).tab_stop(true),
             failure_dismiss_focus: cx.focus_handle().tab_index(11).tab_stop(false),
             steering_focus: HashMap::new(),
         }
@@ -362,7 +367,7 @@ impl NativeComposerControls {
         theme: ArtisanTheme,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        if self.snapshot.pending_steering.is_empty() {
+        if self.snapshot.pending_steering.is_empty() && self.snapshot.queue_status.is_none() {
             return None;
         }
 
@@ -508,6 +513,20 @@ impl NativeComposerControls {
             lip = lip.child(row_view);
         }
 
+        if let Some(status) = self.snapshot.queue_status.clone() {
+            let mut row = div().flex().items_center().gap(px(8.0)).px(px(12.0)).py(px(4.0))
+                .text_size(px(12.0)).text_color(theme.colors.muted_foreground.to_paint())
+                .child(div().flex_1().child(status));
+            if let Some(label) = self.snapshot.queue_retry.clone() {
+                let entity = cx.entity();
+                let retry = Button::new("artisan-composer-queue-retry", self.queue_retry_focus.clone(), theme,
+                    MotionPolicy::Reduced, ButtonVariant::Ghost, ButtonSize::Small, ButtonContent::text(label))
+                    .expect("queue retry label is valid").disabled(self.snapshot.disabled)
+                    .on_activate(move |_, _, app| entity.update(app, |controls, cx| controls.emit_if_allowed(NativeComposerControlsEvent::RetryQueue, cx)));
+                row = row.child(retry);
+            }
+            lip = lip.child(row);
+        }
         Some(lip)
     }
 
@@ -910,6 +929,7 @@ pub fn native_composer_controls_event_is_allowed(
     }
 
     match event {
+        NativeComposerControlsEvent::RetryQueue => snapshot.queue_retry.is_some(),
         NativeComposerControlsEvent::SendRequested => !snapshot.run_active && snapshot.send_ready,
         NativeComposerControlsEvent::StopRequested { run_id } => {
             snapshot.run_active

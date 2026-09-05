@@ -67,6 +67,8 @@ pub enum NativeModelSelectorEvent {
     SelectPolicy(SelectPolicy),
     /// Request that the owner persist one favorite mutation.
     SetFavorite(SetFavorite),
+    /// Retry the retained failed request or reload unavailable catalog data.
+    Retry,
 }
 
 /// Owner-controlled persistence/status feedback.
@@ -678,6 +680,7 @@ pub struct NativeModelSelector {
     state: NativeModelSelectorState,
     theme: ArtisanTheme,
     trigger_focus: FocusHandle,
+    retry_focus: FocusHandle,
     menu_focus: FocusHandle,
     menu_scroll: ScrollHandle,
     trigger_origin: Rc<RefCell<Option<Point<Pixels>>>>,
@@ -703,6 +706,7 @@ impl NativeModelSelector {
             state: NativeModelSelectorState::new(snapshot, policy),
             theme: ArtisanTheme::for_mode(mode),
             trigger_focus: cx.focus_handle().tab_index(1).tab_stop(true),
+            retry_focus: cx.focus_handle().tab_stop(true),
             menu_focus: cx.focus_handle(),
             menu_scroll: ScrollHandle::new(),
             trigger_origin: Rc::new(RefCell::new(None)),
@@ -1370,7 +1374,24 @@ impl NativeModelSelector {
                 div()
                     .text_size(px(10.0))
                     .text_color(self.theme.colors.destructive.to_paint())
-                    .child(error),
+                    .child(error)
+                    .child(
+                        div().id("artisan-model-selector-retry")
+                            .track_focus(&self.retry_focus)
+                            .cursor_pointer().px(px(8.0)).py(px(4.0))
+                            .text_color(self.theme.colors.foreground.to_paint())
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(NativeModelSelectorEvent::Retry);
+                            }))
+                            .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
+                                if event.keystroke.key == "enter" || event.keystroke.key == "space" {
+                                    cx.stop_propagation();
+                                    cx.emit(NativeModelSelectorEvent::Retry);
+                                }
+                            }))
+                            .child("Retry")
+                    ),
             );
         } else if self.state.status().saving {
             preview = preview.child(

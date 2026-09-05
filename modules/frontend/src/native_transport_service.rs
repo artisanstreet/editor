@@ -24,14 +24,15 @@ use std::{
 };
 
 use crate::forge_dev_endpoint as dev_endpoint;
+use crate::native_transport::CatalogLoadGeneration;
 use artisan_domain::{
     AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor, ConversationQuery,
     ConversationQueryBounds, ConversationRequest, ConversationSnapshot, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects,
     ListProjectThreads, ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing,
-    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, QueueMessage,
-    ReadThreadEngineSettings, RequestId, SetThreadEngineConfig, ThreadId, ThreadListing,
-    ThreadSummary, ThreadTitle, UnixMillis,
+    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, QueueMessage, ReadComposerCatalog,
+    ReadModelFavorites, ReadThreadEngineSettings, RequestId, SetModelFavorite,
+    SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{
@@ -99,6 +100,7 @@ impl SettingsLoadGeneration {
 /// Commands accepted by the native service.
 #[derive(Clone, Eq, PartialEq)]
 pub enum NativeTransportCommand {
+    ComposerState(ComposerStateCommand),
     /// Query exact live run ownership, fenced by the application's selection generation.
     ReadActiveRun {
         thread_id: ThreadId,
@@ -125,10 +127,32 @@ pub enum NativeTransportCommand {
         /// Application-owned stale-response fence.
         generation: SettingsLoadGeneration,
     },
+    /// Load the authenticated runtime catalog for one thread/profile scope.
+    ReadComposerCatalog {
+        /// Thread whose authoritative settings selected the profile.
+        thread_id: ThreadId,
+        /// Profile whose runtime owns discovery.
+        profile_id: artisan_domain::EngineProfileId,
+        /// Application-owned stale-response fence.
+        generation: CatalogLoadGeneration,
+    },
+    /// Load the durable global model-favorites snapshot in one thread/profile
+    /// scope so a late read cannot update a replacement selector.
+    ReadModelFavorites {
+        /// Current thread scope at admission time.
+        thread_id: ThreadId,
+        /// Current engine profile scope at admission time.
+        profile_id: artisan_domain::EngineProfileId,
+        /// Application-owned stale-response fence.
+        generation: CatalogLoadGeneration,
+    },
     /// Load the certified engine profile catalogue.
     ListRegisteredProfiles,
     /// Durably save one complete thread engine configuration.
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
+    /// Durably save one desired model-favorite state with stable retry
+    /// identity.
+    SetModelFavorite(Box<SetModelFavorite>),
     /// Durably queue the first exact message body on one known thread.
     QueueFirstMessage(Box<QueueFirstMessage>),
     /// Durably queue text and ordered images, including subsequent messages.
@@ -159,6 +183,7 @@ pub enum NativeTransportCommand {
 impl std::fmt::Debug for NativeTransportCommand {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let variant = match self {
+            Self::ComposerState(_) => "ComposerState",
             Self::ReadActiveRun { .. } => "ReadActiveRun",
             Self::StopRun(_) => "StopRun",
             Self::BeginProjectIntake => "BeginProjectIntake",
@@ -168,8 +193,11 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::RequestSnapshot(_) => "RequestSnapshot",
             Self::ReadMessageImage(_) => "ReadMessageImage",
             Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
+            Self::ReadComposerCatalog { .. } => "ReadComposerCatalog",
+            Self::ReadModelFavorites { .. } => "ReadModelFavorites",
             Self::ListRegisteredProfiles => "ListRegisteredProfiles",
             Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
+            Self::SetModelFavorite(_) => "SetModelFavorite",
             Self::QueueFirstMessage(_) => "QueueFirstMessage",
             Self::QueueMessage(_) => "QueueMessage",
             Self::Subscribe { .. } => "Subscribe",
@@ -359,6 +387,7 @@ pub enum ServiceStopStatus {
 /// Events crossing from the service thread to the GPUI application.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeTransportEvent {
+    ComposerState(ComposerStateEvent),
     ActiveRun {
         thread_id: ThreadId,
         generation: u64,
@@ -441,6 +470,73 @@ pub enum NativeTransportEvent {
     RegisteredProfiles(RegisteredEngineProfilesResult),
     /// Registered engine profile catalogue read failure.
     RegisteredProfilesFailed(ServiceFailure),
+    /// Runtime model catalog for one exact thread/profile/generation scope.
+    ComposerCatalog {
+        /// Thread that owns the discovery request.
+        thread_id: ThreadId,
+        /// Profile used for discovery.
+        profile_id: artisan_domain::EngineProfileId,
+        /// Application-owned stale-response fence.
+        generation: CatalogLoadGeneration,
+        /// Validated shared catalog response.
+        result: artisan_protocol::ComposerCatalogResult,
+    },
+    /// Runtime model catalog discovery failed for one exact scope.
+    ComposerCatalogFailed {
+        /// Thread that owns the discovery request.
+        thread_id: ThreadId,
+        /// Profile used for discovery.
+        profile_id: artisan_domain::EngineProfileId,
+        /// Application-owned stale-response fence.
+        generation: CatalogLoadGeneration,
+        /// Redacted failure.
+        failure: ServiceFailure,
+    },
+    /// Durable model favorites for one exact frontend scope.
+    ModelFavorites {
+        /// Thread scope captured before the query was admitted.
+        thread_id: ThreadId,
+        /// Profile scope captured before the query was admitted.
+        profile_id: artisan_domain::EngineProfileId,
+        /// Application-owned stale-response fence.
+        generation: CatalogLoadGeneration,
+        /// Complete authoritative ordered snapshot.
+        result: artisan_protocol::ModelFavoritesSnapshot,
+    },
+    /// Durable model favorites read failed for one exact scope.
+    ModelFavoritesFailed {
+        /// Thread scope captured before the query was admitted.
+        thread_id: ThreadId,
+        /// Profile scope captured before the query was admitted.
+        profile_id: artisan_domain::EngineProfileId,
+        /// Application-owned stale-response fence.
+        generation: CatalogLoadGeneration,
+        /// Redacted failure.
+        failure: ServiceFailure,
+    },
+    /// Correlated durable favorite mutation receipt.
+    ModelFavoriteSet {
+        /// Thread scope captured by the mutation.
+        thread_id: ThreadId,
+        /// Profile scope captured by the mutation.
+        profile_id: artisan_domain::EngineProfileId,
+        /// Stable mutation identity.
+        request_id: RequestId,
+        /// Authoritative mutation receipt and post-state.
+        receipt: artisan_protocol::SetModelFavoriteReceipt,
+    },
+    /// Correlated durable favorite mutation failure. The application retains
+    /// the command for an explicit same-identity retry.
+    ModelFavoriteFailed {
+        /// Thread scope captured by the mutation.
+        thread_id: ThreadId,
+        /// Profile scope captured by the mutation.
+        profile_id: artisan_domain::EngineProfileId,
+        /// Stable mutation identity.
+        request_id: RequestId,
+        /// Redacted failure.
+        failure: ServiceFailure,
+    },
     /// Durable thread engine configuration applied.
     ThreadEngineConfigSet(SetThreadEngineConfigResult, Box<EngineRunConfig>),
     /// Thread engine configuration precondition was stale.
@@ -952,6 +1048,19 @@ fn registered_profiles_request() -> ClientRequest {
     ))
 }
 
+fn composer_catalog_request(
+    thread_id: ThreadId,
+    profile_id: artisan_domain::EngineProfileId,
+) -> ClientRequest {
+    query_request(Query::ReadComposerCatalog(ReadComposerCatalog::new(
+        thread_id, profile_id,
+    )))
+}
+
+fn model_favorites_request() -> ClientRequest {
+    query_request(Query::ReadModelFavorites(ReadModelFavorites))
+}
+
 fn engine_config_stable_mutation(
     command: Box<SetThreadEngineConfig>,
 ) -> Result<StableMutation, ServiceFailure> {
@@ -970,6 +1079,27 @@ fn engine_config_stable_mutation(
         frame_id,
         sent_at,
         command: Command::SetThreadEngineConfig(command),
+    })
+}
+
+fn model_favorite_stable_mutation(
+    command: SetModelFavorite,
+) -> Result<StableMutation, ServiceFailure> {
+    let request_id = command.request_id.clone();
+    let frame_id = FrameId::parse(request_id.as_str().to_owned())
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let frame_request_id = frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    if frame_request_id != request_id || command.request_id != request_id {
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+    }
+    let sent_at =
+        real_unix_millis().map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    Ok(StableMutation {
+        frame_id,
+        sent_at,
+        command: Command::SetModelFavorite(command),
     })
 }
 
@@ -1099,6 +1229,11 @@ fn create_mutation(
 
 #[derive(Clone)]
 enum ExpectedResponse {
+    QueuedMessages { thread_id: ThreadId },
+    MessageWithdrawn { thread_id: ThreadId, message_id: artisan_domain::MessageId, original_request_id: RequestId, request_id: RequestId },
+    RecalledMessage { thread_id: ThreadId, message_id: artisan_domain::MessageId, original_request_id: RequestId },
+    RunUsage { thread_id: ThreadId, run_id: artisan_domain::RunId },
+
     ActiveRun(ThreadId),
     RunStopped(artisan_domain::StopRun),
     Directory,
@@ -1110,6 +1245,16 @@ enum ExpectedResponse {
     MessageImage(artisan_domain::ImageAttachmentRef),
     ThreadEngineSettings(ThreadId),
     RegisteredProfiles,
+    ComposerCatalog {
+        thread_id: ThreadId,
+        profile_id: artisan_domain::EngineProfileId,
+    },
+    ModelFavorites,
+    ModelFavoriteSet {
+        request_id: RequestId,
+        model_id: artisan_domain::ModelFavoriteId,
+        favorite: bool,
+    },
     ThreadEngineConfigSet {
         thread_id: ThreadId,
         request_id: RequestId,
@@ -1409,6 +1554,11 @@ fn validate_response_family(
     payload: ResponsePayload,
 ) -> Result<ResponsePayload, ServiceFailure> {
     match (expected, payload) {
+        (ExpectedResponse::QueuedMessages { thread_id }, ResponsePayload::QueuedMessages(value)) if value.thread_id() == &thread_id => Ok(ResponsePayload::QueuedMessages(value)),
+        (ExpectedResponse::MessageWithdrawn { thread_id, message_id, original_request_id, request_id }, ResponsePayload::MessageWithdrawn(value)) if value.thread_id == thread_id && value.message_id == message_id && value.original_request_id == original_request_id && value.withdrawal_request_id() == &request_id => Ok(ResponsePayload::MessageWithdrawn(value)),
+        (ExpectedResponse::RecalledMessage { thread_id, message_id, original_request_id }, ResponsePayload::RecalledMessage(value)) if value.thread_id == thread_id && value.message_id == message_id && value.original_request_id == original_request_id => Ok(ResponsePayload::RecalledMessage(value)),
+        (ExpectedResponse::RunUsage { thread_id, run_id }, ResponsePayload::RunUsage(value)) if value.thread_id == thread_id && value.run_id == run_id => Ok(ResponsePayload::RunUsage(value)),
+
         (ExpectedResponse::Directory, ResponsePayload::DirectoryPicked(outcome)) => {
             Ok(ResponsePayload::DirectoryPicked(outcome))
         }
@@ -1486,6 +1636,31 @@ fn validate_response_family(
             ExpectedResponse::RegisteredProfiles,
             ResponsePayload::RegisteredEngineProfiles(result),
         ) => Ok(ResponsePayload::RegisteredEngineProfiles(result)),
+        (
+            ExpectedResponse::ComposerCatalog {
+                thread_id,
+                profile_id,
+            },
+            ResponsePayload::ComposerCatalog(result),
+        ) if result.thread_id == thread_id && result.profile_id == profile_id => {
+            Ok(ResponsePayload::ComposerCatalog(result))
+        }
+        (ExpectedResponse::ModelFavorites, ResponsePayload::ModelFavorites(result)) => {
+            Ok(ResponsePayload::ModelFavorites(result))
+        }
+        (
+            ExpectedResponse::ModelFavoriteSet {
+                request_id,
+                model_id,
+                favorite,
+            },
+            ResponsePayload::ModelFavoriteSet(receipt),
+        ) if receipt.request_id == request_id
+            && receipt.model_id == model_id
+            && receipt.favorite == favorite =>
+        {
+            Ok(ResponsePayload::ModelFavoriteSet(receipt))
+        }
         (
             ExpectedResponse::ThreadEngineConfigSet {
                 thread_id,
@@ -2823,6 +2998,9 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::CreateTask(project_id)) => {
                         create_task_in_project(runtime, frames, events, project_id).await?;
                     }
+                    Some(NativeTransportCommand::ComposerState(command)) => {
+                        composer_state_operations::handle_composer_state_command(runtime, frames, events, command).await?;
+                    }
                     Some(NativeTransportCommand::ReadActiveRun { thread_id, generation }) => {
                         composer_operations::read_active_run(runtime, frames, events, thread_id, generation).await?;
                     }
@@ -2838,11 +3016,24 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::LoadThreadEngineSettings { thread_id, generation }) => {
                         load_thread_engine_settings(runtime, frames, events, thread_id, generation).await?;
                     }
+                    Some(NativeTransportCommand::ReadComposerCatalog { thread_id, profile_id, generation }) => {
+                        composer_operations::read_composer_catalog(
+                            runtime, frames, events, thread_id, profile_id, generation,
+                        ).await?;
+                    }
+                    Some(NativeTransportCommand::ReadModelFavorites { thread_id, profile_id, generation }) => {
+                        composer_operations::read_model_favorites(
+                            runtime, frames, events, thread_id, profile_id, generation,
+                        ).await?;
+                    }
                     Some(NativeTransportCommand::ListRegisteredProfiles) => {
                         list_registered_profiles(runtime, frames, events).await?;
                     }
                     Some(NativeTransportCommand::SetThreadEngineConfig(command)) => {
                         set_thread_engine_config(runtime, frames, events, command).await?;
+                    }
+                    Some(NativeTransportCommand::SetModelFavorite(command)) => {
+                        composer_operations::set_model_favorite(runtime, frames, events, *command).await?;
                     }
                     Some(NativeTransportCommand::QueueFirstMessage(command)) => {
                         queue_first_message(runtime, frames, events, *command).await?;
@@ -4017,6 +4208,7 @@ fn custody_trace() -> Vec<CustodyStep> {
 
 #[cfg(test)]
 mod tests {
+    use artisan_domain::UnixMillis;
     use super::{
         COMMAND_CAPACITY, ExpectedResponse, FrameFactory, IntakeRetry, NativeTransportCommand,
         PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
@@ -4032,17 +4224,18 @@ mod tests {
     use artisan_domain::{
         AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
         ConversationQueryBounds, ConversationSnapshot, CreateThread, DirectoryId, DisplayName,
-        EngineProfileId, ListProjectThreads, MessageBody, ProjectId, ProjectListing,
-        ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, ReceiptDisposition, RequestId,
-        RootPath, SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle,
-        UnixMillis,
+        EngineProfileId, ListProjectThreads, MessageBody, ModelFavoriteId, ProjectId,
+        ProjectListing, ProjectSummary, Query, QueryTurnCount, QueueFirstMessage,
+        ReceiptDisposition, RequestId, RootPath, SetThreadEngineConfig, ThreadId, ThreadListing,
+        ThreadSummary, ThreadTitle,
     };
     use artisan_editor_cli::payload::PayloadHealth;
     use artisan_protocol::{
-        ClientRequest, DirectoryPickOutcome, ErrorCode, FirstMessageReceipt, HelloCredential,
-        ProtocolVersion, QueueMessageReceipt, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
-        RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
-        WireEnvelopeBody, encode_envelope,
+        CatalogSnapshotWire, ClientRequest, ComposerCatalogResult, DirectoryPickOutcome, ErrorCode,
+        FirstMessageReceipt, HelloCredential, ModelFavoritesSnapshot, ProtocolVersion,
+        QueueMessageReceipt, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
+        RegisteredEngineProfilesResult, ResponsePayload, SetModelFavoriteReceipt,
+        SetThreadEngineConfigResult, WireEnvelopeBody, encode_envelope,
     };
     use artisan_transport::{
         ClientRequestError, DeadlineError, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
@@ -4067,6 +4260,21 @@ mod tests {
             created_at: UnixMillis::EPOCH,
             updated_at: UnixMillis::EPOCH,
         }
+    }
+
+    fn catalog_result(thread_id: &str, profile_id: &str) -> ComposerCatalogResult {
+        let thread_id = ThreadId::parse(thread_id).expect("valid thread");
+        let profile_id = EngineProfileId::parse(profile_id).expect("valid profile");
+        let mut catalog =
+            crate::native_model_catalog::NativeModelCatalog::offline().expect("bundled catalog");
+        catalog.scope = Some(artisan_catalog::NativeCatalogScope {
+            profile_id: profile_id.as_str().to_owned(),
+            working_directory: "C:/workspace".to_owned(),
+            workspace_trust: "safe".to_owned(),
+        });
+        let bytes = artisan_catalog::wire::encode_catalog(&catalog).expect("catalog wire");
+        let snapshot = CatalogSnapshotWire::new(bytes).expect("bounded catalog wire");
+        ComposerCatalogResult::new(thread_id, profile_id, snapshot).expect("catalog result")
     }
 
     #[test]
@@ -5067,6 +5275,70 @@ mod tests {
     }
 
     #[test]
+    fn composer_catalog_response_family_requires_exact_thread_and_profile() {
+        let expected_thread = ThreadId::parse("thread-a").expect("thread");
+        let expected_profile = EngineProfileId::parse("profile-a").expect("profile");
+        let expected = ExpectedResponse::ComposerCatalog {
+            thread_id: expected_thread.clone(),
+            profile_id: expected_profile.clone(),
+        };
+        let matching = catalog_result("thread-a", "profile-a");
+        assert!(
+            validate_response_family(expected.clone(), ResponsePayload::ComposerCatalog(matching))
+                .is_ok()
+        );
+        let wrong_profile = catalog_result("thread-a", "profile-b");
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::ComposerCatalog(wrong_profile)
+            )
+            .is_err()
+        );
+        let wrong_thread = catalog_result("thread-b", "profile-a");
+        assert!(
+            validate_response_family(expected, ResponsePayload::ComposerCatalog(wrong_thread))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn favorite_receipt_response_family_requires_exact_request_model_and_desired_state() {
+        let request_id = RequestId::parse("favorite-a").expect("request");
+        let model_id = ModelFavoriteId::parse("model-a").expect("model");
+        let snapshot = ModelFavoritesSnapshot::new(
+            artisan_domain::ModelFavoritesRevision::default(),
+            vec![model_id.clone()],
+        )
+        .expect("snapshot");
+        let receipt = SetModelFavoriteReceipt {
+            request_id: request_id.clone(),
+            model_id: model_id.clone(),
+            favorite: true,
+            disposition: ReceiptDisposition::Accepted,
+            snapshot,
+        };
+        let expected = ExpectedResponse::ModelFavoriteSet {
+            request_id: request_id.clone(),
+            model_id: model_id.clone(),
+            favorite: true,
+        };
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::ModelFavoriteSet(receipt.clone())
+            )
+            .is_ok()
+        );
+        let mut wrong_state = receipt;
+        wrong_state.favorite = false;
+        assert!(
+            validate_response_family(expected, ResponsePayload::ModelFavoriteSet(wrong_state))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn registered_profiles_response_family_is_exact() {
         let missing = RegisteredEngineProfilesResult::RegistryMissing;
         assert!(
@@ -5277,3 +5549,7 @@ mod tests {
 
 #[path = "native_composer_transport.rs"]
 mod composer_operations;
+
+#[path = "native_composer_state_transport.rs"]
+mod composer_state_operations;
+pub(crate) use composer_state_operations::{ComposerStateCommand, ComposerStateEvent};

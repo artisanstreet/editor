@@ -97,6 +97,7 @@ impl NativeApplication {
         {
             return;
         }
+        let was_active = self.run_controls.active.is_some();
         self.run_controls.pending = None;
         match result {
             Ok(ActiveRunResult::Active {
@@ -117,6 +118,8 @@ impl NativeApplication {
             _ => self.run_controls.available = false,
         }
         self.sync_composer_controls(cx);
+        self.schedule_composer_queue(false, cx);
+        if was_active && self.run_controls.active.is_none() { self.request_composer_usage(cx); }
         self.schedule_run_observation(cx);
         cx.notify();
     }

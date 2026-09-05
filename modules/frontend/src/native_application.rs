@@ -24,8 +24,8 @@ use std::collections::VecDeque;
 
 use artisan_assets::AssetId;
 use artisan_domain::{
-    ConversationSnapshot, EngineProfileId, PatchBatch, ProjectId, ProjectListing,
-    QueueMessagePayload, RequestId, ThreadId, ThreadListing,
+    CatalogRevision, ConversationSnapshot, EngineProfileId, ModelFavoriteId, PatchBatch, ProjectId,
+    ProjectListing, QueueMessagePayload, RequestId, SetModelFavorite, ThreadId, ThreadListing,
 };
 use artisan_protocol::{ConversationSubscriptionStarted, QueueMessageReceipt};
 use artisan_ui::button::{
@@ -62,9 +62,13 @@ use crate::native_composer_controls::{
 };
 use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
 use crate::native_model_catalog::NativeModelCatalog;
-use crate::native_model_selector::NativeModelSelector;
+use crate::native_model_selector::{NativeModelSelector, NativeModelSelectorStatus};
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
+use crate::native_transport::{
+    CatalogLoadGeneration, CatalogScopeError, NativeCatalogController, NativeCatalogPhase,
+    NativeCatalogScope,
+};
 use crate::native_transport_service::{
     CommandSendError, EventReceiveError, NativeProjectIntakeOperation, NativeProjectIntakeStage,
     NativeTransportCommand, NativeTransportEvent, NativeTransportService, ServiceFailure,
@@ -228,8 +232,10 @@ pub struct NativeApplication {
     service: Option<Arc<NativeTransportService>>,
     composer: Entity<NativeComposer>,
     run_controls: composer_run_controls::RunControlsState,
+    composer_queue: composer_queue_application::QueueApplicationState,
     composer_controls: Entity<NativeComposerControls>,
     model_selector: Entity<NativeModelSelector>,
+    catalog_controller: NativeCatalogController,
     _composer_controls_subscription: Subscription,
     _composer_model_subscription: Subscription,
     message_images: Entity<NativeMessageImages>,
@@ -328,6 +334,7 @@ impl NativeApplication {
         let model_selector =
             cx.new(|cx| NativeModelSelector::new(catalog, None, ThemeMode::Dark, cx));
         let composer_controls_subscription = cx.subscribe(&composer_controls, |application, _, event, cx| {
+            if application.handle_queue_control(event, cx) { return; }
             match event {
                 NativeComposerControlsEvent::SendRequested => application.begin_message_submission(cx),
                 NativeComposerControlsEvent::JumpToLatest => {
@@ -413,8 +420,10 @@ impl NativeApplication {
             service,
             composer,
             run_controls: composer_run_controls::RunControlsState::default(),
+            composer_queue: composer_queue_application::QueueApplicationState::new(cx),
             composer_controls,
             model_selector,
+            catalog_controller: NativeCatalogController::new(),
             _composer_controls_subscription: composer_controls_subscription,
             _composer_model_subscription: composer_model_subscription,
             _composer_subscription: composer_subscription,
@@ -1476,6 +1485,13 @@ impl NativeApplication {
             self.message_submission_is_admissible(cx) && self.composer.read(cx).send_ready();
         snapshot.disabled = self.service_stopped;
         self.project_run_controls(&mut snapshot);
+        crate::native_composer_queue::project_controls_snapshot(&self.composer_queue.state, &mut snapshot);
+        let queue = &self.composer_queue.state;
+        let count = crate::native_composer_queue::queue_count_label(queue);
+        let status = queue.status().label();
+        snapshot.queue_status = if status.is_empty() { count } else { Some(match count { Some(count) => format!("{count} · {status}"), None => status.to_owned() }) };
+        snapshot.queue_retry = if queue.can_retry_restore() { Some("Restore".into()) } else if queue.can_retry_recalled_read() || matches!(queue.status(), crate::composer_queue_state::QueueStatus::TransportFailed) { Some("Retry".into()) } else { None };
+
         snapshot.new_thread_ready =
             snapshot.run_active && snapshot.send_ready && self.add_project_action_is_admissible();
         snapshot.failure = self.message_failure.map(|notice| {
@@ -1520,6 +1536,7 @@ impl NativeApplication {
         });
         self.sync_composer_controls(cx);
         self.schedule_run_observation(cx);
+        self.schedule_composer_queue(false, cx);
     }
 
     fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
@@ -1850,6 +1867,7 @@ impl NativeApplication {
             return;
         }
         match event {
+            NativeTransportEvent::ComposerState(event) => self.handle_composer_state_event(event, cx),
             NativeTransportEvent::ActiveRun {
                 thread_id,
                 generation,
@@ -1926,6 +1944,44 @@ impl NativeApplication {
             NativeTransportEvent::RegisteredProfilesFailed(failure) => {
                 self.handle_registered_profiles_failed(failure, cx);
             }
+            NativeTransportEvent::ComposerCatalog {
+                thread_id,
+                profile_id,
+                generation,
+                result,
+            } => self.handle_composer_catalog(thread_id, profile_id, generation, result, cx),
+            NativeTransportEvent::ComposerCatalogFailed {
+                thread_id,
+                profile_id,
+                generation,
+                failure,
+            } => {
+                self.handle_composer_catalog_failed(thread_id, profile_id, generation, failure, cx)
+            }
+            NativeTransportEvent::ModelFavorites {
+                thread_id,
+                profile_id,
+                generation,
+                result,
+            } => self.handle_model_favorites(thread_id, profile_id, generation, result, cx),
+            NativeTransportEvent::ModelFavoritesFailed {
+                thread_id,
+                profile_id,
+                generation,
+                failure,
+            } => self.handle_model_favorites_failed(thread_id, profile_id, generation, failure, cx),
+            NativeTransportEvent::ModelFavoriteSet {
+                thread_id,
+                profile_id,
+                request_id,
+                receipt,
+            } => self.handle_model_favorite_set(thread_id, profile_id, request_id, receipt, cx),
+            NativeTransportEvent::ModelFavoriteFailed {
+                thread_id,
+                profile_id,
+                request_id,
+                failure,
+            } => self.handle_model_favorite_failed(thread_id, profile_id, request_id, failure, cx),
             NativeTransportEvent::ThreadEngineConfigSet(result, retained) => {
                 self.handle_engine_config_set(&result, *retained, cx);
             }
@@ -1955,6 +2011,7 @@ impl NativeApplication {
             | NativeTransportEvent::FirstMessageFailed { .. } => {}
             NativeTransportEvent::MessageQueued(receipt) => {
                 self.handle_message_receipt(receipt, cx);
+                self.schedule_composer_queue(true, cx);
             }
             NativeTransportEvent::MessageFailed {
                 thread_id,
@@ -2019,6 +2076,7 @@ impl NativeApplication {
             self.state = NativeViewState::EmptyThreads;
             self.sync_thread_picker_selected(cx);
             self.engine_settings.select_thread(None);
+            self.reset_composer_catalog(cx);
             self.sync_composer_availability(cx);
         }
         cx.notify();
@@ -2027,6 +2085,7 @@ impl NativeApplication {
     fn handle_service_stopped(&mut self, status: ServiceStopStatus, cx: &mut Context<Self>) {
         self.retain_message_flight(cx);
         self.service_stopped = true;
+        self.reset_composer_catalog(cx);
         self.thread_switch_flight = None;
         self.ordinary_unsubscribe_thread = None;
         self.pending_thread = None;
@@ -2362,6 +2421,7 @@ impl NativeApplication {
                 self.sync_thread_picker_selected(cx);
                 self.sync_thread_picker_disabled(cx);
                 self.engine_settings.select_thread(None);
+                self.reset_composer_catalog(cx);
                 self.sync_composer_availability(cx);
                 cx.notify();
                 return;
@@ -2372,6 +2432,7 @@ impl NativeApplication {
             self.sync_thread_picker_selected(cx);
             self.sync_thread_picker_disabled(cx);
             self.engine_settings.select_thread(None);
+            self.reset_composer_catalog(cx);
             self.sync_composer_availability(cx);
             cx.notify();
         }
@@ -2894,6 +2955,7 @@ impl NativeApplication {
         self.selected_thread = None;
         self.standalone_snapshot_thread = None;
         self.engine_settings.select_thread(None);
+        self.reset_composer_catalog(cx);
         self.sync_thread_picker_selected(cx);
         self.sync_composer_availability(cx);
     }
@@ -3356,6 +3418,7 @@ impl NativeApplication {
                     self.state = NativeViewState::EmptyThreads;
                     self.sync_thread_picker_selected(cx);
                     self.engine_settings.select_thread(None);
+                    self.reset_composer_catalog(cx);
                     self.sync_composer_availability(cx);
                 }
             }
@@ -3673,6 +3736,7 @@ impl NativeApplication {
         }
         self.sync_thread_picker_selected(cx);
         self.engine_settings.select_thread(Some(&thread_id));
+        self.reset_composer_catalog(cx);
         self.request_engine_settings_for_selected(cx);
         let Ok(host) = ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx) else {
             self.set_failure(invalid_service_failure(), cx);
@@ -3755,6 +3819,7 @@ impl NativeApplication {
             self.selected_thread = None;
             self.standalone_snapshot_thread = None;
             self.engine_settings.select_thread(None);
+            self.reset_composer_catalog(cx);
             self.sync_thread_picker_selected(cx);
             self.sync_composer_availability(cx);
             cx.notify();
@@ -3769,6 +3834,7 @@ impl NativeApplication {
             self.ordinary_unsubscribe_thread = None;
             self.standalone_snapshot_thread = None;
             self.engine_settings.select_thread(None);
+            self.reset_composer_catalog(cx);
             self.sync_thread_picker_selected(cx);
             self.sync_thread_picker_disabled(cx);
             self.sync_composer_availability(cx);
@@ -3953,6 +4019,383 @@ impl NativeApplication {
         cx.notify();
     }
 
+    fn reset_model_selector_offline(&mut self, cx: &mut Context<Self>) {
+        let catalog = NativeModelCatalog::offline()
+            .expect("the bundled model catalog is validated at the native boundary");
+        self.model_selector.update(cx, |selector, cx| {
+            selector.set_snapshot(catalog, cx);
+            selector.set_policy(None, cx);
+            selector.set_status(NativeModelSelectorStatus::default(), cx);
+        });
+    }
+
+    fn reset_composer_catalog(&mut self, cx: &mut Context<Self>) {
+        self.catalog_controller.clear_scope();
+        self.reset_model_selector_offline(cx);
+    }
+
+    fn discover_composer_catalog(
+        &mut self,
+        thread_id: ThreadId,
+        profile_id: EngineProfileId,
+        cx: &mut Context<Self>,
+    ) {
+        let selection = match self.catalog_controller.select_scope(thread_id, profile_id) {
+            Ok(selection) => selection,
+            Err(CatalogScopeError::GenerationExhausted) => {
+                self.model_selector.update(cx, |selector, cx| {
+                    selector.set_status(
+                        NativeModelSelectorStatus {
+                            saving: false,
+                            error: Some(
+                                "Runtime model catalog loading is unavailable for this session."
+                                    .to_owned(),
+                            ),
+                            authoritative: false,
+                        },
+                        cx,
+                    );
+                });
+                return;
+            }
+        };
+        if selection.changed() {
+            self.reset_model_selector_offline(cx);
+        }
+        self.submit_composer_catalog_reads(selection.scope().clone(), cx);
+    }
+
+    fn submit_composer_catalog_reads(&mut self, scope: NativeCatalogScope, cx: &mut Context<Self>) {
+        let service = self.service.clone();
+        if self.catalog_controller.catalog_request_needed(&scope) {
+            let command = NativeTransportCommand::ReadComposerCatalog {
+                thread_id: scope.thread_id.clone(),
+                profile_id: scope.profile_id.clone(),
+                generation: scope.generation,
+            };
+            let outcome = service
+                .as_ref()
+                .map_or(Err(CommandSendError::Stopped), |service| {
+                    service.submit(command)
+                });
+            match outcome {
+                Ok(()) => {
+                    if !self.catalog_controller.mark_catalog_admitted(&scope) {
+                        self.catalog_controller
+                            .on_catalog_admission_failed(&scope, invalid_service_failure());
+                    }
+                }
+                Err(error) => {
+                    self.catalog_controller
+                        .on_catalog_admission_failed(&scope, command_failure(error));
+                }
+            }
+        }
+        if self.catalog_controller.favorites_request_needed(&scope) {
+            let command = NativeTransportCommand::ReadModelFavorites {
+                thread_id: scope.thread_id.clone(),
+                profile_id: scope.profile_id.clone(),
+                generation: scope.generation,
+            };
+            let outcome = service
+                .as_ref()
+                .map_or(Err(CommandSendError::Stopped), |service| {
+                    service.submit(command)
+                });
+            match outcome {
+                Ok(()) => {
+                    if !self.catalog_controller.mark_favorites_admitted(&scope) {
+                        self.catalog_controller
+                            .on_favorites_admission_failed(&scope, invalid_service_failure());
+                    }
+                }
+                Err(error) => {
+                    self.catalog_controller
+                        .on_favorites_admission_failed(&scope, command_failure(error));
+                }
+            }
+        }
+        self.sync_composer_catalog_status(cx);
+    }
+
+    /// Retries the current catalog read without minting a new scope.
+    pub fn retry_composer_catalog(&mut self, cx: &mut Context<Self>) {
+        if let Some(scope) = self.catalog_controller.retry_catalog() {
+            self.submit_composer_catalog_reads(scope, cx);
+        }
+    }
+
+    /// Returns whether the current runtime catalog exposes an explicit retry.
+    #[must_use]
+    pub fn composer_catalog_retry_available(&self) -> bool {
+        self.catalog_controller.catalog_retry_available()
+    }
+
+    /// Returns the truthful lifecycle of the selected runtime catalog.
+    #[must_use]
+    pub fn composer_catalog_phase(&self) -> NativeCatalogPhase {
+        self.catalog_controller.catalog_phase()
+    }
+
+    /// Retries the current durable favorites read without minting a new scope.
+    pub fn retry_composer_favorites(&mut self, cx: &mut Context<Self>) {
+        if let Some(scope) = self.catalog_controller.retry_favorites() {
+            self.submit_composer_catalog_reads(scope, cx);
+        }
+    }
+
+    /// Returns whether the current durable favorites read exposes an explicit
+    /// retry.
+    #[must_use]
+    pub fn composer_favorites_retry_available(&self) -> bool {
+        self.catalog_controller.favorites_retry_available()
+    }
+
+    /// Retries the exact favorite mutation retained after a failure.
+    pub fn retry_composer_favorite(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.catalog_controller.retry_favorite() {
+            self.submit_pending_model_favorite(pending, cx);
+        }
+    }
+
+    /// Returns whether an exact favorite mutation may be retried.
+    #[must_use]
+    pub fn composer_favorite_retry_available(&self) -> bool {
+        self.catalog_controller.retry_favorite().is_some()
+    }
+
+    fn discover_composer_catalog_for_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.selected_thread.clone() else {
+            return;
+        };
+        let profile = self.engine_settings.authoritative_config()
+            .map(|config| config.selection().as_opencode2().profile_id().clone())
+            .or_else(|| match self.engine_settings.registry_view() {
+                crate::engine_settings::RegistryView::Present(profiles) if profiles.len() == 1 => profiles.into_iter().next(),
+                _ => None,
+            });
+        let Some(profile_id) = profile else {
+            self.reset_composer_catalog(cx);
+            return;
+        };
+        self.discover_composer_catalog(thread_id, profile_id, cx);
+    }
+
+    fn sync_composer_catalog_status(&mut self, cx: &mut Context<Self>) {
+        let error = if self.catalog_controller.catalog_phase() == NativeCatalogPhase::Failed {
+            Some("Runtime model catalog is unavailable. Retry model loading.".to_owned())
+        } else if self.catalog_controller.favorites_failure().is_some() {
+            Some("Model favorites could not be synchronized. Retry the favorite action.".to_owned())
+        } else {
+            None
+        };
+        let saving = self.catalog_controller.catalog_loading()
+            || self
+                .catalog_controller
+                .pending_favorite()
+                .is_some_and(|pending| pending.admitted);
+        let authoritative = self.catalog_controller.catalog_ready();
+        self.model_selector.update(cx, |selector, cx| {
+            selector.set_status(
+                NativeModelSelectorStatus {
+                    saving,
+                    error,
+                    authoritative,
+                },
+                cx,
+            );
+        });
+    }
+
+    fn handle_composer_catalog(
+        &mut self,
+        thread_id: ThreadId,
+        profile_id: EngineProfileId,
+        generation: CatalogLoadGeneration,
+        result: artisan_protocol::ComposerCatalogResult,
+        cx: &mut Context<Self>,
+    ) {
+        let scope = NativeCatalogScope::new(thread_id.clone(), profile_id.clone(), generation);
+        if !self.catalog_controller.catalog_response_current(&scope)
+            || result.thread_id != thread_id
+            || result.profile_id != profile_id
+        {
+            return;
+        }
+        let mut catalog = match result.snapshot.decoded() {
+            Ok(catalog) => catalog,
+            Err(_) => {
+                self.catalog_controller.on_catalog_failed(
+                    &scope,
+                    ServiceFailure {
+                        stage: ServiceFailureStage::Request,
+                        category: ServiceFailureCategory::Integrity,
+                    },
+                );
+                self.sync_composer_catalog_status(cx);
+                return;
+            }
+        };
+        if catalog
+            .scope
+            .as_ref()
+            .is_none_or(|catalog_scope| catalog_scope.profile_id.as_str() != profile_id.as_str())
+        {
+            self.catalog_controller.on_catalog_failed(
+                &scope,
+                ServiceFailure {
+                    stage: ServiceFailureStage::Request,
+                    category: ServiceFailureCategory::Integrity,
+                },
+            );
+            self.sync_composer_catalog_status(cx);
+            return;
+        }
+        if !self.catalog_controller.on_catalog_loaded(&scope) {
+            return;
+        }
+        if self.catalog_controller.favorite_revision().is_some() {
+            catalog.favorite_ids = self.catalog_controller.favorite_ids().to_vec();
+        }
+        self.model_selector.update(cx, |selector, cx| {
+            selector.set_snapshot(catalog, cx);
+        });
+        self.sync_composer_model_policy(cx);
+        self.sync_composer_catalog_status(cx);
+        cx.notify();
+    }
+
+    fn handle_composer_catalog_failed(
+        &mut self,
+        thread_id: ThreadId,
+        profile_id: EngineProfileId,
+        generation: CatalogLoadGeneration,
+        failure: ServiceFailure,
+        cx: &mut Context<Self>,
+    ) {
+        let scope = NativeCatalogScope::new(thread_id, profile_id, generation);
+        if self.catalog_controller.on_catalog_failed(&scope, failure) {
+            self.sync_composer_catalog_status(cx);
+            cx.notify();
+        }
+    }
+
+    fn handle_model_favorites(
+        &mut self,
+        thread_id: ThreadId,
+        profile_id: EngineProfileId,
+        generation: CatalogLoadGeneration,
+        result: artisan_protocol::ModelFavoritesSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let scope = NativeCatalogScope::new(thread_id, profile_id, generation);
+        if !self.catalog_controller.favorites_response_current(&scope) {
+            return;
+        }
+        let revision = result.revision.get();
+        let model_ids = result
+            .model_ids
+            .iter()
+            .map(|model_id| model_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let applied = self
+            .catalog_controller
+            .on_favorites_loaded(&scope, revision, model_ids);
+        if applied {
+            self.apply_authoritative_favorites(cx);
+        }
+        self.sync_composer_catalog_status(cx);
+        cx.notify();
+    }
+
+    fn handle_model_favorites_failed(
+        &mut self,
+        thread_id: ThreadId,
+        profile_id: EngineProfileId,
+        generation: CatalogLoadGeneration,
+        failure: ServiceFailure,
+        cx: &mut Context<Self>,
+    ) {
+        let scope = NativeCatalogScope::new(thread_id, profile_id, generation);
+        if self.catalog_controller.on_favorites_failed(&scope, failure) {
+            self.sync_composer_catalog_status(cx);
+            cx.notify();
+        }
+    }
+
+    fn apply_authoritative_favorites(&mut self, cx: &mut Context<Self>) {
+        let favorite_ids = self.catalog_controller.favorite_ids().to_vec();
+        let mut catalog = self.model_selector.read(cx).state().snapshot().clone();
+        catalog.favorite_ids = favorite_ids;
+        self.model_selector.update(cx, |selector, cx| {
+            selector.set_snapshot(catalog, cx);
+        });
+        self.sync_composer_model_policy(cx);
+    }
+
+    fn handle_model_favorite_set(
+        &mut self,
+        thread_id: ThreadId,
+        profile_id: EngineProfileId,
+        request_id: RequestId,
+        receipt: artisan_protocol::SetModelFavoriteReceipt,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scope) = self.catalog_controller.scope().cloned() else {
+            return;
+        };
+        if scope.thread_id != thread_id
+            || scope.profile_id != profile_id
+            || receipt.request_id != request_id
+        {
+            return;
+        }
+        let model_id = receipt.model_id.clone();
+        let favorite = receipt.favorite;
+        let revision = receipt.snapshot.revision.get();
+        let model_ids = receipt
+            .snapshot
+            .model_ids
+            .iter()
+            .map(|model_id| model_id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if self.catalog_controller.on_favorite_succeeded(
+            &scope,
+            &request_id,
+            &model_id,
+            favorite,
+            revision,
+            model_ids,
+        ) {
+            self.apply_authoritative_favorites(cx);
+            self.sync_composer_catalog_status(cx);
+            cx.notify();
+        }
+    }
+
+    fn handle_model_favorite_failed(
+        &mut self,
+        thread_id: ThreadId,
+        profile_id: EngineProfileId,
+        request_id: RequestId,
+        failure: ServiceFailure,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scope) = self.catalog_controller.scope().cloned() else {
+            return;
+        };
+        if scope.thread_id != thread_id || scope.profile_id != profile_id {
+            return;
+        }
+        if self
+            .catalog_controller
+            .on_favorite_failed(&scope, &request_id, failure)
+        {
+            self.sync_composer_catalog_status(cx);
+            cx.notify();
+        }
+    }
+
     fn request_engine_settings_for_selected(&mut self, cx: &mut Context<Self>) {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
@@ -4038,8 +4481,16 @@ impl NativeApplication {
         result: artisan_protocol::ThreadEngineSettingsResult,
         cx: &mut Context<Self>,
     ) {
+        let accepted = self.engine_settings.active_settings_generation() == Some(generation)
+            && self
+                .selected_thread
+                .as_ref()
+                .is_some_and(|thread_id| result.thread_id() == thread_id);
         self.engine_settings.on_settings_loaded(generation, result);
         self.sync_composer_model_policy(cx);
+        if accepted {
+            self.discover_composer_catalog_for_settings(cx);
+        }
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -4050,6 +4501,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.engine_settings.on_registry_loaded(result);
+        self.discover_composer_catalog_for_settings(cx);
         cx.notify();
     }
 
@@ -4068,8 +4520,13 @@ impl NativeApplication {
         retained: artisan_domain::EngineRunConfig,
         cx: &mut Context<Self>,
     ) {
+        let accepted = self.engine_settings.selected_thread() == Some(&result.thread_id)
+            && self.engine_settings.pending_save_request_id() == Some(&result.request_id);
         self.engine_settings.on_save_succeeded(result, retained);
         self.sync_composer_model_policy(cx);
+        if accepted {
+            self.discover_composer_catalog_for_settings(cx);
+        }
         cx.notify();
     }
 
@@ -4079,7 +4536,12 @@ impl NativeApplication {
         request_id: &artisan_domain::RequestId,
         cx: &mut Context<Self>,
     ) {
+        let accepted = self.engine_settings.selected_thread() == Some(&thread_id)
+            && self.engine_settings.pending_save_request_id() == Some(request_id);
         self.engine_settings.on_conflict(thread_id, request_id);
+        if accepted && self.engine_settings.pending_reload_thread().is_some() {
+            self.reset_composer_catalog(cx);
+        }
         if self.engine_settings.pending_reload_thread().is_some() {
             self.request_engine_settings_for_selected(cx);
         } else {
@@ -4096,6 +4558,7 @@ impl NativeApplication {
     ) {
         self.engine_settings
             .on_save_failed(thread_id, request_id, failure);
+        self.sync_composer_model_policy(cx);
         cx.notify();
     }
 
@@ -4106,8 +4569,13 @@ impl NativeApplication {
         failure: ServiceFailure,
         cx: &mut Context<Self>,
     ) {
+        let accepted = self.engine_settings.active_settings_generation() == Some(generation)
+            && self.selected_thread.as_ref() == Some(&thread_id);
         self.engine_settings
             .on_settings_load_failed(thread_id, generation, failure);
+        if accepted {
+            self.reset_composer_catalog(cx);
+        }
         cx.notify();
     }
 
@@ -4187,6 +4655,7 @@ impl NativeApplication {
             Ok(id) => id,
             Err(failure) => {
                 self.engine_settings.on_save_admission_failed(failure);
+                self.sync_composer_model_policy(cx);
                 cx.notify();
                 return;
             }
@@ -4197,6 +4666,7 @@ impl NativeApplication {
                     stage: ServiceFailureStage::Request,
                     category: ServiceFailureCategory::InvalidConfiguration,
                 });
+            self.sync_composer_model_policy(cx);
             cx.notify();
             return;
         };
@@ -4208,6 +4678,7 @@ impl NativeApplication {
                     stage: ServiceFailureStage::EventBridge,
                     category: ServiceFailureCategory::ChannelClosed,
                 });
+            self.sync_composer_model_policy(cx);
             cx.notify();
             return;
         };
@@ -4230,12 +4701,14 @@ impl NativeApplication {
                 .engine_settings
                 .on_save_admission_failed(command_failure(error)),
         }
+        self.sync_composer_model_policy(cx);
         cx.notify();
     }
 
     /// Cancels local edits without emitting a save.
     pub fn cancel_engine_settings(&mut self, cx: &mut Context<Self>) {
         self.engine_settings.cancel();
+        self.sync_composer_model_policy(cx);
         cx.notify();
     }
 
@@ -8088,3 +8561,6 @@ mod composer_run_controls;
 
 #[path = "native_composer_models.rs"]
 mod native_composer_models;
+
+#[path = "native_composer_queue_application.rs"]
+mod composer_queue_application;
