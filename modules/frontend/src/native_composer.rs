@@ -13,7 +13,7 @@ use artisan_ui::{
     button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility},
     input::InputStyle,
     motion::MotionPolicy,
-    theme::{ArtisanTheme, ThemeMode},
+    theme::{ArtisanTheme, DesktopTheme, ThemeMode},
 };
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler,
@@ -495,6 +495,7 @@ impl Render for NativeComposer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let desktop_theme = DesktopTheme::neutral_dark();
         let style = InputStyle::resolve(theme, false);
         let draft = self.state.draft().to_owned();
         let styled_text = StyledText::new(SharedString::from(draft));
@@ -507,17 +508,17 @@ impl Render for NativeComposer {
             .key_context(NATIVE_COMPOSER_KEY_CONTEXT)
             .w_full()
             .min_w(px(0.0))
-            .min_h(style.height)
+            .min_h(px(56.0))
             .max_h(px(180.0))
-            .px(style.horizontal_padding)
-            .py(style.vertical_padding)
-            .rounded(style.corner_radius)
+            .px(px(12.0))
+            .py(px(10.0))
+            .rounded(px(6.0))
             .border(style.border_width)
-            .border_color(style.border)
-            .bg(style.background)
-            .text_color(style.foreground)
-            .text_size(style.text_size)
-            .line_height(style.line_height)
+            .border_color(desktop_theme.line)
+            .bg(desktop_theme.field)
+            .text_color(desktop_theme.foreground)
+            .text_size(px(15.0))
+            .line_height(px(22.0))
             .whitespace_normal()
             .overflow_y_scroll()
             .track_focus(&focus)
@@ -527,18 +528,18 @@ impl Render for NativeComposer {
             editor = editor.child(
                 div()
                     .absolute()
-                    .top(style.vertical_padding)
-                    .left(style.horizontal_padding)
-                    .text_color(style.placeholder_foreground)
-                    .text_size(style.text_size)
-                    .line_height(style.line_height)
+                    .top(px(10.0))
+                    .left(px(12.0))
+                    .text_color(desktop_theme.secondary)
+                    .text_size(px(15.0))
+                    .line_height(px(22.0))
                     .whitespace_normal()
                     .debug_selector(|| NATIVE_COMPOSER_PLACEHOLDER_SELECTOR.to_string())
                     .child(NATIVE_COMPOSER_PLACEHOLDER),
             );
         }
 
-        editor = editor.focus(move |focused| focused.border_color(style.focus_border));
+        editor = editor.focus(move |focused| focused.border_color(desktop_theme.foreground));
 
         let mouse_entity = entity.clone();
         editor = editor.on_mouse_down(MouseButton::Left, move |event, _, cx| {
@@ -575,7 +576,7 @@ impl Render for NativeComposer {
             self.send_focus_handle.clone(),
             theme,
             MotionPolicy::Reduced,
-            ButtonVariant::Ghost,
+            ButtonVariant::Default,
             ButtonSize::Small,
             ButtonContent::text(if sending { "Sending…" } else { "Send" }),
         )
@@ -591,9 +592,14 @@ impl Render for NativeComposer {
             .w_full()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(px(8.0))
+            .p(px(12.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(desktop_theme.line)
+            .bg(desktop_theme.sidebar)
             .child(editor)
-            .child(send)
+            .child(div().w_full().flex().justify_end().child(send))
     }
 }
 

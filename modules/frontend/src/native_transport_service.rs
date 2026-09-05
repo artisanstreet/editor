@@ -103,6 +103,8 @@ pub enum NativeTransportCommand {
     RetryProjectIntake,
     /// Select an existing Forge-owned project.
     SelectProject(ProjectId),
+    /// Create a new task in an existing, authoritative project.
+    CreateTask(ProjectId),
     /// Request a real snapshot for a host mounted on a known thread.
     RequestSnapshot(ThreadId),
     /// Load authoritative engine settings for one thread and generation.
@@ -147,6 +149,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::BeginProjectIntake => "BeginProjectIntake",
             Self::RetryProjectIntake => "RetryProjectIntake",
             Self::SelectProject(_) => "SelectProject",
+            Self::CreateTask(_) => "CreateTask",
             Self::RequestSnapshot(_) => "RequestSnapshot",
             Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
             Self::ListRegisteredProfiles => "ListRegisteredProfiles",
@@ -2708,6 +2711,9 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::SelectProject(project_id)) => {
                         select_project(runtime, frames, events, project_id).await?;
                     }
+                    Some(NativeTransportCommand::CreateTask(project_id)) => {
+                        create_task_in_project(runtime, frames, events, project_id).await?;
+                    }
                     Some(NativeTransportCommand::RequestSnapshot(thread_id)) => {
                         request_snapshot(runtime, frames, events, thread_id).await?;
                     }
@@ -3048,6 +3054,58 @@ async fn refresh_projects(
         title,
     )
     .await
+}
+
+async fn create_task_in_project(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    project_id: ProjectId,
+) -> Result<(), ServiceFailure> {
+    runtime.intake.reset();
+    let payload = match runtime
+        .request(frames, project_request(), ExpectedResponse::Projects)
+        .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return report_intake_failure(
+                runtime,
+                events,
+                NativeProjectIntakeOperation::CreateThread,
+                error,
+                None,
+                false,
+            );
+        }
+    };
+    let ResponsePayload::ProjectListing(projects) = payload else {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::CreateThread,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    };
+    if !projects
+        .projects()
+        .iter()
+        .any(|project| project.project_id == project_id)
+    {
+        return report_intake_failure(
+            runtime,
+            events,
+            NativeProjectIntakeOperation::CreateThread,
+            RequestFailure::terminal(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            None,
+            false,
+        );
+    }
+    runtime.intake.projects = Some(projects.clone());
+    let title = ThreadTitle::parse("New task").expect("static task title is valid");
+    create_thread(runtime, frames, events, projects, project_id, title).await
 }
 
 async fn create_thread(

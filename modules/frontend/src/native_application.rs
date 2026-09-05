@@ -16,7 +16,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 #[cfg(test)]
@@ -34,21 +34,27 @@ use artisan_ui::button::{
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
-use artisan_ui::theme::{ArtisanTheme, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
-    FocusHandle, FontWeight, KeyBinding, Render, Stateful, StatefulInteractiveElement,
-    Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
+    FocusHandle, FontWeight, KeyBinding, Render, SharedString, Stateful,
+    StatefulInteractiveElement, Subscription, Task, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
 
 use crate::composer::{DraftDisposition, SubmissionBlocked, SubmissionToken};
-use crate::editor_route_screen::{EditorScreen, EditorScreenIdentity, EditorSurfaceState};
-use crate::native_composer::{NativeComposer, NativeComposerEvent};
-use crate::native_new_thread_surface::{
-    NEW_THREAD_SURFACE_SELECTOR, NewThreadRecentRow, render_new_thread_surface,
+use crate::desktop_shell::{
+    DESKTOP_COLLAPSE_SELECTOR, DESKTOP_COMPOSER_SELECTOR, DESKTOP_EMPTY_SELECTOR,
+    DESKTOP_HOME_SELECTOR, DESKTOP_OFFLINE_SELECTOR, DESKTOP_PROJECTS_SELECTOR,
+    DESKTOP_THREADS_SELECTOR, desktop_label, desktop_muted, desktop_nav_glyph, desktop_shell,
 };
+use crate::editor_route_screen::{EditorScreen, EditorScreenIdentity, EditorSurfaceState};
+use crate::native_command_menu::{
+    CommandMenuAction, CommandMenuEntry, CommandMenuGroup, NativeCommandMenu,
+};
+use crate::native_composer::{NativeComposer, NativeComposerEvent};
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
 use crate::native_transport_service::{
@@ -60,8 +66,6 @@ use crate::onboarding_harness_presentation::{
     HarnessCatalog, HarnessSetupAction, HarnessSetupState,
 };
 use crate::onboarding_screen::{OnboardingHarnessEntry, OnboardingScreen};
-use crate::shell::{LegacyShellProps, RailIdentity, legacy_shell_frame};
-use crate::shell_layout::ProseWidth;
 use crate::thread_screen::{ThreadScreen, ThreadScreenGate};
 use crate::workspace_tab_state::EditorViewState;
 use crate::{
@@ -74,14 +78,14 @@ use crate::{
         RegistryView, manual_configuration_template,
     },
     native_thread_picker::{NativeThreadPicker, ThreadPickerAction},
-    new_thread_sentence_policy::{PROJECT_MARKER, pick_default_new_thread_sentence},
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
-    shell::{ShellFrameStyle, shell_rail},
-    thread_navigation_core::format_recent_thread_time,
     thread_title_policy::{ThreadTitleInput, ThreadTitleMode, thread_display_title},
 };
 
-actions!(native_application, [Quit, NextTabStop, PreviousTabStop]);
+actions!(
+    native_application,
+    [Quit, NextTabStop, PreviousTabStop, OpenCommandMenu]
+);
 
 /// The one shipping application title.
 pub(crate) const WINDOW_TITLE: &str = "Artisan";
@@ -197,6 +201,7 @@ const MAX_RETAINED_SWITCH_LISTINGS: usize = 8;
 /// The real native window root and its application-thread entities.
 pub struct NativeApplication {
     theme: ArtisanTheme,
+    desktop_theme: DesktopTheme,
     focus_handle: FocusHandle,
     add_project_focus_handle: FocusHandle,
     message_retry_focus_handle: FocusHandle,
@@ -204,6 +209,9 @@ pub struct NativeApplication {
     composer: Entity<NativeComposer>,
     _composer_subscription: Subscription,
     _composer_observation: Subscription,
+    command_menu: Entity<NativeCommandMenu>,
+    _command_menu_observation: Subscription,
+    sidebar_collapsed: bool,
     message_flight: Option<NativeMessageFlight>,
     message_retry: Option<NativeMessageRetry>,
     message_receipt: Option<FirstMessageReceipt>,
@@ -284,8 +292,16 @@ impl NativeApplication {
         let composer_observation = cx.observe(&composer, |application, composer, cx| {
             application.observe_composer_change(&composer, cx);
         });
+        let command_menu = cx.new(|menu_cx| {
+            NativeCommandMenu::new(vec![CommandMenuGroup::actions()], ThemeMode::Dark, menu_cx)
+                .titlebar_mode()
+        });
+        let command_menu_observation = cx.observe(&command_menu, |application, menu, cx| {
+            application.route_command_action(&menu, cx);
+        });
         let mut application = Self {
             theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+            desktop_theme: DesktopTheme::neutral_dark(),
             focus_handle,
             add_project_focus_handle,
             message_retry_focus_handle,
@@ -293,6 +309,9 @@ impl NativeApplication {
             composer,
             _composer_subscription: composer_subscription,
             _composer_observation: composer_observation,
+            command_menu,
+            _command_menu_observation: command_menu_observation,
+            sidebar_collapsed: false,
             message_flight: None,
             message_retry: None,
             message_receipt: None,
@@ -340,6 +359,11 @@ impl NativeApplication {
             poll_task: None,
             engine_settings: EngineSettingsController::new(),
         };
+        let return_focus = application.focus_handle.clone();
+        application.command_menu.update(cx, |menu, _| {
+            menu.set_return_focus(return_focus);
+        });
+        application.sync_command_menu_groups(cx);
         application.sync_composer_availability(cx);
         application
     }
@@ -398,6 +422,7 @@ impl NativeApplication {
     /// Navigates to `route`, retaining history, and rerenders.
     pub fn navigate(&mut self, route: NativeRoute, cx: &mut Context<Self>) {
         self.route_history.navigate(route);
+        self.sync_composer_availability(cx);
         cx.notify();
     }
 
@@ -405,64 +430,758 @@ impl NativeApplication {
     pub fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
         let moved = self.route_history.go_back();
         if moved {
+            self.sync_composer_availability(cx);
             cx.notify();
         }
         moved
     }
 
-    /// Maximum recent-thread rows on the new-thread surface.
-    const NEW_THREAD_MAX_ROWS: usize = 8;
-
-    /// Renders the new-thread surface for the current selection: sentence
-    /// heading plus recent rows from the retained listing, or the empty
-    /// copy when nothing is retained.
+    /// Renders the concise new-task home surface. All actions and catalog
+    /// rows live in the shell/sidebar; this route only explains the current
+    /// real state and leaves the editable composer to the shell footer.
     fn new_thread_surface_section(&self) -> Div {
-        let project_name = self
-            .selected_project
-            .as_ref()
-            .and_then(|selected| {
+        let (heading, detail) = if self.project_options.is_empty() {
+            (
+                "Start a task",
+                "Add a project to give Artisan a workspace to work in.".to_owned(),
+            )
+        } else if matches!(&self.state, NativeViewState::Failure(_)) {
+            (
+                "Start a task",
+                "Forge is offline. Existing project and task data will remain visible when it reconnects."
+                    .to_owned(),
+            )
+        } else if let Some(project) = self.selected_project_name() {
+            (
+                "Start a task",
+                format!("Choose a task in {project}, or describe what you need below."),
+            )
+        } else {
+            (
+                "Start a task",
+                "Choose a project from the sidebar, then describe what you need below.".to_owned(),
+            )
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .px(px(24.0))
+            .pb(px(24.0))
+            .debug_selector(|| DESKTOP_HOME_SELECTOR.to_string())
+            .child(
+                div()
+                    .text_size(px(20.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(self.desktop_theme.foreground)
+                    .child(heading),
+            )
+            .child(
+                div()
+                    .mt(px(8.0))
+                    .max_w(px(440.0))
+                    .text_size(px(15.0))
+                    .text_color(self.desktop_theme.secondary)
+                    .child(detail),
+            )
+    }
+
+    fn selected_project_name(&self) -> Option<String> {
+        self.selected_project.as_ref().and_then(|selected| {
+            self.project_options
+                .iter()
+                .find(|option| &option.id == selected)
+                .map(|option| option.name.to_string())
+        })
+    }
+
+    fn sync_command_menu_groups(&mut self, cx: &mut Context<Self>) {
+        let mut groups = vec![CommandMenuGroup::actions()];
+        if !self.project_options.is_empty() {
+            groups.push(CommandMenuGroup::new(
+                "projects",
+                "Projects",
                 self.project_options
                     .iter()
-                    .find(|option| &option.id == selected)
-            })
-            .map_or_else(
-                || "your project".to_owned(),
-                |option| option.name.to_string(),
-            );
-        let template = pick_default_new_thread_sentence(None, 0.0);
-        let sentence = template.replace(PROJECT_MARKER, &project_name);
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(0));
-        let rows: Vec<NewThreadRecentRow> = self
-            .thread_listing
-            .iter()
-            .flat_map(ThreadListing::threads)
-            .filter(|summary| {
-                self.selected_project
+                    .map(|project| {
+                        CommandMenuEntry::project(project.id.as_str(), project.name.to_string())
+                    })
+                    .collect(),
+            ));
+        }
+        if let Some(listing) = self.thread_listing.as_ref() {
+            let project_id = self.selected_project.as_ref();
+            let entries = listing
+                .threads()
+                .iter()
+                .filter(|thread| project_id == Some(&thread.project_id))
+                .map(|thread| {
+                    let title = thread_display_title(
+                        ThreadTitleInput {
+                            summary_title: None,
+                            title: thread.title.as_str(),
+                            title_locked: false,
+                        },
+                        ThreadTitleMode::default(),
+                    );
+                    CommandMenuEntry::thread(
+                        thread.thread_id.as_str(),
+                        title.to_owned(),
+                        thread.title.as_str(),
+                    )
+                })
+                .collect();
+            let (group_id, heading) = self
+                .selected_project
+                .as_ref()
+                .map(|project| {
+                    (
+                        format!("tasks-{}", project.as_str()),
+                        self.selected_project_name()
+                            .map_or_else(|| "Tasks".to_owned(), |name| format!("{name} tasks")),
+                    )
+                })
+                .unwrap_or_else(|| (String::from("tasks"), String::from("Tasks")));
+            groups.push(CommandMenuGroup::new(group_id, heading, entries));
+        }
+        let command_menu = self.command_menu.clone();
+        command_menu.update(cx, |menu, menu_cx| {
+            menu.replace_groups(groups, menu_cx);
+        });
+    }
+
+    fn route_command_action(&mut self, menu: &Entity<NativeCommandMenu>, cx: &mut Context<Self>) {
+        let Some(action) = menu.update(cx, |menu, _| menu.take_pending_action()) else {
+            return;
+        };
+        match action {
+            CommandMenuAction::NewThread => self.begin_new_task(cx),
+            CommandMenuAction::OpenSettings => {
+                self.navigate(
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Models,
+                        engine: None,
+                    },
+                    cx,
+                );
+            }
+            CommandMenuAction::OpenProject { project_id } => {
+                let Some(project) = self
+                    .project_options
+                    .iter()
+                    .find(|project| project.id.as_str() == project_id)
+                    .map(|project| project.id.clone())
+                else {
+                    return;
+                };
+                self.select_project_from_sidebar(project, cx);
+            }
+            CommandMenuAction::OpenThread { thread_id } => {
+                let Some(thread) = self
+                    .thread_listing
                     .as_ref()
-                    .is_none_or(|selected| &summary.project_id == selected)
+                    .and_then(|listing| {
+                        listing
+                            .threads()
+                            .iter()
+                            .find(|thread| thread.thread_id.as_str() == thread_id)
+                    })
+                    .map(|thread| thread.thread_id.clone())
+                else {
+                    return;
+                };
+                self.open_thread_from_sidebar(thread, cx);
+            }
+        }
+    }
+
+    fn activate_command_menu(
+        &mut self,
+        _: &OpenCommandMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = self.command_menu.clone();
+        menu.update(cx, |menu, menu_cx| {
+            menu.focus_or_open(window, menu_cx);
+        });
+    }
+
+    fn dismiss_command_menu(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = self.command_menu.clone();
+        if menu.read(cx).state().is_open() {
+            menu.update(cx, |menu, menu_cx| menu.dismiss(window, menu_cx));
+        }
+    }
+
+    fn activate_new_task(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.begin_new_task(cx);
+    }
+
+    fn begin_new_task(&mut self, cx: &mut Context<Self>) {
+        if !self.add_project_action_is_admissible() {
+            return;
+        }
+        if self.intake_retry_available || self.selected_project.is_none() {
+            self.submit_intake_command(cx);
+            if self.intake_stage.is_some() {
+                self.navigate(
+                    NativeRoute::NewThread {
+                        project: self.selected_project.clone(),
+                    },
+                    cx,
+                );
+            }
+            return;
+        }
+        let project = self
+            .selected_project
+            .clone()
+            .expect("selected project checked above");
+        match self.submit_command(NativeTransportCommand::CreateTask(project)) {
+            Ok(()) => {
+                self.handle_intake_progress(NativeProjectIntakeStage::CreatingThread, cx);
+                self.state = NativeViewState::Loading;
+                self.navigate(
+                    NativeRoute::NewThread {
+                        project: self.selected_project.clone(),
+                    },
+                    cx,
+                );
+            }
+            Err(error) => self.handle_intake_failed(
+                NativeProjectIntakeOperation::CreateThread,
+                command_failure(error),
+                false,
+                cx,
+            ),
+        }
+    }
+
+    fn activate_settings(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(
+            NativeRoute::Settings {
+                section: SettingsRoute::Models,
+                engine: None,
+            },
+            cx,
+        );
+    }
+
+    fn toggle_sidebar(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        cx.notify();
+    }
+
+    fn select_project_from_sidebar(&mut self, project_id: ProjectId, cx: &mut Context<Self>) {
+        if !self
+            .project_options
+            .iter()
+            .any(|project| &project.id == &project_id)
+            || !self.project_picker_action_is_admissible()
+        {
+            return;
+        }
+        self.retain_message_flight(cx);
+        self.clear_message_presentation();
+        self.intake_stage = None;
+        self.intake_failure_operation = None;
+        self.intake_retry_available = false;
+        self.intake_restore_state = None;
+        self.pending_thread = None;
+        self.pending_snapshot = None;
+        if self.selected_project.as_ref() != Some(&project_id) {
+            self.retire_host(cx);
+            self.thread_listing = None;
+            self.retained_switch_listings.clear();
+            self.install_thread_picker(empty_thread_listing(), None, cx);
+        }
+        self.selected_project = Some(project_id.clone());
+        self.navigate(
+            NativeRoute::NewThread {
+                project: Some(project_id.clone()),
+            },
+            cx,
+        );
+        self.set_thread_picker_disabled(true, cx);
+        self.state = NativeViewState::Loading;
+        self.sync_command_menu_groups(cx);
+        self.sync_composer_availability(cx);
+        match self.submit_command(NativeTransportCommand::SelectProject(project_id)) {
+            Ok(()) => cx.notify(),
+            Err(error) => self.set_failure(command_failure(error), cx),
+        }
+    }
+
+    fn open_thread_from_sidebar(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+        if !self.thread_is_listed(&thread_id) || !self.project_picker_action_is_admissible() {
+            return;
+        }
+        let Some(project) = self.selected_project.clone() else {
+            return;
+        };
+        if self.selected_thread.as_ref() == Some(&thread_id) {
+            self.navigate(
+                NativeRoute::Thread {
+                    project,
+                    thread: thread_id,
+                },
+                cx,
+            );
+            self.sync_composer_availability(cx);
+            return;
+        }
+        if self.selected_thread.is_none() || self.conversation_host.is_none() {
+            self.selected_thread = None;
+            self.pending_thread = Some(thread_id);
+            self.state = NativeViewState::Loading;
+            self.try_mount_pending_thread(cx);
+        } else {
+            self.begin_thread_switch(thread_id, cx);
+        }
+        self.sync_composer_availability(cx);
+        cx.notify();
+    }
+
+    fn desktop_identity(&self) -> Div {
+        let mut identity = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(self.desktop_theme.foreground)
+                    .child("Artisan"),
+            );
+        if let Some(project) = self.selected_project_name() {
+            identity = identity.child(
+                div()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .whitespace_nowrap()
+                    .text_size(px(13.0))
+                    .text_color(self.desktop_theme.secondary)
+                    .child(format!("/ {project}")),
+            );
+        }
+        identity
+    }
+
+    fn desktop_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = self.desktop_theme;
+        let collapsed = self.sidebar_collapsed;
+        let mut shell = div()
+            .h_full()
+            .w_full()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .p(px(10.0));
+
+        let mut new_task = div()
+            .id("artisan-desktop-new-task")
+            .w_full()
+            .h(px(34.0))
+            .flex()
+            .items_center()
+            .justify_start()
+            .gap(px(8.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .bg(if self.add_project_action_is_admissible() {
+                theme.primary_action
+            } else {
+                theme.selected
             })
-            .take(Self::NEW_THREAD_MAX_ROWS)
-            .enumerate()
-            .map(|(index, summary)| {
+            .text_color(if self.add_project_action_is_admissible() {
+                theme.primary_action_foreground
+            } else {
+                theme.secondary
+            })
+            .on_click(cx.listener(Self::activate_new_task));
+        if collapsed {
+            new_task = new_task.justify_center().px(px(0.0));
+        }
+        new_task = new_task.child(desktop_nav_glyph(AssetId::TABLER_EDIT, theme));
+        if !collapsed {
+            new_task = new_task.child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("New task"),
+            );
+        }
+        shell = shell.child(new_task);
+
+        let mut projects_section = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .debug_selector(|| DESKTOP_PROJECTS_SELECTOR.to_string());
+        if !collapsed {
+            let mut heading = div()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(6.0))
+                .child(desktop_label(theme, "Projects"));
+            let collapse_asset = AssetId::TABLER_CHEVRON_LEFT;
+            heading = heading.child(
+                div()
+                    .id(DESKTOP_COLLAPSE_SELECTOR)
+                    .w(px(24.0))
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .hover(|style| style.bg(theme.selected))
+                    .on_click(cx.listener(Self::toggle_sidebar))
+                    .debug_selector(|| DESKTOP_COLLAPSE_SELECTOR.to_string())
+                    .child(desktop_nav_glyph(collapse_asset, theme)),
+            );
+            projects_section = projects_section.child(heading);
+        } else {
+            let collapse_asset = AssetId::TABLER_CHEVRON_RIGHT;
+            projects_section = projects_section.child(
+                div()
+                    .id(DESKTOP_COLLAPSE_SELECTOR)
+                    .w_full()
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .hover(|style| style.bg(theme.selected))
+                    .on_click(cx.listener(Self::toggle_sidebar))
+                    .debug_selector(|| DESKTOP_COLLAPSE_SELECTOR.to_string())
+                    .child(desktop_nav_glyph(collapse_asset, theme)),
+            );
+        }
+
+        for project in &self.project_options {
+            let selected = self.selected_project.as_ref() == Some(&project.id);
+            let project_id = project.id.clone();
+            let mut row = div()
+                .id(SharedString::from(format!(
+                    "artisan-desktop-project-{}",
+                    project.id.as_str()
+                )))
+                .w_full()
+                .h(px(32.0))
+                .flex()
+                .items_center()
+                .justify_start()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .rounded(px(5.0))
+                .bg(if selected {
+                    theme.selected
+                } else {
+                    theme.sidebar
+                })
+                .hover(|style| style.bg(theme.selected))
+                .on_click(cx.listener(move |application, _: &ClickEvent, _, cx| {
+                    application.select_project_from_sidebar(project_id.clone(), cx);
+                }));
+            if collapsed {
+                row = row.justify_center().px(px(0.0));
+            }
+            row = row.child(desktop_nav_glyph(AssetId::TABLER_FOLDER, theme));
+            if !collapsed {
+                row = row.child(
+                    div()
+                        .min_w(px(0.0))
+                        .flex_1()
+                        .truncate()
+                        .whitespace_nowrap()
+                        .text_size(px(13.0))
+                        .text_color(if selected {
+                            theme.foreground
+                        } else {
+                            theme.secondary
+                        })
+                        .child(project.name.clone()),
+                );
+            }
+            projects_section = projects_section.child(row);
+        }
+        if self.project_options.is_empty() && !collapsed {
+            projects_section = projects_section.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.secondary)
+                    .debug_selector(|| DESKTOP_EMPTY_SELECTOR.to_string())
+                    .child("No projects attached."),
+            );
+        }
+        shell = shell.child(projects_section);
+
+        let mut threads_section = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .debug_selector(|| DESKTOP_THREADS_SELECTOR.to_string());
+        if !collapsed {
+            threads_section = threads_section.child(
+                div()
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .px(px(6.0))
+                    .child(desktop_label(theme, "Tasks")),
+            );
+        }
+        if let Some(listing) = self.thread_listing.as_ref() {
+            let mut visible_threads = 0;
+            for thread in listing
+                .threads()
+                .iter()
+                .filter(|thread| self.selected_project.as_ref() == Some(&thread.project_id))
+            {
+                visible_threads += 1;
+                let selected = self.selected_thread.as_ref() == Some(&thread.thread_id);
+                let thread_id = thread.thread_id.clone();
                 let title = thread_display_title(
                     ThreadTitleInput {
                         summary_title: None,
-                        title: summary.title.as_str(),
+                        title: thread.title.as_str(),
                         title_locked: false,
                     },
                     ThreadTitleMode::default(),
                 )
                 .to_owned();
-                NewThreadRecentRow::new(
-                    title,
-                    format_recent_thread_time(summary.updated_at.as_millis(), now_ms),
-                    format!("row-{index}"),
-                )
-            })
-            .collect();
-        render_new_thread_surface(self.theme, &sentence, &rows, NEW_THREAD_SURFACE_SELECTOR)
+                let mut row = div()
+                    .id(SharedString::from(format!(
+                        "artisan-desktop-thread-{}",
+                        thread.thread_id.as_str()
+                    )))
+                    .w_full()
+                    .h(px(32.0))
+                    .flex()
+                    .items_center()
+                    .justify_start()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .rounded(px(5.0))
+                    .bg(if selected {
+                        theme.selected
+                    } else {
+                        theme.sidebar
+                    })
+                    .hover(|style| style.bg(theme.selected))
+                    .on_click(cx.listener(move |application, _: &ClickEvent, _, cx| {
+                        application.open_thread_from_sidebar(thread_id.clone(), cx);
+                    }));
+                if collapsed {
+                    row = row.justify_center().px(px(0.0));
+                }
+                row = row.child(desktop_nav_glyph(AssetId::TABLER_MESSAGE_CIRCLE, theme));
+                if !collapsed {
+                    row = row.child(
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .truncate()
+                            .whitespace_nowrap()
+                            .text_size(px(13.0))
+                            .text_color(if selected {
+                                theme.foreground
+                            } else {
+                                theme.secondary
+                            })
+                            .child(title),
+                    );
+                }
+                threads_section = threads_section.child(row);
+            }
+            if visible_threads == 0 && !collapsed {
+                threads_section = threads_section.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.secondary)
+                        .debug_selector(|| DESKTOP_EMPTY_SELECTOR.to_string())
+                        .child("No tasks yet."),
+                );
+            }
+        } else if !collapsed {
+            threads_section = threads_section.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.secondary)
+                    .child(if matches!(&self.state, NativeViewState::Failure(_)) {
+                        "Tasks unavailable while offline."
+                    } else if self.selected_project.is_none() {
+                        "Choose a project to see its tasks."
+                    } else {
+                        "Loading tasks…"
+                    }),
+            );
+        }
+        shell = shell.child(threads_section);
+
+        if matches!(&self.state, NativeViewState::Failure(_)) && !collapsed {
+            shell = shell.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(8.0))
+                    .rounded(px(5.0))
+                    .bg(theme.field)
+                    .text_size(px(12.0))
+                    .text_color(theme.secondary)
+                    .debug_selector(|| DESKTOP_OFFLINE_SELECTOR.to_string())
+                    .child("Forge is offline."),
+            );
+        }
+
+        shell = shell.child(div().flex_1().min_h(px(0.0)));
+
+        let mut settings = div()
+            .id("artisan-desktop-settings")
+            .w_full()
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .justify_start()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .rounded(px(5.0))
+            .hover(|style| style.bg(theme.selected))
+            .on_click(cx.listener(Self::activate_settings))
+            .child(desktop_nav_glyph(AssetId::TABLER_SETTINGS, theme));
+        if collapsed {
+            settings = settings.justify_center().px(px(0.0));
+        } else {
+            settings = settings.child(desktop_muted(theme, "Settings"));
+        }
+        shell = shell.child(settings);
+
+        let mut add_project = div()
+            .w_full()
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .justify_start()
+            .gap(px(4.0))
+            .px(px(2.0))
+            .child(self.add_project_button(cx));
+        if !collapsed {
+            add_project = add_project.child(desktop_muted(theme, "Add project"));
+        }
+        shell.child(add_project)
+    }
+
+    fn desktop_toolbar(&self) -> Div {
+        let theme = self.desktop_theme;
+        let (title, detail) = match self.route() {
+            NativeRoute::NewThread { .. } => ("New task".to_owned(), self.selected_project_name()),
+            NativeRoute::Thread { thread, .. } => {
+                let title = self
+                    .thread_listing
+                    .as_ref()
+                    .and_then(|listing| {
+                        listing
+                            .threads()
+                            .iter()
+                            .find(|item| &item.thread_id == thread)
+                    })
+                    .map(|item| item.title.as_str().to_owned())
+                    .unwrap_or_else(|| "Task".to_owned());
+                (title, self.selected_project_name())
+            }
+            NativeRoute::Editor { .. } => ("Files".to_owned(), self.selected_project_name()),
+            NativeRoute::Settings { section, .. } => {
+                (format!("Settings / {}", section.as_str()), None)
+            }
+            NativeRoute::Onboarding => ("Welcome".to_owned(), None),
+        };
+        let mut toolbar = div()
+            .w_full()
+            .h_full()
+            .min_w(px(0.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(20.0))
+            .gap(px(12.0))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .text_size(px(15.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(title),
+            );
+        if let Some(detail) = detail {
+            toolbar = toolbar.child(
+                div()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .whitespace_nowrap()
+                    .text_size(px(12.0))
+                    .text_color(theme.secondary)
+                    .child(detail),
+            );
+        }
+        toolbar
+    }
+
+    fn desktop_route_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let route = self.route().clone();
+        let route_selector = route.selector_suffix();
+        let content = self.route_surface(cx);
+        let mut body = div()
+            .size_full()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .debug_selector(move || route_selector.clone());
+        if matches!(route, NativeRoute::NewThread { .. }) {
+            body = body.child(div().flex_1().min_w(px(0.0)).min_h(px(0.0)).child(content));
+            body = body.child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px(px(24.0))
+                    .pt(px(12.0))
+                    .pb(px(18.0))
+                    .bg(self.desktop_theme.sidebar)
+                    .border_t_1()
+                    .border_color(self.desktop_theme.line)
+                    .debug_selector(|| DESKTOP_COMPOSER_SELECTOR.to_string())
+                    .child(self.composer.clone()),
+            );
+        } else {
+            body = body.child(content);
+        }
+        body.into_any_element()
     }
 
     /// Returns the host entity when a real thread is selected.
@@ -472,7 +1191,10 @@ impl NativeApplication {
     }
 
     fn message_submission_is_admissible(&self, cx: &App) -> bool {
-        self.message_composer_visible(cx)
+        matches!(self.route(), NativeRoute::Thread { project, thread }
+            if self.selected_project.as_ref() == Some(project)
+                && self.selected_thread.as_ref() == Some(thread))
+            && self.message_composer_visible(cx)
     }
 
     fn project_picker_action_is_admissible(&self) -> bool {
@@ -2068,6 +2790,7 @@ impl NativeApplication {
         self.install_picker(options, Some(project_id), cx);
         self.install_thread_picker(threads.clone(), self.selected_thread.clone(), cx);
         self.try_mount_pending_thread(cx);
+        self.sync_command_menu_groups(cx);
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -2094,6 +2817,7 @@ impl NativeApplication {
         } else {
             self.state = NativeViewState::LoadingThreads;
         }
+        self.sync_command_menu_groups(cx);
         cx.notify();
     }
 
@@ -2199,9 +2923,11 @@ impl NativeApplication {
                 .all(|thread| &thread.project_id == project_id);
         if self.thread_switch_flight.is_some() {
             self.handle_threads_during_switch(listing_is_valid, listing, cx);
+            self.sync_command_menu_groups(cx);
             return;
         }
         self.handle_threads_without_switch(listing_is_valid, project_id, listing, cx);
+        self.sync_command_menu_groups(cx);
     }
 
     fn handle_threads_during_switch(
@@ -2447,40 +3173,7 @@ impl NativeApplication {
         }
         match picker_route(&action, &self.project_options) {
             Ok(PickerRoute::Select(project_id)) => {
-                self.retain_message_flight(cx);
-                self.clear_message_presentation();
-                self.intake_stage = None;
-                self.intake_failure_operation = None;
-                self.intake_retry_available = false;
-                self.intake_restore_state = None;
-                self.pending_thread = None;
-                self.pending_snapshot = None;
-                if self.selected_project.as_ref() != Some(&project_id) {
-                    self.retire_host(cx);
-                    self.thread_listing = None;
-                    self.retained_switch_listings.clear();
-                    self.install_thread_picker(empty_thread_listing(), None, cx);
-                }
-                self.selected_project = Some(project_id.clone());
-                self.set_thread_picker_disabled(true, cx);
-                self.state = NativeViewState::Loading;
-                self.sync_composer_availability(cx);
-                let Some(service) = self.service.clone() else {
-                    self.set_failure(
-                        ServiceFailure {
-                            stage: ServiceFailureStage::EventBridge,
-                            category: ServiceFailureCategory::ChannelClosed,
-                        },
-                        cx,
-                    );
-                    return;
-                };
-                match service.submit(NativeTransportCommand::SelectProject(project_id)) {
-                    Ok(()) => cx.notify(),
-                    Err(error) => {
-                        self.set_failure(command_failure(error), cx);
-                    }
-                }
+                self.select_project_from_sidebar(project_id, cx);
             }
             Ok(PickerRoute::BeginProjectIntake) => {
                 self.submit_intake_command(cx);
@@ -2645,6 +3338,20 @@ impl NativeApplication {
             return;
         };
         self.selected_thread = Some(thread_id.clone());
+        if matches!(
+            self.route(),
+            NativeRoute::NewThread { .. } | NativeRoute::Thread { .. }
+        ) {
+            if let Some(project) = self.selected_project.clone() {
+                self.navigate(
+                    NativeRoute::Thread {
+                        project,
+                        thread: thread_id.clone(),
+                    },
+                    cx,
+                );
+            }
+        }
         if switch_generation.is_none() {
             self.standalone_snapshot_thread = None;
         }
@@ -3479,44 +4186,38 @@ fn message_status_detail(
 }
 
 impl Render for NativeApplication {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Every route mounts inside the legacy shell frame (`+layout.svelte`
-        // port); the pre-port chrome was retired when the route packets
-        // landed.
-        let content = self.legacy_route_surface(cx);
-        let props = LegacyShellProps {
-            theme: self.theme.clone(),
-            prose_width: ProseWidth::Tight,
-            identity: RailIdentity::new(None, None),
-            title_header: None,
-            card_header: None,
-            inspector_width_px: None,
-            secondary: None,
-        };
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidebar = self.desktop_sidebar(cx).into_any_element();
+        let toolbar = self.desktop_toolbar().into_any_element();
+        let body = self.desktop_route_body(cx);
+        let identity = self.desktop_identity().into_any_element();
+        let search = self.command_menu.clone().into_any_element();
+        let shell = desktop_shell(
+            self.desktop_theme,
+            self.sidebar_collapsed,
+            identity,
+            search,
+            sidebar,
+            toolbar,
+            body,
+            window.scale_factor(),
+        );
         div()
+            .id("artisan-desktop-application-root")
             .track_focus(&self.focus_handle)
             .key_context(NATIVE_KEY_CONTEXT)
+            .on_click(cx.listener(Self::dismiss_command_menu))
             .on_action(|_: &NextTabStop, window, cx| window.focus_next(cx))
             .on_action(|_: &PreviousTabStop, window, cx| window.focus_prev(cx))
+            .on_action(cx.listener(Self::activate_command_menu))
             .size_full()
             .debug_selector(|| NATIVE_ROOT_SELECTOR.to_string())
-            .child(legacy_shell_frame(props, content))
+            .child(shell)
     }
 }
 
 impl NativeApplication {
-    fn legacy_route_surface(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        // Route identity rides on the content so routing changes stay
-        // observable in the mounted tree.
-        let route_selector = self.route().selector_suffix();
-        let content = self.route_surface(cx);
-        div()
-            .debug_selector(move || route_selector.clone())
-            .child(content)
-            .into_any_element()
-    }
-
-    /// Renders the legacy shell content for every route, mounting each
+    /// Renders the route content for every route, mounting each
     /// route-port screen on first entry (or when the route identity changes)
     /// and reusing it afterwards.
     fn route_surface(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -4037,9 +4738,12 @@ fn engine_settings_panel(
 
 fn bind_native_actions(cx: &mut App) {
     NativeComposer::bind_actions(cx);
+    NativeCommandMenu::bind_actions(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("cmd-k", OpenCommandMenu, Some(NATIVE_KEY_CONTEXT)),
+        KeyBinding::new("ctrl-k", OpenCommandMenu, Some(NATIVE_KEY_CONTEXT)),
         KeyBinding::new("tab", NextTabStop, Some(NATIVE_KEY_CONTEXT)),
         KeyBinding::new("shift-tab", PreviousTabStop, Some(NATIVE_KEY_CONTEXT)),
     ]);
@@ -4149,7 +4853,7 @@ pub fn run() -> ExitCode {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
                         title: Some(WINDOW_TITLE.into()),
-                        // CE keeps native resizing; shell_title_bar supplies caption hit areas.
+                        // CE keeps native resizing; desktop_shell supplies caption hit areas.
                         appears_transparent: true,
                         ..Default::default()
                     }),
@@ -4187,17 +4891,19 @@ mod tests {
     use super::NATIVE_STATUS_SELECTOR;
     use super::{
         NATIVE_MESSAGE_RETRY_LABEL, NATIVE_MESSAGE_RETRY_SELECTOR, NATIVE_RAIL_ADD_PROJECT_LABEL,
-        NATIVE_RAIL_ADD_PROJECT_SELECTOR, NativeApplication, NativeMessageFailure,
-        NativeMessageFlight, NativeProjectIntakeOperation, NativeProjectIntakeStage,
-        NativeTestCommandSink, NativeTransportCommand, NativeTransportEvent, NativeViewState,
-        PickerRoute, ServiceFailure, ServiceStopStatus, ThreadSwitchFlight, ThreadSwitchPhase,
-        WINDOW_TITLE, create_message_request_id, intake_command, message_status_detail,
-        picker_route, project_options_from_listing, ready_membership_is_valid,
+        NativeApplication, NativeMessageFailure, NativeMessageFlight, NativeProjectIntakeOperation,
+        NativeProjectIntakeStage, NativeTestCommandSink, NativeTransportCommand,
+        NativeTransportEvent, NativeViewState, PickerRoute, ServiceFailure, ServiceStopStatus,
+        ThreadSwitchFlight, ThreadSwitchPhase, WINDOW_TITLE, create_message_request_id,
+        intake_command, message_status_detail, picker_route, project_options_from_listing,
+        ready_membership_is_valid,
     };
     use crate::composer::{ComposerState, DraftDisposition};
-    use crate::native_new_thread_surface::{
-        NEW_THREAD_SENTENCE_SELECTOR, NEW_THREAD_SURFACE_SELECTOR,
+    use crate::desktop_shell::{
+        DESKTOP_COMPOSER_SELECTOR, DESKTOP_EMPTY_SELECTOR, DESKTOP_HOME_SELECTOR,
+        DESKTOP_OFFLINE_SELECTOR, DESKTOP_SIDEBAR_SELECTOR, DESKTOP_TITLEBAR_SELECTOR,
     };
+    use crate::native_command_menu::COMMAND_MENU_DROPDOWN_SELECTOR;
     use crate::native_route::{NativeRoute, SettingsRoute};
     use crate::{
         conversation_delivery_machine::ConversationDeliveryEffect,
@@ -4223,7 +4929,7 @@ mod tests {
     };
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
-    use gpui::{Context, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{Context, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext};
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     fn project(id: &str, name: &str) -> ProjectSummary {
@@ -4304,6 +5010,15 @@ mod tests {
     ) {
         let host = ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx)
             .expect("message host");
+        let project = application
+            .selected_project
+            .clone()
+            .unwrap_or_else(|| ProjectId::parse("message-project").expect("project"));
+        application.selected_project = Some(project.clone());
+        application.route_history.navigate(NativeRoute::Thread {
+            project,
+            thread: thread_id.clone(),
+        });
         application.selected_thread = Some(thread_id);
         application.state = NativeViewState::Ready;
         application.conversation_host = Some(host);
@@ -4315,6 +5030,108 @@ mod tests {
             composer_cx.notify();
         });
         application.sync_composer_availability(cx);
+    }
+
+    #[gpui::test]
+    fn desktop_new_task_preserves_draft_and_blocks_repeat_creation(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([Ok(())]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                let old = ThreadId::parse("existing-task").expect("thread");
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    old.clone(),
+                    "keep this draft",
+                    sink,
+                );
+                let project = application.selected_project.clone().expect("project");
+                application.begin_new_task(cx);
+                assert_eq!(
+                    *commands.borrow(),
+                    vec![NativeTransportCommand::CreateTask(project)]
+                );
+                assert_eq!(application.selected_thread.as_ref(), Some(&old));
+                assert_eq!(application.composer.read(cx).draft(), "keep this draft");
+                assert!(!application.message_submission_is_admissible(cx));
+                application.begin_new_task(cx);
+                application.begin_message_submission(cx);
+                assert_eq!(commands.borrow().len(), 1);
+                application.handle_intake_failed(
+                    NativeProjectIntakeOperation::CreateThread,
+                    message_failure(),
+                    false,
+                    cx,
+                );
+                assert_eq!(application.composer.read(cx).draft(), "keep this draft");
+                assert!(!application.message_submission_is_admissible(cx));
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn desktop_route_mismatch_cannot_send_to_previous_task(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    ThreadId::parse("old-task").expect("thread"),
+                    "keep",
+                    sink,
+                );
+                assert!(application.message_submission_is_admissible(cx));
+                application.navigate(
+                    NativeRoute::NewThread {
+                        project: application.selected_project.clone(),
+                    },
+                    cx,
+                );
+                application.begin_message_submission(cx);
+                assert!(commands.borrow().is_empty());
+                assert_eq!(application.composer.read(cx).draft(), "keep");
+                application.navigate(
+                    NativeRoute::Thread {
+                        project: application.selected_project.clone().expect("project"),
+                        thread: ThreadId::parse("different-task").expect("thread"),
+                    },
+                    cx,
+                );
+                application.begin_message_submission(cx);
+                assert!(commands.borrow().is_empty());
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn desktop_busy_sidebar_navigation_keeps_visible_task_and_draft(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        let (sink, commands) = command_sink([]);
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                install_ready_message_surface(
+                    application,
+                    cx,
+                    ThreadId::parse("old-task").expect("thread"),
+                    "keep",
+                    sink,
+                );
+                application.thread_listing = Some(
+                    ThreadListing::new(vec![thread("target-task", "message-project", "Target")])
+                        .expect("listing"),
+                );
+                let old_route = application.route().clone();
+                application.intake_stage = Some(NativeProjectIntakeStage::CreatingThread);
+                application
+                    .open_thread_from_sidebar(ThreadId::parse("target-task").expect("thread"), cx);
+                assert_eq!(application.route(), &old_route);
+                assert_eq!(application.composer.read(cx).draft(), "keep");
+                assert!(commands.borrow().is_empty());
+            })
+        });
     }
 
     fn admit_message_flight(
@@ -4466,9 +5283,8 @@ mod tests {
         });
         cx.run_until_parked();
 
-        // The pre-port rail chrome is retired; the add-project affordance
-        // re-homes onto the legacy rail in a later packet. The builder
-        // metadata and admission policy above remain the contract.
+        // The desktop workspace owns the active frame; the shared button
+        // metadata and admission policy remain the contract for the sidebar.
     }
 
     #[gpui::test]
@@ -4508,6 +5324,8 @@ mod tests {
     fn ready_without_host_mounts_surface_on_new_thread_route(cx: &mut TestAppContext) {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(DESKTOP_OFFLINE_SELECTOR).is_some());
         cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.state = NativeViewState::Ready;
@@ -4516,9 +5334,13 @@ mod tests {
         });
         cx.run_until_parked();
 
-        // Default route is NewThread: the surface mounts, not the status card.
-        assert!(cx.debug_bounds(NEW_THREAD_SURFACE_SELECTOR).is_some());
-        assert!(cx.debug_bounds(NEW_THREAD_SENTENCE_SELECTOR).is_some());
+        // Default route is NewThread: the concise home and actual composer
+        // mount inside the desktop workspace, not the legacy activity recipe.
+        assert!(cx.debug_bounds(DESKTOP_HOME_SELECTOR).is_some());
+        assert!(cx.debug_bounds(DESKTOP_COMPOSER_SELECTOR).is_some());
+        assert!(cx.debug_bounds(DESKTOP_SIDEBAR_SELECTOR).is_some());
+        assert!(cx.debug_bounds(DESKTOP_TITLEBAR_SELECTOR).is_some());
+        assert!(cx.debug_bounds(DESKTOP_EMPTY_SELECTOR).is_some());
         assert!(
             cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_none(),
             "the Ready stub must not mount beside the surface"
@@ -4543,6 +5365,69 @@ mod tests {
         // is the observable navigation outcome.
         assert!(cx.debug_bounds("route-settings-models").is_some());
         assert!(cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_none());
+    }
+
+    #[gpui::test]
+    fn command_shortcut_opens_shared_titlebar_search_and_escape_restores_root(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.update(|_, app| super::bind_native_actions(app));
+        cx.run_until_parked();
+        let input = cx
+            .debug_bounds(crate::native_command_menu::COMMAND_MENU_INPUT_SELECTOR)
+            .expect("search input");
+        cx.simulate_click(input.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, app| assert!(view.read(app).command_menu.read(app).state().is_open()));
+        cx.simulate_keystrokes("escape");
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let application = view.read(app);
+            let menu = application.command_menu.read(app);
+            assert!(menu.state().is_open());
+            assert!(menu.input_focus().is_focused(window));
+        });
+        assert!(cx.debug_bounds(COMMAND_MENU_DROPDOWN_SELECTOR).is_some());
+        assert!(
+            cx.debug_bounds("artisan-native-command-menu-scrim")
+                .is_none()
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let application = view.read(app);
+            assert!(!application.command_menu.read(app).state().is_open());
+            assert!(application.focus_handle.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn command_activation_routes_settings_through_the_application(cx: &mut TestAppContext) {
+        let (view, cx) =
+            cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+        cx.update(|_, app| super::bind_native_actions(app));
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |application, _| {
+                assert_eq!(
+                    application.route(),
+                    &NativeRoute::Settings {
+                        section: SettingsRoute::Models,
+                        engine: None,
+                    }
+                );
+            });
+        });
     }
 
     #[gpui::test]

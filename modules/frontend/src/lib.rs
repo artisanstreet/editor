@@ -91,6 +91,7 @@ pub mod model_policy_controller;
 pub mod model_policy_controls_presentation;
 pub mod model_selection_presentation;
 pub mod motion_spring;
+pub mod desktop_shell;
 pub mod native_application;
 pub mod native_command_menu;
 pub mod native_composer;

@@ -1084,3 +1084,78 @@ fn with_alpha(mut base: SrgbComponents, a: f32) -> SrgbComponents {
     base.a = a;
     base
 }
+
+/// Shared tokens for the native desktop workspace.
+///
+/// The desktop shell deliberately has a smaller, quieter palette than the
+/// legacy application surfaces. Keeping it here makes the shell and its
+/// controls agree on the neutral-dark art direction without introducing
+/// frontend-local color constants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DesktopTheme {
+    /// Native titlebar and outer chrome background (`#0a0a0a`).
+    pub chrome: Hsla,
+    /// Main workspace background (`#0a0a0a`).
+    pub workspace: Hsla,
+    /// Sidebar and composer surface (`#111111`).
+    pub sidebar: Hsla,
+    /// Hairline rules (`#292929`).
+    pub line: Hsla,
+    /// Primary text (`#ededed`).
+    pub foreground: Hsla,
+    /// Secondary text (`#a1a1a1`).
+    pub secondary: Hsla,
+    /// Selected row background (`#242424`).
+    pub selected: Hsla,
+    /// Primary action background (`#ededed`).
+    pub primary_action: Hsla,
+    /// Primary action foreground (`#0a0a0a`).
+    pub primary_action_foreground: Hsla,
+    /// Search and composer input surface (`#171717`).
+    pub field: Hsla,
+    /// Input border (`#333333`).
+    pub field_line: Hsla,
+    /// Search result surface border (`#383838`).
+    pub popover_line: Hsla,
+    /// Keyboard shortcut capsule border (`#3a3a3a`).
+    pub shortcut_line: Hsla,
+    /// Slightly brighter crosshair stroke than the surrounding rule.
+    pub crosshair: Hsla,
+}
+
+impl DesktopTheme {
+    /// The accepted neutral-dark native workspace palette.
+    pub fn neutral_dark() -> Self {
+        Self {
+            chrome: desktop_color(0x0a0a0a),
+            workspace: desktop_color(0x0a0a0a),
+            sidebar: desktop_color(0x111111),
+            line: desktop_color(0x292929),
+            foreground: desktop_color(0xededed),
+            secondary: desktop_color(0xa1a1a1),
+            selected: desktop_color(0x242424),
+            primary_action: desktop_color(0xededed),
+            primary_action_foreground: desktop_color(0x0a0a0a),
+            field: desktop_color(0x171717),
+            field_line: desktop_color(0x333333),
+            popover_line: desktop_color(0x383838),
+            shortcut_line: desktop_color(0x3a3a3a),
+            crosshair: desktop_color(0x666666),
+        }
+    }
+}
+
+impl Default for DesktopTheme {
+    fn default() -> Self {
+        Self::neutral_dark()
+    }
+}
+
+fn desktop_color(hex: u32) -> Hsla {
+    srgb_to_hsla(SrgbComponents {
+        r: ((hex >> 16) & 0xff) as f32 / 255.0,
+        g: ((hex >> 8) & 0xff) as f32 / 255.0,
+        b: (hex & 0xff) as f32 / 255.0,
+        a: 1.0,
+    })
+}

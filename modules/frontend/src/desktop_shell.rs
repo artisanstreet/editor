@@ -1,0 +1,351 @@
+//! Native desktop workspace composition.
+//!
+//! This module owns only the frame: the application supplies the real
+//! sidebar, toolbar, route surface, search menu, and composer entities. That
+//! keeps the native window geometry independent from route and transport
+//! policy while giving every route the same quiet neutral-dark workspace.
+
+#![forbid(unsafe_code)]
+
+use artisan_assets::AssetId;
+use artisan_ui::asset_seam::asset_glyph;
+use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
+use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
+use gpui::{AnyElement, Div, FontWeight, Pixels, WindowControlArea, div, px};
+
+use crate::shell::title_bar_caption_button;
+
+/// Root selector for the mounted native workspace.
+pub const DESKTOP_ROOT_SELECTOR: &str = "artisan-desktop-workspace";
+/// Native titlebar selector.
+pub const DESKTOP_TITLEBAR_SELECTOR: &str = "artisan-desktop-titlebar";
+/// Sidebar selector.
+pub const DESKTOP_SIDEBAR_SELECTOR: &str = "artisan-desktop-sidebar";
+/// Main workspace selector.
+pub const DESKTOP_MAIN_SELECTOR: &str = "artisan-desktop-main";
+/// Route toolbar selector.
+pub const DESKTOP_TOOLBAR_SELECTOR: &str = "artisan-desktop-toolbar";
+/// Route body selector.
+pub const DESKTOP_BODY_SELECTOR: &str = "artisan-desktop-body";
+/// Home route selector.
+pub const DESKTOP_HOME_SELECTOR: &str = "artisan-desktop-home";
+/// Actual composer wrapper selector.
+pub const DESKTOP_COMPOSER_SELECTOR: &str = "artisan-desktop-composer";
+/// Sidebar projects section selector.
+pub const DESKTOP_PROJECTS_SELECTOR: &str = "artisan-desktop-projects";
+/// Sidebar threads section selector.
+pub const DESKTOP_THREADS_SELECTOR: &str = "artisan-desktop-threads";
+/// Sidebar empty-state selector.
+pub const DESKTOP_EMPTY_SELECTOR: &str = "artisan-desktop-empty";
+/// Sidebar offline-state selector.
+pub const DESKTOP_OFFLINE_SELECTOR: &str = "artisan-desktop-offline";
+/// Sidebar collapse control selector.
+pub const DESKTOP_COLLAPSE_SELECTOR: &str = "artisan-desktop-collapse";
+
+/// Native workspace titlebar height.
+pub const DESKTOP_TITLEBAR_HEIGHT_PX: f32 = 48.0;
+/// Expanded sidebar width.
+pub const DESKTOP_SIDEBAR_WIDTH_PX: f32 = 218.0;
+/// Compact sidebar width when labels are collapsed.
+pub const DESKTOP_SIDEBAR_COLLAPSED_WIDTH_PX: f32 = 58.0;
+/// Main route toolbar height.
+pub const DESKTOP_TOOLBAR_HEIGHT_PX: f32 = 54.0;
+/// Crosshair arm length.
+pub const DESKTOP_CROSSHAIR_SIZE_PX: f32 = 12.0;
+/// Native titlebar control width.
+pub const DESKTOP_TITLEBAR_CONTROL_WIDTH_PX: f32 = 46.0;
+
+/// Geometry resolved at the shell boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DesktopShellStyle {
+    /// Titlebar height.
+    pub titlebar_height: Pixels,
+    /// Current sidebar width.
+    pub sidebar_width: Pixels,
+    /// Route toolbar height.
+    pub toolbar_height: Pixels,
+    /// One physical pixel expressed in logical pixels.
+    pub one_device_pixel: Pixels,
+}
+
+impl DesktopShellStyle {
+    /// Resolve the shell geometry for the current display scale.
+    #[must_use]
+    pub fn resolve(collapsed: bool, scale_factor: f32) -> Self {
+        let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+
+        Self {
+            titlebar_height: px(DESKTOP_TITLEBAR_HEIGHT_PX),
+            sidebar_width: px(if collapsed {
+                DESKTOP_SIDEBAR_COLLAPSED_WIDTH_PX
+            } else {
+                DESKTOP_SIDEBAR_WIDTH_PX
+            }),
+            toolbar_height: px(DESKTOP_TOOLBAR_HEIGHT_PX),
+            one_device_pixel: px(1.0 / scale_factor),
+        }
+    }
+}
+
+/// Paints the small crosshair used where the shell's major rules meet.
+///
+/// This is intentionally a plain layout element: it has no id, focus handle,
+/// or pointer listener, so it cannot intercept a click meant for a nearby
+/// control. The stroke thickness is supplied by the display-aware shell
+/// style so it remains one physical pixel on scaled Windows displays.
+#[must_use]
+pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
+    let crosshair_offset = px((DESKTOP_CROSSHAIR_SIZE_PX - f32::from(stroke)) / 2.0);
+    div()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .w(px(DESKTOP_CROSSHAIR_SIZE_PX))
+        .h(px(DESKTOP_CROSSHAIR_SIZE_PX))
+        .child(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(crosshair_offset)
+                .w(px(DESKTOP_CROSSHAIR_SIZE_PX))
+                .h(stroke)
+                .bg(theme.crosshair),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(crosshair_offset)
+                .top(px(0.0))
+                .w(stroke)
+                .h(px(DESKTOP_CROSSHAIR_SIZE_PX))
+                .bg(theme.crosshair),
+        )
+}
+
+/// Compose the complete native desktop frame around application-owned
+/// surfaces.
+#[must_use]
+pub fn desktop_shell(
+    theme: DesktopTheme,
+    collapsed: bool,
+    identity: AnyElement,
+    search: AnyElement,
+    sidebar: AnyElement,
+    toolbar: AnyElement,
+    body: AnyElement,
+    scale_factor: f32,
+) -> Div {
+    let style = DesktopShellStyle::resolve(collapsed, scale_factor);
+    let legacy_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+
+    let controls = div()
+        .flex()
+        .h_full()
+        .flex_shrink_0()
+        .debug_selector(|| "artisan-desktop-titlebar-controls".to_string())
+        .child(title_bar_caption_button(
+            legacy_theme,
+            WindowControlArea::Min,
+            "artisan-desktop-titlebar-minimize",
+        ))
+        .child(title_bar_caption_button(
+            legacy_theme,
+            WindowControlArea::Max,
+            "artisan-desktop-titlebar-maximize",
+        ))
+        .child(title_bar_caption_button(
+            legacy_theme,
+            WindowControlArea::Close,
+            "artisan-desktop-titlebar-close",
+        ));
+
+    let drag = div()
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
+        .flex()
+        .items_center()
+        .window_control_area(WindowControlArea::Drag)
+        .child(
+            div()
+                .w(style.sidebar_width)
+                .h_full()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .px(px(14.0))
+                .child(identity),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_end()
+                .pr(px(14.0))
+                .child(search),
+        );
+
+    let titlebar = div()
+        .relative()
+        .w_full()
+        .h(style.titlebar_height)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .bg(theme.chrome)
+        .border_b_1()
+        .border_color(theme.line)
+        .debug_selector(|| DESKTOP_TITLEBAR_SELECTOR.to_string())
+        .child(drag)
+        .child(controls);
+
+    let main = div()
+        .relative()
+        .flex_1()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .flex()
+        .flex_row()
+        .child(
+            div()
+                .w(style.sidebar_width)
+                .h_full()
+                .flex_shrink_0()
+                .bg(theme.sidebar)
+                .border_r_1()
+                .border_color(theme.line)
+                .debug_selector(|| DESKTOP_SIDEBAR_SELECTOR.to_string())
+                .child(sidebar),
+        )
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .flex()
+                .flex_col()
+                .bg(theme.workspace)
+                .debug_selector(|| DESKTOP_MAIN_SELECTOR.to_string())
+                .child(
+                    div()
+                        .h(style.toolbar_height)
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(theme.line)
+                        .debug_selector(|| DESKTOP_TOOLBAR_SELECTOR.to_string())
+                        .child(toolbar),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .min_h(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .debug_selector(|| DESKTOP_BODY_SELECTOR.to_string())
+                        .child(body),
+                )
+                .child(
+                    junction_crosshair(theme, style.one_device_pixel)
+                        .left(px(-6.0))
+                        .top(style.toolbar_height - px(6.0)),
+                ),
+        );
+
+    div()
+        .relative()
+        .size_full()
+        .flex()
+        .flex_col()
+        .bg(theme.workspace)
+        .text_color(theme.foreground)
+        .font_family("Segoe UI")
+        .text_size(px(14.0))
+        .debug_selector(|| DESKTOP_ROOT_SELECTOR.to_string())
+        .child(titlebar)
+        .child(main)
+        .child(
+            junction_crosshair(theme, style.one_device_pixel)
+                .left(style.sidebar_width - px(6.0))
+                .top(style.titlebar_height - px(6.0)),
+        )
+}
+
+/// Small square glyph used by desktop-only navigation rows.
+#[must_use]
+pub fn desktop_nav_glyph(asset: AssetId, theme: DesktopTheme) -> Div {
+    div()
+        .w(px(16.0))
+        .h(px(16.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .text_color(theme.secondary)
+        .child(asset_glyph(asset).size(px(15.0)))
+}
+
+/// Shared title treatment for the compact desktop chrome.
+#[must_use]
+pub fn desktop_label(theme: DesktopTheme, text: impl Into<String>) -> Div {
+    div()
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.secondary)
+        .child(text.into())
+}
+
+/// Resolve a low-emphasis text color against a neutral desktop surface.
+#[must_use]
+pub fn desktop_muted(theme: DesktopTheme, text: impl Into<String>) -> Div {
+    div()
+        .text_size(px(13.0))
+        .text_color(theme.secondary)
+        .child(text.into())
+}
+
+/// Make a one-pixel desktop rule without introducing another palette.
+#[must_use]
+pub fn desktop_rule(theme: DesktopTheme) -> Div {
+    div().h(px(1.0)).w_full().bg(theme.line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_shell_keeps_compact_native_geometry() {
+        assert_eq!(DESKTOP_TITLEBAR_HEIGHT_PX, 48.0);
+        assert_eq!(DESKTOP_SIDEBAR_WIDTH_PX, 218.0);
+        assert_eq!(DESKTOP_TOOLBAR_HEIGHT_PX, 54.0);
+        assert_eq!(DESKTOP_CROSSHAIR_SIZE_PX, 12.0);
+
+        let expanded = DesktopShellStyle::resolve(false, 1.0);
+        let collapsed = DesktopShellStyle::resolve(true, 1.0);
+        assert!(collapsed.sidebar_width < expanded.sidebar_width);
+        assert_eq!(expanded.one_device_pixel, px(1.0));
+    }
+
+    #[test]
+    fn desktop_shell_resolves_one_physical_pixel_on_scaled_displays() {
+        assert_eq!(
+            DesktopShellStyle::resolve(false, 1.25).one_device_pixel,
+            px(0.8)
+        );
+        assert_eq!(
+            DesktopShellStyle::resolve(false, 0.0).one_device_pixel,
+            px(1.0)
+        );
+    }
+}

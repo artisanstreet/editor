@@ -90,6 +90,7 @@ rust_library(
         "src/model_policy_controls_presentation.rs",
         "src/model_selection_presentation.rs",
         "src/motion_spring.rs",
+        "src/desktop_shell.rs",
         "src/native_application.rs",
         "src/native_command_menu.rs",
         "src/native_composer.rs",
