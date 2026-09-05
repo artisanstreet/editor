@@ -1038,10 +1038,16 @@ impl NativeApplication {
             .cursor_pointer()
             .rounded(px(8.0))
             .w_full()
-            .h(px(32.0))
+            .h(px(44.0))
+            .p(px(5.0))
+            .border_1()
+            .border_color(theme.line)
+            .bg(if self.profile_menu.is_open() { theme.selected } else { theme.field })
+            .hover(move |style| style.bg(theme.selected))
+            .focus(move |style| style.border_color(theme.secondary))
             .flex()
             .items_center()
-            .gap(px(10.0))
+            .gap(px(8.0))
             .child(
                 div()
                     .size(px(32.0))
@@ -1078,6 +1084,12 @@ impl NativeApplication {
                                     .unwrap_or_else(|| "This computer".into()),
                             ),
                     )
+            }))
+            .children((!self.sidebar_collapsed).then(|| {
+                desktop_nav_glyph(
+                    if self.profile_menu.is_open() { AssetId::TABLER_CHEVRON_DOWN } else { AssetId::TABLER_CHEVRON_UP },
+                    theme,
+                )
             }))
             .on_click(cx.listener(|app, _, window, cx| {
                 cx.stop_propagation();
