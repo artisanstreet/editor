@@ -2421,6 +2421,150 @@ async fn await_first_durable_delta(
     .expect("first assistant delta should become durable before the deadline");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_fixture_stop_before_prepared_signal_settles_cancelled() {
+    let MidturnLossSeed {
+        database,
+        repository,
+        temp,
+        thread_id,
+        fixture,
+        ..
+    } = seed_midturn_loss().await;
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_for_fixture_dispatch(notifier).expect("fixture dispatch policy");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let cancellation = RunCancellationRegistry::new(1).expect("registry capacity is valid");
+    let request_registry = cancellation.clone();
+    let mut dispatcher =
+        NativeRunDispatcher::start_with_fixture_scenario_for_tests(FixtureScenarioLaunch {
+            repository,
+            database_path: temp.path().to_owned(),
+            config,
+            process_cancel: Arc::clone(&process_cancel),
+            cancellation,
+            activity: ActivityGateImpl::new(),
+            runtime: &tokio::runtime::Handle::current(),
+            fixture_program: fixture,
+            scenario: MIDTURN_LOSS_SCENARIO,
+        });
+    let run_id = RunId::parse("fixture-run").expect("fixture run id");
+    tokio::time::timeout(MIDTURN_LOSS_DEADLINE, async {
+        loop {
+            if request_registry.active_run(&thread_id) == Ok(Some(run_id.clone())) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fixture run should register before preparation");
+    assert_eq!(
+        request_registry.request_cancel(&thread_id, &run_id),
+        Ok(crate::run_cancellation::CancelRequestOutcome::Signalled)
+    );
+
+    tokio::time::timeout(MIDTURN_LOSS_DEADLINE, async {
+        loop {
+            let run = entities::assistant_run::Entity::find_by_id("fixture-run")
+                .one(&database)
+                .await
+                .expect("preparation-cancel run query");
+            if let Some(run) = run {
+                if run.lifecycle == AssistantRunLifecycle::Cancelled {
+                    break;
+                }
+                assert_ne!(
+                    run.lifecycle,
+                    AssistantRunLifecycle::Interrupted,
+                    "user cancellation must not settle as process interruption"
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("preparation cancellation should settle before the deadline");
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    assert_eq!(request_registry.active_run(&thread_id), Ok(None));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_fixture_stop_request_settles_cancelled_and_releases_exact_lease() {
+    let MidturnLossSeed {
+        database,
+        repository,
+        temp,
+        thread_id,
+        fixture,
+        ..
+    } = seed_midturn_loss().await;
+    let notifier = ConversationCommitNotifier::new();
+    let mut subscription = notifier
+        .subscribe(thread_id.clone())
+        .expect("stop-test thread subscription");
+    let config = config_for_fixture_dispatch(notifier).expect("fixture dispatch policy");
+    let process_cancel = Arc::new(CancelHandle::new());
+    let cancellation = RunCancellationRegistry::new(1).expect("registry capacity is valid");
+    let request_registry = cancellation.clone();
+    let mut dispatcher =
+        NativeRunDispatcher::start_with_fixture_scenario_for_tests(FixtureScenarioLaunch {
+            repository,
+            database_path: temp.path().to_owned(),
+            config,
+            process_cancel: Arc::clone(&process_cancel),
+            cancellation,
+            activity: ActivityGateImpl::new(),
+            runtime: &tokio::runtime::Handle::current(),
+            fixture_program: fixture,
+            scenario: MIDTURN_LOSS_SCENARIO,
+        });
+    await_first_durable_delta(&database, &mut subscription).await;
+
+    let run_id = RunId::parse("fixture-run").expect("fixture run id");
+    assert_eq!(
+        request_registry.request_cancel(&thread_id, &run_id),
+        Ok(crate::run_cancellation::CancelRequestOutcome::Signalled)
+    );
+    tokio::time::timeout(MIDTURN_LOSS_DEADLINE, async {
+        loop {
+            let run = entities::assistant_run::Entity::find_by_id("fixture-run")
+                .one(&database)
+                .await
+                .expect("cancelled fixture run query")
+                .expect("cancelled fixture run should exist");
+            if run.lifecycle == AssistantRunLifecycle::Cancelled {
+                break;
+            }
+            subscription
+                .wait()
+                .await
+                .expect("stop-test notifier should remain open");
+        }
+    })
+    .await
+    .expect("fixture stop should settle before the deadline");
+
+    process_cancel.cancel();
+    assert_eq!(
+        dispatcher.shutdown().await,
+        NativeRunDispatcherShutdown::Joined
+    );
+    assert_eq!(request_registry.active_run(&thread_id), Ok(None));
+    let replacement = request_registry
+        .register(
+            thread_id,
+            RunId::parse("fixture-next-run").expect("replacement run id"),
+        )
+        .expect("a settled run must release its exact registry lease");
+    drop(replacement);
+}
+
 fn assert_midturn_hold_state(held: &AllRows, message_id: &MessageId) -> u64 {
     assert_eq!(held.dispatches.len(), 1);
     assert_eq!(held.runs.len(), 1);

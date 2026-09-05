@@ -767,6 +767,7 @@ fn encode_response_payload(
         }
         ResponsePayload::RunStopped(receipt) => {
             let mut encoded = builder.reborrow().init_stop_run_receipt();
+            encoded.set_request_id(receipt.request_id.as_str());
             encoded.set_thread_id(receipt.thread_id.as_str());
             encoded.set_run_id(receipt.run_id.as_str());
             encoded.set_disposition(encode_stop_run_disposition(receipt.disposition));
@@ -1350,9 +1351,7 @@ const fn encode_stop_run_disposition(
 ) -> artisan_capnp::StopRunDisposition {
     match value {
         StopRunDisposition::Requested => artisan_capnp::StopRunDisposition::Requested,
-        StopRunDisposition::AlreadyRequested => {
-            artisan_capnp::StopRunDisposition::AlreadyRequested
-        }
+        StopRunDisposition::AlreadyRequested => artisan_capnp::StopRunDisposition::AlreadyRequested,
         StopRunDisposition::NotActive => artisan_capnp::StopRunDisposition::NotActive,
     }
 }
@@ -2284,9 +2283,7 @@ fn decode_response(
             decode_queue_message_receipt(receipt?, &request_id)?
         }
         response::Which::MessageImage(result) => decode_message_image(result?)?,
-        response::Which::StopRunReceipt(receipt) => {
-            decode_stop_run_receipt(receipt?, &request_id)?
-        }
+        response::Which::StopRunReceipt(receipt) => decode_stop_run_receipt(receipt?, &request_id)?,
         response::Which::ActiveRun(result) => decode_active_run_result(result?)?,
         response::Which::ConversationSnapshot(snapshot) => {
             ResponsePayload::ConversationSnapshot(decode_conversation_snapshot(snapshot?)?)
@@ -2541,8 +2538,20 @@ fn decode_stop_run_receipt(
     receipt: artisan_capnp::stop_run_receipt::Reader<'_>,
     request_id: &RequestId,
 ) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let nested_request_id = parse_request_id(
+        read_text(
+            receipt.get_request_id(),
+            "response.stopRunReceipt.requestId",
+        )?,
+        "response.stopRunReceipt.requestId",
+    )?;
+    if &nested_request_id != request_id {
+        return Err(ProtocolDecodeError::CorrelationMismatch {
+            field: "response.stopRunReceipt.requestId",
+        });
+    }
     Ok(ResponsePayload::RunStopped(StopRunReceipt {
-        request_id: request_id.clone(),
+        request_id: nested_request_id,
         thread_id: parse_thread_id(
             read_text(receipt.get_thread_id(), "response.stopRunReceipt.threadId")?,
             "response.stopRunReceipt.threadId",
@@ -2566,15 +2575,13 @@ fn decode_active_run_result(
         artisan_capnp::active_run_result::state::Which::NoActive(()) => {
             ActiveRunResult::NoActive { thread_id }
         }
-        artisan_capnp::active_run_result::state::Which::Active(run_id) => {
-            ActiveRunResult::Active {
-                thread_id,
-                run_id: parse_run_id(
-                    read_text(run_id, "response.activeRun.runId")?,
-                    "response.activeRun.runId",
-                )?,
-            }
-        }
+        artisan_capnp::active_run_result::state::Which::Active(run_id) => ActiveRunResult::Active {
+            thread_id,
+            run_id: parse_run_id(
+                read_text(run_id, "response.activeRun.runId")?,
+                "response.activeRun.runId",
+            )?,
+        },
     };
     Ok(ResponsePayload::ActiveRun(result))
 }
@@ -3136,9 +3143,7 @@ const fn decode_stop_run_disposition(
 ) -> StopRunDisposition {
     match value {
         artisan_capnp::StopRunDisposition::Requested => StopRunDisposition::Requested,
-        artisan_capnp::StopRunDisposition::AlreadyRequested => {
-            StopRunDisposition::AlreadyRequested
-        }
+        artisan_capnp::StopRunDisposition::AlreadyRequested => StopRunDisposition::AlreadyRequested,
         artisan_capnp::StopRunDisposition::NotActive => StopRunDisposition::NotActive,
     }
 }

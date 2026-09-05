@@ -315,7 +315,7 @@ pub enum NativeRunDispatcherShutdown {
 
 /// Test-only bundled parameters for the one-shot fixture pipeline.
 ///
-/// Groups the eight fixture-launch inputs so the scenario helper stays
+/// Groups the nine fixture-launch inputs so the scenario helper stays
 /// within the argument budget without a lint suppression. No production
 /// path uses this type.
 #[cfg(test)]
@@ -532,9 +532,7 @@ impl NativeRunDispatcher {
         }
     }
 
-    pub(crate) fn catalog_client(&self) -> crate::engine_owner::EngineCatalogClient {
-        self.catalog_client.clone()
-    }
+    pub(crate) fn catalog_client(&self) -> crate::engine_owner::EngineCatalogClient { self.catalog_client.clone() }
 
     /// Stops claims, drains admission, and awaits the owner. A budget breach
     /// is reported after the join is nevertheless awaited so child custody is
@@ -960,8 +958,8 @@ enum ClaimCustody {
 }
 
 struct RetainedActivity {
-    activity: ActivityLease,
-    cancellation: RunCancellationLease,
+    _activity: ActivityLease,
+    _cancellation: RunCancellationLease,
 }
 
 async fn execute_claim(
@@ -1002,8 +1000,8 @@ async fn execute_claim(
         return match custody {
             ClaimCustody::Released => None,
             ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
-                activity: activity_lease,
-                cancellation,
+                _activity: activity_lease,
+                _cancellation: cancellation,
             }),
         };
     };
@@ -1012,16 +1010,16 @@ async fn execute_claim(
         return match custody {
             ClaimCustody::Released => None,
             ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
-                activity: activity_lease,
-                cancellation,
+                _activity: activity_lease,
+                _cancellation: cancellation,
             }),
         };
     };
     match consume_bound_claim(bound).await {
         ClaimCustody::Released => None,
         ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
-            activity: activity_lease,
-            cancellation,
+            _activity: activity_lease,
+            _cancellation: cancellation,
         }),
     }
 }
@@ -1212,6 +1210,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
     let prompt_delivery = context.config.prompt_delivery.clone();
     let stream_after = context.config.stream_after;
     let control_capacity = context.config.queue_capacity.get();
+    let run_cancel = cancellation.cancel_handle();
     let turn_result = match launch {
         ResolvedLaunch::Configured(launch) => context.owner.admit_turn(
             EngineTurnInput {
@@ -1246,7 +1245,23 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
     let Ok(mut turn) = turn_result else {
         return (None, ClaimCustody::Released);
     };
-    let Ok(session) = turn.prepare().await else {
+    let preparation = tokio::select! {
+        biased;
+        result = turn.prepare() => Ok(result),
+        () = run_cancel.wait() => Err(()),
+    };
+    let (session_result, cancellation_observed) = match preparation {
+        Ok(result) => (result, run_cancel.is_cancelled()),
+        Err(()) => {
+            // The lease signal wins without dropping the AcceptedTurn. Keep
+            // setup alive long enough to obtain the session needed for the
+            // durable bind, then cancel before authorization. This preserves
+            // a user-cancelled terminal path instead of leaving an unbound
+            // launching row for interruption recovery.
+            (turn.prepare().await, true)
+        }
+    };
+    let Ok(session) = session_result else {
         let custody = if is_unresolved_reap(&turn.finish().await) {
             ClaimCustody::Retained(cancellation)
         } else {
@@ -1254,6 +1269,9 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
         };
         return (None, custody);
     };
+    if cancellation_observed {
+        turn.cancel();
+    }
     (
         Some(PreparedClaim {
             context,
@@ -1278,6 +1296,10 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         session,
         cancellation,
     } = claim;
+    let run_cancel = cancellation.cancel_handle();
+    if run_cancel.is_cancelled() {
+        turn.cancel();
+    }
     let Some(binding_bytes) = provider_binding_bytes(
         settings
             .config()
@@ -1308,21 +1330,36 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             },
         );
     };
-    let bind_result = bind_with_retry(
-        context.repository,
-        BindRunProvider {
-            claimed: &context.claimed,
-            receipt: &receipt,
-            run_start_key: &ids.run_start_key,
-            credentials: &ids.credentials,
-            expected_launch_at: ids.operated_at,
-            bound_at,
-            binding_version: PROVIDER_BINDING_VERSION,
-            binding_bytes: &binding_bytes,
-        },
-        context.config.max_command_retries,
-    )
-    .await;
+    let bind_command = || BindRunProvider {
+        claimed: &context.claimed,
+        receipt: &receipt,
+        run_start_key: &ids.run_start_key,
+        credentials: &ids.credentials,
+        expected_launch_at: ids.operated_at,
+        bound_at,
+        binding_version: PROVIDER_BINDING_VERSION,
+        binding_bytes: &binding_bytes,
+    };
+    let bind_result = tokio::select! {
+        biased;
+        result = bind_with_retry(
+            context.repository,
+            bind_command(),
+            context.config.max_command_retries,
+        ) => result,
+        () = run_cancel.wait() => {
+            // Do not drop the AcceptedTurn while the durable bind is pending.
+            // Cancel the provider operation, then finish the same idempotent
+            // bind path so terminal settlement has an authenticated scope.
+            turn.cancel();
+            bind_with_retry(
+                context.repository,
+                bind_command(),
+                context.config.max_command_retries,
+            )
+            .await
+        }
+    };
     let (bound, already_bound) = match bind_result {
         Ok(BindRunProviderOutcome::Bound(receipt)) => (receipt, false),
         Ok(BindRunProviderOutcome::AlreadyBound(receipt)) => (receipt, true),
@@ -1338,11 +1375,14 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             );
         }
     };
-    if matches!(
-        prompt_authorization_after_binding(already_bound),
-        PromptAuthorization::DoNotAuthorize
-    ) || turn.authorize().is_err()
-    {
+    if run_cancel.is_cancelled() {
+        turn.cancel();
+    }
+    let authorization_failed = match prompt_authorization_after_binding(already_bound) {
+        PromptAuthorization::DoNotAuthorize => true,
+        PromptAuthorization::Authorize => turn.authorize().is_err(),
+    };
+    if authorization_failed && !run_cancel.is_cancelled() {
         let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
         return (
             None,
@@ -1352,6 +1392,9 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
                 ClaimCustody::Released
             },
         );
+    }
+    if run_cancel.is_cancelled() {
+        turn.cancel();
     }
     (
         Some(BoundClaim {

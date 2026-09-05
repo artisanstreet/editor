@@ -11,9 +11,8 @@ use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
     ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision,
     EngineProfileId, EngineRunConfig, Event, IdentifierError, ImageAttachmentRef, MessageId,
-    PatchBatch, RunId,
-    ProjectListing, ProjectSummary, Query, ReceiptDisposition, RequestId, ThreadId, ThreadListing,
-    ThreadSummary, UnixMillis,
+    PatchBatch, ProjectListing, ProjectSummary, Query, ReceiptDisposition, RequestId, RunId,
+    ThreadId, ThreadListing, ThreadSummary, UnixMillis,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;

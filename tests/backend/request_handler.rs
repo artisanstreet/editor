@@ -17,6 +17,7 @@ use artisan_backend::conversation_subscription_registry::{
 use artisan_backend::request_handler::{
     ActivatedConversationSubscription, ConversationSubscriptionRegistrar, RequestHandlerReceipt,
 };
+use artisan_backend::run_cancellation::RunCancellationRegistry;
 use artisan_backend::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeStorage, RequestHandler,
 };
@@ -35,8 +36,8 @@ use artisan_domain::{
     EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText, ItemId, ListAttachedProjects,
     ListDirectories, ListProjectThreads, MessageBody, MessageId, NetworkAccess, OpenCode2Selection,
     PatchBatch, PatchId, PatchSequence, PermissionId, ProjectId, Query, QueryTurnCount,
-    ReceiptDisposition, RequestId, Revision, RootPath, SetThreadEngineConfig, ThreadId,
-    ThreadSummary, ThreadTitle, UnixMillis, WebSearchAccess,
+    ReceiptDisposition, RequestId, Revision, RootPath, RunId, SetThreadEngineConfig, StopRun,
+    ThreadId, ThreadSummary, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt, FrameId,
@@ -3776,5 +3777,136 @@ async fn list_registered_engine_profiles_correlation_and_no_origin_consult() {
         response.payload,
         ResponsePayload::RegisteredEngineProfiles(_)
     ));
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn stop_run_answers_exact_signal_dispositions_and_rejects_stale_targets() {
+    let (_temporary, storage) = opened_storage("stop-run-routing").await;
+    let thread_id = ThreadId::parse("thread-stop").expect("valid thread id");
+    let old_run = RunId::parse("run-stop-old").expect("valid old run id");
+    let new_run = RunId::parse("run-stop-new").expect("valid new run id");
+    let registry = RunCancellationRegistry::new(2).expect("registry capacity is valid");
+    let old_lease = registry
+        .register(thread_id.clone(), old_run.clone())
+        .expect("old run should register");
+    let handler = RequestHandler::new(storage.repository().clone())
+        .with_run_cancellation_registry(registry.clone());
+
+    let wrong_thread = ClientRequest::Command(Command::StopRun(StopRun::new(
+        request("request-stop-wrong-thread"),
+        ThreadId::parse("thread-other").expect("valid other thread id"),
+        old_run.clone(),
+    )));
+    let wrong_thread_response = handler
+        .respond(&request("request-stop-wrong-thread"), &wrong_thread)
+        .await
+        .expect("wrong-thread stop should be a correlated response");
+    assert!(matches!(
+        wrong_thread_response.payload,
+        ResponsePayload::RunStopped(receipt)
+            if receipt.disposition == artisan_protocol::StopRunDisposition::NotActive
+    ));
+
+    let stop = ClientRequest::Command(Command::StopRun(StopRun::new(
+        request("request-stop-exact"),
+        thread_id.clone(),
+        old_run.clone(),
+    )));
+    let requested = handler
+        .respond(&request("request-stop-exact"), &stop)
+        .await
+        .expect("exact stop should be a correlated response");
+    assert_eq!(requested.request_id, request("request-stop-exact"));
+    assert!(matches!(
+        requested.payload,
+        ResponsePayload::RunStopped(receipt)
+            if receipt.request_id == request("request-stop-exact")
+                && receipt.thread_id == thread_id
+                && receipt.run_id == old_run
+                && receipt.disposition == artisan_protocol::StopRunDisposition::Requested
+    ));
+    let repeated = handler
+        .respond(&request("request-stop-exact"), &stop)
+        .await
+        .expect("repeated stop should be a correlated response");
+    assert!(matches!(
+        repeated.payload,
+        ResponsePayload::RunStopped(receipt)
+            if receipt.disposition == artisan_protocol::StopRunDisposition::AlreadyRequested
+    ));
+
+    drop(old_lease);
+    let new_lease = registry
+        .register(thread_id.clone(), new_run.clone())
+        .expect("replacement run should register");
+    let stale = ClientRequest::Command(Command::StopRun(StopRun::new(
+        request("request-stop-stale"),
+        thread_id.clone(),
+        old_run,
+    )));
+    let stale_response = handler
+        .respond(&request("request-stop-stale"), &stale)
+        .await
+        .expect("stale stop should be a correlated response");
+    assert!(matches!(
+        stale_response.payload,
+        ResponsePayload::RunStopped(receipt)
+            if receipt.disposition == artisan_protocol::StopRunDisposition::NotActive
+    ));
+    drop(new_lease);
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn read_active_run_reports_authoritative_singleton_and_empty_state() {
+    let (_temporary, storage) = opened_storage("read-active-run").await;
+    let thread_id = ThreadId::parse("thread-active").expect("valid thread id");
+    let run_id = RunId::parse("run-active").expect("valid run id");
+    let registry = RunCancellationRegistry::new(2).expect("registry capacity is valid");
+    let handler = RequestHandler::new(storage.repository().clone())
+        .with_run_cancellation_registry(registry.clone());
+    let query = ClientRequest::Query(Query::ReadActiveRun(artisan_domain::ReadActiveRun::new(
+        thread_id.clone(),
+    )));
+    let empty = handler
+        .respond(&request("frame-active-empty"), &query)
+        .await
+        .expect("empty active-run query should succeed");
+    assert!(matches!(
+        empty.payload,
+        ResponsePayload::ActiveRun(artisan_protocol::ActiveRunResult::NoActive { thread_id: id })
+            if id == thread_id
+    ));
+
+    let lease = registry
+        .register(thread_id.clone(), run_id.clone())
+        .expect("active run should register");
+    let active = handler
+        .respond(&request("frame-active-one"), &query)
+        .await
+        .expect("singleton active-run query should succeed");
+    assert!(matches!(
+        active.payload,
+        ResponsePayload::ActiveRun(artisan_protocol::ActiveRunResult::Active {
+            thread_id: id,
+            run_id: active_id,
+        }) if id == thread_id && active_id == run_id
+    ));
+    let second_lease = registry
+        .register(
+            thread_id.clone(),
+            RunId::parse("run-active-2").expect("valid second run id"),
+        )
+        .expect("second active run should register for ambiguity coverage");
+    let ambiguous = failure_of(
+        handler
+            .respond(&request("frame-active-ambiguous"), &query)
+            .await,
+    );
+    assert_eq!(ambiguous.code, ErrorCode::Internal);
+    assert!(!ambiguous.retryable);
+    drop(second_lease);
+    drop(lease);
     storage.close().await.expect("storage should close");
 }

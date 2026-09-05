@@ -521,14 +521,10 @@ impl RequestHandler {
     /// with native dispatch. The registry contains only exact live
     /// `(thread_id, run_id)` routes; it owns no terminal state or provider.
     #[must_use]
-    pub(crate) fn with_composer_catalog(
-        mut self,
-        service: crate::composer_catalog_service::ComposerCatalogService,
-    ) -> Self {
+    pub(crate) fn with_composer_catalog(mut self, service: crate::composer_catalog_service::ComposerCatalogService) -> Self {
         self.composer_catalog = Some(service);
         self
     }
-
     pub fn with_run_cancellation_registry(mut self, registry: RunCancellationRegistry) -> Self {
         self.run_cancellation = Some(registry);
         self

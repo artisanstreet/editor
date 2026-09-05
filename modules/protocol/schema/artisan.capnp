@@ -667,9 +667,10 @@ enum StopRunDisposition {
 }
 
 struct StopRunReceipt {
-  threadId @0 :Text;
-  runId @1 :Text;
-  disposition @2 :StopRunDisposition;
+  requestId @0 :Text;
+  threadId @1 :Text;
+  runId @2 :Text;
+  disposition @3 :StopRunDisposition;
 }
 
 struct ActiveRunResult {

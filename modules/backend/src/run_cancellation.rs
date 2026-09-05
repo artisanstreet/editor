@@ -255,10 +255,7 @@ impl RunCancellationRegistry {
     /// Multiple active runs are deliberately not ordered or guessed: callers
     /// receive [`RunCancellationError::AmbiguousActiveRuns`] and must fail
     /// closed until the registry returns to a singleton or empty state.
-    pub fn active_run(
-        &self,
-        thread_id: &ThreadId,
-    ) -> Result<Option<RunId>, RunCancellationError> {
+    pub fn active_run(&self, thread_id: &ThreadId) -> Result<Option<RunId>, RunCancellationError> {
         let state = self.inner.lock()?;
         let mut active = state
             .active
@@ -443,16 +440,16 @@ mod tests {
     fn active_run_query_returns_empty_singleton_and_fails_closed_on_ambiguity() {
         let registry = registry(3);
         let thread_id = thread_id("thread-active-query");
-        let run_id = run_id("run-active-query");
+        let active_run_id = run_id("run-active-query");
 
         assert_eq!(registry.active_run(&thread_id), Ok(None));
         let first = registry
-            .register(thread_id.clone(), run_id.clone())
+            .register(thread_id.clone(), active_run_id.clone())
             .expect("active run should register");
-        assert_eq!(registry.active_run(&thread_id), Ok(Some(run_id)));
+        assert_eq!(registry.active_run(&thread_id), Ok(Some(active_run_id)));
 
         let second = registry
-            .register(thread_id.clone(), RunId::parse("run-active-query-2").unwrap())
+            .register(thread_id.clone(), run_id("run-active-query-2"))
             .expect("second fixture run should register");
         assert_eq!(
             registry.active_run(&thread_id),
