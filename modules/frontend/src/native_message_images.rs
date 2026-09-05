@@ -28,18 +28,16 @@ use artisan_ui::{
     asset_seam::asset_glyph,
     theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode},
 };
+use gpui::ColorExt;
 use gpui::prelude::{
     InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _,
 };
-use gpui::ColorExt;
 use gpui::{
     Bounds, Context, ElementId, FocusHandle, Image, ImageFormat, ImageSource, KeyDownEvent,
     ObjectFit, Pixels, Render, RenderImage, SvgRenderer, Task, Window, div, img, px,
 };
-use image::{
-    DynamicImage, ImageDecoder, ImageFormat as EncodedImageFormat, ImageReader, Limits,
-};
+use image::{DynamicImage, ImageDecoder, ImageFormat as EncodedImageFormat, ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -65,8 +63,7 @@ pub const THUMBNAIL_TILE_EDGE: Pixels = px(128.0);
 /// Stable selector for the entity's optional overlay root.
 pub const NATIVE_MESSAGE_IMAGES_ROOT_SELECTOR: &str = "artisan-native-message-images";
 /// Stable selector for one image thumbnail tile.
-pub const NATIVE_MESSAGE_IMAGE_THUMBNAIL_SELECTOR: &str =
-    "artisan-native-message-image-thumbnail";
+pub const NATIVE_MESSAGE_IMAGE_THUMBNAIL_SELECTOR: &str = "artisan-native-message-image-thumbnail";
 /// Stable selector for the full preview backdrop.
 pub const NATIVE_MESSAGE_IMAGE_PREVIEW_BACKDROP_SELECTOR: &str =
     "artisan-native-message-image-preview-backdrop";
@@ -232,6 +229,7 @@ impl ThumbnailCache {
         self.entries.get(reference)
     }
 
+    #[cfg(test)]
     fn contains(&self, reference: &ImageAttachmentRef) -> bool {
         self.entries.contains_key(reference)
     }
@@ -279,9 +277,7 @@ impl ThumbnailCache {
         }
 
         let _ = self.remove(&reference);
-        self.encoded_bytes = self
-            .encoded_bytes
-            .saturating_add(incoming_bytes);
+        self.encoded_bytes = self.encoded_bytes.saturating_add(incoming_bytes);
         self.entries.insert(reference.clone(), entry);
         self.lru.push_back(reference);
         Ok(evicted)
@@ -354,9 +350,7 @@ impl ThumbnailCache {
         let stale = self
             .entries
             .keys()
-            .filter(|reference| {
-                thread_id.is_none_or(|thread_id| &reference.thread_id != thread_id)
-            })
+            .filter(|reference| thread_id.is_none_or(|thread_id| &reference.thread_id != thread_id))
             .cloned()
             .collect::<Vec<_>>();
         for reference in &stale {
@@ -461,7 +455,8 @@ impl ImageState {
             if pending.state == PendingRequestState::InFlight {
                 self.in_flight = self.in_flight.saturating_sub(1);
             }
-            self.visible_queue.retain(|candidate| candidate != reference);
+            self.visible_queue
+                .retain(|candidate| candidate != reference);
             Some(pending)
         } else {
             None
@@ -524,9 +519,7 @@ impl ImageState {
         let stale = self
             .pending
             .keys()
-            .filter(|reference| {
-                thread_id.is_none_or(|thread_id| &reference.thread_id != thread_id)
-            })
+            .filter(|reference| thread_id.is_none_or(|thread_id| &reference.thread_id != thread_id))
             .cloned()
             .collect::<Vec<_>>();
         for reference in stale {
@@ -586,6 +579,11 @@ impl NativeMessageImages {
     /// records, releases any full preview task, and fences late work. The
     /// caller should perform this before rendering a replacement conversation
     /// scene.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImageStateError::GenerationExhausted`] without changing the
+    /// current scope when the checked scope-generation counter cannot advance.
     pub fn set_current_thread(
         &mut self,
         thread_id: Option<ThreadId>,
@@ -676,21 +674,13 @@ impl NativeMessageImages {
             })
             .on_click(move |_, window, app| {
                 let _ = click_entity.update(app, |images, images_cx| {
-                    let _ = images.open_preview(
-                        click_reference.clone(),
-                        window,
-                        images_cx,
-                    );
+                    let _ = images.open_preview(click_reference.clone(), window, images_cx);
                 });
             })
             .on_key_down(move |event, window, app| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     let _ = key_entity.update(app, |images, images_cx| {
-                        let _ = images.open_preview(
-                            key_reference.clone(),
-                            window,
-                            images_cx,
-                        );
+                        let _ = images.open_preview(key_reference.clone(), window, images_cx);
                     });
                 }
             });
@@ -842,10 +832,10 @@ impl NativeMessageImages {
         ) {
             Ok(evicted) => evicted,
             Err(_) => {
-                if let Ok(evicted) = self.state.record_failure(
-                    reference.clone(),
-                    protected.as_ref(),
-                ) {
+                if let Ok(evicted) = self
+                    .state
+                    .record_failure(reference.clone(), protected.as_ref())
+                {
                     self.drop_thumbnail_tasks(evicted);
                 }
                 self.pump_requests(cx);
@@ -880,24 +870,20 @@ impl NativeMessageImages {
 
     /// Records a typed parent failure for one exact pending response.
     ///
-    /// The transport diagnostic is reduced to a private category immediately;
-    /// no service error payload is retained in the entity.
+    /// The transport diagnostic is consumed without retaining any service
+    /// error payload in the entity.
     pub fn fail_image(
         &mut self,
         reference: ImageAttachmentRef,
-        failure: ServiceFailure,
+        _failure: ServiceFailure,
         cx: &mut Context<Self>,
     ) -> ImageResponseDisposition {
         if validate_pending_reference(&self.state, &reference).is_err() {
             return ImageResponseDisposition::IgnoredNotPending;
         }
         let _ = self.state.settle_pending(&reference);
-        let _ = failure;
         let protected = self.viewer_reference();
-        if let Ok(evicted) = self
-            .state
-            .record_failure(reference, protected.as_ref())
-        {
+        if let Ok(evicted) = self.state.record_failure(reference, protected.as_ref()) {
             self.drop_thumbnail_tasks(evicted);
         }
         self.pump_requests(cx);
@@ -910,11 +896,7 @@ impl NativeMessageImages {
     /// Retry is an interaction event, not render-time work. It is admitted
     /// only for the current thread and only while the bounded pending budget
     /// has room.
-    pub fn retry_image(
-        &mut self,
-        reference: &ImageAttachmentRef,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub fn retry_image(&mut self, reference: &ImageAttachmentRef, cx: &mut Context<Self>) -> bool {
         if self.state.current_thread.as_ref() != Some(&reference.thread_id)
             || !self.state.cache.is_failed(reference)
             || self.state.pending.contains_key(reference)
@@ -925,9 +907,9 @@ impl NativeMessageImages {
         let _ = self.state.cache.remove(reference);
         self.thumbnail_tasks.remove(reference);
         let protected = self.viewer_reference();
-        let Ok((admitted, evicted)) = self
-            .state
-            .enqueue_visible(reference.clone(), true, protected.as_ref())
+        let Ok((admitted, evicted)) =
+            self.state
+                .enqueue_visible(reference.clone(), true, protected.as_ref())
         else {
             return false;
         };
@@ -963,7 +945,10 @@ impl NativeMessageImages {
         let Some(record) = self.state.cache.get(&reference) else {
             return PreviewOpenDisposition::NotReady;
         };
-        if !matches!(record.status, ImageThumbnailStatus::Decoding | ImageThumbnailStatus::Ready) {
+        if !matches!(
+            record.status,
+            ImageThumbnailStatus::Decoding | ImageThumbnailStatus::Ready
+        ) {
             return PreviewOpenDisposition::NotReady;
         }
         let Some(encoded) = record.encoded.clone() else {
@@ -1038,10 +1023,7 @@ impl NativeMessageImages {
         };
 
         let reference = viewer.fence.reference.clone();
-        let preview = viewer
-            .preview
-            .clone()
-            .or_else(|| viewer.thumbnail.clone());
+        let preview = viewer.preview.clone().or_else(|| viewer.thumbnail.clone());
         let full_ready = viewer.preview.is_some();
         let preview_error = viewer.error;
         let name = reference.name.clone();
@@ -1155,9 +1137,9 @@ impl NativeMessageImages {
 
     fn request_visible(&mut self, reference: ImageAttachmentRef, cx: &mut Context<Self>) {
         let protected = self.viewer_reference();
-        let Ok((admitted, evicted)) = self
-            .state
-            .enqueue_visible(reference, false, protected.as_ref())
+        let Ok((admitted, evicted)) =
+            self.state
+                .enqueue_visible(reference, false, protected.as_ref())
         else {
             return;
         };
@@ -1190,12 +1172,11 @@ impl NativeMessageImages {
         }
         self.thumbnail_tasks.remove(&reference);
         let changed = match result {
-            Ok(thumbnail) => self.state.cache.mark_ready(
-                &reference,
-                generation,
-                scope_generation,
-                thumbnail,
-            ),
+            Ok(thumbnail) => {
+                self.state
+                    .cache
+                    .mark_ready(&reference, generation, scope_generation, thumbnail)
+            }
             Err(_) => self
                 .state
                 .cache
@@ -1215,18 +1196,15 @@ impl NativeMessageImages {
         result: Result<Arc<RenderImage>, DecodeFailure>,
         cx: &mut Context<Self>,
     ) {
-        let is_current = self
-            .viewer
-            .as_ref()
-            .is_some_and(|viewer| {
-                preview_fence_is_current(
-                    Some(&viewer.fence),
-                    &reference,
-                    generation,
-                    scope_generation,
-                ) && self.state.scope_generation == scope_generation
-                    && self.state.current_thread.as_ref() == Some(&reference.thread_id)
-            });
+        let is_current = self.viewer.as_ref().is_some_and(|viewer| {
+            preview_fence_is_current(
+                Some(&viewer.fence),
+                &reference,
+                generation,
+                scope_generation,
+            ) && self.state.scope_generation == scope_generation
+                && self.state.current_thread.as_ref() == Some(&reference.thread_id)
+        });
         if !is_current {
             return;
         }
@@ -1405,10 +1383,7 @@ fn render_full_preview(
     render_png(encoded)
 }
 
-fn decode_bounded(
-    bytes: &[u8],
-    mime_type: ImageMimeType,
-) -> Result<DynamicImage, DecodeFailure> {
+fn decode_bounded(bytes: &[u8], mime_type: ImageMimeType) -> Result<DynamicImage, DecodeFailure> {
     if bytes.is_empty() {
         return Err(DecodeFailure::InvalidImage);
     }
@@ -1473,15 +1448,9 @@ fn encoded_format(mime_type: ImageMimeType) -> EncodedImageFormat {
 mod tests {
     use super::*;
     use artisan_domain::{MessageId, ThreadId};
-    use gpui::ColorExt;
-use gpui::{Bounds, point, px, size};
+    use gpui::{Bounds, point, px, size};
 
-    fn reference(
-        thread: &str,
-        message: &str,
-        index: u32,
-        bytes: &[u8],
-    ) -> ImageAttachmentRef {
+    fn reference(thread: &str, message: &str, index: u32, bytes: &[u8]) -> ImageAttachmentRef {
         let digest: [u8; 32] = Sha256::digest(bytes).into();
         ImageAttachmentRef::new(
             MessageId::parse(message).expect("test message id is valid"),
@@ -1496,8 +1465,7 @@ use gpui::{Bounds, point, px, size};
     }
 
     fn attachment(name: &str, bytes: &[u8]) -> ImageAttachment {
-        ImageAttachment::new("image/png", bytes.to_vec(), name)
-            .expect("test attachment is valid")
+        ImageAttachment::new("image/png", bytes.to_vec(), name).expect("test attachment is valid")
     }
 
     fn state_for(thread: &str) -> ImageState {
@@ -1538,14 +1506,11 @@ use gpui::{Bounds, point, px, size};
             .enqueue_visible(exact.clone(), false, None)
             .expect("queue admission succeeds");
 
-        assert!(validate_pending_response(&state, &exact, &attachment("capture-0.png", &bytes))
-            .is_ok());
+        assert!(
+            validate_pending_response(&state, &exact, &attachment("capture-0.png", &bytes)).is_ok()
+        );
         assert_eq!(
-            validate_pending_response(
-                &state,
-                &other_thread,
-                &attachment("capture-0.png", &bytes)
-            ),
+            validate_pending_response(&state, &other_thread, &attachment("capture-0.png", &bytes)),
             Err(ImageResponseRejection::NoPendingReference)
         );
     }
@@ -1614,7 +1579,11 @@ use gpui::{Bounds, point, px, size};
             cache
                 .insert(
                     reference.clone(),
-                    cached_entry(Some(small.clone()), ImageThumbnailStatus::Ready, index as u64),
+                    cached_entry(
+                        Some(small.clone()),
+                        ImageThumbnailStatus::Ready,
+                        index as u64,
+                    ),
                     None,
                 )
                 .expect("small entry fits");
@@ -1635,7 +1604,12 @@ use gpui::{Bounds, point, px, size};
 
         let mut bytes = Vec::new();
         for index in 0..8 {
-            bytes.push(reference("thread-a", &format!("large-{index}"), index, &[1]));
+            bytes.push(reference(
+                "thread-a",
+                &format!("large-{index}"),
+                index,
+                &[1],
+            ));
         }
         for (index, reference) in bytes.into_iter().enumerate() {
             cache
@@ -1661,25 +1635,33 @@ use gpui::{Bounds, point, px, size};
             .map(|index| reference("thread-a", &format!("message-{index}"), index as u32, &[1]))
             .collect::<Vec<_>>();
 
-        assert!(state
-            .enqueue_visible(references[0].clone(), false, None)
-            .expect("first request fits")
-            .0);
-        assert!(!state
-            .enqueue_visible(references[0].clone(), false, None)
-            .expect("duplicate is a no-op")
-            .0);
+        assert!(
+            state
+                .enqueue_visible(references[0].clone(), false, None)
+                .expect("first request fits")
+                .0
+        );
+        assert!(
+            !state
+                .enqueue_visible(references[0].clone(), false, None)
+                .expect("duplicate is a no-op")
+                .0
+        );
         for reference in references.iter().skip(1) {
-            assert!(state
-                .enqueue_visible(reference.clone(), false, None)
-                .expect("request fits")
-                .0);
+            assert!(
+                state
+                    .enqueue_visible(reference.clone(), false, None)
+                    .expect("request fits")
+                    .0
+            );
         }
         let overflow = reference("thread-a", "message-overflow", 100, &[1]);
-        assert!(!state
-            .enqueue_visible(overflow, false, None)
-            .expect("capacity refusal is typed")
-            .0);
+        assert!(
+            !state
+                .enqueue_visible(overflow, false, None)
+                .expect("capacity refusal is typed")
+                .0
+        );
         assert_eq!(state.take_request_batch().len(), MAX_OUTSTANDING_REQUESTS);
 
         let failed = references[0].clone();
@@ -1689,20 +1671,30 @@ use gpui::{Bounds, point, px, size};
             .expect("failure record fits");
         assert_eq!(state.status(&failed), ImageThumbnailStatus::Failed);
         let _ = state.cache.remove(&failed);
-        assert!(state
-            .enqueue_visible(failed, true, None)
-            .expect("explicit retry fits")
-            .0);
+        assert!(
+            state
+                .enqueue_visible(failed, true, None)
+                .expect("explicit retry fits")
+                .0
+        );
     }
 
     #[test]
     fn hidden_thumbnail_bounds_never_admit_a_request() {
         let hidden = bounds(900.0, 900.0, 128.0, 128.0);
         let viewport = bounds(0.0, 0.0, 640.0, 480.0);
-        assert!(hidden.intersect(&viewport).is_empty());
-        assert!(!bounds(8.0, 16.0, 128.0, 128.0)
-            .intersect(&viewport)
-            .is_empty());
+        assert!(!is_visible_in_content_mask(hidden, &viewport));
+        assert!(is_visible_in_content_mask(
+            bounds(8.0, 16.0, 128.0, 128.0),
+            &viewport
+        ));
+
+        let mut state = state_for("thread-a");
+        let hidden_reference = reference("thread-a", "hidden", 0, &[1]);
+        if is_visible_in_content_mask(hidden, &viewport) {
+            let _ = state.enqueue_visible(hidden_reference, false, None);
+        }
+        assert!(state.pending.is_empty());
     }
 
     #[test]
