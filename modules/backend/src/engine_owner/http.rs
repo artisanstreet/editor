@@ -30,6 +30,10 @@ use zeroize::Zeroize;
 
 use artisan_transport::CancelHandle;
 
+use super::catalog::{
+    CatalogError, CatalogResult, CatalogScope, MAX_CATALOG_RESPONSE_BYTES, decode_models_response,
+    location_query, normalize_catalog,
+};
 use super::readiness::ValidatedEndpoint;
 use crate::engine_owner::EngineBounds;
 
@@ -453,6 +457,195 @@ pub async fn perform_health(
     };
     settle_driver(conn_handle, deadline, cancel, shutdown).await?;
     Ok(version)
+}
+
+/// Performs the bounded authenticated, location-scoped OpenCode2 model
+/// discovery request. The request is deliberately limited to `GET
+/// /api/model`; no provider session, assistant run, or prompt is created.
+///
+/// The response is decoded and normalized before the connection is considered
+/// settled. Only the typed, bounded result escapes this module; raw response
+/// bytes and headers remain private to the owner operation.
+pub(crate) async fn perform_catalog(
+    endpoint: &ValidatedEndpoint,
+    secret: &HealthSecret,
+    bounds: &EngineBounds,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    shutdown: &CancelHandle,
+    scope: &CatalogScope,
+) -> Result<CatalogResult, CatalogError> {
+    if shutdown.is_cancelled() {
+        return Err(CatalogError::Shutdown);
+    }
+    if cancel.is_cancelled() {
+        return Err(CatalogError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(CatalogError::Timeout);
+    }
+    let request = build_catalog_request(endpoint, secret, scope)?;
+    let (mut sender, conn_handle) =
+        connect_and_handshake_catalog(endpoint, bounds, deadline, cancel, shutdown).await?;
+    let response =
+        match send_catalog_request(&mut sender, request, deadline, cancel, shutdown).await {
+            Ok(response) => response,
+            Err(error) => {
+                abort_and_join(conn_handle).await;
+                return Err(error);
+            }
+        };
+    if !response.status().is_success() {
+        abort_and_join(conn_handle).await;
+        return Err(CatalogError::StatusNotSuccess);
+    }
+    if let Err(error) = check_catalog_content_length(&response, bounds) {
+        abort_and_join(conn_handle).await;
+        return Err(error);
+    }
+    let result = match collect_and_parse_catalog(
+        response, bounds, deadline, cancel, shutdown, scope,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            abort_and_join(conn_handle).await;
+            return Err(error);
+        }
+    };
+    settle_catalog_driver(conn_handle, deadline, cancel, shutdown).await?;
+    Ok(result)
+}
+
+fn build_catalog_request(
+    endpoint: &ValidatedEndpoint,
+    secret: &HealthSecret,
+    scope: &CatalogScope,
+) -> Result<Request<Empty<Bytes>>, CatalogError> {
+    let host_header = match endpoint.host() {
+        std::net::IpAddr::V4(ip) => format!("{ip}:{}", endpoint.port()),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]:{}", endpoint.port()),
+    };
+    let auth_header = secret.basic_auth();
+    Request::builder()
+        .method("GET")
+        .uri(format!("/api/model?{}", location_query(scope)))
+        .header("host", host_header)
+        .header("authorization", auth_header)
+        .header("content-type", "application/json")
+        .header("connection", "close")
+        .body(Empty::<Bytes>::new())
+        .map_err(|_| CatalogError::SendFailed)
+}
+
+async fn connect_and_handshake_catalog(
+    endpoint: &ValidatedEndpoint,
+    bounds: &EngineBounds,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    shutdown: &CancelHandle,
+) -> Result<
+    (
+        hyper::client::conn::http1::SendRequest<Empty<Bytes>>,
+        tokio::task::JoinHandle<Result<(), hyper::Error>>,
+    ),
+    CatalogError,
+> {
+    connect_and_handshake(endpoint, bounds, deadline, cancel, shutdown)
+        .await
+        .map_err(map_health_error_to_catalog)
+}
+
+async fn send_catalog_request(
+    sender: &mut hyper::client::conn::http1::SendRequest<Empty<Bytes>>,
+    request: Request<Empty<Bytes>>,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    shutdown: &CancelHandle,
+) -> Result<hyper::Response<hyper::body::Incoming>, CatalogError> {
+    send_request(sender, request, deadline, cancel, shutdown)
+        .await
+        .map_err(map_health_error_to_catalog)
+}
+
+fn check_catalog_content_length(
+    response: &hyper::Response<hyper::body::Incoming>,
+    bounds: &EngineBounds,
+) -> Result<(), CatalogError> {
+    let Some(len_header) = response.headers().get("content-length") else {
+        return Ok(());
+    };
+    let Ok(len_str) = len_header.to_str() else {
+        return Err(CatalogError::InvalidShape);
+    };
+    let Ok(len) = len_str.parse::<usize>() else {
+        return Err(CatalogError::InvalidShape);
+    };
+    if len > catalog_body_limit(bounds) {
+        return Err(CatalogError::BodyTooLarge);
+    }
+    Ok(())
+}
+
+fn catalog_body_limit(bounds: &EngineBounds) -> usize {
+    bounds.max_json_body.min(MAX_CATALOG_RESPONSE_BYTES)
+}
+
+async fn collect_and_parse_catalog(
+    response: hyper::Response<hyper::body::Incoming>,
+    bounds: &EngineBounds,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    shutdown: &CancelHandle,
+    scope: &CatalogScope,
+) -> Result<CatalogResult, CatalogError> {
+    let body = response.into_body();
+    let limited = Limited::new(body, catalog_body_limit(bounds));
+    let collected = tokio::select! {
+        biased;
+        () = shutdown.wait() => return Err(CatalogError::Shutdown),
+        () = cancel.wait() => return Err(CatalogError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => return Err(CatalogError::Timeout),
+        res = limited.collect() => res.map_err(|_| CatalogError::BodyReadFailed)?,
+    };
+    let bytes = collected.to_bytes();
+    if bytes.len() > catalog_body_limit(bounds) {
+        return Err(CatalogError::BodyTooLarge);
+    }
+    let raw = decode_models_response(&bytes)?;
+    normalize_catalog(raw, scope.clone())
+}
+
+async fn settle_catalog_driver(
+    handle: tokio::task::JoinHandle<Result<(), hyper::Error>>,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    shutdown: &CancelHandle,
+) -> Result<(), CatalogError> {
+    settle_driver(handle, deadline, cancel, shutdown)
+        .await
+        .map_err(map_health_error_to_catalog)
+}
+
+fn map_health_error_to_catalog(error: HealthError) -> CatalogError {
+    match error {
+        HealthError::EntropyFailed => CatalogError::InvalidShape,
+        HealthError::ConnectFailed => CatalogError::ConnectFailed,
+        HealthError::HandshakeFailed => CatalogError::HandshakeFailed,
+        HealthError::SendFailed => CatalogError::SendFailed,
+        HealthError::StatusNotSuccess => CatalogError::StatusNotSuccess,
+        HealthError::HeadersTooLarge => CatalogError::BodyTooLarge,
+        HealthError::BodyTooLarge => CatalogError::BodyTooLarge,
+        HealthError::InvalidJson
+        | HealthError::MissingVersion
+        | HealthError::IncompatibleVersion => CatalogError::InvalidShape,
+        HealthError::BodyReadFailed => CatalogError::BodyReadFailed,
+        HealthError::Timeout => CatalogError::Timeout,
+        HealthError::Cancelled => CatalogError::Cancelled,
+        HealthError::Shutdown => CatalogError::Shutdown,
+        HealthError::DriverFailed => CatalogError::DriverFailed,
+    }
 }
 
 async fn connect_and_handshake(
@@ -1194,7 +1387,60 @@ async fn settle_driver_prompt(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
     use super::*;
+
+    fn catalog_bounds() -> EngineBounds {
+        EngineBounds {
+            max_json_body: 64 * 1024,
+            max_sse_line: 1024,
+            max_sse_event: 2048,
+            max_readiness_line: 1024,
+            max_headers: 32,
+            max_buf_bytes: 8192,
+            stderr_cap_bytes: 4096,
+            sink_capacity: 4,
+            control_capacity: 4,
+        }
+    }
+
+    fn catalog_scope() -> CatalogScope {
+        CatalogScope::new("profile-1", r"C:\work space", "safe")
+            .expect("fixture catalog scope should validate")
+    }
+
+    fn catalog_endpoint(port: u16) -> ValidatedEndpoint {
+        let line = format!(r###"{{"url":"http://127.0.0.1:{port}"}}"###);
+        super::super::readiness::validate_readiness_line(line.as_bytes(), 1024)
+            .expect("fixture endpoint should validate")
+    }
+
+    async fn read_request_headers(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 512];
+            let read = stream
+                .read(&mut chunk)
+                .await
+                .expect("fixture request should read");
+            assert!(read > 0, "fixture request ended before headers");
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return request;
+            }
+            assert!(request.len() <= 16 * 1024, "fixture request exceeded bound");
+        }
+    }
+
+    fn catalog_fixture_body() -> &'static [u8] {
+        br#"{"data":[{"capabilities":{"input":["text","image"],"output":["text"],"tools":true},"cost":[{"input":1.0,"output":2.0}],"enabled":true,"id":"model-a","limit":{"context":8192,"output":1024},"modelID":"upstream-a","name":"Model A","providerID":"opencode","status":"active","variants":[{"id":"high"}]}]}"#
+    }
 
     #[test]
     fn image_prompt_files_keep_mime_bytes_name_and_order() {
@@ -1221,5 +1467,197 @@ mod tests {
         let error = validate_prompt_inputs("session-1", "immediate", "prompt-1", None, &[])
             .expect_err("empty prompt must not be sent");
         assert_eq!(error, PromptError::InvalidText);
+    }
+
+    #[tokio::test]
+    async fn catalog_uses_location_scope_auth_and_no_prompt_route() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("fixture listener should bind");
+        let port = listener.local_addr().expect("fixture address").port();
+        let body = catalog_fixture_body();
+        let secret = HealthSecret::from_raw_for_tests("catalog-secret".to_owned());
+        let expected_auth = secret.basic_auth();
+        let server_expected_auth = expected_auth.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("fixture request should arrive");
+            let request = read_request_headers(&mut stream).await;
+            let request = String::from_utf8(request).expect("fixture request is ascii");
+            assert!(request.starts_with(
+                "GET /api/model?location%5Bdirectory%5D=C%3A%5Cwork+space HTTP/1.1\r\n"
+            ));
+            assert!(request.contains(&format!("authorization: {server_expected_auth}")));
+            assert!(request.contains("content-type: application/json"));
+            assert!(!request.contains("/api/session"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("fixture headers should write");
+            stream
+                .write_all(body)
+                .await
+                .expect("fixture body should write");
+        });
+        let result = perform_catalog(
+            &catalog_endpoint(port),
+            &secret,
+            &catalog_bounds(),
+            Instant::now() + Duration::from_secs(5),
+            &CancelHandle::new(),
+            &CancelHandle::new(),
+            &catalog_scope(),
+        )
+        .await
+        .expect("catalog request should succeed");
+        server.await.expect("fixture server should finish");
+        assert_eq!(result.model_count(), 2);
+        assert_eq!(result.route_count(), 1);
+        assert_eq!(result.models[1].variant_id.as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn catalog_rejects_invalid_and_overbound_responses() {
+        for (response_body, content_length, expected) in [
+            (
+                br#"{"data":{}}"#.as_slice(),
+                None,
+                CatalogError::InvalidShape,
+            ),
+            (
+                br#"{}"#.as_slice(),
+                Some(catalog_bounds().max_json_body + 1),
+                CatalogError::BodyTooLarge,
+            ),
+        ] {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("fixture listener should bind");
+            let port = listener.local_addr().expect("fixture address").port();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("fixture request should arrive");
+                let _request = read_request_headers(&mut stream).await;
+                let length = content_length.unwrap_or(response_body.len());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(response_body).await;
+            });
+            let result = perform_catalog(
+                &catalog_endpoint(port),
+                &HealthSecret::from_raw_for_tests("catalog-secret".to_owned()),
+                &catalog_bounds(),
+                Instant::now() + Duration::from_secs(5),
+                &CancelHandle::new(),
+                &CancelHandle::new(),
+                &catalog_scope(),
+            )
+            .await
+            .expect_err("invalid fixture response must fail");
+            assert_eq!(result, expected);
+            server.await.expect("fixture server should finish");
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_cancellation_wakes_a_stalled_request() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("fixture listener should bind");
+        let port = listener.local_addr().expect("fixture address").port();
+        let (connected, connected_receiver) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("fixture request should arrive");
+            let _request = read_request_headers(&mut stream).await;
+            let _ = connected.send(());
+            std::future::pending::<()>().await;
+        });
+        let cancel = Arc::new(CancelHandle::new());
+        let operation = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                perform_catalog(
+                    &catalog_endpoint(port),
+                    &HealthSecret::from_raw_for_tests("catalog-secret".to_owned()),
+                    &catalog_bounds(),
+                    Instant::now() + Duration::from_secs(30),
+                    &cancel,
+                    &CancelHandle::new(),
+                    &catalog_scope(),
+                )
+                .await
+            }
+        });
+        connected_receiver
+            .await
+            .expect("fixture request should be observed");
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), operation)
+            .await
+            .expect("cancellation should settle")
+            .expect("catalog task should join")
+            .expect_err("cancelled catalog must fail");
+        assert_eq!(result, CatalogError::Cancelled);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn catalog_shutdown_wakes_a_stalled_request() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("fixture listener should bind");
+        let port = listener.local_addr().expect("fixture address").port();
+        let (connected, connected_receiver) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("fixture request should arrive");
+            let _request = read_request_headers(&mut stream).await;
+            let _ = connected.send(());
+            std::future::pending::<()>().await;
+        });
+        let shutdown = Arc::new(CancelHandle::new());
+        let operation = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                perform_catalog(
+                    &catalog_endpoint(port),
+                    &HealthSecret::from_raw_for_tests("catalog-secret".to_owned()),
+                    &catalog_bounds(),
+                    Instant::now() + Duration::from_secs(30),
+                    &CancelHandle::new(),
+                    &shutdown,
+                    &catalog_scope(),
+                )
+                .await
+            }
+        });
+        connected_receiver
+            .await
+            .expect("fixture request should be observed");
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), operation)
+            .await
+            .expect("shutdown should settle")
+            .expect("catalog task should join")
+            .expect_err("shutdown catalog must fail");
+        assert_eq!(result, CatalogError::Shutdown);
+        server.abort();
+        let _ = server.await;
     }
 }

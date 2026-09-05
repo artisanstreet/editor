@@ -43,6 +43,7 @@ use crate::{
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
+    run_cancellation::{RunCancellationLease, RunCancellationRegistry},
     startup_reconciliation_sweep::{
         PatchSourceError, StartupReconciliationPatchSource, StartupReconciliationPatches,
         StartupReconciliationSweepInput,
@@ -323,6 +324,7 @@ pub(crate) struct FixtureScenarioLaunch<'a> {
     pub(crate) database_path: PathBuf,
     pub(crate) config: NativeRunDispatcherConfig,
     pub(crate) process_cancel: Arc<CancelHandle>,
+    pub(crate) cancellation: RunCancellationRegistry,
     pub(crate) activity: ActivityGateImpl,
     pub(crate) runtime: &'a Handle,
     pub(crate) fixture_program: PathBuf,
@@ -332,6 +334,7 @@ pub(crate) struct FixtureScenarioLaunch<'a> {
 /// One running configured first-message dispatcher.
 #[allow(clippy::module_name_repetitions)]
 pub struct NativeRunDispatcher {
+    catalog_client: crate::engine_owner::EngineCatalogClient,
     stop: Arc<CancelHandle>,
     shutdown_budget: Duration,
     join: Option<JoinHandle<DispatchLoopExit>>,
@@ -396,11 +399,38 @@ impl NativeRunDispatcher {
         activity: ActivityGateImpl,
         runtime: &Handle,
     ) -> Self {
+        let cancellation = RunCancellationRegistry::new(config.queue_capacity.get())
+            .expect("dispatcher queue capacity should be nonzero");
+        Self::start_with_registry(
+            repository,
+            database_path,
+            config,
+            process_cancel,
+            cancellation,
+            activity,
+            runtime,
+        )
+    }
+
+    /// Starts the production dispatcher with the exact registry shared by
+    /// authenticated StopRun requests. The registry is created by Forge
+    /// assembly and never replaced for the dispatcher's lifetime.
+    #[must_use]
+    pub(crate) fn start_with_registry(
+        repository: Repository,
+        database_path: PathBuf,
+        config: NativeRunDispatcherConfig,
+        process_cancel: Arc<CancelHandle>,
+        cancellation: RunCancellationRegistry,
+        activity: ActivityGateImpl,
+        runtime: &Handle,
+    ) -> Self {
         Self::start_with_mode(
             repository,
             database_path,
             config,
             process_cancel,
+            cancellation,
             activity,
             runtime,
             DispatchLaunchMode::Configured,
@@ -425,6 +455,8 @@ impl NativeRunDispatcher {
             database_path,
             config,
             process_cancel,
+            cancellation: RunCancellationRegistry::new(1)
+                .expect("fixture cancellation capacity should be nonzero"),
             activity,
             runtime,
             fixture_program,
@@ -443,6 +475,7 @@ impl NativeRunDispatcher {
             database_path,
             config,
             process_cancel,
+            cancellation,
             activity,
             runtime,
             fixture_program,
@@ -453,6 +486,7 @@ impl NativeRunDispatcher {
             database_path,
             config,
             process_cancel,
+            cancellation,
             activity,
             runtime,
             DispatchLaunchMode::Fixture(Some(FixtureConfiguredLaunch {
@@ -469,6 +503,7 @@ impl NativeRunDispatcher {
         database_path: PathBuf,
         config: NativeRunDispatcherConfig,
         process_cancel: Arc<CancelHandle>,
+        cancellation: RunCancellationRegistry,
         activity: ActivityGateImpl,
         runtime: &Handle,
         launch_mode: DispatchLaunchMode,
@@ -476,12 +511,14 @@ impl NativeRunDispatcher {
         let shutdown_budget = config.shutdown_budget;
         let stop = Arc::new(CancelHandle::new());
         let owner = EngineOwner::start_configured(config.queue_capacity, runtime);
+        let catalog_client = owner.catalog_client();
         let join = runtime.spawn(dispatch_loop(DispatchLoopContext {
             repository,
             database_path,
             config,
             stop: Arc::clone(&stop),
             process_cancel,
+            cancellation,
             owner,
             activity,
             launch_mode,
@@ -489,9 +526,14 @@ impl NativeRunDispatcher {
         Self {
             stop,
             shutdown_budget,
+            catalog_client,
             join: Some(join),
             observed: None,
         }
+    }
+
+    pub(crate) fn catalog_client(&self) -> crate::engine_owner::EngineCatalogClient {
+        self.catalog_client.clone()
     }
 
     /// Stops claims, drains admission, and awaits the owner. A budget breach
@@ -545,6 +587,7 @@ struct DispatchLoopContext {
     config: NativeRunDispatcherConfig,
     stop: Arc<CancelHandle>,
     process_cancel: Arc<CancelHandle>,
+    cancellation: RunCancellationRegistry,
     owner: EngineOwner,
     activity: ActivityGateImpl,
     launch_mode: DispatchLaunchMode,
@@ -661,6 +704,7 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
         config,
         stop,
         process_cancel,
+        cancellation,
         mut owner,
         activity,
         mut launch_mode,
@@ -741,6 +785,7 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
                 origin: &origin,
                 stop: &stop,
                 process_cancel: &process_cancel,
+                cancellation: &cancellation,
                 owner: &owner,
                 claimed,
             },
@@ -837,6 +882,7 @@ struct ClaimExecution<'a> {
     origin: &'a SystemCommandOrigin,
     stop: &'a CancelHandle,
     process_cancel: &'a CancelHandle,
+    cancellation: &'a RunCancellationRegistry,
     owner: &'a EngineOwner,
     claimed: ClaimedMessageDispatch,
 }
@@ -885,6 +931,7 @@ struct LaunchedClaim<'a> {
     launch: ResolvedLaunch,
     ids: ClaimIds,
     receipt: LaunchedRunReceipt,
+    cancellation: RunCancellationLease,
 }
 
 struct PreparedClaim<'a> {
@@ -894,6 +941,7 @@ struct PreparedClaim<'a> {
     settings: artisan_database::ThreadEngineSettings,
     turn: AcceptedTurn,
     session: PreparedSession,
+    cancellation: RunCancellationLease,
 }
 
 struct BoundClaim<'a> {
@@ -903,19 +951,24 @@ struct BoundClaim<'a> {
     bound: artisan_database::BoundRunReceipt,
     bound_at: UnixMillis,
     turn: AcceptedTurn,
+    cancellation: RunCancellationLease,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClaimCustody {
     Released,
-    Retained,
+    Retained(RunCancellationLease),
+}
+
+struct RetainedActivity {
+    activity: ActivityLease,
+    cancellation: RunCancellationLease,
 }
 
 async fn execute_claim(
     context: ClaimExecution<'_>,
     launch_mode: ClaimLaunchMode,
     activity_lease: ActivityLease,
-) -> Option<ActivityLease> {
+) -> Option<RetainedActivity> {
     if context.stop.is_cancelled() || context.process_cancel.is_cancelled() {
         context.requeue("dispatcher stopping").await;
         return None;
@@ -932,24 +985,44 @@ async fn execute_claim(
             return None;
         }
     };
-    let launched = launch_claim(loaded, ids).await?;
+    let cancellation = match loaded
+        .context
+        .cancellation
+        .register(loaded.payload.thread_id.clone(), ids.run_id.clone())
+    {
+        Ok(lease) => lease,
+        Err(_) => {
+            loaded.context.requeue("run cancellation unavailable").await;
+            return None;
+        }
+    };
+    let launched = launch_claim(loaded, ids, cancellation).await?;
     let (prepared, custody) = admit_claim(launched).await;
     let Some(prepared) = prepared else {
         return match custody {
             ClaimCustody::Released => None,
-            ClaimCustody::Retained => Some(activity_lease),
+            ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
+                activity: activity_lease,
+                cancellation,
+            }),
         };
     };
     let (bound, custody) = bind_claim(prepared).await;
     let Some(bound) = bound else {
         return match custody {
             ClaimCustody::Released => None,
-            ClaimCustody::Retained => Some(activity_lease),
+            ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
+                activity: activity_lease,
+                cancellation,
+            }),
         };
     };
     match consume_bound_claim(bound).await {
         ClaimCustody::Released => None,
-        ClaimCustody::Retained => Some(activity_lease),
+        ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
+            activity: activity_lease,
+            cancellation,
+        }),
     }
 }
 
@@ -1066,7 +1139,11 @@ fn fixture_claim_ids() -> Result<(RunId, TurnId, ItemId, PatchId, PatchId), &'st
     ))
 }
 
-async fn launch_claim(loaded: LoadedClaim<'_>, ids: ClaimIds) -> Option<LaunchedClaim<'_>> {
+async fn launch_claim(
+    loaded: LoadedClaim<'_>,
+    ids: ClaimIds,
+    cancellation: RunCancellationLease,
+) -> Option<LaunchedClaim<'_>> {
     let launch_result = launch_with_retry(
         loaded.context.repository,
         LaunchClaimedRun {
@@ -1114,6 +1191,7 @@ async fn launch_claim(loaded: LoadedClaim<'_>, ids: ClaimIds) -> Option<Launched
         launch,
         ids,
         receipt,
+        cancellation,
     })
 }
 
@@ -1126,6 +1204,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
         launch,
         ids,
         receipt,
+        cancellation,
     } = claim;
     let attempt_budget = Duration::from_millis(settings.config().runtime().attempt_budget().get());
     let prompt_id = payload.message_id.as_str().to_owned();
@@ -1169,7 +1248,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
     };
     let Ok(session) = turn.prepare().await else {
         let custody = if is_unresolved_reap(&turn.finish().await) {
-            ClaimCustody::Retained
+            ClaimCustody::Retained(cancellation)
         } else {
             ClaimCustody::Released
         };
@@ -1183,6 +1262,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             settings,
             turn,
             session,
+            cancellation,
         }),
         ClaimCustody::Released,
     )
@@ -1196,6 +1276,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         settings,
         mut turn,
         session,
+        cancellation,
     } = claim;
     let Some(binding_bytes) = provider_binding_bytes(
         settings
@@ -1210,7 +1291,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         return (
             None,
             if custody {
-                ClaimCustody::Retained
+                ClaimCustody::Retained(cancellation)
             } else {
                 ClaimCustody::Released
             },
@@ -1221,7 +1302,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         return (
             None,
             if custody {
-                ClaimCustody::Retained
+                ClaimCustody::Retained(cancellation)
             } else {
                 ClaimCustody::Released
             },
@@ -1250,7 +1331,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             return (
                 None,
                 if custody {
-                    ClaimCustody::Retained
+                    ClaimCustody::Retained(cancellation)
                 } else {
                     ClaimCustody::Released
                 },
@@ -1266,7 +1347,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         return (
             None,
             if custody {
-                ClaimCustody::Retained
+                ClaimCustody::Retained(cancellation)
             } else {
                 ClaimCustody::Released
             },
@@ -1280,6 +1361,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             bound,
             bound_at,
             turn,
+            cancellation,
         }),
         ClaimCustody::Released,
     )
@@ -1293,6 +1375,7 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         bound,
         bound_at,
         turn,
+        cancellation,
     } = bound;
     let scope = RunBatchScope {
         claimed: &context.claimed,
@@ -1303,18 +1386,20 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         expected_launch_at: ids.operated_at,
         expected_updated_at: bound_at,
     };
+    let run_cancel = cancellation.cancel_handle();
     let custody_unresolved = consume_turn(
         context.repository,
         context.config,
         context.origin,
         context.stop,
         context.process_cancel,
+        run_cancel.as_ref(),
         turn,
         scope,
     )
     .await;
     if custody_unresolved {
-        ClaimCustody::Retained
+        ClaimCustody::Retained(cancellation)
     } else {
         ClaimCustody::Released
     }
@@ -1579,6 +1664,7 @@ struct TurnConsumptionContext<'a> {
     origin: &'a SystemCommandOrigin,
     stop: &'a CancelHandle,
     process_cancel: &'a CancelHandle,
+    run_cancel: &'a CancelHandle,
 }
 
 struct TurnConsumptionState<'a> {
@@ -1588,6 +1674,7 @@ struct TurnConsumptionState<'a> {
     assistant_body: String,
     batch_sequence: i64,
     forced_interrupted: bool,
+    forced_cancelled: bool,
     progress_uncertain: bool,
     terminal: Option<TerminalState>,
 }
@@ -1601,6 +1688,7 @@ impl<'a> TurnConsumptionState<'a> {
             assistant_body: String::new(),
             batch_sequence: 1,
             forced_interrupted: false,
+            forced_cancelled: false,
             progress_uncertain: false,
             terminal: None,
         }
@@ -1613,6 +1701,7 @@ async fn consume_turn(
     origin: &SystemCommandOrigin,
     stop: &CancelHandle,
     process_cancel: &CancelHandle,
+    run_cancel: &CancelHandle,
     mut turn: crate::engine_owner::operation::AcceptedTurn,
     scope: RunBatchScope<'_>,
 ) -> bool {
@@ -1622,6 +1711,7 @@ async fn consume_turn(
         origin,
         stop,
         process_cancel,
+        run_cancel,
     };
     let mut state = TurnConsumptionState::new(scope);
 
@@ -1652,6 +1742,11 @@ async fn consume_turn(
                     state.forced_interrupted = true;
                     turn.cancel();
                 }
+                () = context.run_cancel.wait() => {
+                    cancel_signalled = true;
+                    state.forced_cancelled = true;
+                    turn.cancel();
+                }
                 observation = turn.next_observation() => {
                     let Some(observation) = observation else { break; };
                     handle_observation(&context, &mut state, &mut turn, observation).await;
@@ -1669,8 +1764,15 @@ async fn consume_turn(
     if state.progress_uncertain {
         return false;
     }
-    let Some(terminal) = resolve_terminal(state.forced_interrupted, state.terminal, &owner_result)
-    else {
+    if context.run_cancel.is_cancelled() {
+        state.forced_cancelled = true;
+    }
+    let Some(terminal) = resolve_terminal(
+        state.forced_interrupted,
+        state.forced_cancelled,
+        state.terminal,
+        &owner_result,
+    ) else {
         return false;
     };
     if !ensure_assistant_item(&context, &mut state).await {
@@ -1702,7 +1804,7 @@ async fn handle_observation(
         }
         EngineObservation::Terminal(observation) => {
             state.terminal = Some(observation.state());
-            if state.forced_interrupted {
+            if state.forced_interrupted || state.forced_cancelled {
                 turn.cancel();
             }
         }
@@ -1845,11 +1947,15 @@ async fn append_assistant_delta(
 
 fn resolve_terminal(
     forced_interrupted: bool,
+    forced_cancelled: bool,
     terminal: Option<TerminalState>,
     owner_result: &TurnResult,
 ) -> Option<TerminalState> {
     if forced_interrupted {
         return Some(TerminalState::Interrupted);
+    }
+    if forced_cancelled {
+        return Some(TerminalState::Cancelled);
     }
     if let Some(terminal) = terminal {
         return Some(terminal);

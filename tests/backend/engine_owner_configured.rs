@@ -19,9 +19,9 @@ use artisan_domain::{
     ApprovalMode, ByteLimit, CountLimit, DirectoryId, DisplayName, EngineAgentId,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, MessageBody, NetworkAccess,
-    OpenCode2Selection, PermissionId, ProjectId, RequestId, RootPath, RunId, ThreadId, ThreadTitle,
-    UnixMillis, WebSearchAccess,
+    EngineSelection, FilesystemAccess, FiniteMillis, NetworkAccess, OpenCode2Selection,
+    PermissionId, ProjectId, RequestId, RootPath, RunId, ThreadId, ThreadTitle, UnixMillis,
+    WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 
@@ -372,7 +372,7 @@ async fn configured_fixture_happy_path_delivers_observation_and_reaps() {
         run_id: RunId::parse("fixture-run").expect("run id"),
         project_root: root.clone(),
         prompt_id: "prompt-1".to_owned(),
-        prompt_text: MessageBody::parse("hello world").expect("body"),
+        prompt: artisan_domain::QueueMessagePayload::text_only("hello world").expect("payload"),
         settings: settings.clone(),
         fixture: FixtureConfiguredLaunch {
             program: fixture.clone(),
@@ -464,7 +464,7 @@ async fn configured_fixture_descendant_holds_sentinel_until_group_reap() {
         run_id: RunId::parse("fixture-run").expect("run id"),
         project_root: root.clone(),
         prompt_id: "prompt-descendant".to_owned(),
-        prompt_text: MessageBody::parse("hello world").expect("body"),
+        prompt: artisan_domain::QueueMessagePayload::text_only("hello world").expect("payload"),
         settings,
         fixture: FixtureConfiguredLaunch {
             program: fixture,
@@ -547,7 +547,7 @@ async fn configured_fixture_run_mismatch_fails_without_leak() {
         run_id: RunId::parse("other-run").expect("run id"),
         project_root: root,
         prompt_id: "prompt-mismatch".to_owned(),
-        prompt_text: MessageBody::parse("hello").expect("body"),
+        prompt: artisan_domain::QueueMessagePayload::text_only("hello").expect("payload"),
         settings,
         fixture: FixtureConfiguredLaunch {
             program: fixture,
@@ -627,7 +627,7 @@ async fn configured_fixture_cancellation_before_authorize_aborts() {
         run_id: RunId::parse("fixture-run").expect("run id"),
         project_root: root,
         prompt_id: "prompt-cancel".to_owned(),
-        prompt_text: MessageBody::parse("hello world").expect("body"),
+        prompt: artisan_domain::QueueMessagePayload::text_only("hello world").expect("payload"),
         settings,
         fixture: FixtureConfiguredLaunch {
             program: fixture,
@@ -703,7 +703,7 @@ async fn configured_fixture_abrupt_exit_is_handled_and_bounded() {
         run_id: RunId::parse("fixture-run").expect("run id"),
         project_root: root,
         prompt_id: "prompt-abrupt".to_owned(),
-        prompt_text: MessageBody::parse("hello").expect("body"),
+        prompt: artisan_domain::QueueMessagePayload::text_only("hello").expect("payload"),
         settings,
         fixture: FixtureConfiguredLaunch {
             program: fixture,

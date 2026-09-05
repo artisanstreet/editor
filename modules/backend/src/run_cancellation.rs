@@ -55,6 +55,9 @@ pub enum RunCancellationError {
     /// The registry mutex was poisoned by a prior panic while holding it.
     #[error("run cancellation registry lock is poisoned")]
     Poisoned,
+    /// More than one live run belongs to the queried thread.
+    #[error("run cancellation has multiple active runs for the queried thread")]
+    AmbiguousActiveRuns,
 }
 
 /// Result of one exact cancellation request.
@@ -246,6 +249,30 @@ impl RunCancellationRegistry {
         cancel.cancel();
         Ok(CancelRequestOutcome::Signalled)
     }
+
+    /// Returns the sole live run for `thread_id`, if one exists.
+    ///
+    /// Multiple active runs are deliberately not ordered or guessed: callers
+    /// receive [`RunCancellationError::AmbiguousActiveRuns`] and must fail
+    /// closed until the registry returns to a singleton or empty state.
+    pub fn active_run(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<RunId>, RunCancellationError> {
+        let state = self.inner.lock()?;
+        let mut active = state
+            .active
+            .keys()
+            .filter(|(active_thread, _)| active_thread == thread_id)
+            .map(|(_, run_id)| run_id.clone());
+        let Some(run_id) = active.next() else {
+            return Ok(None);
+        };
+        if active.next().is_some() {
+            return Err(RunCancellationError::AmbiguousActiveRuns);
+        }
+        Ok(Some(run_id))
+    }
 }
 
 /// RAII ownership of one live cancellation registration.
@@ -410,6 +437,30 @@ mod tests {
             Ok(CancelRequestOutcome::NotActive)
         );
         assert!(!handle.is_cancelled());
+    }
+
+    #[test]
+    fn active_run_query_returns_empty_singleton_and_fails_closed_on_ambiguity() {
+        let registry = registry(3);
+        let thread_id = thread_id("thread-active-query");
+        let run_id = run_id("run-active-query");
+
+        assert_eq!(registry.active_run(&thread_id), Ok(None));
+        let first = registry
+            .register(thread_id.clone(), run_id.clone())
+            .expect("active run should register");
+        assert_eq!(registry.active_run(&thread_id), Ok(Some(run_id)));
+
+        let second = registry
+            .register(thread_id.clone(), RunId::parse("run-active-query-2").unwrap())
+            .expect("second fixture run should register");
+        assert_eq!(
+            registry.active_run(&thread_id),
+            Err(RunCancellationError::AmbiguousActiveRuns)
+        );
+        drop(second);
+        drop(first);
+        assert_eq!(registry.active_run(&thread_id), Ok(None));
     }
 
     #[test]

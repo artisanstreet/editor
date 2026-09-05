@@ -14,7 +14,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -24,8 +24,8 @@ use std::collections::VecDeque;
 
 use artisan_assets::AssetId;
 use artisan_domain::{
-    ConversationSnapshot, EngineProfileId, QueueMessagePayload, PatchBatch, ProjectId, ProjectListing,
-    RequestId, ThreadId, ThreadListing,
+    ConversationSnapshot, EngineProfileId, PatchBatch, ProjectId, ProjectListing,
+    QueueMessagePayload, RequestId, ThreadId, ThreadListing,
 };
 use artisan_protocol::{ConversationSubscriptionStarted, QueueMessageReceipt};
 use artisan_ui::button::{
@@ -57,7 +57,12 @@ use crate::native_command_menu::{
     CommandMenuAction, CommandMenuEntry, CommandMenuGroup, NativeCommandMenu,
 };
 use crate::native_composer::{NativeComposer, NativeComposerEvent};
+use crate::native_composer_controls::{
+    NativeComposerControls, NativeComposerControlsEvent, NativeComposerControlsSnapshot,
+};
 use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
+use crate::native_model_catalog::NativeModelCatalog;
+use crate::native_model_selector::NativeModelSelector;
 use crate::native_route::{NativeRoute, RouteHistory, SettingsRoute};
 use crate::native_settings::SettingsScreen;
 use crate::native_transport_service::{
@@ -163,6 +168,18 @@ struct NativeMessageRetry {
 #[derive(Clone, Copy)]
 struct NativeMessageFailure {
     failure: ServiceFailure,
+    id: u64,
+}
+impl NativeMessageFailure {
+    fn new(failure: ServiceFailure) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("failure identity exhausted");
+        Self { failure, id }
+    }
 }
 
 /// One finite, generation-fenced transition between mounted conversations.
@@ -210,6 +227,11 @@ pub struct NativeApplication {
     message_retry_focus_handle: FocusHandle,
     service: Option<Arc<NativeTransportService>>,
     composer: Entity<NativeComposer>,
+    run_controls: composer_run_controls::RunControlsState,
+    composer_controls: Entity<NativeComposerControls>,
+    model_selector: Entity<NativeModelSelector>,
+    _composer_controls_subscription: Subscription,
+    _composer_model_subscription: Subscription,
     message_images: Entity<NativeMessageImages>,
     _message_images_subscription: Subscription,
     _composer_subscription: Subscription,
@@ -299,22 +321,78 @@ impl NativeApplication {
             })
         };
         let composer = cx.new(NativeComposer::new);
-        let message_images = cx.new(NativeMessageImages::new);
-        let message_images_subscription = cx.subscribe(&message_images, |application, images, event, cx| {
-            let NativeMessageImagesEvent::RequestImage(reference) = event;
-            if let Err(error) = application.submit_command(NativeTransportCommand::ReadMessageImage(reference.clone())) {
-                images.update(cx, |images, cx| {
-                    images.fail_image(reference.clone(), command_failure(error), cx);
-                });
+        let composer_controls =
+            cx.new(|cx| NativeComposerControls::new(NativeComposerControlsSnapshot::idle(), cx));
+        let catalog =
+            NativeModelCatalog::offline().expect("the bundled model catalog is validated");
+        let model_selector =
+            cx.new(|cx| NativeModelSelector::new(catalog, None, ThemeMode::Dark, cx));
+        let composer_controls_subscription = cx.subscribe(&composer_controls, |application, _, event, cx| {
+            match event {
+                NativeComposerControlsEvent::SendRequested => application.begin_message_submission(cx),
+                NativeComposerControlsEvent::JumpToLatest => {
+                    if let Some(host) = application.conversation_host.clone() {
+                        let result = host.update(cx, |host, cx| host.dispatch(
+                            ConversationStateEvent::Viewport(crate::conversation_view_machine::ViewportEvent::JumpToBottomRequested), cx));
+                        if result.is_err() { application.set_failure(invalid_service_failure(), cx); }
+                        else { application.pump_host_boundary(&host, cx); }
+                    }
+                }
+                NativeComposerControlsEvent::StopRequested { run_id } => application.stop_composer_run(run_id, cx),
+                NativeComposerControlsEvent::StartNewThreadWithPrompt { run_id } => {
+                    let snapshot = application.composer_controls.read(cx).snapshot();
+                    if snapshot.new_thread_ready && snapshot.run_id.as_deref() == Some(run_id.as_str()) {
+                        application.begin_new_task(cx);
+                    }
+                }
+                NativeComposerControlsEvent::DismissFailure { failure_id } => {
+                    if application.message_failure.is_some_and(|failure| failure.id == *failure_id) {
+                        application.message_failure = None;
+                        application.clear_message_retry();
+                        application.sync_composer_controls(cx);
+                    }
+                }
+                NativeComposerControlsEvent::RetryFailure { failure_id } => {
+                    if application.message_failure.is_some_and(|failure| failure.id == *failure_id) {
+                        application.activate_message_retry(cx);
+                        application.sync_composer_controls(cx);
+                    }
+                }
+                _ => {}
             }
         });
+        let composer_model_subscription =
+            cx.subscribe(&model_selector, |application, _, event, cx| {
+                application.handle_composer_model_event(event, cx);
+            });
+        composer.update(cx, |composer, cx| {
+            composer.set_components(composer_controls.clone(), model_selector.clone(), cx)
+        });
+        let message_images = cx.new(NativeMessageImages::new);
+        let message_images_subscription =
+            cx.subscribe(&message_images, |application, images, event, cx| {
+                let NativeMessageImagesEvent::RequestImage(reference) = event;
+                if let Err(error) = application
+                    .submit_command(NativeTransportCommand::ReadMessageImage(reference.clone()))
+                {
+                    images.update(cx, |images, cx| {
+                        images.fail_image(reference.clone(), command_failure(error), cx);
+                    });
+                }
+            });
         composer.update(cx, |composer, cx| {
             composer.set_attachment_delivery_enabled(true, cx);
         });
         let composer_subscription =
             cx.subscribe(&composer, |application, _composer, event, cx| match event {
                 NativeComposerEvent::SendRequested => application.begin_message_submission(cx),
-                NativeComposerEvent::ConfigureModel => application.navigate(NativeRoute::Settings { section: SettingsRoute::Engines, engine: None }, cx),
+                NativeComposerEvent::ConfigureModel => application.navigate(
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Engines,
+                        engine: None,
+                    },
+                    cx,
+                ),
             });
         let composer_observation = cx.observe(&composer, |application, composer, cx| {
             application.observe_composer_change(&composer, cx);
@@ -334,6 +412,11 @@ impl NativeApplication {
             message_retry_focus_handle,
             service,
             composer,
+            run_controls: composer_run_controls::RunControlsState::default(),
+            composer_controls,
+            model_selector,
+            _composer_controls_subscription: composer_controls_subscription,
+            _composer_model_subscription: composer_model_subscription,
             _composer_subscription: composer_subscription,
             message_images,
             _message_images_subscription: message_images_subscription,
@@ -996,7 +1079,12 @@ impl NativeApplication {
                                 .rounded(px(6.0))
                                 .debug_selector(|| "artisan-marketplace-navigation".to_owned())
                                 .child(desktop_nav_glyph(AssetId::TABLER_SHOPPING_BAG, nav_theme))
-                                .child(div().text_size(px(14.0)).text_color(theme.foreground).child("Marketplace")),
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .text_color(theme.foreground)
+                                        .child("Marketplace"),
+                                ),
                         )
                     }),
             )
@@ -1060,7 +1148,11 @@ impl NativeApplication {
             .p(px(5.0))
             .border_1()
             .border_color(theme.line)
-            .bg(if self.profile_menu.is_open() { theme.selected } else { theme.field })
+            .bg(if self.profile_menu.is_open() {
+                theme.selected
+            } else {
+                theme.field
+            })
             .hover(move |style| style.bg(theme.selected))
             .focus(move |style| style.border_color(theme.secondary))
             .flex()
@@ -1105,7 +1197,11 @@ impl NativeApplication {
             }))
             .children((!self.sidebar_collapsed).then(|| {
                 desktop_nav_glyph(
-                    if self.profile_menu.is_open() { AssetId::TABLER_CHEVRON_DOWN } else { AssetId::TABLER_CHEVRON_UP },
+                    if self.profile_menu.is_open() {
+                        AssetId::TABLER_CHEVRON_DOWN
+                    } else {
+                        AssetId::TABLER_CHEVRON_UP
+                    },
                     theme,
                 )
             }))
@@ -1374,20 +1470,56 @@ impl NativeApplication {
             && !self.service_stopped
     }
 
+    fn sync_composer_controls(&mut self, cx: &mut Context<Self>) {
+        let mut snapshot = self.composer_controls.read(cx).snapshot().clone();
+        snapshot.send_ready =
+            self.message_submission_is_admissible(cx) && self.composer.read(cx).send_ready();
+        snapshot.disabled = self.service_stopped;
+        self.project_run_controls(&mut snapshot);
+        snapshot.new_thread_ready =
+            snapshot.run_active && snapshot.send_ready && self.add_project_action_is_admissible();
+        snapshot.failure = self.message_failure.map(|notice| {
+            crate::native_composer_controls::NativeComposerFailure::new(
+                notice.id,
+                "Could not send message",
+                "Your draft is preserved. Check the connection and try again.",
+                self.message_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.draft_matches)
+                    && self.command_submission_is_available(),
+            )
+        });
+        self.composer_controls
+            .update(cx, |controls, cx| controls.set_snapshot(snapshot, cx));
+    }
+
     fn sync_composer_availability(&mut self, cx: &mut Context<Self>) {
-        let image_thread = self.conversation_host.as_ref().map(|host| host.read(cx).controller_view().delivery.thread_id);
-        if self.message_images.update(cx, |images, cx| images.set_current_thread(image_thread, cx)).is_err() {
+        let image_thread = self
+            .conversation_host
+            .as_ref()
+            .map(|host| host.read(cx).controller_view().delivery.thread_id);
+        if self
+            .message_images
+            .update(cx, |images, cx| images.set_current_thread(image_thread, cx))
+            .is_err()
+        {
             self.state = NativeViewState::Failure(invalid_service_failure());
         }
         let disabled = !self.message_submission_is_admissible(cx);
-        let model_label = self.engine_settings.authoritative_config().map(|config| {
-            let artisan_domain::EngineSelection::OpenCode2(selection) = config.selection();
-            selection.model_id().as_str().to_owned()
-        }).unwrap_or_else(|| "Select model".into());
+        let model_label = self
+            .engine_settings
+            .authoritative_config()
+            .map(|config| {
+                let artisan_domain::EngineSelection::OpenCode2(selection) = config.selection();
+                selection.model_id().as_str().to_owned()
+            })
+            .unwrap_or_else(|| "Select model".into());
         self.composer.update(cx, |composer, composer_cx| {
             composer.set_attachment_delivery_enabled(true, composer_cx);
             composer.set_surface(disabled, model_label, composer_cx);
         });
+        self.sync_composer_controls(cx);
+        self.schedule_run_observation(cx);
     }
 
     fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
@@ -1405,7 +1537,7 @@ impl NativeApplication {
             Ok(submission) => submission,
             Err(blocked) => {
                 if let Some(failure) = submission_blocked_failure(blocked) {
-                    self.message_failure = Some(NativeMessageFailure { failure });
+                    self.message_failure = Some(NativeMessageFailure::new(failure));
                 }
                 cx.notify();
                 return;
@@ -1420,13 +1552,12 @@ impl NativeApplication {
                 return;
             }
         };
-        let command = NativeTransportCommand::QueueMessage(Box::new(
-            artisan_domain::QueueMessage {
+        let command =
+            NativeTransportCommand::QueueMessage(Box::new(artisan_domain::QueueMessage {
                 request_id: request_id.clone(),
                 thread_id: thread_id.clone(),
                 payload: body.clone(),
-            },
-        ));
+            }));
         match self.submit_command(command) {
             Ok(()) => {
                 self.message_flight = Some(NativeMessageFlight {
@@ -1467,6 +1598,7 @@ impl NativeApplication {
         composer: &Entity<NativeComposer>,
         cx: &mut Context<Self>,
     ) {
+        self.sync_composer_controls(cx);
         let Some(retry) = self.message_retry.as_mut() else {
             return;
         };
@@ -1510,7 +1642,7 @@ impl NativeApplication {
                     retry.draft_matches = false;
                 }
                 if let Some(failure) = submission_blocked_failure(blocked) {
-                    self.message_failure = Some(NativeMessageFailure { failure });
+                    self.message_failure = Some(NativeMessageFailure::new(failure));
                 }
                 cx.notify();
                 return;
@@ -1528,13 +1660,12 @@ impl NativeApplication {
 
         self.message_receipt = None;
         self.message_failure = None;
-        let command = NativeTransportCommand::QueueMessage(Box::new(
-            artisan_domain::QueueMessage {
+        let command =
+            NativeTransportCommand::QueueMessage(Box::new(artisan_domain::QueueMessage {
                 request_id: request_id.clone(),
                 thread_id: thread_id.clone(),
                 payload: retry_body.clone(),
-            },
-        ));
+            }));
         match self.submit_command(command) {
             Ok(()) => {
                 self.clear_message_retry();
@@ -1547,9 +1678,9 @@ impl NativeApplication {
             }
             Err(CommandSendError::Busy) => {
                 self.finish_composer_submission(token, DraftDisposition::Retained, cx);
-                self.message_failure = Some(NativeMessageFailure {
-                    failure: command_failure(CommandSendError::Busy),
-                });
+                self.message_failure = Some(NativeMessageFailure::new(command_failure(
+                    CommandSendError::Busy,
+                )));
             }
             Err(CommandSendError::Stopped) => {
                 self.finish_composer_submission(token, DraftDisposition::Retained, cx);
@@ -1583,7 +1714,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.finish_composer_submission(token, DraftDisposition::Retained, cx);
-        self.message_failure = Some(NativeMessageFailure { failure });
+        self.message_failure = Some(NativeMessageFailure::new(failure));
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -1602,11 +1733,7 @@ impl NativeApplication {
         self.message_failure = None;
     }
 
-    fn handle_message_receipt(
-        &mut self,
-        receipt: QueueMessageReceipt,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_message_receipt(&mut self, receipt: QueueMessageReceipt, cx: &mut Context<Self>) {
         let Some(flight) = self.message_flight.as_ref() else {
             return;
         };
@@ -1659,7 +1786,7 @@ impl NativeApplication {
             draft_matches: false,
         });
         self.message_receipt = None;
-        self.message_failure = Some(NativeMessageFailure { failure });
+        self.message_failure = Some(NativeMessageFailure::new(failure));
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -1723,11 +1850,33 @@ impl NativeApplication {
             return;
         }
         match event {
+            NativeTransportEvent::ActiveRun {
+                thread_id,
+                generation,
+                result,
+            } => {
+                self.receive_active_run(thread_id, generation, Ok(result), cx);
+            }
+            NativeTransportEvent::ActiveRunFailed {
+                thread_id,
+                generation,
+                failure,
+            } => {
+                self.receive_active_run(thread_id, generation, Err(failure), cx);
+            }
+            NativeTransportEvent::RunStopped(receipt) => self.receive_run_stop(Ok(receipt), cx),
+            NativeTransportEvent::StopRunFailed { command, failure } => {
+                self.receive_run_stop_failure(command, failure, cx)
+            }
             NativeTransportEvent::MessageImageLoaded { reference, image } => {
-                self.message_images.update(cx, |images, cx| { images.accept_image(reference, image, cx); });
+                self.message_images.update(cx, |images, cx| {
+                    images.accept_image(reference, image, cx);
+                });
             }
             NativeTransportEvent::MessageImageFailed { reference, failure } => {
-                self.message_images.update(cx, |images, cx| { images.fail_image(reference, failure, cx); });
+                self.message_images.update(cx, |images, cx| {
+                    images.fail_image(reference, failure, cx);
+                });
             }
             NativeTransportEvent::Starting => {
                 self.state = NativeViewState::Loading;
@@ -3498,7 +3647,11 @@ impl NativeApplication {
             return;
         };
         self.composer.update(cx, |composer, cx| {
-            composer.switch_thread(thread_id.as_str().to_owned(), switch_generation.is_none(), cx);
+            composer.switch_thread(
+                thread_id.as_str().to_owned(),
+                switch_generation.is_none(),
+                cx,
+            );
         });
         self.selected_thread = Some(thread_id.clone());
         if matches!(
@@ -3531,7 +3684,10 @@ impl NativeApplication {
         });
         self.conversation_host = Some(host.clone());
         let images = self.message_images.clone();
-        host.read(cx).surface().clone().update(cx, |surface, cx| surface.set_message_images(images, cx));
+        host.read(cx)
+            .surface()
+            .clone()
+            .update(cx, |surface, cx| surface.set_message_images(images, cx));
         drop(self.conversation_host_subscription.replace(subscription));
         suppress_conversation_tab_stops(&host, cx);
         self.collect_host_effects(&host, cx);
@@ -3883,6 +4039,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.engine_settings.on_settings_loaded(generation, result);
+        self.sync_composer_model_policy(cx);
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -3912,6 +4069,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.engine_settings.on_save_succeeded(result, retained);
+        self.sync_composer_model_policy(cx);
         cx.notify();
     }
 
@@ -4170,7 +4328,9 @@ fn submission_blocked_failure(blocked: SubmissionBlocked) -> Option<ServiceFailu
             stage: ServiceFailureStage::Request,
             category: ServiceFailureCategory::Integrity,
         }),
-        SubmissionBlocked::InFlight | SubmissionBlocked::Disabled | SubmissionBlocked::DraftChanged => None,
+        SubmissionBlocked::InFlight
+        | SubmissionBlocked::Disabled
+        | SubmissionBlocked::DraftChanged => None,
     }
 }
 
@@ -4353,6 +4513,7 @@ fn message_status_detail(
 
 impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_composer_controls(cx);
         let sidebar = self.desktop_sidebar(cx).into_any_element();
         let body = self.desktop_route_body(cx);
         let identity = self.desktop_identity(cx).into_any_element();
@@ -5541,14 +5702,23 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
         cx.update(|_, app| {
             view.update(app, |view, cx| {
-                view.navigate(NativeRoute::Settings { section: SettingsRoute::Models, engine: None }, cx);
+                view.navigate(
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Models,
+                        engine: None,
+                    },
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
         let brand = cx.debug_bounds("artisan-brand-home").expect("wordmark");
         cx.simulate_click(brand.center(), gpui::Modifiers::default());
         cx.run_until_parked();
-        assert!(cx.update(|_, app| matches!(view.read(app).route(), NativeRoute::NewThread { project: None })));
+        assert!(cx.update(|_, app| matches!(
+            view.read(app).route(),
+            NativeRoute::NewThread { project: None }
+        )));
     }
 
     #[gpui::test]
@@ -6459,7 +6629,12 @@ mod tests {
                     .as_ref()
                     .expect("admitted flight");
                 let request_id = flight.request_id.clone();
-                let body = flight.payload.text().expect("text payload").as_str().to_owned();
+                let body = flight
+                    .payload
+                    .text()
+                    .expect("text payload")
+                    .as_str()
+                    .to_owned();
 
                 application.handle_service_event(
                     NativeTransportEvent::MessageFailed {
@@ -6801,7 +6976,10 @@ mod tests {
                 let flight = application.message_flight.as_ref().expect("fresh flight");
                 assert_ne!(flight.request_id, original_request);
                 assert_eq!(flight.thread_id, thread_id);
-                assert_eq!(flight.payload.text().expect("text payload").as_str(), "edited fresh body");
+                assert_eq!(
+                    flight.payload.text().expect("text payload").as_str(),
+                    "edited fresh body"
+                );
             });
         });
 
@@ -6812,7 +6990,10 @@ mod tests {
         };
         assert_ne!(command.request_id, original_request);
         assert_eq!(command.thread_id, thread_id);
-        assert_eq!(command.payload.text().expect("text payload").as_str(), "edited fresh body");
+        assert_eq!(
+            command.payload.text().expect("text payload").as_str(),
+            "edited fresh body"
+        );
     }
 
     #[gpui::test]
@@ -6843,7 +7024,10 @@ mod tests {
                 let retry = application.message_retry.as_ref().expect("retained retry");
                 assert_eq!(retry.thread_id, thread_id);
                 assert_eq!(retry.request_id, request_id);
-                assert_eq!(retry.payload.text().expect("text payload").as_str(), "busy retry body");
+                assert_eq!(
+                    retry.payload.text().expect("text payload").as_str(),
+                    "busy retry body"
+                );
                 assert!(application.message_flight.is_none());
                 assert!(!application.composer.read(application_cx).is_submitting());
                 assert_eq!(
@@ -6852,7 +7036,7 @@ mod tests {
                 );
                 assert!(matches!(
                     application.message_failure,
-                    Some(NativeMessageFailure { failure })
+                    Some(NativeMessageFailure { failure, .. })
                         if failure.stage == super::ServiceFailureStage::EventBridge
                             && failure.category == super::ServiceFailureCategory::Backpressure
                 ));
@@ -7073,13 +7257,9 @@ mod tests {
 
     #[test]
     fn message_failure_presentation_contains_only_redacted_stage_and_category() {
-        let detail = message_status_detail(
-            None,
-            Some(NativeMessageFailure {
-                failure: message_failure(),
-            }),
-        )
-        .expect("failure detail");
+        let detail =
+            message_status_detail(None, Some(NativeMessageFailure::new(message_failure())))
+                .expect("failure detail");
         assert_eq!(detail, "Send failed: request (peer).");
         for secret in [
             "body text",
@@ -7359,12 +7539,10 @@ mod tests {
                     "message-old",
                     ReceiptDisposition::Accepted,
                 ));
-                application.message_failure = Some(NativeMessageFailure {
-                    failure: ServiceFailure {
-                        stage: super::ServiceFailureStage::Request,
-                        category: super::ServiceFailureCategory::Peer,
-                    },
-                });
+                application.message_failure = Some(NativeMessageFailure::new(ServiceFailure {
+                    stage: super::ServiceFailureStage::Request,
+                    category: super::ServiceFailureCategory::Peer,
+                }));
                 application.retire_host(application_cx);
                 assert!(application.message_flight.is_none());
                 assert_eq!(application.selected_thread, None);
@@ -7904,3 +8082,9 @@ mod tests {
         assert!(!WINDOW_TITLE.contains("phase"));
     }
 }
+
+#[path = "native_composer_run_controls.rs"]
+mod composer_run_controls;
+
+#[path = "native_composer_models.rs"]
+mod native_composer_models;

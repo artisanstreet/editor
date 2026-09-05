@@ -593,6 +593,8 @@ struct Request {
     listRegisteredEngineProfiles @13 :ListRegisteredEngineProfilesRequest;
     queueMessage @14 :QueueMessageRequest;
     readMessageImage @15 :ReadMessageImageRequest;
+    stopRun @16 :StopRunRequest;
+    readActiveRun @17 :ReadActiveRunRequest;
   }
 }
 
@@ -641,6 +643,40 @@ struct Response {
     registeredEngineProfiles @14 :RegisteredEngineProfilesResult;
     queuedMessageReceipt @15 :QueueMessageReceipt;
     messageImage @16 :MessageImageResult;
+    stopRunReceipt @17 :StopRunReceipt;
+    activeRun @18 :ActiveRunResult;
+  }
+}
+
+# A live exact-run cancellation request. This is not a durable completion
+# command: the response reports only registry signal disposition.
+struct StopRunRequest {
+  threadId @0 :Text;
+  runId @1 :Text;
+}
+
+# A bounded read of the process-owned live-run registry for one thread.
+struct ReadActiveRunRequest {
+  threadId @0 :Text;
+}
+
+enum StopRunDisposition {
+  requested @0;
+  alreadyRequested @1;
+  notActive @2;
+}
+
+struct StopRunReceipt {
+  threadId @0 :Text;
+  runId @1 :Text;
+  disposition @2 :StopRunDisposition;
+}
+
+struct ActiveRunResult {
+  threadId @0 :Text;
+  state :union {
+    noActive @1 :Void;
+    active @2 :Text;
   }
 }
 

@@ -38,6 +38,7 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
+pub(crate) mod catalog;
 pub(crate) mod event;
 pub(crate) mod framing;
 pub mod http;
@@ -233,6 +234,26 @@ impl fmt::Debug for EnginePreflightInput {
     }
 }
 
+/// Immutable production input for one owner-serialized runtime model
+/// discovery. The caller supplies the already verified launch capability,
+/// exact project root/scope, separate catalog deadline, and existing bounded
+/// protocol limits. Discovery never creates a provider session or sends a
+/// prompt.
+pub(crate) struct EngineCatalogInput {
+    pub(crate) project_root: RootPath,
+    pub(crate) launch: VerifiedOpenCode2ProfileLaunch,
+    pub(crate) scope: catalog::CatalogScope,
+    pub(crate) deadlines: PreflightDeadlines,
+    pub(crate) catalog_deadline: tokio::time::Instant,
+    pub(crate) bounds: EngineBounds,
+}
+
+impl fmt::Debug for EngineCatalogInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineCatalogInput { <redacted> }")
+    }
+}
+
 /// Test-only input for the same preflight executor using the existing
 /// configured-engine fixture seam.
 #[cfg(test)]
@@ -256,6 +277,22 @@ pub(crate) struct InternalPreflightInput {
     pub(crate) launch: InternalLaunch,
     pub(crate) deadlines: PreflightDeadlines,
     pub(crate) bounds: EngineBounds,
+}
+
+/// Single internal catalog input carried by the owner queue.
+pub(crate) struct InternalCatalogInput {
+    pub(crate) project_root: RootPath,
+    pub(crate) launch: InternalLaunch,
+    pub(crate) scope: catalog::CatalogScope,
+    pub(crate) deadlines: PreflightDeadlines,
+    pub(crate) catalog_deadline: tokio::time::Instant,
+    pub(crate) bounds: EngineBounds,
+}
+
+impl fmt::Debug for InternalCatalogInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InternalCatalogInput { <redacted> }")
+    }
 }
 
 /// Raw engine time limits.
@@ -487,6 +524,44 @@ pub struct EngineOwner {
     observed_join: Option<bool>,
 }
 
+/// Cloneable admission handle; process and shutdown custody stays with `EngineOwner`.
+#[derive(Clone)]
+pub(crate) struct EngineCatalogClient {
+    jobs: mpsc::Sender<Job>,
+    shutdown: Arc<CancelHandle>,
+    health: watch::Receiver<OwnerHealth>,
+}
+
+impl EngineCatalogClient {
+    pub(crate) fn admit_catalog(
+        &self,
+        input: EngineCatalogInput,
+    ) -> Result<operation::AcceptedCatalog, LaunchAdmissionError> {
+        if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
+            return Err(LaunchAdmissionError::Unavailable);
+        }
+        let input = InternalCatalogInput {
+            project_root: input.project_root,
+            launch: InternalLaunch::Verified(Box::new(input.launch)),
+            scope: input.scope,
+            deadlines: input.deadlines,
+            catalog_deadline: input.catalog_deadline,
+            bounds: input.bounds,
+        };
+        let control = Arc::new(CancelHandle::new());
+        let (respond, receiver) = oneshot::channel();
+        match self.jobs.try_send(Job::Catalog {
+            input: Box::new(input),
+            control: Arc::clone(&control),
+            respond,
+        }) {
+            Ok(()) => Ok(operation::AcceptedCatalog::from_parts(receiver, control)),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
+        }
+    }
+}
+
 impl fmt::Debug for EngineOwner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("EngineOwner { <payload-free> }")
@@ -494,6 +569,14 @@ impl fmt::Debug for EngineOwner {
 }
 
 impl EngineOwner {
+    pub(crate) fn catalog_client(&self) -> EngineCatalogClient {
+        EngineCatalogClient {
+            jobs: self.jobs.clone(),
+            shutdown: Arc::clone(&self.shutdown),
+            health: self.health.clone(),
+        }
+    }
+
     /// Starts the single owner task on the supplied runtime handle.
     ///
     /// Creates the bounded job channel with capacity
@@ -693,6 +776,25 @@ impl EngineOwner {
         self.admit_internal_preflight(internal)
     }
 
+    /// Admits one configured OpenCode2 runtime model discovery into the
+    /// single owner queue. The owner performs certified spawn, readiness,
+    /// authenticated health, and the location-scoped `/api/model` request,
+    /// then observes cleanup before resolving the returned future.
+    pub(crate) fn admit_catalog(
+        &self,
+        input: EngineCatalogInput,
+    ) -> Result<operation::AcceptedCatalog, LaunchAdmissionError> {
+        let internal = InternalCatalogInput {
+            project_root: input.project_root,
+            launch: InternalLaunch::Verified(Box::new(input.launch)),
+            scope: input.scope,
+            deadlines: input.deadlines,
+            catalog_deadline: input.catalog_deadline,
+            bounds: input.bounds,
+        };
+        self.admit_internal_catalog(internal)
+    }
+
     /// Test-only fixture admission for the same owner-serialized preflight
     /// branch. It uses the existing configured fixture launch seam and no
     /// alternate engine protocol.
@@ -726,6 +828,27 @@ impl EngineOwner {
         };
         match self.jobs.try_send(job) {
             Ok(()) => Ok(operation::AcceptedPreflight::from_parts(receiver, control)),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
+        }
+    }
+
+    fn admit_internal_catalog(
+        &self,
+        input: InternalCatalogInput,
+    ) -> Result<operation::AcceptedCatalog, LaunchAdmissionError> {
+        if *self.health.borrow() != OwnerHealth::Active || self.shutdown.is_cancelled() {
+            return Err(LaunchAdmissionError::Unavailable);
+        }
+        let control = Arc::new(CancelHandle::new());
+        let (respond, receiver) = oneshot::channel();
+        let job = Job::Catalog {
+            input: Box::new(input),
+            control: Arc::clone(&control),
+            respond,
+        };
+        match self.jobs.try_send(job) {
+            Ok(()) => Ok(operation::AcceptedCatalog::from_parts(receiver, control)),
             Err(mpsc::error::TrySendError::Full(_)) => Err(LaunchAdmissionError::Busy),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(LaunchAdmissionError::Unavailable),
         }

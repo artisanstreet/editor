@@ -51,6 +51,7 @@ use crate::{
         NativeRunDispatcher, NativeRunDispatcherConfig, NativeRunDispatcherConfigError,
         NativeRunDispatcherConfigInput, NativeRunDispatcherShutdown,
     },
+    run_cancellation::RunCancellationRegistry,
     startup_reconciliation_sweep::{
         PatchSourceError, StartupReconciliationPatchSource, StartupReconciliationPatches,
         StartupReconciliationSweepError, StartupReconciliationSweepInput,
@@ -1364,6 +1365,11 @@ async fn run_with_handler(
         cancel,
         native_run,
     } = context;
+    let run_cancellation = RunCancellationRegistry::new(
+        usize::try_from(admission_capacity.get()).expect("u32 admission capacity fits usize"),
+    )
+    .expect("validated Forge admission capacity is nonzero");
+    let handler = handler.with_run_cancellation_registry(run_cancellation.clone());
     let activity = ActivityGateImpl::new();
     let lifecycle = LifecycleController::with_activity_gate(Arc::new(activity.clone()));
     let ForgeListenerStartup {
@@ -1404,13 +1410,21 @@ async fn run_with_handler(
             .await;
         }
     };
-    let native_dispatcher = NativeRunDispatcher::start(
+    let native_dispatcher = NativeRunDispatcher::start_with_registry(
         app.repository().clone(),
-        database,
+        database.clone(),
         native_run,
         Arc::clone(&cancel),
+        run_cancellation,
         activity,
         &tokio::runtime::Handle::current(),
+    );
+    let handler = handler.with_composer_catalog(
+        crate::composer_catalog_service::ComposerCatalogService::new(
+            native_dispatcher.catalog_client(),
+            app.repository().clone(),
+            database,
+        ),
     );
     let primary = match listener.serve_until_cancel(&handler, &cancel).await {
         Ok(()) => None,

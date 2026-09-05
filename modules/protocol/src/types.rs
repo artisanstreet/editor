@@ -11,7 +11,7 @@ use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
     ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision,
     EngineProfileId, EngineRunConfig, Event, IdentifierError, ImageAttachmentRef, MessageId,
-    PatchBatch,
+    PatchBatch, RunId,
     ProjectListing, ProjectSummary, Query, ReceiptDisposition, RequestId, ThreadId, ThreadListing,
     ThreadSummary, UnixMillis,
 };
@@ -703,6 +703,39 @@ pub struct QueueMessageReceipt {
     pub disposition: artisan_domain::ReceiptDisposition,
 }
 
+/// Disposition of one exact live-run cancellation signal.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StopRunDisposition {
+    /// The first cancellation signal was published to the live run.
+    Requested,
+    /// The live run had already received a cancellation signal.
+    AlreadyRequested,
+    /// No live registry entry matched the requested thread/run pair.
+    NotActive,
+}
+
+/// Correlated result of one exact live-run cancellation request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StopRunReceipt {
+    /// Stable client request identity echoed by the enclosing response.
+    pub request_id: RequestId,
+    /// Thread supplied by the caller.
+    pub thread_id: ThreadId,
+    /// Exact run supplied by the caller.
+    pub run_id: RunId,
+    /// Signal disposition; this never claims durable terminal completion.
+    pub disposition: StopRunDisposition,
+}
+
+/// Authoritative live-run query result for one thread.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActiveRunResult {
+    /// No exact live run is registered for the thread.
+    NoActive { thread_id: ThreadId },
+    /// Exactly one exact live run is registered for the thread.
+    Active { thread_id: ThreadId, run_id: RunId },
+}
+
 /// Successful start of authoritative conversation delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationSubscriptionStarted {
@@ -841,6 +874,10 @@ pub enum ResponsePayload {
     MessageQueued(QueueMessageReceipt),
     /// One authenticated image read result.
     MessageImage(MessageImageResult),
+    /// Correlated exact-run cancellation signal result.
+    RunStopped(StopRunReceipt),
+    /// Authoritative live-run query result.
+    ActiveRun(ActiveRunResult),
     /// Complete bounded conversation projection.
     ConversationSnapshot(ConversationSnapshot),
     /// Fresh snapshot-first or resumed subscription acknowledgement.
@@ -1076,6 +1113,12 @@ impl WireEnvelope {
             WireEnvelopeBody::Response(ServerResponse {
                 request_id,
                 payload: ResponsePayload::MessageQueued(receipt),
+            }) if request_id != &receipt.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::RunStopped(receipt),
             }) if request_id != &receipt.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }

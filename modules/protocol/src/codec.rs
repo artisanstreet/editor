@@ -22,10 +22,10 @@ use artisan_domain::{
     ListProjectThreads, MessageBody, MessageBodyError,
     MessageId, NetworkAccess, OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS, PatchBatch,
     PatchBatchError, PatchId, PatchSequence, PermissionId, PlaceKind, ProjectAttached, ProjectId,
-    ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
+    ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount, ReadActiveRun,
     QueryTurnCountError, QueueFirstMessage, QueueMessage, QueueMessagePayload,
     QueueMessagePayloadError, QueuedMessage, ReceiptDisposition, RequestId, Revision,
-    RootPath, RootPathError, RunId, SetThreadEngineConfig, THREAD_LISTING_MAX_THREADS,
+    RootPath, RootPathError, RunId, SetThreadEngineConfig, StopRun, THREAD_LISTING_MAX_THREADS,
     ThreadCreated, ThreadId, ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle,
     ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
     MultimodalUserMessageItem, WebSearchAccess,
@@ -46,10 +46,11 @@ use crate::types::{
     DirectoryPickOutcome, ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello,
     HelloCredential, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
     LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
-    MessageImageResult, ProtocolFailure, ProtocolValueError, ProtocolVersion, ReconnectCapability,
+    ActiveRunResult, MessageImageResult, ProtocolFailure, ProtocolValueError, ProtocolVersion,
+    ReconnectCapability,
     QueueMessageReceipt, ReconnectCapabilityError, RegisteredEngineProfilesResult,
     ResponsePayload, ServerEvent, ServerResponse, SetThreadEngineConfigResult, VersionOffer,
-    VersionOfferError, Welcome,
+    VersionOfferError, Welcome, StopRunDisposition, StopRunReceipt,
     WireEnvelope, WireEnvelopeBody,
 };
 
@@ -596,6 +597,11 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
                 encoded.set_bytes(attachment.bytes());
             }
         }
+        ClientRequest::Command(Command::StopRun(command)) => {
+            let mut stop = builder.reborrow().init_stop_run();
+            stop.set_thread_id(command.thread_id().as_str());
+            stop.set_run_id(command.run_id().as_str());
+        }
         ClientRequest::Command(Command::SetThreadEngineConfig(command)) => {
             encode_set_thread_engine_config(builder.reborrow(), command.as_ref());
         }
@@ -645,6 +651,12 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             encoded.set_thread_id(query.thread_id().as_str());
             encoded.set_message_id(query.message_id().as_str());
             encoded.set_index(query.index());
+        }
+        ClientRequest::Query(Query::ReadActiveRun(query)) => {
+            builder
+                .reborrow()
+                .init_read_active_run()
+                .set_thread_id(query.thread_id().as_str());
         }
     }
 }
@@ -752,6 +764,25 @@ fn encode_response_payload(
             let mut encoded = builder.reborrow().init_message_image();
             encode_image_attachment_ref(encoded.reborrow().init_reference(), &result.reference);
             encoded.set_bytes(&result.bytes);
+        }
+        ResponsePayload::RunStopped(receipt) => {
+            let mut encoded = builder.reborrow().init_stop_run_receipt();
+            encoded.set_thread_id(receipt.thread_id.as_str());
+            encoded.set_run_id(receipt.run_id.as_str());
+            encoded.set_disposition(encode_stop_run_disposition(receipt.disposition));
+        }
+        ResponsePayload::ActiveRun(result) => {
+            let mut encoded = builder.reborrow().init_active_run();
+            match result {
+                ActiveRunResult::NoActive { thread_id } => {
+                    encoded.set_thread_id(thread_id.as_str());
+                    encoded.init_state().set_no_active(());
+                }
+                ActiveRunResult::Active { thread_id, run_id } => {
+                    encoded.set_thread_id(thread_id.as_str());
+                    encoded.init_state().set_active(run_id.as_str());
+                }
+            }
         }
         ResponsePayload::ConversationSnapshot(snapshot) => {
             encode_conversation_snapshot(
@@ -1314,6 +1345,18 @@ const fn encode_disposition(value: ReceiptDisposition) -> artisan_capnp::Receipt
     }
 }
 
+const fn encode_stop_run_disposition(
+    value: StopRunDisposition,
+) -> artisan_capnp::StopRunDisposition {
+    match value {
+        StopRunDisposition::Requested => artisan_capnp::StopRunDisposition::Requested,
+        StopRunDisposition::AlreadyRequested => {
+            artisan_capnp::StopRunDisposition::AlreadyRequested
+        }
+        StopRunDisposition::NotActive => artisan_capnp::StopRunDisposition::NotActive,
+    }
+}
+
 const fn encode_place_kind(value: PlaceKind) -> artisan_capnp::PlaceKind {
     match value {
         PlaceKind::Home => artisan_capnp::PlaceKind::Home,
@@ -1518,6 +1561,7 @@ fn decode_request(
             decode_queue_first_message(command?, request_id)
         }
         request::Which::QueueMessage(command) => decode_queue_message(command?, request_id),
+        request::Which::StopRun(command) => decode_stop_run(command?, request_id),
         request::Which::SetThreadEngineConfig(command) => {
             decode_set_thread_engine_config(command?, request_id)
         }
@@ -1553,6 +1597,15 @@ fn decode_request(
                     )?,
                     query.get_index(),
                 ),
+            )))
+        }
+        request::Which::ReadActiveRun(query) => {
+            let query = query?;
+            Ok(ClientRequest::Query(Query::ReadActiveRun(
+                ReadActiveRun::new(parse_thread_id(
+                    read_text(query.get_thread_id(), "request.readActiveRun.threadId")?,
+                    "request.readActiveRun.threadId",
+                )?),
             )))
         }
     }
@@ -1624,6 +1677,23 @@ fn decode_queue_message(
     let payload = QueueMessagePayload::new(text, attachments)?;
     Ok(ClientRequest::Command(Command::QueueMessage(QueueMessage::new(
         request_id, thread_id, payload,
+    ))))
+}
+
+fn decode_stop_run(
+    command: artisan_capnp::stop_run_request::Reader<'_>,
+    request_id: RequestId,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    Ok(ClientRequest::Command(Command::StopRun(StopRun::new(
+        request_id,
+        parse_thread_id(
+            read_text(command.get_thread_id(), "request.stopRun.threadId")?,
+            "request.stopRun.threadId",
+        )?,
+        parse_run_id(
+            read_text(command.get_run_id(), "request.stopRun.runId")?,
+            "request.stopRun.runId",
+        )?,
     ))))
 }
 
@@ -2214,6 +2284,10 @@ fn decode_response(
             decode_queue_message_receipt(receipt?, &request_id)?
         }
         response::Which::MessageImage(result) => decode_message_image(result?)?,
+        response::Which::StopRunReceipt(receipt) => {
+            decode_stop_run_receipt(receipt?, &request_id)?
+        }
+        response::Which::ActiveRun(result) => decode_active_run_result(result?)?,
         response::Which::ConversationSnapshot(snapshot) => {
             ResponsePayload::ConversationSnapshot(decode_conversation_snapshot(snapshot?)?)
         }
@@ -2461,6 +2535,48 @@ fn decode_message_image(
         reference,
         bytes,
     }))
+}
+
+fn decode_stop_run_receipt(
+    receipt: artisan_capnp::stop_run_receipt::Reader<'_>,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    Ok(ResponsePayload::RunStopped(StopRunReceipt {
+        request_id: request_id.clone(),
+        thread_id: parse_thread_id(
+            read_text(receipt.get_thread_id(), "response.stopRunReceipt.threadId")?,
+            "response.stopRunReceipt.threadId",
+        )?,
+        run_id: parse_run_id(
+            read_text(receipt.get_run_id(), "response.stopRunReceipt.runId")?,
+            "response.stopRunReceipt.runId",
+        )?,
+        disposition: decode_stop_run_disposition(receipt.get_disposition()?),
+    }))
+}
+
+fn decode_active_run_result(
+    result: artisan_capnp::active_run_result::Reader<'_>,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(result.get_thread_id(), "response.activeRun.threadId")?,
+        "response.activeRun.threadId",
+    )?;
+    let result = match result.get_state().which()? {
+        artisan_capnp::active_run_result::state::Which::NoActive(()) => {
+            ActiveRunResult::NoActive { thread_id }
+        }
+        artisan_capnp::active_run_result::state::Which::Active(run_id) => {
+            ActiveRunResult::Active {
+                thread_id,
+                run_id: parse_run_id(
+                    read_text(run_id, "response.activeRun.runId")?,
+                    "response.activeRun.runId",
+                )?,
+            }
+        }
+    };
+    Ok(ResponsePayload::ActiveRun(result))
 }
 
 fn decode_conversation_subscription_started(
@@ -3012,6 +3128,18 @@ const fn decode_disposition(value: artisan_capnp::ReceiptDisposition) -> Receipt
     match value {
         artisan_capnp::ReceiptDisposition::Accepted => ReceiptDisposition::Accepted,
         artisan_capnp::ReceiptDisposition::Duplicate => ReceiptDisposition::Duplicate,
+    }
+}
+
+const fn decode_stop_run_disposition(
+    value: artisan_capnp::StopRunDisposition,
+) -> StopRunDisposition {
+    match value {
+        artisan_capnp::StopRunDisposition::Requested => StopRunDisposition::Requested,
+        artisan_capnp::StopRunDisposition::AlreadyRequested => {
+            StopRunDisposition::AlreadyRequested
+        }
+        artisan_capnp::StopRunDisposition::NotActive => StopRunDisposition::NotActive,
     }
 }
 

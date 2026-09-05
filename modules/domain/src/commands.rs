@@ -9,7 +9,7 @@
 //! rediscovery, directory browsing, and project-scoped thread listing.
 
 use crate::engine_config::{EngineConfigUpdatePrecondition, EngineRunConfig};
-use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, ThreadId};
+use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, RunId, ThreadId};
 use crate::message::QueueMessagePayload;
 use crate::text::{MessageBody, ThreadTitle};
 
@@ -103,6 +103,51 @@ impl QueueMessage {
     }
 }
 
+/// Requests cancellation of one exact live native run.
+///
+/// This is a live routing request, not a durable completion receipt. The
+/// backend answers from its process-wide run registry and the existing
+/// engine-owner path settles the durable run separately.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct StopRun {
+    /// Client-minted stable request identity for this cancellation request.
+    pub request_id: RequestId,
+    /// Thread that must own the exact target run.
+    pub thread_id: ThreadId,
+    /// Exact native run identity to signal.
+    pub run_id: RunId,
+}
+
+impl StopRun {
+    /// Creates an exact thread/run cancellation request.
+    #[must_use]
+    pub const fn new(request_id: RequestId, thread_id: ThreadId, run_id: RunId) -> Self {
+        Self {
+            request_id,
+            thread_id,
+            run_id,
+        }
+    }
+
+    /// Returns the stable request identity.
+    #[must_use]
+    pub const fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+
+    /// Returns the authenticated owning thread.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the exact target run.
+    #[must_use]
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+}
+
 /// Changes the complete engine configuration for one existing thread.
 ///
 /// The fields remain private so a caller cannot accidentally omit the
@@ -168,6 +213,8 @@ pub enum Command {
     QueueFirstMessage(QueueFirstMessage),
     /// See [`QueueMessage`].
     QueueMessage(QueueMessage),
+    /// See [`StopRun`].
+    StopRun(StopRun),
     /// See [`SetThreadEngineConfig`].
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
 }
@@ -181,6 +228,7 @@ impl Command {
             Self::CreateThread(command) => &command.request_id,
             Self::QueueFirstMessage(command) => &command.request_id,
             Self::QueueMessage(command) => &command.request_id,
+            Self::StopRun(command) => &command.request_id,
             Self::SetThreadEngineConfig(command) => command.request_id(),
         }
     }
@@ -269,6 +317,28 @@ impl ReadMessageImage {
     }
 }
 
+/// Reads the authoritative live native run for one thread, if exactly one is
+/// registered. Multiple live runs are a fail-closed backend condition rather
+/// than a reason to guess the newest run.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ReadActiveRun {
+    thread_id: ThreadId,
+}
+
+impl ReadActiveRun {
+    /// Constructs a bounded live-run query.
+    #[must_use]
+    pub const fn new(thread_id: ThreadId) -> Self {
+        Self { thread_id }
+    }
+
+    /// Returns the thread being queried.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+}
+
 /// Lists every registered native engine profile.
 ///
 /// The registry may be absent, empty, or contain up to 64 ordered profile
@@ -296,4 +366,6 @@ pub enum Query {
     ListRegisteredEngineProfiles(ListRegisteredEngineProfiles),
     /// See [`ReadMessageImage`].
     ReadMessageImage(ReadMessageImage),
+    /// See [`ReadActiveRun`].
+    ReadActiveRun(ReadActiveRun),
 }

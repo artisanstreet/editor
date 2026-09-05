@@ -20,6 +20,7 @@ use crate::native_run_dispatch::{
 use crate::{
     CommandOrigin,
     lifecycle_control::{ActivityGate, ActivityGateImpl},
+    run_cancellation::RunCancellationRegistry,
 };
 
 fn config(
@@ -2494,6 +2495,8 @@ async fn dispatch_fixture_midturn_engine_loss_recovers_without_second_spawn() {
             database_path: temp.path().to_owned(),
             config,
             process_cancel: Arc::clone(&process_cancel),
+            cancellation: RunCancellationRegistry::new(1)
+                .expect("fixture cancellation capacity should be nonzero"),
             activity: ActivityGateImpl::new(),
             runtime: &tokio::runtime::Handle::current(),
             fixture_program: fixture.clone(),
@@ -2755,6 +2758,8 @@ async fn restart_midturn_dispatcher(
             database_path: temp.path().to_owned(),
             config: restart_config,
             process_cancel: Arc::clone(&restart_cancel),
+            cancellation: RunCancellationRegistry::new(1)
+                .expect("fixture cancellation capacity should be nonzero"),
             activity: ActivityGateImpl::new(),
             runtime: &tokio::runtime::Handle::current(),
             fixture_program: fixture,

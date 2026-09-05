@@ -1,0 +1,3 @@
+# Bazel supplies this for runfiles macros; Cargo tests use the main repository.
+[env]
+REPOSITORY_NAME = { value = "_main", force = false }

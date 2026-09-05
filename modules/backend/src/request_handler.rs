@@ -44,13 +44,14 @@ use artisan_database::{
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineProfileId, MessageId, PatchBatch,
-    ProjectId, Query, QueueFirstMessage, QueueMessage, RequestId, RootPath,
-    SetThreadEngineConfig, ThreadId, UnixMillis,
+    ProjectId, Query, QueueFirstMessage, QueueMessage, RequestId, RootPath, SetThreadEngineConfig,
+    ThreadId, UnixMillis,
 };
 use artisan_protocol::{
-    ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome, ErrorCode, ErrorDetail,
-    FirstMessageReceipt, MessageImageResult, ProtocolFailure, QueueMessageReceipt,
-    RegisteredEngineProfilesResult, ResponsePayload, ServerResponse, SetThreadEngineConfigResult,
+    ActiveRunResult, ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome,
+    ErrorCode, ErrorDetail, FirstMessageReceipt, MessageImageResult, ProtocolFailure,
+    QueueMessageReceipt, RegisteredEngineProfilesResult, ResponsePayload, ServerResponse,
+    SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt,
 };
 use tokio::sync::Mutex;
 
@@ -69,6 +70,9 @@ use crate::directory_controller::{
     AdmissionError, DirectoryController, DirectoryPickOutcome, HelperOperationError, ShutdownReport,
 };
 use crate::directory_selection::{DirectorySelectionAdmissionError, SelectedDirectoryAuthority};
+use crate::run_cancellation::{
+    CancelRequestOutcome, RunCancellationError, RunCancellationRegistry,
+};
 
 /// Detail used when a diagnostic text would exceed the protocol-owned
 /// error-detail ceiling. Short by construction, so parsing it cannot fail.
@@ -81,6 +85,11 @@ const RESNAPSHOT_REQUIRED_DETAIL: &str = "a fresh conversation resnapshot is req
 /// exhausted.
 const SUBSCRIPTION_GENERATION_EXHAUSTED_DETAIL: &str =
     "conversation subscription registration capacity is exhausted";
+
+/// Stable detail for builds whose native dispatcher has not supplied the
+/// shared live-run cancellation registry.
+const RUN_CANCELLATION_UNAVAILABLE_DETAIL: &str =
+    "live run cancellation is not available in this build";
 
 /// Cloneable owner of one connection-local conversation subscription table.
 ///
@@ -305,6 +314,8 @@ pub struct RequestHandler {
     conversation_commit_notifier: Option<ConversationCommitNotifier>,
     directory_picker: Option<DirectoryPicker>,
     registered_engine_profiles: Option<Box<dyn RegisteredEngineProfilesReader>>,
+    run_cancellation: Option<RunCancellationRegistry>,
+    composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
 }
 
 impl fmt::Debug for RequestHandler {
@@ -433,6 +444,8 @@ impl RequestHandler {
             conversation_commit_notifier: None,
             directory_picker: None,
             registered_engine_profiles: None,
+            run_cancellation: None,
+            composer_catalog: None,
         }
     }
 
@@ -454,6 +467,8 @@ impl RequestHandler {
             conversation_commit_notifier: None,
             directory_picker: None,
             registered_engine_profiles: None,
+            run_cancellation: None,
+            composer_catalog: None,
         }
     }
 
@@ -476,6 +491,8 @@ impl RequestHandler {
             conversation_commit_notifier: None,
             directory_picker: None,
             registered_engine_profiles: None,
+            run_cancellation: None,
+            composer_catalog: None,
         }
     }
 
@@ -497,6 +514,23 @@ impl RequestHandler {
         notifier: ConversationCommitNotifier,
     ) -> Self {
         self.conversation_commit_notifier = Some(notifier);
+        self
+    }
+
+    /// Attaches the one process-owned live-run cancellation registry shared
+    /// with native dispatch. The registry contains only exact live
+    /// `(thread_id, run_id)` routes; it owns no terminal state or provider.
+    #[must_use]
+    pub(crate) fn with_composer_catalog(
+        mut self,
+        service: crate::composer_catalog_service::ComposerCatalogService,
+    ) -> Self {
+        self.composer_catalog = Some(service);
+        self
+    }
+
+    pub fn with_run_cancellation_registry(mut self, registry: RunCancellationRegistry) -> Self {
+        self.run_cancellation = Some(registry);
         self
     }
 
@@ -949,6 +983,29 @@ impl RequestHandler {
                     }),
                 ))
             }
+            Query::ReadActiveRun(read) => {
+                let Some(registry) = self.run_cancellation.as_ref() else {
+                    return Err(typed_failure(
+                        ErrorCode::UnsupportedFeature,
+                        RUN_CANCELLATION_UNAVAILABLE_DETAIL,
+                        false,
+                        request_id,
+                    ));
+                };
+                let result = registry
+                    .active_run(read.thread_id())
+                    .map_err(|error| run_cancellation_failure(error, request_id))?;
+                let result = match result {
+                    Some(run_id) => ActiveRunResult::Active {
+                        thread_id: read.thread_id().clone(),
+                        run_id,
+                    },
+                    None => ActiveRunResult::NoActive {
+                        thread_id: read.thread_id().clone(),
+                    },
+                };
+                Ok(outcome(request_id, ResponsePayload::ActiveRun(result)))
+            }
             Query::ListRegisteredEngineProfiles(_) => {
                 let Some(reader) = self.registered_engine_profiles.as_ref() else {
                     return Err(typed_failure(
@@ -1069,11 +1126,44 @@ impl RequestHandler {
                 self.queue_first_message_outcome(request_id, queue).await
             }
             Command::QueueMessage(queue) => self.queue_message_outcome(request_id, queue).await,
+            Command::StopRun(stop) => self.stop_run_outcome(request_id, stop),
             Command::SetThreadEngineConfig(config) => {
                 self.set_thread_engine_config_outcome(request_id, config.as_ref())
                     .await
             }
         }
+    }
+
+    fn stop_run_outcome(
+        &self,
+        request_id: &RequestId,
+        stop: &artisan_domain::StopRun,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let Some(registry) = self.run_cancellation.as_ref() else {
+            return Err(typed_failure(
+                ErrorCode::UnsupportedFeature,
+                RUN_CANCELLATION_UNAVAILABLE_DETAIL,
+                false,
+                request_id,
+            ));
+        };
+        let disposition = registry
+            .request_cancel(stop.thread_id(), stop.run_id())
+            .map_err(|error| run_cancellation_failure(error, request_id))?;
+        let disposition = match disposition {
+            CancelRequestOutcome::Signalled => StopRunDisposition::Requested,
+            CancelRequestOutcome::AlreadySignalled => StopRunDisposition::AlreadyRequested,
+            CancelRequestOutcome::NotActive => StopRunDisposition::NotActive,
+        };
+        Ok(outcome(
+            request_id,
+            ResponsePayload::RunStopped(StopRunReceipt {
+                request_id: request_id.clone(),
+                thread_id: stop.thread_id().clone(),
+                run_id: stop.run_id().clone(),
+                disposition,
+            }),
+        ))
     }
 
     /// Answers one create-thread mutation from its durable receipt or a
@@ -1422,6 +1512,21 @@ fn unbacked_failure(request_id: &RequestId, operation: &str) -> ProtocolFailure 
     typed_failure(
         ErrorCode::Internal,
         format!("{operation} is not backed by a Forge capability in this build"),
+        false,
+        request_id,
+    )
+}
+
+/// Maps the live cancellation registry's fail-closed errors to one bounded,
+/// payload-free protocol failure. Registry details are intentionally not
+/// exposed because they contain no client-actionable state.
+fn run_cancellation_failure(
+    _error: RunCancellationError,
+    request_id: &RequestId,
+) -> ProtocolFailure {
+    typed_failure(
+        ErrorCode::Internal,
+        "live run cancellation registry is unavailable",
         false,
         request_id,
     )

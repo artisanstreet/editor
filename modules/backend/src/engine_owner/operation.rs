@@ -29,6 +29,7 @@ use tokio::time::Instant;
 
 use artisan_transport::CancelHandle;
 
+use super::catalog::{CatalogError, CatalogResult};
 use super::http::{
     CreateSessionInput, HealthError, HealthSecret, PromptError, PromptFile, PromptInput,
     perform_create_session, perform_interrupt, perform_prompt,
@@ -136,6 +137,9 @@ pub(crate) enum EngineOperationError {
     ReadinessFailed(ReadinessError),
     /// Bounded health handshake failed.
     HealthFailed(HealthError),
+    /// Runtime model catalog discovery failed after the owner authenticated
+    /// the certified engine.
+    CatalogFailed(CatalogError),
     /// Health version was incompatible with the expected value.
     IncompatibleVersion,
     /// Persisted turn settings could not be translated into owner limits.
@@ -246,6 +250,13 @@ pub(crate) enum Job {
         control: Arc<CancelHandle>,
         respond: oneshot::Sender<PreflightResult>,
     },
+    /// Configured spawn/readiness/health/location-scoped model discovery that
+    /// stops before provider session creation.
+    Catalog {
+        input: Box<super::InternalCatalogInput>,
+        control: Arc<CancelHandle>,
+        respond: oneshot::Sender<CatalogOperationResult>,
+    },
     /// A fully immutable configured turn handed to the owner after durable
     /// launch. Carries the single internal input so production and `#[cfg(test)]`
     /// fixture admissions share exactly one queued type and one executor.
@@ -346,6 +357,52 @@ impl std::future::Future for AcceptedPreflight {
 }
 
 impl Drop for AcceptedPreflight {
+    fn drop(&mut self) {
+        self.control.cancel();
+    }
+}
+
+/// Single-owner future for one configured-engine runtime model catalog.
+pub(crate) struct AcceptedCatalog {
+    receiver: oneshot::Receiver<CatalogOperationResult>,
+    control: Arc<CancelHandle>,
+}
+
+impl AcceptedCatalog {
+    /// Creates an accepted catalog request from its owner-only response parts.
+    pub(crate) fn from_parts(
+        receiver: oneshot::Receiver<CatalogOperationResult>,
+        control: Arc<CancelHandle>,
+    ) -> Self {
+        Self { receiver, control }
+    }
+
+    /// Cancels this catalog request explicitly.
+    pub(crate) fn cancel(&self) {
+        self.control.cancel();
+    }
+}
+
+impl std::future::Future for AcceptedCatalog {
+    type Output = CatalogOperationResult;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        use std::pin::Pin;
+        use std::task::Poll;
+        match Pin::new(&mut self.receiver).poll(context) {
+            Poll::Ready(Ok(result)) => Poll::Ready(result),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(EngineOperationError::ReapUnresolved)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+pub(crate) type CatalogOperationResult = Result<CatalogResult, EngineOperationError>;
+
+impl Drop for AcceptedCatalog {
     fn drop(&mut self) {
         self.control.cancel();
     }
@@ -587,6 +644,9 @@ async fn run_owner_loop(
                     job @ Job::Preflight { .. } => {
                         Box::pin(execute_preflight_job(job, &shutdown)).await
                     }
+                    job @ Job::Catalog { .. } => {
+                        Box::pin(execute_catalog_job(job, &shutdown)).await
+                    }
                     job @ Job::Turn { .. } => {
                         Box::pin(execute_configured_job(job, &shutdown)).await
                     }
@@ -612,6 +672,7 @@ fn job_control(job: &Job) -> &Arc<CancelHandle> {
     match job {
         Job::Legacy { control, .. }
         | Job::Preflight { control, .. }
+        | Job::Catalog { control, .. }
         | Job::Turn { control, .. } => control,
     }
 }
@@ -620,6 +681,7 @@ fn job_deadline(job: &Job) -> Instant {
     match job {
         Job::Legacy { deadline, .. } | Job::Turn { deadline, .. } => *deadline,
         Job::Preflight { input, .. } => input.deadlines.admission,
+        Job::Catalog { input, .. } => input.deadlines.admission.min(input.catalog_deadline),
     }
 }
 
@@ -629,6 +691,9 @@ fn reject_job(job: Job, error: EngineOperationError) {
             let _ = respond.send(Err(error));
         }
         Job::Preflight { respond, .. } => {
+            let _ = respond.send(Err(error));
+        }
+        Job::Catalog { respond, .. } => {
             let _ = respond.send(Err(error));
         }
         Job::Turn {
@@ -998,6 +1063,270 @@ async fn finish_preflight_success(
     };
     let _ = respond.send(Ok(PreflightReceipt::new(profile_id, version, reap)));
     Execution::Completed
+}
+
+struct CatalogRequest {
+    input: super::InternalCatalogInput,
+    control: Arc<CancelHandle>,
+    respond: oneshot::Sender<CatalogOperationResult>,
+}
+
+impl CatalogRequest {
+    fn fail(self, error: EngineOperationError) -> Execution {
+        let _ = self.respond.send(Err(error));
+        Execution::Completed
+    }
+}
+
+struct CatalogContext {
+    scope: super::catalog::CatalogScope,
+    expected_version: String,
+    bounds: EngineBounds,
+    deadlines: super::PreflightDeadlines,
+    catalog_deadline: Instant,
+    control: Arc<CancelHandle>,
+    respond: oneshot::Sender<CatalogOperationResult>,
+    secret: HealthSecret,
+    parts: ChildParts,
+    stdout: Option<tokio::process::ChildStdout>,
+}
+
+fn catalog_admission_error(
+    request: &CatalogRequest,
+    shutdown: &Arc<CancelHandle>,
+) -> Option<EngineOperationError> {
+    if shutdown.is_cancelled() {
+        return Some(EngineOperationError::Shutdown);
+    }
+    if request.control.is_cancelled() {
+        return Some(EngineOperationError::Cancelled);
+    }
+    if Instant::now()
+        >= request
+            .input
+            .deadlines
+            .admission
+            .min(request.input.catalog_deadline)
+    {
+        return Some(EngineOperationError::Deadline);
+    }
+    if !preflight_bounds_are_valid(&request.input.bounds) {
+        return Some(EngineOperationError::Configuration);
+    }
+    if !request.input.scope.matches_launch(
+        request.input.launch.profile_id(),
+        request.input.project_root.as_str(),
+    ) {
+        return Some(EngineOperationError::Configuration);
+    }
+    None
+}
+
+fn prepare_catalog_context(request: CatalogRequest) -> Result<CatalogContext, Execution> {
+    let CatalogRequest {
+        input,
+        control,
+        respond,
+    } = request;
+    let expected_version = input.launch.version().to_owned();
+    let bounds = input.bounds;
+    let deadlines = input.deadlines;
+    let catalog_deadline = input.catalog_deadline;
+    let scope = input.scope;
+    let secret = match HealthSecret::generate() {
+        Ok(secret) => secret,
+        Err(HealthError::EntropyFailed) => {
+            let _ = respond.send(Err(EngineOperationError::EntropyFailed));
+            return Err(Execution::Completed);
+        }
+        Err(_) => unreachable!("health secret generation has one failure mode"),
+    };
+    let child_result = match &input.launch {
+        super::InternalLaunch::Verified(verified) => {
+            spawn_configured_engine(verified.as_ref(), &input.project_root, secret.as_str())
+        }
+        #[cfg(test)]
+        super::InternalLaunch::Fixture(fixture) => super::process::spawn_configured_fixture_engine(
+            &fixture.program,
+            fixture.scenario,
+            secret.as_str(),
+        ),
+    };
+    let Ok(mut child) = child_result else {
+        let _ = respond.send(Err(EngineOperationError::SpawnFailed));
+        return Err(Execution::Completed);
+    };
+    let lifeline = LifelineWriter::take(&mut child);
+    let stdout = child.stdout.take();
+    let stderr_counter = StderrCounter::new(child.stderr.take(), bounds.stderr_cap_bytes);
+    Ok(CatalogContext {
+        scope,
+        expected_version,
+        bounds,
+        deadlines,
+        catalog_deadline,
+        control,
+        respond,
+        secret,
+        parts: ChildParts {
+            child,
+            lifeline,
+            stdout: None,
+            stderr_counter,
+        },
+        stdout,
+    })
+}
+
+/// Executes certified spawn/readiness/health and one location-scoped model
+/// catalog read. This branch deliberately has no session, assistant, prompt,
+/// or stream path.
+async fn execute_catalog_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execution {
+    let Job::Catalog {
+        input,
+        control,
+        respond,
+    } = job
+    else {
+        unreachable!("catalog executor received a non-catalog job");
+    };
+    let request = CatalogRequest {
+        input: *input,
+        control,
+        respond,
+    };
+    if let Some(error) = catalog_admission_error(&request, shutdown) {
+        return request.fail(error);
+    }
+    let context = match prepare_catalog_context(request) {
+        Ok(context) => context,
+        Err(execution) => return execution,
+    };
+    execute_catalog_context(context, shutdown).await
+}
+
+async fn execute_catalog_context(
+    context: CatalogContext,
+    shutdown: &Arc<CancelHandle>,
+) -> Execution {
+    let CatalogContext {
+        scope,
+        expected_version,
+        bounds,
+        deadlines,
+        catalog_deadline,
+        control,
+        respond,
+        secret,
+        mut parts,
+        stdout,
+    } = context;
+    let phase_deadline =
+        |deadline: Instant| deadline.min(deadlines.admission).min(catalog_deadline);
+    let Some(mut stdout) = stdout else {
+        drop(secret);
+        return finish_catalog_failure(
+            parts,
+            EngineOperationError::ReadinessFailed(ReadinessError::Io),
+            respond,
+            deadlines.close,
+        )
+        .await;
+    };
+    let endpoint = match drive_readiness(
+        &mut stdout,
+        &mut parts,
+        phase_deadline(deadlines.readiness),
+        shutdown,
+        &control,
+        bounds.max_readiness_line,
+    )
+    .await
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            drop(stdout);
+            drop(secret);
+            return finish_catalog_failure(
+                parts,
+                map_readiness_error(error),
+                respond,
+                deadlines.close,
+            )
+            .await;
+        }
+    };
+    drop(stdout);
+    if let Err(error) = super::http::perform_health(
+        &endpoint,
+        &secret,
+        &bounds,
+        phase_deadline(deadlines.health),
+        &control,
+        shutdown,
+        Some(&expected_version),
+    )
+    .await
+    {
+        drop(secret);
+        return finish_catalog_failure(parts, map_health_error(error), respond, deadlines.close)
+            .await;
+    }
+    let result = super::http::perform_catalog(
+        &endpoint,
+        &secret,
+        &bounds,
+        phase_deadline(catalog_deadline),
+        &control,
+        shutdown,
+        &scope,
+    )
+    .await;
+    drop(secret);
+    match result {
+        Ok(result) => finish_catalog_success(parts, result, respond, deadlines.close).await,
+        Err(error) => {
+            finish_catalog_failure(parts, map_catalog_error(error), respond, deadlines.close).await
+        }
+    }
+}
+
+async fn finish_catalog_failure(
+    parts: ChildParts,
+    cause: EngineOperationError,
+    respond: oneshot::Sender<CatalogOperationResult>,
+    close_deadline: Instant,
+) -> Execution {
+    match cleanup_after_abort(parts, remaining_until(close_deadline)).await {
+        CleanupObservation::ReapedWithoutKill(_) | CleanupObservation::ReapedAfterKill(_) => {
+            let _ = respond.send(Err(cause));
+            Execution::Completed
+        }
+        CleanupObservation::Retained(engine) => {
+            let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring {
+                primary: Box::new(cause),
+            }));
+            Execution::Quarantined(engine)
+        }
+    }
+}
+
+async fn finish_catalog_success(
+    parts: ChildParts,
+    result: CatalogResult,
+    respond: oneshot::Sender<CatalogOperationResult>,
+    close_deadline: Instant,
+) -> Execution {
+    match cleanup_after_abort(parts, remaining_until(close_deadline)).await {
+        CleanupObservation::ReapedWithoutKill(_) | CleanupObservation::ReapedAfterKill(_) => {
+            let _ = respond.send(Ok(result));
+            Execution::Completed
+        }
+        CleanupObservation::Retained(engine) => {
+            let _ = respond.send(Err(EngineOperationError::ReapUnresolved));
+            Execution::Quarantined(engine)
+        }
+    }
 }
 
 /// Executes one legacy readiness/health job end to end.  This path remains
@@ -1851,6 +2180,15 @@ fn map_health_error(error: HealthError) -> EngineOperationError {
         HealthError::Shutdown => EngineOperationError::Shutdown,
         HealthError::IncompatibleVersion => EngineOperationError::IncompatibleVersion,
         other => EngineOperationError::HealthFailed(other),
+    }
+}
+
+fn map_catalog_error(error: CatalogError) -> EngineOperationError {
+    match error {
+        CatalogError::Shutdown => EngineOperationError::Shutdown,
+        CatalogError::Cancelled => EngineOperationError::Cancelled,
+        CatalogError::Timeout => EngineOperationError::Deadline,
+        other => EngineOperationError::CatalogFailed(other),
     }
 }
 

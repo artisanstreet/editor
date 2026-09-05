@@ -24,14 +24,14 @@ use std::{
 };
 
 use crate::forge_dev_endpoint as dev_endpoint;
-use sha2::{Digest as _, Sha256};
 use artisan_domain::{
     AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor, ConversationQuery,
     ConversationQueryBounds, ConversationRequest, ConversationSnapshot, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects,
     ListProjectThreads, ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing,
-    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, QueueMessage, ReadThreadEngineSettings, RequestId,
-    SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
+    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, QueueMessage,
+    ReadThreadEngineSettings, RequestId, SetThreadEngineConfig, ThreadId, ThreadListing,
+    ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{
@@ -45,7 +45,7 @@ use artisan_editor_cli::{
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ConversationSubscriptionStopped, ErrorCode,
-    FirstMessageReceipt, QueueMessageReceipt, FrameId, Hello, HelloCredential, ProtocolVersion,
+    FirstMessageReceipt, FrameId, Hello, HelloCredential, ProtocolVersion, QueueMessageReceipt,
     RegisteredEngineProfilesResult, ResponsePayload, SetThreadEngineConfigResult,
     ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
 };
@@ -55,6 +55,7 @@ use artisan_transport::{
     LoopbackTarget, PinnedIdentity, RequestOutcome,
 };
 use rustls_pki_types::CertificateDer;
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 /// Maximum number of commands waiting for the service thread.
@@ -98,6 +99,13 @@ impl SettingsLoadGeneration {
 /// Commands accepted by the native service.
 #[derive(Clone, Eq, PartialEq)]
 pub enum NativeTransportCommand {
+    /// Query exact live run ownership, fenced by the application's selection generation.
+    ReadActiveRun {
+        thread_id: ThreadId,
+        generation: u64,
+    },
+    /// Signal cancellation for an exact thread/run pair.
+    StopRun(artisan_domain::StopRun),
     /// Start a fresh opaque-directory project intake.
     BeginProjectIntake,
     /// Continue the one retained retry plan for project intake.
@@ -151,6 +159,8 @@ pub enum NativeTransportCommand {
 impl std::fmt::Debug for NativeTransportCommand {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let variant = match self {
+            Self::ReadActiveRun { .. } => "ReadActiveRun",
+            Self::StopRun(_) => "StopRun",
             Self::BeginProjectIntake => "BeginProjectIntake",
             Self::RetryProjectIntake => "RetryProjectIntake",
             Self::SelectProject(_) => "SelectProject",
@@ -349,10 +359,31 @@ pub enum ServiceStopStatus {
 /// Events crossing from the service thread to the GPUI application.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeTransportEvent {
+    ActiveRun {
+        thread_id: ThreadId,
+        generation: u64,
+        result: artisan_protocol::ActiveRunResult,
+    },
+    ActiveRunFailed {
+        thread_id: ThreadId,
+        generation: u64,
+        failure: ServiceFailure,
+    },
+    RunStopped(artisan_protocol::StopRunReceipt),
+    StopRunFailed {
+        command: artisan_domain::StopRun,
+        failure: ServiceFailure,
+    },
     /// Original image data loaded for an exact history reference.
-    MessageImageLoaded { reference: artisan_domain::ImageAttachmentRef, image: artisan_domain::ImageAttachment },
+    MessageImageLoaded {
+        reference: artisan_domain::ImageAttachmentRef,
+        image: artisan_domain::ImageAttachment,
+    },
     /// An on-demand history image could not be loaded.
-    MessageImageFailed { reference: artisan_domain::ImageAttachmentRef, failure: ServiceFailure },
+    MessageImageFailed {
+        reference: artisan_domain::ImageAttachmentRef,
+        failure: ServiceFailure,
+    },
     /// The service thread has begun installation/session startup.
     Starting,
     /// Real attached-project rows in Forge order.
@@ -963,9 +994,7 @@ fn first_message_stable_mutation(
     })
 }
 
-fn message_stable_mutation(
-    command: QueueMessage,
-) -> Result<StableMutation, ServiceFailure> {
+fn message_stable_mutation(command: QueueMessage) -> Result<StableMutation, ServiceFailure> {
     let request_id = command.request_id.clone();
     let frame_id = FrameId::parse(request_id.as_str().to_owned())
         .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
@@ -1070,6 +1099,8 @@ fn create_mutation(
 
 #[derive(Clone)]
 enum ExpectedResponse {
+    ActiveRun(ThreadId),
+    RunStopped(artisan_domain::StopRun),
     Directory,
     Projects,
     AttachedProject,
@@ -1423,10 +1454,28 @@ fn validate_response_family(
         ) if snapshot.thread_id() == &thread_id => {
             Ok(ResponsePayload::ConversationSnapshot(snapshot))
         }
+        (ExpectedResponse::ActiveRun(expected), ResponsePayload::ActiveRun(result))
+            if match &result {
+                artisan_protocol::ActiveRunResult::NoActive { thread_id }
+                | artisan_protocol::ActiveRunResult::Active { thread_id, .. } => {
+                    thread_id == &expected
+                }
+            } =>
+        {
+            Ok(ResponsePayload::ActiveRun(result))
+        }
+        (ExpectedResponse::RunStopped(expected), ResponsePayload::RunStopped(receipt))
+            if receipt.request_id == expected.request_id
+                && receipt.thread_id == expected.thread_id
+                && receipt.run_id == expected.run_id =>
+        {
+            Ok(ResponsePayload::RunStopped(receipt))
+        }
         (ExpectedResponse::MessageImage(expected), ResponsePayload::MessageImage(result))
             if result.reference == expected
                 && result.bytes.len() == expected.size_bytes as usize
-                && Sha256::digest(&result.bytes).as_slice() == expected.digest => {
+                && Sha256::digest(&result.bytes).as_slice() == expected.digest =>
+        {
             Ok(ResponsePayload::MessageImage(result))
         }
         (
@@ -2774,6 +2823,12 @@ async fn command_loop_with_delivery(
                     Some(NativeTransportCommand::CreateTask(project_id)) => {
                         create_task_in_project(runtime, frames, events, project_id).await?;
                     }
+                    Some(NativeTransportCommand::ReadActiveRun { thread_id, generation }) => {
+                        composer_operations::read_active_run(runtime, frames, events, thread_id, generation).await?;
+                    }
+                    Some(NativeTransportCommand::StopRun(command)) => {
+                        composer_operations::stop_run(runtime, frames, events, command).await?;
+                    }
                     Some(NativeTransportCommand::ReadMessageImage(reference)) => {
                         read_message_image(runtime, frames, events, reference).await?;
                     }
@@ -3486,28 +3541,63 @@ async fn read_message_image(
     reference: artisan_domain::ImageAttachmentRef,
 ) -> Result<(), ServiceFailure> {
     if !runtime.known_threads.contains(&reference.thread_id) {
-        return publish(events, NativeTransportEvent::MessageImageFailed {
-            reference, failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-        });
+        return publish(
+            events,
+            NativeTransportEvent::MessageImageFailed {
+                reference,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        );
     }
     let query = Query::ReadMessageImage(artisan_domain::ReadMessageImage::new(
-        reference.thread_id.clone(), reference.message_id.clone(), reference.index,
+        reference.thread_id.clone(),
+        reference.message_id.clone(),
+        reference.index,
     ));
-    let response = runtime.request(frames, query_request(query), ExpectedResponse::MessageImage(reference.clone())).await;
+    let response = runtime
+        .request(
+            frames,
+            query_request(query),
+            ExpectedResponse::MessageImage(reference.clone()),
+        )
+        .await;
     let result = match response {
         Ok(ResponsePayload::MessageImage(result)) => result,
-        Ok(_) => return publish(events, NativeTransportEvent::MessageImageFailed {
-            reference, failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-        }),
-        Err(error) => return publish(events, NativeTransportEvent::MessageImageFailed {
-            reference, failure: error.into(),
-        }),
+        Ok(_) => {
+            return publish(
+                events,
+                NativeTransportEvent::MessageImageFailed {
+                    reference,
+                    failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+                },
+            );
+        }
+        Err(error) => {
+            return publish(
+                events,
+                NativeTransportEvent::MessageImageFailed {
+                    reference,
+                    failure: error.into(),
+                },
+            );
+        }
     };
-    match artisan_domain::ImageAttachment::new(reference.mime_type_str(), result.bytes, reference.name.clone()) {
-        Ok(image) => publish(events, NativeTransportEvent::MessageImageLoaded { reference, image }),
-        Err(_) => publish(events, NativeTransportEvent::MessageImageFailed {
-            reference, failure: ServiceFailure::invalid(ServiceFailureStage::Request),
-        }),
+    match artisan_domain::ImageAttachment::new(
+        reference.mime_type_str(),
+        result.bytes,
+        reference.name.clone(),
+    ) {
+        Ok(image) => publish(
+            events,
+            NativeTransportEvent::MessageImageLoaded { reference, image },
+        ),
+        Err(_) => publish(
+            events,
+            NativeTransportEvent::MessageImageFailed {
+                reference,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        ),
     }
 }
 
@@ -3933,10 +4023,11 @@ mod tests {
         ServiceFailureCategory, StartupError, ThreadSelectionDecision, attach_mutation,
         build_reconnect_binding, contains_exact_project, contains_exact_thread,
         create_command_values, create_mutation, engine_config_stable_mutation, finite_duration,
-        first_message_stable_mutation, message_stable_mutation, known_thread_for_queue, make_request_frame,
-        payload_health_decision, project_request, reconnect_hello, session_needs_reconnect,
-        snapshot_request, thread_engine_settings_request, thread_selection_decision,
-        threads_request, try_send_command, validate_readiness, validate_response_family,
+        first_message_stable_mutation, known_thread_for_queue, make_request_frame,
+        message_stable_mutation, payload_health_decision, project_request, reconnect_hello,
+        session_needs_reconnect, snapshot_request, thread_engine_settings_request,
+        thread_selection_decision, threads_request, try_send_command, validate_readiness,
+        validate_response_family,
     };
     use artisan_domain::{
         AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
@@ -4312,21 +4403,40 @@ mod tests {
             "image.png",
             3,
             Sha256::digest(&bytes).into(),
-        ).expect("reference");
+        )
+        .expect("reference");
         let response = artisan_protocol::MessageImageResult {
-            reference: reference.clone(), bytes,
+            reference: reference.clone(),
+            bytes,
         };
         let expected = ExpectedResponse::MessageImage(reference);
-        assert!(validate_response_family(expected.clone(), ResponsePayload::MessageImage(response.clone())).is_ok());
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::MessageImage(response.clone())
+            )
+            .is_ok()
+        );
         let mut wrong_content = response.clone();
         wrong_content.bytes[0] = 9;
-        assert!(validate_response_family(expected.clone(), ResponsePayload::MessageImage(wrong_content)).is_err());
+        assert!(
+            validate_response_family(
+                expected.clone(),
+                ResponsePayload::MessageImage(wrong_content)
+            )
+            .is_err()
+        );
         let mut wrong_owner = response.clone();
         wrong_owner.reference.thread_id = ThreadId::parse("other-thread").expect("thread");
-        assert!(validate_response_family(expected.clone(), ResponsePayload::MessageImage(wrong_owner)).is_err());
+        assert!(
+            validate_response_family(expected.clone(), ResponsePayload::MessageImage(wrong_owner))
+                .is_err()
+        );
         let mut wrong_size = response;
         wrong_size.bytes.push(4);
-        assert!(validate_response_family(expected, ResponsePayload::MessageImage(wrong_size)).is_err());
+        assert!(
+            validate_response_family(expected, ResponsePayload::MessageImage(wrong_size)).is_err()
+        );
     }
 
     #[test]
@@ -5164,3 +5274,6 @@ mod tests {
         assert!(!text.contains("engine-save"));
     }
 }
+
+#[path = "native_composer_transport.rs"]
+mod composer_operations;

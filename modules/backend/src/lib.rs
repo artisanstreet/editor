@@ -239,3 +239,5 @@ mod tests {
         ));
     }
 }
+
+mod composer_catalog_service;

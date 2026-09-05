@@ -40,6 +40,7 @@ winapi-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+runfiles = "0.3.0"
 
 [[test]]
 name = "activated_conversation_replay"

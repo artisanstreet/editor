@@ -506,6 +506,7 @@ dependencies = [
  "native-dialog",
  "quinn",
  "rcgen",
+ "runfiles",
  "rustls-pki-types",
  "sea-orm",
  "serde_json",
@@ -6266,6 +6267,12 @@ checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "runfiles"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc1beaa13fbade520858d2f6ed799f2a963d0ef32d15506ccf290b6e14dfd560"
 
 [[package]]
 name = "rust_decimal"
