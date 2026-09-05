@@ -362,7 +362,7 @@ impl NativeModelSelectorState {
                 .unwrap_or_else(|| humanize_variant(&value.id));
             values.push(label);
         }
-        values.join(" Â· ")
+        values.join(" \u{b7} ")
     }
 
     /// Opens/closes the popover without emitting a policy event.
