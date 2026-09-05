@@ -36,6 +36,9 @@ use crate::composer_draft_session_policy::{
     ComposerDraftDocument, ComposerDraftSession, ComposerDraftToken, InMemoryComposerDraftStore,
 };
 use crate::native_composer_controls::NativeComposerControls;
+use crate::native_composer_material::{
+    GLASS_BLUR_RADIUS_PX, glass_card_shadows, glass_highlight_layer, glass_material,
+};
 use crate::native_model_selector::NativeModelSelector;
 
 #[path = "native_composer_attachments.rs"]
@@ -2256,11 +2259,12 @@ impl Render for NativeComposer {
             .id("artisan-native-composer-editor")
             .key_context(NATIVE_COMPOSER_KEY_CONTEXT)
             .w_full()
+            .flex_1()
             .min_w(px(0.0))
             .min_h(px(64.0))
             .max_h(px(240.0))
             .px(px(12.0))
-            .py(px(10.0))
+            .py(px(8.0))
             .rounded(px(6.0))
             .text_color(desktop_theme.foreground)
             .text_size(px(15.0))
@@ -2363,6 +2367,7 @@ impl Render for NativeComposer {
             )
             .expect("the native composer send button configuration is valid")
             .focus_visibility(FocusVisibility::Visible)
+            .corner_radius(px(10.0))
             .disabled(!send_ready)
             .debug_selector(NATIVE_COMPOSER_SEND_SELECTOR)
             .on_activate(move |_, _, cx| {
@@ -2379,7 +2384,7 @@ impl Render for NativeComposer {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .rounded(px(8.0))
+                .rounded(px(10.0))
                 .cursor_pointer()
                 .hover(move |style| style.bg(desktop_theme.selected))
                 .text_color(desktop_theme.secondary)
@@ -2399,6 +2404,8 @@ impl Render for NativeComposer {
                 div()
                     .w_full()
                     .flex()
+                    .h(px(32.0))
+                    .flex_shrink_0()
                     .items_center()
                     .justify_between()
                     .child(model)
@@ -2411,17 +2418,19 @@ impl Render for NativeComposer {
         let drop_entity = entity.clone();
         let mut root = div()
             .id("artisan-native-composer")
+            .debug_selector(|| "artisan-native-composer".to_owned())
             .w_full()
             .flex()
             .flex_col()
             .gap(px(8.0))
             .min_h(px(128.0))
             .p(px(8.0))
-            .rounded(px(16.0))
-            .border_1()
-            .border_color(desktop_theme.line)
-            .bg(desktop_theme.field)
+            .rounded(px(18.0))
+            .backdrop_blur(px(GLASS_BLUR_RADIUS_PX))
+            .bg(glass_material())
+            .shadow(glass_card_shadows())
             .relative()
+            .child(glass_highlight_layer(px(18.0)))
             .on_drop::<ExternalPaths>(move |paths, _, cx| {
                 let paths = paths.paths().to_vec();
                 drop_entity.update(cx, |composer, composer_cx| {

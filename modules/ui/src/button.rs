@@ -311,6 +311,7 @@ pub struct Button {
     size: ButtonSize,
     content: ButtonContent,
     disabled: bool,
+    corner_radius_override: Option<Pixels>,
     on_activate: Option<ActivationHandler>,
     debug_selector: Option<SharedString>,
 }
@@ -356,6 +357,7 @@ impl Button {
             size,
             content,
             disabled: false,
+            corner_radius_override: None,
             on_activate: None,
             debug_selector: None,
         })
@@ -372,6 +374,14 @@ impl Button {
     #[must_use]
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Overrides the default radius for a nested control while preserving the
+    /// shared button variant, focus, hover, and activation behavior.
+    #[must_use]
+    pub fn corner_radius(mut self, radius: Pixels) -> Self {
+        self.corner_radius_override = Some(radius);
         self
     }
 
@@ -402,7 +412,11 @@ impl Button {
     /// Returns the resolved theme/motion recipe.
     #[must_use]
     pub fn visual_style(&self) -> ButtonStyle {
-        ButtonStyle::resolve(self.theme, self.variant, self.size, self.motion)
+        let mut style = ButtonStyle::resolve(self.theme, self.variant, self.size, self.motion);
+        if let Some(radius) = self.corner_radius_override {
+            style.corner_radius = radius;
+        }
+        style
     }
 
     /// Whether this button should paint its keyboard-visible focus ring now.

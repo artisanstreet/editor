@@ -791,6 +791,7 @@ impl NativeComposerControls {
             )
             .expect("the new-thread button is valid")
             .focus_visibility(FocusVisibility::Visible)
+            .corner_radius(px(10.0))
             .disabled(self.snapshot.disabled)
             .debug_selector(NATIVE_COMPOSER_NEW_THREAD_SELECTOR)
             .on_activate(move |_, _, app| {
@@ -820,6 +821,7 @@ impl NativeComposerControls {
         )
         .expect("the primary composer control is valid")
         .focus_visibility(FocusVisibility::Visible)
+        .corner_radius(px(10.0))
         .disabled(primary_disabled)
         .debug_selector(NATIVE_COMPOSER_PRIMARY_SELECTOR);
         if let Some(event) = primary_event {
@@ -836,6 +838,8 @@ impl NativeComposerControls {
             .id(ElementId::Name(NATIVE_COMPOSER_CONTROL_ROW_SELECTOR.into()))
             .debug_selector(|| NATIVE_COMPOSER_CONTROL_ROW_SELECTOR.to_owned())
             .w_full()
+            .h(px(32.0))
+            .flex_shrink_0()
             .flex()
             .flex_row()
             .items_center()

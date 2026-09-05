@@ -50,3 +50,7 @@ path = "../../tests/ui/textarea.rs"
 [[test]]
 name = "slider"
 path = "../../tests/ui/slider.rs"
+
+[[test]]
+name = "button"
+path = "../../tests/ui/button.rs"

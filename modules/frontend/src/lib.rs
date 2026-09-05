@@ -95,6 +95,7 @@ pub mod desktop_shell;
 pub mod native_application;
 pub mod native_command_menu;
 pub mod native_composer;
+mod native_composer_material;
 pub mod native_composer_controls;
 pub mod native_context_usage;
 pub mod native_composer_visuals;
@@ -186,3 +187,6 @@ pub mod native_transport;
 
 mod composer_queue_state;
 mod native_composer_queue;
+
+#[cfg(test)]
+mod native_composer_layout_tests;

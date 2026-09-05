@@ -11,7 +11,7 @@ use artisan_ui::button::{
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{ArtisanTheme, SurfaceStep, ThemeMode};
 use gpui::{
-    ClickEvent, Context, FocusHandle, IntoElement, KeyUpEvent, Keystroke, Modifiers, ParentElement,
+    ClickEvent, Context, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ParentElement,
     Render, Styled, TestAppContext, Window, div, point, transparent_black,
 };
 
@@ -70,7 +70,7 @@ impl Render for ButtonProbe {
         .disabled(self.disabled)
         .debug_selector(BUTTON_SELECTOR)
         .on_activate(move |event, _, _| match event {
-            ClickEvent::Mouse(_) => {
+            ClickEvent::Mouse(_) | ClickEvent::Touch(_) => {
                 pointer_activations.set(pointer_activations.get() + 1);
             }
             ClickEvent::Keyboard(_) => {
@@ -322,6 +322,11 @@ fn enter_and_space_activate_from_keyboard_focus_without_a_pointer_click(cx: &mut
     cx.run_until_parked();
 
     for key in ["enter", "space"] {
+        cx.simulate_event(KeyDownEvent {
+            keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
+            is_held: false,
+            prefer_character_input: false,
+        });
         cx.simulate_event(KeyUpEvent {
             keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
         });
@@ -356,6 +361,11 @@ fn disabled_button_suppresses_pointer_keyboard_and_focus_tracking(cx: &mut TestA
     });
     cx.run_until_parked();
     for key in ["enter", "space"] {
+        cx.simulate_event(KeyDownEvent {
+            keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
+            is_held: false,
+            prefer_character_input: false,
+        });
         cx.simulate_event(KeyUpEvent {
             keystroke: Keystroke::parse(key).expect("known keyboard activation key"),
         });

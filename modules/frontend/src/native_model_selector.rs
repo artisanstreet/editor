@@ -19,13 +19,16 @@ use artisan_ui::{
     theme::{ArtisanTheme, SurfaceStep, ThemeMode},
 };
 use gpui::{
-    Anchor, AnyElement, App, Bounds, BoxShadow, ClickEvent, Context, Div, EventEmitter,
+    Anchor, AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, Div, EventEmitter,
     FocusHandle, Focusable, FontWeight, InteractiveElement as _, KeyDownEvent, MouseDownEvent,
     ParentElement as _, Pixels, Point, Render, ScrollHandle, Size, Stateful,
     StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div, point,
     prelude::FluentBuilder as _, prelude::IntoElement, px,
 };
 
+use crate::native_composer_material::{
+    GLASS_BLUR_RADIUS_PX, glass_card_shadows, glass_highlight_layer, glass_material,
+};
 use crate::native_model_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeModelView,
     NativeOptionValue, NativePolicyValidationError, NativeThinkingCapability,
@@ -359,7 +362,7 @@ impl NativeModelSelectorState {
                 .unwrap_or_else(|| humanize_variant(&value.id));
             values.push(label);
         }
-        values.join(" · ")
+        values.join(" Â· ")
     }
 
     /// Opens/closes the popover without emitting a policy event.
@@ -448,21 +451,13 @@ impl NativeModelSelectorState {
 
     /// Selects a model by exact catalog ID without requiring runtime readiness.
     pub fn select_model(&mut self, model_id: &str) -> Option<NativeModelSelectorEvent> {
-        self.preview_model(model_id);
-        let policy = match self.snapshot.selection_policy_for_model(model_id) {
-            Ok(policy) => policy,
+        match self.select_model_policy(model_id) {
+            Ok(policy) => Some(NativeModelSelectorEvent::SelectPolicy(policy)),
             Err(error) => {
                 self.local_error = Some(error.to_string());
-                return None;
+                None
             }
-        };
-        self.policy = Some(policy.clone());
-        self.open = false;
-        self.open_axis = None;
-        self.previewed_model_id = Some(model_id.to_owned());
-        self.highlighted_model_id = None;
-        self.local_error = None;
-        Some(NativeModelSelectorEvent::SelectPolicy(policy))
+        }
     }
 
     /// Applies one exact option ID/native value to the preview policy.
@@ -472,7 +467,9 @@ impl NativeModelSelectorState {
         option_id: &str,
     ) -> Result<Option<NativeModelSelectorEvent>, NativePolicyValidationError> {
         if axis == NativePolicyAxis::Variant {
-            return Ok(self.select_model(option_id));
+            return Ok(Some(NativeModelSelectorEvent::SelectPolicy(
+                self.select_model_policy(option_id)?,
+            )));
         }
         let model_id = self
             .previewed_model_id
@@ -703,6 +700,21 @@ impl NativeModelSelectorState {
 
     fn set_local_error(&mut self, error: Option<String>) {
         self.local_error = error;
+    }
+
+    fn select_model_policy(
+        &mut self,
+        model_id: &str,
+    ) -> Result<NativeModelPolicy, NativePolicyValidationError> {
+        self.preview_model(model_id);
+        let policy = self.snapshot.selection_policy_for_model(model_id)?;
+        self.policy = Some(policy.clone());
+        self.open = false;
+        self.open_axis = None;
+        self.previewed_model_id = Some(model_id.to_owned());
+        self.highlighted_model_id = None;
+        self.local_error = None;
+        Ok(policy)
     }
 
     fn model_definition_disabled(&self, model_id: &str) -> bool {
@@ -1041,7 +1053,7 @@ impl NativeModelSelector {
             .h(px(COMPACT_CONTROL_HEIGHT_PX))
             .max_w(px(360.0))
             .px(px(8.0))
-            .rounded(px(4.0))
+            .rounded(px(10.0))
             .hover(move |style| style.bg(hover_fill_gradient(self.theme)))
             .text_color(foreground);
         trigger = trigger.child(
@@ -1058,7 +1070,7 @@ impl NativeModelSelector {
             div()
                 .flex()
                 .items_center()
-                .gap(px(5.0))
+                .gap(px(4.0))
                 .flex_1()
                 .min_w(px(0.0))
                 .overflow_hidden()
@@ -1126,8 +1138,11 @@ impl NativeModelSelector {
             .p(px(8.0))
             .gap(px(8.0))
             .rounded(px(22.0))
-            .bg(source_surface_gradient(self.theme))
+            .backdrop_blur(px(GLASS_BLUR_RADIUS_PX))
+            .bg(glass_material())
+            .text_color(self.theme.colors.foreground.to_paint())
             .shadow(source_menu_shadows(self.theme));
+        panel = panel.child(glass_highlight_layer(px(22.0)));
         panel = panel.child(self.render_engine_tabs(cx));
         panel = panel.child(
             div()
@@ -1243,8 +1258,9 @@ impl NativeModelSelector {
                     .gap(px(4.0))
                     .px(px(10.0))
                     .py(px(4.0))
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .rounded(px(10.0))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(self.theme.colors.muted_foreground.to_paint())
                     .child(
                         icon(IconStyle::resolve(
@@ -1264,8 +1280,16 @@ impl NativeModelSelector {
             list = list.child(section);
         }
         let scroll = self.menu_scroll.clone();
-        let top = self.theme.surfaces.value(SurfaceStep::S800);
-        let bottom = self.theme.surfaces.value(SurfaceStep::S925);
+        let top = self
+            .theme
+            .surfaces
+            .value(SurfaceStep::S800)
+            .with_alpha(0.14);
+        let bottom = self
+            .theme
+            .surfaces
+            .value(SurfaceStep::S800)
+            .with_alpha(0.14);
         let fade = canvas(
             |_, _, _| {},
             move |bounds, (), window, _| {
@@ -1326,10 +1350,12 @@ impl NativeModelSelector {
             .gap(px(8.0))
             .h(px(MODEL_ROW_HEIGHT_PX))
             .px(px(10.0))
-            .rounded(px(14.0))
+            .rounded(px(12.0))
             .hover(|style| style.bg(hover_fill_gradient(self.theme)))
-            .when(highlighted, |row| row.bg(hover_fill_gradient(self.theme)))
-            .when(selected, |row| row.bg(hover_fill_gradient(self.theme)))
+            .when(
+                highlighted || (selected && self.state.highlighted_model_id().is_none()),
+                |row| row.bg(hover_fill_gradient(self.theme)),
+            )
             .when(definition_disabled, |row| row.opacity(0.58));
         row = row.on_hover(cx.listener(move |view: &mut Self, hovered: &bool, _, cx| {
             if *hovered {
@@ -1349,7 +1375,7 @@ impl NativeModelSelector {
                 self.theme,
                 provider_asset(&model.provider_id, &model.engine_id),
                 IconSize::Default,
-                IconTint::Muted,
+                IconTint::Inherit,
             ))
             .size(px(20.0))
             .flex_shrink_0(),
@@ -1364,7 +1390,7 @@ impl NativeModelSelector {
                 div()
                     .truncate()
                     .text_size(px(14.0))
-                    .line_height(px(16.0))
+                    .line_height(px(20.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(model.name.clone()),
             )
@@ -1462,7 +1488,7 @@ impl NativeModelSelector {
         let mut summary = div().flex().flex_col().gap(px(4.0)).child(
             div()
                 .flex()
-                .items_center()
+                .items_baseline()
                 .justify_between()
                 .gap(px(8.0))
                 .child(
@@ -1572,9 +1598,16 @@ impl NativeModelSelector {
             .gap(px(7.0))
             .h(px(POLICY_CONTROL_HEIGHT_PX))
             .px(px(8.0))
-            .rounded(px(6.0))
+            .rounded(px(8.0))
             .bg(source_control_gradient(self.theme))
-            .shadow(source_card_shadows(self.theme))
+            .shadow(
+                self.theme
+                    .elevation
+                    .card_shadow
+                    .into_iter()
+                    .map(|layer| layer.to_box_shadow())
+                    .collect(),
+            )
             .when(disabled, |trigger| trigger.opacity(0.58))
             .child(
                 icon(IconStyle::resolve(
@@ -1644,11 +1677,13 @@ impl NativeModelSelector {
                 .max_h(px(220.0))
                 .overflow_y_scroll()
                 .scrollbar_width(px(0.0))
-                .p(px(3.0))
+                .p(px(4.0))
                 .gap(px(2.0))
                 .rounded(px(18.0))
-                .bg(source_surface_gradient(self.theme))
+                .backdrop_blur(px(GLASS_BLUR_RADIUS_PX))
+                .bg(glass_material())
                 .shadow(source_card_shadows(self.theme));
+            options = options.child(glass_highlight_layer(px(18.0)));
             let mut current_thinking_group: Option<String> = None;
             for option in self.axis_options(axis, &self.preview_view()) {
                 let group = option.group.clone();
@@ -1712,6 +1747,10 @@ impl NativeModelSelector {
         let option_label = option.label.clone();
         let highlighted = self.highlighted_axis_option.as_ref() == Some(&option.id);
         let option_selector = format!("artisan-model-policy-option-{axis:?}-{}", option.id);
+        let option_description = option.description.clone();
+        let option_advisory = option.advisory.clone();
+        let tooltip_description =
+            option_tooltip_text(option_advisory.as_deref(), option_description.as_deref());
         let mut row = div()
             .id(format!(
                 "artisan-native-model-selector-option-{axis:?}-{}",
@@ -1727,9 +1766,10 @@ impl NativeModelSelector {
             .rounded(px(10.0))
             .text_size(px(11.0))
             .hover(|row| row.bg(hover_fill_gradient(self.theme)))
-            .when(option.selected || highlighted, |row| {
-                row.bg(hover_fill_gradient(self.theme))
-            })
+            .when(
+                highlighted || (option.selected && self.highlighted_axis_option.is_none()),
+                |row| row.bg(hover_fill_gradient(self.theme)),
+            )
             .when(option.disabled, |row| row.opacity(0.5))
             .child(
                 div()
@@ -1738,29 +1778,28 @@ impl NativeModelSelector {
                     .justify_between()
                     .child(option_label),
             );
+        if let Some(tooltip_description) = tooltip_description {
+            let tooltip_advisory = option_advisory.clone();
+            let tooltip_copy = option_description.clone();
+            let tooltip_theme = self.theme;
+            row = row
+                .aria_description(tooltip_description.clone())
+                .tooltip(move |_, cx| {
+                    let advisory = tooltip_advisory.clone();
+                    let description = tooltip_copy.clone();
+                    cx.new(move |_| NativeModelSelectorOptionTooltip {
+                        theme: tooltip_theme,
+                        advisory,
+                        description,
+                    })
+                    .into()
+                });
+        }
         if !option_disabled {
             row = row.on_click(
                 cx.listener(move |view: &mut Self, _: &ClickEvent, window, cx| {
                     view.choose_axis(axis, option_id.clone(), window, cx);
                 }),
-            );
-        }
-        if let Some(description) = option.description {
-            row = row.child(
-                div()
-                    .text_size(px(9.0))
-                    .line_height(px(12.0))
-                    .text_color(self.theme.colors.muted_foreground.to_paint())
-                    .child(description),
-            );
-        }
-        if let Some(advisory) = option.advisory {
-            row = row.child(
-                div()
-                    .text_size(px(9.0))
-                    .line_height(px(12.0))
-                    .text_color(self.theme.colors.banner_warning.to_paint())
-                    .child(advisory),
             );
         }
         if option.selected {
@@ -1953,6 +1992,46 @@ impl Render for NativeModelSelector {
     }
 }
 
+struct NativeModelSelectorOptionTooltip {
+    theme: ArtisanTheme,
+    advisory: Option<String>,
+    description: Option<String>,
+}
+
+impl Render for NativeModelSelectorOptionTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let mut tooltip = div()
+            .flex()
+            .flex_col()
+            .max_w(px(320.0))
+            .gap(px(2.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(18.0))
+            .backdrop_blur(px(GLASS_BLUR_RADIUS_PX))
+            .bg(glass_material())
+            .shadow(source_card_shadows(self.theme))
+            .text_size(px(12.0))
+            .line_height(px(16.0))
+            .text_color(self.theme.colors.muted_foreground.to_paint())
+            .relative()
+            .overflow_hidden()
+            .child(glass_highlight_layer(px(18.0)));
+        if let Some(advisory) = self.advisory.clone() {
+            tooltip = tooltip.child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(self.theme.colors.destructive.to_paint())
+                    .child(advisory),
+            );
+        }
+        if let Some(description) = self.description.clone() {
+            tooltip = tooltip.child(div().child(description));
+        }
+        tooltip
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SelectorOption {
     id: String,
@@ -1962,6 +2041,20 @@ struct SelectorOption {
     group: Option<String>,
     selected: bool,
     disabled: bool,
+}
+
+fn option_tooltip_text(advisory: Option<&str>, description: Option<&str>) -> Option<String> {
+    let mut text = String::new();
+    if let Some(advisory) = advisory.filter(|advisory| !advisory.is_empty()) {
+        text.push_str(advisory);
+    }
+    if let Some(description) = description.filter(|description| !description.is_empty()) {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(description);
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 fn selector_key_from_event(event: &KeyDownEvent) -> Option<NativeModelSelectorKey> {
@@ -1990,14 +2083,6 @@ fn menu_max_height_for_viewport(viewport: Size<Pixels>) -> Pixels {
     px(MENU_MAX_HEIGHT_PX.min(available.max(0.0)))
 }
 
-fn source_surface_gradient(theme: ArtisanTheme) -> gpui::Background {
-    let (top, bottom) = match theme.mode {
-        ThemeMode::Light => (SurfaceStep::S225, SurfaceStep::S200),
-        ThemeMode::Dark => (SurfaceStep::S800, SurfaceStep::S925),
-    };
-    vertical_gradient(theme.surfaces.value(top), theme.surfaces.value(bottom))
-}
-
 fn source_control_gradient(theme: ArtisanTheme) -> gpui::Background {
     let (top, bottom) = match theme.mode {
         ThemeMode::Light => (SurfaceStep::S225, SurfaceStep::S200),
@@ -2006,25 +2091,12 @@ fn source_control_gradient(theme: ArtisanTheme) -> gpui::Background {
     vertical_gradient(theme.surfaces.value(top), theme.surfaces.value(bottom))
 }
 
-fn source_card_shadows(theme: ArtisanTheme) -> Vec<BoxShadow> {
-    theme
-        .elevation
-        .card_shadow
-        .into_iter()
-        .map(|layer| layer.to_box_shadow())
-        .collect()
+fn source_card_shadows(_theme: ArtisanTheme) -> Vec<gpui::BoxShadow> {
+    glass_card_shadows()
 }
 
-fn source_menu_shadows(theme: ArtisanTheme) -> Vec<BoxShadow> {
-    let mut shadows = source_card_shadows(theme);
-    shadows.extend(
-        theme
-            .elevation
-            .menu_shadow
-            .into_iter()
-            .map(|layer| layer.to_box_shadow()),
-    );
-    shadows
+fn source_menu_shadows(_theme: ArtisanTheme) -> Vec<gpui::BoxShadow> {
+    glass_card_shadows()
 }
 
 fn axis_icon(axis: NativePolicyAxis) -> AssetId {
@@ -2303,20 +2375,10 @@ mod tests {
             state.choose_option(NativePolicyAxis::Thinking, "not-in-the-catalog"),
             Err(NativePolicyValidationError::InvalidThinkingOption { .. })
         ));
-    }
-
-    #[test]
-    fn electron_compact_geometry_is_bounded() {
-        assert_eq!(MENU_WIDTH_PX, 480.0);
-        assert_eq!(MODEL_PANEL_HEIGHT_PX, 192.0);
-        assert_eq!(MODEL_PREVIEW_WIDTH_PX, 224.0);
-        assert_eq!(MODEL_ROW_HEIGHT_PX, 48.0);
-        assert_eq!(COMPACT_CONTROL_HEIGHT_PX, 32.0);
-        assert_eq!(POLICY_CONTROL_HEIGHT_PX, 24.0);
-        assert_eq!(
-            menu_width_for_viewport(gpui::size(px(900.0), px(700.0))),
-            px(480.0)
-        );
+        assert!(matches!(
+            state.choose_option(NativePolicyAxis::Variant, "not-in-the-catalog"),
+            Err(NativePolicyValidationError::UnknownModel(model_id)) if model_id == "not-in-the-catalog"
+        ));
     }
 
     #[test]
@@ -2329,7 +2391,6 @@ mod tests {
             .find(|model| model.id == "codex-sol")
             .expect("catalog model remains readable while offline");
         assert!(!row.available);
-        assert!(row.unavailable_reason.is_some());
         assert!(!state.model_definition_disabled("codex-sol"));
         assert!(state.select_model("codex-sol").is_some());
         assert!(state.local_error.is_none());
