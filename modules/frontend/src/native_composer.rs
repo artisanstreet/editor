@@ -9,8 +9,10 @@
 
 use std::{ops::Range, panic};
 
+use artisan_assets::AssetId;
 use artisan_ui::{
-    button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility},
+    asset_seam::asset_glyph,
+    button::{AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility},
     motion::MotionPolicy,
     theme::{ArtisanTheme, DesktopTheme, ThemeMode},
 };
@@ -26,6 +28,7 @@ use gpui::{
 };
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
+use crate::composer_draft_session_policy::{ComposerDraft, ComposerDraftStore, InMemoryComposerDraftStore};
 
 actions!(
     native_composer,
@@ -44,6 +47,8 @@ actions!(
         End,
         RequestSend,
         InsertNewline,
+        Undo,
+        Redo,
     ]
 );
 
@@ -57,6 +62,7 @@ const NATIVE_COMPOSER_SEND_SELECTOR: &str = "artisan-native-composer-send";
 pub(crate) enum NativeComposerEvent {
     /// The user invoked the send control; the application owns admission.
     SendRequested,
+    ConfigureModel,
 }
 
 /// Native GPUI owner of the exact composer draft and its text-service state.
@@ -64,6 +70,13 @@ pub(crate) struct NativeComposer {
     state: ComposerState,
     focus_handle: FocusHandle,
     send_focus_handle: FocusHandle,
+    model_focus_handle: FocusHandle,
+    model_label: String,
+    send_blocked: bool,
+    draft_store: InMemoryComposerDraftStore,
+    draft_thread: Option<String>,
+    undo: Vec<(String, Range<usize>)>,
+    redo: Vec<(String, Range<usize>)>,
     selection: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -84,7 +97,14 @@ impl NativeComposer {
         Self {
             state: ComposerState::new(),
             focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
-            send_focus_handle: cx.focus_handle().tab_index(1).tab_stop(true),
+            send_focus_handle: cx.focus_handle().tab_index(2).tab_stop(true),
+            model_focus_handle: cx.focus_handle().tab_index(1).tab_stop(true),
+            model_label: "Select model".into(),
+            send_blocked: false,
+            draft_store: InMemoryComposerDraftStore::new(),
+            draft_thread: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
             selection: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -119,15 +139,46 @@ impl NativeComposer {
     }
 
     pub(crate) fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
-        if self.state.is_disabled() == disabled {
+        if self.state.is_disabled() == disabled && self.send_blocked == disabled {
             return;
         }
+        self.send_blocked = disabled;
         self.state.set_disabled(disabled);
         cx.notify();
     }
 
+    pub(crate) fn switch_thread(&mut self, thread: String, carry_draft: bool, cx: &mut Context<Self>) {
+        if self.draft_thread.as_ref() == Some(&thread) || self.state.is_submitting() { return; }
+        if let Some(previous) = self.draft_thread.replace(thread.clone()) {
+            self.draft_store.write(&previous, ComposerDraft {
+                text: self.state.draft().to_owned(), ..ComposerDraft::default()
+            });
+            if !carry_draft {
+                let restored = self.draft_store.read(&thread).unwrap_or_default();
+                self.state.set_draft(restored.text);
+                let end = self.state.draft().len();
+                self.selection = end..end;
+                self.selection_reversed = false;
+                self.marked_range = None;
+                self.undo.clear();
+                self.redo.clear();
+                self.layout = None;
+                self.painted_bounds = None;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_surface(&mut self, blocked: bool, model_label: String, cx: &mut Context<Self>) {
+        if self.send_blocked != blocked || self.model_label != model_label {
+            self.send_blocked = blocked;
+            self.model_label = model_label;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn send_ready(&self) -> bool {
-        self.state.send_ready() && self.marked_range.is_none()
+        !self.send_blocked && self.state.send_ready() && self.marked_range.is_none()
     }
 
     pub(crate) fn is_submitting(&self) -> bool {
@@ -137,6 +188,7 @@ impl NativeComposer {
     pub(crate) fn begin_submission(
         &mut self,
     ) -> Result<(artisan_domain::MessageBody, SubmissionToken), SubmissionBlocked> {
+        if self.send_blocked { return Err(SubmissionBlocked::Disabled); }
         self.state.begin_submission()
     }
 
@@ -155,6 +207,30 @@ impl NativeComposer {
             self.selection = end..end;
             self.selection_reversed = false;
             self.marked_range = None;
+            cx.notify();
+        }
+    }
+
+    fn undo_action(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.is_disabled() || self.state.is_submitting() || self.marked_range.is_some() { return; }
+        if let Some((draft, selection)) = self.undo.pop() {
+            self.redo.push((self.state.draft().to_owned(), self.selection.clone()));
+            self.state.set_draft(draft);
+            self.selection = selection;
+            self.selection_reversed = false;
+            self.layout = None;
+            cx.notify();
+        }
+    }
+
+    fn redo_action(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.is_disabled() || self.state.is_submitting() || self.marked_range.is_some() { return; }
+        if let Some((draft, selection)) = self.redo.pop() {
+            self.undo.push((self.state.draft().to_owned(), self.selection.clone()));
+            self.state.set_draft(draft);
+            self.selection = selection;
+            self.selection_reversed = false;
+            self.layout = None;
             cx.notify();
         }
     }
@@ -198,6 +274,11 @@ impl NativeComposer {
             Some(_) => return,
             None => None,
         };
+        if next != self.state.draft() && self.marked_range.is_none() {
+            if self.undo.len() >= 64 { self.undo.remove(0); }
+            self.undo.push((self.state.draft().to_owned(), self.selection.clone()));
+            self.redo.clear();
+        }
         self.state.set_draft(next);
         self.layout = None;
         self.painted_bounds = None;
@@ -255,6 +336,11 @@ impl NativeComposer {
 
     pub(crate) fn bind_actions(cx: &mut App) {
         cx.bind_keys([
+            KeyBinding::new("ctrl-z", Undo, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("cmd-z", Undo, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-z", Redo, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("cmd-shift-z", Redo, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-y", Redo, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("backspace", Backspace, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("delete", Delete, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("left", Left, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
@@ -506,8 +592,8 @@ impl Render for NativeComposer {
             .key_context(NATIVE_COMPOSER_KEY_CONTEXT)
             .w_full()
             .min_w(px(0.0))
-            .min_h(px(56.0))
-            .max_h(px(180.0))
+            .min_h(px(64.0))
+            .max_h(px(240.0))
             .px(px(12.0))
             .py(px(10.0))
             .rounded(px(6.0))
@@ -543,6 +629,8 @@ impl Render for NativeComposer {
         });
 
         editor = editor
+            .on_action(cx.listener(Self::undo_action))
+            .on_action(cx.listener(Self::redo_action))
             .on_action(cx.listener(Self::delete_backward))
             .on_action(cx.listener(Self::delete_forward))
             .on_action(cx.listener(Self::move_left_action))
@@ -561,7 +649,7 @@ impl Render for NativeComposer {
         let editor =
             NativeComposerInputElement::new(editor.into_any_element(), entity.clone(), focus);
         let send_ready = self.send_ready();
-        let sending = self.is_submitting();
+
         self.send_focus_handle = self.send_focus_handle.clone().tab_stop(send_ready);
         let send_entity = entity.clone();
         let send = Button::new(
@@ -570,8 +658,9 @@ impl Render for NativeComposer {
             theme,
             MotionPolicy::Reduced,
             ButtonVariant::Default,
-            ButtonSize::Small,
-            ButtonContent::text(if sending { "Sending…" } else { "Send" }),
+            ButtonSize::IconSmall,
+            ButtonContent::icon_only(AssetId::TABLER_ARROW_UP,
+                AccessibleLabel::new("Send message").expect("nonempty send label")),
         )
         .expect("the native composer send button configuration is valid")
         .focus_visibility(FocusVisibility::Visible)
@@ -581,18 +670,38 @@ impl Render for NativeComposer {
             send_entity.update(cx, NativeComposer::request_send);
         });
 
+        let model = div()
+            .id("artisan-composer-model")
+            .track_focus(&self.model_focus_handle)
+            .tab_index(0)
+            .h(px(32.0)).min_w(px(0.0)).px(px(8.0))
+            .flex().items_center().gap(px(6.0)).rounded(px(8.0))
+            .cursor_pointer().hover(move |style| style.bg(desktop_theme.selected))
+            .text_color(desktop_theme.secondary).text_size(px(13.0))
+            .debug_selector(|| "artisan-composer-model".to_owned())
+            .child(div().truncate().child(self.model_label.clone()))
+            .child(asset_glyph(AssetId::TABLER_CHEVRON_DOWN).size(px(14.0)))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(NativeComposerEvent::ConfigureModel)))
+            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    cx.emit(NativeComposerEvent::ConfigureModel);
+                }
+            }));
+
         div()
             .w_full()
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .p(px(12.0))
+            .min_h(px(128.0))
+            .p(px(8.0))
             .rounded(px(16.0))
             .border_1()
             .border_color(desktop_theme.line)
             .bg(desktop_theme.field)
             .child(editor)
-            .child(div().w_full().flex().justify_end().child(send))
+            .child(div().w_full().flex().items_center().justify_between().child(model).child(send))
     }
 }
 
@@ -1131,6 +1240,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn thread_drafts_restore_without_cross_thread_undo(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        cx.update(|_, app| {
+            view.update(app, |composer, cx| {
+                composer.switch_thread("one".into(), false, cx);
+                composer.replace_range(0..0, "first draft", None, cx);
+                composer.switch_thread("two".into(), false, cx);
+                assert_eq!(composer.state.draft(), "");
+                assert!(composer.undo.is_empty());
+                composer.replace_range(0..0, "second draft", None, cx);
+                composer.switch_thread("one".into(), false, cx);
+                assert_eq!(composer.state.draft(), "first draft");
+                composer.switch_thread("two".into(), false, cx);
+                assert_eq!(composer.state.draft(), "second draft");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn offline_drafting_and_undo_preserve_text_without_admitting_send(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+        cx.update(|window, app| {
+            view.update(app, |composer, cx| {
+                composer.set_surface(true, "Select model".into(), cx);
+                composer.replace_range(0..0, "hello 🌍", None, cx);
+                assert_eq!(composer.state.draft(), "hello 🌍");
+                assert!(!composer.send_ready());
+                assert!(matches!(composer.begin_submission(), Err(super::SubmissionBlocked::Disabled)));
+                composer.undo_action(&super::Undo, window, cx);
+                assert_eq!(composer.state.draft(), "");
+                composer.redo_action(&super::Redo, window, cx);
+                assert_eq!(composer.state.draft(), "hello 🌍");
+            });
+        });
+    }
+
+    #[gpui::test]
     fn send_has_stable_identity_focusability_visible_focus_and_local_tab_order(
         cx: &mut TestAppContext,
     ) {
@@ -1144,7 +1290,7 @@ mod tests {
         cx.update(|_, app| {
             let composer = view.read(app);
             assert_eq!(composer.focus_handle.tab_index, 0);
-            assert_eq!(composer.send_focus_handle.tab_index, 1);
+            assert_eq!(composer.send_focus_handle.tab_index, 2);
             assert!(composer.focus_handle.tab_stop);
             assert!(composer.send_focus_handle.tab_stop);
         });
@@ -1160,9 +1306,14 @@ mod tests {
             let composer = view.read(app);
             let editor_focus = composer.focus_handle.clone();
             let send_focus = composer.send_focus_handle.clone();
+            let model_focus = composer.model_focus_handle.clone();
             window.focus(&editor_focus, app);
             window.focus_next(app);
+            assert!(model_focus.is_focused(window));
+            window.focus_next(app);
             assert!(send_focus.is_focused(window));
+            window.focus_prev(app);
+            assert!(model_focus.is_focused(window));
             window.focus_prev(app);
             assert!(editor_focus.is_focused(window));
         });

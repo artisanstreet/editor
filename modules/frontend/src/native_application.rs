@@ -299,6 +299,7 @@ impl NativeApplication {
         let composer_subscription =
             cx.subscribe(&composer, |application, _composer, event, cx| match event {
                 NativeComposerEvent::SendRequested => application.begin_message_submission(cx),
+                NativeComposerEvent::ConfigureModel => application.navigate(NativeRoute::Settings { section: SettingsRoute::Engines, engine: None }, cx),
             });
         let composer_observation = cx.observe(&composer, |application, composer, cx| {
             application.observe_composer_change(&composer, cx);
@@ -1358,8 +1359,12 @@ impl NativeApplication {
 
     fn sync_composer_availability(&mut self, cx: &mut Context<Self>) {
         let disabled = !self.message_submission_is_admissible(cx);
+        let model_label = self.engine_settings.authoritative_config().map(|config| {
+            let artisan_domain::EngineSelection::OpenCode2(selection) = config.selection();
+            selection.model_id().as_str().to_owned()
+        }).unwrap_or_else(|| "Select model".into());
         self.composer.update(cx, |composer, composer_cx| {
-            composer.set_disabled(disabled, composer_cx);
+            composer.set_surface(disabled, model_label, composer_cx);
         });
     }
 
@@ -3460,6 +3465,9 @@ impl NativeApplication {
         let Some(thread_id) = self.pending_thread.take() else {
             return;
         };
+        self.composer.update(cx, |composer, cx| {
+            composer.switch_thread(thread_id.as_str().to_owned(), switch_generation.is_none(), cx);
+        });
         self.selected_thread = Some(thread_id.clone());
         if matches!(
             self.route(),
@@ -3841,6 +3849,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         self.engine_settings.on_settings_loaded(generation, result);
+        self.sync_composer_availability(cx);
         cx.notify();
     }
 
