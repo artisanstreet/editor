@@ -4174,6 +4174,7 @@ impl Render for NativeApplication {
             sidebar,
             body,
             window.scale_factor(),
+            window.is_maximized(),
         );
         div()
             .id("artisan-desktop-application-root")

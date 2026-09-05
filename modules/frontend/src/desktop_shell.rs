@@ -10,7 +10,9 @@
 use artisan_assets::AssetId;
 use artisan_ui::asset_seam::asset_glyph;
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
-use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
+use gpui::prelude::{
+    InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
+};
 use gpui::{AnyElement, Div, FontWeight, Pixels, WindowControlArea, div, px};
 
 use crate::shell::title_bar_caption_button;
@@ -130,6 +132,7 @@ pub fn desktop_shell(
     sidebar: AnyElement,
     body: AnyElement,
     scale_factor: f32,
+    maximized: bool,
 ) -> Div {
     let style = DesktopShellStyle::resolve(collapsed, scale_factor);
     let legacy_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
@@ -144,11 +147,7 @@ pub fn desktop_shell(
             WindowControlArea::Min,
             "artisan-desktop-titlebar-minimize",
         ))
-        .child(title_bar_caption_button(
-            legacy_theme,
-            WindowControlArea::Max,
-            "artisan-desktop-titlebar-maximize",
-        ))
+        .child(maximize_button(theme, maximized, style.one_device_pixel))
         .child(title_bar_caption_button(
             legacy_theme,
             WindowControlArea::Close,
@@ -255,6 +254,52 @@ pub fn desktop_shell(
                 .left(style.sidebar_width - px(6.0))
                 .top(style.titlebar_height - px(6.0)),
         )
+}
+
+/// Windows maximize/restore glyph follows the actual window state.
+fn maximize_button(theme: DesktopTheme, maximized: bool, stroke: Pixels) -> gpui::Stateful<Div> {
+    let mut glyph = div().relative().w(px(10.0)).h(px(10.0));
+    if maximized {
+        glyph = glyph
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .border_t(stroke)
+                    .border_r(stroke)
+                    .border_color(theme.foreground),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .border(stroke)
+                    .border_color(theme.foreground),
+            );
+    } else {
+        glyph = glyph.border(stroke).border_color(theme.foreground);
+    }
+    div()
+        .id("artisan-desktop-titlebar-maximize")
+        .w(px(DESKTOP_TITLEBAR_CONTROL_WIDTH_PX))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(move |style| style.bg(theme.selected))
+        .window_control_area(WindowControlArea::Max)
+        .on_click(|event, window, _| {
+            if event.is_keyboard() {
+                window.zoom_window();
+            }
+        })
+        .child(glyph)
 }
 
 /// Small square glyph used by desktop-only navigation rows.
