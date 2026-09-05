@@ -44,8 +44,8 @@ use artisan_database::{
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineProfileId, MessageId, PatchBatch,
-    ProjectId, Query, QueueFirstMessage, QueueMessage, RequestId, RootPath, SetThreadEngineConfig,
-    ThreadId, UnixMillis,
+    ProjectId, Query, QueueFirstMessage, QueueMessage, RequestId, RootPath, SetModelFavorite,
+    SetThreadEngineConfig, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ActiveRunResult, ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome,
@@ -60,7 +60,7 @@ use crate::command_admission::{
 };
 use crate::conversation_commit_notifier::ConversationCommitNotifier;
 use crate::conversation_subscription_preparation::{
-    PrepareSubscriptionError, prepare_conversation_subscription, stop_conversation_subscription,
+    prepare_conversation_subscription, stop_conversation_subscription, PrepareSubscriptionError,
 };
 use crate::conversation_subscription_registry::{
     ActivateError, ApplyBatchError, ConversationSubscriptionRegistry, RegisterError,
@@ -517,14 +517,23 @@ impl RequestHandler {
         self
     }
 
+    /// Attaches the one process-owned thread/profile catalog service shared
+    /// with native dispatch. The service resolves its scope from durable
+    /// repository state and performs bounded owner admission; it owns no run,
+    /// provider session, or frontend publication state.
+    #[must_use]
+    pub(crate) fn with_composer_catalog(
+        mut self,
+        service: crate::composer_catalog_service::ComposerCatalogService,
+    ) -> Self {
+        self.composer_catalog = Some(service);
+        self
+    }
+
     /// Attaches the one process-owned live-run cancellation registry shared
     /// with native dispatch. The registry contains only exact live
     /// `(thread_id, run_id)` routes; it owns no terminal state or provider.
     #[must_use]
-    pub(crate) fn with_composer_catalog(mut self, service: crate::composer_catalog_service::ComposerCatalogService) -> Self {
-        self.composer_catalog = Some(service);
-        self
-    }
     pub fn with_run_cancellation_registry(mut self, registry: RunCancellationRegistry) -> Self {
         self.run_cancellation = Some(registry);
         self
@@ -1002,6 +1011,22 @@ impl RequestHandler {
                 };
                 Ok(outcome(request_id, ResponsePayload::ActiveRun(result)))
             }
+            Query::ListQueuedMessages(query) => self.read_composer_queue(request_id, query).await,
+            Query::ReadRecalledMessage(query) => self.read_recalled_composer_message(request_id, query).await,
+            Query::ReadRunUsage(query) => self.read_composer_usage(request_id, query).await,
+            Query::ReadComposerCatalog(read) => {
+                crate::composer_catalog_handler::read_composer_catalog(
+                    self.composer_catalog.as_ref(),
+                    &self.repository,
+                    request_id,
+                    read,
+                )
+                .await
+            }
+            Query::ReadModelFavorites(_) => {
+                crate::composer_catalog_handler::read_model_favorites(&self.repository, request_id)
+                    .await
+            }
             Query::ListRegisteredEngineProfiles(_) => {
                 let Some(reader) = self.registered_engine_profiles.as_ref() else {
                     return Err(typed_failure(
@@ -1126,6 +1151,10 @@ impl RequestHandler {
             Command::SetThreadEngineConfig(config) => {
                 self.set_thread_engine_config_outcome(request_id, config.as_ref())
                     .await
+            }
+            Command::WithdrawQueuedMessage(command) => self.withdraw_composer_message(request_id, command).await,
+            Command::SetModelFavorite(favorite) => {
+                self.set_model_favorite_outcome(request_id, favorite).await
             }
         }
     }
@@ -1378,6 +1407,60 @@ impl RequestHandler {
             .await
             .map_err(|error| repository_failure(&error, request_id))?;
         Ok(set_thread_engine_config_response(request_id, &result))
+    }
+
+    /// Answers one catalog-backed favorite mutation.
+    ///
+    /// Durable receipt lookup runs before catalog discovery and before the
+    /// acceptance clock. Exact repository replays therefore succeed while a
+    /// provider/profile service is unavailable and do not consult the Forge
+    /// admission origin. A lookup miss performs scoped catalog admission first;
+    /// only an admitted mutation consumes one acceptance instant. The
+    /// repository remains authoritative for the immediate favorite-state
+    /// transaction and its race-safe receipt replay.
+    async fn set_model_favorite_outcome(
+        &self,
+        request_id: &RequestId,
+        favorite: &SetModelFavorite,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        if let Some(replay) = self
+            .repository
+            .lookup_set_model_favorite(
+                favorite.request_id(),
+                favorite.model_id(),
+                favorite.favorite(),
+            )
+            .await
+            .map_err(|error| {
+                crate::composer_catalog_handler::protocol_failure(
+                    crate::composer_catalog_handler::favorites_error(&error),
+                    request_id,
+                )
+            })?
+        {
+            return Ok(crate::composer_catalog_handler::favorite_response(
+                request_id, favorite, &replay,
+            ));
+        }
+
+        crate::composer_catalog_handler::prepare_model_favorite(
+            self.composer_catalog.as_ref(),
+            &self.repository,
+            favorite,
+        )
+        .await
+        .map_err(|error| crate::composer_catalog_handler::protocol_failure(error, request_id))?;
+        let accepted_at = self
+            .origin
+            .acceptance_instant()
+            .map_err(|error| origin_clock_failure(error, request_id))?;
+        crate::composer_catalog_handler::persist_model_favorite(
+            &self.repository,
+            favorite,
+            accepted_at,
+            request_id,
+        )
+        .await
     }
 
     /// Answers conversation reads and subscription control.
@@ -1744,3 +1827,10 @@ fn typed_failure(
         request_id: Some(request_id.clone()),
     }
 }
+
+#[path = "composer_state_handler.rs"]
+mod composer_state_handler;
+
+#[cfg(test)]
+#[path = "../../../tests/backend/composer_state_handler.rs"]
+mod composer_state_handler_tests;

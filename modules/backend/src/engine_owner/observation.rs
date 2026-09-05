@@ -5,7 +5,7 @@
 //! No raw frames, credentials, serde persistence, database calls, or public
 //! exports are added here.
 
-use artisan_domain::RunId;
+use artisan_domain::{RunId, RunUsageReport};
 use artisan_transport::CancelHandle;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -25,13 +25,15 @@ pub(crate) enum TerminalState {
 /// Text-delta observation for one lossless chunk.
 ///
 /// Contains the caller-provided run identity, provided durable sequence
-/// (never zero/invented/incremented per chunk), stable chunk ID, and exact
-/// delta text. Empty text may produce zero deltas.
+/// (never zero/invented/incremented per chunk), stable chunk ID, optional
+/// explicit provider part ID, and exact delta text. Empty text may produce
+/// zero deltas.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TextDelta {
     run_id: RunId,
     sequence: u64,
     chunk_id: String,
+    part_id: Option<String>,
     delta: String,
 }
 
@@ -49,6 +51,20 @@ impl TextDelta {
     #[must_use]
     pub(crate) fn chunk_id(&self) -> &str {
         &self.chunk_id
+    }
+
+    #[must_use]
+    pub(crate) fn part_id(&self) -> Option<&str> {
+        self.part_id.as_deref()
+    }
+
+    /// Attaches the provider's already-validated explicit text-part identity.
+    /// Fixture deltas intentionally leave this absent and use one bounded
+    /// compatibility part in the dispatcher.
+    #[must_use]
+    pub(crate) fn with_part_id(mut self, part_id: String) -> Self {
+        self.part_id = Some(part_id);
+        self
     }
 
     #[must_use]
@@ -90,6 +106,7 @@ pub(crate) fn chunk_text(
                 run_id: run_id.clone(),
                 sequence: durable_sequence,
                 chunk_id,
+                part_id: None,
                 delta,
             });
             chunk_index += 1;
@@ -106,6 +123,7 @@ pub(crate) fn chunk_text(
             run_id: run_id.clone(),
             sequence: durable_sequence,
             chunk_id,
+            part_id: None,
             delta,
         });
     }
@@ -171,10 +189,74 @@ impl TerminalObservation {
     }
 }
 
-/// Minimal wakeable observation carrying either a text delta or a terminal.
+/// A bounded provider text projection used when OpenCode sends a text-end
+/// reconciliation envelope. The dispatcher applies it to the explicit part
+/// projection and rebuilds the one durable assistant item without appending
+/// the same full part twice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TextSnapshot {
+    run_id: RunId,
+    sequence: u64,
+    part_id: String,
+    text: String,
+}
+
+impl TextSnapshot {
+    #[must_use]
+    pub(crate) fn new(run_id: RunId, sequence: u64, part_id: String, text: String) -> Self {
+        Self {
+            run_id,
+            sequence,
+            part_id,
+            text,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    #[must_use]
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    #[must_use]
+    pub(crate) fn part_id(&self) -> &str {
+        &self.part_id
+    }
+
+    #[must_use]
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// A provider usage report attributed to the immutable current run snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UsageObservation {
+    report: RunUsageReport,
+}
+
+impl UsageObservation {
+    #[must_use]
+    pub(crate) fn new(report: RunUsageReport) -> Self {
+        Self { report }
+    }
+
+    #[must_use]
+    pub(crate) fn report(&self) -> &RunUsageReport {
+        &self.report
+    }
+}
+
+/// Minimal wakeable observation carrying normalized provider state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EngineObservation {
     TextDelta(TextDelta),
+    TextSnapshot(TextSnapshot),
+    Usage(UsageObservation),
     Terminal(TerminalObservation),
 }
 

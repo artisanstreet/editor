@@ -32,7 +32,8 @@ use artisan_transport::CancelHandle;
 use super::catalog::{CatalogError, CatalogResult};
 use super::http::{
     CreateSessionInput, HealthError, HealthSecret, PromptError, PromptFile, PromptInput,
-    perform_create_session, perform_interrupt, perform_prompt,
+    ResumeError, ResumeInput, ResumeSelection, perform_create_session, perform_interrupt,
+    perform_prompt, perform_resume,
 };
 use super::observation::{EngineObservation, TerminalState};
 use super::process::{
@@ -41,7 +42,9 @@ use super::process::{
 };
 use super::readiness::ReadinessError;
 use super::readiness::ValidatedEndpoint;
-use super::stream::{StreamError, StreamInput, follow_stream_for_run};
+use super::stream::{
+    StreamError, StreamInput, StreamState, StreamUsageContext, follow_stream_for_run_with_state,
+};
 use super::{EngineBounds, EngineLimits};
 
 /// Payload-free engine health observable by the facade.
@@ -1512,6 +1515,8 @@ struct PreparedConfiguredSession {
     secret: HealthSecret,
     runtime: ConfiguredRuntime,
     session: String,
+    resume: bool,
+    stream_after: Option<u64>,
 }
 
 struct ConfiguredSession {
@@ -1526,6 +1531,9 @@ struct ConfiguredSession {
     secret: HealthSecret,
     runtime: ConfiguredRuntime,
     session: String,
+    resume: bool,
+    stream_after: Option<u64>,
+    stream_state: StreamState,
 }
 
 impl ConfiguredSession {
@@ -1542,6 +1550,9 @@ impl ConfiguredSession {
             secret,
             runtime,
             session,
+            resume: _,
+            stream_after,
+            stream_state,
         } = self;
         abort_after_session(AbortAfterSession {
             parts,
@@ -1550,7 +1561,9 @@ impl ConfiguredSession {
             runtime: &runtime,
             session: &session,
             run_id: &input.run_id,
-            stream_after: input.stream_after,
+            stream_after,
+            stream_state,
+            usage_context: stream_usage_context(&input),
             observations,
             respond,
             shutdown,
@@ -1704,50 +1717,96 @@ async fn create_configured_session(
     } = request;
     let selection = input.settings.config().selection().as_opencode2();
     let permission = selection.permission();
-    let create_input = CreateSessionInput {
-        directory: input.project_root.as_str(),
-        profile_id: selection.profile_id().as_str(),
-        model_id: selection.model_id().as_str(),
-        route_id: selection.route_id().as_str(),
-        variant_id: selection
-            .variant_id()
-            .map(artisan_domain::EngineVariantId::as_str),
-        permission_id: permission.permission_id().as_str(),
-        agent_id: permission.agent_id().as_str(),
-        approval: permission.approval().as_str(),
-        filesystem: permission.filesystem().as_str(),
-        network: permission.network().as_str(),
-        web_search: permission.web_search().as_str(),
-    };
-    let session_receipt = match perform_create_session(
-        &endpoint,
-        &secret,
-        &runtime.bounds,
-        phase_deadline(runtime.limits.prompt, deadline),
-        &control,
-        shutdown,
-        create_input,
-    )
-    .await
-    {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            let error = map_prompt_error(error);
-            return Err(finish_configured_start(
-                ConfiguredTurnRequest {
-                    input,
-                    deadline,
-                    control,
-                    prepared,
-                    authorize,
-                    observations,
-                    respond,
-                },
-                parts,
-                error,
-                runtime.limits.close,
-            )
-            .await);
+    let session_details = if let Some(continuation) = input.continuation.as_ref() {
+        let resume_selection = ResumeSelection::new(
+            continuation.provider_session_id(),
+            input.project_root.as_str(),
+            permission.agent_id().as_str(),
+            selection.model_id().as_str(),
+            selection.route_id().as_str(),
+            selection
+                .variant_id()
+                .map(artisan_domain::EngineVariantId::as_str),
+        );
+        match perform_resume(ResumeInput {
+            endpoint: &endpoint,
+            secret: &secret,
+            bounds: &runtime.bounds,
+            deadline: phase_deadline(runtime.limits.prompt, deadline),
+            cancel: &control,
+            shutdown,
+            selection: resume_selection,
+        })
+        .await
+        {
+            Ok(receipt) => (receipt.session_id().to_owned(), true, receipt.log_cursor()),
+            Err(error) => {
+                return Err(finish_configured_start(
+                    ConfiguredTurnRequest {
+                        input,
+                        deadline,
+                        control,
+                        prepared,
+                        authorize,
+                        observations,
+                        respond,
+                    },
+                    parts,
+                    map_resume_error(error),
+                    runtime.limits.close,
+                )
+                .await);
+            }
+        }
+    } else {
+        let create_input = CreateSessionInput {
+            directory: input.project_root.as_str(),
+            profile_id: selection.profile_id().as_str(),
+            model_id: selection.model_id().as_str(),
+            route_id: selection.route_id().as_str(),
+            variant_id: selection
+                .variant_id()
+                .map(artisan_domain::EngineVariantId::as_str),
+            permission_id: permission.permission_id().as_str(),
+            agent_id: permission.agent_id().as_str(),
+            approval: permission.approval().as_str(),
+            filesystem: permission.filesystem().as_str(),
+            network: permission.network().as_str(),
+            web_search: permission.web_search().as_str(),
+        };
+        match perform_create_session(
+            &endpoint,
+            &secret,
+            &runtime.bounds,
+            phase_deadline(runtime.limits.prompt, deadline),
+            &control,
+            shutdown,
+            create_input,
+        )
+        .await
+        {
+            Ok(receipt) => (
+                receipt.session().to_owned(),
+                false,
+                Some(input.stream_after),
+            ),
+            Err(error) => {
+                return Err(finish_configured_start(
+                    ConfiguredTurnRequest {
+                        input,
+                        deadline,
+                        control,
+                        prepared,
+                        authorize,
+                        observations,
+                        respond,
+                    },
+                    parts,
+                    map_prompt_error(error),
+                    runtime.limits.close,
+                )
+                .await);
+            }
         }
     };
     Ok(PreparedConfiguredSession {
@@ -1762,7 +1821,9 @@ async fn create_configured_session(
         endpoint,
         secret,
         runtime,
-        session: session_receipt.session().to_owned(),
+        session: session_details.0,
+        resume: session_details.1,
+        stream_after: session_details.2,
     })
 }
 
@@ -1783,7 +1844,35 @@ async fn authorize_configured_session(
         secret,
         runtime,
         session,
+        resume,
+        stream_after,
     } = state;
+    let initial_stream = match &input.launch {
+        super::InternalLaunch::Verified(_) => StreamState::for_run(input.run_id.clone(), session.clone(), stream_after),
+        #[cfg(test)]
+        super::InternalLaunch::Fixture(_) => Ok(StreamState::new(stream_after)),
+    };
+    let stream_state =
+        match initial_stream {
+            Ok(state) => state,
+            Err(error) => {
+                return finish_configured_start(
+                    ConfiguredTurnRequest {
+                        input,
+                        deadline,
+                        control,
+                        prepared,
+                        authorize,
+                        observations,
+                        respond,
+                    },
+                    parts,
+                    map_stream_error(error),
+                    runtime.limits.close,
+                )
+                .await;
+            }
+        };
     let session = ConfiguredSession {
         input,
         deadline,
@@ -1796,6 +1885,9 @@ async fn authorize_configured_session(
         secret,
         runtime,
         session,
+        resume,
+        stream_after,
+        stream_state,
     };
     if prepared
         .send(Ok(PreparedSession::new(session.session.clone())))
@@ -1848,7 +1940,7 @@ async fn execute_authorized_configured_turn(
             &session.input.prompt_delivery,
             &files,
             &session.input.prompt_id,
-            false,
+            session.resume,
             session.input.prompt.text().map(|text| text.as_str()),
         ),
     )
@@ -1856,19 +1948,24 @@ async fn execute_authorized_configured_turn(
     {
         return session.abort(shutdown, map_prompt_error(error)).await;
     }
-    let stream_result = follow_stream_for_run(
-        StreamInput::new((
-            &session.endpoint,
-            &session.secret,
-            &session.runtime.bounds,
-            phase_deadline(session.runtime.limits.sse, session.deadline),
-            &session.control,
-            shutdown,
-            &session.session,
-            session.input.stream_after,
-            session.observations.clone(),
-        )),
+    let stream_usage = stream_usage_context(&session.input);
+    let stream_input = StreamInput::new((
+        &session.endpoint,
+        &session.secret,
+        &session.runtime.bounds,
+        phase_deadline(session.runtime.limits.sse, session.deadline),
+        &session.control,
+        shutdown,
+        &session.session,
+        session.input.stream_after,
+        session.observations.clone(),
+    ))
+    .with_after(session.stream_after)
+    .with_usage_context_option(stream_usage);
+    let stream_result = follow_stream_for_run_with_state(
+        stream_input,
         &session.input.run_id,
+        &mut session.stream_state,
     )
     .await;
     match stream_result {
@@ -1892,6 +1989,18 @@ async fn execute_authorized_configured_turn(
         }
         Err(error) => session.abort(shutdown, map_stream_error(error)).await,
     }
+}
+
+fn stream_usage_context(input: &super::InternalTurnInput) -> Option<StreamUsageContext> {
+    let thread_id = input.thread_id.as_ref()?.clone();
+    let selection = input.settings.config().selection().as_opencode2();
+    Some(StreamUsageContext::new(
+        input.run_id.clone(),
+        thread_id,
+        selection.model_id().clone(),
+        selection.route_id().clone(),
+        selection.variant_id().cloned(),
+    ))
 }
 
 struct ConfiguredRuntime {
@@ -1997,7 +2106,9 @@ struct AbortAfterSession<'a> {
     runtime: &'a ConfiguredRuntime,
     session: &'a str,
     run_id: &'a RunId,
-    stream_after: u64,
+    stream_after: Option<u64>,
+    stream_state: StreamState,
+    usage_context: Option<StreamUsageContext>,
     observations: mpsc::Sender<EngineObservation>,
     respond: oneshot::Sender<TurnResult>,
     shutdown: &'a Arc<CancelHandle>,
@@ -2015,6 +2126,8 @@ async fn abort_after_session(input: AbortAfterSession<'_>) -> Execution {
         run_id,
         stream_after,
         observations,
+        mut stream_state,
+        usage_context,
         respond,
         shutdown,
         cause,
@@ -2035,21 +2148,21 @@ async fn abort_after_session(input: AbortAfterSession<'_>) -> Execution {
 
     let stream_cancel = CancelHandle::new();
     let stream_deadline = phase_deadline(runtime.limits.sse, attempt_deadline);
-    let stream_result = follow_stream_for_run(
-        StreamInput::new((
-            endpoint,
-            secret,
-            &runtime.bounds,
-            stream_deadline,
-            &stream_cancel,
-            shutdown,
-            session,
-            stream_after,
-            observations,
-        )),
-        run_id,
-    )
-    .await;
+    let stream_input = StreamInput::new((
+        endpoint,
+        secret,
+        &runtime.bounds,
+        stream_deadline,
+        &stream_cancel,
+        shutdown,
+        session,
+        stream_after.unwrap_or(0),
+        observations,
+    ))
+    .with_after(stream_after)
+    .with_usage_context_option(usage_context);
+    let stream_result =
+        follow_stream_for_run_with_state(stream_input, run_id, &mut stream_state).await;
     match stream_result {
         Ok(receipt) => {
             finish_turn_result(
@@ -2151,6 +2264,15 @@ fn map_prompt_error(error: PromptError) -> EngineOperationError {
         PromptError::Shutdown => EngineOperationError::Shutdown,
         PromptError::Cancelled => EngineOperationError::Cancelled,
         PromptError::Timeout => EngineOperationError::Deadline,
+        _ => EngineOperationError::ProviderRequestFailed,
+    }
+}
+
+fn map_resume_error(error: ResumeError) -> EngineOperationError {
+    match error {
+        ResumeError::Shutdown => EngineOperationError::Shutdown,
+        ResumeError::Cancelled => EngineOperationError::Cancelled,
+        ResumeError::Timeout => EngineOperationError::Deadline,
         _ => EngineOperationError::ProviderRequestFailed,
     }
 }

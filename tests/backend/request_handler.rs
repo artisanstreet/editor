@@ -25,19 +25,22 @@ use artisan_database::{
     AttachProjectInput, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     CreateThreadInput, DispatchLeaseOwner, LaunchClaimedRun, LaunchClaimedRunOutcome,
     MessageDispatchPayload, ProviderBindingBytes, QueueFirstMessageInput, Repository,
-    RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
+    RunLaunchCredentials, RunStartKey, SetModelFavoriteInput, SetThreadEngineConfigInput,
+    SqliteConfig,
 };
 use artisan_domain::{
-    ApprovalMode, ByteLimit, Command, ConversationCursor, ConversationPatch, ConversationQuery,
-    ConversationQueryBounds, ConversationRequest, ConversationSubscribe, ConversationUnsubscribe,
-    CountLimit, DirectoryId, DisplayName, EngineAgentId, EngineConfigRevision,
-    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText, ItemId, ListAttachedProjects,
-    ListDirectories, ListProjectThreads, MessageBody, MessageId, NetworkAccess, OpenCode2Selection,
-    PatchBatch, PatchId, PatchSequence, PermissionId, ProjectId, Query, QueryTurnCount,
-    ReceiptDisposition, RequestId, Revision, RootPath, RunId, SetThreadEngineConfig, StopRun,
-    ThreadId, ThreadSummary, ThreadTitle, UnixMillis, WebSearchAccess,
+    ApprovalMode, ByteLimit, CatalogRevision, Command, ConversationCursor, ConversationPatch,
+    ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSubscribe,
+    ConversationUnsubscribe, CountLimit, DirectoryId, DisplayName, EngineAgentId,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
+    EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, IncrementalText,
+    ItemId, ListAttachedProjects, ListDirectories, ListProjectThreads, MessageBody, MessageId,
+    ModelFavoriteId, NetworkAccess, OpenCode2Selection, PatchBatch, PatchId, PatchSequence,
+    PermissionId, ProjectId, Query, QueryTurnCount, ReadComposerCatalog, ReadModelFavorites,
+    ReceiptDisposition, RequestId, Revision, RootPath, RunId, SetModelFavorite,
+    SetThreadEngineConfig, StopRun, ThreadId, ThreadSummary, ThreadTitle, UnixMillis,
+    WebSearchAccess,
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ErrorCode, FirstMessageReceipt, FrameId,
@@ -3299,12 +3302,10 @@ async fn handler_unsubscribe_and_replacement_stale_retained_publication_leases()
     .await;
     stop_wire.expect("unsubscribe should answer");
     assert!(stop_receipt.is_no_work());
-    assert!(
-        retained_registrar
-            .subscription_view(&thread_id)
-            .await
-            .is_none()
-    );
+    assert!(retained_registrar
+        .subscription_view(&thread_id)
+        .await
+        .is_none());
     assert_eq!(
         retained_registrar
             .record_published_batch(&initial_lease, &initial_batch)
@@ -3486,8 +3487,8 @@ async fn read_thread_engine_settings_for_missing_thread_fails_thread_unknown() {
 }
 
 #[tokio::test]
-async fn read_thread_engine_settings_response_request_id_equals_triggering_frame_and_no_origin_consult()
- {
+async fn read_thread_engine_settings_response_request_id_equals_triggering_frame_and_no_origin_consult(
+) {
     let (_temporary, storage) = opened_storage("read-correlation").await;
     let repository = storage.repository();
     repository
@@ -3908,5 +3909,170 @@ async fn read_active_run_reports_authoritative_singleton_and_empty_state() {
     assert!(!ambiguous.retryable);
     drop(second_lease);
     drop(lease);
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn model_favorite_replay_and_conflict_precede_catalog_and_origin() {
+    let (_temporary, storage) = opened_storage("model-favorite-replay").await;
+    let model_id = ModelFavoriteId::parse("model-replay").expect("model id is valid");
+    storage
+        .repository()
+        .set_model_favorite(SetModelFavoriteInput {
+            request_id: request("favorite-replay"),
+            model_id: model_id.clone(),
+            favorite: true,
+            accepted_at: UnixMillis::from_millis(400),
+        })
+        .await
+        .expect("seed favorite should persist");
+
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), Vec::new());
+    let handler = scripted_handler(&storage, &origin);
+    let replay = ClientRequest::Command(Command::SetModelFavorite(SetModelFavorite::new(
+        request("favorite-replay"),
+        ThreadId::parse("thread-replay").expect("thread id is valid"),
+        EngineProfileId::parse("profile-replay").expect("profile id is valid"),
+        CatalogRevision::parse("catalog-replay").expect("catalog revision is valid"),
+        model_id.clone(),
+        true,
+    )));
+    let response = handler
+        .respond(&request("favorite-replay"), &replay)
+        .await
+        .expect("exact favorite replay should not need catalog service");
+    assert!(matches!(
+        response.payload,
+        ResponsePayload::ModelFavoriteSet(receipt)
+            if receipt.request_id == request("favorite-replay")
+                && receipt.model_id == model_id
+                && receipt.favorite
+                && receipt.disposition == ReceiptDisposition::Duplicate
+    ));
+    assert_eq!(origin.identity_calls(), 0);
+    assert_eq!(origin.instant_calls(), 0);
+
+    let conflict = ClientRequest::Command(Command::SetModelFavorite(SetModelFavorite::new(
+        request("favorite-replay"),
+        ThreadId::parse("thread-replay").expect("thread id is valid"),
+        EngineProfileId::parse("profile-replay").expect("profile id is valid"),
+        CatalogRevision::parse("catalog-replay").expect("catalog revision is valid"),
+        ModelFavoriteId::parse("model-other").expect("other model id is valid"),
+        true,
+    )));
+    let failure = failure_of(
+        handler
+            .respond(&request("favorite-replay"), &conflict)
+            .await,
+    );
+    assert_eq!(failure.code, ErrorCode::IdempotencyConflict);
+    assert!(!failure.retryable);
+    assert_eq!(origin.identity_calls(), 0);
+    assert_eq!(origin.instant_calls(), 0);
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn catalog_and_favorites_queries_fail_closed_without_origin_consultation() {
+    let (_temporary, storage) = opened_storage("catalog-unavailable").await;
+    let origin = ScriptedOriginHandle::failing_entropy();
+    let handler = scripted_handler(&storage, &origin);
+
+    let catalog_query = ClientRequest::Query(Query::ReadComposerCatalog(ReadComposerCatalog::new(
+        ThreadId::parse("thread-catalog-unavailable").expect("thread id is valid"),
+        EngineProfileId::parse("profile-catalog-unavailable").expect("profile id is valid"),
+    )));
+    let catalog_failure = failure_of(
+        handler
+            .respond(&request("catalog-unavailable"), &catalog_query)
+            .await,
+    );
+    assert_eq!(catalog_failure.code, ErrorCode::UnsupportedFeature);
+    assert!(!catalog_failure.retryable);
+
+    let favorite_failure = failure_of(
+        handler
+            .respond(
+                &request("favorite-unavailable"),
+                &ClientRequest::Command(Command::SetModelFavorite(SetModelFavorite::new(
+                    request("favorite-unavailable"),
+                    ThreadId::parse("thread-favorite-unavailable").expect("thread id is valid"),
+                    EngineProfileId::parse("profile-favorite-unavailable")
+                        .expect("profile id is valid"),
+                    CatalogRevision::parse("catalog-favorite-unavailable")
+                        .expect("catalog revision is valid"),
+                    ModelFavoriteId::parse("model-favorite-unavailable")
+                        .expect("model id is valid"),
+                    true,
+                ))),
+            )
+            .await,
+    );
+    assert_eq!(favorite_failure.code, ErrorCode::UnsupportedFeature);
+    assert!(!favorite_failure.retryable);
+
+    let favorites = handler
+        .respond(
+            &request("favorites-query"),
+            &ClientRequest::Query(Query::ReadModelFavorites(ReadModelFavorites)),
+        )
+        .await
+        .expect("favorites query should use durable state");
+    assert!(matches!(
+        favorites.payload,
+        ResponsePayload::ModelFavorites(snapshot)
+            if snapshot.revision.get() == 0 && snapshot.model_ids.is_empty()
+    ));
+    assert_eq!(origin.identity_calls(), 0);
+    assert_eq!(origin.instant_calls(), 0);
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn persisted_stale_favorite_removal_needs_no_catalog_or_identity() {
+    let (_temporary, storage) = opened_storage("stale-favorite-removal").await;
+    let model_id = ModelFavoriteId::parse("stale-model").expect("model id is valid");
+    storage
+        .repository()
+        .set_model_favorite(SetModelFavoriteInput {
+            request_id: request("stale-favorite-seed"),
+            model_id: model_id.clone(),
+            favorite: true,
+            accepted_at: UnixMillis::from_millis(500),
+        })
+        .await
+        .expect("stale favorite seed should persist");
+
+    let origin = ScriptedOriginHandle::scripted(Vec::new(), vec![Ok(UnixMillis::from_millis(501))]);
+    let handler = scripted_handler(&storage, &origin);
+    let command = ClientRequest::Command(Command::SetModelFavorite(SetModelFavorite::new(
+        request("stale-favorite-remove"),
+        ThreadId::parse("thread-stale").expect("thread id is valid"),
+        EngineProfileId::parse("profile-no-longer-registered").expect("profile id is valid"),
+        CatalogRevision::parse("stale-catalog").expect("catalog revision is valid"),
+        model_id.clone(),
+        false,
+    )));
+    let response = handler
+        .respond(&request("stale-favorite-remove"), &command)
+        .await
+        .expect("persisted stale removal should not need discovery");
+    assert!(matches!(
+        response.payload,
+        ResponsePayload::ModelFavoriteSet(receipt)
+            if receipt.model_id == model_id
+                && !receipt.favorite
+                && receipt.disposition == ReceiptDisposition::Accepted
+                && receipt.snapshot.model_ids.is_empty()
+    ));
+    assert_eq!(origin.identity_calls(), 0);
+    assert_eq!(origin.instant_calls(), 1);
+    assert!(storage
+        .repository()
+        .read_model_favorites()
+        .await
+        .expect("favorites should remain readable")
+        .model_ids()
+        .is_empty());
     storage.close().await.expect("storage should close");
 }

@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use artisan_database::ThreadEngineSettings;
-use artisan_domain::{QueueMessagePayload, RootPath, RunId};
+use artisan_domain::{QueueMessagePayload, RootPath, RunId, ThreadId};
 use artisan_native_engine::VerifiedOpenCode2ProfileLaunch;
 use artisan_transport::CancelHandle;
 use thiserror::Error;
@@ -43,10 +43,12 @@ pub(crate) mod event;
 pub(crate) mod framing;
 pub mod http;
 pub(crate) mod observation;
+pub(crate) mod opencode_event;
 pub(crate) mod operation;
 mod process;
 pub mod readiness;
 pub(crate) mod stream;
+pub(crate) mod usage;
 
 #[cfg(test)]
 #[path = "../../../../tests/backend/engine_owner_configuration.rs"]
@@ -75,6 +77,49 @@ mod engine_owner_preflight;
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
 
+/// A repository-validated existing provider session offered to one configured
+/// turn.  The owner receives no prior prompt text or database row; it may only
+/// resume this bounded route segment through the authenticated resume leaf.
+pub(crate) struct EngineContinuation {
+    provider_session_id: String,
+}
+
+impl EngineContinuation {
+    /// Creates the owner-side continuation reference after the database leaf
+    /// has validated the provider session identity.
+    #[must_use]
+    pub(crate) fn new(provider_session_id: String) -> Option<Self> {
+        if provider_session_id.is_empty()
+            || provider_session_id.len() > 256
+            || provider_session_id.contains('/')
+            || provider_session_id.contains('?')
+            || provider_session_id.contains('#')
+            || provider_session_id.contains('%')
+            || provider_session_id.contains('\r')
+            || provider_session_id.contains('\n')
+            || provider_session_id
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return None;
+        }
+        Some(Self {
+            provider_session_id,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn provider_session_id(&self) -> &str {
+        &self.provider_session_id
+    }
+}
+
+impl std::fmt::Debug for EngineContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineContinuation { <redacted> }")
+    }
+}
+
 /// Immutable input handed to the configured `OpenCode2` owner.
 ///
 /// The dispatcher constructs this only after reading the durable settings and
@@ -82,11 +127,13 @@ use process::LaunchRecipe;
 /// thread, registry, or environment while this value is live.
 pub(crate) struct EngineTurnInput {
     pub(crate) run_id: RunId,
+    pub(crate) thread_id: ThreadId,
     pub(crate) project_root: RootPath,
     pub(crate) prompt_id: String,
     pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: VerifiedOpenCode2ProfileLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -186,11 +233,13 @@ impl InternalLaunch {
 /// the same type and exactly one executor proves the lifecycle.
 pub(crate) struct InternalTurnInput {
     pub(crate) run_id: RunId,
+    pub(crate) thread_id: Option<ThreadId>,
     pub(crate) project_root: RootPath,
     pub(crate) prompt_id: String,
     pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: InternalLaunch,
+    pub(crate) continuation: Option<EngineContinuation>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -745,11 +794,13 @@ impl EngineOwner {
     ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
         let internal = InternalTurnInput {
             run_id: input.run_id,
+            thread_id: Some(input.thread_id),
             project_root: input.project_root,
             prompt_id: input.prompt_id,
             prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Verified(Box::new(input.launch)),
+            continuation: input.continuation,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
@@ -865,11 +916,13 @@ impl EngineOwner {
     ) -> Result<operation::AcceptedTurn, LaunchAdmissionError> {
         let internal = InternalTurnInput {
             run_id: input.run_id,
+            thread_id: None,
             project_root: input.project_root,
             prompt_id: input.prompt_id,
             prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Fixture(input.fixture),
+            continuation: None,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,

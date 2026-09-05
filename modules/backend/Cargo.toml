@@ -152,3 +152,8 @@ path = "../../tests/backend/request_handler.rs"
 
 [lints]
 workspace = true
+
+# Test-only child protocol fixture; excluded from shipping binary builds.
+[[example]]
+name = "engine-owner-fixture"
+path = "../../tests/backend/engine_owner_fixture.rs"

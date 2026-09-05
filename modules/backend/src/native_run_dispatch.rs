@@ -21,13 +21,13 @@ use artisan_database::{
     AssistantChange, BindRunProvider, BindRunProviderOutcome, ClaimMessageDispatch,
     ClaimedMessageDispatch, CommitRunBatch, CommitRunBatchOutcome, CompleteRun,
     DispatchFailureReason, DispatchLeaseOwner, FailMessageDispatch, InterruptRun, LaunchClaimedRun,
-    LaunchClaimedRunOutcome, LaunchedRunReceipt, ProviderBindingBytes, Repository,
+    LaunchClaimedRunOutcome, LaunchedRunReceipt, ProviderBindingBytes, RecordRunUsage, Repository,
     RequeueMessageDispatch, RunBatchScope, RunErrorCode, RunErrorMessage, RunLaunchCredentials,
-    RunLaunchError, RunStartKey,
+    RunLaunchError, RunStartKey, SessionContinuationLookup, SessionContinuationQuery,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, IncrementalText, ItemId, PatchId, Revision, RootPath,
-    RunId, TurnId, UnixMillis,
+    AssistantBody, AssistantMessagePhase, EngineId, IncrementalText, ItemId, PatchId, Revision,
+    RootPath, RunId, TurnId, UnixMillis,
 };
 use artisan_native_engine::{NativeOpenCode2Authority, VerifiedOpenCode2ProfileLaunch};
 use artisan_transport::CancelHandle;
@@ -38,9 +38,11 @@ use crate::engine_owner::{FixtureConfiguredLaunch, FixtureTurnInput};
 use crate::{
     CommandOrigin, SystemCommandOrigin,
     conversation_commit_notifier::ConversationCommitNotifier,
-    engine_owner::EngineTurnInput,
-    engine_owner::observation::{EngineObservation, TerminalState, TextDelta},
+    engine_owner::observation::{
+        EngineObservation, TerminalState, TextDelta, TextSnapshot, UsageObservation,
+    },
     engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession, TurnResult},
+    engine_owner::{EngineContinuation, EngineTurnInput},
     engine_owner::{EngineOwner, EngineOwnerShutdown},
     lifecycle_control::{ActivityGateError, ActivityGateImpl, ActivityLease},
     run_cancellation::{RunCancellationLease, RunCancellationRegistry},
@@ -57,6 +59,101 @@ const PROVIDER_FAILURE_CODE: &str = "provider_failed";
 const PROVIDER_FAILURE_MESSAGE: &str = "OpenCode2 provider turn failed";
 const INTERRUPTED_CODE: &str = "provider_interrupted";
 const INTERRUPTED_MESSAGE: &str = "OpenCode2 provider turn interrupted";
+const MAX_ASSISTANT_TEXT_PARTS: usize = 128;
+const FIXTURE_TEXT_PART_ID: &str = "fixture-text-part";
+
+struct AssistantTextPart {
+    part_id: String,
+    text: String,
+}
+
+#[derive(Default)]
+struct OrderedAssistantText {
+    parts: Vec<AssistantTextPart>,
+    total_bytes: usize,
+}
+
+impl OrderedAssistantText {
+    fn append_delta(&mut self, delta: &TextDelta) -> Option<String> {
+        self.append(
+            delta.part_id().unwrap_or(FIXTURE_TEXT_PART_ID),
+            delta.delta(),
+        )
+    }
+
+    fn replace_snapshot(&mut self, snapshot: &TextSnapshot) -> Option<String> {
+        self.replace(snapshot.part_id(), snapshot.text())
+    }
+
+    fn append(&mut self, part_id: &str, text: &str) -> Option<String> {
+        if part_id.is_empty() {
+            return None;
+        }
+        let Some(index) = self.parts.iter().position(|part| part.part_id == part_id) else {
+            if self.parts.len() >= MAX_ASSISTANT_TEXT_PARTS {
+                return None;
+            }
+            let next_total = self.total_bytes.checked_add(text.len())?;
+            if next_total > AssistantBody::MAX_BYTES {
+                return None;
+            }
+            self.parts.push(AssistantTextPart {
+                part_id: part_id.to_owned(),
+                text: text.to_owned(),
+            });
+            self.total_bytes = next_total;
+            return Some(self.body());
+        };
+        let next_total = self.total_bytes.checked_add(text.len())?;
+        if next_total > AssistantBody::MAX_BYTES {
+            return None;
+        }
+        self.parts[index].text.push_str(text);
+        self.total_bytes = next_total;
+        Some(self.body())
+    }
+
+    fn replace(&mut self, part_id: &str, text: &str) -> Option<String> {
+        if part_id.is_empty() {
+            return None;
+        }
+        let Some(index) = self.parts.iter().position(|part| part.part_id == part_id) else {
+            if self.parts.len() >= MAX_ASSISTANT_TEXT_PARTS {
+                return None;
+            }
+            let next_total = self.total_bytes.checked_add(text.len())?;
+            if next_total > AssistantBody::MAX_BYTES {
+                return None;
+            }
+            self.parts.push(AssistantTextPart {
+                part_id: part_id.to_owned(),
+                text: text.to_owned(),
+            });
+            self.total_bytes = next_total;
+            return Some(self.body());
+        };
+        let previous_length = self.parts[index].text.len();
+        let next_total = self
+            .total_bytes
+            .checked_sub(previous_length)?
+            .checked_add(text.len())?;
+        if next_total > AssistantBody::MAX_BYTES {
+            return None;
+        }
+        self.parts[index].text.clear();
+        self.parts[index].text.push_str(text);
+        self.total_bytes = next_total;
+        Some(self.body())
+    }
+
+    fn body(&self) -> String {
+        let mut body = String::with_capacity(self.total_bytes);
+        for part in &self.parts {
+            body.push_str(&part.text);
+        }
+        body
+    }
+}
 
 /// Decision made before any provider launch is permitted.
 #[derive(Debug, Eq, PartialEq)]
@@ -532,7 +629,9 @@ impl NativeRunDispatcher {
         }
     }
 
-    pub(crate) fn catalog_client(&self) -> crate::engine_owner::EngineCatalogClient { self.catalog_client.clone() }
+    pub(crate) fn catalog_client(&self) -> crate::engine_owner::EngineCatalogClient {
+        self.catalog_client.clone()
+    }
 
     /// Stops claims, drains admission, and awaits the owner. A budget breach
     /// is reported after the join is nevertheless awaited so child custody is
@@ -927,6 +1026,7 @@ struct LaunchedClaim<'a> {
     settings: artisan_database::ThreadEngineSettings,
     project_root: RootPath,
     launch: ResolvedLaunch,
+    continuation: Option<EngineContinuation>,
     ids: ClaimIds,
     receipt: LaunchedRunReceipt,
     cancellation: RunCancellationLease,
@@ -983,6 +1083,13 @@ async fn execute_claim(
             return None;
         }
     };
+    let continuation = match resolve_continuation(&loaded, &ids).await {
+        Ok(continuation) => continuation,
+        Err(reason) => {
+            loaded.context.fail(reason).await;
+            return None;
+        }
+    };
     let cancellation = match loaded
         .context
         .cancellation
@@ -994,7 +1101,7 @@ async fn execute_claim(
             return None;
         }
     };
-    let launched = launch_claim(loaded, ids, cancellation).await?;
+    let launched = launch_claim(loaded, ids, cancellation, continuation).await?;
     let (prepared, custody) = admit_claim(launched).await;
     let Some(prepared) = prepared else {
         return match custody {
@@ -1095,6 +1202,44 @@ async fn load_claim(
     })
 }
 
+async fn resolve_continuation(
+    claim: &LoadedClaim<'_>,
+    ids: &ClaimIds,
+) -> Result<Option<EngineContinuation>, &'static str> {
+    #[cfg(test)]
+    if matches!(&claim.launch, ResolvedLaunch::Fixture(_)) {
+        return Ok(None);
+    }
+    let profile_id = claim
+        .settings
+        .config()
+        .selection()
+        .as_opencode2()
+        .profile_id()
+        .clone();
+    let lookup = claim
+        .context
+        .repository
+        .read_session_continuation(SessionContinuationQuery {
+            thread_id: claim.payload.thread_id.clone(),
+            engine_id: EngineId::OpenCode2,
+            profile_id,
+            exclude_run_id: Some(ids.run_id.clone()),
+        })
+        .await
+        .map_err(|_| "provider continuation lookup failed")?;
+    match lookup {
+        SessionContinuationLookup::NoHistory => Ok(None),
+        SessionContinuationLookup::Usable(continuation) => {
+            EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                .map(Some)
+                .ok_or("provider continuation corrupt")
+        }
+        SessionContinuationLookup::Unavailable(_) => Err("provider continuation unavailable"),
+        SessionContinuationLookup::Incompatible(_) => Err("provider continuation incompatible"),
+    }
+}
+
 fn mint_claim_ids(
     origin: &SystemCommandOrigin,
     updated_at: UnixMillis,
@@ -1141,6 +1286,7 @@ async fn launch_claim(
     loaded: LoadedClaim<'_>,
     ids: ClaimIds,
     cancellation: RunCancellationLease,
+    continuation: Option<EngineContinuation>,
 ) -> Option<LaunchedClaim<'_>> {
     let launch_result = launch_with_retry(
         loaded.context.repository,
@@ -1187,6 +1333,7 @@ async fn launch_claim(
         settings,
         project_root,
         launch,
+        continuation,
         ids,
         receipt,
         cancellation,
@@ -1200,6 +1347,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
         settings,
         project_root,
         launch,
+        continuation,
         ids,
         receipt,
         cancellation,
@@ -1215,11 +1363,13 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
         ResolvedLaunch::Configured(launch) => context.owner.admit_turn(
             EngineTurnInput {
                 run_id: receipt.run_id.clone(),
+                thread_id: payload.thread_id.clone(),
                 project_root,
                 prompt_id,
                 prompt,
                 settings: settings.clone(),
                 launch: *launch,
+                continuation,
                 prompt_delivery,
                 stream_after,
                 control_capacity,
@@ -1714,6 +1864,7 @@ struct TurnConsumptionState<'a> {
     scope: RunBatchScope<'a>,
     assistant_item: Option<ItemId>,
     assistant_revision: Revision,
+    assistant_parts: OrderedAssistantText,
     assistant_body: String,
     batch_sequence: i64,
     forced_interrupted: bool,
@@ -1728,6 +1879,7 @@ impl<'a> TurnConsumptionState<'a> {
             scope,
             assistant_item: None,
             assistant_revision: Revision::new(0),
+            assistant_parts: OrderedAssistantText::default(),
             assistant_body: String::new(),
             batch_sequence: 1,
             forced_interrupted: false,
@@ -1845,6 +1997,12 @@ async fn handle_observation(
         EngineObservation::TextDelta(delta) => {
             handle_text_delta(context, state, turn, delta).await;
         }
+        EngineObservation::TextSnapshot(snapshot) => {
+            handle_text_snapshot(context, state, turn, snapshot).await;
+        }
+        EngineObservation::Usage(usage) => {
+            handle_usage(context, state, turn, usage).await;
+        }
         EngineObservation::Terminal(observation) => {
             state.terminal = Some(observation.state());
             if state.forced_interrupted || state.forced_cancelled {
@@ -1854,26 +2012,145 @@ async fn handle_observation(
     }
 }
 
+async fn handle_usage(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    usage: UsageObservation,
+) {
+    let report = usage.report();
+    if report.run_id() != &state.scope.launched.run_id
+        || report.thread_id() != &state.scope.launched.thread_id
+        || context
+            .repository
+            .record_run_usage(RecordRunUsage {
+                run_id: &state.scope.launched.run_id,
+                thread_id: &state.scope.launched.thread_id,
+                report,
+            })
+            .await
+            .is_err()
+    {
+        // A valid text stream must not be presented as durably completed when
+        // its authenticated usage observation could not be fenced/persisted.
+        mark_interrupted(state, turn, true);
+    }
+}
+
+async fn handle_text_snapshot(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+    snapshot: TextSnapshot,
+) {
+    if snapshot.run_id() != &state.scope.launched.run_id {
+        mark_interrupted(state, turn, true);
+        return;
+    }
+    let current = state.assistant_body.clone();
+    let Some(next_body) = state.assistant_parts.replace_snapshot(&snapshot) else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    if next_body == current {
+        return;
+    }
+    state.assistant_body = next_body;
+    if state.assistant_item.is_none() {
+        // An ended-only part is a first durable body, not a text delta. Start
+        // it through the normal run-scoped item-upsert seam without replaying
+        // an artificial provider append.
+        start_assistant_item(context, state, turn).await;
+    } else {
+        replace_assistant_body(context, state, turn).await;
+    }
+}
+
 async fn handle_text_delta(
     context: &TurnConsumptionContext<'_>,
     state: &mut TurnConsumptionState<'_>,
     turn: &mut AcceptedTurn,
     delta: TextDelta,
 ) {
-    let Some(next_length) = state.assistant_body.len().checked_add(delta.delta().len()) else {
+    if delta.run_id() != &state.scope.launched.run_id || delta.delta().is_empty() {
+        if delta.run_id() != &state.scope.launched.run_id {
+            mark_interrupted(state, turn, true);
+        }
+        return;
+    }
+    let previous = state.assistant_body.clone();
+    let Some(next_body) = state.assistant_parts.append_delta(&delta) else {
         mark_interrupted(state, turn, true);
         return;
     };
-    if next_length > AssistantBody::MAX_BYTES {
-        mark_interrupted(state, turn, true);
-        return;
-    }
-    state.assistant_body.push_str(delta.delta());
+    state.assistant_body = next_body.clone();
     if state.assistant_item.is_none() {
         start_assistant_item(context, state, turn).await;
     } else {
-        append_assistant_delta(context, state, turn, delta).await;
+        let mut append_body = previous;
+        append_body.push_str(delta.delta());
+        if append_body == next_body {
+            append_assistant_delta(context, state, turn, delta).await;
+        } else {
+            replace_assistant_body(context, state, turn).await;
+        }
     }
+}
+
+async fn replace_assistant_body(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+) {
+    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    let Some(item_id) = state.assistant_item.clone() else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    let Ok(next_revision) = state.assistant_revision.checked_next() else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    let Some(patch_id) = mint_patch_id(context.origin) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    let changes = [AssistantChange::Replace {
+        item_id: &item_id,
+        expected_revision: state.assistant_revision,
+        body: &body,
+        phase: AssistantMessagePhase::Unspecified,
+        patch_id: &patch_id,
+    }];
+    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
+        mark_interrupted(state, turn, false);
+        return;
+    };
+    if !commit_batch_with_retry(CommitBatchRequest {
+        repository: context.repository,
+        notifier: &context.config.notifier,
+        scope: &state.scope,
+        batch_sequence: state.batch_sequence,
+        operated_at,
+        activate_turn_patch_id: None,
+        changes: &changes,
+        retries: context.config.max_command_retries,
+    })
+    .await
+    {
+        mark_interrupted(state, turn, true);
+        return;
+    }
+    state.assistant_revision = next_revision;
+    state.scope.expected_updated_at = operated_at;
+    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
+        mark_interrupted(state, turn, true);
+        return;
+    };
+    state.batch_sequence = next_sequence;
 }
 
 async fn start_assistant_item(
@@ -2253,4 +2530,68 @@ async fn persist_interrupted(settlement: &TerminalSettlement<'_>) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod text_projection_tests {
+    use artisan_domain::RunId;
+
+    use super::OrderedAssistantText;
+    use crate::engine_owner::observation::{TextSnapshot, chunk_text};
+
+    #[test]
+    fn multipart_byte_bound_tracks_all_parts_and_replacements() {
+        let mut parts = OrderedAssistantText::default();
+        let full = "x".repeat(artisan_domain::AssistantBody::MAX_BYTES - 1);
+        assert!(parts.append("a", &full).is_some());
+        assert!(parts.append("b", "b").is_some());
+        assert!(parts.append("c", "c").is_none());
+        assert!(parts.replace("b", "bb").is_none());
+        assert!(parts.replace("a", "a").is_some());
+        assert_eq!(parts.append("c", "c").as_deref(), Some("abc"));
+        assert_eq!(parts.total_bytes, 3);
+    }
+
+    #[test]
+    fn correcting_second_text_part_retains_first_without_duplicate_bytes() {
+        let run_id = RunId::parse("text-projection-run").expect("bounded run id");
+        let mut parts = OrderedAssistantText::default();
+        let part_a_delta = chunk_text(&run_id, 1, "event-a", "A-1")
+            .pop()
+            .expect("part A delta")
+            .with_part_id("part-a".to_owned());
+        assert_eq!(parts.append_delta(&part_a_delta), Some("A-1".to_owned()));
+        let part_a_delta = chunk_text(&run_id, 2, "event-a-2", "A-2")
+            .pop()
+            .expect("part A second delta")
+            .with_part_id("part-a".to_owned());
+        assert_eq!(parts.append_delta(&part_a_delta), Some("A-1A-2".to_owned()));
+        assert_eq!(
+            parts.replace_snapshot(&TextSnapshot::new(
+                run_id.clone(),
+                3,
+                "part-a".to_owned(),
+                "A-1A-2".to_owned(),
+            )),
+            Some("A-1A-2".to_owned())
+        );
+        let part_b_delta = chunk_text(&run_id, 4, "event-b", "B-1")
+            .pop()
+            .expect("part B delta")
+            .with_part_id("part-b".to_owned());
+        assert_eq!(
+            parts.append_delta(&part_b_delta),
+            Some("A-1A-2B-1".to_owned())
+        );
+        assert_eq!(
+            parts.replace_snapshot(&TextSnapshot::new(
+                run_id,
+                5,
+                "part-b".to_owned(),
+                "B-corrected".to_owned(),
+            )),
+            Some("A-1A-2B-corrected".to_owned())
+        );
+        assert_eq!(parts.body(), "A-1A-2B-corrected");
+    }
 }

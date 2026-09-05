@@ -241,3 +241,7 @@ mod tests {
 }
 
 mod composer_catalog_service;
+
+mod native_model_catalog;
+
+mod composer_catalog_handler;

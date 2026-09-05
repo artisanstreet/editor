@@ -30,6 +30,10 @@ use zeroize::Zeroize;
 
 use artisan_transport::CancelHandle;
 
+#[path = "http/resume.rs"]
+mod resume;
+pub(crate) use resume::{ResumeError, ResumeInput, ResumeReceipt, ResumeSelection, perform_resume};
+
 use super::catalog::{
     CatalogError, CatalogResult, CatalogScope, MAX_CATALOG_RESPONSE_BYTES, decode_models_response,
     location_query, normalize_catalog,

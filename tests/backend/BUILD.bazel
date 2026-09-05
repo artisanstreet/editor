@@ -49,6 +49,7 @@ rust_test(
 # cfg(test) modules of the backend crate, not as standalone integration
 # crates.
 exports_files([
+    "composer_state_handler.rs",
     "directory_controller.rs",
     "directory_helper.rs",
     "directory_helper_fixture.rs",
