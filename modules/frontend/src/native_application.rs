@@ -35,6 +35,7 @@ use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
+use artisan_ui::tabs::{TabSpec, Tabs};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
@@ -47,9 +48,8 @@ use gpui::{
 
 use crate::composer::{DraftDisposition, SubmissionBlocked, SubmissionToken};
 use crate::desktop_shell::{
-    DESKTOP_COLLAPSE_SELECTOR, DESKTOP_COMPOSER_SELECTOR, DESKTOP_EMPTY_SELECTOR,
-    DESKTOP_HOME_SELECTOR, DESKTOP_OFFLINE_SELECTOR, DESKTOP_PROJECTS_SELECTOR,
-    DESKTOP_THREADS_SELECTOR, desktop_label, desktop_muted, desktop_nav_glyph, desktop_shell,
+    DESKTOP_COMPOSER_SELECTOR, DESKTOP_HOME_SELECTOR, desktop_muted, desktop_nav_glyph,
+    desktop_shell,
 };
 use crate::editor_route_screen::{EditorScreen, EditorScreenIdentity, EditorSurfaceState};
 use crate::native_command_menu::{
@@ -219,6 +219,9 @@ pub struct NativeApplication {
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
+    sidebar_editor: bool,
+    sidebar_tabs_focus: FocusHandle,
+    sidebar_navigation_focus: FocusHandle,
     message_flight: Option<NativeMessageFlight>,
     message_retry: Option<NativeMessageRetry>,
     message_receipt: Option<FirstMessageReceipt>,
@@ -332,6 +335,9 @@ impl NativeApplication {
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
+            sidebar_editor: false,
+            sidebar_tabs_focus: cx.focus_handle(),
+            sidebar_navigation_focus: cx.focus_handle(),
             message_flight: None,
             message_retry: None,
             message_receipt: None,
@@ -453,6 +459,13 @@ impl NativeApplication {
 
     /// Navigates to `route`, retaining history, and rerenders.
     pub fn navigate(&mut self, route: NativeRoute, cx: &mut Context<Self>) {
+        match &route {
+            NativeRoute::Editor { .. } => self.sidebar_editor = true,
+            NativeRoute::Thread { .. } | NativeRoute::NewThread { .. } => {
+                self.sidebar_editor = false
+            }
+            _ => {}
+        }
         self.route_history.navigate(route);
         self.sync_composer_availability(cx);
         cx.notify();
@@ -462,6 +475,13 @@ impl NativeApplication {
     pub fn go_back(&mut self, cx: &mut Context<Self>) -> bool {
         let moved = self.route_history.go_back();
         if moved {
+            match self.route() {
+                NativeRoute::Editor { .. } => self.sidebar_editor = true,
+                NativeRoute::Thread { .. } | NativeRoute::NewThread { .. } => {
+                    self.sidebar_editor = false
+                }
+                _ => {}
+            }
             self.sync_composer_availability(cx);
             cx.notify();
         }
@@ -820,286 +840,118 @@ impl NativeApplication {
         )
     }
 
+    fn select_sidebar_tab(&mut self, editor: bool, cx: &mut Context<Self>) {
+        self.sidebar_editor = editor;
+        match (editor, self.route().clone()) {
+            (true, NativeRoute::Thread { project, thread }) => {
+                self.navigate(
+                    NativeRoute::Editor {
+                        project,
+                        thread,
+                        file: None,
+                    },
+                    cx,
+                );
+            }
+            (
+                false,
+                NativeRoute::Editor {
+                    project, thread, ..
+                },
+            ) => {
+                self.navigate(NativeRoute::Thread { project, thread }, cx);
+            }
+            _ => cx.notify(),
+        }
+    }
+
     fn desktop_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = self.desktop_theme;
-        let collapsed = self.sidebar_collapsed;
-        let mut shell = div()
+        let weak = cx.entity().downgrade();
+        let tabs = Tabs::new(
+            "artisan-workspace-tabs",
+            self.sidebar_tabs_focus.clone(),
+            self.theme,
+            if self.sidebar_editor {
+                "editor"
+            } else {
+                "agents"
+            },
+            [
+                TabSpec::new("agents", "Agents"),
+                TabSpec::new("editor", "Editor"),
+            ],
+        )
+        .w_full()
+        .rounded(px(6.0))
+        .debug_selector("artisan-workspace-tabs")
+        .on_change(move |value, _, _, cx| {
+            let _ = weak.update(cx, |app, cx| {
+                app.select_sidebar_tab(value.as_ref() == "editor", cx)
+            });
+        });
+        let nav = div()
+            .id("artisan-workspace-navigation")
+            .track_focus(&self.sidebar_navigation_focus)
+            .tab_index(0)
+            .w_full()
+            .h(px(34.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.selected))
+            .debug_selector(|| "artisan-workspace-navigation".to_owned())
+            .child(desktop_nav_glyph(
+                if self.sidebar_editor {
+                    AssetId::TABLER_FOLDER_PLUS
+                } else {
+                    AssetId::TABLER_EDIT
+                },
+                theme,
+            ))
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(theme.foreground)
+                    .child(if self.sidebar_editor {
+                        "Open project"
+                    } else {
+                        "New thread"
+                    }),
+            )
+            .on_click(cx.listener(|app, _, window, cx| {
+                window.focus(&app.sidebar_navigation_focus, cx);
+                if app.sidebar_editor {
+                    app.activate_add_project(cx);
+                } else {
+                    app.begin_new_task(cx);
+                }
+            }))
+            .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    if app.sidebar_editor {
+                        app.activate_add_project(cx);
+                    } else {
+                        app.begin_new_task(cx);
+                    }
+                }
+            }));
+        div()
             .h_full()
             .w_full()
             .min_h(px(0.0))
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .p(px(10.0));
-
-        let mut new_task = div()
-            .id("artisan-desktop-new-task")
-            .w_full()
-            .h(px(34.0))
-            .flex()
-            .items_center()
-            .justify_start()
-            .gap(px(8.0))
-            .px(px(10.0))
-            .rounded(px(6.0))
-            .bg(if self.add_project_action_is_admissible() {
-                theme.primary_action
-            } else {
-                theme.selected
-            })
-            .text_color(if self.add_project_action_is_admissible() {
-                theme.primary_action_foreground
-            } else {
-                theme.secondary
-            })
-            .on_click(cx.listener(Self::activate_new_task));
-        if collapsed {
-            new_task = new_task.justify_center().px(px(0.0));
-        }
-        new_task = new_task.child(desktop_nav_glyph(AssetId::TABLER_EDIT, theme));
-        if !collapsed {
-            new_task = new_task.child(
-                div()
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("New task"),
-            );
-        }
-        shell = shell.child(new_task);
-
-        let mut projects_section = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .debug_selector(|| DESKTOP_PROJECTS_SELECTOR.to_string());
-        if !collapsed {
-            let mut heading = div()
-                .h(px(24.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(px(6.0))
-                .child(desktop_label(theme, "Projects"));
-            let collapse_asset = AssetId::TABLER_CHEVRON_LEFT;
-            heading = heading.child(
-                div()
-                    .id(DESKTOP_COLLAPSE_SELECTOR)
-                    .w(px(24.0))
-                    .h(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|style| style.bg(theme.selected))
-                    .on_click(cx.listener(Self::toggle_sidebar))
-                    .debug_selector(|| DESKTOP_COLLAPSE_SELECTOR.to_string())
-                    .child(desktop_nav_glyph(collapse_asset, theme)),
-            );
-            projects_section = projects_section.child(heading);
-        } else {
-            let collapse_asset = AssetId::TABLER_CHEVRON_RIGHT;
-            projects_section = projects_section.child(
-                div()
-                    .id(DESKTOP_COLLAPSE_SELECTOR)
-                    .w_full()
-                    .h(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|style| style.bg(theme.selected))
-                    .on_click(cx.listener(Self::toggle_sidebar))
-                    .debug_selector(|| DESKTOP_COLLAPSE_SELECTOR.to_string())
-                    .child(desktop_nav_glyph(collapse_asset, theme)),
-            );
-        }
-
-        for project in &self.project_options {
-            let selected = self.selected_project.as_ref() == Some(&project.id);
-            let project_id = project.id.clone();
-            let mut row = div()
-                .id(SharedString::from(format!(
-                    "artisan-desktop-project-{}",
-                    project.id.as_str()
-                )))
-                .w_full()
-                .h(px(32.0))
-                .flex()
-                .items_center()
-                .justify_start()
-                .gap(px(8.0))
-                .px(px(8.0))
-                .rounded(px(5.0))
-                .bg(if selected {
-                    theme.selected
-                } else {
-                    theme.sidebar
-                })
-                .hover(|style| style.bg(theme.selected))
-                .on_click(cx.listener(move |application, _: &ClickEvent, _, cx| {
-                    application.select_project_from_sidebar(project_id.clone(), cx);
-                }));
-            if collapsed {
-                row = row.justify_center().px(px(0.0));
-            }
-            row = row.child(desktop_nav_glyph(AssetId::TABLER_FOLDER, theme));
-            if !collapsed {
-                row = row.child(
-                    div()
-                        .min_w(px(0.0))
-                        .flex_1()
-                        .truncate()
-                        .whitespace_nowrap()
-                        .text_size(px(13.0))
-                        .text_color(if selected {
-                            theme.foreground
-                        } else {
-                            theme.secondary
-                        })
-                        .child(project.name.clone()),
-                );
-            }
-            projects_section = projects_section.child(row);
-        }
-        if self.project_options.is_empty() && !collapsed {
-            projects_section = projects_section.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.secondary)
-                    .debug_selector(|| DESKTOP_EMPTY_SELECTOR.to_string())
-                    .child("No projects attached."),
-            );
-        }
-        shell = shell.child(projects_section);
-
-        let mut threads_section = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .debug_selector(|| DESKTOP_THREADS_SELECTOR.to_string());
-        if !collapsed {
-            threads_section = threads_section.child(
-                div()
-                    .h(px(24.0))
-                    .flex()
-                    .items_center()
-                    .px(px(6.0))
-                    .child(desktop_label(theme, "Tasks")),
-            );
-        }
-        if let Some(listing) = self.thread_listing.as_ref() {
-            let mut visible_threads = 0;
-            for thread in listing
-                .threads()
-                .iter()
-                .filter(|thread| self.selected_project.as_ref() == Some(&thread.project_id))
-            {
-                visible_threads += 1;
-                let selected = self.selected_thread.as_ref() == Some(&thread.thread_id);
-                let thread_id = thread.thread_id.clone();
-                let title = thread_display_title(
-                    ThreadTitleInput {
-                        summary_title: None,
-                        title: thread.title.as_str(),
-                        title_locked: false,
-                    },
-                    ThreadTitleMode::default(),
-                )
-                .to_owned();
-                let mut row = div()
-                    .id(SharedString::from(format!(
-                        "artisan-desktop-thread-{}",
-                        thread.thread_id.as_str()
-                    )))
-                    .w_full()
-                    .h(px(32.0))
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .gap(px(8.0))
-                    .px(px(8.0))
-                    .rounded(px(5.0))
-                    .bg(if selected {
-                        theme.selected
-                    } else {
-                        theme.sidebar
-                    })
-                    .hover(|style| style.bg(theme.selected))
-                    .on_click(cx.listener(move |application, _: &ClickEvent, _, cx| {
-                        application.open_thread_from_sidebar(thread_id.clone(), cx);
-                    }));
-                if collapsed {
-                    row = row.justify_center().px(px(0.0));
-                }
-                row = row.child(desktop_nav_glyph(AssetId::TABLER_MESSAGE_CIRCLE, theme));
-                if !collapsed {
-                    row = row.child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .truncate()
-                            .whitespace_nowrap()
-                            .text_size(px(13.0))
-                            .text_color(if selected {
-                                theme.foreground
-                            } else {
-                                theme.secondary
-                            })
-                            .child(title),
-                    );
-                }
-                threads_section = threads_section.child(row);
-            }
-            if visible_threads == 0 && !collapsed {
-                threads_section = threads_section.child(
-                    div()
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .text_size(px(12.0))
-                        .text_color(theme.secondary)
-                        .debug_selector(|| DESKTOP_EMPTY_SELECTOR.to_string())
-                        .child("No tasks yet."),
-                );
-            }
-        } else if !collapsed {
-            threads_section = threads_section.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.secondary)
-                    .child(if matches!(&self.state, NativeViewState::Failure(_)) {
-                        "Tasks unavailable while offline."
-                    } else if self.selected_project.is_none() {
-                        "Choose a project to see its tasks."
-                    } else {
-                        "Loading tasks…"
-                    }),
-            );
-        }
-        shell = shell.child(threads_section);
-
-        if matches!(&self.state, NativeViewState::Failure(_)) && !collapsed {
-            shell = shell.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(8.0))
-                    .rounded(px(5.0))
-                    .bg(theme.field)
-                    .text_size(px(12.0))
-                    .text_color(theme.secondary)
-                    .debug_selector(|| DESKTOP_OFFLINE_SELECTOR.to_string())
-                    .child("Forge is offline."),
-            );
-        }
-
-        shell = shell.child(div().flex_1().min_h(px(0.0)));
-
-        shell.child(self.desktop_profile(cx))
+            .p(px(10.0))
+            .child(tabs)
+            .child(nav)
+            .child(div().flex_1().min_h(px(0.0)))
+            .child(self.desktop_profile(cx))
     }
 
     fn activate_profile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1337,6 +1189,9 @@ impl NativeApplication {
     }
 
     fn desktop_route_title(&self) -> String {
+        if self.sidebar_editor && matches!(self.route(), NativeRoute::NewThread { .. }) {
+            return "Editor".into();
+        }
         let (title, _) = match self.route() {
             NativeRoute::NewThread { .. } => ("New task".to_owned(), self.selected_project_name()),
             NativeRoute::Thread { thread, .. } => {
@@ -1363,6 +1218,19 @@ impl NativeApplication {
     }
 
     fn desktop_route_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.sidebar_editor && matches!(self.route(), NativeRoute::NewThread { .. }) {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
+                .text_color(self.desktop_theme.secondary)
+                .debug_selector(|| "artisan-editor-empty".into())
+                .child("Open a project to start editing")
+                .into_any_element();
+        }
         let route = self.route().clone();
         let route_selector = route.selector_suffix();
         let content = self.route_surface(cx);
@@ -5137,6 +5005,7 @@ mod tests {
     };
     use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
     use artisan_ui::motion::MotionPolicy;
+    use artisan_ui::tabs::{TabSpec, Tabs};
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
     use gpui::{Context, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext};
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
@@ -5534,7 +5403,7 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
         cx.run_until_parked();
-        assert!(cx.debug_bounds(DESKTOP_OFFLINE_SELECTOR).is_some());
+        assert!(cx.debug_bounds(DESKTOP_OFFLINE_SELECTOR).is_none());
         cx.update(|_, app| {
             view.update(app, |application, application_cx| {
                 application.state = NativeViewState::Ready;
@@ -5549,7 +5418,7 @@ mod tests {
         assert!(cx.debug_bounds(DESKTOP_COMPOSER_SELECTOR).is_some());
         assert!(cx.debug_bounds(DESKTOP_SIDEBAR_SELECTOR).is_some());
         assert!(cx.debug_bounds(DESKTOP_TITLEBAR_SELECTOR).is_some());
-        assert!(cx.debug_bounds(DESKTOP_EMPTY_SELECTOR).is_some());
+        assert!(cx.debug_bounds("artisan-workspace-tabs-list").is_some());
         assert!(
             cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_none(),
             "the Ready stub must not mount beside the surface"
@@ -5574,6 +5443,26 @@ mod tests {
         // is the observable navigation outcome.
         assert!(cx.debug_bounds("route-settings-models").is_some());
         assert!(cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_none());
+    }
+
+    #[gpui::test]
+    fn workspace_tabs_switch_by_pointer_and_keyboard(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        cx.run_until_parked();
+        let editor = cx
+            .debug_bounds("artisan-workspace-tabs-trigger-editor")
+            .expect("Editor tab");
+        cx.simulate_click(editor.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).sidebar_editor));
+        assert!(cx.debug_bounds("artisan-editor-empty").is_some());
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.sidebar_tabs_focus, cx));
+        });
+        cx.simulate_keystrokes("left");
+        cx.run_until_parked();
+        assert!(!cx.update(|_, app| view.read(app).sidebar_editor));
+        assert!(cx.debug_bounds(DESKTOP_COMPOSER_SELECTOR).is_some());
     }
 
     #[gpui::test]
