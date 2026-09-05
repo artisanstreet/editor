@@ -23,8 +23,6 @@ pub const DESKTOP_TITLEBAR_SELECTOR: &str = "artisan-desktop-titlebar";
 pub const DESKTOP_SIDEBAR_SELECTOR: &str = "artisan-desktop-sidebar";
 /// Main workspace selector.
 pub const DESKTOP_MAIN_SELECTOR: &str = "artisan-desktop-main";
-/// Route toolbar selector.
-pub const DESKTOP_TOOLBAR_SELECTOR: &str = "artisan-desktop-toolbar";
 /// Route body selector.
 pub const DESKTOP_BODY_SELECTOR: &str = "artisan-desktop-body";
 /// Home route selector.
@@ -48,8 +46,6 @@ pub const DESKTOP_TITLEBAR_HEIGHT_PX: f32 = 48.0;
 pub const DESKTOP_SIDEBAR_WIDTH_PX: f32 = 218.0;
 /// Compact sidebar width when labels are collapsed.
 pub const DESKTOP_SIDEBAR_COLLAPSED_WIDTH_PX: f32 = 58.0;
-/// Main route toolbar height.
-pub const DESKTOP_TOOLBAR_HEIGHT_PX: f32 = 54.0;
 /// Crosshair arm length.
 pub const DESKTOP_CROSSHAIR_SIZE_PX: f32 = 12.0;
 /// Native titlebar control width.
@@ -62,8 +58,6 @@ pub struct DesktopShellStyle {
     pub titlebar_height: Pixels,
     /// Current sidebar width.
     pub sidebar_width: Pixels,
-    /// Route toolbar height.
-    pub toolbar_height: Pixels,
     /// One physical pixel expressed in logical pixels.
     pub one_device_pixel: Pixels,
 }
@@ -85,7 +79,6 @@ impl DesktopShellStyle {
             } else {
                 DESKTOP_SIDEBAR_WIDTH_PX
             }),
-            toolbar_height: px(DESKTOP_TOOLBAR_HEIGHT_PX),
             one_device_pixel: px(1.0 / scale_factor),
         }
     }
@@ -135,7 +128,6 @@ pub fn desktop_shell(
     identity: AnyElement,
     search: AnyElement,
     sidebar: AnyElement,
-    toolbar: AnyElement,
     body: AnyElement,
     scale_factor: f32,
 ) -> Div {
@@ -172,9 +164,9 @@ pub fn desktop_shell(
         .window_control_area(WindowControlArea::Drag)
         .child(
             div()
-                .w(style.sidebar_width)
+                .flex_1()
+                .min_w(px(0.0))
                 .h_full()
-                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .px(px(14.0))
@@ -182,7 +174,7 @@ pub fn desktop_shell(
         )
         .child(
             div()
-                .flex_1()
+                .w(px(360.0))
                 .min_w(px(0.0))
                 .h_full()
                 .flex()
@@ -218,7 +210,7 @@ pub fn desktop_shell(
                 .w(style.sidebar_width)
                 .h_full()
                 .flex_shrink_0()
-                .bg(theme.sidebar)
+                .bg(theme.workspace)
                 .border_r_1()
                 .border_color(theme.line)
                 .debug_selector(|| DESKTOP_SIDEBAR_SELECTOR.to_string())
@@ -236,17 +228,6 @@ pub fn desktop_shell(
                 .debug_selector(|| DESKTOP_MAIN_SELECTOR.to_string())
                 .child(
                     div()
-                        .h(style.toolbar_height)
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(theme.line)
-                        .debug_selector(|| DESKTOP_TOOLBAR_SELECTOR.to_string())
-                        .child(toolbar),
-                )
-                .child(
-                    div()
                         .flex_1()
                         .min_w(px(0.0))
                         .min_h(px(0.0))
@@ -254,11 +235,6 @@ pub fn desktop_shell(
                         .flex_col()
                         .debug_selector(|| DESKTOP_BODY_SELECTOR.to_string())
                         .child(body),
-                )
-                .child(
-                    junction_crosshair(theme, style.one_device_pixel)
-                        .left(px(-6.0))
-                        .top(style.toolbar_height - px(6.0)),
                 ),
         );
 
@@ -328,7 +304,6 @@ mod tests {
     fn desktop_shell_keeps_compact_native_geometry() {
         assert_eq!(DESKTOP_TITLEBAR_HEIGHT_PX, 48.0);
         assert_eq!(DESKTOP_SIDEBAR_WIDTH_PX, 218.0);
-        assert_eq!(DESKTOP_TOOLBAR_HEIGHT_PX, 54.0);
         assert_eq!(DESKTOP_CROSSHAIR_SIZE_PX, 12.0);
 
         let expanded = DesktopShellStyle::resolve(false, 1.0);

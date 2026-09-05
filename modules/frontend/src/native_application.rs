@@ -777,7 +777,15 @@ impl NativeApplication {
                     .child(format!("/ {project}")),
             );
         }
-        identity
+        identity.child(
+            div()
+                .min_w(px(0.0))
+                .truncate()
+                .whitespace_nowrap()
+                .text_size(px(14.0))
+                .text_color(self.desktop_theme.secondary)
+                .child(format!("/ {}", self.desktop_route_title())),
+        )
     }
 
     fn desktop_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
@@ -1094,9 +1102,8 @@ impl NativeApplication {
         shell.child(add_project)
     }
 
-    fn desktop_toolbar(&self) -> Div {
-        let theme = self.desktop_theme;
-        let (title, detail) = match self.route() {
+    fn desktop_route_title(&self) -> String {
+        let (title, _) = match self.route() {
             NativeRoute::NewThread { .. } => ("New task".to_owned(), self.selected_project_name()),
             NativeRoute::Thread { thread, .. } => {
                 let title = self
@@ -1118,38 +1125,7 @@ impl NativeApplication {
             }
             NativeRoute::Onboarding => ("Welcome".to_owned(), None),
         };
-        let mut toolbar = div()
-            .w_full()
-            .h_full()
-            .min_w(px(0.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(20.0))
-            .gap(px(12.0))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_1()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .text_size(px(15.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child(title),
-            );
-        if let Some(detail) = detail {
-            toolbar = toolbar.child(
-                div()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .whitespace_nowrap()
-                    .text_size(px(12.0))
-                    .text_color(theme.secondary)
-                    .child(detail),
-            );
-        }
-        toolbar
+        title
     }
 
     fn desktop_route_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1172,11 +1148,10 @@ impl NativeApplication {
                     .px(px(24.0))
                     .pt(px(12.0))
                     .pb(px(18.0))
-                    .bg(self.desktop_theme.sidebar)
-                    .border_t_1()
-                    .border_color(self.desktop_theme.line)
+                    .flex()
+                    .justify_center()
                     .debug_selector(|| DESKTOP_COMPOSER_SELECTOR.to_string())
-                    .child(self.composer.clone()),
+                    .child(div().w_full().max_w(px(768.0)).child(self.composer.clone())),
             );
         } else {
             body = body.child(content);
@@ -4188,7 +4163,6 @@ fn message_status_detail(
 impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = self.desktop_sidebar(cx).into_any_element();
-        let toolbar = self.desktop_toolbar().into_any_element();
         let body = self.desktop_route_body(cx);
         let identity = self.desktop_identity().into_any_element();
         let search = self.command_menu.clone().into_any_element();
@@ -4198,7 +4172,6 @@ impl Render for NativeApplication {
             identity,
             search,
             sidebar,
-            toolbar,
             body,
             window.scale_factor(),
         );

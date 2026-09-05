@@ -11,7 +11,6 @@ use std::{ops::Range, panic};
 
 use artisan_ui::{
     button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility},
-    input::InputStyle,
     motion::MotionPolicy,
     theme::{ArtisanTheme, DesktopTheme, ThemeMode},
 };
@@ -496,7 +495,6 @@ impl Render for NativeComposer {
         let entity = cx.entity();
         let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
         let desktop_theme = DesktopTheme::neutral_dark();
-        let style = InputStyle::resolve(theme, false);
         let draft = self.state.draft().to_owned();
         let styled_text = StyledText::new(SharedString::from(draft));
         self.painted_bounds = None;
@@ -513,9 +511,6 @@ impl Render for NativeComposer {
             .px(px(12.0))
             .py(px(10.0))
             .rounded(px(6.0))
-            .border(style.border_width)
-            .border_color(desktop_theme.line)
-            .bg(desktop_theme.field)
             .text_color(desktop_theme.foreground)
             .text_size(px(15.0))
             .line_height(px(22.0))
@@ -538,8 +533,6 @@ impl Render for NativeComposer {
                     .child(NATIVE_COMPOSER_PLACEHOLDER),
             );
         }
-
-        editor = editor.focus(move |focused| focused.border_color(desktop_theme.foreground));
 
         let mouse_entity = entity.clone();
         editor = editor.on_mouse_down(MouseButton::Left, move |event, _, cx| {
@@ -594,10 +587,10 @@ impl Render for NativeComposer {
             .flex_col()
             .gap(px(8.0))
             .p(px(12.0))
-            .rounded(px(8.0))
+            .rounded(px(16.0))
             .border_1()
             .border_color(desktop_theme.line)
-            .bg(desktop_theme.sidebar)
+            .bg(desktop_theme.field)
             .child(editor)
             .child(div().w_full().flex().justify_end().child(send))
     }
