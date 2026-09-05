@@ -136,6 +136,16 @@ LICENSE_DOCS = [
 FONT_FILES = [
     "fonts/spline-sans-variable.ttf",
     "fonts/spline-sans-mono-variable.ttf",
+    "fonts/spline-sans-300.ttf",
+    "fonts/spline-sans-400.ttf",
+    "fonts/spline-sans-500.ttf",
+    "fonts/spline-sans-600.ttf",
+    "fonts/spline-sans-700.ttf",
+    "fonts/spline-sans-mono-300.ttf",
+    "fonts/spline-sans-mono-400.ttf",
+    "fonts/spline-sans-mono-500.ttf",
+    "fonts/spline-sans-mono-600.ttf",
+    "fonts/spline-sans-mono-700.ttf",
 ]
 
 FONT_LICENSES = [

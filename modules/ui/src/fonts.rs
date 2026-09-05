@@ -1,4 +1,4 @@
-//! Register the two bundled Spline variable fonts before any window paints.
+//! Register the static weight faces of the two bundled Spline families before any window paints.
 
 use gpui::{App, SharedString};
 

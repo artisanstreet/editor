@@ -2,7 +2,9 @@
 //!
 //! Files are embedded at compile time and registered once through
 //! `artisan_ui::fonts::register_bundled_fonts`. Family names and weight ranges
-//! match the fonts' internal name/fvar tables. See `fonts/FONTS.md` for
+//! match the source fonts' internal name/fvar tables. Static instances of
+//! weights 300–700 are registered because the WGPU text backend matches faces
+//! by metadata and does not apply variable weight axes. See `fonts/FONTS.md` for
 //! upstream sources, licenses and SHA-256 hashes. TrueType is required by
 //! DirectWrite's in-memory loader; WOFF2 is not supported there.
 
@@ -24,6 +26,8 @@ pub struct BundledFont {
     pub license_text: &'static str,
     /// Unmodified upstream TrueType bytes (provenance in `fonts/FONTS.md`).
     pub bytes: &'static [u8],
+    /// Static weight instances registered by renderers without variable-axis support.
+    pub static_faces: &'static [&'static [u8]],
 }
 
 /// Failure returned when a string does not name a bundled typeface.
@@ -53,6 +57,13 @@ pub const ALL: &[BundledFont] = &[
         license_path: "licenses/spline-sans-OFL.txt",
         license_text: include_str!("../licenses/spline-sans-OFL.txt"),
         bytes: include_bytes!("../fonts/spline-sans-variable.ttf"),
+        static_faces: &[
+            include_bytes!("../fonts/spline-sans-300.ttf"),
+            include_bytes!("../fonts/spline-sans-400.ttf"),
+            include_bytes!("../fonts/spline-sans-500.ttf"),
+            include_bytes!("../fonts/spline-sans-600.ttf"),
+            include_bytes!("../fonts/spline-sans-700.ttf"),
+        ],
     },
     BundledFont {
         file_name: "spline-sans-mono-variable.ttf",
@@ -61,6 +72,13 @@ pub const ALL: &[BundledFont] = &[
         license_path: "licenses/spline-sans-mono-OFL.txt",
         license_text: include_str!("../licenses/spline-sans-mono-OFL.txt"),
         bytes: include_bytes!("../fonts/spline-sans-mono-variable.ttf"),
+        static_faces: &[
+            include_bytes!("../fonts/spline-sans-mono-300.ttf"),
+            include_bytes!("../fonts/spline-sans-mono-400.ttf"),
+            include_bytes!("../fonts/spline-sans-mono-500.ttf"),
+            include_bytes!("../fonts/spline-sans-mono-600.ttf"),
+            include_bytes!("../fonts/spline-sans-mono-700.ttf"),
+        ],
     },
 ];
 
@@ -70,7 +88,9 @@ pub const ALL: &[BundledFont] = &[
 /// so registration copies nothing.
 #[must_use]
 pub fn bundled_fonts() -> Vec<Cow<'static, [u8]>> {
-    ALL.iter().map(|font| Cow::Borrowed(font.bytes)).collect()
+    ALL.iter()
+        .flat_map(|font| font.static_faces.iter().map(|bytes| Cow::Borrowed(*bytes)))
+        .collect()
 }
 
 /// Resolves a family name (exactly as declared, e.g. `"Spline Sans"`) to its
@@ -144,14 +164,10 @@ mod tests {
     #[test]
     fn bundled_fonts_shapes_borrowed_slices_for_add_fonts() {
         let shaped = bundled_fonts();
-        assert_eq!(shaped.len(), ALL.len());
-        for (shaped, font) in shaped.iter().zip(ALL.iter()) {
-            assert_eq!(
-                shaped.as_ref(),
-                font.bytes,
-                "{}: shaped bytes must borrow the embedded bytes",
-                font.file_name
-            );
+        assert_eq!(shaped.len(), 10);
+        let expected = ALL.iter().flat_map(|font| font.static_faces.iter());
+        for (shaped, bytes) in shaped.iter().zip(expected) {
+            assert_eq!(shaped.as_ref(), *bytes);
         }
     }
 
