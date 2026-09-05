@@ -95,6 +95,8 @@ pub mod desktop_shell;
 pub mod native_application;
 pub mod native_command_menu;
 pub mod native_composer;
+pub mod native_composer_controls;
+pub mod native_context_usage;
 pub mod native_composer_visuals;
 pub mod native_hover_rail_card;
 pub mod native_new_thread_surface;
