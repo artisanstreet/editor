@@ -32,14 +32,15 @@ use artisan_ui::button::{
     AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
 };
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
+use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
     FocusHandle, FontWeight, KeyBinding, Render, SharedString, Stateful,
-    StatefulInteractiveElement, Subscription, Task, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, div,
+    StatefulInteractiveElement, StyledImage as _, Subscription, Task, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, actions, div,
     prelude::{InteractiveElement as _, IntoElement, ParentElement as _, Styled as _},
     px, size,
 };
@@ -209,6 +210,12 @@ pub struct NativeApplication {
     composer: Entity<NativeComposer>,
     _composer_subscription: Subscription,
     _composer_observation: Subscription,
+    profile_menu: DropdownMenuState,
+    profile_focus: FocusHandle,
+    profile_origin: Rc<Cell<gpui::Point<gpui::Pixels>>>,
+    profile_picture: Option<std::path::PathBuf>,
+    profile_name: Option<String>,
+    profile_hostname: Option<String>,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
     sidebar_collapsed: bool,
@@ -309,6 +316,19 @@ impl NativeApplication {
             composer,
             _composer_subscription: composer_subscription,
             _composer_observation: composer_observation,
+            profile_menu: DropdownMenuState::new([
+                DropdownMenuEntry::item(DropdownMenuItem::new("settings", "Settings")),
+                DropdownMenuEntry::item(DropdownMenuItem::new("add-project", "Add project")),
+            ]),
+            profile_focus: cx.focus_handle(),
+            profile_origin: Rc::new(Cell::new(gpui::point(px(0.0), px(0.0)))),
+            profile_picture: None,
+            profile_name: std::env::var("USERNAME")
+                .ok()
+                .filter(|name| !name.is_empty()),
+            profile_hostname: std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|name| !name.is_empty()),
             command_menu,
             _command_menu_observation: command_menu_observation,
             sidebar_collapsed: false,
@@ -365,6 +385,18 @@ impl NativeApplication {
         });
         application.sync_command_menu_groups(cx);
         application.sync_composer_availability(cx);
+        #[cfg(not(test))]
+        cx.spawn(async move |view, cx| {
+            let picture = cx
+                .background_executor()
+                .spawn(async { crate::shell::local_account_picture() })
+                .await;
+            let _ = view.update(cx, |app, cx| {
+                app.profile_picture = picture;
+                cx.notify();
+            });
+        })
+        .detach();
         application
     }
 
@@ -1067,39 +1099,197 @@ impl NativeApplication {
 
         shell = shell.child(div().flex_1().min_h(px(0.0)));
 
-        let mut settings = div()
-            .id("artisan-desktop-settings")
-            .w_full()
-            .h(px(32.0))
-            .flex()
-            .items_center()
-            .justify_start()
-            .gap(px(8.0))
-            .px(px(8.0))
-            .rounded(px(5.0))
-            .hover(|style| style.bg(theme.selected))
-            .on_click(cx.listener(Self::activate_settings))
-            .child(desktop_nav_glyph(AssetId::TABLER_SETTINGS, theme));
-        if collapsed {
-            settings = settings.justify_center().px(px(0.0));
-        } else {
-            settings = settings.child(desktop_muted(theme, "Settings"));
-        }
-        shell = shell.child(settings);
+        shell.child(self.desktop_profile(cx))
+    }
 
-        let mut add_project = div()
-            .w_full()
-            .h(px(32.0))
-            .flex()
-            .items_center()
-            .justify_start()
-            .gap(px(4.0))
-            .px(px(2.0))
-            .child(self.add_project_button(cx));
-        if !collapsed {
-            add_project = add_project.child(desktop_muted(theme, "Add project"));
+    fn activate_profile_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for action in self.profile_menu.take_actions() {
+            match action.item_id().as_ref() {
+                "settings" => self.navigate(
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Models,
+                        engine: None,
+                    },
+                    cx,
+                ),
+                "add-project" => self.activate_add_project(cx),
+                _ => {}
+            }
         }
-        shell.child(add_project)
+        window.focus(&self.profile_focus, cx);
+        cx.notify();
+    }
+
+    fn desktop_profile(&self, cx: &Context<Self>) -> Div {
+        let theme = self.desktop_theme;
+        let origin = self.profile_origin.clone();
+        let avatar_theme = self.theme;
+        let name = self.profile_name.clone();
+        let hostname = self.profile_hostname.clone();
+        let fallback = move || {
+            crate::shell::gradient_avatar(
+                &avatar_theme,
+                crate::shell::RailIdentity::new(name.as_deref(), hostname.as_deref()),
+            )
+            .into_any_element()
+        };
+        let avatar = if let Some(path) = self.profile_picture.clone() {
+            gpui::img(path)
+                .size(px(40.0))
+                .rounded_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .with_fallback(fallback.clone())
+                .with_loading(fallback)
+                .into_any_element()
+        } else {
+            fallback()
+        };
+        let trigger = div()
+            .id("artisan-desktop-profile-trigger")
+            .debug_selector(|| "artisan-desktop-profile-trigger".to_string())
+            .track_focus(&self.profile_focus)
+            .tab_index(0)
+            .cursor_pointer()
+            .rounded_full()
+            .size(px(40.0))
+            .child(avatar)
+            .on_click(cx.listener(|app, _, window, cx| {
+                cx.stop_propagation();
+                let _ = app.profile_menu.press_trigger();
+                window.focus(&app.profile_focus, cx);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        let _ = app.profile_menu.dismiss();
+                    }
+                    "down" => {
+                        app.profile_menu.set_open(true);
+                        let _ = app.profile_menu.move_next();
+                    }
+                    "up" => {
+                        app.profile_menu.set_open(true);
+                        let _ = app.profile_menu.move_previous();
+                    }
+                    "home" => {
+                        let _ = app.profile_menu.move_first();
+                    }
+                    "end" => {
+                        let _ = app.profile_menu.move_last();
+                    }
+                    "enter" | "space" => {
+                        if app.profile_menu.is_open() {
+                            let _ = app.profile_menu.activate_highlighted();
+                            app.activate_profile_selection(window, cx);
+                        } else {
+                            let _ = app.profile_menu.press_trigger();
+                        }
+                    }
+                    "tab" => {
+                        let _ = app.profile_menu.dismiss();
+                        cx.notify();
+                        return;
+                    }
+                    _ => return,
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }));
+        let mut root = div().relative().w_full().py(px(6.0)).child(
+            div()
+                .child(trigger)
+                .on_children_prepainted(move |bounds, _, _| {
+                    if let Some(bounds) = bounds.first() {
+                        origin.set(bounds.origin);
+                    }
+                }),
+        );
+        if self.profile_menu.is_open() {
+            let mut panel = div()
+                .id("artisan-desktop-profile-menu")
+                .debug_selector(|| "artisan-desktop-profile-menu".to_string())
+                .w(px(248.0))
+                .p(px(6.0))
+                .rounded(px(12.0))
+                .bg(theme.field)
+                .border_1()
+                .border_color(theme.line)
+                .flex()
+                .flex_col()
+                .block_mouse_except_scroll()
+                .on_mouse_down_out(cx.listener(|app, event: &gpui::MouseDownEvent, _, cx| {
+                    let trigger = Bounds::new(app.profile_origin.get(), size(px(40.0), px(40.0)));
+                    if !trigger.contains(&event.position) {
+                        let _ = app.profile_menu.dismiss();
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    div()
+                        .px(px(10.0))
+                        .py(px(10.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(theme.foreground)
+                                .child(
+                                    self.profile_name
+                                        .clone()
+                                        .unwrap_or_else(|| "This computer".into()),
+                                ),
+                        )
+                        .children(
+                            self.profile_hostname
+                                .clone()
+                                .map(|hostname| desktop_muted(theme, hostname)),
+                        ),
+                )
+                .child(div().h(px(1.0)).bg(theme.line).my(px(4.0)));
+            for (index, (label, icon)) in [
+                ("Settings", AssetId::TABLER_SETTINGS),
+                ("Add project", AssetId::TABLER_FOLDER_PLUS),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                panel = panel.child(
+                    div()
+                        .id(("artisan-profile-action", index))
+                        .h(px(34.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .bg(if self.profile_menu.highlighted_index() == Some(index) {
+                            theme.selected
+                        } else {
+                            theme.field
+                        })
+                        .hover(|style| style.bg(theme.selected))
+                        .child(desktop_nav_glyph(icon, theme))
+                        .child(desktop_muted(theme, label))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            cx.stop_propagation();
+                            let _ = app.profile_menu.activate_index(index);
+                            app.activate_profile_selection(window, cx);
+                        })),
+                );
+            }
+            root = root.child(gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::BottomLeft)
+                    .position(self.profile_origin.get())
+                    .offset(gpui::point(px(0.0), px(-10.0)))
+                    .child(panel),
+            ));
+        }
+        root
     }
 
     fn desktop_route_title(&self) -> String {
@@ -4901,6 +5091,7 @@ mod tests {
     use artisan_ui::button::{
         Button, ButtonContent, ButtonSize, ButtonStyle, ButtonVariant, FocusVisibility,
     };
+    use artisan_ui::dropdown_menu::{DropdownMenuEntry, DropdownMenuItem, DropdownMenuState};
     use artisan_ui::motion::MotionPolicy;
     use artisan_ui::theme::{ArtisanTheme, ThemeMode};
     use gpui::{Context, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext};
@@ -5339,6 +5530,44 @@ mod tests {
         // is the observable navigation outcome.
         assert!(cx.debug_bounds("route-settings-models").is_some());
         assert!(cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_none());
+    }
+
+    #[gpui::test]
+    fn profile_menu_keyboard_opens_settings_and_closes(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        cx.update(|window, app| {
+            view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update(|_, app| view.read(app).profile_menu.is_open())
+            .then_some(())
+            .expect("menu opens");
+        assert!(cx.debug_bounds("artisan-desktop-profile-menu").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        let trigger = cx
+            .debug_bounds("artisan-desktop-profile-trigger")
+            .expect("profile trigger");
+        cx.simulate_click(trigger.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        cx.simulate_click(trigger.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(!cx.update(|_, app| view.read(app).profile_menu.is_open()));
+        cx.simulate_keystrokes("enter home enter");
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert!(!view.read(app).profile_menu.is_open());
+            assert!(matches!(
+                view.read(app).route(),
+                NativeRoute::Settings {
+                    section: SettingsRoute::Models,
+                    ..
+                }
+            ));
+        });
     }
 
     #[gpui::test]
