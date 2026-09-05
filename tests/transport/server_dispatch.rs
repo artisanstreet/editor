@@ -33,6 +33,52 @@ const REQUEST_ID: &str = "client-request-1";
 /// Correlation id carried by a reply that settles a different request.
 const OTHER_REQUEST_ID: &str = "other-request-9";
 
+/// The Electron-sized image batch plus text must cross the production frame
+/// boundary, including Quinn's smaller per-stream flow-control window.
+#[tokio::test]
+async fn image_batch_sized_frame_crosses_production_transport() {
+    let mut loopback = spawn_loopback();
+    let client = connect_client(&loopback).await;
+    let server = server_connection(&mut loopback).await;
+    let payload = harness::deterministic_payload(12 * 1024 * 1024 + 65_536);
+    let receiver = tokio::spawn(async move {
+        let (mut send, mut recv) = server.accept_bi().await.expect("accept image frame");
+        let received = transport::read_frame(&mut recv, transport::MAX_FRAME_LEN)
+            .await
+            .expect("read complete image batch");
+        transport::write_frame(&mut send, b"received")
+            .await
+            .expect("acknowledge image batch");
+        send.finish().expect("finish acknowledgement");
+        tokio::time::timeout(TEST_DEADLINE, send.stopped())
+            .await
+            .expect("acknowledgement delivery deadline")
+            .expect("acknowledgement delivered");
+        received
+    });
+    let (mut send, mut recv) = client.open_bi().await.expect("open image stream");
+    tokio::time::timeout(TEST_DEADLINE, transport::write_frame(&mut send, &payload))
+        .await
+        .expect("image frame write deadline")
+        .expect("image frame fits production ceiling");
+    send.finish().expect("finish image frame");
+    let acknowledgement =
+        tokio::time::timeout(TEST_DEADLINE, transport::read_frame(&mut recv, 32))
+            .await
+            .expect("acknowledgement deadline")
+            .expect("read acknowledgement");
+    assert_eq!(acknowledgement, b"received");
+    let received = tokio::time::timeout(TEST_DEADLINE, receiver)
+        .await
+        .expect("receiver deadline")
+        .expect("receiver joins");
+    assert_eq!(received, payload);
+    drop(send);
+    drop(recv);
+    drop(client);
+    loopback.drain(VarInt::from_u32(0), b"image frame complete").await;
+}
+
 /// A distinct local handler failure type, proving local failures stay typed
 /// instead of becoming protocol failures.
 #[derive(Debug, Eq, PartialEq)]

@@ -12,10 +12,11 @@ use std::mem::size_of;
 use quinn::{ReadError, ReadExactError, RecvStream, SendStream, WriteError};
 use thiserror::Error;
 
-/// Largest frame the production transport accepts. The bound mirrors the
-/// legacy codec so a Phase 1 peer can never be pushed into allocating more
-/// than four mebibytes per message.
-pub const MAX_FRAME_LEN: u32 = 4 * 1024 * 1024;
+/// Largest frame the production transport accepts. This matches the Electron
+/// control frame ceiling: a complete 12 MiB image batch leaves room for text,
+/// attachment metadata, and the Cap'n Proto envelope. The prefix is checked
+/// before allocating, independently of the domain's tighter payload limits.
+pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
 const PREFIX_LEN: usize = size_of::<u32>();
 
