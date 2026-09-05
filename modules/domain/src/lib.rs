@@ -105,3 +105,11 @@ pub use run_usage::{RUN_USAGE_PROVIDER_SESSION_MAX_BYTES,RUN_USAGE_PROVIDER_TURN
 
 mod queued_message;
 pub use queued_message::{QUEUED_MESSAGE_LIST_MAX,QueuedMessageListOrder,ListQueuedMessages,QueuedMessageListError,QueuedMessageSummary,QueuedMessageListing,QueuedMessageListingError,WithdrawQueuedMessage,QueuedMessageWithdrawalOutcome,WithdrawQueuedMessageResult};
+
+pub use model_favorites::MODEL_FAVORITE_ID_MAX_BYTES;
+
+pub mod composer_catalog;
+pub use composer_catalog::{CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
+
+pub mod composer_state;
+pub use composer_state::{ReadRecalledMessage, ReadRunUsage, RecalledMessageResult, RunUsageResult, WithdrawQueuedMessageCommand, QueuedMessageWithdrawalResult};

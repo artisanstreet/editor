@@ -244,6 +244,27 @@ pub enum QueuedMessageRepositoryError {
 }
 
 impl Repository {
+    /// Replays an exact withdrawal before the caller consults its acceptance clock.
+    /// No dispatch state or receipt is changed by this lookup.
+    ///
+    /// # Errors
+    /// Returns an identity conflict, corrupt receipt, or database error.
+    pub async fn lookup_queued_message_withdrawal(
+        &self,
+        thread_id: &ThreadId,
+        message_id: &MessageId,
+        original_request_id: &RequestId,
+        withdrawal_request_id: &RequestId,
+    ) -> Result<Option<WithdrawQueuedMessageResult>, QueuedMessageRepositoryError> {
+        lookup_withdrawal(&self.database, &WithdrawQueuedMessage {
+            thread_id: thread_id.clone(),
+            message_id: message_id.clone(),
+            original_request_id: original_request_id.clone(),
+            withdrawal_request_id: withdrawal_request_id.clone(),
+            // Lookup replaces this unused stamp with the durable receipt time.
+            accepted_at: UnixMillis::EPOCH,
+        }).await
+    }
     /// Reads one bounded page of still-queued, never-claimed general
     /// messages for exactly one existing thread.
     ///

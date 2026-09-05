@@ -14,6 +14,8 @@ use std::collections::HashSet;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+pub mod wire;
+
 /// The exact TypeScript source that produced the bundled manifest.
 pub const NATIVE_MODEL_CATALOG_SOURCE: &str = "modules/catalog/src/model-manifest.ts";
 /// The revision encoded by the bundled manifest snapshot.

@@ -47,15 +47,25 @@ pub use codec::{
     decode_envelope, encode_envelope,
 };
 pub use types::{
-    APPLICATION_PROTOCOL_VERSION, ActiveRunResult, ClientRequest, ConnectionId,
+    APPLICATION_PROTOCOL_VERSION, ActiveRunResult, CATALOG_SNAPSHOT_MAX_BYTES, CatalogSnapshotWire,
+    CatalogSnapshotWireError, ClientRequest, ComposerCatalogResult, ConnectionId,
     ConversationSubscriptionStarted, ConversationSubscriptionStopped, DirectoryPickOutcome,
     DispatchFailure, ERROR_DETAIL_MAX_BYTES, ErrorCode, ErrorDetail, EventCursor,
     FirstMessageReceipt, FrameId, HELLO_VERSION_MAX_ENTRIES, Hello, HelloCredential,
     LOCAL_CAPABILITY_BYTES, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
     LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
-    MessageImageResult, ProtocolFailure, ProtocolValueError, ProtocolVersion, QueueMessageReceipt,
-    RECONNECT_CAPABILITY_BYTES, ReconnectCapability, ReconnectCapabilityError,
-    RegisteredEngineProfilesResult, ResponsePayload, ServerEvent, ServerResponse,
-    SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt, ThreadEngineSettingsResult,
-    VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
+    MessageImageResult, ModelFavoritesSnapshot, ProtocolFailure, ProtocolValueError,
+    ProtocolVersion, QueueMessageReceipt, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
+    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResponsePayload, ServerEvent,
+    ServerResponse, SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition,
+    StopRunReceipt, ThreadEngineSettingsResult, VersionOffer, VersionOfferError, Welcome,
+    WireEnvelope, WireEnvelopeBody,
 };
+
+#[allow(clippy::all)]
+#[allow(clippy::pedantic)]
+#[rustfmt::skip]
+pub mod composer_state_capnp;
+#[path = "codec/composer_state.rs"]
+pub(crate) mod composer_state_codec;
+pub mod composer_state;

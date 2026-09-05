@@ -205,6 +205,12 @@ async fn exact_withdrawal_replays_and_reused_identity_conflicts() {
         accepted_at: UnixMillis::from_millis(500), ..input.clone()
     }).await.expect("server clock advancement must replay the receipt");
     assert_eq!(later_clock_retry, expected_duplicate);
+    let lookup = repository.lookup_queued_message_withdrawal(
+        &input.thread_id, &input.message_id, &input.original_request_id,
+        &input.withdrawal_request_id,
+    ).await.expect("receipt lookup").expect("durable receipt");
+    assert_eq!(lookup, expected_duplicate);
+
 
     let reused = repository
         .withdraw_queued_message(WithdrawQueuedMessage {

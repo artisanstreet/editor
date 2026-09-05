@@ -299,3 +299,14 @@ async fn immediate_transactions_serialize_concurrent_revisions() -> Result<(), B
     database.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn native_catalog_identity_uses_its_own_full_byte_bound() {
+    let (_database, repository) = memory_repository().await;
+    let model_id = "m".repeat(artisan_domain::MODEL_FAVORITE_ID_MAX_BYTES);
+    let saved = repository.set_model_favorite(input("long-catalog-id", &model_id, true, 1))
+        .await.expect("a valid catalog ID must fit the migration");
+    assert_eq!(ids(saved.snapshot()), vec![model_id.as_str()]);
+    let read = repository.read_model_favorites().await.expect("stored favorites");
+    assert_eq!(ids(&read), vec![model_id.as_str()]);
+}

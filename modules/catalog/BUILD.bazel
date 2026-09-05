@@ -4,7 +4,7 @@ exports_files(["Cargo.toml"])
 
 rust_library(
     name = "catalog",
-    srcs = ["rust/lib.rs"],
+    srcs = ["rust/lib.rs", "rust/wire.rs"],
     compile_data = ["rust/native_model_catalog.json"],
     crate_name = "artisan_catalog",
     crate_root = "rust/lib.rs",

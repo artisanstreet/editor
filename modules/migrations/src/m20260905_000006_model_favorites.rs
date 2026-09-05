@@ -6,9 +6,10 @@
 
 use sea_orm_migration::prelude::*;
 
-const MODEL_ID_MAX_BYTES: i64 = 128;
+const REQUEST_ID_MAX_BYTES: i64 = 128;
+const MODEL_FAVORITE_ID_MAX_BYTES: i64 = 4_096;
 const MODEL_FAVORITES_MAX_MODELS: i64 = 1_024;
-const SNAPSHOT_JSON_MAX_BYTES: i64 = 262_144;
+const SNAPSHOT_JSON_MAX_BYTES: i64 = 8 * 1024 * 1024;
 
 /// Creates the model-favorites rows, singleton revision, and idempotency
 /// receipts.
@@ -24,7 +25,7 @@ impl MigrationTrait for Migration {
                 "CREATE TABLE model_favorites (\
                     model_id TEXT NOT NULL PRIMARY KEY,\
                     favorited_at_ms INTEGER NOT NULL,\
-                    CHECK (typeof(model_id) = 'text' AND length(CAST(model_id AS BLOB)) BETWEEN 1 AND {MODEL_ID_MAX_BYTES}),\
+                    CHECK (typeof(model_id) = 'text' AND length(CAST(model_id AS BLOB)) BETWEEN 1 AND {MODEL_FAVORITE_ID_MAX_BYTES}),\
                     CHECK (typeof(favorited_at_ms) = 'integer')\
                 )"
             ))
@@ -60,8 +61,8 @@ impl MigrationTrait for Migration {
                     result_revision INTEGER NOT NULL,\
                     snapshot_json TEXT NOT NULL,\
                     accepted_at_ms INTEGER NOT NULL,\
-                    CHECK (typeof(request_id) = 'text' AND length(CAST(request_id AS BLOB)) BETWEEN 1 AND {MODEL_ID_MAX_BYTES}),\
-                    CHECK (typeof(model_id) = 'text' AND length(CAST(model_id AS BLOB)) BETWEEN 1 AND {MODEL_ID_MAX_BYTES}),\
+                    CHECK (typeof(request_id) = 'text' AND length(CAST(request_id AS BLOB)) BETWEEN 1 AND {REQUEST_ID_MAX_BYTES}),\
+                    CHECK (typeof(model_id) = 'text' AND length(CAST(model_id AS BLOB)) BETWEEN 1 AND {MODEL_FAVORITE_ID_MAX_BYTES}),\
                     CHECK (typeof(favorite) = 'integer' AND favorite IN (0, 1)),\
                     CHECK (typeof(result_revision) = 'integer' AND result_revision BETWEEN 0 AND 9223372036854775807),\
                     CHECK (typeof(snapshot_json) = 'text' AND length(CAST(snapshot_json AS BLOB)) BETWEEN 2 AND {SNAPSHOT_JSON_MAX_BYTES}),\
@@ -108,6 +109,7 @@ impl MigrationTrait for Migration {
             .await?;
         connection
             .execute_unprepared("DROP TABLE IF EXISTS model_favorites")
-            .await.map(|_| ())
+            .await
+            .map(|_| ())
     }
 }

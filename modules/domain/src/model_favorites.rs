@@ -11,17 +11,22 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::bounds::IDENTIFIER_MAX_BYTES;
-
 /// Maximum number of stable catalog ids in the global favorites snapshot.
 pub const MODEL_FAVORITES_MAX_MODELS: usize = 1_024;
 
+/// Maximum UTF-8 byte length of one stable catalog model id.
+///
+/// OpenCode2 catalog ids are URL-safe base64url encodings of a JSON route /
+/// model / variant tuple. They therefore do not share the smaller generic
+/// request-id ceiling.
+pub const MODEL_FAVORITE_ID_MAX_BYTES: usize = 4_096;
+
 /// Maximum canonical JSON size retained in one idempotency receipt.
 ///
-/// The bound is intentionally much larger than the worst-case encoding of a
-/// 1,024-entry snapshot at the 128-byte identifier limit, while still making
-/// receipt growth finite at the storage boundary.
-pub const MODEL_FAVORITES_MAX_SNAPSHOT_BYTES: usize = 262_144;
+/// This remains a finite storage and wire boundary for the full ordered
+/// snapshot. It is deliberately independent from the generic request-id
+/// bound because ordinary OpenCode2 ids can exceed 128 bytes.
+pub const MODEL_FAVORITES_MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
 /// A stable model id from the catalog.
 ///
@@ -36,7 +41,7 @@ impl ModelFavoriteId {
     ///
     /// The validation rule matches the native wire identifier contract:
     /// non-empty, no Unicode whitespace or control characters, and at most
-    /// [`IDENTIFIER_MAX_BYTES`] UTF-8 bytes.
+    /// [`MODEL_FAVORITE_ID_MAX_BYTES`] UTF-8 bytes.
     ///
     /// # Errors
     ///
@@ -106,10 +111,10 @@ fn validate_model_favorite_id(value: &str) -> Result<(), ModelFavoriteIdError> {
     }
 
     let length = value.len();
-    if length > IDENTIFIER_MAX_BYTES {
+    if length > MODEL_FAVORITE_ID_MAX_BYTES {
         return Err(ModelFavoriteIdError::TooLong {
             length,
-            maximum: IDENTIFIER_MAX_BYTES,
+            maximum: MODEL_FAVORITE_ID_MAX_BYTES,
         });
     }
 
@@ -209,8 +214,9 @@ impl ModelFavoritesSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelFavoritesSnapshotError`] when the snapshot is too large
-    /// or contains the same stable model id more than once.
+    /// Returns [`ModelFavoritesSnapshotError`] when the snapshot is too large,
+    /// exceeds the encoded byte ceiling, or contains the same stable model id
+    /// more than once.
     pub fn new(
         revision: ModelFavoritesRevision,
         model_ids: Vec<ModelFavoriteId>,
@@ -229,6 +235,15 @@ impl ModelFavoritesSnapshot {
                     model_id: model_id.clone(),
                 });
             }
+        }
+
+        let encoded_bytes = snapshot_json_upper_bound(&model_ids)
+            .unwrap_or_else(|| MODEL_FAVORITES_MAX_SNAPSHOT_BYTES.saturating_add(1));
+        if encoded_bytes > MODEL_FAVORITES_MAX_SNAPSHOT_BYTES {
+            return Err(ModelFavoritesSnapshotError::TooLarge {
+                bytes: encoded_bytes,
+                maximum: MODEL_FAVORITES_MAX_SNAPSHOT_BYTES,
+            });
         }
 
         Ok(Self {
@@ -265,6 +280,29 @@ impl ModelFavoritesSnapshot {
     }
 }
 
+/// Computes a checked upper bound for the canonical JSON array persisted by
+/// the favorites repository. The repository stores the revision separately;
+/// this bound covers JSON quotes, separators, and escaping without allocating
+/// a second snapshot string in the domain layer.
+fn snapshot_json_upper_bound(model_ids: &[ModelFavoriteId]) -> Option<usize> {
+    let mut bytes = 2usize; // []
+    for (index, model_id) in model_ids.iter().enumerate() {
+        if index > 0 {
+            bytes = bytes.checked_add(1)?;
+        }
+        bytes = bytes.checked_add(2)?; // JSON string quotes
+        for byte in model_id.as_str().bytes() {
+            let escaped_bytes = match byte {
+                b'"' | b'\\' => 2,
+                0x00..=0x1f => 6,
+                _ => 1,
+            };
+            bytes = bytes.checked_add(escaped_bytes)?;
+        }
+    }
+    Some(bytes)
+}
+
 /// Failure while constructing a model favorites snapshot.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ModelFavoritesSnapshotError {
@@ -282,6 +320,14 @@ pub enum ModelFavoritesSnapshotError {
         /// The repeated catalog model id.
         model_id: ModelFavoriteId,
     },
+    /// The canonical JSON representation exceeded the snapshot byte ceiling.
+    #[error("model favorites snapshot is {bytes} bytes; the maximum is {maximum}")]
+    TooLarge {
+        /// Conservative encoded byte count for the ordered snapshot.
+        bytes: usize,
+        /// Maximum accepted encoded byte count.
+        maximum: usize,
+    },
 }
 
 #[cfg(test)]
@@ -298,14 +344,45 @@ mod tests {
             ModelFavoriteId::parse("model id").unwrap_err(),
             ModelFavoriteIdError::ForbiddenCharacter { character: ' ' }
         );
-        let too_long = "x".repeat(IDENTIFIER_MAX_BYTES + 1);
+        let too_long = "x".repeat(MODEL_FAVORITE_ID_MAX_BYTES + 1);
         assert_eq!(
             ModelFavoriteId::parse(too_long).unwrap_err(),
             ModelFavoriteIdError::TooLong {
-                length: IDENTIFIER_MAX_BYTES + 1,
-                maximum: IDENTIFIER_MAX_BYTES,
+                length: MODEL_FAVORITE_ID_MAX_BYTES + 1,
+                maximum: MODEL_FAVORITE_ID_MAX_BYTES,
             }
         );
+    }
+
+    #[test]
+    fn realistic_opencode2_catalog_id_over_128_bytes_roundtrips() {
+        let id = "opencode2:eyJtb2RlbF9pZCI6IngtcHJldmlldy1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbSIsInByb3ZpZGVyX3JvdXRlX2lkIjoib3BlbmNvZGUiLCJ2YXJpYW50X2lkIjoiaGlnaCJ9";
+        assert!(id.len() > 128);
+        assert_eq!(ModelFavoriteId::parse(id.clone()).unwrap().as_str(), id);
+    }
+
+    #[test]
+    fn favorite_id_and_snapshot_byte_bounds_are_independent() {
+        let id = ModelFavoriteId::parse("x".repeat(MODEL_FAVORITE_ID_MAX_BYTES)).unwrap();
+        assert_eq!(id.as_str().len(), MODEL_FAVORITE_ID_MAX_BYTES);
+        let snapshot = ModelFavoritesSnapshot::new(ModelFavoritesRevision::default(), vec![id])
+            .expect("one maximum-size id fits the snapshot budget");
+        assert_eq!(snapshot.model_ids().len(), 1);
+
+        let too_many_escaped_ids = (0..MODEL_FAVORITES_MAX_MODELS)
+            .map(|index| {
+                let prefix = index.to_string();
+                ModelFavoriteId::parse(format!(
+                    "{prefix}{}",
+                    "\\".repeat(MODEL_FAVORITE_ID_MAX_BYTES - prefix.len())
+                ))
+                .unwrap()
+            })
+            .collect();
+        assert!(matches!(
+            ModelFavoritesSnapshot::new(ModelFavoritesRevision::default(), too_many_escaped_ids),
+            Err(ModelFavoritesSnapshotError::TooLarge { .. })
+        ));
     }
 
     #[test]

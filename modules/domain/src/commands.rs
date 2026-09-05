@@ -11,7 +11,10 @@
 use crate::engine_config::{EngineConfigUpdatePrecondition, EngineRunConfig};
 use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, RunId, ThreadId};
 use crate::message::QueueMessagePayload;
+use crate::{ListQueuedMessages, ReadRecalledMessage, ReadRunUsage, WithdrawQueuedMessageCommand};
 use crate::text::{MessageBody, ThreadTitle};
+
+pub use crate::composer_catalog::{ReadComposerCatalog, ReadModelFavorites, SetModelFavorite};
 
 /// Attaches one Forge-visible directory, minting its project identity.
 ///
@@ -215,6 +218,9 @@ pub enum Command {
     QueueMessage(QueueMessage),
     /// See [`StopRun`].
     StopRun(StopRun),
+    /// See [`SetModelFavorite`].
+    SetModelFavorite(SetModelFavorite),
+    WithdrawQueuedMessage(WithdrawQueuedMessageCommand),
     /// See [`SetThreadEngineConfig`].
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
 }
@@ -229,6 +235,8 @@ impl Command {
             Self::QueueFirstMessage(command) => &command.request_id,
             Self::QueueMessage(command) => &command.request_id,
             Self::StopRun(command) => &command.request_id,
+            Self::SetModelFavorite(command) => command.request_id(),
+            Self::WithdrawQueuedMessage(command) => command.request_id(),
             Self::SetThreadEngineConfig(command) => command.request_id(),
         }
     }
@@ -368,4 +376,11 @@ pub enum Query {
     ReadMessageImage(ReadMessageImage),
     /// See [`ReadActiveRun`].
     ReadActiveRun(ReadActiveRun),
+    /// See [`ReadComposerCatalog`].
+    ReadComposerCatalog(ReadComposerCatalog),
+    /// See [`ReadModelFavorites`].
+    ReadModelFavorites(ReadModelFavorites),
+    ListQueuedMessages(ListQueuedMessages),
+    ReadRecalledMessage(ReadRecalledMessage),
+    ReadRunUsage(ReadRunUsage),
 }

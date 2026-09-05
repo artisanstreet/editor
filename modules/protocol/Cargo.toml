@@ -6,6 +6,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+artisan-catalog = { path = "../catalog" }
 artisan-domain = { path = "../domain" }
 capnp.workspace = true
 subtle.workspace = true
@@ -40,3 +41,11 @@ workspace = true
 [[test]]
 name = "composer_message"
 path = "../../tests/protocol/composer_message.rs"
+
+[[test]]
+name = "composer_catalog"
+path = "../../tests/protocol/composer_catalog.rs"
+
+[[test]]
+name = "composer_state"
+path = "../../tests/protocol/composer_state.rs"

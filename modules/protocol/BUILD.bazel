@@ -22,7 +22,7 @@ capnp_codegen(
     name = "artisan_protocol_codegen",
     compiler = "@capnp_tools_windows_x86_64//:capnp.exe",
     plugin = "//scripts/capnp_codegen:capnpc_rust",
-    srcs = ["schema/artisan.capnp"],
+    srcs = ["schema/artisan.capnp", "schema/composer_state.capnp"],
     out_dir = "src",
 )
 
@@ -41,6 +41,7 @@ rust_library(
     crate_name = "artisan_protocol",
     deps = [
         "//modules/domain:domain",
+        "//modules/catalog:catalog",
         "@crates//:capnp",
         "@crates//:subtle",
         "@crates//:thiserror",

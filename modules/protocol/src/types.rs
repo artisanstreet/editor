@@ -7,10 +7,13 @@
 
 use std::fmt;
 
+use artisan_catalog::wire::{NativeModelCatalogWireError, decode_catalog};
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
     ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision,
     EngineProfileId, EngineRunConfig, Event, IdentifierError, ImageAttachmentRef, MessageId,
+    ModelFavoriteId, ModelFavoritesRevision,
+    ModelFavoritesSnapshot as DomainModelFavoritesSnapshot, ModelFavoritesSnapshotError,
     PatchBatch, ProjectListing, ProjectSummary, Query, ReceiptDisposition, RequestId, RunId,
     ThreadId, ThreadListing, ThreadSummary, UnixMillis,
 };
@@ -28,6 +31,11 @@ pub const LOCAL_CAPABILITY_BYTES: usize = 32;
 pub const RECONNECT_CAPABILITY_BYTES: usize = 32;
 /// Maximum UTF-8 byte length of a protocol error detail.
 pub const ERROR_DETAIL_MAX_BYTES: usize = 1_024;
+/// Maximum encoded shared catalog snapshot carried by one response payload.
+///
+/// The application frame retains at least one additional MiB for Cap'n Proto
+/// metadata and envelope overhead.
+pub const CATALOG_SNAPSHOT_MAX_BYTES: usize = 15 * 1024 * 1024;
 
 /// Validation failure for protocol-owned metadata.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -77,6 +85,186 @@ pub enum ProtocolValueError {
         /// Reported active-work count.
         active_work_count: u32,
     },
+    /// The shared catalog snapshot could not be decoded after construction.
+    #[error("catalog snapshot failed shared validation")]
+    InvalidCatalogSnapshot,
+    /// A catalog result omitted the runtime scope required for profile routing.
+    #[error("catalog result is missing its runtime profile scope")]
+    CatalogScopeMissing,
+    /// The embedded catalog scope belongs to a different engine profile.
+    #[error("catalog result profile scope does not match its response profile")]
+    CatalogScopeMismatch,
+}
+
+/// Exact, bounded bytes of a shared native model catalog snapshot.
+///
+/// The bytes remain private so every instance has passed the shared catalog
+/// decoder before it crosses the protocol boundary. Debug output intentionally
+/// reports only its size and never formats the catalog payload.
+#[derive(Clone, Eq, PartialEq)]
+pub struct CatalogSnapshotWire(Vec<u8>);
+
+impl CatalogSnapshotWire {
+    /// Validates the byte bound and shared catalog encoding before retaining it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogSnapshotWireError::TooLarge`] before parsing an
+    /// oversized payload, or [`CatalogSnapshotWireError::InvalidCatalog`] when
+    /// the shared catalog wire decoder rejects it.
+    pub fn new(bytes: Vec<u8>) -> Result<Self, CatalogSnapshotWireError> {
+        let length = bytes.len();
+        if length > CATALOG_SNAPSHOT_MAX_BYTES {
+            return Err(CatalogSnapshotWireError::TooLarge {
+                length,
+                maximum: CATALOG_SNAPSHOT_MAX_BYTES,
+            });
+        }
+        decode_catalog(&bytes)
+            .map_err(|source| CatalogSnapshotWireError::InvalidCatalog { source })?;
+        Ok(Self(bytes))
+    }
+
+    /// Borrows the exact accepted shared-catalog bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Decodes the snapshot through the shared catalog wire API.
+    ///
+    /// This method preserves the shared decoder's typed failure without
+    /// exposing raw payload data in the error.
+    pub fn decoded(
+        &self,
+    ) -> Result<artisan_catalog::NativeModelCatalog, NativeModelCatalogWireError> {
+        decode_catalog(&self.0)
+    }
+}
+
+impl fmt::Debug for CatalogSnapshotWire {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogSnapshotWire")
+            .field("bytes_len", &self.0.len())
+            .finish()
+    }
+}
+
+/// Failure while validating a shared catalog snapshot at the protocol edge.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum CatalogSnapshotWireError {
+    /// The bytes exceeded the protocol payload ceiling.
+    #[error("catalog snapshot is {length} bytes; the maximum is {maximum}")]
+    TooLarge {
+        /// Rejected byte length.
+        length: usize,
+        /// Maximum accepted byte length.
+        maximum: usize,
+    },
+    /// The shared catalog wire decoder rejected the payload.
+    #[error("catalog snapshot failed shared validation: {source}")]
+    InvalidCatalog {
+        /// Shared typed decoder failure.
+        #[source]
+        source: NativeModelCatalogWireError,
+    },
+}
+
+/// Complete runtime catalog response correlated to one thread/profile scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComposerCatalogResult {
+    /// Thread that requested the projection.
+    pub thread_id: ThreadId,
+    /// Native engine profile that owns the projection.
+    pub profile_id: EngineProfileId,
+    /// Exact shared catalog bytes.
+    pub snapshot: CatalogSnapshotWire,
+}
+
+impl ComposerCatalogResult {
+    /// Creates a catalog result after checking its embedded runtime scope.
+    pub fn new(
+        thread_id: ThreadId,
+        profile_id: EngineProfileId,
+        snapshot: CatalogSnapshotWire,
+    ) -> Result<Self, ProtocolValueError> {
+        let result = Self {
+            thread_id,
+            profile_id,
+            snapshot,
+        };
+        result.validate_scope()?;
+        Ok(result)
+    }
+
+    /// Validates that the decoded catalog belongs to the response profile.
+    pub fn validate_scope(&self) -> Result<(), ProtocolValueError> {
+        let catalog = self
+            .snapshot
+            .decoded()
+            .map_err(|_| ProtocolValueError::InvalidCatalogSnapshot)?;
+        let scope = catalog
+            .scope
+            .as_ref()
+            .ok_or(ProtocolValueError::CatalogScopeMissing)?;
+        if scope.profile_id != self.profile_id.as_str() {
+            return Err(ProtocolValueError::CatalogScopeMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Ordered, domain-validated durable model favorites projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelFavoritesSnapshot {
+    /// Monotonic durable favorites revision.
+    pub revision: ModelFavoritesRevision,
+    /// Exact persisted favorite order.
+    pub model_ids: Vec<ModelFavoriteId>,
+}
+
+impl ModelFavoritesSnapshot {
+    /// Creates a protocol snapshot using the existing domain validation.
+    pub fn new(
+        revision: ModelFavoritesRevision,
+        model_ids: Vec<ModelFavoriteId>,
+    ) -> Result<Self, ModelFavoritesSnapshotError> {
+        DomainModelFavoritesSnapshot::new(revision, model_ids.clone())?;
+        Ok(Self {
+            revision,
+            model_ids,
+        })
+    }
+
+    /// Copies an already domain-validated snapshot into protocol ownership.
+    #[must_use]
+    pub fn from_domain(value: &DomainModelFavoritesSnapshot) -> Self {
+        Self {
+            revision: value.revision(),
+            model_ids: value.model_ids().to_vec(),
+        }
+    }
+
+    /// Converts this owned protocol value back through domain validation.
+    pub fn into_domain(self) -> Result<DomainModelFavoritesSnapshot, ModelFavoritesSnapshotError> {
+        DomainModelFavoritesSnapshot::new(self.revision, self.model_ids)
+    }
+}
+
+/// Correlated receipt for one favorite mutation and its complete post-state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetModelFavoriteReceipt {
+    /// Stable client mutation identity echoed by the enclosing response.
+    pub request_id: RequestId,
+    /// Stable model identity changed by the mutation.
+    pub model_id: ModelFavoriteId,
+    /// Requested resulting favorite state.
+    pub favorite: bool,
+    /// Newly accepted or exact duplicate replay.
+    pub disposition: ReceiptDisposition,
+    /// Complete durable state after the mutation.
+    pub snapshot: ModelFavoritesSnapshot,
 }
 
 /// Negotiated application protocol version.
@@ -893,6 +1081,16 @@ pub enum ResponsePayload {
     ThreadEngineSettings(ThreadEngineSettingsResult),
     /// Registered engine profile catalogue with absence semantics.
     RegisteredEngineProfiles(RegisteredEngineProfilesResult),
+    /// Runtime model catalog for one authenticated thread/profile scope.
+    ComposerCatalog(ComposerCatalogResult),
+    /// Complete durable model-favorites projection.
+    ModelFavorites(ModelFavoritesSnapshot),
+    /// Correlated favorite mutation receipt with complete post-state.
+    ModelFavoriteSet(SetModelFavoriteReceipt),
+    QueuedMessages(artisan_domain::QueuedMessageListing),
+    MessageWithdrawn(artisan_domain::composer_state::QueuedMessageWithdrawalResult),
+    RecalledMessage(artisan_domain::RecalledMessageResult),
+    RunUsage(artisan_domain::RunUsageResult),
 }
 
 /// Successful response correlated to a client request frame.
@@ -1125,6 +1323,12 @@ impl WireEnvelope {
                 request_id,
                 payload: ResponsePayload::ThreadEngineConfigSet(result),
             }) if request_id != &result.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::ModelFavoriteSet(receipt),
+            }) if request_id != &receipt.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }
             _ => Ok(()),

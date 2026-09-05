@@ -77,6 +77,7 @@
 #   bodies) stay shared with artisan-domain.
 
 @0xe149e88b3badbc60;
+using ComposerState = import "composer_state.capnp";
 
 # ---------------------------------------------------------------------------
 # Shared vocabulary
@@ -549,6 +550,52 @@ struct RegisteredEngineProfileList {
   profileIds @0 :List(Text);
 }
 
+# Runtime catalog read scoped to the authenticated thread and native engine
+# profile. The backend resolves the catalog through its certified native
+# engine session; this request does not start a prompt or assistant run.
+struct ReadComposerCatalogRequest {
+  threadId @0 :Text;
+  profileId @1 :Text;
+}
+
+# Durable favorite mutation scoped to the catalog revision observed by the
+# caller. The enclosing Envelope.messageId supplies the request correlation.
+struct SetModelFavoriteRequest {
+  threadId @0 :Text;
+  profileId @1 :Text;
+  catalogRevision @2 :Text;
+  modelId @3 :Text;
+  favorite @4 :Bool;
+}
+
+# Exact shared catalog wire bytes. Owned conversion enforces the 15 MiB
+# SnapshotData ceiling before decoding and preserves every ordered model,
+# route, variant, and capability field without truncation.
+struct ComposerCatalogResult {
+  threadId @0 :Text;
+  profileId @1 :Text;
+  snapshotData @2 :Data;
+}
+
+# Ordered durable favorites snapshot. The owned conversion checks the list
+# length before allocation, then validates revision and every model id through
+# the domain snapshot constructors.
+struct ModelFavoritesSnapshot {
+  revision @0 :UInt64;
+  modelIds @1 :List(Text);
+}
+
+# Correlated favorite mutation receipt. The nested request id must equal the
+# enclosing Response.requestId exactly; the complete post-mutation snapshot
+# is retained so a client never has to infer state from a boolean alone.
+struct SetModelFavoriteReceipt {
+  requestId @0 :Text;
+  modelId @1 :Text;
+  favorite @2 :Bool;
+  disposition @3 :ReceiptDisposition;
+  snapshot @4 :ModelFavoritesSnapshot;
+}
+
 # The request arms of the native protocol: the five original workflow
 # requests, project rediscovery, the three conversation read/subscription
 # requests, explicit host interaction, lifecycle control, durable engine
@@ -595,6 +642,13 @@ struct Request {
     readMessageImage @15 :ReadMessageImageRequest;
     stopRun @16 :StopRunRequest;
     readActiveRun @17 :ReadActiveRunRequest;
+    readComposerCatalog @18 :ReadComposerCatalogRequest;
+    readModelFavorites @19 :Void;
+    setModelFavorite @20 :SetModelFavoriteRequest;
+    listQueuedMessages @21 :ComposerState.ListQueuedMessagesRequest;
+    withdrawQueuedMessage @22 :ComposerState.WithdrawQueuedMessageRequest;
+    readRecalledMessage @23 :ComposerState.ReadRecalledMessageRequest;
+    readRunUsage @24 :ComposerState.ReadRunUsageRequest;
   }
 }
 
@@ -645,6 +699,13 @@ struct Response {
     messageImage @16 :MessageImageResult;
     stopRunReceipt @17 :StopRunReceipt;
     activeRun @18 :ActiveRunResult;
+    composerCatalog @19 :ComposerCatalogResult;
+    modelFavorites @20 :ModelFavoritesSnapshot;
+    modelFavoriteSet @21 :SetModelFavoriteReceipt;
+    queuedMessages @22 :ComposerState.QueuedMessageListing;
+    messageWithdrawn @23 :ComposerState.QueuedMessageWithdrawalResult;
+    recalledMessage @24 :ComposerState.RecalledMessageResult;
+    runUsage @25 :ComposerState.RunUsageResult;
   }
 }
 
@@ -667,10 +728,10 @@ enum StopRunDisposition {
 }
 
 struct StopRunReceipt {
-  requestId @0 :Text;
-  threadId @1 :Text;
-  runId @2 :Text;
-  disposition @3 :StopRunDisposition;
+  threadId @0 :Text;
+  runId @1 :Text;
+  disposition @2 :StopRunDisposition;
+  requestId @3 :Text;
 }
 
 struct ActiveRunResult {

@@ -141,3 +141,21 @@ fn image_read_with_wrong_byte_length_is_rejected() {
     let bytes = encode_envelope(&value).unwrap();
     assert!(decode_envelope(&bytes).is_err());
 }
+
+#[test]
+fn stop_receipt_preserves_and_checks_its_nested_request_identity() {
+    let mut value = frame(WireEnvelopeBody::Response(ServerResponse {
+        request_id: RequestId::parse("composer-request").unwrap(),
+        payload: ResponsePayload::RunStopped(artisan_protocol::StopRunReceipt {
+            request_id: RequestId::parse("composer-request").unwrap(),
+            thread_id: thread(),
+            run_id: artisan_domain::RunId::parse("composer-run").unwrap(),
+            disposition: artisan_protocol::StopRunDisposition::Requested,
+        }),
+    }));
+    assert_roundtrip(&value);
+    let WireEnvelopeBody::Response(response) = &mut value.body else { unreachable!() };
+    let ResponsePayload::RunStopped(receipt) = &mut response.payload else { unreachable!() };
+    receipt.request_id = RequestId::parse("another-request").unwrap();
+    assert!(encode_envelope(&value).is_err());
+}

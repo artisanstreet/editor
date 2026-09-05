@@ -1,57 +1,59 @@
 //! Total conversion between owned protocol values and generated Cap'n Proto.
 
 use artisan_domain::{
-    ApprovalMode, AuthoredText, AssistantBody, AssistantBodyError, AssistantMessageItem,
-    AssistantMessagePhase,
-    AttachProject, ByteLimit, CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
-    Command, ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
+    ApprovalMode, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
+    AttachProject, AuthoredText, ByteLimit, CONVERSATION_PATCH_BATCH_MAX_PATCHES,
+    CONVERSATION_QUERY_MAX_TURNS, CatalogRevision, CatalogRevisionError, Command,
+    ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
     ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
     ConversationTurn, ConversationUnsubscribe, CountLimit, CounterError, CreateThread,
-    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, DirectoryEntry,
-    DirectoryId,
+    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry, DirectoryId,
     DirectoryKind, DirectoryListing, DirectoryListingError, DirectoryPlace, DisplayName,
     DisplayNameError, EngineAgentId, EngineConfigError, EngineConfigReason, EngineConfigRevision,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, EngineVariantId, Event, FilesystemAccess, FiniteMillis, FirstMessageQueued,
-    IdentifierError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
-    ImageAttachment, ImageAttachmentError, ImageAttachmentRef, ImageAttachmentRefError,
-    ListAttachedProjects, ListDirectories,
-    ListProjectThreads, MessageBody, MessageBodyError,
-    MessageId, NetworkAccess, OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS, PatchBatch,
-    PatchBatchError, PatchId, PatchSequence, PermissionId, PlaceKind, ProjectAttached, ProjectId,
-    ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount, ReadActiveRun,
-    QueryTurnCountError, QueueFirstMessage, QueueMessage, QueueMessagePayload,
-    QueueMessagePayloadError, QueuedMessage, ReceiptDisposition, RequestId, Revision,
-    RootPath, RootPathError, RunId, SetThreadEngineConfig, StopRun, THREAD_LISTING_MAX_THREADS,
-    ThreadCreated, ThreadId, ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle,
-    ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
-    MultimodalUserMessageItem, WebSearchAccess,
+    IdentifierError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
+    ImageAttachmentRefError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
+    ListAttachedProjects, ListDirectories, ListProjectThreads, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
+    MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MessageBody, MessageBodyError, MessageId, ModelFavoriteId,
+    ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError,
+    ModelFavoritesSnapshotError, MultimodalUserMessageItem, NetworkAccess, OpenCode2Selection,
+    PROJECT_LISTING_MAX_PROJECTS, PatchBatch, PatchBatchError, PatchId, PatchSequence,
+    PermissionId, PlaceKind, ProjectAttached, ProjectId, ProjectListing, ProjectListingError,
+    ProjectSummary, Query, QueryTurnCount, QueryTurnCountError, QueueFirstMessage, QueueMessage,
+    QueueMessagePayload, QueueMessagePayloadError, QueuedMessage, ReadActiveRun,
+    ReadComposerCatalog, ReadModelFavorites, ReceiptDisposition, RequestId, Revision, RootPath,
+    RootPathError, RunId, SetModelFavorite, SetThreadEngineConfig, StopRun,
+    THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing, ThreadListingError,
+    ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
+    WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
 use thiserror::Error;
 
 use crate::artisan_capnp::{
-    self, conversation_item, conversation_patch, conversation_query_request,
-    conversation_subscribe_request, conversation_subscription_started, directory_listing,
-    directory_pick_outcome, engine_config_precondition, engine_run_config, envelope, event,
-    lifecycle_request, lifecycle_response, list_directories_request, protocol_error, query_range,
-    request, response, set_thread_engine_config_request,
+    self, composer_catalog_result, conversation_item, conversation_patch,
+    conversation_query_request, conversation_subscribe_request, conversation_subscription_started,
+    directory_listing, directory_pick_outcome, engine_config_precondition, engine_run_config,
+    envelope, event, lifecycle_request, lifecycle_response, list_directories_request,
+    model_favorites_snapshot, protocol_error, query_range, read_composer_catalog_request, request,
+    response, set_model_favorite_receipt, set_model_favorite_request,
+    set_thread_engine_config_request,
 };
 use crate::types::{
-    ClientRequest, ConnectionId, ConversationSubscriptionStarted, ConversationSubscriptionStopped,
-    DirectoryPickOutcome, ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello,
-    HelloCredential, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
-    LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
-    ActiveRunResult, MessageImageResult, ProtocolFailure, ProtocolValueError, ProtocolVersion,
-    ReconnectCapability,
-    QueueMessageReceipt, ReconnectCapabilityError, RegisteredEngineProfilesResult,
-    ResponsePayload, ServerEvent, ServerResponse, SetThreadEngineConfigResult, VersionOffer,
-    VersionOfferError, Welcome, StopRunDisposition, StopRunReceipt,
-    WireEnvelope, WireEnvelopeBody,
+    ActiveRunResult, CatalogSnapshotWire, CatalogSnapshotWireError, ClientRequest,
+    ComposerCatalogResult, ConnectionId, ConversationSubscriptionStarted,
+    ConversationSubscriptionStopped, DirectoryPickOutcome, ErrorCode, ErrorDetail, EventCursor,
+    FirstMessageReceipt, FrameId, Hello, HelloCredential, LifecycleRequest, LifecycleResponse,
+    LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
+    LocalCapability, LocalCapabilityError, MessageImageResult, ModelFavoritesSnapshot,
+    ProtocolFailure, ProtocolValueError, ProtocolVersion, QueueMessageReceipt, ReconnectCapability,
+    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResponsePayload, ServerEvent,
+    ServerResponse, SetModelFavoriteReceipt, SetThreadEngineConfigResult, StopRunDisposition,
+    StopRunReceipt, VersionOffer, VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
 
 /// Maximum Cap'n Proto graph traversal for one already-framed application
@@ -66,6 +68,9 @@ pub const CAPNP_NESTING_LIMIT: i32 = 32;
 /// Failure while serializing one already-owned protocol frame.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ProtocolEncodeError {
+    #[error("invalid composer state")]
+    ComposerState,
+
     /// Protocol metadata or request correlation was invalid.
     #[error(transparent)]
     Value(#[from] ProtocolValueError),
@@ -85,11 +90,21 @@ pub enum ProtocolEncodeError {
         /// Duplicate value.
         value: String,
     },
+    /// A public protocol snapshot failed the existing domain validation.
+    #[error("invalid model favorites snapshot: {source}")]
+    ModelFavoritesSnapshot {
+        /// Domain-owned snapshot validation failure.
+        #[source]
+        source: ModelFavoritesSnapshotError,
+    },
 }
 
 /// Failure while reading and validating one external protocol frame.
 #[derive(Debug, Error)]
 pub enum ProtocolDecodeError {
+    #[error("invalid composer state: {0}")]
+    ComposerState(#[from] crate::composer_state_codec::ComposerStateCodecError),
+
     /// Cap'n Proto framing, pointer, nesting, or allocation validation failed.
     #[error("invalid Cap'n Proto message: {source}")]
     Capnp {
@@ -291,6 +306,41 @@ pub enum ProtocolDecodeError {
         #[source]
         source: EngineConfigError,
     },
+    /// A catalog snapshot failed the shared wire validation or byte bound.
+    #[error("invalid catalog snapshot: {source}")]
+    CatalogSnapshot {
+        /// Owned catalog snapshot validation failure.
+        #[source]
+        source: CatalogSnapshotWireError,
+    },
+    /// A catalog revision failed its domain bound or character policy.
+    #[error("invalid catalog revision: {source}")]
+    CatalogRevision {
+        /// Domain-owned revision validation failure.
+        #[source]
+        source: CatalogRevisionError,
+    },
+    /// A favorite model identity failed its domain bound.
+    #[error("invalid model favorite id: {source}")]
+    ModelFavoriteId {
+        /// Domain-owned model-id validation failure.
+        #[source]
+        source: ModelFavoriteIdError,
+    },
+    /// A favorite revision failed its domain storage bound.
+    #[error("invalid model favorites revision: {source}")]
+    ModelFavoritesRevision {
+        /// Domain-owned revision validation failure.
+        #[source]
+        source: ModelFavoritesRevisionError,
+    },
+    /// A decoded favorites snapshot failed domain cardinality/uniqueness.
+    #[error("invalid model favorites snapshot: {source}")]
+    ModelFavoritesSnapshot {
+        /// Domain-owned snapshot validation failure.
+        #[source]
+        source: ModelFavoritesSnapshotError,
+    },
 }
 
 impl From<capnp::Error> for ProtocolDecodeError {
@@ -368,6 +418,36 @@ impl From<PatchBatchError> for ProtocolDecodeError {
 impl From<EngineConfigError> for ProtocolDecodeError {
     fn from(source: EngineConfigError) -> Self {
         Self::EngineConfig { source }
+    }
+}
+
+impl From<CatalogSnapshotWireError> for ProtocolDecodeError {
+    fn from(source: CatalogSnapshotWireError) -> Self {
+        Self::CatalogSnapshot { source }
+    }
+}
+
+impl From<CatalogRevisionError> for ProtocolDecodeError {
+    fn from(source: CatalogRevisionError) -> Self {
+        Self::CatalogRevision { source }
+    }
+}
+
+impl From<ModelFavoriteIdError> for ProtocolDecodeError {
+    fn from(source: ModelFavoriteIdError) -> Self {
+        Self::ModelFavoriteId { source }
+    }
+}
+
+impl From<ModelFavoritesRevisionError> for ProtocolDecodeError {
+    fn from(source: ModelFavoritesRevisionError) -> Self {
+        Self::ModelFavoritesRevision { source }
+    }
+}
+
+impl From<ModelFavoritesSnapshotError> for ProtocolDecodeError {
+    fn from(source: ModelFavoritesSnapshotError) -> Self {
+        Self::ModelFavoritesSnapshot { source }
     }
 }
 
@@ -469,6 +549,14 @@ fn parse_thread_id(value: String, field: &'static str) -> Result<ThreadId, Proto
     ThreadId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
 }
 
+fn parse_profile_id(
+    value: String,
+    field: &'static str,
+) -> Result<EngineProfileId, ProtocolDecodeError> {
+    EngineProfileId::parse(value)
+        .map_err(|_| engine_config_error(field, EngineConfigReason::InvalidIdentifier))
+}
+
 fn parse_message_id(value: String, field: &'static str) -> Result<MessageId, ProtocolDecodeError> {
     MessageId::parse(value).map_err(|source| ProtocolDecodeError::Identifier { field, source })
 }
@@ -527,7 +615,7 @@ fn encode_body(
             welcome.set_lifecycle_control_supported(value.lifecycle_control_supported);
         }
         WireEnvelopeBody::Request(value) => {
-            encode_request(root.reborrow().init_body().init_request(), value);
+            encode_request(root.reborrow().init_body().init_request(), value)?;
         }
         WireEnvelopeBody::Response(value) => {
             encode_response(root.reborrow().init_body().init_response(), value)?;
@@ -545,7 +633,7 @@ fn encode_body(
     Ok(())
 }
 
-fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &ClientRequest) {
+fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &ClientRequest) -> Result<(), ProtocolEncodeError> {
     match value {
         ClientRequest::Query(Query::ListDirectories(query)) => {
             let mut scope = builder.reborrow().init_list_directories().init_scope();
@@ -601,6 +689,14 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             let mut stop = builder.reborrow().init_stop_run();
             stop.set_thread_id(command.thread_id().as_str());
             stop.set_run_id(command.run_id().as_str());
+        }
+        ClientRequest::Command(Command::SetModelFavorite(command)) => {
+            let mut favorite = builder.reborrow().init_set_model_favorite();
+            favorite.set_thread_id(command.thread_id().as_str());
+            favorite.set_profile_id(command.profile_id().as_str());
+            favorite.set_catalog_revision(command.catalog_revision().as_str());
+            favorite.set_model_id(command.model_id().as_str());
+            favorite.set_favorite(command.favorite());
         }
         ClientRequest::Command(Command::SetThreadEngineConfig(command)) => {
             encode_set_thread_engine_config(builder.reborrow(), command.as_ref());
@@ -658,7 +754,21 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
                 .init_read_active_run()
                 .set_thread_id(query.thread_id().as_str());
         }
+        ClientRequest::Query(Query::ReadComposerCatalog(query)) => {
+            let mut catalog = builder.reborrow().init_read_composer_catalog();
+            catalog.set_thread_id(query.thread_id().as_str());
+            catalog.set_profile_id(query.profile_id().as_str());
+        }
+        ClientRequest::Query(Query::ReadModelFavorites(_)) => {
+            builder.reborrow().set_read_model_favorites(());
+        }
+
+        ClientRequest::Query(Query::ListQueuedMessages(query)) => crate::composer_state_codec::encode_list_queued_messages_request(builder.reborrow().init_list_queued_messages(), query).map_err(|_| ProtocolEncodeError::ComposerState)?,
+        ClientRequest::Command(Command::WithdrawQueuedMessage(command)) => crate::composer_state_codec::encode_withdraw_queued_message_request(builder.reborrow().init_withdraw_queued_message(), command),
+        ClientRequest::Query(Query::ReadRecalledMessage(query)) => crate::composer_state_codec::encode_read_recalled_message_request(builder.reborrow().init_read_recalled_message(), query),
+        ClientRequest::Query(Query::ReadRunUsage(query)) => crate::composer_state_codec::encode_read_run_usage_request(builder.reborrow().init_read_run_usage(), query),
     }
+    Ok(())
 }
 
 fn encode_conversation_query_request(
@@ -697,14 +807,19 @@ fn encode_response(
     value: &ServerResponse,
 ) -> Result<(), ProtocolEncodeError> {
     builder.set_request_id(value.request_id.as_str());
-    encode_response_payload(builder, &value.payload)
+    encode_response_payload(builder, &value.payload, &value.request_id)
 }
 
 fn encode_response_payload(
     mut builder: artisan_capnp::response::Builder<'_>,
     payload: &ResponsePayload,
+    outer_request_id: &RequestId,
 ) -> Result<(), ProtocolEncodeError> {
     match payload {
+        ResponsePayload::QueuedMessages(value) => crate::composer_state_codec::encode_queued_message_listing(builder.reborrow().init_queued_messages(), value).map_err(|_| ProtocolEncodeError::ComposerState)?,
+        ResponsePayload::MessageWithdrawn(value) => crate::composer_state_codec::encode_queued_message_withdrawal_result(builder.reborrow().init_message_withdrawn(), outer_request_id, value).map_err(|_| ProtocolEncodeError::ComposerState)?,
+        ResponsePayload::RecalledMessage(value) => crate::composer_state_codec::encode_recalled_message_result(builder.reborrow().init_recalled_message(), value).map_err(|_| ProtocolEncodeError::ComposerState)?,
+        ResponsePayload::RunUsage(value) => crate::composer_state_codec::encode_run_usage_result(builder.reborrow().init_run_usage(), value).map_err(|_| ProtocolEncodeError::ComposerState)?,
         ResponsePayload::DirectoryListing(listing) => {
             encode_directory_listing(builder.reborrow().init_directory_list(), listing)?;
         }
@@ -785,6 +900,24 @@ fn encode_response_payload(
                 }
             }
         }
+        ResponsePayload::ComposerCatalog(result) => {
+            result.validate_scope()?;
+            let mut encoded = builder.reborrow().init_composer_catalog();
+            encoded.set_thread_id(result.thread_id.as_str());
+            encoded.set_profile_id(result.profile_id.as_str());
+            encoded.set_snapshot_data(result.snapshot.as_bytes());
+        }
+        ResponsePayload::ModelFavorites(snapshot) => {
+            encode_model_favorites_snapshot(builder.reborrow().init_model_favorites(), snapshot)?;
+        }
+        ResponsePayload::ModelFavoriteSet(receipt) => {
+            let mut encoded = builder.reborrow().init_model_favorite_set();
+            encoded.set_request_id(receipt.request_id.as_str());
+            encoded.set_model_id(receipt.model_id.as_str());
+            encoded.set_favorite(receipt.favorite);
+            encoded.set_disposition(encode_disposition(receipt.disposition));
+            encode_model_favorites_snapshot(encoded.init_snapshot(), &receipt.snapshot)?;
+        }
         ResponsePayload::ConversationSnapshot(snapshot) => {
             encode_conversation_snapshot(
                 builder.reborrow().init_conversation_snapshot(),
@@ -828,6 +961,26 @@ fn encode_response_payload(
                 result,
             )?;
         }
+    }
+    Ok(())
+}
+
+fn encode_model_favorites_snapshot(
+    mut builder: artisan_capnp::model_favorites_snapshot::Builder<'_>,
+    snapshot: &ModelFavoritesSnapshot,
+) -> Result<(), ProtocolEncodeError> {
+    ModelFavoritesSnapshot::new(snapshot.revision, snapshot.model_ids.clone())
+        .map_err(|source| ProtocolEncodeError::ModelFavoritesSnapshot { source })?;
+    builder.set_revision(snapshot.revision.get());
+    let mut model_ids = builder.init_model_ids(list_length(
+        "modelFavoritesSnapshot.modelIds",
+        snapshot.model_ids.len(),
+    )?);
+    for (index, model_id) in snapshot.model_ids.iter().enumerate() {
+        model_ids.set(
+            list_index("modelFavoritesSnapshot.modelIds", index)?,
+            model_id.as_str(),
+        );
     }
     Ok(())
 }
@@ -1607,6 +1760,64 @@ fn decode_request(
                 )?),
             )))
         }
+        request::Which::ReadComposerCatalog(query) => {
+            let query = query?;
+            Ok(ClientRequest::Query(Query::ReadComposerCatalog(
+                ReadComposerCatalog::new(
+                    parse_thread_id(
+                        read_text(
+                            query.get_thread_id(),
+                            "request.readComposerCatalog.threadId",
+                        )?,
+                        "request.readComposerCatalog.threadId",
+                    )?,
+                    parse_profile_id(
+                        read_text(
+                            query.get_profile_id(),
+                            "request.readComposerCatalog.profileId",
+                        )?,
+                        "request.readComposerCatalog.profileId",
+                    )?,
+                ),
+            )))
+        }
+        request::Which::ListQueuedMessages(value) => Ok(ClientRequest::Query(Query::ListQueuedMessages(crate::composer_state_codec::decode_list_queued_messages_request(value?)?))),
+        request::Which::WithdrawQueuedMessage(value) => Ok(ClientRequest::Command(Command::WithdrawQueuedMessage(crate::composer_state_codec::decode_withdraw_queued_message_request(value?, request_id)?))),
+        request::Which::ReadRecalledMessage(value) => Ok(ClientRequest::Query(Query::ReadRecalledMessage(crate::composer_state_codec::decode_read_recalled_message_request(value?)?))),
+        request::Which::ReadRunUsage(value) => Ok(ClientRequest::Query(Query::ReadRunUsage(crate::composer_state_codec::decode_read_run_usage_request(value?)?))),
+        request::Which::ReadModelFavorites(()) => Ok(ClientRequest::Query(
+            Query::ReadModelFavorites(ReadModelFavorites),
+        )),
+        request::Which::SetModelFavorite(command) => {
+            let command = command?;
+            let catalog_revision = CatalogRevision::parse(read_text(
+                command.get_catalog_revision(),
+                "request.setModelFavorite.catalogRevision",
+            )?)?;
+            let model_id = ModelFavoriteId::parse(read_text(
+                command.get_model_id(),
+                "request.setModelFavorite.modelId",
+            )?)?;
+            Ok(ClientRequest::Command(Command::SetModelFavorite(
+                SetModelFavorite::new(
+                    request_id,
+                    parse_thread_id(
+                        read_text(command.get_thread_id(), "request.setModelFavorite.threadId")?,
+                        "request.setModelFavorite.threadId",
+                    )?,
+                    parse_profile_id(
+                        read_text(
+                            command.get_profile_id(),
+                            "request.setModelFavorite.profileId",
+                        )?,
+                        "request.setModelFavorite.profileId",
+                    )?,
+                    catalog_revision,
+                    model_id,
+                    command.get_favorite(),
+                ),
+            )))
+        }
     }
 }
 
@@ -1674,9 +1885,9 @@ fn decode_queue_message(
         "request.queueMessage.attachments",
     )?;
     let payload = QueueMessagePayload::new(text, attachments)?;
-    Ok(ClientRequest::Command(Command::QueueMessage(QueueMessage::new(
-        request_id, thread_id, payload,
-    ))))
+    Ok(ClientRequest::Command(Command::QueueMessage(
+        QueueMessage::new(request_id, thread_id, payload),
+    )))
 }
 
 fn decode_stop_run(
@@ -1759,7 +1970,11 @@ fn decode_image_attachment_refs(
                 reason: "attachment index overflow",
             }
         })?;
-        refs.push(decode_image_attachment_ref(encoded, field, Some(expected_index))?);
+        refs.push(decode_image_attachment_ref(
+            encoded,
+            field,
+            Some(expected_index),
+        )?);
     }
     Ok(refs)
 }
@@ -2285,6 +2500,17 @@ fn decode_response(
         response::Which::MessageImage(result) => decode_message_image(result?)?,
         response::Which::StopRunReceipt(receipt) => decode_stop_run_receipt(receipt?, &request_id)?,
         response::Which::ActiveRun(result) => decode_active_run_result(result?)?,
+        response::Which::QueuedMessages(value) => ResponsePayload::QueuedMessages(crate::composer_state_codec::decode_queued_message_listing(value?)?),
+        response::Which::MessageWithdrawn(value) => ResponsePayload::MessageWithdrawn(crate::composer_state_codec::decode_queued_message_withdrawal_result(value?, &request_id)?),
+        response::Which::RecalledMessage(value) => ResponsePayload::RecalledMessage(crate::composer_state_codec::decode_recalled_message_result(value?)?),
+        response::Which::RunUsage(value) => ResponsePayload::RunUsage(crate::composer_state_codec::decode_run_usage_result(value?)?),
+        response::Which::ComposerCatalog(result) => decode_composer_catalog(result?)?,
+        response::Which::ModelFavorites(snapshot) => {
+            ResponsePayload::ModelFavorites(decode_model_favorites_snapshot(snapshot?, "response.modelFavorites.modelIds")?)
+        }
+        response::Which::ModelFavoriteSet(receipt) => {
+            decode_model_favorite_set(receipt?, &request_id)?
+        }
         response::Which::ConversationSnapshot(snapshot) => {
             ResponsePayload::ConversationSnapshot(decode_conversation_snapshot(snapshot?)?)
         }
@@ -2584,6 +2810,82 @@ fn decode_active_run_result(
         },
     };
     Ok(ResponsePayload::ActiveRun(result))
+}
+
+fn decode_composer_catalog(
+    result: artisan_capnp::composer_catalog_result::Reader<'_>,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(result.get_thread_id(), "response.composerCatalog.threadId")?,
+        "response.composerCatalog.threadId",
+    )?;
+    let profile_id = parse_profile_id(
+        read_text(
+            result.get_profile_id(),
+            "response.composerCatalog.profileId",
+        )?,
+        "response.composerCatalog.profileId",
+    )?;
+    let snapshot = CatalogSnapshotWire::new(result.get_snapshot_data()?.to_vec())?;
+    Ok(ResponsePayload::ComposerCatalog(
+        ComposerCatalogResult::new(thread_id, profile_id, snapshot)?,
+    ))
+}
+
+fn decode_model_favorites_snapshot(
+    value: artisan_capnp::model_favorites_snapshot::Reader<'_>,
+    model_ids_field: &'static str,
+) -> Result<ModelFavoritesSnapshot, ProtocolDecodeError> {
+    let encoded_model_ids = value.get_model_ids()?;
+    let count = encoded_model_ids.len() as usize;
+    if count > artisan_domain::MODEL_FAVORITES_MAX_MODELS {
+        return Err(ProtocolDecodeError::ModelFavoritesSnapshot {
+            source: ModelFavoritesSnapshotError::TooManyModels {
+                count,
+                maximum: artisan_domain::MODEL_FAVORITES_MAX_MODELS,
+            },
+        });
+    }
+    let mut model_ids = Vec::with_capacity(count);
+    for encoded_model_id in encoded_model_ids.iter() {
+        model_ids.push(ModelFavoriteId::parse(read_text(
+            encoded_model_id,
+            model_ids_field,
+        )?)?);
+    }
+    let revision = ModelFavoritesRevision::new(value.get_revision())?;
+    ModelFavoritesSnapshot::new(revision, model_ids).map_err(ProtocolDecodeError::from)
+}
+
+fn decode_model_favorite_set(
+    receipt: artisan_capnp::set_model_favorite_receipt::Reader<'_>,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let nested_request_id = parse_request_id(
+        read_text(
+            receipt.get_request_id(),
+            "response.modelFavoriteSet.requestId",
+        )?,
+        "response.modelFavoriteSet.requestId",
+    )?;
+    if &nested_request_id != request_id {
+        return Err(ProtocolDecodeError::CorrelationMismatch {
+            field: "response.modelFavoriteSet.requestId",
+        });
+    }
+    Ok(ResponsePayload::ModelFavoriteSet(SetModelFavoriteReceipt {
+        request_id: nested_request_id,
+        model_id: ModelFavoriteId::parse(read_text(
+            receipt.get_model_id(),
+            "response.modelFavoriteSet.modelId",
+        )?)?,
+        favorite: receipt.get_favorite(),
+        disposition: decode_disposition(receipt.get_disposition()?),
+        snapshot: decode_model_favorites_snapshot(
+            receipt.get_snapshot()?,
+            "response.modelFavoriteSet.snapshot.modelIds",
+        )?,
+    }))
 }
 
 fn decode_conversation_subscription_started(
@@ -2917,8 +3219,10 @@ fn decode_conversation_item(
                         value,
                         "conversationItem.multimodalUserMessage.text",
                     )?)
-                    .map_err(|source| ProtocolDecodeError::MessagePayload {
-                        source: QueueMessagePayloadError::Text(source),
+                    .map_err(|source| {
+                        ProtocolDecodeError::MessagePayload {
+                            source: QueueMessagePayloadError::Text(source),
+                        }
                     })?,
                 ),
             };
