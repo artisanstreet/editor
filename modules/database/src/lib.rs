@@ -33,3 +33,5 @@ pub use repository::{
     StartupReconciliationQuery, StartupRunLifecycle, TerminalRunReceipt, ThreadEngineSettings,
     TransitionedMessageDispatch,
 };
+
+pub use repository::{ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult};

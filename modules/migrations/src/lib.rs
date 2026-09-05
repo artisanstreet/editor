@@ -9,6 +9,7 @@ mod m20260824_000002_global_command_receipts;
 mod m20260824_000003_conversation_execution;
 mod m20260830_000004_engine_run_config;
 mod m20260905_000005_multimodal_messages;
+mod m20260905_000006_model_favorites;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseConnection;
@@ -26,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260824_000003_conversation_execution::Migration),
             Box::new(m20260830_000004_engine_run_config::Migration),
             Box::new(m20260905_000005_multimodal_messages::Migration),
+            Box::new(m20260905_000006_model_favorites::Migration),
         ]
     }
 }

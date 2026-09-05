@@ -96,3 +96,6 @@ pub use text::{
 pub use time::UnixMillis;
 
 pub use legacy_workspace_id::{WorkspaceId, WorkspaceIdError};
+
+mod model_favorites;
+pub use model_favorites::{ModelFavoriteId, ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError, ModelFavoritesSnapshot, ModelFavoritesSnapshotError, MODEL_FAVORITES_MAX_MODELS, MODEL_FAVORITES_MAX_SNAPSHOT_BYTES};

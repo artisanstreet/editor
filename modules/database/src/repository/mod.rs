@@ -242,3 +242,6 @@ fn corrupt_data(
 fn millis(value: UnixMillis) -> i64 {
     value.as_millis()
 }
+
+mod model_favorites;
+pub use model_favorites::{ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult};

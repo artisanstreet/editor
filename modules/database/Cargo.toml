@@ -105,3 +105,7 @@ path = "../../tests/database/conversation_patch_replay.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "model_favorites"
+path = "../../tests/database/model_favorites.rs"
