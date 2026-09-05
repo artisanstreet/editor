@@ -3119,6 +3119,60 @@ mod tests {
         cx.update(|_, app| assert!(!view.read(app).state.is_open()));
     }
 
+    #[gpui::test]
+    fn wheel_events_accumulate_once_and_precise_pixels_cancel_inertia(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| app.set_reduce_motion(true));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            NativeModelSelector::new(
+                NativeModelCatalog::offline().unwrap(),
+                None,
+                ThemeMode::Dark,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+            .unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("artisan-native-model-selector-row-codex-sol")
+            .unwrap();
+        let expected = cx.update(|window, app| {
+            app.set_reduce_motion(false);
+            let picker = view.read(app);
+            let maximum = f32::from(picker.menu_scroll.max_offset().y);
+            assert!(maximum > 0.0, "the fixture must scroll");
+            (-3.0 * f32::from(window.line_height())).clamp(-maximum, 0.0)
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: gpui::ScrollDelta::Lines(point(0.0, -3.0)),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.update(|_, app| assert_eq!(view.read(app).model_scroll.target(), expected));
+        let expected_pixel = cx.update(|_, app| {
+            let picker = view.read(app);
+            (f32::from(picker.menu_scroll.offset().y) - 7.0)
+                .clamp(-f32::from(picker.menu_scroll.max_offset().y), 0.0)
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-7.0))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.update(|_, app| {
+            let picker = view.read(app);
+            assert_eq!(f32::from(picker.menu_scroll.offset().y), expected_pixel);
+            assert!(!picker.model_scroll.active());
+        });
+    }
     fn state_with_offline_catalog() -> NativeModelSelectorState {
         NativeModelSelectorState::new(
             NativeModelCatalog::offline().expect("the real bundled catalog must decode"),
@@ -3262,6 +3316,7 @@ mod tests {
     }
     #[gpui::test]
     fn policy_popup_floats_and_accepts_clicks_outside_parent_bounds(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| app.set_reduce_motion(true));
         let (view, cx) = cx.add_window_view(|_, cx| {
             NativeModelSelector::new(
                 NativeModelCatalog::offline().unwrap(),
