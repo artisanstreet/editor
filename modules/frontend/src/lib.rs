@@ -176,3 +176,5 @@ pub mod workspace_tab_state;
 pub fn run() -> std::process::ExitCode {
     native_application::run()
 }
+pub mod native_model_catalog;
+pub mod native_model_selector;

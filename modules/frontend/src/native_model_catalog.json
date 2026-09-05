@@ -1,0 +1,2720 @@
+{
+  "harnesses": [
+    {
+      "compaction_default_model_id": "codex-luna",
+      "id": "codex",
+      "gateways": [],
+      "label": "Codex",
+      "permissions": {
+        "default": "autonomous",
+        "options": [
+          {
+            "approval_behavior": "none",
+            "availability": "always",
+            "description": "Inspect and search without writing files; Codex keeps the read-only sandbox while enabled web search remains available.",
+            "edit_scope": "none",
+            "id": "restricted",
+            "label": "Read only",
+            "native_value": "read-only",
+            "safety_boundary": "sandbox"
+          },
+          {
+            "approval_behavior": "prompts",
+            "availability": "always",
+            "description": "Work autonomously inside the workspace while Codex's sandbox contains writes and its approval policy handles risky actions.",
+            "edit_scope": "workspace",
+            "id": "autonomous",
+            "label": "Auto",
+            "native_value": "workspace-write",
+            "safety_boundary": "sandbox"
+          },
+          {
+            "approval_behavior": "none",
+            "availability": "dynamic",
+            "description": "Remove Codex's local sandbox and approval prompts, granting access beyond the workspace and to the network; administrator policy may forbid this mode.",
+            "edit_scope": "host",
+            "id": "unrestricted",
+            "label": "Unrestricted",
+            "native_value": "danger-full-access",
+            "safety_boundary": "bypassed"
+          }
+        ]
+      }
+    },
+    {
+      "compaction_default_model_id": "claude-haiku",
+      "id": "claude",
+      "gateways": [],
+      "label": "Claude",
+      "permissions": {
+        "default": "autonomous",
+        "options": [
+          {
+            "approval_behavior": "prompts",
+            "availability": "always",
+            "description": "Explore, search, and propose a plan without editing source files until leaving plan mode is approved.",
+            "edit_scope": "none",
+            "id": "restricted",
+            "label": "Read only",
+            "native_value": "plan",
+            "safety_boundary": "plan"
+          },
+          {
+            "approval_behavior": "classifier",
+            "availability": "dynamic",
+            "description": "Use Anthropic's classifier to run routine actions and block or escalate risky actions.",
+            "edit_scope": "host",
+            "id": "autonomous",
+            "label": "Auto",
+            "native_value": "auto",
+            "safety_boundary": "rules"
+          },
+          {
+            "approval_behavior": "none",
+            "availability": "dynamic",
+            "description": "Disable ordinary permission prompts and safety checks; administrator policy may forbid this mode.",
+            "edit_scope": "host",
+            "id": "unrestricted",
+            "label": "Unrestricted",
+            "native_value": "bypassPermissions",
+            "safety_boundary": "bypassed"
+          }
+        ]
+      }
+    },
+    {
+      "compaction_default_model_id": "opencode2:eyJtb2RlbF9pZCI6IngtcHJldmlldy1mLWZyZWUiLCJwcm92aWRlcl9yb3V0ZV9pZCI6Im9wZW5jb2RlIn0",
+      "id": "opencode2",
+      "gateways": [
+        {
+          "id": "opencode",
+          "kind": "managed",
+          "label": "Zen"
+        },
+        {
+          "id": "opencode-go",
+          "kind": "managed",
+          "label": "Go"
+        }
+      ],
+      "label": "OpenCode",
+      "permissions": {
+        "default": "autonomous",
+        "options": [
+          {
+            "approval_behavior": "none",
+            "availability": "always",
+            "description": "Inspect the selected workspace without mutation, shell, external-directory, or subagent tools; enabled web search remains available.",
+            "edit_scope": "none",
+            "id": "restricted",
+            "label": "Read only",
+            "native_value": "artisan-restricted",
+            "safety_boundary": "rules"
+          },
+          {
+            "approval_behavior": "prompts",
+            "availability": "always",
+            "description": "Allow workspace edits automatically while OpenCode continues to ask before shell access and denies external-directory access.",
+            "edit_scope": "workspace",
+            "id": "autonomous",
+            "label": "Auto",
+            "native_value": "artisan-auto",
+            "safety_boundary": "rules"
+          },
+          {
+            "approval_behavior": "none",
+            "availability": "dynamic",
+            "description": "Allow host-level tools without prompts; shell commands have host filesystem, process, and network authority.",
+            "edit_scope": "host",
+            "id": "unrestricted",
+            "label": "Unrestricted",
+            "native_value": "artisan-unrestricted",
+            "safety_boundary": "bypassed"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hermes",
+      "gateways": [],
+      "label": "Hermes",
+      "permissions": {
+        "default": "autonomous",
+        "options": [
+          {
+            "approval_behavior": "prompts",
+            "availability": "always",
+            "description": "Use the selected Hermes profile's approval rules. Hermes tools run with host filesystem and network access unless that profile configures an isolated backend.",
+            "edit_scope": "host",
+            "id": "autonomous",
+            "label": "Auto",
+            "native_value": "profile",
+            "safety_boundary": "rules"
+          },
+          {
+            "approval_behavior": "none",
+            "availability": "dynamic",
+            "description": "Enable Hermes YOLO for this session. Host-level tools proceed without ordinary approval prompts; Hermes hardline deny rules may still apply.",
+            "edit_scope": "host",
+            "id": "unrestricted",
+            "label": "Unrestricted",
+            "native_value": "yolo",
+            "safety_boundary": "bypassed"
+          }
+        ]
+      }
+    },
+    {
+      "compaction_default_model_id": "grok-composer-2-5",
+      "id": "grok",
+      "gateways": [],
+      "label": "Grok Build",
+      "permissions": {
+        "default": "autonomous",
+        "options": [
+          {
+            "approval_behavior": "prompts",
+            "availability": "always",
+            "description": "Explore, search, and prepare a plan while Grok keeps edit tools limited until leaving plan mode is approved.",
+            "edit_scope": "none",
+            "id": "restricted",
+            "label": "Read only",
+            "native_value": "plan",
+            "safety_boundary": "plan"
+          },
+          {
+            "approval_behavior": "classifier",
+            "availability": "dynamic",
+            "description": "Use xAI's classifier to approve safe tools while dangerous actions may still prompt.",
+            "edit_scope": "host",
+            "id": "autonomous",
+            "label": "Auto",
+            "native_value": "auto",
+            "safety_boundary": "rules"
+          },
+          {
+            "approval_behavior": "none",
+            "availability": "always",
+            "description": "Auto-approve tool calls while deny rules and pre-tool hooks remain authoritative.",
+            "edit_scope": "host",
+            "id": "unrestricted",
+            "label": "Unrestricted",
+            "native_value": "always-approve",
+            "safety_boundary": "rules"
+          }
+        ]
+      }
+    },
+    {
+      "compaction_default_model_id": "cursor-composer-2-5",
+      "id": "cursor",
+      "gateways": [],
+      "label": "Cursor",
+      "permissions": {
+        "default": "autonomous",
+        "options": [
+          {
+            "approval_behavior": "none",
+            "availability": "always",
+            "description": "Use Cursor's read-only Ask mode for questions, exploration, planning, and enabled web search without edits.",
+            "edit_scope": "none",
+            "id": "restricted",
+            "label": "Read only",
+            "native_value": "ask",
+            "safety_boundary": "plan"
+          },
+          {
+            "approval_behavior": "prompts",
+            "availability": "always",
+            "description": "Use Cursor's interactive default and ask before terminal commands; configured deny rules remain authoritative.",
+            "edit_scope": "host",
+            "id": "autonomous",
+            "label": "Auto",
+            "native_value": "default",
+            "safety_boundary": "rules"
+          },
+          {
+            "approval_behavior": "none",
+            "availability": "dynamic",
+            "description": "Run print mode with --force so commands and writes proceed without prompts; explicit deny rules still win.",
+            "edit_scope": "host",
+            "id": "unrestricted",
+            "label": "Unrestricted",
+            "native_value": "force",
+            "safety_boundary": "rules"
+          }
+        ]
+      }
+    }
+  ],
+  "models": [
+    {
+      "capabilities": {
+        "context_window": {
+          "availability": "configurable",
+          "default": "standard",
+          "options": [
+            {
+              "description": "What Codex resolves for every GPT-5 model. Compacts near 245K.",
+              "id": "standard",
+              "label": "272K",
+              "native_suffix": "",
+              "tokens": 272000
+            },
+            {
+              "advisory": "Not recommended.",
+              "description": "Input past 272K bills at about twice the standard rate, and it is the whole conversation that is re-sent on every turn — so the premium applies again to the same tokens with each message, not once. Compaction moving to ~945K means far more context is carried into far more turns. Reach for it only when a task genuinely cannot be split, and expect a turn near the ceiling to cost multiples of the same turn under 272K.",
+              "id": "extended",
+              "label": "1M",
+              "native_config": {
+                "model_context_window": 1050000
+              },
+              "native_suffix": "1m",
+              "tokens": 1050000
+            }
+          ]
+        },
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.6 Sol uses 1x ChatGPT credits for 1x speed. Fast mode is available on supported ChatGPT sessions; API-key sessions use API token pricing instead.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "chatgpt-credits",
+            "consumption_multiplier": 2.5,
+            "input_consumption_multiplier": 2.5,
+            "output_consumption_multiplier": 2.5,
+            "default": false,
+            "description": "GPT 5.6 Sol uses 2.5x ChatGPT credits for 1.5x speed. Fast mode is available when signed in with ChatGPT; API-key sessions use API token pricing instead.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1.5,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            },
+            {
+              "advisory": "Not recommended.",
+              "description": "Ultra lets Codex coordinate multiple subagents in parallel and synthesize their results. Each subagent is a separate model run with its own context, so one Ultra turn can cost several times an ordinary one — and how many it spawns is Codex's decision, not yours. It earns that only when complex work splits cleanly into genuinely independent tasks; on work that does not split, it pays the fan-out and synthesizes very little.",
+              "economics": "harness-orchestration",
+              "id": "ultra",
+              "native_value": "ultra",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "OpenAI's frontier agentic coding model.",
+      "harness": "codex",
+      "id": "codex-sol",
+      "name": "GPT 5.6 Sol",
+      "native_model_id": "gpt-5.6-sol",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "context_window": {
+          "availability": "configurable",
+          "default": "standard",
+          "options": [
+            {
+              "description": "What Codex resolves for every GPT-5 model. Compacts near 245K.",
+              "id": "standard",
+              "label": "272K",
+              "native_suffix": "",
+              "tokens": 272000
+            },
+            {
+              "advisory": "Not recommended.",
+              "description": "Input past 272K bills at about twice the standard rate, and it is the whole conversation that is re-sent on every turn — so the premium applies again to the same tokens with each message, not once. Compaction moving to ~945K means far more context is carried into far more turns. Reach for it only when a task genuinely cannot be split, and expect a turn near the ceiling to cost multiples of the same turn under 272K.",
+              "id": "extended",
+              "label": "1M",
+              "native_config": {
+                "model_context_window": 1050000
+              },
+              "native_suffix": "1m",
+              "tokens": 1050000
+            }
+          ]
+        },
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.6 Terra uses 1x ChatGPT credits for 1x speed. Fast mode is available on supported ChatGPT sessions; API-key sessions use API token pricing instead.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "chatgpt-credits",
+            "consumption_multiplier": 2.5,
+            "input_consumption_multiplier": 2.5,
+            "output_consumption_multiplier": 2.5,
+            "default": false,
+            "description": "GPT 5.6 Terra uses 2.5x ChatGPT credits for 1.5x speed. Fast mode is available when signed in with ChatGPT; API-key sessions use API token pricing instead.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1.5,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            },
+            {
+              "advisory": "Not recommended.",
+              "description": "Ultra lets Codex coordinate multiple subagents in parallel and synthesize their results. Each subagent is a separate model run with its own context, so one Ultra turn can cost several times an ordinary one — and how many it spawns is Codex's decision, not yours. It earns that only when complex work splits cleanly into genuinely independent tasks; on work that does not split, it pays the fan-out and synthesizes very little.",
+              "economics": "harness-orchestration",
+              "id": "ultra",
+              "native_value": "ultra",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Balanced agentic coding model for everyday work.",
+      "harness": "codex",
+      "id": "codex-terra",
+      "name": "GPT 5.6 Terra",
+      "native_model_id": "gpt-5.6-terra",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "context_window": {
+          "availability": "configurable",
+          "default": "standard",
+          "options": [
+            {
+              "description": "What Codex resolves for every GPT-5 model. Compacts near 245K.",
+              "id": "standard",
+              "label": "272K",
+              "native_suffix": "",
+              "tokens": 272000
+            },
+            {
+              "advisory": "Not recommended.",
+              "description": "Input past 272K bills at about twice the standard rate, and it is the whole conversation that is re-sent on every turn — so the premium applies again to the same tokens with each message, not once. Compaction moving to ~945K means far more context is carried into far more turns. Reach for it only when a task genuinely cannot be split, and expect a turn near the ceiling to cost multiples of the same turn under 272K.",
+              "id": "extended",
+              "label": "1M",
+              "native_config": {
+                "model_context_window": 1050000
+              },
+              "native_suffix": "1m",
+              "tokens": 1050000
+            }
+          ]
+        },
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.6 Luna uses 1x ChatGPT credits for 1x speed. Fast mode is available on supported ChatGPT sessions; API-key sessions use API token pricing instead.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "chatgpt-credits",
+            "consumption_multiplier": 2.5,
+            "input_consumption_multiplier": 2.5,
+            "output_consumption_multiplier": 2.5,
+            "default": false,
+            "description": "GPT 5.6 Luna uses 2.5x ChatGPT credits for 1.5x speed. Fast mode is available when signed in with ChatGPT; API-key sessions use API token pricing instead.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1.5,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "medium",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            },
+            {
+              "advisory": "Not recommended.",
+              "description": "Ultra lets Codex coordinate multiple subagents in parallel and synthesize their results. Each subagent is a separate model run with its own context, so one Ultra turn can cost several times an ordinary one — and how many it spawns is Codex's decision, not yours. It earns that only when complex work splits cleanly into genuinely independent tasks; on work that does not split, it pays the fan-out and synthesizes very little.",
+              "economics": "harness-orchestration",
+              "id": "ultra",
+              "native_value": "ultra",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Fast and affordable agentic coding model.",
+      "harness": "codex",
+      "id": "codex-luna",
+      "name": "GPT 5.6 Luna",
+      "native_model_id": "gpt-5.6-luna",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.5 uses 1x ChatGPT credits for 1x speed. Fast mode is available on supported ChatGPT sessions; API-key sessions use API token pricing instead.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "chatgpt-credits",
+            "consumption_multiplier": 2.5,
+            "input_consumption_multiplier": 2.5,
+            "output_consumption_multiplier": 2.5,
+            "default": false,
+            "description": "GPT 5.5 uses 2.5x ChatGPT credits for 1.5x speed. Fast mode is available when signed in with ChatGPT; API-key sessions use API token pricing instead.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1.5,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Strong all-round model for complex coding, research, and real-world work.",
+      "harness": "codex",
+      "id": "codex-gpt-5-5",
+      "name": "GPT 5.5",
+      "native_model_id": "gpt-5.5",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.4 uses 1x ChatGPT credits for 1x speed. Fast mode is available on supported ChatGPT sessions; API-key sessions use API token pricing instead.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "chatgpt-credits",
+            "consumption_multiplier": 2,
+            "input_consumption_multiplier": 2,
+            "output_consumption_multiplier": 2,
+            "default": false,
+            "description": "GPT 5.4 uses 2x ChatGPT credits for 1.5x speed. Fast mode is available when signed in with ChatGPT; API-key sessions use API token pricing instead.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1.5,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Strong model for everyday coding.",
+      "harness": "codex",
+      "id": "codex-gpt-5-4",
+      "name": "GPT 5.4",
+      "native_model_id": "gpt-5.4",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.4 Mini uses 1x ChatGPT credits for 1x speed. Fast mode is not available for this model; API-key sessions use API token pricing instead.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "medium",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Small, fast, and cost-efficient model for simpler coding tasks.",
+      "harness": "codex",
+      "id": "codex-gpt-5-4-mini",
+      "name": "GPT 5.4 Mini",
+      "native_model_id": "gpt-5.4-mini",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.3 Codex Spark uses 1x ChatGPT credits for 1x speed. Fast mode is not available for this model; API-key sessions use API token pricing instead.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://learn.chatgpt.com/docs/agent-configuration/speed",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "medium",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Ultra-fast coding model.",
+      "harness": "codex",
+      "id": "codex-spark",
+      "name": "GPT 5.3 Codex Spark",
+      "native_model_id": "gpt-5.3-codex-spark",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "context_window": {
+          "availability": "configurable",
+          "default": "extended",
+          "options": [
+            {
+              "description": "A fifth of the window. The session compacts once it fills.",
+              "id": "standard",
+              "label": "200K",
+              "native_suffix": "",
+              "tokens": 200000
+            },
+            {
+              "description": "5x the window at 1x the token price — no long-context premium past 200K.",
+              "id": "extended",
+              "label": "1M",
+              "native_suffix": "[1m]",
+              "tokens": 1000000
+            }
+          ]
+        },
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Claude Fable 5 uses 1x token price for 1x speed. Fast mode is not available for this model.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://code.claude.com/docs/en/fast-mode",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Most capable for your hardest and longest-running tasks.",
+      "harness": "claude",
+      "id": "claude-fable",
+      "name": "Claude Fable 5",
+      "native_model_id": "claude-fable-5",
+      "provider": "anthropic",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "context_window": {
+          "availability": "configurable",
+          "default": "extended",
+          "options": [
+            {
+              "description": "A fifth of the window. The session compacts once it fills.",
+              "id": "standard",
+              "label": "200K",
+              "native_suffix": "",
+              "tokens": 200000
+            },
+            {
+              "description": "5x the window at 1x the token price — no long-context premium past 200K.",
+              "id": "extended",
+              "label": "1M",
+              "native_suffix": "[1m]",
+              "tokens": 1000000
+            }
+          ]
+        },
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Claude Opus 5 uses 1x token price for 1x speed. Fast mode is available with separately billed usage credits.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://code.claude.com/docs/en/fast-mode",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 2,
+            "input_consumption_multiplier": 2,
+            "output_consumption_multiplier": 2,
+            "default": false,
+            "description": "Claude Opus 5 uses 2x token price for up to 2.5x speed. Fast mode is available for eligible sessions with usage credits and does not use included subscription limits.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://code.claude.com/docs/en/fast-mode",
+            "speed_multiplier": 2.5,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Best for everyday, complex tasks.",
+      "harness": "claude",
+      "id": "claude-opus",
+      "name": "Claude Opus 5",
+      "native_model_id": "claude-opus-5",
+      "provider": "anthropic",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "context_window": {
+          "availability": "configurable",
+          "default": "extended",
+          "options": [
+            {
+              "description": "A fifth of the window. The session compacts once it fills.",
+              "id": "standard",
+              "label": "200K",
+              "native_suffix": "",
+              "tokens": 200000
+            },
+            {
+              "description": "5x the window at 1x the token price — no long-context premium past 200K.",
+              "id": "extended",
+              "label": "1M",
+              "native_suffix": "[1m]",
+              "tokens": 1000000
+            }
+          ]
+        },
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Claude Sonnet 5 uses 1x token price for 1x speed. Fast mode is not available for this model.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://code.claude.com/docs/en/fast-mode",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "Efficient for routine tasks; recommended for most coding.",
+      "harness": "claude",
+      "id": "claude-sonnet",
+      "name": "Claude Sonnet 5",
+      "native_model_id": "claude-sonnet-5",
+      "provider": "anthropic",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": true,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Claude Haiku 4.5 uses 1x token price for 1x speed. Fast mode is not available for this model.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://code.claude.com/docs/en/fast-mode",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "unavailable"
+        },
+        "web_search": true
+      },
+      "description": "Fastest for quick answers at lower cost.",
+      "harness": "claude",
+      "id": "claude-haiku",
+      "name": "Claude Haiku 4.5",
+      "native_model_id": "claude-haiku-4-5",
+      "provider": "anthropic",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": true,
+        "local_tools": true,
+        "mcp": false,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Grok 4.6 uses 1x usage for 1x speed. Fast mode is not available in Grok Build.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://docs.x.ai/build/cli/reference",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "SpaceXAI's frontier model for long-running agents, coding, and knowledge work.",
+      "harness": "grok",
+      "id": "grok-4-6",
+      "name": "Grok 4.6",
+      "native_model_id": "grok-4.6",
+      "provider": "xai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": true,
+        "local_tools": true,
+        "mcp": false,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Grok 4.5 uses 1x usage for 1x speed. Fast mode is not available in Grok Build.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://docs.x.ai/build/cli/reference",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": true
+      },
+      "description": "SpaceXAI's frontier model; fast and token-efficient for coding and agents.",
+      "harness": "grok",
+      "id": "grok-4-5",
+      "name": "Grok 4.5",
+      "native_model_id": "grok-4.5",
+      "provider": "xai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": true,
+        "local_tools": true,
+        "mcp": false,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Grok 4.3 uses 1x usage for 1x speed. Fast mode is not available in Grok Build.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://docs.x.ai/build/cli/reference",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "native",
+          "description": "Grok 4.3 reasons internally; Grok Build documents a reasoning-effort control only for Grok 4.5."
+        },
+        "web_search": true
+      },
+      "harness": "grok",
+      "id": "grok-4-3",
+      "name": "Grok 4.3",
+      "native_model_id": "grok-4.3",
+      "provider": "xai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": false,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Grok Build 0.1 uses 1x usage for 1x speed. Fast mode is not available in Grok Build.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://docs.x.ai/build/cli/reference",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "native",
+          "description": "Grok Build 0.1 manages its reasoning internally; the CLI documents no effort control for it."
+        },
+        "web_search": true
+      },
+      "description": "Purpose-built coding model trained for agentic, multi-step workflows.",
+      "harness": "grok",
+      "id": "grok-build-0-1",
+      "name": "Grok Build 0.1",
+      "native_model_id": "grok-build-0.1",
+      "provider": "xai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": false,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Composer 2.5 uses 1x usage for 1x speed. Fast mode is not available in Grok Build.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://docs.x.ai/build/cli/reference",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "native",
+          "description": "Composer 2.5 adapts its reasoning internally. Grok Build selects it from the /model menu with no reasoning-effort control."
+        },
+        "web_search": false
+      },
+      "description": "Cursor's own model, trained to be highly capable for agentic coding.",
+      "harness": "grok",
+      "id": "grok-composer-2-5",
+      "name": "Composer 2.5",
+      "native_model_id": "composer-2.5",
+      "provider": "cursor",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "standard",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": false,
+            "description": "Composer 2.5 uses 1x token price for standard speed. Fast mode is available and enabled by default where the Cursor account supports it.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/changelog/composer-2-5",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 6,
+            "input_consumption_multiplier": 6,
+            "output_consumption_multiplier": 6,
+            "default": true,
+            "description": "Composer 2.5 uses 6x token price for faster responses. Fast mode is available by default where the Cursor account supports it; Cursor has not published a numerical speed multiplier.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://cursor.com/changelog/composer-2-5",
+            "speed_multiplier": null,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "native",
+          "description": "Composer 2.5 adapts its reasoning internally. Cursor CLI documents model selection but no explicit reasoning-effort control."
+        },
+        "web_search": false
+      },
+      "description": "Cursor's own model, trained to be highly capable for agentic coding.",
+      "harness": "cursor",
+      "id": "cursor-composer-2-5",
+      "name": "Composer 2.5",
+      "native_model_id": "composer-2.5",
+      "provider": "cursor",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Auto uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "native",
+          "description": "Cursor Router selects the underlying model and offers Cost, Balance, and Intelligence optimization modes. The selected model and effort can vary per request."
+        },
+        "web_search": false
+      },
+      "description": "Analyzes each request and routes it to the right model for the job.",
+      "harness": "cursor",
+      "id": "cursor-auto",
+      "name": "Auto",
+      "native_model_id": "auto",
+      "provider": "cursor",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Grok 4.6 uses 1x token price for standard speed. Fast mode is available in supported Cursor accounts.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/grok",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 2,
+            "input_consumption_multiplier": 2,
+            "output_consumption_multiplier": 2,
+            "default": false,
+            "description": "Grok 4.6 uses 2x input and output token price for faster responses. Fast mode is available where the Cursor account supports it; Cursor has not published a numerical speed multiplier.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://cursor.com/grok",
+            "speed_multiplier": null,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "A frontier model from Cursor and SpaceXAI for long-running agents and ambitious interactive work.",
+      "harness": "cursor",
+      "id": "cursor-grok-4-6",
+      "name": "Grok 4.6",
+      "native_model_id": "cursor-grok-4.6",
+      "provider": "cursor",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "always",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Grok 4.5 uses 1x token price for standard speed. Fast mode is available in supported Cursor accounts.",
+            "id": "standard",
+            "label": "Standard",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/grok",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          },
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": null,
+            "input_consumption_multiplier": 2,
+            "output_consumption_multiplier": 3,
+            "default": false,
+            "description": "Grok 4.5 uses 2x input token price and 3x output token price for faster responses. Fast mode is available where the Cursor account supports it; Cursor has not published a numerical speed multiplier.",
+            "id": "fast",
+            "label": "Fast",
+            "native_value": "fast",
+            "source_url": "https://cursor.com/grok",
+            "speed_multiplier": null,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Jointly trained by Cursor and SpaceXAI for long-running coding and knowledge work.",
+      "harness": "cursor",
+      "id": "cursor-grok-4-5",
+      "name": "Grok 4.5",
+      "native_model_id": "cursor-grok-4.5",
+      "provider": "cursor",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.6 Sol uses its selected model's token price for provider-native speed. Fast mode is available in supported Cursor account configurations.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "OpenAI's frontier agentic coding model.",
+      "harness": "cursor",
+      "id": "cursor-gpt-5-6-sol",
+      "name": "GPT 5.6 Sol",
+      "native_model_id": "gpt-5.6-sol",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.6 Terra uses its selected model's token price for provider-native speed. Fast mode is available in supported Cursor account configurations.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Balanced agentic coding model for everyday work.",
+      "harness": "cursor",
+      "id": "cursor-gpt-5-6-terra",
+      "name": "GPT 5.6 Terra",
+      "native_model_id": "gpt-5.6-terra",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.6 Luna uses its selected model's token price for provider-native speed. Fast mode is available in supported Cursor account configurations.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "medium",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Fast and affordable agentic coding model.",
+      "harness": "cursor",
+      "id": "cursor-gpt-5-6-luna",
+      "name": "GPT 5.6 Luna",
+      "native_model_id": "gpt-5.6-luna",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.5 uses its selected model's token price for provider-native speed. Fast mode is available in supported Cursor account configurations.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Strong all-round model for complex coding, research, and real-world work.",
+      "harness": "cursor",
+      "id": "cursor-gpt-5-5",
+      "name": "GPT 5.5",
+      "native_model_id": "gpt-5.5",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.4 uses its selected model's token price for provider-native speed. Fast mode is available in supported Cursor account configurations.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Strong model for everyday coding.",
+      "harness": "cursor",
+      "id": "cursor-gpt-5-4",
+      "name": "GPT 5.4",
+      "native_model_id": "gpt-5.4",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.4 Mini uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "medium",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Small, fast, and cost-efficient model for simpler coding tasks.",
+      "harness": "cursor",
+      "id": "cursor-gpt-5-4-mini",
+      "name": "GPT 5.4 Mini",
+      "native_model_id": "gpt-5.4-mini",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GPT 5.3 Codex uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "medium",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Previous-generation agentic coding model.",
+      "harness": "cursor",
+      "id": "cursor-gpt-5-3-codex",
+      "name": "GPT 5.3 Codex",
+      "native_model_id": "gpt-5.3-codex",
+      "provider": "openai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Claude Fable 5 uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Most capable for your hardest and longest-running tasks.",
+      "harness": "cursor",
+      "id": "cursor-claude-fable-5",
+      "name": "Claude Fable 5",
+      "native_model_id": "claude-fable-5",
+      "provider": "anthropic",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Claude Opus 5 uses its selected model's token price for provider-native speed. Fast mode is available in supported Cursor account configurations.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Best for everyday, complex tasks.",
+      "harness": "cursor",
+      "id": "cursor-claude-opus-5",
+      "name": "Claude Opus 5",
+      "native_model_id": "claude-opus-5",
+      "provider": "anthropic",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Claude Sonnet 5 uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "xhigh",
+              "native_value": "xhigh",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Efficient for routine tasks; recommended for most coding.",
+      "harness": "cursor",
+      "id": "cursor-claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "native_model_id": "claude-sonnet-5",
+      "provider": "anthropic",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Claude Haiku 4.5 uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "unavailable"
+        },
+        "web_search": false
+      },
+      "description": "Fastest for quick answers at lower cost.",
+      "harness": "cursor",
+      "id": "cursor-claude-haiku-4-5",
+      "name": "Claude Haiku 4.5",
+      "native_model_id": "claude-haiku-4-5",
+      "provider": "anthropic",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Gemini 3.7 Flash uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "medium",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "minimal",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Google's latest speed-tier model for high-throughput coding and large-context agent work.",
+      "harness": "cursor",
+      "id": "cursor-gemini-3-7-flash",
+      "name": "Gemini 3.7 Flash",
+      "native_model_id": "gemini-3.7-flash",
+      "provider": "google",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Gemini 3.1 Pro uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "minimal",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "medium",
+              "native_value": "medium",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Google's Pro-tier model, strongest on deep reasoning tasks.",
+      "harness": "cursor",
+      "id": "cursor-gemini-3-1-pro",
+      "name": "Gemini 3.1 Pro",
+      "native_model_id": "gemini-3.1-pro",
+      "provider": "google",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "reasoning_display": "trace",
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "Kimi K3 uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "low",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Open-weight frontier model; leads open models on long autonomous engineering work.",
+      "harness": "cursor",
+      "id": "cursor-kimi-k3",
+      "name": "Kimi K3",
+      "native_model_id": "kimi-k3",
+      "provider": "moonshot",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    },
+    {
+      "capabilities": {
+        "image_input": false,
+        "local_tools": true,
+        "mcp": true,
+        "reasoning_display": "trace",
+        "speed_options": [
+          {
+            "availability": "dynamic",
+            "consumption_basis": "usage-credit-price",
+            "consumption_multiplier": 1,
+            "input_consumption_multiplier": 1,
+            "output_consumption_multiplier": 1,
+            "default": true,
+            "description": "GLM 5.2 uses its selected model's token price for provider-native speed. Fast mode is not available as a separate configuration.",
+            "id": "standard",
+            "label": "Native",
+            "native_value": "standard",
+            "source_url": "https://cursor.com/docs/models",
+            "speed_multiplier": 1,
+            "verified_at": "2026-07-27"
+          }
+        ],
+        "thinking": {
+          "availability": "supported",
+          "default": "high",
+          "options": [
+            {
+              "economics": "standard",
+              "id": "light",
+              "native_value": "none",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "standard",
+              "id": "high",
+              "native_value": "high",
+              "presentation_group": "base"
+            },
+            {
+              "economics": "diminishing-returns",
+              "id": "max",
+              "native_value": "max",
+              "presentation_group": "special"
+            }
+          ]
+        },
+        "web_search": false
+      },
+      "description": "Z.ai's cost-efficient model for bounded coding, terminal work, and algorithmic reasoning.",
+      "harness": "cursor",
+      "id": "cursor-glm-5-2",
+      "name": "GLM 5.2",
+      "native_model_id": "glm-5.2",
+      "provider": "zai",
+      "routing": {
+        "kind": "default"
+      },
+      "status": "prototype"
+    }
+  ],
+  "providers": [
+    {
+      "id": "openai",
+      "label": "OpenAI"
+    },
+    {
+      "id": "anthropic",
+      "label": "Anthropic"
+    },
+    {
+      "id": "xai",
+      "label": "xAI"
+    },
+    {
+      "id": "opencode",
+      "label": "OpenCode"
+    },
+    {
+      "id": "deepseek",
+      "label": "DeepSeek"
+    },
+    {
+      "id": "meta",
+      "label": "Meta"
+    },
+    {
+      "id": "minimax",
+      "label": "MiniMax"
+    },
+    {
+      "id": "nvidia",
+      "label": "NVIDIA"
+    },
+    {
+      "id": "qwen",
+      "label": "Qwen"
+    },
+    {
+      "id": "tencent",
+      "label": "Tencent"
+    },
+    {
+      "id": "xiaomi",
+      "label": "Xiaomi"
+    },
+    {
+      "id": "unknown",
+      "label": "Unknown"
+    },
+    {
+      "id": "cursor",
+      "label": "Cursor"
+    },
+    {
+      "id": "google",
+      "label": "Google"
+    },
+    {
+      "id": "moonshot",
+      "label": "Moonshot"
+    },
+    {
+      "id": "zai",
+      "label": "Z.ai"
+    }
+  ],
+  "revision": "2026-08-21.2"
+}
