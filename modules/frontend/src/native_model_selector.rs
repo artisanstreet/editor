@@ -10,24 +10,30 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use artisan_assets::AssetId;
 use artisan_ui::{
     gradient::{hover_fill_gradient, vertical_gradient},
     icon::{IconSize, IconStyle, IconTint, icon},
+    motion::MotionCurve,
     theme::{ArtisanTheme, SurfaceStep, ThemeMode},
 };
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, Div, EventEmitter,
-    FocusHandle, Focusable, FontWeight, InteractiveElement as _, KeyDownEvent, MouseDownEvent,
-    ParentElement as _, Pixels, Point, Render, ScrollHandle, Size, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div, point,
-    prelude::FluentBuilder as _, prelude::IntoElement, px,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Bounds, ClickEvent,
+    Context, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight, ImageSource,
+    InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point,
+    Render, RenderImage, ScrollHandle, Size, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, anchored, canvas, deferred, div, img, point, prelude::FluentBuilder as _,
+    prelude::IntoElement, px,
 };
 
+use crate::engine_section_indicator_policy::{
+    EngineSectionIndicatorMeasurement, EngineSectionIndicatorPolicy,
+};
 use crate::native_composer_material::{
-    GLASS_BLUR_RADIUS_PX, glass_card_shadows, glass_highlight_layer, glass_material,
+    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
 };
 use crate::native_model_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeModelView,
@@ -794,6 +800,15 @@ fn rebase_selection_policy(
     Some(rebased)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct EngineIndicatorTransition {
+    from_left: f64,
+    from_width: f64,
+    to_left: f64,
+    to_width: f64,
+    generation: u64,
+}
+
 /// A GPUI entity that paints the model trigger and bounded selector popover.
 pub struct NativeModelSelector {
     state: NativeModelSelectorState,
@@ -804,6 +819,10 @@ pub struct NativeModelSelector {
     trigger_origin: Rc<RefCell<Option<Point<Pixels>>>>,
     menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     trigger_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    engine_indicator: Rc<RefCell<EngineSectionIndicatorPolicy>>,
+    engine_surface_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    engine_indicator_transition: Rc<RefCell<Option<EngineIndicatorTransition>>>,
+    engine_indicator_animation_generation: Rc<RefCell<u64>>,
     axis_trigger_bounds: Rc<RefCell<[Option<Bounds<Pixels>>; 5]>>,
     axis_menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     highlighted_axis_option: Option<String>,
@@ -834,6 +853,10 @@ impl NativeModelSelector {
             trigger_origin: Rc::new(RefCell::new(None)),
             menu_bounds: Rc::new(RefCell::new(None)),
             trigger_bounds: Rc::new(RefCell::new(None)),
+            engine_indicator: Rc::new(RefCell::new(EngineSectionIndicatorPolicy::new())),
+            engine_surface_bounds: Rc::new(RefCell::new(None)),
+            engine_indicator_transition: Rc::new(RefCell::new(None)),
+            engine_indicator_animation_generation: Rc::new(RefCell::new(0)),
             axis_trigger_bounds: Rc::new(RefCell::new([None; 5])),
             axis_menu_bounds: Rc::new(RefCell::new(None)),
             highlighted_axis_option: None,
@@ -1138,11 +1161,12 @@ impl NativeModelSelector {
             .p(px(8.0))
             .gap(px(8.0))
             .rounded(px(22.0))
-            .backdrop_blur(px(GLASS_BLUR_RADIUS_PX))
-            .bg(glass_material())
+            .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+            .bg(glass_foreground_base(self.theme))
             .text_color(self.theme.colors.foreground.to_paint())
             .shadow(source_menu_shadows(self.theme));
-        panel = panel.child(glass_highlight_layer(px(22.0)));
+        panel = panel.child(glass_material_layer(GlassStrength::Strong, px(22.0)));
+        panel = panel.child(glass_highlight_layer(GlassStrength::Strong, px(22.0)));
         panel = panel.child(self.render_engine_tabs(cx));
         panel = panel.child(
             div()
@@ -1165,8 +1189,44 @@ impl NativeModelSelector {
     }
 
     fn render_engine_tabs(&self, cx: &Context<Self>) -> Stateful<Div> {
+        let surface_bounds = Rc::clone(&self.engine_surface_bounds);
+        let surface_probe = canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let changed = {
+                    let mut surface = surface_bounds.borrow_mut();
+                    if *surface == Some(bounds) {
+                        false
+                    } else {
+                        *surface = Some(bounds);
+                        true
+                    }
+                };
+                if changed {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+        let active_engine = self.state.active_engine().to_owned();
+        let transition = *self.engine_indicator_transition.borrow();
+        let indicator = {
+            let indicator = self.engine_indicator.borrow();
+            indicator.indicator_visible().then(|| {
+                render_engine_light(
+                    self.theme,
+                    px(indicator.indicator_left() as f32),
+                    px(indicator.indicator_width() as f32),
+                    transition,
+                )
+            })
+        };
         let mut tabs = div()
             .id("artisan-model-engine-tabs")
+            .relative()
             .flex()
             .flex_row()
             .w_full()
@@ -1175,12 +1235,78 @@ impl NativeModelSelector {
             .p(px(4.0))
             .rounded(px(10.0))
             .overflow_x_scroll()
+            .overflow_y_hidden()
             .scrollbar_width(px(0.0))
             .bg(source_control_gradient(self.theme))
-            .shadow(source_card_shadows(self.theme));
+            .shadow(source_card_shadows(self.theme))
+            .child(surface_probe);
+        if let Some(indicator) = indicator {
+            tabs = tabs.child(indicator);
+        }
         for harness in &self.state.snapshot().manifest.harnesses {
-            let selected = harness.id == self.state.active_engine();
             let engine_id = harness.id.clone();
+            let measured_engine_id = engine_id.clone();
+            let indicator_policy = Rc::clone(&self.engine_indicator);
+            let surface_bounds = Rc::clone(&self.engine_surface_bounds);
+            let indicator_transition = Rc::clone(&self.engine_indicator_transition);
+            let animation_generation = Rc::clone(&self.engine_indicator_animation_generation);
+            let active_engine = active_engine.clone();
+            let tab_probe = canvas(
+                |_, _, _| {},
+                move |bounds, (), window, cx| {
+                    if measured_engine_id != active_engine {
+                        return;
+                    }
+                    let Some(surface) = *surface_bounds.borrow() else {
+                        return;
+                    };
+                    let measurement = EngineSectionIndicatorMeasurement::new(
+                        f64::from(f32::from(surface.left())),
+                        f64::from(f32::from(bounds.left())),
+                        f64::from(f32::from(bounds.size.width)),
+                    );
+                    let changed = {
+                        let mut indicator = indicator_policy.borrow_mut();
+                        let previous_visible = indicator.indicator_visible();
+                        let previous_left = indicator.indicator_left();
+                        let previous_width = indicator.indicator_width();
+                        let engine_changed =
+                            indicator.lit_engine() != Some(measured_engine_id.as_str());
+                        let geometry_changed = previous_left != measurement.tab_left
+                            || previous_width != measurement.tab_width;
+                        if !previous_visible || engine_changed || geometry_changed {
+                            indicator.measure(measured_engine_id.clone(), Some(measurement));
+                            if previous_visible && engine_changed {
+                                let mut generation = animation_generation.borrow_mut();
+                                *generation = generation.saturating_add(1);
+                                *indicator_transition.borrow_mut() =
+                                    Some(EngineIndicatorTransition {
+                                        from_left: previous_left,
+                                        from_width: previous_width,
+                                        to_left: measurement.tab_left,
+                                        to_width: measurement.tab_width,
+                                        generation: *generation,
+                                    });
+                            } else {
+                                // Resize remeasurement follows the source's
+                                // instant geometry correction rather than
+                                // replaying a tab-change animation.
+                                *indicator_transition.borrow_mut() = None;
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if changed {
+                        window.defer(cx, |window, _| window.refresh());
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full();
             let selector = format!(
                 "{NATIVE_MODEL_SELECTOR_ENGINE_SELECTOR_PREFIX}-{}",
                 harness.id
@@ -1201,26 +1327,15 @@ impl NativeModelSelector {
                 .justify_center()
                 .size(px(32.0))
                 .flex_shrink_0()
-                .rounded(px(6.0))
-                .hover(|style| style.bg(hover_fill_gradient(self.theme)))
-                .text_color(if selected {
-                    self.theme.colors.foreground.to_paint()
-                } else {
-                    self.theme.colors.muted_foreground.to_paint()
-                });
-            if selected {
-                tab = tab.bg(hover_fill_gradient(self.theme));
-            }
+                .rounded(px(14.0))
+                .text_color(self.theme.colors.foreground.to_paint())
+                .child(tab_probe);
             tab = tab.child(
                 icon(IconStyle::resolve(
                     self.theme,
                     engine_asset(&harness.id),
                     IconSize::Compact,
-                    if selected {
-                        IconTint::Inherit
-                    } else {
-                        IconTint::Muted
-                    },
+                    IconTint::Inherit,
                 ))
                 .size(px(16.0))
                 .flex_shrink_0(),
@@ -1336,6 +1451,8 @@ impl NativeModelSelector {
         let model_id = model.id.clone();
         let hover_model_id = model.id.clone();
         let favorite_id = model.id.clone();
+        let hover_shadow = source_hover_highlight_shadow(self.theme);
+        let selected_shadow = hover_shadow.clone();
         let mut row = div()
             .id(format!(
                 "{NATIVE_MODEL_SELECTOR_ROW_SELECTOR_PREFIX}-{}",
@@ -1350,11 +1467,20 @@ impl NativeModelSelector {
             .gap(px(8.0))
             .h(px(MODEL_ROW_HEIGHT_PX))
             .px(px(10.0))
-            .rounded(px(12.0))
-            .hover(|style| style.bg(hover_fill_gradient(self.theme)))
+            .rounded(px(14.0))
+            .hover({
+                move |style| {
+                    style
+                        .bg(hover_fill_gradient(self.theme))
+                        .shadow(hover_shadow.clone())
+                }
+            })
             .when(
                 highlighted || (selected && self.state.highlighted_model_id().is_none()),
-                |row| row.bg(hover_fill_gradient(self.theme)),
+                move |row| {
+                    row.bg(hover_fill_gradient(self.theme))
+                        .shadow(selected_shadow.clone())
+                },
             )
             .when(definition_disabled, |row| row.opacity(0.58));
         row = row.on_hover(cx.listener(move |view: &mut Self, hovered: &bool, _, cx| {
@@ -1600,14 +1726,7 @@ impl NativeModelSelector {
             .px(px(8.0))
             .rounded(px(8.0))
             .bg(source_control_gradient(self.theme))
-            .shadow(
-                self.theme
-                    .elevation
-                    .card_shadow
-                    .into_iter()
-                    .map(|layer| layer.to_box_shadow())
-                    .collect(),
-            )
+            .shadow(source_card_shadows(self.theme))
             .when(disabled, |trigger| trigger.opacity(0.58))
             .child(
                 icon(IconStyle::resolve(
@@ -1680,10 +1799,11 @@ impl NativeModelSelector {
                 .p(px(4.0))
                 .gap(px(2.0))
                 .rounded(px(18.0))
-                .backdrop_blur(px(GLASS_BLUR_RADIUS_PX))
-                .bg(glass_material())
-                .shadow(source_card_shadows(self.theme));
-            options = options.child(glass_highlight_layer(px(18.0)));
+                .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+                .bg(glass_foreground_base(self.theme))
+                .shadow(glass_card_shadows());
+            options = options.child(glass_material_layer(GlassStrength::Strong, px(18.0)));
+            options = options.child(glass_highlight_layer(GlassStrength::Strong, px(18.0)));
             let mut current_thinking_group: Option<String> = None;
             for option in self.axis_options(axis, &self.preview_view()) {
                 let group = option.group.clone();
@@ -1749,6 +1869,8 @@ impl NativeModelSelector {
         let option_selector = format!("artisan-model-policy-option-{axis:?}-{}", option.id);
         let option_description = option.description.clone();
         let option_advisory = option.advisory.clone();
+        let hover_shadow = source_hover_highlight_shadow(self.theme);
+        let selected_shadow = hover_shadow.clone();
         let tooltip_description =
             option_tooltip_text(option_advisory.as_deref(), option_description.as_deref());
         let mut row = div()
@@ -1763,12 +1885,20 @@ impl NativeModelSelector {
             .flex_col()
             .gap(px(1.0))
             .p(px(6.0))
-            .rounded(px(10.0))
+            .rounded(px(14.0))
             .text_size(px(11.0))
-            .hover(|row| row.bg(hover_fill_gradient(self.theme)))
+            .hover({
+                move |row| {
+                    row.bg(hover_fill_gradient(self.theme))
+                        .shadow(hover_shadow.clone())
+                }
+            })
             .when(
                 highlighted || (option.selected && self.highlighted_axis_option.is_none()),
-                |row| row.bg(hover_fill_gradient(self.theme)),
+                move |row| {
+                    row.bg(hover_fill_gradient(self.theme))
+                        .shadow(selected_shadow.clone())
+                },
             )
             .when(option.disabled, |row| row.opacity(0.5))
             .child(
@@ -2008,15 +2138,16 @@ impl Render for NativeModelSelectorOptionTooltip {
             .px(px(12.0))
             .py(px(8.0))
             .rounded(px(18.0))
-            .backdrop_blur(px(GLASS_BLUR_RADIUS_PX))
-            .bg(glass_material())
-            .shadow(source_card_shadows(self.theme))
+            .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+            .bg(glass_foreground_base(self.theme))
+            .shadow(glass_card_shadows())
             .text_size(px(12.0))
             .line_height(px(16.0))
             .text_color(self.theme.colors.muted_foreground.to_paint())
             .relative()
             .overflow_hidden()
-            .child(glass_highlight_layer(px(18.0)));
+            .child(glass_material_layer(GlassStrength::Strong, px(18.0)))
+            .child(glass_highlight_layer(GlassStrength::Strong, px(18.0)));
         if let Some(advisory) = self.advisory.clone() {
             tooltip = tooltip.child(
                 div()
@@ -2091,12 +2222,165 @@ fn source_control_gradient(theme: ArtisanTheme) -> gpui::Background {
     vertical_gradient(theme.surfaces.value(top), theme.surfaces.value(bottom))
 }
 
-fn source_card_shadows(_theme: ArtisanTheme) -> Vec<gpui::BoxShadow> {
-    glass_card_shadows()
+fn source_card_shadows(theme: ArtisanTheme) -> Vec<gpui::BoxShadow> {
+    card_shadows(theme)
 }
 
 fn source_menu_shadows(_theme: ArtisanTheme) -> Vec<gpui::BoxShadow> {
     glass_card_shadows()
+}
+
+fn source_hover_highlight_shadow(theme: ArtisanTheme) -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow {
+        color: theme.colors.foreground.with_alpha(0.13).to_paint(),
+        offset: point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(0.5),
+        inset: true,
+    }]
+}
+
+fn render_engine_light(
+    theme: ArtisanTheme,
+    tab_left: Pixels,
+    tab_width: Pixels,
+    transition: Option<EngineIndicatorTransition>,
+) -> AnyElement {
+    let target_left = transition
+        .map(|transition| centered_engine_light_left(transition.to_left, transition.to_width))
+        .unwrap_or_else(|| {
+            centered_engine_light_left(
+                f64::from(f32::from(tab_left)),
+                f64::from(f32::from(tab_width)),
+            )
+        });
+    let image = engine_light_image(theme);
+    let image = img(ImageSource::Render(image))
+        .absolute()
+        .top(px(-2.0))
+        .left(px(target_left))
+        .w(px(ENGINE_LIGHT_WIDTH_PX))
+        .h(px(ENGINE_LIGHT_HEIGHT_PX))
+        .blur(px(2.0));
+    let Some(transition) = transition else {
+        return image.into_any_element();
+    };
+    let from_left = centered_engine_light_left(transition.from_left, transition.from_width);
+    let animation_id = ElementId::Name(
+        format!(
+            "artisan-native-model-engine-light-{}",
+            transition.generation
+        )
+        .into(),
+    );
+    image
+        .left(px(from_left))
+        .with_animation(
+            animation_id,
+            Animation::new(std::time::Duration::from_millis(250))
+                .with_easing(engine_light_smooth_out),
+            move |image, progress| {
+                image.left(px(from_left + ((target_left - from_left) * progress)))
+            },
+        )
+        .into_any_element()
+}
+
+fn centered_engine_light_left(tab_left: f64, tab_width: f64) -> f32 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    let left = tab_left + ((tab_width - f64::from(ENGINE_LIGHT_WIDTH_PX)) / 2.0).max(0.0);
+    left as f32
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn engine_light_smooth_out(progress: f32) -> f32 {
+    MotionCurve::SmoothOut.sample(f64::from(progress)) as f32
+}
+
+const ENGINE_LIGHT_WIDTH_PX: f32 = 32.0;
+const ENGINE_LIGHT_HEIGHT_PX: f32 = 24.0;
+const ENGINE_LIGHT_RASTER_SCALE: u32 = 4;
+const ENGINE_LIGHT_RASTER_WIDTH: u32 = 128;
+const ENGINE_LIGHT_RASTER_HEIGHT: u32 = 96;
+
+thread_local! {
+    static ENGINE_LIGHT_IMAGES: RefCell<[Option<Arc<RenderImage>>; 2]> = RefCell::new([None, None]);
+}
+
+fn engine_light_image(theme: ArtisanTheme) -> Arc<RenderImage> {
+    ENGINE_LIGHT_IMAGES.with(|images| {
+        let mut images = images.borrow_mut();
+        let slot = match theme.mode {
+            ThemeMode::Light => 0,
+            ThemeMode::Dark => 1,
+        };
+        images[slot]
+            .get_or_insert_with(|| Arc::new(RenderImage::new(vec![engine_light_frame(theme)])))
+            .clone()
+    })
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn engine_light_frame(theme: ArtisanTheme) -> image::Frame {
+    let foreground = theme.colors.foreground.to_srgb();
+    let red = color_channel_to_byte(foreground.r);
+    let green = color_channel_to_byte(foreground.g);
+    let blue = color_channel_to_byte(foreground.b);
+    let mut buffer = image::ImageBuffer::from_fn(
+        ENGINE_LIGHT_RASTER_WIDTH,
+        ENGINE_LIGHT_RASTER_HEIGHT,
+        |x, y| {
+            let x = (x as f32 + 0.5) / ENGINE_LIGHT_RASTER_SCALE as f32;
+            let y = (y as f32 + 0.5) / ENGINE_LIGHT_RASTER_SCALE as f32;
+            let x = x / ENGINE_LIGHT_WIDTH_PX;
+            let y = y / ENGINE_LIGHT_HEIGHT_PX;
+            let vertical_alpha =
+                interpolate_profile(y, &[(0.0, 0.32), (0.26, 0.10), (0.52, 0.02), (0.74, 0.0)]);
+            let radial_distance = (((x - 0.5) / 0.48).powi(2) + ((y - 0.35) / 0.70).powi(2)).sqrt();
+            let radial_alpha = interpolate_profile(
+                radial_distance,
+                &[(0.0, 1.0), (0.42, 0.5), (0.68, 0.1), (0.88, 0.0)],
+            );
+            image::Rgba([
+                blue,
+                green,
+                red,
+                color_channel_to_byte(vertical_alpha * radial_alpha),
+            ])
+        },
+    );
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    image::Frame::new(buffer)
+}
+
+fn interpolate_profile(value: f32, stops: &[(f32, f32)]) -> f32 {
+    let Some(&(first_position, first_alpha)) = stops.first() else {
+        return 0.0;
+    };
+    if value <= first_position {
+        return first_alpha;
+    }
+    for window in stops.windows(2) {
+        let [(start_position, start_alpha), (end_position, end_alpha)] = window else {
+            unreachable!("a two-item profile window is guaranteed by windows(2)");
+        };
+        if value <= *end_position {
+            let span = *end_position - *start_position;
+            if span <= f32::EPSILON {
+                return *end_alpha;
+            }
+            let progress = (value - *start_position) / span;
+            return start_alpha + ((*end_alpha - *start_alpha) * progress);
+        }
+    }
+    stops.last().map_or(0.0, |(_, alpha)| *alpha)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn color_channel_to_byte(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 fn axis_icon(axis: NativePolicyAxis) -> AssetId {
@@ -2296,6 +2580,35 @@ mod tests {
             NativeModelCatalog::offline().expect("the real bundled catalog must decode"),
             None,
         )
+    }
+
+    #[test]
+    fn engine_light_profile_matches_source_stop_values() {
+        assert_eq!(interpolate_profile(0.0, &[(0.0, 0.32), (0.26, 0.10)]), 0.32);
+        assert_eq!(
+            interpolate_profile(0.26, &[(0.0, 0.32), (0.26, 0.10)]),
+            0.10
+        );
+        assert_eq!(
+            interpolate_profile(0.52, &[(0.0, 0.32), (0.26, 0.10), (0.52, 0.02)]),
+            0.02
+        );
+        assert_eq!(
+            interpolate_profile(
+                0.74,
+                &[(0.0, 0.32), (0.26, 0.10), (0.52, 0.02), (0.74, 0.0)]
+            ),
+            0.0
+        );
+        assert_eq!(interpolate_profile(0.0, &[(0.0, 1.0), (0.42, 0.5)]), 1.0);
+        assert_eq!(
+            interpolate_profile(0.42, &[(0.0, 1.0), (0.42, 0.5), (0.68, 0.1)]),
+            0.5
+        );
+        assert_eq!(
+            interpolate_profile(0.88, &[(0.0, 1.0), (0.42, 0.5), (0.68, 0.1), (0.88, 0.0)]),
+            0.0
+        );
     }
 
     #[test]

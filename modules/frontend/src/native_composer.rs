@@ -37,7 +37,8 @@ use crate::composer_draft_session_policy::{
 };
 use crate::native_composer_controls::NativeComposerControls;
 use crate::native_composer_material::{
-    GLASS_BLUR_RADIUS_PX, glass_card_shadows, glass_highlight_layer, glass_material,
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
 };
 use crate::native_model_selector::NativeModelSelector;
 
@@ -2426,11 +2427,12 @@ impl Render for NativeComposer {
             .min_h(px(128.0))
             .p(px(8.0))
             .rounded(px(18.0))
-            .backdrop_blur(px(GLASS_BLUR_RADIUS_PX))
-            .bg(glass_material())
+            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+            .bg(glass_foreground_base(theme))
             .shadow(glass_card_shadows())
             .relative()
-            .child(glass_highlight_layer(px(18.0)))
+            .child(glass_material_layer(GlassStrength::Quiet, px(18.0)))
+            .child(glass_highlight_layer(GlassStrength::Quiet, px(18.0)))
             .on_drop::<ExternalPaths>(move |paths, _, cx| {
                 let paths = paths.paths().to_vec();
                 drop_entity.update(cx, |composer, composer_cx| {
