@@ -804,7 +804,7 @@ impl NativeApplication {
         cx.notify();
     }
 
-    fn desktop_identity(&self) -> Div {
+    fn desktop_identity(&self, cx: &Context<Self>) -> Div {
         let mut identity = div()
             .flex()
             .items_center()
@@ -813,6 +813,12 @@ impl NativeApplication {
             .overflow_hidden()
             .child(
                 div()
+                    .id("artisan-brand-home")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.navigate(NativeRoute::NewThread { project: None }, cx);
+                    }))
+                    .debug_selector(|| "artisan-brand-home".to_owned())
                     .flex_shrink_0()
                     .text_size(px(16.0))
                     .font_weight(FontWeight::EXTRA_BOLD)
@@ -4292,7 +4298,7 @@ impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = self.desktop_sidebar(cx).into_any_element();
         let body = self.desktop_route_body(cx);
-        let identity = self.desktop_identity().into_any_element();
+        let identity = self.desktop_identity(cx).into_any_element();
         let search = self.command_menu.clone().into_any_element();
         let shell = desktop_shell(
             self.desktop_theme,
@@ -5469,6 +5475,21 @@ mod tests {
         // is the observable navigation outcome.
         assert!(cx.debug_bounds("route-settings-models").is_some());
         assert!(cx.debug_bounds(NATIVE_STATUS_SELECTOR).is_none());
+    }
+
+    #[gpui::test]
+    fn wordmark_returns_to_start(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.navigate(NativeRoute::Settings { section: SettingsRoute::Models, engine: None }, cx);
+            });
+        });
+        cx.run_until_parked();
+        let brand = cx.debug_bounds("artisan-brand-home").expect("wordmark");
+        cx.simulate_click(brand.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.update(|_, app| matches!(view.read(app).route(), NativeRoute::NewThread { project: None })));
     }
 
     #[gpui::test]

@@ -729,16 +729,7 @@ pub fn title_bar_caption_button(
     selector: &'static str,
 ) -> Stateful<Div> {
     let (hover_background, hover_foreground) = match area {
-        WindowControlArea::Close => {
-            // Near-white glyph on the destructive tint, both modes — the
-            // Windows caption convention. Both arms resolve the same paper
-            // step through their mode's light-text token.
-            let light_text = match theme.mode {
-                ThemeMode::Light => theme.colors.primary_foreground,
-                ThemeMode::Dark => theme.colors.foreground_extra,
-            };
-            (theme.colors.destructive.to_paint(), light_text.to_paint())
-        }
+        WindowControlArea::Close => (gpui::rgb_to_hsla(gpui::rgb(0xe81123)), gpui::rgb_to_hsla(gpui::rgb(0xffffff))),
         WindowControlArea::Min | WindowControlArea::Max | WindowControlArea::Drag => {
             let hover = match theme.mode {
                 ThemeMode::Light => theme.colors.muted,

@@ -160,7 +160,6 @@ pub fn desktop_shell(
         .h_full()
         .flex()
         .items_center()
-        .window_control_area(WindowControlArea::Drag)
         .child(
             div()
                 .flex_1()
@@ -170,7 +169,8 @@ pub fn desktop_shell(
                 .items_center()
                 .px(px(14.0))
                 .overflow_hidden()
-                .child(identity),
+                .child(identity)
+                .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag)),
         )
         .child(
             div()
@@ -190,6 +190,7 @@ pub fn desktop_shell(
                 .h_full()
                 .flex()
                 .justify_end()
+                .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
                 .child(controls),
         );
 
