@@ -1184,7 +1184,7 @@ impl NativeCommandMenu {
             })
     }
 
-    fn render_query_input(&self, cx: &Context<Self>) -> AnyElement {
+    fn render_query_input(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let theme = self.theme;
         let query = SharedString::from(self.state.query().to_owned());
         let placeholder = SharedString::from(COMMAND_MENU_PLACEHOLDER);
@@ -1195,9 +1195,9 @@ impl NativeCommandMenu {
             query,
         )
         .placeholder(placeholder)
-        .focus_visibility(artisan_ui::button::FocusVisibility::Visible)
+        .focus_visibility(artisan_ui::button::FocusVisibility::Hidden)
         .debug_selector(COMMAND_MENU_INPUT_SELECTOR)
-        .h(px(32.0))
+        .h(px(30.0))
         .min_w(px(0.0))
         .flex_1()
         .rounded(px(6.0))
@@ -1224,7 +1224,11 @@ impl NativeCommandMenu {
             .px(px(8.0))
             .rounded(px(6.0))
             .border_1()
-            .border_color(self.desktop_theme.field_line)
+            .border_color(if self.input_focus.is_focused(window) {
+                self.desktop_theme.secondary
+            } else {
+                self.desktop_theme.field_line
+            })
             .bg(self.desktop_theme.field)
             .child(
                 asset_glyph(AssetId::TABLER_SEARCH)
@@ -1314,8 +1318,8 @@ impl NativeCommandMenu {
         list
     }
 
-    fn render_dialog(&self, cx: &Context<Self>) -> AnyElement {
-        let input = self.render_query_input(cx);
+    fn render_dialog(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let input = self.render_query_input(window, cx);
         let list = self.render_list(cx);
         let card = popover_content(
             PopoverStyle::default_card(self.theme),
@@ -1373,8 +1377,8 @@ impl NativeCommandMenu {
             .into_any_element()
     }
 
-    fn render_titlebar(&self, cx: &Context<Self>) -> AnyElement {
-        let input = self.render_query_input(cx);
+    fn render_titlebar(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let input = self.render_query_input(window, cx);
         let click_entity = cx.entity();
         let mut root = div()
             .id("native-command-menu-root")
@@ -1438,9 +1442,9 @@ impl NativeCommandMenu {
 }
 
 impl Render for NativeCommandMenu {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.anchored {
-            return self.render_titlebar(cx);
+            return self.render_titlebar(window, cx);
         }
         if !self.state.is_open() {
             return div()
@@ -1448,7 +1452,7 @@ impl Render for NativeCommandMenu {
                 .debug_selector(|| COMMAND_MENU_SELECTOR.to_owned())
                 .into_any_element();
         }
-        let dialog = self.render_dialog(cx);
+        let dialog = self.render_dialog(window, cx);
         div()
             .id("native-command-menu-root")
             .debug_selector(|| COMMAND_MENU_SELECTOR.to_owned())
