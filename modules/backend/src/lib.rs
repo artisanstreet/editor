@@ -39,6 +39,7 @@ pub mod preview_service_policy;
 pub mod process_custody;
 pub mod product_telemetry_capture_policy;
 pub mod request_handler;
+pub mod run_cancellation;
 pub mod sqlite_write_retry_policy;
 pub mod startup_reconciliation_sweep;
 pub mod storage;
