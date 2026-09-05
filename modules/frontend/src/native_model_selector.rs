@@ -2586,7 +2586,7 @@ fn render_picker_hover_pill(
         let hover = hover.borrow();
         (hover.visual_rect(), hover.visible(), hover.transition())
     };
-    let mut pill = div()
+    let pill = div()
         .id(format!("artisan-native-model-picker-hover-{surface}"))
         .absolute()
         .left(px(rect.left))

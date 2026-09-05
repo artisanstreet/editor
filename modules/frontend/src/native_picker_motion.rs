@@ -52,6 +52,7 @@ pub(crate) struct SlidingHoverState {
     active_id: Option<String>,
     target_id: Option<String>,
     current: HoverRect,
+    from: HoverRect,
     target: HoverRect,
     visible: bool,
     has_geometry: bool,
@@ -92,6 +93,7 @@ impl SlidingHoverState {
         self.active_id = None;
         self.target_id = None;
         self.visible = false;
+        self.has_geometry = false;
         self.animating = false;
         self.generation = self.generation.wrapping_add(1);
     }
@@ -123,6 +125,7 @@ impl SlidingHoverState {
         self.target_id = Some(id.to_owned());
         self.visible = true;
         self.has_geometry = true;
+        self.from = self.current;
         self.target = rect;
         self.generation = self.generation.wrapping_add(1);
         if animate {
@@ -138,7 +141,7 @@ impl SlidingHoverState {
     #[must_use]
     pub(crate) fn transition(&self) -> Option<HoverTransition> {
         self.animating.then_some(HoverTransition {
-            from: self.current,
+            from: self.from,
             to: self.target,
             generation: self.generation,
         })
@@ -150,7 +153,7 @@ impl SlidingHoverState {
         if !self.animating || generation != self.generation {
             return;
         }
-        self.current = self.current.lerp(self.target, progress);
+        self.current = self.from.lerp(self.target, progress);
         if progress >= 1.0 {
             self.current = self.target;
             self.animating = false;
@@ -386,6 +389,16 @@ mod tests {
         ));
         let interrupted = hover.transition().expect("third target animates");
         assert_eq!(interrupted.from, mid);
+        hover.apply_progress(interrupted.generation, 0.25);
+        hover.apply_progress(interrupted.generation, 0.5);
+        assert_eq!(hover.visual_rect(), mid.lerp(interrupted.to, 0.5));
+        hover.clear();
+        hover.set_active("first".to_owned());
+        hover.measure("first", HoverRect::default());
+        assert!(
+            hover.transition().is_none(),
+            "reentry must place the pill instantly"
+        );
     }
 
     #[test]
