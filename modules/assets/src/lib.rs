@@ -21,6 +21,9 @@ use core::str::FromStr;
 
 pub mod fonts;
 
+/// White duotone portrait used by the Electron shell, embedded unchanged.
+pub const ARTISAN_PORTRAIT_PNG: &[u8] = include_bytes!("../images/artisan-street-jaw-shaded.png");
+
 /// Stable identifier for a vendored asset.
 ///
 /// The string form is `<family>.<name>` (for example `tabler.check`) and

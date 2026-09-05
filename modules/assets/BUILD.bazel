@@ -146,7 +146,7 @@ FONT_LICENSES = [
 rust_library(
     name = "assets",
     srcs = glob(["src/**/*.rs"]),
-    compile_data = ["manifest.toml"] + ASSET_SOURCES + LICENSE_DOCS + FONT_FILES + FONT_LICENSES,
+    compile_data = ["manifest.toml", "images/artisan-street-jaw-shaded.png"] + ASSET_SOURCES + LICENSE_DOCS + FONT_FILES + FONT_LICENSES,
     crate_name = "artisan_assets",
     edition = "2024",
     lint_config = "//:workspace_lints",

@@ -89,7 +89,7 @@ actions!(
 );
 
 /// The one shipping application title.
-pub(crate) const WINDOW_TITLE: &str = "Artisan";
+pub(crate) const WINDOW_TITLE: &str = "Artisan Editor";
 
 /// Stable selector for the real application root.
 pub(crate) const NATIVE_ROOT_SELECTOR: &str = "artisan-native-application";
@@ -784,6 +784,13 @@ impl NativeApplication {
     }
 
     fn desktop_identity(&self) -> Div {
+        static PORTRAIT: std::sync::OnceLock<Arc<gpui::Image>> = std::sync::OnceLock::new();
+        let portrait = PORTRAIT.get_or_init(|| {
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                artisan_assets::ARTISAN_PORTRAIT_PNG.to_vec(),
+            ))
+        });
         let mut identity = div()
             .flex()
             .items_center()
@@ -791,12 +798,18 @@ impl NativeApplication {
             .min_w(px(0.0))
             .overflow_hidden()
             .child(
+                gpui::img(portrait.clone())
+                    .size(px(32.0))
+                    .flex_shrink_0()
+                    .object_fit(gpui::ObjectFit::Contain),
+            )
+            .child(
                 div()
                     .flex_shrink_0()
                     .text_size(px(16.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(self.desktop_theme.foreground)
-                    .child("Artisan"),
+                    .child("Artisan Editor"),
             );
         if let Some(project) = self.selected_project_name() {
             identity = identity.child(
@@ -7902,7 +7915,7 @@ mod tests {
 
     #[test]
     fn production_title_is_the_native_title() {
-        assert_eq!(WINDOW_TITLE, "Artisan");
+        assert_eq!(WINDOW_TITLE, "Artisan Editor");
         assert!(!WINDOW_TITLE.contains("phase"));
     }
 }
