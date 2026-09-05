@@ -38,19 +38,19 @@ use std::{
 };
 
 use artisan_database::{
-    AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError,
-    SetThreadEngineConfigInput,
+    AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, QueueMessageInput, Repository,
+    RepositoryError, SetThreadEngineConfigInput,
 };
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineProfileId, MessageId, PatchBatch,
-    ProjectId, Query, QueueFirstMessage, RequestId, RootPath, SetThreadEngineConfig, ThreadId,
-    UnixMillis,
+    ProjectId, Query, QueueFirstMessage, QueueMessage, RequestId, RootPath,
+    SetThreadEngineConfig, ThreadId, UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, DirectoryPickOutcome as ProtocolDirectoryPickOutcome, ErrorCode, ErrorDetail,
-    FirstMessageReceipt, ProtocolFailure, RegisteredEngineProfilesResult, ResponsePayload,
-    ServerResponse, SetThreadEngineConfigResult,
+    FirstMessageReceipt, MessageImageResult, ProtocolFailure, QueueMessageReceipt,
+    RegisteredEngineProfilesResult, ResponsePayload, ServerResponse, SetThreadEngineConfigResult,
 };
 use tokio::sync::Mutex;
 
@@ -927,6 +927,28 @@ impl RequestHandler {
                     Err(error) => Err(repository_failure(&error, request_id)),
                 }
             }
+            Query::ReadMessageImage(read) => {
+                let image = self
+                    .repository
+                    .read_message_image(read.thread_id(), read.message_id(), read.index())
+                    .await
+                    .map_err(|error| repository_failure(&error, request_id))?;
+                let Some(image) = image else {
+                    return Err(typed_failure(
+                        ErrorCode::InvalidInput,
+                        "message image is unavailable",
+                        false,
+                        request_id,
+                    ));
+                };
+                Ok(outcome(
+                    request_id,
+                    ResponsePayload::MessageImage(MessageImageResult {
+                        reference: image.reference,
+                        bytes: image.bytes,
+                    }),
+                ))
+            }
             Query::ListRegisteredEngineProfiles(_) => {
                 let Some(reader) = self.registered_engine_profiles.as_ref() else {
                     return Err(typed_failure(
@@ -1046,6 +1068,7 @@ impl RequestHandler {
             Command::QueueFirstMessage(queue) => {
                 self.queue_first_message_outcome(request_id, queue).await
             }
+            Command::QueueMessage(queue) => self.queue_message_outcome(request_id, queue).await,
             Command::SetThreadEngineConfig(config) => {
                 self.set_thread_engine_config_outcome(request_id, config.as_ref())
                     .await
@@ -1169,6 +1192,64 @@ impl RequestHandler {
                 request_id: result.receipt.request_id,
                 message_id: result.message.message_id,
                 thread_id: result.message.thread_id,
+                disposition: result.receipt.disposition,
+            }),
+        ))
+    }
+
+    /// Answers one general message mutation from its durable receipt or a
+    /// fresh Forge-minted queued message. Unlike the compatibility
+    /// `QueueFirstMessage` path, this command is valid for every existing
+    /// thread and carries the ordered text/image payload durably through the
+    /// outbox.
+    async fn queue_message_outcome(
+        &self,
+        request_id: &RequestId,
+        queue: &QueueMessage,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        if let Some(replay) = self
+            .repository
+            .lookup_queue_message(&queue.request_id, &queue.thread_id, &queue.payload)
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?
+        {
+            return Ok(outcome(
+                request_id,
+                ResponsePayload::MessageQueued(QueueMessageReceipt {
+                    request_id: replay.receipt.request_id,
+                    message_id: replay.message_id,
+                    thread_id: replay.thread_id,
+                    disposition: replay.receipt.disposition,
+                }),
+            ));
+        }
+        let identity = self
+            .origin
+            .mint_identity()
+            .map_err(|error| origin_entropy_failure(&error, request_id))?;
+        let accepted_at = self
+            .origin
+            .acceptance_instant()
+            .map_err(|error| origin_clock_failure(error, request_id))?;
+        let message_id = MessageId::parse(identity)
+            .map_err(|_| forged_identity_failure("message", request_id))?;
+        let result = self
+            .repository
+            .queue_message(QueueMessageInput {
+                request_id: queue.request_id.clone(),
+                message_id,
+                thread_id: queue.thread_id.clone(),
+                payload: queue.payload.clone(),
+                accepted_at,
+            })
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?;
+        Ok(outcome(
+            request_id,
+            ResponsePayload::MessageQueued(QueueMessageReceipt {
+                request_id: result.receipt.request_id,
+                message_id: result.message_id,
+                thread_id: result.thread_id,
                 disposition: result.receipt.disposition,
             }),
         ))

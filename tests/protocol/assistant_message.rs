@@ -6,20 +6,21 @@
 use std::error::Error;
 
 use artisan_domain::{
-    AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
-    ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
-    ConversationSnapshot, ConversationSubscriptionStart, ConversationTurn, IdentifierError, ItemId,
-    ItemOrdinal, MESSAGE_BODY_MAX_BYTES, MessageBody, PatchBatch, PatchId, PatchSequence,
-    RequestId, Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
+    AuthoredText, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
+    Command, ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
+    ConversationSnapshot, ConversationSubscriptionStart, ConversationTurn, IdentifierError,
+    ImageAttachment, ImageAttachmentRef, ItemId, ItemOrdinal, MESSAGE_BODY_MAX_BYTES, MessageBody,
+    MessageId, PatchBatch, PatchId, PatchSequence, QueueMessage, QueueMessagePayload, RequestId,
+    Revision, RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
 use artisan_protocol::artisan_capnp::{
     AssistantMessagePhase as WirePhase, ConversationLifecycle as WireLifecycle,
     assistant_message_item, envelope,
 };
 use artisan_protocol::{
-    ConversationSubscriptionStarted, FrameId, ProtocolDecodeError, ProtocolVersion,
-    ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody, decode_envelope,
-    encode_envelope,
+    ClientRequest, ConversationSubscriptionStarted, FrameId, ProtocolDecodeError,
+    ProtocolVersion, ResponsePayload, ServerResponse, WireEnvelope, WireEnvelopeBody,
+    decode_envelope, encode_envelope,
 };
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -76,6 +77,60 @@ fn user_item() -> ConversationItem {
     })
 }
 
+fn image_reference(message: &str, index: u32) -> ImageAttachmentRef {
+    ImageAttachmentRef::new(
+        MessageId::parse(message).expect("fixture message id is valid"),
+        thread_id(),
+        index,
+        "image/png",
+        format!("capture-{index}.png"),
+        3,
+        [index as u8; 32],
+    )
+    .expect("fixture image reference is valid")
+}
+
+fn multimodal_snapshot() -> ConversationSnapshot {
+    ConversationSnapshot::new(
+        thread_id(),
+        ConversationCursor::new(10),
+        vec![turn(ConversationLifecycle::Completed)],
+        vec![
+            ConversationItem::MultimodalUserMessage(
+                artisan_domain::MultimodalUserMessageItem {
+                    item_id: item_id("item-mixed-proto-1"),
+                    turn_id: turn_id(),
+                    ordinal: ItemOrdinal::new(1),
+                    revision: Revision::new(0),
+                    lifecycle: ConversationLifecycle::Completed,
+                    text: Some(AuthoredText::parse("caption").expect("caption is valid")),
+                    attachments: vec![image_reference("message-mixed-proto-1", 0)],
+                    created_at: UnixMillis::from_millis(1),
+                    updated_at: UnixMillis::from_millis(2),
+                },
+            ),
+            ConversationItem::MultimodalUserMessage(
+                artisan_domain::MultimodalUserMessageItem {
+                    item_id: item_id("item-image-only-proto-1"),
+                    turn_id: turn_id(),
+                    ordinal: ItemOrdinal::new(2),
+                    revision: Revision::new(0),
+                    lifecycle: ConversationLifecycle::Completed,
+                    text: None,
+                    attachments: vec![
+                        image_reference("message-image-only-proto-1", 0),
+                        image_reference("message-image-only-proto-1", 1),
+                    ],
+                    created_at: UnixMillis::from_millis(3),
+                    updated_at: UnixMillis::from_millis(4),
+                },
+            ),
+        ],
+        UnixMillis::from_millis(5),
+    )
+    .expect("fixture multimodal snapshot is valid")
+}
+
 fn assistant_item(
     phase: AssistantMessagePhase,
     lifecycle: ConversationLifecycle,
@@ -130,6 +185,16 @@ fn response(frame_id: &str, payload: ResponsePayload) -> WireEnvelope {
     )
 }
 
+fn queue_request(frame_id: &str, payload: QueueMessagePayload) -> WireEnvelope {
+    let request_id = RequestId::parse(frame_id).expect("queue frame id is a valid request id");
+    envelope(
+        frame_id,
+        WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(
+            QueueMessage::new(request_id, thread_id(), payload),
+        ))),
+    )
+}
+
 fn assert_roundtrip(value: &WireEnvelope) -> Result<(), Box<dyn Error>> {
     let encoded = encode_envelope(value)?;
     let decoded = decode_envelope(&encoded)?;
@@ -173,6 +238,76 @@ fn mixed_assistant_snapshot_response_roundtrips_through_production_codec()
     assert_eq!(message.lifecycle, ConversationLifecycle::Completed);
     assert_eq!(message.body.as_str(), ASSISTANT_BODY);
     assert_eq!(message.phase, AssistantMessagePhase::Final);
+    Ok(())
+}
+
+#[test]
+fn mixed_and_image_only_items_roundtrip_without_image_bytes_in_history()
+-> Result<(), Box<dyn Error>> {
+    let value = response(
+        "server-multimodal-snapshot",
+        ResponsePayload::ConversationSnapshot(multimodal_snapshot()),
+    );
+    let decoded = decode_envelope(&encode_envelope(&value)?)?;
+    assert_eq!(decoded, value);
+
+    let WireEnvelopeBody::Response(response) = decoded.body else {
+        panic!("multimodal frame must remain a response");
+    };
+    let ResponsePayload::ConversationSnapshot(snapshot) = response.payload else {
+        panic!("multimodal frame must remain a snapshot");
+    };
+    let [ConversationItem::MultimodalUserMessage(mixed),
+        ConversationItem::MultimodalUserMessage(image_only)] = snapshot.items() else {
+        panic!("both multimodal item arms must survive the codec");
+    };
+    assert_eq!(mixed.text.as_ref().map(AuthoredText::as_str), Some("caption"));
+    assert_eq!(mixed.attachments[0].size_bytes, 3);
+    assert_eq!(image_only.text, None);
+    assert_eq!(image_only.attachments.len(), 2);
+    assert_eq!(image_only.attachments[1].index, 1);
+    Ok(())
+}
+
+#[test]
+fn mixed_and_image_only_queue_payloads_roundtrip_with_ordered_bytes()
+-> Result<(), Box<dyn Error>> {
+    let mixed = QueueMessagePayload::new(
+        Some(AuthoredText::parse("caption").expect("caption is valid")),
+        vec![
+            ImageAttachment::new("image/png", vec![1, 2, 3], "first.png")
+                .expect("first image is valid"),
+            ImageAttachment::new("image/jpeg", vec![4, 5], "second.jpg")
+                .expect("second image is valid"),
+        ],
+    )
+    .expect("mixed payload is valid");
+    let image_only = QueueMessagePayload::new(
+        None,
+        vec![ImageAttachment::new("image/webp", vec![6, 7], "only.webp")
+            .expect("image-only attachment is valid")],
+    )
+    .expect("image-only payload is valid");
+
+    for (frame_id, payload) in [
+        ("request-mixed-payload", mixed),
+        ("request-image-only-payload", image_only),
+    ] {
+        let value = queue_request(frame_id, payload);
+        let decoded = decode_envelope(&encode_envelope(&value)?)?;
+        assert_eq!(decoded, value);
+        let WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueMessage(command))) =
+            decoded.body
+        else {
+            panic!("queue payload must remain a QueueMessage command");
+        };
+        assert_eq!(command.thread_id, thread_id());
+        assert_eq!(command.payload.attachments().len(), if frame_id.contains("mixed") {
+            2
+        } else {
+            1
+        });
+    }
     Ok(())
 }
 

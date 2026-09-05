@@ -342,17 +342,19 @@ async fn load_items(
         values.push(Value::from(turn_id.clone()));
     }
 
-    transaction
+    let rows = transaction
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             sql,
             values,
         ))
         .await
-        .map_err(|source| database_error("load selected conversation items", source))?
-        .into_iter()
-        .map(|row| item_from_row(&row, &query.thread_id, selected_turn_ids))
-        .collect()
+        .map_err(|source| database_error("load selected conversation items", source))?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(item_from_row(&row, &query.thread_id, selected_turn_ids, transaction).await?);
+    }
+    Ok(items)
 }
 
 fn turn_from_row(
@@ -417,10 +419,11 @@ fn turn_from_row(
     clippy::too_many_lines,
     reason = "the durable item shape is decoded and validated in one place"
 )]
-fn item_from_row(
+async fn item_from_row(
     row: &QueryResult,
     expected_thread_id: &ThreadId,
     selected_turn_ids: &HashSet<String>,
+    transaction: &DatabaseTransaction,
 ) -> Result<ConversationItem, RepositoryError> {
     let item_id = ItemId::parse(raw_value::<String>(
         row,
@@ -511,20 +514,50 @@ fn item_from_row(
                     "user-message item is missing its source message",
                 )
             })?;
-            MessageId::parse(source_message_id)
-                .map_err(|error| corrupt_data("conversation_items", "source_message_id", &error))?;
-            let body = MessageBody::parse(body)
-                .map_err(|error| corrupt_data("conversation_items", "body", &error))?;
-            Ok(ConversationItem::UserMessage(UserMessageItem {
-                item_id,
-                turn_id,
-                ordinal,
-                revision,
-                lifecycle,
-                body,
-                created_at: UnixMillis::from_millis(created_at_ms),
-                updated_at: UnixMillis::from_millis(updated_at_ms),
-            }))
+            let source_message_id = MessageId::parse(source_message_id).map_err(|error| {
+                corrupt_data("conversation_items", "source_message_id", &error)
+            })?;
+            let (text, attachments) = super::queue_message::read_queue_message_projection(
+                transaction,
+                &source_message_id,
+                expected_thread_id,
+            )
+            .await?;
+            if body != text.as_ref().map_or("", |value| value.as_str()) {
+                return Err(corrupt_data(
+                    "conversation_items",
+                    "body",
+                    "user item body disagrees with its source message",
+                ));
+            }
+            if attachments.is_empty() {
+                let body = MessageBody::parse(body)
+                    .map_err(|error| corrupt_data("conversation_items", "body", &error))?;
+                Ok(ConversationItem::UserMessage(UserMessageItem {
+                    item_id,
+                    turn_id,
+                    ordinal,
+                    revision,
+                    lifecycle,
+                    body,
+                    created_at: UnixMillis::from_millis(created_at_ms),
+                    updated_at: UnixMillis::from_millis(updated_at_ms),
+                }))
+            } else {
+                Ok(ConversationItem::MultimodalUserMessage(
+                    artisan_domain::MultimodalUserMessageItem {
+                        item_id,
+                        turn_id,
+                        ordinal,
+                        revision,
+                        lifecycle,
+                        text,
+                        attachments,
+                        created_at: UnixMillis::from_millis(created_at_ms),
+                        updated_at: UnixMillis::from_millis(updated_at_ms),
+                    },
+                ))
+            }
         }
         "assistant_message" => {
             if source_message_id.is_some() {

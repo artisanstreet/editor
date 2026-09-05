@@ -22,8 +22,8 @@
 //! interpreted as authority to contact a provider again.
 
 use artisan_domain::{
-    ConversationCursor, ItemId, MessageBody, MessageId, PatchId, RunId, ThreadId, TurnId,
-    UnixMillis,
+    AuthoredText, ConversationCursor, ItemId, MessageId, PatchId,
+    QueueMessagePayload, RunId, ThreadId, TurnId, UnixMillis,
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
@@ -417,7 +417,7 @@ impl Repository {
 /// The accepted message's validated thread and body, loaded verbatim.
 struct AcceptedMessageContext {
     thread_id: ThreadId,
-    body: MessageBody,
+    payload: QueueMessagePayload,
 }
 
 /// Loads and revalidates the immutable accepted message for one launch.
@@ -453,9 +453,20 @@ async fn load_accepted_message(
     }
     let thread_id = ThreadId::parse(message.thread_id.clone())
         .map_err(|error| corrupt_data_launch("messages", "thread_id", &error))?;
-    let body = MessageBody::parse(message.body.clone())
+    let text = if message.body.is_empty() {
+        None
+    } else {
+        Some(
+            AuthoredText::parse(message.body.clone())
+                .map_err(|error| corrupt_data_launch("messages", "body", &error))?,
+        )
+    };
+    let attachments = super::queue_message::read_image_attachments(transaction, message_id)
+        .await
+        .map_err(RunLaunchError::Repository)?;
+    let payload = QueueMessagePayload::new(text, attachments)
         .map_err(|error| corrupt_data_launch("messages", "body", &error))?;
-    Ok(AcceptedMessageContext { thread_id, body })
+    Ok(AcceptedMessageContext { thread_id, payload })
 }
 
 /// Confirms the owning thread exists and predates the launch operation.
@@ -550,7 +561,7 @@ async fn build_launched_graph(
 ) -> Result<LaunchedRunReceipt, RunLaunchError> {
     let claimed = command.claimed;
 
-    let AcceptedMessageContext { thread_id, body } =
+    let AcceptedMessageContext { thread_id, payload } =
         load_accepted_message(transaction, &claimed.message_id.clone(), operated_at_ms).await?;
     ensure_thread_admits_launch(
         transaction,
@@ -600,12 +611,13 @@ async fn build_launched_graph(
     )
     .await?;
 
+    let body = payload.text().map_or("", |text| text.as_str());
     let projections = LaunchedProjections {
         thread_id: thread_id.as_str(),
         turn_id: command.turn_id.as_str(),
         item_id: command.item_id.as_str(),
         message_id: claimed.message_id.as_str(),
-        body: body.as_str(),
+        body,
         turn_ordinal,
         item_ordinal,
     };
@@ -1221,9 +1233,7 @@ async fn classify_running_replay(
 ) -> Result<LaunchedRunReceipt, RunLaunchError> {
     validate_running_dispatch_snapshot(dispatch, command.claimed, operated_at_ms)?;
     let run = load_validated_replayed_run(transaction, command, operated_at_ms).await?;
-    let persisted_body =
-        MessageBody::parse(message_body_of_replay(transaction, command.claimed).await?)
-            .map_err(|error| corrupt_data_launch("messages", "body", &error))?;
+    let persisted_body = message_body_of_replay(transaction, command.claimed).await?;
     let (turn, item) = validate_replayed_turn_item(
         transaction,
         command,
@@ -1271,6 +1281,19 @@ async fn message_body_of_replay(
         .ok_or(RunLaunchError::Repository(RepositoryError::Invariant {
             reason: "replayed launch lost its accepted message",
         }))?;
+    let text = if message.body.is_empty() {
+        None
+    } else {
+        Some(
+            AuthoredText::parse(message.body.clone())
+                .map_err(|error| corrupt_data_launch("messages", "body", &error))?,
+        )
+    };
+    let attachments = super::queue_message::read_image_attachments(transaction, &claimed.message_id)
+        .await
+        .map_err(|error| RunLaunchError::Repository(error))?;
+    QueueMessagePayload::new(text, attachments)
+        .map_err(|error| corrupt_data_launch("messages", "body", &error))?;
     Ok(message.body)
 }
 

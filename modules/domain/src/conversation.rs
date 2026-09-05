@@ -22,7 +22,10 @@ use crate::bounds::{
     CONVERSATION_TEXT_FRAGMENT_MAX_BYTES,
 };
 use crate::identifiers::{ItemId, PatchId, ThreadId, TurnId};
-use crate::text::MessageBody;
+use crate::{
+    message::{AuthoredText, ImageAttachmentRef},
+    text::MessageBody,
+};
 use crate::time::UnixMillis;
 
 /// Failure while advancing a bounded conversation counter.
@@ -322,11 +325,42 @@ pub struct UserMessageItem {
     pub updated_at: UnixMillis,
 }
 
+/// One durably queued user-message item whose ordered image attachments are
+/// part of the renderer-visible value.
+///
+/// Text-only history keeps using [`UserMessageItem`] for compatibility. A
+/// mixed or image-only message uses this shape so absent authored text is
+/// represented as absence rather than an empty [`MessageBody`] or placeholder
+/// text.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct MultimodalUserMessageItem {
+    /// Forge-minted item identity.
+    pub item_id: ItemId,
+    /// Turn that owns the message.
+    pub turn_id: TurnId,
+    /// Stable position in the containing conversation.
+    pub ordinal: ItemOrdinal,
+    /// Current entity revision; newly queued items start at zero.
+    pub revision: Revision,
+    /// Renderer-visible lifecycle.
+    pub lifecycle: ConversationLifecycle,
+    /// Authored text, when present.
+    pub text: Option<AuthoredText>,
+    /// Ordered byte-free references to the message's persisted images.
+    pub attachments: Vec<ImageAttachmentRef>,
+    /// Creation time as signed Unix epoch milliseconds.
+    pub created_at: UnixMillis,
+    /// Last update time as signed Unix epoch milliseconds.
+    pub updated_at: UnixMillis,
+}
+
 /// Renderer-visible conversation item vocabulary for this phase.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ConversationItem {
     /// Canonical user input durably queued before any engine dispatch.
     UserMessage(UserMessageItem),
+    /// Canonical user input with one or more ordered image attachments.
+    MultimodalUserMessage(MultimodalUserMessageItem),
     /// Assistant output durably stored under the run that produced it.
     AssistantMessage(AssistantMessageItem),
 }
@@ -337,6 +371,7 @@ impl ConversationItem {
     pub const fn item_id(&self) -> &ItemId {
         match self {
             Self::UserMessage(item) => &item.item_id,
+            Self::MultimodalUserMessage(item) => &item.item_id,
             Self::AssistantMessage(item) => &item.item_id,
         }
     }
@@ -346,6 +381,7 @@ impl ConversationItem {
     pub const fn turn_id(&self) -> &TurnId {
         match self {
             Self::UserMessage(item) => &item.turn_id,
+            Self::MultimodalUserMessage(item) => &item.turn_id,
             Self::AssistantMessage(item) => &item.turn_id,
         }
     }
@@ -355,6 +391,7 @@ impl ConversationItem {
     pub const fn ordinal(&self) -> ItemOrdinal {
         match self {
             Self::UserMessage(item) => item.ordinal,
+            Self::MultimodalUserMessage(item) => item.ordinal,
             Self::AssistantMessage(item) => item.ordinal,
         }
     }
@@ -618,6 +655,10 @@ impl ConversationPatch {
             Self::TurnUpsert { turn, .. } => turn.updated_at,
             Self::ItemUpsert {
                 item: ConversationItem::UserMessage(message),
+                ..
+            } => message.updated_at,
+            Self::ItemUpsert {
+                item: ConversationItem::MultimodalUserMessage(message),
                 ..
             } => message.updated_at,
             Self::ItemUpsert {

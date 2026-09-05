@@ -591,6 +591,8 @@ struct Request {
     setThreadEngineConfig @11 :SetThreadEngineConfigRequest;
     readThreadEngineSettings @12 :ReadThreadEngineSettingsRequest;
     listRegisteredEngineProfiles @13 :ListRegisteredEngineProfilesRequest;
+    queueMessage @14 :QueueMessageRequest;
+    readMessageImage @15 :ReadMessageImageRequest;
   }
 }
 
@@ -637,6 +639,8 @@ struct Response {
     threadEngineConfigSet @12 :SetThreadEngineConfigResult;
     threadEngineSettings @13 :ThreadEngineSettingsResult;
     registeredEngineProfiles @14 :RegisteredEngineProfilesResult;
+    queuedMessageReceipt @15 :QueueMessageReceipt;
+    messageImage @16 :MessageImageResult;
   }
 }
 
@@ -865,6 +869,11 @@ struct ConversationItem {
     # Appended assistant output under the run that produced it; fresh
     # ordinal, existing ordinals frozen.
     assistantMessage @2 :AssistantMessageItem;
+
+    # Ordered image-bearing user input. Text-only items keep the legacy
+    # userMessage arm; this fresh arm represents absent text without a
+    # placeholder body.
+    multimodalUserMessage @3 :MultimodalUserMessageItem;
   }
 }
 
@@ -1180,4 +1189,80 @@ struct Envelope {
     # which is already response. Existing members stay untouched.
     patchBatch @9 :PatchBatch;
   }
+}
+
+# One owned image attachment in a general queued message. `bytes` is encoded
+# image content, never a filesystem path or URI. Owned conversion enforces the
+# accepted MIME set, filename-only name policy, and aggregate byte bounds.
+struct ImageAttachment {
+  mimeType @0 :Text;
+  name @1 :Text;
+  bytes @2 :Data;
+}
+
+# General message submission. `text` preserves absent versus present-empty so
+# an image-only command never needs a placeholder string.
+struct QueueMessageRequest {
+  threadId @0 :Text;
+  text :union {
+    absent @1 :Void;
+    present @2 :Text;
+  }
+  attachments @3 :List(ImageAttachment);
+}
+
+# Receipt for a general queued message. It intentionally mirrors
+# FirstMessageReceipt but has its own fresh type so consumers cannot infer a
+# first-message-only uniqueness rule from the response arm.
+struct QueueMessageReceipt {
+  requestId @0 :Text;
+  messageId @1 :Text;
+  threadId @2 :Text;
+  disposition @3 :ReceiptDisposition;
+  state @4 :QueuedState;
+}
+
+# Renderer-visible user input carrying ordered image bytes. The payload is
+# deliberately separate from UserMessageItem so image-only input is never
+# coerced into the legacy nonblank body field.
+struct MultimodalUserMessageItem {
+  itemId @0 :Text;
+  turnId @1 :Text;
+  ordinal @2 :UInt64;
+  revision @3 :UInt64;
+  lifecycle @4 :ConversationLifecycle;
+  text :union {
+    absent @5 :Void;
+    present @6 :Text;
+  }
+  attachments @7 :List(ImageAttachmentRef);
+  createdAtMillis @8 :Int64;
+  updatedAtMillis @9 :Int64;
+}
+
+# Byte-free renderer reference for one persisted image. The bytes are
+# returned only by the authenticated single-image read query.
+struct ImageAttachmentRef {
+  messageId @0 :Text;
+  threadId @1 :Text;
+  index @2 :UInt32;
+  mimeType @3 :Text;
+  name @4 :Text;
+  sizeBytes @5 :UInt32;
+  digest @6 :Data;
+}
+
+# Authenticated bounded query for one owned image. The backend verifies the
+# thread/message relation and exact ordered index before returning bytes.
+struct ReadMessageImageRequest {
+  threadId @0 :Text;
+  messageId @1 :Text;
+  index @2 :UInt32;
+}
+
+# One bounded image read response. Metadata is repeated so the caller can
+# verify the bytes against the exact renderer reference it requested.
+struct MessageImageResult {
+  reference @0 :ImageAttachmentRef;
+  bytes @1 :Data;
 }

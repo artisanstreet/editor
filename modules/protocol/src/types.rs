@@ -10,7 +10,8 @@ use std::fmt;
 use artisan_domain::{
     Command, ConversationCursor, ConversationRequest, ConversationSnapshot,
     ConversationSubscriptionStart, DirectoryId, DirectoryListing, EngineConfigRevision,
-    EngineProfileId, EngineRunConfig, Event, IdentifierError, MessageId, PatchBatch,
+    EngineProfileId, EngineRunConfig, Event, IdentifierError, ImageAttachmentRef, MessageId,
+    PatchBatch,
     ProjectListing, ProjectSummary, Query, ReceiptDisposition, RequestId, ThreadId, ThreadListing,
     ThreadSummary, UnixMillis,
 };
@@ -685,6 +686,23 @@ pub struct FirstMessageReceipt {
     pub disposition: artisan_domain::ReceiptDisposition,
 }
 
+/// Receipt returned when a general text/image message is durably queued.
+///
+/// This deliberately has a distinct public type from [`FirstMessageReceipt`]
+/// so callers cannot infer first-message-only uniqueness from the response
+/// shape. The identity fields retain the same replay contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueueMessageReceipt {
+    /// Stable client correlation identity.
+    pub request_id: RequestId,
+    /// Forge-minted durable message identity.
+    pub message_id: MessageId,
+    /// Owning thread.
+    pub thread_id: ThreadId,
+    /// Accepted or exact duplicate replay.
+    pub disposition: artisan_domain::ReceiptDisposition,
+}
+
 /// Successful start of authoritative conversation delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationSubscriptionStarted {
@@ -819,6 +837,10 @@ pub enum ResponsePayload {
     },
     /// Durable first-message receipt.
     FirstMessageQueued(FirstMessageReceipt),
+    /// Durable general text/image message receipt.
+    MessageQueued(QueueMessageReceipt),
+    /// One authenticated image read result.
+    MessageImage(MessageImageResult),
     /// Complete bounded conversation projection.
     ConversationSnapshot(ConversationSnapshot),
     /// Fresh snapshot-first or resumed subscription acknowledgement.
@@ -844,6 +866,25 @@ pub struct ServerResponse {
     pub request_id: RequestId,
     /// Successful result.
     pub payload: ResponsePayload,
+}
+
+/// One bounded authenticated image read returned on demand.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MessageImageResult {
+    /// Byte-free ownership and integrity metadata.
+    pub reference: ImageAttachmentRef,
+    /// Original encoded image bytes, bounded to one image.
+    pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for MessageImageResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageImageResult")
+            .field("reference", &self.reference)
+            .field("bytes_len", &self.bytes.len())
+            .finish()
+    }
 }
 
 /// Durable Forge-originated event with its connection replay sequence.
@@ -1029,6 +1070,12 @@ impl WireEnvelope {
             WireEnvelopeBody::Response(ServerResponse {
                 request_id,
                 payload: ResponsePayload::FirstMessageQueued(receipt),
+            }) if request_id != &receipt.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::MessageQueued(receipt),
             }) if request_id != &receipt.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }

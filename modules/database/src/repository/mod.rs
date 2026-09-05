@@ -7,6 +7,7 @@ mod first_message;
 mod message_dispatch;
 mod project_catalog;
 mod project_threads;
+mod queue_message;
 mod run_binding;
 mod run_launch;
 mod run_observation;
@@ -25,8 +26,9 @@ use artisan_domain::{
 use crate::entities;
 
 pub use conversation_patch_replay::ConversationPatchReplay;
-pub use dispatch_payload::MessageDispatchPayload;
+pub use dispatch_payload::{MessageDispatchPayload, QueueMessageDispatchPayload};
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
+pub use queue_message::{MessageImageRead, QueueMessageInput, QueueMessageResult};
 pub use message_dispatch::{
     ClaimMessageDispatch, ClaimedMessageDispatch, CompleteMessageDispatch, DispatchFailureReason,
     DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,

@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use artisan_database::ThreadEngineSettings;
-use artisan_domain::{MessageBody, RootPath, RunId};
+use artisan_domain::{QueueMessagePayload, RootPath, RunId};
 use artisan_native_engine::VerifiedOpenCode2ProfileLaunch;
 use artisan_transport::CancelHandle;
 use thiserror::Error;
@@ -83,7 +83,7 @@ pub(crate) struct EngineTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) project_root: RootPath,
     pub(crate) prompt_id: String,
-    pub(crate) prompt_text: MessageBody,
+    pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: VerifiedOpenCode2ProfileLaunch,
     pub(crate) prompt_delivery: String,
@@ -128,7 +128,7 @@ pub(crate) struct FixtureTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) project_root: RootPath,
     pub(crate) prompt_id: String,
-    pub(crate) prompt_text: MessageBody,
+    pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) fixture: FixtureConfiguredLaunch,
     pub(crate) prompt_delivery: String,
@@ -187,7 +187,7 @@ pub(crate) struct InternalTurnInput {
     pub(crate) run_id: RunId,
     pub(crate) project_root: RootPath,
     pub(crate) prompt_id: String,
-    pub(crate) prompt_text: MessageBody,
+    pub(crate) prompt: QueueMessagePayload,
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: InternalLaunch,
     pub(crate) prompt_delivery: String,
@@ -664,7 +664,7 @@ impl EngineOwner {
             run_id: input.run_id,
             project_root: input.project_root,
             prompt_id: input.prompt_id,
-            prompt_text: input.prompt_text,
+            prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Verified(Box::new(input.launch)),
             prompt_delivery: input.prompt_delivery,
@@ -744,7 +744,7 @@ impl EngineOwner {
             run_id: input.run_id,
             project_root: input.project_root,
             prompt_id: input.prompt_id,
-            prompt_text: input.prompt_text,
+            prompt: input.prompt,
             settings: input.settings,
             launch: InternalLaunch::Fixture(input.fixture),
             prompt_delivery: input.prompt_delivery,

@@ -124,6 +124,17 @@ impl PromptFile {
         Self { uri, name }
     }
 
+    /// Builds an in-memory image file for the native prompt API.
+    ///
+    /// The engine's frozen `files` contract carries a URI and display name.
+    /// Image bytes therefore become a data URI; no client or server
+    /// filesystem path is ever dereferenced by the engine owner.
+    #[must_use]
+    pub(crate) fn from_image(mime_type: &str, bytes: &[u8], name: String) -> Self {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Self::new(format!("data:{mime_type};base64,{encoded}"), name)
+    }
+
     #[must_use]
     pub(crate) fn uri(&self) -> &str {
         &self.uri
@@ -151,7 +162,7 @@ pub(crate) struct PromptInput<'a> {
     files: &'a [PromptFile],
     id: &'a str,
     resume: bool,
-    text: &'a str,
+    text: Option<&'a str>,
 }
 
 /// Every persisted `OpenCode2` selection and permission field, plus the exact
@@ -209,6 +220,25 @@ impl<'a> PromptInput<'a> {
             files,
             id,
             resume,
+            text: Some(text),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn new_with_optional_text(
+        session: &'a str,
+        delivery: &'a str,
+        files: &'a [PromptFile],
+        id: &'a str,
+        resume: bool,
+        text: Option<&'a str>,
+    ) -> Self {
+        Self {
+            session,
+            delivery,
+            files,
+            id,
+            resume,
             text,
         }
     }
@@ -244,7 +274,7 @@ pub(crate) enum PromptError {
     #[error("prompt id was invalid")]
     InvalidId,
 
-    /// Text was empty.
+    /// Text was empty and no file was supplied.
     #[error("prompt text was invalid")]
     InvalidText,
 
@@ -630,7 +660,7 @@ fn validate_prompt_inputs(
     session: &str,
     delivery: &str,
     id: &str,
-    text: &str,
+    text: Option<&str>,
     files: &[PromptFile],
 ) -> Result<(), PromptError> {
     validate_session(session)?;
@@ -640,7 +670,7 @@ fn validate_prompt_inputs(
     if id.is_empty() {
         return Err(PromptError::InvalidId);
     }
-    if text.is_empty() {
+    if text.is_none_or(str::is_empty) && files.is_empty() {
         return Err(PromptError::InvalidText);
     }
     for file in files {
@@ -659,7 +689,7 @@ fn serialize_prompt_body(
     files: &[PromptFile],
     id: &str,
     resume: bool,
-    text: &str,
+    text: Option<&str>,
 ) -> Result<Vec<u8>, PromptError> {
     let mut files_json = Vec::with_capacity(files.len());
     for file in files {
@@ -670,7 +700,7 @@ fn serialize_prompt_body(
         "files": files_json,
         "id": id,
         "resume": resume,
-        "text": text
+        "text": text.unwrap_or_default()
     });
     serde_json::to_vec(&value).map_err(|_| PromptError::BodyTooLarge)
 }
@@ -1160,4 +1190,36 @@ async fn settle_driver_prompt(
         return Err(driver_result.unwrap_err());
     }
     driver_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_prompt_files_keep_mime_bytes_name_and_order() {
+        let files = [
+            PromptFile::from_image("image/png", &[0, 1, 2], "猫.png".to_owned()),
+            PromptFile::from_image("image/jpeg", &[3, 4], "second.jpg".to_owned()),
+        ];
+        let body = serialize_prompt_body("immediate", &files, "prompt-1", false, None)
+            .expect("image-only prompt should serialize");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("prompt body should be JSON");
+        assert_eq!(value["text"], "");
+        assert_eq!(value["resume"], false);
+        assert_eq!(value["files"][0]["name"], "猫.png");
+        assert_eq!(value["files"][0]["uri"], "data:image/png;base64,AAEC");
+        assert_eq!(value["files"][1]["name"], "second.jpg");
+        assert_eq!(value["files"][1]["uri"], "data:image/jpeg;base64,AwQ=");
+        validate_prompt_inputs("session-1", "immediate", "prompt-1", None, &files)
+            .expect("image-only prompt should pass preflight");
+    }
+
+    #[test]
+    fn prompt_without_text_or_files_is_rejected() {
+        let error = validate_prompt_inputs("session-1", "immediate", "prompt-1", None, &[])
+            .expect_err("empty prompt must not be sent");
+        assert_eq!(error, PromptError::InvalidText);
+    }
 }

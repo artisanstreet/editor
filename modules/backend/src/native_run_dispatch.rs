@@ -860,7 +860,7 @@ impl ClaimExecution<'_> {
 
 struct LoadedClaim<'a> {
     context: ClaimExecution<'a>,
-    payload: artisan_database::MessageDispatchPayload,
+    payload: artisan_database::QueueMessageDispatchPayload,
     settings: artisan_database::ThreadEngineSettings,
     project_root: RootPath,
     launch: ResolvedLaunch,
@@ -879,7 +879,7 @@ struct ClaimIds {
 
 struct LaunchedClaim<'a> {
     context: ClaimExecution<'a>,
-    payload: artisan_database::MessageDispatchPayload,
+    payload: artisan_database::QueueMessageDispatchPayload,
     settings: artisan_database::ThreadEngineSettings,
     project_root: RootPath,
     launch: ResolvedLaunch,
@@ -1129,7 +1129,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
     } = claim;
     let attempt_budget = Duration::from_millis(settings.config().runtime().attempt_budget().get());
     let prompt_id = payload.message_id.as_str().to_owned();
-    let prompt_text = payload.body;
+    let prompt = payload.payload;
     let prompt_delivery = context.config.prompt_delivery.clone();
     let stream_after = context.config.stream_after;
     let control_capacity = context.config.queue_capacity.get();
@@ -1139,7 +1139,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
                 run_id: receipt.run_id.clone(),
                 project_root,
                 prompt_id,
-                prompt_text,
+                prompt,
                 settings: settings.clone(),
                 launch: *launch,
                 prompt_delivery,
@@ -1154,7 +1154,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
                 run_id: receipt.run_id.clone(),
                 project_root,
                 prompt_id,
-                prompt_text,
+                prompt,
                 settings: settings.clone(),
                 fixture,
                 prompt_delivery,
@@ -1323,9 +1323,9 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
 async fn read_payload(
     repository: &Repository,
     claimed: &ClaimedMessageDispatch,
-) -> Option<artisan_database::MessageDispatchPayload> {
+) -> Option<artisan_database::QueueMessageDispatchPayload> {
     repository
-        .read_message_dispatch_payload(&claimed.message_id)
+        .read_queue_message_dispatch_payload(&claimed.message_id)
         .await
         .ok()
         .flatten()

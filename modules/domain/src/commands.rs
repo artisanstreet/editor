@@ -9,7 +9,8 @@
 //! rediscovery, directory browsing, and project-scoped thread listing.
 
 use crate::engine_config::{EngineConfigUpdatePrecondition, EngineRunConfig};
-use crate::identifiers::{DirectoryId, ProjectId, RequestId, ThreadId};
+use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, ThreadId};
+use crate::message::QueueMessagePayload;
 use crate::text::{MessageBody, ThreadTitle};
 
 /// Attaches one Forge-visible directory, minting its project identity.
@@ -51,6 +52,55 @@ pub struct QueueFirstMessage {
     pub thread_id: ThreadId,
     /// Validated, bounded body of the first message.
     pub body: MessageBody,
+}
+
+/// Durably queues one text and/or image message on an existing thread.
+///
+/// Unlike [`QueueFirstMessage`], this command is not restricted to ordinal
+/// zero. Its payload is validated before admission and retains image bytes in
+/// authored order through persistence and engine dispatch.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct QueueMessage {
+    /// Client-minted stable request identity for this mutation.
+    pub request_id: RequestId,
+    /// Existing thread receiving the message.
+    pub thread_id: ThreadId,
+    /// Authored text and ordered owned image attachments.
+    pub payload: QueueMessagePayload,
+}
+
+impl QueueMessage {
+    /// Creates a general message command with an already validated payload.
+    #[must_use]
+    pub const fn new(
+        request_id: RequestId,
+        thread_id: ThreadId,
+        payload: QueueMessagePayload,
+    ) -> Self {
+        Self {
+            request_id,
+            thread_id,
+            payload,
+        }
+    }
+
+    /// Returns the client request identity.
+    #[must_use]
+    pub const fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+
+    /// Returns the target thread identity.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the immutable validated message payload.
+    #[must_use]
+    pub const fn payload(&self) -> &QueueMessagePayload {
+        &self.payload
+    }
 }
 
 /// Changes the complete engine configuration for one existing thread.
@@ -116,6 +166,8 @@ pub enum Command {
     CreateThread(CreateThread),
     /// See [`QueueFirstMessage`].
     QueueFirstMessage(QueueFirstMessage),
+    /// See [`QueueMessage`].
+    QueueMessage(QueueMessage),
     /// See [`SetThreadEngineConfig`].
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
 }
@@ -128,6 +180,7 @@ impl Command {
             Self::AttachProject(command) => &command.request_id,
             Self::CreateThread(command) => &command.request_id,
             Self::QueueFirstMessage(command) => &command.request_id,
+            Self::QueueMessage(command) => &command.request_id,
             Self::SetThreadEngineConfig(command) => command.request_id(),
         }
     }
@@ -176,6 +229,46 @@ impl ReadThreadEngineSettings {
     }
 }
 
+/// Reads one owned image attachment by its authenticated thread, message, and
+/// authored position. The result is bounded by the native image limits and
+/// never permits a client filesystem path or URI.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ReadMessageImage {
+    thread_id: ThreadId,
+    message_id: MessageId,
+    index: u32,
+}
+
+impl ReadMessageImage {
+    /// Constructs a single-image ownership query.
+    #[must_use]
+    pub const fn new(thread_id: ThreadId, message_id: MessageId, index: u32) -> Self {
+        Self {
+            thread_id,
+            message_id,
+            index,
+        }
+    }
+
+    /// Returns the authenticated owning thread.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the persisted message identity.
+    #[must_use]
+    pub const fn message_id(&self) -> &MessageId {
+        &self.message_id
+    }
+
+    /// Returns the zero-based authored attachment position.
+    #[must_use]
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+}
+
 /// Lists every registered native engine profile.
 ///
 /// The registry may be absent, empty, or contain up to 64 ordered profile
@@ -201,4 +294,6 @@ pub enum Query {
     ReadThreadEngineSettings(ReadThreadEngineSettings),
     /// See [`ListRegisteredEngineProfiles`].
     ListRegisteredEngineProfiles(ListRegisteredEngineProfiles),
+    /// See [`ReadMessageImage`].
+    ReadMessageImage(ReadMessageImage),
 }

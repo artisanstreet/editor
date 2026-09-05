@@ -1494,7 +1494,19 @@ async fn execute_authorized_configured_turn(
     {
         return session.abort(shutdown, error).await;
     }
-    let files: [PromptFile; 0] = [];
+    let files: Vec<PromptFile> = session
+        .input
+        .prompt
+        .attachments()
+        .iter()
+        .map(|attachment| {
+            PromptFile::from_image(
+                attachment.mime_type_str(),
+                attachment.bytes(),
+                attachment.name().to_owned(),
+            )
+        })
+        .collect();
     if let Err(error) = perform_prompt(
         &session.endpoint,
         &session.secret,
@@ -1502,13 +1514,13 @@ async fn execute_authorized_configured_turn(
         phase_deadline(session.runtime.limits.prompt, session.deadline),
         &session.control,
         shutdown,
-        PromptInput::new(
+        PromptInput::new_with_optional_text(
             &session.session,
             &session.input.prompt_delivery,
             &files,
             &session.input.prompt_id,
             false,
-            session.input.prompt_text.as_str(),
+            session.input.prompt.text().map(|text| text.as_str()),
         ),
     )
     .await

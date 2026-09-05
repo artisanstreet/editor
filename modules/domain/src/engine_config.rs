@@ -807,7 +807,7 @@ mod tests {
         assert!(FiniteMillis::new(0).is_err());
         assert!(FiniteMillis::new(86_400_001).is_err());
         assert!(ByteLimit::new(0).is_err());
-        assert!(ByteLimit::new(8_388_609).is_err());
+        assert!(ByteLimit::new(24 * 1024 * 1024 + 1).is_err());
         assert!(CountLimit::new(0).is_err());
         assert!(CountLimit::new(4_097).is_err());
         assert!(EngineConfigRevision::new(0).is_err());

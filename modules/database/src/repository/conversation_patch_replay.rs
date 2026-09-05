@@ -8,8 +8,8 @@ use artisan_domain::bounds::CONVERSATION_PATCH_BATCH_MAX_PATCHES;
 use artisan_domain::{
     AssistantBody, AssistantMessageItem, AssistantMessagePhase, ConversationCursor,
     ConversationItem, ConversationLifecycle, ConversationPatch, ConversationTurn, IncrementalText,
-    ItemId, ItemOrdinal, MessageBody, PatchBatch, PatchId, PatchSequence, Revision, RunId,
-    ThreadId, TurnId, TurnOrdinal, UnixMillis,
+    ItemId, ItemOrdinal, MessageBody, MessageId, PatchBatch, PatchId, PatchSequence, Revision,
+    RunId, ThreadId, TurnId, TurnOrdinal, UnixMillis,
 };
 
 use super::{Repository, RepositoryError, corrupt_data, database_error};
@@ -22,7 +22,10 @@ const STATE_QUERY: &str = "SELECT thread_id, CAST(next_renderer_ordinal AS TEXT)
 const PATCH_SELECT: &str = "SELECT patch_id, thread_id, CAST(sequence AS TEXT), kind, \
             CAST(revision AS TEXT), CAST(recorded_at_ms AS TEXT), turn_id, item_id, \
             CAST(ordinal AS TEXT), lifecycle, item_kind, run_id, phase, body, fragment, \
-            CAST(entity_created_at_ms AS TEXT), CAST(entity_updated_at_ms AS TEXT) \
+            CAST(entity_created_at_ms AS TEXT), CAST(entity_updated_at_ms AS TEXT), \
+            (SELECT source_message_id FROM conversation_items AS ci \
+             WHERE ci.item_id = conversation_patches.item_id \
+               AND ci.thread_id = conversation_patches.thread_id LIMIT 1) \
      FROM conversation_patches WHERE thread_id = ? AND sequence > ? \
      ORDER BY sequence ASC LIMIT ?";
 
@@ -256,7 +259,9 @@ async fn load_patches(
             &mut seen_sequences,
             &mut seen_patch_ids,
             tail,
-        )?;
+            transaction,
+        )
+        .await?;
         patches.push(patch);
     }
     // Contiguity beyond first row is validated by PatchBatch::new, but
@@ -269,12 +274,13 @@ async fn load_patches(
     clippy::too_many_lines,
     reason = "patch row validation is intentionally contiguous"
 )]
-fn patch_from_row(
+async fn patch_from_row(
     row: &sea_orm::QueryResult,
     expected_thread_id: &ThreadId,
     seen_sequences: &mut HashSet<u64>,
     seen_patch_ids: &mut HashSet<String>,
     tail: ConversationCursor,
+    transaction: &DatabaseTransaction,
 ) -> Result<ConversationPatch, RepositoryError> {
     let patch_id_raw = raw_value::<String>(row, 0, "conversation_patches", "patch_id")?;
     let patch_id = PatchId::parse(patch_id_raw)
@@ -345,6 +351,8 @@ fn patch_from_row(
         raw_opt_signed_integer(row, 15, "conversation_patches", "entity_created_at_ms")?;
     let entity_updated_opt =
         raw_opt_signed_integer(row, 16, "conversation_patches", "entity_updated_at_ms")?;
+    let source_message_id_opt =
+        raw_value::<Option<String>>(row, 17, "conversation_items", "source_message_id")?;
 
     match kind.as_str() {
         "turn_upsert" => {
@@ -496,18 +504,71 @@ fn patch_from_row(
                             "user item has assistant fields",
                         ));
                     }
-                    let body = MessageBody::parse(body_str)
-                        .map_err(|error| corrupt_data("conversation_patches", "body", &error))?;
-                    ConversationItem::UserMessage(artisan_domain::UserMessageItem {
-                        item_id,
-                        turn_id,
-                        ordinal,
-                        revision,
-                        lifecycle,
-                        body,
-                        created_at,
-                        updated_at,
-                    })
+                    let Some(source_message_id) = source_message_id_opt else {
+                        let body = MessageBody::parse(body_str).map_err(|error| {
+                            corrupt_data("conversation_patches", "body", &error)
+                        })?;
+                        return Ok(ConversationPatch::ItemUpsert {
+                            patch_id,
+                            sequence,
+                            item: ConversationItem::UserMessage(artisan_domain::UserMessageItem {
+                                item_id,
+                                turn_id,
+                                ordinal,
+                                revision,
+                                lifecycle,
+                                body,
+                                created_at,
+                                updated_at,
+                            }),
+                        });
+                    };
+                    let source_message_id = MessageId::parse(source_message_id).map_err(|error| {
+                        corrupt_data("conversation_patches", "source_message_id", &error)
+                    })?;
+                    let (text, attachments) =
+                        super::queue_message::read_queue_message_projection(
+                            transaction,
+                            &source_message_id,
+                            expected_thread_id,
+                        )
+                        .await?;
+                    if body_str != text.as_ref().map_or("", |value| value.as_str()) {
+                        return Err(corrupt_data(
+                            "conversation_patches",
+                            "body",
+                            "user patch body disagrees with its source message",
+                        ));
+                    }
+                    if attachments.is_empty() {
+                        let body = MessageBody::parse(body_str).map_err(|error| {
+                            corrupt_data("conversation_patches", "body", &error)
+                        })?;
+                        ConversationItem::UserMessage(artisan_domain::UserMessageItem {
+                            item_id,
+                            turn_id,
+                            ordinal,
+                            revision,
+                            lifecycle,
+                            body,
+                            created_at,
+                            updated_at,
+                        })
+                    } else {
+                        ConversationItem::MultimodalUserMessage(
+                            artisan_domain::MultimodalUserMessageItem {
+                                item_id,
+                                turn_id,
+                                ordinal,
+                                revision,
+                                lifecycle,
+                                text,
+                                attachments,
+                                created_at,
+                                updated_at,
+                            },
+                        )
+                    }
                 }
                 "assistant_message" => {
                     let run_id_str = run_id_opt.ok_or_else(|| {

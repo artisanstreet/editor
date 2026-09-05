@@ -11,6 +11,7 @@ pub mod conversation_turn;
 pub mod execution_value;
 pub mod message;
 pub mod message_dispatch;
+pub mod message_image_attachment;
 pub mod run_batch_receipt;
 pub mod run_checkpoint;
 pub mod thread;
@@ -29,6 +30,7 @@ pub use execution_value::{
 };
 pub use message::Model as Message;
 pub use message_dispatch::{DispatchState, Model as MessageDispatch};
+pub use message_image_attachment::Model as MessageImageAttachment;
 pub use run_batch_receipt::Model as RunBatchReceipt;
 pub use run_checkpoint::Model as RunCheckpoint;
 pub use thread::Model as Thread;

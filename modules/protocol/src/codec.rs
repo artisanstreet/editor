@@ -1,27 +1,34 @@
 //! Total conversion between owned protocol values and generated Cap'n Proto.
 
 use artisan_domain::{
-    ApprovalMode, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
+    ApprovalMode, AuthoredText, AssistantBody, AssistantBodyError, AssistantMessageItem,
+    AssistantMessagePhase,
     AttachProject, ByteLimit, CONVERSATION_PATCH_BATCH_MAX_PATCHES, CONVERSATION_QUERY_MAX_TURNS,
     Command, ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
     ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
     ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
     ConversationTurn, ConversationUnsubscribe, CountLimit, CounterError, CreateThread,
-    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry, DirectoryId,
+    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES,
+    MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, DirectoryEntry,
+    DirectoryId,
     DirectoryKind, DirectoryListing, DirectoryListingError, DirectoryPlace, DisplayName,
     DisplayNameError, EngineAgentId, EngineConfigError, EngineConfigReason, EngineConfigRevision,
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, EngineVariantId, Event, FilesystemAccess, FiniteMillis, FirstMessageQueued,
     IdentifierError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
-    ListAttachedProjects, ListDirectories, ListProjectThreads, MessageBody, MessageBodyError,
+    ImageAttachment, ImageAttachmentError, ImageAttachmentRef, ImageAttachmentRefError,
+    ListAttachedProjects, ListDirectories,
+    ListProjectThreads, MessageBody, MessageBodyError,
     MessageId, NetworkAccess, OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS, PatchBatch,
     PatchBatchError, PatchId, PatchSequence, PermissionId, PlaceKind, ProjectAttached, ProjectId,
     ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
-    QueryTurnCountError, QueueFirstMessage, QueuedMessage, ReceiptDisposition, RequestId, Revision,
+    QueryTurnCountError, QueueFirstMessage, QueueMessage, QueueMessagePayload,
+    QueueMessagePayloadError, QueuedMessage, ReceiptDisposition, RequestId, Revision,
     RootPath, RootPathError, RunId, SetThreadEngineConfig, THREAD_LISTING_MAX_THREADS,
     ThreadCreated, ThreadId, ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle,
-    ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
+    ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
+    MultimodalUserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -39,9 +46,10 @@ use crate::types::{
     DirectoryPickOutcome, ErrorCode, ErrorDetail, EventCursor, FirstMessageReceipt, FrameId, Hello,
     HelloCredential, LifecycleRequest, LifecycleResponse, LifecycleState, LifecycleStatus,
     LifecycleStopDisposition, LifecycleStopReceipt, LocalCapability, LocalCapabilityError,
-    ProtocolFailure, ProtocolValueError, ProtocolVersion, ReconnectCapability,
-    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResponsePayload, ServerEvent,
-    ServerResponse, SetThreadEngineConfigResult, VersionOffer, VersionOfferError, Welcome,
+    MessageImageResult, ProtocolFailure, ProtocolValueError, ProtocolVersion, ReconnectCapability,
+    QueueMessageReceipt, ReconnectCapabilityError, RegisteredEngineProfilesResult,
+    ResponsePayload, ServerEvent, ServerResponse, SetThreadEngineConfigResult, VersionOffer,
+    VersionOfferError, Welcome,
     WireEnvelope, WireEnvelopeBody,
 };
 
@@ -177,6 +185,30 @@ pub enum ProtocolDecodeError {
         #[source]
         source: MessageBodyError,
     },
+    /// Optional authored text or image payload failed its domain bound.
+    #[error("invalid queued message payload: {source}")]
+    MessagePayload {
+        /// Domain payload validation failure.
+        #[source]
+        source: QueueMessagePayloadError,
+    },
+    /// One image attachment failed its domain bound.
+    #[error("invalid {field}: {source}")]
+    ImageAttachment {
+        /// Attachment field being decoded.
+        field: &'static str,
+        /// Domain attachment validation failure.
+        #[source]
+        source: ImageAttachmentError,
+    },
+    /// A renderer-visible image reference failed its bounded validation.
+    #[error("invalid image attachment reference in {field}: {reason}")]
+    ImageAttachmentReference {
+        /// Reference field being decoded.
+        field: &'static str,
+        /// Stable validation reason.
+        reason: &'static str,
+    },
     /// An assistant body failed its domain bound.
     #[error("invalid assistant body: {source}")]
     AssistantBody {
@@ -299,6 +331,12 @@ impl From<VersionOfferError> for ProtocolDecodeError {
 impl From<AssistantBodyError> for ProtocolDecodeError {
     fn from(source: AssistantBodyError) -> Self {
         Self::AssistantBody { source }
+    }
+}
+
+impl From<QueueMessagePayloadError> for ProtocolDecodeError {
+    fn from(source: QueueMessagePayloadError) -> Self {
+        Self::MessagePayload { source }
     }
 }
 
@@ -541,6 +579,23 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
             queue.set_thread_id(command.thread_id.as_str());
             queue.set_body(command.body.as_str());
         }
+        ClientRequest::Command(Command::QueueMessage(command)) => {
+            let mut queue = builder.reborrow().init_queue_message();
+            queue.set_thread_id(command.thread_id.as_str());
+            match command.payload.text() {
+                Some(text) => queue.reborrow().init_text().set_present(text.as_str()),
+                None => queue.reborrow().init_text().set_absent(()),
+            }
+            let mut attachments = queue
+                .reborrow()
+                .init_attachments(command.payload.attachments().len() as u32);
+            for (index, attachment) in command.payload.attachments().iter().enumerate() {
+                let mut encoded = attachments.reborrow().get(index as u32);
+                encoded.set_mime_type(attachment.mime_type_str());
+                encoded.set_name(attachment.name());
+                encoded.set_bytes(attachment.bytes());
+            }
+        }
         ClientRequest::Command(Command::SetThreadEngineConfig(command)) => {
             encode_set_thread_engine_config(builder.reborrow(), command.as_ref());
         }
@@ -584,6 +639,12 @@ fn encode_request(mut builder: artisan_capnp::request::Builder<'_>, value: &Clie
         }
         ClientRequest::Query(Query::ListRegisteredEngineProfiles(_)) => {
             builder.reborrow().init_list_registered_engine_profiles();
+        }
+        ClientRequest::Query(Query::ReadMessageImage(query)) => {
+            let mut encoded = builder.reborrow().init_read_message_image();
+            encoded.set_thread_id(query.thread_id().as_str());
+            encoded.set_message_id(query.message_id().as_str());
+            encoded.set_index(query.index());
         }
     }
 }
@@ -678,6 +739,19 @@ fn encode_response_payload(
             result.set_thread_id(receipt.thread_id.as_str());
             result.set_disposition(encode_disposition(receipt.disposition));
             result.set_state(artisan_capnp::QueuedState::Queued);
+        }
+        ResponsePayload::MessageQueued(receipt) => {
+            let mut result = builder.reborrow().init_queued_message_receipt();
+            result.set_request_id(receipt.request_id.as_str());
+            result.set_message_id(receipt.message_id.as_str());
+            result.set_thread_id(receipt.thread_id.as_str());
+            result.set_disposition(encode_disposition(receipt.disposition));
+            result.set_state(artisan_capnp::QueuedState::Queued);
+        }
+        ResponsePayload::MessageImage(result) => {
+            let mut encoded = builder.reborrow().init_message_image();
+            encode_image_attachment_ref(encoded.reborrow().init_reference(), &result.reference);
+            encoded.set_bytes(&result.bytes);
         }
         ResponsePayload::ConversationSnapshot(snapshot) => {
             encode_conversation_snapshot(
@@ -1076,6 +1150,33 @@ fn encode_conversation_item(
             encoded.set_created_at_millis(message.created_at.as_millis());
             encoded.set_updated_at_millis(message.updated_at.as_millis());
         }
+        ConversationItem::MultimodalUserMessage(message) => {
+            let mut encoded = builder.init_multimodal_user_message();
+            encoded.set_item_id(message.item_id.as_str());
+            encoded.set_turn_id(message.turn_id.as_str());
+            encoded.set_ordinal(message.ordinal.get());
+            encoded.set_revision(message.revision.get());
+            encoded.set_lifecycle(encode_conversation_lifecycle(message.lifecycle));
+            match message.text.as_ref() {
+                Some(text) => encoded.reborrow().init_text().set_present(text.as_str()),
+                None => encoded.reborrow().init_text().set_absent(()),
+            }
+            let mut attachments = encoded
+                .reborrow()
+                .init_attachments(message.attachments.len() as u32);
+            for (index, attachment) in message.attachments.iter().enumerate() {
+                let mut encoded_attachment = attachments.reborrow().get(index as u32);
+                encoded_attachment.set_message_id(attachment.message_id.as_str());
+                encoded_attachment.set_thread_id(attachment.thread_id.as_str());
+                encoded_attachment.set_index(attachment.index);
+                encoded_attachment.set_mime_type(attachment.mime_type_str());
+                encoded_attachment.set_name(attachment.name.as_str());
+                encoded_attachment.set_size_bytes(attachment.size_bytes);
+                encoded_attachment.set_digest(&attachment.digest[..]);
+            }
+            encoded.set_created_at_millis(message.created_at.as_millis());
+            encoded.set_updated_at_millis(message.updated_at.as_millis());
+        }
         ConversationItem::AssistantMessage(message) => {
             let mut encoded = builder.init_assistant_message();
             encoded.set_item_id(message.item_id.as_str());
@@ -1090,6 +1191,19 @@ fn encode_conversation_item(
             encoded.set_updated_at_millis(message.updated_at.as_millis());
         }
     }
+}
+
+fn encode_image_attachment_ref(
+    mut builder: artisan_capnp::image_attachment_ref::Builder<'_>,
+    reference: &ImageAttachmentRef,
+) {
+    builder.set_message_id(reference.message_id.as_str());
+    builder.set_thread_id(reference.thread_id.as_str());
+    builder.set_index(reference.index);
+    builder.set_mime_type(reference.mime_type_str());
+    builder.set_name(reference.name.as_str());
+    builder.set_size_bytes(reference.size_bytes);
+    builder.set_digest(&reference.digest[..]);
 }
 
 fn encode_patch_batch(
@@ -1403,6 +1517,7 @@ fn decode_request(
         request::Which::QueueFirstMessage(command) => {
             decode_queue_first_message(command?, request_id)
         }
+        request::Which::QueueMessage(command) => decode_queue_message(command?, request_id),
         request::Which::SetThreadEngineConfig(command) => {
             decode_set_thread_engine_config(command?, request_id)
         }
@@ -1422,6 +1537,22 @@ fn decode_request(
             query?;
             Ok(ClientRequest::Query(Query::ListRegisteredEngineProfiles(
                 artisan_domain::commands::ListRegisteredEngineProfiles,
+            )))
+        }
+        request::Which::ReadMessageImage(query) => {
+            let query = query?;
+            Ok(ClientRequest::Query(Query::ReadMessageImage(
+                artisan_domain::ReadMessageImage::new(
+                    parse_thread_id(
+                        read_text(query.get_thread_id(), "request.readMessageImage.threadId")?,
+                        "request.readMessageImage.threadId",
+                    )?,
+                    parse_message_id(
+                        read_text(query.get_message_id(), "request.readMessageImage.messageId")?,
+                        "request.readMessageImage.messageId",
+                    )?,
+                    query.get_index(),
+                ),
             )))
         }
     }
@@ -1463,6 +1594,148 @@ fn decode_queue_first_message(
             .map_err(|source| ProtocolDecodeError::MessageBody { source })?,
         },
     )))
+}
+
+fn decode_queue_message(
+    command: artisan_capnp::queue_message_request::Reader<'_>,
+    request_id: RequestId,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(command.get_thread_id(), "request.queueMessage.threadId")?,
+        "request.queueMessage.threadId",
+    )?;
+    let text = match command.get_text().which()? {
+        artisan_capnp::queue_message_request::text::Which::Absent(()) => None,
+        artisan_capnp::queue_message_request::text::Which::Present(value) => Some(
+            AuthoredText::parse(read_text(value, "request.queueMessage.text")?).map_err(
+                |source| ProtocolDecodeError::MessagePayload {
+                    source: QueueMessagePayloadError::Text(source),
+                },
+            )?,
+        ),
+    };
+    let attachments = decode_image_attachments(
+        command.get_attachments()?,
+        "request.queueMessage.attachments.mimeType",
+        "request.queueMessage.attachments.name",
+        "request.queueMessage.attachments.bytes",
+        "request.queueMessage.attachments",
+    )?;
+    let payload = QueueMessagePayload::new(text, attachments)?;
+    Ok(ClientRequest::Command(Command::QueueMessage(QueueMessage::new(
+        request_id, thread_id, payload,
+    ))))
+}
+
+fn decode_image_attachments(
+    encoded_attachments: capnp::struct_list::Reader<'_, artisan_capnp::image_attachment::Owned>,
+    mime_field: &'static str,
+    name_field: &'static str,
+    bytes_field: &'static str,
+    attachment_field: &'static str,
+) -> Result<Vec<ImageAttachment>, ProtocolDecodeError> {
+    let count = encoded_attachments.len() as usize;
+    if count > MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT {
+        return Err(ProtocolDecodeError::MessagePayload {
+            source: QueueMessagePayloadError::TooManyAttachments {
+                count,
+                maximum: MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
+            },
+        });
+    }
+    let mut attachments = Vec::with_capacity(count);
+    for encoded in encoded_attachments.iter() {
+        let bytes = encoded.get_bytes()?;
+        if bytes.len() > MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES {
+            return Err(ProtocolDecodeError::ImageAttachment {
+                field: bytes_field,
+                source: ImageAttachmentError::BytesTooLarge {
+                    length: bytes.len(),
+                    maximum: MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
+                },
+            });
+        }
+        let mime_type = read_text(encoded.get_mime_type(), mime_field)?;
+        let name = read_text(encoded.get_name(), name_field)?;
+        attachments.push(
+            ImageAttachment::new(mime_type, bytes.to_vec(), name).map_err(|source| {
+                ProtocolDecodeError::ImageAttachment {
+                    field: attachment_field,
+                    source,
+                }
+            })?,
+        );
+    }
+    Ok(attachments)
+}
+
+fn decode_image_attachment_refs(
+    encoded_refs: capnp::struct_list::Reader<'_, artisan_capnp::image_attachment_ref::Owned>,
+    field: &'static str,
+) -> Result<Vec<ImageAttachmentRef>, ProtocolDecodeError> {
+    let count = encoded_refs.len() as usize;
+    if count > MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT {
+        return Err(ProtocolDecodeError::MessagePayload {
+            source: QueueMessagePayloadError::TooManyAttachments {
+                count,
+                maximum: MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
+            },
+        });
+    }
+    let mut refs = Vec::with_capacity(count);
+    for (expected_index, encoded) in encoded_refs.iter().enumerate() {
+        let expected_index = u32::try_from(expected_index).map_err(|_| {
+            ProtocolDecodeError::ImageAttachmentReference {
+                field,
+                reason: "attachment index overflow",
+            }
+        })?;
+        refs.push(decode_image_attachment_ref(encoded, field, Some(expected_index))?);
+    }
+    Ok(refs)
+}
+
+fn decode_image_attachment_ref(
+    encoded: artisan_capnp::image_attachment_ref::Reader<'_>,
+    field: &'static str,
+    expected_index: Option<u32>,
+) -> Result<ImageAttachmentRef, ProtocolDecodeError> {
+    let index = encoded.get_index();
+    if expected_index.is_some_and(|expected| expected != index) {
+        return Err(ProtocolDecodeError::ImageAttachmentReference {
+            field,
+            reason: "attachment indexes are not ordered",
+        });
+    }
+    let digest: [u8; 32] = encoded.get_digest()?.to_vec().try_into().map_err(|_| {
+        ProtocolDecodeError::ImageAttachmentReference {
+            field,
+            reason: "digest must be exactly 32 bytes",
+        }
+    })?;
+    ImageAttachmentRef::new(
+        parse_message_id(
+            read_text(encoded.get_message_id(), "imageAttachmentRef.messageId")?,
+            "imageAttachmentRef.messageId",
+        )?,
+        parse_thread_id(
+            read_text(encoded.get_thread_id(), "imageAttachmentRef.threadId")?,
+            "imageAttachmentRef.threadId",
+        )?,
+        index,
+        read_text(encoded.get_mime_type(), "imageAttachmentRef.mimeType")?,
+        read_text(encoded.get_name(), "imageAttachmentRef.name")?,
+        encoded.get_size_bytes(),
+        digest,
+    )
+    .map_err(|source| ProtocolDecodeError::ImageAttachmentReference {
+        field,
+        reason: match source {
+            ImageAttachmentRefError::UnsupportedMimeType => "unsupported MIME type",
+            ImageAttachmentRefError::InvalidSize { .. } => "invalid image size",
+            ImageAttachmentRefError::InvalidName => "invalid filename",
+        },
+    })
 }
 
 fn decode_set_thread_engine_config(
@@ -1937,6 +2210,10 @@ fn decode_response(
             }
         }
         response::Which::QueuedReceipt(receipt) => decode_queued_receipt(receipt?, &request_id)?,
+        response::Which::QueuedMessageReceipt(receipt) => {
+            decode_queue_message_receipt(receipt?, &request_id)?
+        }
+        response::Which::MessageImage(result) => decode_message_image(result?)?,
         response::Which::ConversationSnapshot(snapshot) => {
             ResponsePayload::ConversationSnapshot(decode_conversation_snapshot(snapshot?)?)
         }
@@ -2123,6 +2400,66 @@ fn decode_queued_receipt(
             "response.queuedReceipt.threadId",
         )?,
         disposition: decode_disposition(receipt.get_disposition()?),
+    }))
+}
+
+fn decode_queue_message_receipt(
+    receipt: artisan_capnp::queue_message_receipt::Reader<'_>,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let nested_request_id = parse_request_id(
+        read_text(
+            receipt.get_request_id(),
+            "response.queuedMessageReceipt.requestId",
+        )?,
+        "response.queuedMessageReceipt.requestId",
+    )?;
+    if &nested_request_id != request_id {
+        return Err(ProtocolDecodeError::CorrelationMismatch {
+            field: "response.queuedMessageReceipt.requestId",
+        });
+    }
+    match receipt.get_state()? {
+        artisan_capnp::QueuedState::Queued => {}
+    }
+    Ok(ResponsePayload::MessageQueued(QueueMessageReceipt {
+        request_id: nested_request_id,
+        message_id: parse_message_id(
+            read_text(
+                receipt.get_message_id(),
+                "response.queuedMessageReceipt.messageId",
+            )?,
+            "response.queuedMessageReceipt.messageId",
+        )?,
+        thread_id: parse_thread_id(
+            read_text(
+                receipt.get_thread_id(),
+                "response.queuedMessageReceipt.threadId",
+            )?,
+            "response.queuedMessageReceipt.threadId",
+        )?,
+        disposition: decode_disposition(receipt.get_disposition()?),
+    }))
+}
+
+fn decode_message_image(
+    result: artisan_capnp::message_image_result::Reader<'_>,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let reference = decode_image_attachment_ref(
+        result.get_reference()?,
+        "response.messageImage.reference",
+        None,
+    )?;
+    let bytes = result.get_bytes()?.to_vec();
+    if bytes.len() != usize::try_from(reference.size_bytes).unwrap_or(usize::MAX) {
+        return Err(ProtocolDecodeError::ImageAttachmentReference {
+            field: "response.messageImage.bytes",
+            reason: "image bytes do not match reference size",
+        });
+    }
+    Ok(ResponsePayload::MessageImage(MessageImageResult {
+        reference,
+        bytes,
     }))
 }
 
@@ -2447,6 +2784,55 @@ fn decode_conversation_item(
                 created_at: UnixMillis::from_millis(message.get_created_at_millis()),
                 updated_at: UnixMillis::from_millis(message.get_updated_at_millis()),
             }))
+        }
+        conversation_item::Which::MultimodalUserMessage(message) => {
+            let message = message?;
+            let text = match message.get_text().which()? {
+                artisan_capnp::multimodal_user_message_item::text::Which::Absent(()) => None,
+                artisan_capnp::multimodal_user_message_item::text::Which::Present(value) => Some(
+                    AuthoredText::parse(read_text(
+                        value,
+                        "conversationItem.multimodalUserMessage.text",
+                    )?)
+                    .map_err(|source| ProtocolDecodeError::MessagePayload {
+                        source: QueueMessagePayloadError::Text(source),
+                    })?,
+                ),
+            };
+            let attachments = decode_image_attachment_refs(
+                message.get_attachments()?,
+                "conversationItem.multimodalUserMessage.attachments",
+            )?;
+            if attachments.is_empty() {
+                return Err(ProtocolDecodeError::MessagePayload {
+                    source: QueueMessagePayloadError::Empty,
+                });
+            }
+            Ok(ConversationItem::MultimodalUserMessage(
+                MultimodalUserMessageItem {
+                    item_id: parse_item_id(
+                        read_text(
+                            message.get_item_id(),
+                            "conversationItem.multimodalUserMessage.itemId",
+                        )?,
+                        "conversationItem.multimodalUserMessage.itemId",
+                    )?,
+                    turn_id: parse_turn_id(
+                        read_text(
+                            message.get_turn_id(),
+                            "conversationItem.multimodalUserMessage.turnId",
+                        )?,
+                        "conversationItem.multimodalUserMessage.turnId",
+                    )?,
+                    ordinal: ItemOrdinal::new(message.get_ordinal()),
+                    revision: Revision::new(message.get_revision()),
+                    lifecycle: decode_conversation_lifecycle(message.get_lifecycle()?),
+                    text,
+                    attachments,
+                    created_at: UnixMillis::from_millis(message.get_created_at_millis()),
+                    updated_at: UnixMillis::from_millis(message.get_updated_at_millis()),
+                },
+            ))
         }
         conversation_item::Which::AssistantMessage(message) => {
             let message = message?;

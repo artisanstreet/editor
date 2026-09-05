@@ -4,12 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use artisan_database::entities::{self, CommandKind, DispatchState};
 use artisan_database::{
-    AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, Repository, RepositoryError,
-    SqliteConfig, connect,
+    AttachProjectInput, CreateThreadInput, QueueFirstMessageInput, QueueMessageInput, Repository,
+    RepositoryError, SqliteConfig, connect,
 };
 use artisan_domain::{
-    DirectoryId, DisplayName, MessageBody, MessageId, ProjectId, ReceiptDisposition, RequestId,
-    RootPath, ThreadId, ThreadTitle, UnixMillis,
+    AuthoredText, DirectoryId, DisplayName, ImageAttachment, MessageBody, MessageId, ProjectId,
+    QueueMessagePayload, ReceiptDisposition, RequestId, RootPath, ThreadId, ThreadTitle,
+    UnixMillis,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -508,6 +509,288 @@ async fn concurrent_retry_has_one_accept_and_reopens_receipt_message_and_outbox(
     assert_eq!(dispatch.correlation_id, "queue-request");
     assert_eq!(dispatch.queued_at_ms, duplicate.queued_at.as_millis());
     reopened.close().await.expect("database should close");
+}
+
+fn image_only_payload(seed: u8) -> QueueMessagePayload {
+    let mut attachments = Vec::new();
+    for index in 0_u8..3 {
+        attachments.push(
+            ImageAttachment::new(
+                "image/png",
+                vec![seed.saturating_add(index); 4 * 1024 * 1024],
+                format!("capture-{index}.png"),
+            )
+            .expect("fixture image should satisfy the per-image bound"),
+        );
+    }
+    QueueMessagePayload::new(None, attachments).expect("three images fit the aggregate bound")
+}
+
+fn payload_with_text(text: Option<&str>, name: &str) -> QueueMessagePayload {
+    QueueMessagePayload::new(
+        text.map(|value| AuthoredText::parse(value).expect("test text should parse")),
+        vec![
+            ImageAttachment::new("image/png", vec![7, 8, 9], name)
+                .expect("test image should satisfy the image bound"),
+        ],
+    )
+    .expect("text/image payload should be valid")
+}
+
+#[tokio::test]
+async fn general_message_preserves_order_replay_and_owned_image_reads_after_reopen() {
+    let temporary = TemporaryDatabase::new("queue-message-media");
+    let database = connect(
+        SqliteConfig::file(temporary.path())
+            .min_connections(1)
+            .max_connections(4)
+            .sqlx_logging(false),
+    )
+    .await
+    .expect("file database should open");
+    migrate_to_current(&database)
+        .await
+        .expect("file database should migrate");
+    let repository = Repository::new(database.clone());
+    setup_thread(&repository).await;
+
+    let payload = image_only_payload(0);
+    let accepted = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-media-request"),
+            message_id: message_id("queue-media-message"),
+            thread_id: thread_id("thread-1"),
+            payload: payload.clone(),
+            accepted_at: UnixMillis::from_millis(301),
+        })
+        .await
+        .expect("image-only general message should queue");
+    assert_eq!(accepted.receipt.disposition, ReceiptDisposition::Accepted);
+    assert_eq!(accepted.payload, payload);
+
+    let dispatch = repository
+        .read_queue_message_dispatch_payload(&accepted.message_id)
+        .await
+        .expect("dispatch payload should load")
+        .expect("dispatch payload should exist");
+    assert_eq!(dispatch.payload, payload);
+    assert_eq!(dispatch.payload.attachments()[0].name(), "capture-0.png");
+    assert_eq!(dispatch.payload.attachments()[2].bytes()[0], 2);
+
+    let second_payload = image_only_payload(10);
+    let second = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-media-request-2"),
+            message_id: message_id("queue-media-message-2"),
+            thread_id: thread_id("thread-1"),
+            payload: second_payload.clone(),
+            accepted_at: UnixMillis::from_millis(302),
+        })
+        .await
+        .expect("a subsequent 12 MiB image message should queue");
+    assert_eq!(second.payload, second_payload);
+
+    let duplicate = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-media-request"),
+            message_id: message_id("discarded-media-message"),
+            thread_id: thread_id("thread-1"),
+            payload: payload.clone(),
+            accepted_at: UnixMillis::from_millis(302),
+        })
+        .await
+        .expect("exact general-message retry should replay");
+    assert_eq!(duplicate.receipt.disposition, ReceiptDisposition::Duplicate);
+    assert_eq!(duplicate.message_id, accepted.message_id);
+
+    let changed = QueueMessagePayload::new(
+        Some(AuthoredText::parse("changed").expect("changed text should parse")),
+        Vec::new(),
+    )
+    .expect("changed text should be a valid payload");
+    assert!(matches!(
+        repository
+            .queue_message(QueueMessageInput {
+                request_id: request("queue-media-request"),
+                message_id: message_id("conflicting-media-message"),
+                thread_id: thread_id("thread-1"),
+                payload: changed,
+                accepted_at: UnixMillis::from_millis(303),
+            })
+            .await
+            .expect_err("same request id cannot change payload"),
+        RepositoryError::IdempotencyConflict { .. }
+    ));
+
+    let first_image = repository
+        .read_message_image(
+            &thread_id("thread-1"),
+            &accepted.message_id,
+            0,
+        )
+        .await
+        .expect("owned image read should work")
+        .expect("first image should exist");
+    assert_eq!(first_image.reference.thread_id, thread_id("thread-1"));
+    assert_eq!(first_image.reference.message_id, accepted.message_id);
+    assert_eq!(first_image.reference.index, 0);
+    assert_eq!(first_image.reference.name, "capture-0.png");
+    assert_eq!(first_image.bytes.len(), 4 * 1024 * 1024);
+    assert_eq!(first_image.bytes[0], 0);
+    assert_ne!(first_image.reference.digest, [0; 32]);
+
+    assert!(repository
+        .read_message_image(
+            &thread_id("thread-2"),
+            &accepted.message_id,
+            0,
+        )
+        .await
+        .expect("wrong-thread image read should be handled")
+        .is_none());
+
+    database.close().await.expect("database should close");
+    let reopened = connect(SqliteConfig::file(temporary.path()).sqlx_logging(false))
+        .await
+        .expect("database should reopen");
+    migrate_to_current(&reopened)
+        .await
+        .expect("reopen migration should be idempotent");
+    let reopened_repository = Repository::new(reopened.clone());
+    let replay = reopened_repository
+        .lookup_queue_message(
+            &request("queue-media-request"),
+            &thread_id("thread-1"),
+            &payload,
+        )
+        .await
+        .expect("reopened receipt lookup should work")
+        .expect("reopened receipt should exist");
+    assert_eq!(replay.receipt.disposition, ReceiptDisposition::Duplicate);
+    assert_eq!(replay.message_id, accepted.message_id);
+    let reopened_dispatch = reopened_repository
+        .read_queue_message_dispatch_payload(&accepted.message_id)
+        .await
+        .expect("reopened dispatch payload should load")
+        .expect("reopened dispatch payload should exist");
+    assert_eq!(reopened_dispatch.payload, payload);
+    let third_image = reopened_repository
+        .read_message_image(
+            &thread_id("thread-1"),
+            &accepted.message_id,
+            2,
+        )
+        .await
+        .expect("reopened image read should work")
+        .expect("third image should exist");
+    assert_eq!(third_image.reference.index, 2);
+    assert_eq!(third_image.reference.name, "capture-2.png");
+    assert_eq!(third_image.bytes[0], 2);
+    let second_history_image = reopened_repository
+        .read_message_image(
+            &thread_id("thread-1"),
+            &second.message_id,
+            1,
+        )
+        .await
+        .expect("second history image read should work")
+        .expect("second history image should exist");
+    assert_eq!(second_history_image.reference.message_id, second.message_id);
+    assert_eq!(second_history_image.bytes[0], 11);
+    reopened.close().await.expect("reopened database should close");
+}
+
+#[tokio::test]
+async fn general_message_reloads_absent_and_empty_text_exactly_after_reopen() {
+    let temporary = TemporaryDatabase::new("queue-message-text-presence");
+    let database = connect(SqliteConfig::file(temporary.path()).sqlx_logging(false))
+        .await
+        .expect("file database should open");
+    migrate_to_current(&database)
+        .await
+        .expect("file database should migrate");
+    let repository = Repository::new(database.clone());
+    setup_thread(&repository).await;
+
+    let absent = payload_with_text(None, "absent.png");
+    let present_empty = payload_with_text(Some(""), "present-empty.png");
+    let absent_result = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-text-absent"),
+            message_id: message_id("queue-text-absent-message"),
+            thread_id: thread_id("thread-1"),
+            payload: absent.clone(),
+            accepted_at: UnixMillis::from_millis(301),
+        })
+        .await
+        .expect("absent-text message should queue");
+    let present_empty_result = repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-text-empty"),
+            message_id: message_id("queue-text-empty-message"),
+            thread_id: thread_id("thread-1"),
+            payload: present_empty.clone(),
+            accepted_at: UnixMillis::from_millis(302),
+        })
+        .await
+        .expect("present-empty-text message should queue");
+
+    database.close().await.expect("database should close");
+    let reopened = connect(SqliteConfig::file(temporary.path()).sqlx_logging(false))
+        .await
+        .expect("database should reopen");
+    migrate_to_current(&reopened)
+        .await
+        .expect("reopen migration should be idempotent");
+    let reopened_repository = Repository::new(reopened.clone());
+
+    let absent_dispatch = reopened_repository
+        .read_queue_message_dispatch_payload(&absent_result.message_id)
+        .await
+        .expect("absent-text dispatch should reload")
+        .expect("absent-text dispatch should exist");
+    assert!(absent_dispatch.payload.text().is_none());
+    let present_empty_dispatch = reopened_repository
+        .read_queue_message_dispatch_payload(&present_empty_result.message_id)
+        .await
+        .expect("present-empty-text dispatch should reload")
+        .expect("present-empty-text dispatch should exist");
+    assert_eq!(
+        present_empty_dispatch
+            .payload
+            .text()
+            .expect("present empty text should remain present")
+            .as_str(),
+        ""
+    );
+
+    let replay = reopened_repository
+        .queue_message(QueueMessageInput {
+            request_id: request("queue-text-empty"),
+            message_id: message_id("discarded-text-empty-replay"),
+            thread_id: thread_id("thread-1"),
+            payload: present_empty.clone(),
+            accepted_at: UnixMillis::from_millis(303),
+        })
+        .await
+        .expect("exact present-empty retry should replay");
+    assert_eq!(replay.receipt.disposition, ReceiptDisposition::Duplicate);
+    assert_eq!(replay.message_id, present_empty_result.message_id);
+    assert!(matches!(
+        reopened_repository
+            .queue_message(QueueMessageInput {
+                request_id: request("queue-text-empty"),
+                message_id: message_id("conflicting-text-empty-replay"),
+                thread_id: thread_id("thread-1"),
+                payload: absent,
+                accepted_at: UnixMillis::from_millis(304),
+            })
+            .await
+            .expect_err("same request with absent text must conflict"),
+        RepositoryError::IdempotencyConflict { .. }
+    ));
+
+    reopened.close().await.expect("reopened database should close");
 }
 
 struct TemporaryDatabase {

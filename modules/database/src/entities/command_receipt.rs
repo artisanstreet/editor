@@ -32,6 +32,8 @@ pub enum CommandKind {
     CreateThread,
     #[sea_orm(string_value = "queue_first_message")]
     QueueFirstMessage,
+    #[sea_orm(string_value = "queue_message")]
+    QueueMessage,
     #[sea_orm(string_value = "set_thread_engine_config")]
     SetThreadEngineConfig,
 }

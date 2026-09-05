@@ -2,7 +2,7 @@
 
 use sea_orm::{ConnectionTrait, EntityTrait};
 
-use artisan_domain::{MessageBody, MessageId, RequestId, ThreadId};
+use artisan_domain::{MessageBody, MessageId, QueueMessagePayload, RequestId, ThreadId};
 
 use crate::entities;
 
@@ -23,6 +23,19 @@ pub struct MessageDispatchPayload {
     pub correlation_id: RequestId,
     /// Validated body exactly as accepted.
     pub body: MessageBody,
+}
+
+/// Immutable execution payload for a general text/image message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueMessageDispatchPayload {
+    /// Forge-minted identity of the dispatched message.
+    pub message_id: MessageId,
+    /// Thread the dispatched message is queued on.
+    pub thread_id: ThreadId,
+    /// Client request identity whose acceptance produced the message.
+    pub correlation_id: RequestId,
+    /// Authored text and ordered owned image attachments.
+    pub payload: QueueMessagePayload,
 }
 
 impl Repository {
@@ -65,6 +78,42 @@ impl Repository {
             thread_id,
             correlation_id,
             body,
+        }))
+    }
+
+    /// Loads the immutable general text/image dispatch payload without
+    /// touching claim or lease state.
+    pub async fn read_queue_message_dispatch_payload(
+        &self,
+        message_id: &MessageId,
+    ) -> Result<Option<QueueMessageDispatchPayload>, RepositoryError> {
+        let Some(dispatch) = dispatch_row_by_message_id(&self.database, message_id).await? else {
+            return Ok(None);
+        };
+        let Some(message) = message_row_by_id(&self.database, message_id).await? else {
+            return Err(RepositoryError::Invariant {
+                reason: "message dispatch references a missing message",
+            });
+        };
+
+        let correlation_id = RequestId::parse(dispatch.correlation_id)
+            .map_err(|error| corrupt_data("message_dispatches", "correlation_id", &error))?;
+        let thread_id = ThreadId::parse(message.thread_id)
+            .map_err(|error| corrupt_data("messages", "thread_id", &error))?;
+        let payload = super::queue_message::read_queue_message_payload(
+            &self.database,
+            message_id,
+        )
+        .await?
+        .ok_or(RepositoryError::Invariant {
+            reason: "message dispatch references a missing message payload",
+        })?;
+
+        Ok(Some(QueueMessageDispatchPayload {
+            message_id: message_id.clone(),
+            thread_id,
+            correlation_id,
+            payload,
         }))
     }
 }

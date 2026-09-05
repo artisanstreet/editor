@@ -32,8 +32,13 @@ pub const ENGINE_CONFIG_MAX_ENCODED_BYTES: usize = 65_536;
 /// Maximum duration accepted by any engine runtime control, in milliseconds.
 pub const ENGINE_RUNTIME_MAX_MILLIS: u64 = 86_400_000;
 
-/// Maximum JSON body and HTTP buffer size accepted by engine runtime controls.
-pub const ENGINE_RUNTIME_MAX_BODY_BYTES: u64 = 8_388_608;
+/// Maximum JSON body size accepted by engine runtime controls.
+///
+/// Native image files travel to the provider as base64 data URIs. The ceiling
+/// therefore leaves room above the 12 MiB authored-image aggregate after the
+/// 4/3 base64 expansion, the bounded authored text, and JSON/file metadata.
+/// The transport/application frame ceiling remains a separate bound.
+pub const ENGINE_RUNTIME_MAX_BODY_BYTES: u64 = 24 * 1024 * 1024;
 
 /// Maximum SSE event size accepted by engine runtime controls.
 pub const ENGINE_RUNTIME_MAX_SSE_EVENT_BYTES: u64 = 8_388_608;
@@ -87,6 +92,25 @@ pub const ROOT_PATH_MAX_BYTES: usize = 32_768;
 /// a reply truncated mid-sentence reads as answered, so the stored body bound
 /// stays generous while remaining finite.
 pub const MESSAGE_BODY_MAX_BYTES: usize = 65_536;
+
+/// Maximum number of images in one queued message.
+///
+/// The native contract mirrors the Electron composer policy exactly. The
+/// production transport frame ceiling is raised in the integrating packet so
+/// this payload can cross the wire without truncation.
+pub const MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT: usize = 10;
+
+/// Maximum encoded image size accepted for one attachment.
+pub const MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+/// Maximum aggregate encoded image size accepted for one message.
+pub const MESSAGE_IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES: usize = 12 * 1024 * 1024;
+
+/// Maximum UTF-8 byte length of an image's display name.
+pub const MESSAGE_IMAGE_ATTACHMENT_NAME_MAX_BYTES: usize = 256;
+
+/// Maximum UTF-8 byte length of an image MIME type.
+pub const MESSAGE_IMAGE_ATTACHMENT_MIME_MAX_BYTES: usize = 64;
 
 /// Maximum number of directory entries in one listing.
 ///
