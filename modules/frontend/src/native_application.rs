@@ -1154,7 +1154,7 @@ impl NativeApplication {
             .cursor_pointer()
             .rounded(px(10.0))
             .w_full()
-            .h(px(48.0))
+            .h(px(40.0))
             .flex()
             .items_center()
             .gap(px(10.0))
@@ -1176,7 +1176,8 @@ impl NativeApplication {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(13.0))
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
                             .child(self.profile_name.clone().unwrap_or_else(|| "User".into())),
                     )
@@ -1235,15 +1236,19 @@ impl NativeApplication {
                 cx.stop_propagation();
                 cx.notify();
             }));
-        let mut root = div().relative().w_full().py(px(6.0)).child(
+        let mut root =
             div()
-                .child(trigger)
-                .on_children_prepainted(move |bounds, _, _| {
-                    if let Some(bounds) = bounds.first() {
-                        origin.set(*bounds);
-                    }
-                }),
-        );
+                .relative()
+                .w_full()
+                .child(
+                    div()
+                        .child(trigger)
+                        .on_children_prepainted(move |bounds, _, _| {
+                            if let Some(bounds) = bounds.first() {
+                                origin.set(*bounds);
+                            }
+                        }),
+                );
         if self.profile_menu.is_open() {
             let mut panel = div()
                 .id("artisan-desktop-profile-menu")
