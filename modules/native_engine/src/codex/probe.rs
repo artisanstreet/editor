@@ -402,6 +402,7 @@ fn drive_version_drain(
             }
             Ok(true) => {
                 let status = reap_or_kill(child, deadline)?;
+                finish_stderr_drain(child, stderr_drain, deadline)?;
                 return map_version_exit(status, output);
             }
             Ok(false) => {}
@@ -411,7 +412,7 @@ fn drive_version_drain(
                 stop_child(child);
                 return Err(error);
             }
-            Ok(()) => {}
+            Ok(_) => {}
         }
         if Instant::now() >= deadline {
             stop_child(child);
@@ -445,20 +446,57 @@ fn pump_version_stdout(
 
 /// Pumps and discards available stderr events while enforcing its bound.
 ///
+/// Returns true once the stream ends.
+///
 /// # Errors
 ///
 /// Returns [`CodexProbeError::OutputTooLarge`] when the stream exceeds its
 /// bound and [`CodexProbeError::Unavailable`] when the stream fails.
-fn pump_version_stderr(drain: &mut PipeDrain) -> Result<(), CodexProbeError> {
+fn pump_version_stderr(drain: &mut PipeDrain) -> Result<bool, CodexProbeError> {
+    let mut ended = false;
     while let Ok(event) = drain.events().try_recv() {
         match event {
             PipeEvent::Line(_) => {}
-            PipeEvent::Eof => {}
+            PipeEvent::Eof => ended = true,
             PipeEvent::TooLarge => return Err(CodexProbeError::OutputTooLarge),
             PipeEvent::Io => return Err(CodexProbeError::Unavailable),
         }
     }
-    Ok(())
+    Ok(ended)
+}
+
+/// Pumps the stderr drain to its terminal event within the deadline.
+///
+/// Used after stdout ends so a racing stderr flood is still bounded instead
+/// of being ignored on a zero exit.
+///
+/// # Errors
+///
+/// Returns [`CodexProbeError::OutputTooLarge`] when the stream exceeds its
+/// bound, [`CodexProbeError::Unavailable`] when the stream fails, and
+/// [`CodexProbeError::Timeout`] when the deadline passes first. The child is
+/// stopped before returning any error.
+fn finish_stderr_drain(
+    child: &mut std::process::Child,
+    drain: &mut PipeDrain,
+    deadline: Instant,
+) -> Result<(), CodexProbeError> {
+    loop {
+        match pump_version_stderr(drain) {
+            Err(error) => {
+                stop_child(child);
+                return Err(error);
+            }
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                if Instant::now() >= deadline {
+                    stop_child(child);
+                    return Err(CodexProbeError::Timeout);
+                }
+                thread::sleep(PROBE_POLL_INTERVAL);
+            }
+        }
+    }
 }
 
 fn map_version_exit(
