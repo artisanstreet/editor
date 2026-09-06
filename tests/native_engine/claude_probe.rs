@@ -63,7 +63,7 @@ fn auth_document_requires_the_exact_logged_in_shape() {
         b"[{\"loggedIn\": true}]",
     ];
     for document in malformed {
-        assert_eq!(parse_auth_logged_in(malformed), None);
+        assert_eq!(parse_auth_logged_in(document), None);
     }
 }
 
