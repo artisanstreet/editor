@@ -16,10 +16,10 @@ use artisan_domain::{
     QuestionObservation, QuestionOption, QuestionState, ReasoningSummaryCompletedObservation,
     ReasoningSummaryDeltaObservation, RetryAttemptState, RetryObservation, RunState,
     RunStateObservation, RunTerminalObservation, RunTerminalState, SearchObservation, SearchScope,
-    SearchState, SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
-    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, TerminalChannel,
-    ToolAction, ToolObservation, TranscriptContent, TurnState, TurnStateObservation, UsageBasis,
-    UsageInput, UsageObservation,
+    SearchState, SubagentInput, SubagentObservation, SubagentState, TerminalActivityInput,
+    TerminalActivityObservation, TerminalActivityState, TerminalChannel, ToolAction,
+    ToolObservation, TranscriptContent, TurnState, TurnStateObservation, UsageBasis, UsageInput,
+    UsageObservation,
 };
 
 fn oid(value: &str) -> ObservationId {
@@ -613,13 +613,16 @@ fn subagent_lifecycle_and_transcript_projection() {
             )
             .expect("question is valid"),
         ),
-        Observation::RunTerminal(RunTerminalObservation::new(
-            oid("obs-t"),
-            seq(12),
-            RunTerminalState::Completed,
-            None,
-            None,
-        )),
+        Observation::RunTerminal(
+            RunTerminalObservation::new(
+                oid("obs-t"),
+                seq(12),
+                RunTerminalState::Completed,
+                None,
+                None,
+            )
+            .expect("terminal outcome is valid"),
+        ),
         Observation::Usage(
             UsageObservation::new(
                 oid("obs-u"),
