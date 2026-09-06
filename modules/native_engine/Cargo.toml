@@ -18,3 +18,27 @@ winapi-util.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "codex_discovery"
+path = "../../tests/native_engine/codex_discovery.rs"
+
+[[test]]
+name = "codex_probe"
+path = "../../tests/native_engine/codex_probe.rs"
+
+[[test]]
+name = "codex_session"
+path = "../../tests/native_engine/codex_session.rs"
+
+[[test]]
+name = "codex_version"
+path = "../../tests/native_engine/codex_version.rs"
+
+[[test]]
+name = "claude_discovery"
+path = "../../tests/native_engine/claude_discovery.rs"
+
+[[test]]
+name = "claude_probe"
+path = "../../tests/native_engine/claude_probe.rs"

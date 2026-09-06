@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod claude;
 pub mod codex;
 #[path = "install.rs"]
 mod engine_core;
