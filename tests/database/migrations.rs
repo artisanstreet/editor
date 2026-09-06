@@ -14,6 +14,11 @@ const INITIAL_MIGRATION: &str = "m20260824_000001_initial_native_schema";
 const RECEIPTS_MIGRATION: &str = "m20260824_000002_global_command_receipts";
 const EXECUTION_MIGRATION: &str = "m20260824_000003_conversation_execution";
 const ENGINE_CONFIG_MIGRATION: &str = "m20260830_000004_engine_run_config";
+const MULTIMODAL_MIGRATION: &str = "m20260905_000005_multimodal_messages";
+const MODEL_FAVORITES_MIGRATION: &str = "m20260905_000006_model_favorites";
+const RUN_USAGE_MIGRATION: &str = "m20260905_000007_run_usage";
+const WITHDRAWALS_MIGRATION: &str = "m20260905_000008_queued_message_withdrawals";
+const ENGINE_CONFIG_V2_MIGRATION: &str = "m20260906_000009_engine_run_config_v2";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -192,7 +197,12 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             INITIAL_MIGRATION.to_string(),
             RECEIPTS_MIGRATION.to_string(),
             EXECUTION_MIGRATION.to_string(),
-            ENGINE_CONFIG_MIGRATION.to_string()
+            ENGINE_CONFIG_MIGRATION.to_string(),
+            MULTIMODAL_MIGRATION.to_string(),
+            MODEL_FAVORITES_MIGRATION.to_string(),
+            RUN_USAGE_MIGRATION.to_string(),
+            WITHDRAWALS_MIGRATION.to_string(),
+            ENGINE_CONFIG_V2_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -525,7 +535,9 @@ async fn engine_config_migration_preserves_legacy_receipts_and_allows_set_histor
         .await?
         .ok_or_else(|| std::io::Error::other("engine receipt index did not survive migration"))?;
     let index_sql: String = index_sql.try_get_by_index(0)?;
-    assert!(index_sql.contains("WHERE command_kind <> 'set_thread_engine_config'"));
+    assert!(index_sql.contains(
+        "WHERE command_kind IN ('attach_project', 'create_thread', 'queue_first_message')"
+    ));
     database.close().await?;
     Ok(())
 }
@@ -657,6 +669,11 @@ async fn seed_v2_guard_scope(
             "INSERT INTO conversation_turns (turn_id, thread_id, ordinal, kind, revision, lifecycle, created_at_ms, updated_at_ms) VALUES ('turn1', 't1', 0, 'turn', 0, 'pending', 7, 7)",
         )
         .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m2', 't1', 1, 'second', 8)",
+        )
+        .await?;
     Ok(())
 }
 
@@ -691,7 +708,7 @@ async fn assert_v2_shape_guards(
         .await?;
     database
         .execute_unprepared(
-            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, accepted_at_ms) VALUES ('queue-msg-2', 'queue_message', 't-v2', 'm1', 7)",
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, accepted_at_ms) VALUES ('queue-msg-2', 'queue_message', 't-v2', 'm2', 7)",
         )
         .await?;
     assert_eq!(
