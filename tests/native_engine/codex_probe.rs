@@ -221,7 +221,7 @@ fn fixture_command(kind: FixtureKind) -> (PathBuf, Vec<String>) {
         FixtureKind::StderrFlood => {
             format!("for /L %i in (1,1,2000) do @echo {} 1>&2", "x".repeat(100))
         }
-        FixtureKind::Slow => "for /L %i in (1,1,200000) do @rem".to_owned(),
+        FixtureKind::Slow => "ping -n 30 127.0.0.1 >NUL & rem".to_owned(),
         FixtureKind::NonZero => "exit 3".to_owned(),
     };
     (shell, vec!["/C".to_owned(), script])
