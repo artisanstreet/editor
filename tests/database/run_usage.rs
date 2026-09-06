@@ -481,6 +481,18 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
         })
         .await
         .expect("codex configuration should persist");
+    // The second run needs its own origin message: each message originates
+    // at most one run, so reusing the seeded message would collide.
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("request-first-codex").expect("request id"),
+            message_id: MessageId::parse("message-codex").expect("message id"),
+            thread_id: thread_id.clone(),
+            body: MessageBody::parse("codex").expect("body"),
+            accepted_at: UnixMillis::from_millis(5),
+        })
+        .await
+        .expect("codex message should queue");
     let thread = entities::thread::Entity::find_by_id(THREAD_ID)
         .one(&database)
         .await
@@ -519,7 +531,7 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
         run_id: Set("run-codex".to_owned()),
         thread_id: Set(THREAD_ID.to_owned()),
         run_start_key: Set(entities::OpaqueBytes::new(vec![1; 32])),
-        origin_message_id: Set(MESSAGE_ID.to_owned()),
+        origin_message_id: Set("message-codex".to_owned()),
         origin_turn_id: Set("turn-codex".to_owned()),
         lifecycle: Set(AssistantRunLifecycle::Completed),
         generation: Set(1),
