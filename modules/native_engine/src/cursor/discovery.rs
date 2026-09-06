@@ -191,7 +191,7 @@ fn match_version_at(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
     }
     cursor += 1;
     let suffix_start = cursor;
-    while bytes.get(cursor).is_some_and(is_suffix_char) {
+    while bytes.get(cursor).is_some_and(|byte| is_suffix_char(*byte)) {
         cursor += 1;
     }
     if cursor == suffix_start {

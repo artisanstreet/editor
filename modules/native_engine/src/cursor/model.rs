@@ -126,7 +126,7 @@ pub fn resolve_cursor_model(
     let effort = effort.map(str::trim).filter(|value| !value.is_empty());
     let with_effort = match effort {
         None => model.to_owned(),
-        Some(effort) if has_reasoning_suffix(model) => model.to_owned(),
+        Some(_) if has_reasoning_suffix(model) => model.to_owned(),
         Some(effort) => format!("{model}-{effort}"),
     };
     if speed.is_some_and(CursorSpeed::is_fast) && !with_effort.ends_with("-fast") {
