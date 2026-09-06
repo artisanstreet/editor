@@ -738,3 +738,80 @@ async fn unknown_engine_blob_and_version_column_mismatch_are_corruption() {
         Err(RepositoryError::CorruptData { .. })
     ));
 }
+
+#[tokio::test]
+async fn receipt_shape_guard_allows_versions_one_and_two_but_rejects_zero_and_three() {
+    let (database, _repository, _thread_id) = seeded_repository().await;
+    // Version 2 receipts persist once the widened CHECK arm is migrated.
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('request-receipt-v2', 'set_thread_engine_config', 'thread-engine-config', 100, 2, X'00', 1)",
+        )
+        .await
+        .expect("version two receipt should persist");
+    assert_eq!(
+        entities::command_receipt::Entity::find_by_id("request-receipt-v2")
+            .one(&database)
+            .await
+            .expect("receipt query should work")
+            .expect("receipt should exist")
+            .engine_run_config_version,
+        Some(2)
+    );
+
+    // Version 0 and 3 stay outside every durable guard.
+    for version in [0, 3] {
+        let rejected = database
+            .execute_unprepared(&format!(
+                "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('request-receipt-v{version}', 'set_thread_engine_config', 'thread-engine-config', 100, {version}, X'00', 1)"
+            ))
+            .await;
+        assert!(
+            rejected.is_err(),
+            "version {version} receipt must be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn thread_shape_trigger_rejects_version_zero_and_three_inserts_and_updates() {
+    let (database, repository, thread_id) = seeded_repository().await;
+    repository
+        .set_thread_engine_config(input(
+            "request-engine-guard-base",
+            &thread_id,
+            EngineConfigUpdatePrecondition::Unconfigured,
+            config("guard", false),
+            100,
+        ))
+        .await
+        .expect("base configuration should persist");
+
+    for version in [0, 3] {
+        let insert = database
+            .execute_unprepared(&format!(
+                "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('thread-guard-v{version}', 'project-config', 'Guard', 1, 1, {version}, 1, X'00')"
+            ))
+            .await;
+        assert!(
+            insert.is_err(),
+            "version {version} thread insert must be rejected"
+        );
+        let update = database
+            .execute_unprepared(&format!(
+                "UPDATE threads SET engine_run_config_version = {version} WHERE thread_id = 'thread-engine-config'"
+            ))
+            .await;
+        assert!(
+            update.is_err(),
+            "version {version} thread update must be rejected"
+        );
+    }
+    // The rejection leaves the configured row untouched.
+    let settings = repository
+        .read_thread_engine_settings(&thread_id)
+        .await
+        .expect("settings read should work")
+        .expect("thread should stay configured");
+    assert_eq!(settings.revision().get(), 1);
+}

@@ -14,12 +14,12 @@ use artisan_database::{
     SetThreadEngineConfigInput, SqliteConfig, ThreadEngineSettings, connect,
 };
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
-    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
-    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
-    FiniteMillis, ItemId, MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PatchId,
-    PermissionId, ProjectId, RequestId, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis,
-    WebSearchAccess,
+    ApprovalMode, ByteLimit, CodexSelection, CountLimit, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
+    EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, ItemId,
+    MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PatchId, PermissionId, ProjectId,
+    RequestId, RunId, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{
@@ -1687,4 +1687,124 @@ async fn rendered_launch_errors_never_disclose_capabilities() {
         assert!(!rendered_display.contains(secret_pattern));
         assert!(!rendered_debug.contains(secret_pattern));
     }
+}
+
+fn codex_launch_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-launch").expect("permission id is valid"),
+        EngineAgentId::parse("agent-launch").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::Codex(
+            CodexSelection::new(
+                EngineProfileId::parse("profile-launch").expect("profile id is valid"),
+                Some(EngineModelId::parse("model-launch").expect("model id is valid")),
+                permission,
+                None,
+                None,
+                None,
+            )
+            .expect("codex selection is valid"),
+        ),
+        runtime,
+    )
+}
+
+fn launch_command_with_settings<'a>(
+    claimed: &'a ClaimedMessageDispatch,
+    identity: &'a LaunchIdentityFixture,
+    context: &'a LaunchContext,
+    settings: &'a ThreadEngineSettings,
+) -> LaunchClaimedRun<'a> {
+    LaunchClaimedRun {
+        claimed,
+        run_id: &identity.run,
+        turn_id: &identity.turn,
+        item_id: &identity.item,
+        first_patch_id: &identity.first_patch,
+        second_patch_id: &identity.second_patch,
+        operated_at: UnixMillis::from_millis(OPERATED_AT_MS),
+        run_start_key: &context.start_key,
+        credentials: &context.credentials,
+        engine_settings: settings,
+    }
+}
+
+#[tokio::test]
+async fn codex_launch_snapshot_carries_codec_version_two() {
+    let (database, repository) = seeded_repository().await;
+    let thread_id = ThreadId::parse(THREAD_ID).expect("fixture thread id");
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("codex-before-launch").expect("request id is valid"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                launch_engine_settings().revision(),
+            ),
+            config: codex_launch_config(),
+            accepted_at: UnixMillis::from_millis(OPERATED_AT_MS),
+        })
+        .await
+        .expect("codex configuration should persist");
+    let settings = repository
+        .read_thread_engine_settings(&thread_id)
+        .await
+        .expect("codex settings should read")
+        .expect("codex settings should be present");
+    assert_eq!(settings.config().engine_id(), EngineId::Codex);
+
+    let claimed = claim_live_dispatch(&repository).await;
+    let identity = launch_identity();
+    let context = LaunchContext::fixture();
+    repository
+        .launch_claimed_run(launch_command_with_settings(
+            &claimed, &identity, &context, &settings,
+        ))
+        .await
+        .expect("codex launch should succeed");
+
+    let run = entities::assistant_run::Entity::find_by_id(RUN_ID)
+        .one(&database)
+        .await
+        .expect("run should query")
+        .expect("run should exist");
+    assert_eq!(run.engine_run_config_version, Some(2));
+    assert_eq!(run.engine_run_config_revision, Some(2));
+    let thread = entities::thread::Entity::find_by_id(THREAD_ID)
+        .one(&database)
+        .await
+        .expect("thread should query")
+        .expect("thread should exist");
+    assert_eq!(thread.engine_run_config_version, Some(2));
+    assert_eq!(
+        run.engine_run_config
+            .as_ref()
+            .map(entities::OpaqueBytes::as_slice),
+        thread
+            .engine_run_config
+            .as_ref()
+            .map(entities::OpaqueBytes::as_slice)
+    );
 }

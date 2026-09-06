@@ -628,3 +628,142 @@ async fn engine_config_migration_enforces_thread_and_run_snapshot_shapes()
     database.close().await?;
     Ok(())
 }
+
+async fn seed_v2_guard_scope(
+    database: &sea_orm_migration::sea_orm::DatabaseConnection,
+) -> Result<(), Box<dyn Error>> {
+    database
+        .execute_unprepared(
+            "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/work/p1', 'Project', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'Thread', 2, 2)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m1', 't1', 0, 'hello', 7)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO conversation_ordinals (thread_id, ordinal, kind, entity_id) VALUES ('t1', 0, 'turn', 'turn1')",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO conversation_turns (turn_id, thread_id, ordinal, kind, revision, lifecycle, created_at_ms, updated_at_ms) VALUES ('turn1', 't1', 0, 'turn', 0, 'pending', 7, 7)",
+        )
+        .await?;
+    Ok(())
+}
+
+async fn assert_v2_shape_guards(
+    database: &sea_orm_migration::sea_orm::DatabaseConnection,
+) -> Result<(), Box<dyn Error>> {
+    // Codec version 2 rows persist on every guarded table.
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v2', 'p1', 'V2 thread', 4, 4, 2, 1, X'00')",
+        )
+        .await?;
+    assert_eq!(
+        scalar_i64(
+            database,
+            "SELECT engine_run_config_version FROM threads WHERE thread_id = 't-v2'",
+        )
+        .await?,
+        2
+    );
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('engine-v2', 'set_thread_engine_config', 't-v2', 5, 2, X'00', 1)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO assistant_runs (run_id, thread_id, run_start_key, origin_message_id, origin_turn_id, lifecycle, generation, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('run-v2', 't1', zeroblob(32), 'm1', 'turn1', 'queued', 0, 10, 10, 2, 1, X'00')",
+        )
+        .await?;
+
+    // Version 0 and 3 stay outside every durable guard.
+    for version in [0, 3] {
+        let thread_insert = database
+            .execute_unprepared(&format!(
+                "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v{version}', 'p1', 'Out of range', 4, 4, {version}, 1, X'00')"
+            ))
+            .await;
+        assert!(
+            thread_insert.is_err(),
+            "version {version} thread insert must be rejected"
+        );
+        let receipt_insert = database
+            .execute_unprepared(&format!(
+                "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('engine-v{version}', 'set_thread_engine_config', 't-v2', 5, {version}, X'00', 1)"
+            ))
+            .await;
+        assert!(
+            receipt_insert.is_err(),
+            "version {version} receipt insert must be rejected"
+        );
+        let run_insert = database
+            .execute_unprepared(&format!(
+                "INSERT INTO assistant_runs (run_id, thread_id, run_start_key, origin_message_id, origin_turn_id, lifecycle, generation, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('run-v{version}', 't1', zeroblob(32), 'm1', 'turn1', 'queued', 0, 10, 10, {version}, 1, X'00')"
+            ))
+            .await;
+        assert!(
+            run_insert.is_err(),
+            "version {version} run snapshot must be rejected"
+        );
+    }
+    let thread_update = database
+        .execute_unprepared(
+            "UPDATE threads SET engine_run_config_version = 3 WHERE thread_id = 't-v2'",
+        )
+        .await;
+    assert!(
+        thread_update.is_err(),
+        "version 3 thread update must be rejected"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn engine_config_v2_migration_widens_shape_guards_and_down_restores_them()
+-> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&database).await?;
+    seed_v2_guard_scope(&database).await?;
+    assert_v2_shape_guards(&database).await?;
+    database.close().await?;
+
+    // Downgrade restores the version-1-only guards on a v1-shaped database.
+    let downgraded = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&downgraded).await?;
+    seed_v2_guard_scope(&downgraded).await?;
+    Migrator::down(&downgraded, Some(1)).await?;
+    let v2_after_down = downgraded
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v2-down', 'p1', 'V2 thread', 4, 4, 2, 1, X'00')",
+        )
+        .await;
+    assert!(
+        v2_after_down.is_err(),
+        "downgrade must restore the version-1-only thread guard"
+    );
+    downgraded
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v1-down', 'p1', 'V1 thread', 4, 4, 1, 1, X'00')",
+        )
+        .await?;
+    migrate_to_current(&downgraded).await?;
+    downgraded
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v2-again', 'p1', 'V2 thread', 4, 4, 2, 1, X'00')",
+        )
+        .await?;
+    downgraded.close().await?;
+    Ok(())
+}

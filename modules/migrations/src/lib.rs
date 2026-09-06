@@ -15,6 +15,8 @@ mod m20260905_000007_run_usage;
 
 mod m20260905_000008_queued_message_withdrawals;
 
+mod m20260906_000009_engine_run_config_v2;
+
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::DatabaseConnection;
 use thiserror::Error;
@@ -34,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260905_000006_model_favorites::Migration),
             Box::new(m20260905_000007_run_usage::Migration),
             Box::new(m20260905_000008_queued_message_withdrawals::Migration),
+            Box::new(m20260906_000009_engine_run_config_v2::Migration),
         ]
     }
 }
