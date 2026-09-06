@@ -30,7 +30,10 @@ pub const CODEX_TRANSPORT: &str = "stdio-jsonl";
 ///
 /// Mirrors `ParseCodexVersion` (`/\b(\d+\.\d+\.\d+)\b/`): the surrounding
 /// bytes may contain product names or suffixes; only the first semantic
-/// version with word boundaries on both sides counts.
+/// version with word boundaries on both sides counts. Intentional native
+/// deviation: a `v`/`V` prefix at a word boundary is accepted and excluded
+/// from the result, since real-world version strings are commonly
+/// `v`-prefixed and rejecting `v0.146.0` outright would fail a valid probe.
 #[must_use]
 pub fn parse_codex_version(output: &[u8]) -> Option<String> {
     find_dotted_version(output, false)
@@ -98,7 +101,7 @@ fn is_word_byte(byte: u8) -> bool {
 fn find_dotted_version(output: &[u8], extended: bool) -> Option<String> {
     let mut index = 0;
     while index < output.len() {
-        if output[index].is_ascii_digit() && (index == 0 || !is_word_byte(output[index - 1])) {
+        if output[index].is_ascii_digit() && is_version_start(output, index) {
             if let Some((version, end)) = match_version_at(output, index, extended) {
                 if end >= output.len() || !is_word_byte(output[end]) {
                     return Some(version);
@@ -108,6 +111,19 @@ fn find_dotted_version(output: &[u8], extended: bool) -> Option<String> {
         index += 1;
     }
     None
+}
+
+/// Reports whether a digit starts a version candidate.
+///
+/// A word boundary always qualifies. A `v`/`V` prefix at a word boundary
+/// also qualifies; parsing starts at the digit so the prefix is excluded
+/// from the result. `vv1.2.3` and `x10.2.3` stay rejected.
+fn is_version_start(output: &[u8], index: usize) -> bool {
+    if index == 0 || !is_word_byte(output[index - 1]) {
+        return true;
+    }
+    let prefix = output[index - 1];
+    (prefix == b'v' || prefix == b'V') && (index < 2 || !is_word_byte(output[index - 2]))
 }
 
 fn match_version_at(output: &[u8], start: usize, extended: bool) -> Option<(String, usize)> {
