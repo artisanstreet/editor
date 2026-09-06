@@ -81,7 +81,7 @@ fn numeric_component(version: &str, index: usize) -> u64 {
         .split('.')
         .nth(index)
         .and_then(|part| {
-            let digits: String = part.bytes().take_while(u8::is_ascii_digit).collect();
+            let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
             if digits.is_empty() {
                 None
             } else {
