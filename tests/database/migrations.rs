@@ -100,7 +100,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        4
+        9
     );
     first
         .execute_unprepared(
@@ -134,7 +134,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        4
+        9
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
