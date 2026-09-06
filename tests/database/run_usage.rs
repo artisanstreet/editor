@@ -5,16 +5,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use artisan_database::entities::{self, AssistantRunLifecycle, EntityLifecycle, OrdinalKind};
 use artisan_database::{
-    CreateThreadInput, QueueFirstMessageInput, RecordRunUsage, RecordRunUsageOutcome, Repository,
-    RunUsageRepositoryError, SetThreadEngineConfigInput, SqliteConfig, connect,
+    CreateThreadInput, QueueFirstMessageInput, QueueMessageInput, RecordRunUsage,
+    RecordRunUsageOutcome, Repository, RunUsageRepositoryError, SetThreadEngineConfigInput,
+    SqliteConfig, connect,
 };
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CodexSelection, CountLimit, EngineAgentId, EngineConfigRevision,
-    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, MessageBody, MessageId, NetworkAccess,
-    OpenCode2Selection, PermissionId, ProjectId, RequestId, RunId, RunUsageBasis, RunUsageReport,
-    RunUsageReportInput, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
+    ApprovalMode, AuthoredText, ByteLimit, CodexSelection, CountLimit, EngineAgentId,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy,
+    EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, MessageBody,
+    MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId, QueueMessagePayload,
+    RequestId, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId, ThreadTitle,
+    UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -482,13 +484,19 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
         .await
         .expect("codex configuration should persist");
     // The second run needs its own origin message: each message originates
-    // at most one run, so reusing the seeded message would collide.
+    // at most one run, so reusing the seeded message would collide. The
+    // general queue path is used because the thread already has a first
+    // message.
     repository
-        .queue_first_message(QueueFirstMessageInput {
-            request_id: RequestId::parse("request-first-codex").expect("request id"),
+        .queue_message(QueueMessageInput {
+            request_id: RequestId::parse("request-message-codex").expect("request id"),
             message_id: MessageId::parse("message-codex").expect("message id"),
             thread_id: thread_id.clone(),
-            body: MessageBody::parse("codex").expect("body"),
+            payload: QueueMessagePayload::new(
+                Some(AuthoredText::parse("codex").expect("text")),
+                Vec::new(),
+            )
+            .expect("payload"),
             accepted_at: UnixMillis::from_millis(5),
         })
         .await
