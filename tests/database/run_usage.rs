@@ -17,9 +17,7 @@ use artisan_domain::{
     RunUsageReportInput, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, EntityTrait,
-};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 
 const PROJECT_ID: &str = "project-usage";
 const THREAD_ID: &str = "thread-usage";
@@ -469,7 +467,8 @@ async fn unknown_run_is_rejected_without_creating_a_usage_row() {
 async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
     let (database, repository, run_id, thread_id) = seeded(None).await;
     // Promote the thread to a Codex configuration, then snapshot that exact
-    // configuration onto the run row the way dispatch would.
+    // configuration onto a second run row at insert time the way dispatch
+    // would. Snapshots are write-once, so the row is inserted, never updated.
     repository
         .set_thread_engine_config(SetThreadEngineConfigInput {
             request_id: RequestId::parse("request-config-codex").expect("request id"),
@@ -482,15 +481,63 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
         })
         .await
         .expect("codex configuration should persist");
-    database
-        .execute_unprepared(
-            "UPDATE assistant_runs SET engine_run_config_version = 2, engine_run_config_revision = 2, engine_run_config = (SELECT engine_run_config FROM threads WHERE thread_id = 'thread-usage') WHERE run_id = 'run-usage'",
-        )
+    let thread = entities::thread::Entity::find_by_id(THREAD_ID)
+        .one(&database)
         .await
-        .expect("run snapshot should follow the thread configuration");
-    let first = report(4, Some(10), 10);
+        .expect("thread should read")
+        .expect("thread should exist");
+    let config_blob = thread
+        .engine_run_config
+        .expect("configured thread has a snapshot")
+        .into_vec();
+    entities::assistant_run::ActiveModel {
+        run_id: Set("run-codex".to_owned()),
+        thread_id: Set(THREAD_ID.to_owned()),
+        run_start_key: Set(entities::OpaqueBytes::new(vec![1; 32])),
+        origin_message_id: Set(MESSAGE_ID.to_owned()),
+        origin_turn_id: Set(TURN_ID.to_owned()),
+        lifecycle: Set(AssistantRunLifecycle::Completed),
+        generation: Set(1),
+        owner: Set(None),
+        lease: Set(None),
+        claim_token: Set(None),
+        provider_binding_version: Set(None),
+        provider_binding: Set(None),
+        provider_bound_at_ms: Set(None),
+        error_code: Set(None),
+        error_message: Set(None),
+        created_at_ms: Set(4),
+        updated_at_ms: Set(4),
+        terminal_at_ms: Set(Some(4)),
+        engine_run_config_version: Set(Some(2)),
+        engine_run_config_revision: Set(Some(thread.engine_run_config_revision)),
+        engine_run_config: Set(Some(entities::OpaqueBytes::new(config_blob))),
+    }
+    .insert(&database)
+    .await
+    .expect("codex run should insert");
+    let codex_report = RunUsageReport::new(RunUsageReportInput {
+        run_id: RunId::parse("run-codex").expect("run id"),
+        thread_id: ThreadId::parse(THREAD_ID).expect("thread id"),
+        provider_session_id: "provider-session-usage".to_owned(),
+        source_sequence: 4,
+        model_id: EngineModelId::parse("model-usage").expect("model id"),
+        provider_route_id: EngineRouteId::parse("route-usage").expect("route id"),
+        variant_id: None,
+        basis: RunUsageBasis::Delta,
+        provider_turn_id: Some("assistant-usage".to_owned()),
+        input_tokens: Some(10),
+        cached_input_tokens: Some(2),
+        output_tokens: Some(3),
+        context_tokens: None,
+        context_window_tokens: None,
+        observed_at: UnixMillis::from_millis(10),
+    })
+    .expect("codex usage report should validate");
     assert!(matches!(
-        repository.record_run_usage(record_command(&first)).await,
+        repository
+            .record_run_usage(record_command(&codex_report))
+            .await,
         Err(RunUsageRepositoryError::InvalidRunSnapshot { .. })
     ));
     drop(database);
