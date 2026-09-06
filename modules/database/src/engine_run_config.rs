@@ -625,11 +625,13 @@ fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCo
                     permission,
                     details
                         .reasoning_effort
+                        .as_deref()
                         .map(CodexReasoningEffort::parse)
                         .transpose()
                         .map_err(domain_error)?,
                     details
                         .service_tier
+                        .as_deref()
                         .map(CodexServiceTier::parse)
                         .transpose()
                         .map_err(domain_error)?,
@@ -655,11 +657,13 @@ fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCo
                     permission,
                     details
                         .effort
+                        .as_deref()
                         .map(ClaudeEffort::parse)
                         .transpose()
                         .map_err(domain_error)?,
                     details
                         .permission_mode
+                        .as_deref()
                         .map(ClaudePermissionMode::parse)
                         .transpose()
                         .map_err(domain_error)?,
@@ -686,6 +690,7 @@ fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCo
                     .map_err(domain_error)?,
                 details
                     .permission_mode
+                    .as_deref()
                     .map(GrokPermissionMode::parse)
                     .transpose()
                     .map_err(domain_error)?,
@@ -708,11 +713,13 @@ fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCo
                     .map_err(domain_error)?,
                 details
                     .speed
+                    .as_deref()
                     .map(CursorSpeed::parse)
                     .transpose()
                     .map_err(domain_error)?,
                 details
                     .permission_mode
+                    .as_deref()
                     .map(CursorPermissionMode::parse)
                     .transpose()
                     .map_err(domain_error)?,
