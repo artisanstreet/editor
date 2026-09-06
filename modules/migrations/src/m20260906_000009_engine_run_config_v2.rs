@@ -121,6 +121,7 @@ async fn rebuild_command_receipts(
                     (command_kind = 'attach_project' AND directory_id IS NOT NULL AND project_id IS NOT NULL AND thread_id IS NULL AND title IS NULL AND message_id IS NULL AND body IS NULL AND engine_run_config_version IS NULL AND engine_run_config IS NULL AND engine_run_config_expected_revision IS NULL AND engine_run_config_result_revision IS NULL) OR\
                     (command_kind = 'create_thread' AND directory_id IS NULL AND project_id IS NOT NULL AND thread_id IS NOT NULL AND title IS NOT NULL AND message_id IS NULL AND body IS NULL AND engine_run_config_version IS NULL AND engine_run_config IS NULL AND engine_run_config_expected_revision IS NULL AND engine_run_config_result_revision IS NULL) OR\
                     (command_kind = 'queue_first_message' AND directory_id IS NULL AND project_id IS NULL AND thread_id IS NOT NULL AND title IS NULL AND message_id IS NOT NULL AND body IS NOT NULL AND engine_run_config_version IS NULL AND engine_run_config IS NULL AND engine_run_config_expected_revision IS NULL AND engine_run_config_result_revision IS NULL) OR\
+                    (command_kind = 'queue_message' AND directory_id IS NULL AND project_id IS NULL AND thread_id IS NOT NULL AND title IS NULL AND message_id IS NOT NULL AND (body IS NULL OR (typeof(body) = 'text' AND length(body) <= 65536)) AND engine_run_config_version IS NULL AND engine_run_config IS NULL AND engine_run_config_expected_revision IS NULL AND engine_run_config_result_revision IS NULL) OR\
                     (command_kind = 'set_thread_engine_config' AND directory_id IS NULL AND project_id IS NULL AND thread_id IS NOT NULL AND title IS NULL AND message_id IS NULL AND body IS NULL AND typeof(engine_run_config_version) = 'integer' AND engine_run_config_version {version_predicate} AND typeof(engine_run_config) = 'blob' AND length(engine_run_config) BETWEEN 1 AND 65536 AND (engine_run_config_expected_revision IS NULL OR (typeof(engine_run_config_expected_revision) = 'integer' AND engine_run_config_expected_revision BETWEEN 1 AND 9223372036854775807)) AND typeof(engine_run_config_result_revision) = 'integer' AND engine_run_config_result_revision BETWEEN 1 AND 9223372036854775807)\
                 )\
             )"
@@ -136,7 +137,7 @@ async fn rebuild_command_receipts(
         .await?;
     connection
         .execute_unprepared(
-            "CREATE UNIQUE INDEX uq_command_receipts_kind_thread_id ON command_receipts(command_kind, thread_id) WHERE command_kind <> 'set_thread_engine_config'",
+            "CREATE UNIQUE INDEX uq_command_receipts_kind_thread_id ON command_receipts(command_kind, thread_id) WHERE command_kind IN ('attach_project', 'create_thread', 'queue_first_message')",
         )
         .await?;
     connection

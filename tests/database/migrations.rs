@@ -682,6 +682,26 @@ async fn assert_v2_shape_guards(
             "INSERT INTO command_receipts (request_id, command_kind, thread_id, accepted_at_ms, engine_run_config_version, engine_run_config, engine_run_config_result_revision) VALUES ('engine-v2', 'set_thread_engine_config', 't-v2', 5, 2, X'00', 1)",
         )
         .await?;
+    // The lane-000005 queue_message arm survives the receipts rebuild with
+    // both body states.
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, body, accepted_at_ms) VALUES ('queue-msg-1', 'queue_message', 't-v2', 'm1', 'hello', 6)",
+        )
+        .await?;
+    database
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, accepted_at_ms) VALUES ('queue-msg-2', 'queue_message', 't-v2', 'm1', 7)",
+        )
+        .await?;
+    assert_eq!(
+        scalar_i64(
+            database,
+            "SELECT count(*) FROM command_receipts WHERE command_kind = 'queue_message'",
+        )
+        .await?,
+        2
+    );
     database
         .execute_unprepared(
             "INSERT INTO assistant_runs (run_id, thread_id, run_start_key, origin_message_id, origin_turn_id, lifecycle, generation, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('run-v2', 't1', zeroblob(32), 'm1', 'turn1', 'queued', 0, 10, 10, 2, 1, X'00')",
@@ -756,6 +776,12 @@ async fn engine_config_v2_migration_widens_shape_guards_and_down_restores_them()
     downgraded
         .execute_unprepared(
             "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('t-v1-down', 'p1', 'V1 thread', 4, 4, 1, 1, X'00')",
+        )
+        .await?;
+    // The downgrade rebuild keeps the queue_message arm as well.
+    downgraded
+        .execute_unprepared(
+            "INSERT INTO command_receipts (request_id, command_kind, thread_id, message_id, body, accepted_at_ms) VALUES ('queue-msg-down', 'queue_message', 't-v1-down', 'm1', 'hello', 6)",
         )
         .await?;
     migrate_to_current(&downgraded).await?;
