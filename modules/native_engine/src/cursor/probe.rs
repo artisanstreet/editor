@@ -19,7 +19,8 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::discovery::{
     CURSOR_AUTH_PROBE_ARGS, CURSOR_VERSION_ARGS, parse_cursor_version, resolve_live,
@@ -178,16 +179,16 @@ pub fn is_authenticated_output(output: &str) -> bool {
     !lowered.contains("not authenticated") && !lowered.contains("not logged in")
 }
 
-/// Caps an excerpt for error reasons. Never carries environment values;
-/// callers must not append any.
+/// Caps an excerpt for error reasons. Trims first so padded output stays
+/// compact, then applies the character cap. Never carries environment
+/// values; callers must not append any.
 #[must_use]
 pub fn redact_probe_excerpt(output: &str) -> String {
     output
+        .trim()
         .chars()
         .take(MAX_PROBE_EXCERPT_CHARS)
-        .collect::<String>()
-        .trim_end()
-        .to_owned()
+        .collect()
 }
 
 /// Classifies a completed `--version` spawn. Non-zero exits and unparsable
@@ -295,10 +296,35 @@ fn map_spawn_error(error: &std::io::Error, phase: CursorProbePhase) -> CursorPro
     }
 }
 
+/// Grace period for a drain thread to finish after its child is reaped
+/// before the probe stops waiting for it.
+const DRAIN_JOIN_GRACE: Duration = Duration::from_secs(1);
+
+/// Joins a drain thread, detaching it after a bounded grace period.
+///
+/// Detachment only happens when another process inherited the pipe and holds
+/// it open (e.g. a grandchild surviving its parent's kill, like `ping` under
+/// a killed `cmd.exe`); normally reaped children always join. A detached
+/// thread keeps draining until the orphan exits and its pipes close, while
+/// the probe result is already returned — orphans exit on their own, so no
+/// unbounded wait and no leaked result. Like the codex precedent.
+fn join_or_detach(handle: thread::JoinHandle<CappedRead>) -> Option<CappedRead> {
+    let grace = Instant::now().checked_add(DRAIN_JOIN_GRACE);
+    while !handle.is_finished() {
+        if grace.is_none_or(|deadline| Instant::now() >= deadline) {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    handle.join().ok()
+}
+
 /// Runs one bounded child process: concurrent stdout/stderr drains (no pipe
 /// deadlock), a hard deadline, a per-stream byte bound, and child cleanup on
 /// every path (kill + reap on timeout, bound breach, or wait failure — no
-/// unbounded waits, no orphaned children).
+/// unbounded waits, no unreaped children). Drain threads are joined with a
+/// bounded grace period and detached when an orphaned pipe-holder outlives
+/// the kill, so the result never waits for a grandchild's natural exit.
 ///
 /// This is the testable seam: tests drive it with fixture processes.
 ///
@@ -354,16 +380,16 @@ pub fn run_bounded_command(
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     reap(&mut child);
-                    let _ = stdout_reader.join();
-                    let _ = stderr_reader.join();
+                    join_or_detach(stdout_reader);
+                    join_or_detach(stderr_reader);
                     return Err(CursorProbeError::Timeout { phase });
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(error) => {
                 reap(&mut child);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
+                join_or_detach(stdout_reader);
+                join_or_detach(stderr_reader);
                 return Err(CursorProbeError::Unavailable {
                     reason: format!("cursor probe {phase} wait failed: {error}"),
                 });
@@ -371,16 +397,16 @@ pub fn run_bounded_command(
         }
     };
 
-    let stdout_bytes = match stdout_reader.join() {
-        Ok(CappedRead::Done(bytes)) => bytes,
-        Ok(CappedRead::TooLarge) | Err(_) => {
+    let stdout_bytes = match join_or_detach(stdout_reader) {
+        Some(CappedRead::Done(bytes)) => bytes,
+        Some(CappedRead::TooLarge) | None => {
             reap(&mut child);
             return Err(CursorProbeError::OutputTooLarge { phase });
         }
     };
-    let stderr_bytes = match stderr_reader.join() {
-        Ok(CappedRead::Done(bytes)) => bytes,
-        Ok(CappedRead::TooLarge) | Err(_) => {
+    let stderr_bytes = match join_or_detach(stderr_reader) {
+        Some(CappedRead::Done(bytes)) => bytes,
+        Some(CappedRead::TooLarge) | None => {
             reap(&mut child);
             return Err(CursorProbeError::OutputTooLarge { phase });
         }
