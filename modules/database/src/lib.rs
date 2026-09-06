@@ -35,6 +35,9 @@ pub use repository::{
     StartupReconciliationDispositionReceipt, StartupReconciliationError,
     StartupReconciliationQuery, StartupRunLifecycle, TerminalRunReceipt, ThreadEngineSettings,
     TransitionedMessageDispatch,
+    decode_observation_checkpoint, encode_observation_bytes, encode_observation_checkpoint,
+    validate_observation_bind, validate_observation_engine, OBSERVATION_BATCH_MAX_OBSERVATIONS,
+    OBSERVATION_CHECKPOINT_VERSION, OBSERVATION_FORMAT_TAG, ObservationCommitError,
 };
 
 pub use repository::{ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult};

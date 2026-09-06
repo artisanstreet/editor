@@ -51,8 +51,12 @@ pub use run_observation::terminal::{
     TerminalRunReceipt,
 };
 pub use run_observation::{
-    AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome, EngineCheckpoint,
-    RunBatchReceiptInfo, RunBatchScope, RunObservationError,
+    AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome,
+    DecodedObservationBatch, EngineCheckpoint, OBSERVATION_BATCH_MAX_OBSERVATIONS,
+    OBSERVATION_CHECKPOINT_VERSION, OBSERVATION_FORMAT_TAG, ObservationCommitError,
+    RunBatchReceiptInfo, RunBatchScope, RunObservationError, decode_observation_checkpoint,
+    encode_observation_bytes, encode_observation_checkpoint, validate_observation_bind,
+    validate_observation_engine,
 };
 pub use startup_reconciliation::{
     StartupReconciliationCandidate, StartupReconciliationCandidates, StartupReconciliationError,

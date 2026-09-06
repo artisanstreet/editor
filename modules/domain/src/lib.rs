@@ -36,6 +36,7 @@ pub mod identifiers;
 mod legacy_workspace_id;
 pub mod model;
 pub mod message;
+pub mod observation;
 pub mod text;
 pub mod time;
 
@@ -92,6 +93,32 @@ pub use message::{
     AuthoredText, AuthoredTextError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
     ImageAttachmentRefError, ImageMimeType, ImageMimeTypeError, QueueMessagePayload,
     QueueMessagePayloadError,
+};
+pub use observation::{
+    AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
+    ApprovalObservation, ApprovalRequest, ApprovalState, ArtisanCode, CompactionObservation,
+    CompactionState, DiagnosticLevel, EngineErrorRef, EngineErrorRefInput, FileAction,
+    FileObservation, LimitScope, MessagePhase, NativeActionObservation,
+    OBSERVATION_ANSWER_MAX_BYTES, OBSERVATION_ANSWERS_MAX, OBSERVATION_ARTISAN_CODE_MAX_BYTES,
+    OBSERVATION_COMMAND_MAX_BYTES, OBSERVATION_COUNT_MAX, OBSERVATION_DELTA_MAX_BYTES,
+    OBSERVATION_DESCRIPTION_MAX_BYTES, OBSERVATION_DURATION_MAX_MILLIS, OBSERVATION_ID_MAX_BYTES,
+    OBSERVATION_LABEL_MAX_BYTES, OBSERVATION_LIMIT_LABEL_MAX_BYTES, OBSERVATION_MESSAGE_MAX_BYTES,
+    OBSERVATION_OUTPUT_MAX_BYTES, OBSERVATION_PATH_MAX_BYTES, OBSERVATION_PLAN_MAX_ENTRIES,
+    OBSERVATION_PLAN_TEXT_MAX_BYTES, OBSERVATION_PROVIDER_CODE_MAX_BYTES,
+    OBSERVATION_QUERY_MAX_BYTES, OBSERVATION_REASON_MAX_BYTES, OBSERVATION_SEQUENCE_MAX,
+    OBSERVATION_SUMMARY_INDEX_MAX, OBSERVATION_TEXT_MAX_BYTES, OBSERVATION_TIMESTAMP_MAX_BYTES,
+    OBSERVATION_TITLE_MAX_BYTES, Observation, ObservationError, ObservationId, ObservationSequence,
+    PlanEntry, PlanEntryStatus, PlanObservation, ProcessDiagnosticObservation,
+    ProtocolDiagnosticObservation, QuestionInput, QuestionObservation, QuestionOption,
+    QuestionState, ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation,
+    RetryAttemptState, RetryObservation, RunState, RunStateObservation, RunTerminalObservation,
+    RunTerminalState, SearchObservation, SearchScope, SearchState, SubagentInput,
+    SubagentObservation, SubagentState, SubagentTranscriptObservation, TerminalActivityInput,
+    TerminalActivityObservation, TerminalActivityState, TerminalChannel, ToolAction,
+    ToolObservation, TranscriptAgentMessageCompleted, TranscriptAgentMessageDelta,
+    TranscriptContent, TranscriptFile, TranscriptReasoningSummaryCompleted,
+    TranscriptReasoningSummaryDelta, TranscriptSearch, TranscriptTerminalActivity, TranscriptTool,
+    TurnState, TurnStateObservation, UsageBasis, UsageInput, UsageObservation,
 };
 pub use text::{
     DisplayName, DisplayNameError, MessageBody, MessageBodyError, RootPath, RootPathError,

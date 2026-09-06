@@ -121,3 +121,7 @@ path = "../../tests/database/queued_message.rs"
 [[test]]
 name = "session_continuation"
 path = "../../tests/database/session_continuation.rs"
+
+[[test]]
+name = "observations"
+path = "../../tests/database/observations.rs"
