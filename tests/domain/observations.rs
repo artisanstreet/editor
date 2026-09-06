@@ -858,7 +858,7 @@ fn error_references_require_ae_codes_and_keep_provider_evidence() {
             limit_id: None,
             limit_label: None,
             limit_scope: None,
-            resets_at: Some("not a timestamp\n".to_owned()),
+            resets_at: Some("not-a-timestamp\n".to_owned()),
         })
         .expect_err("timestamps carry no whitespace"),
         ObservationError::Identifier(IdentifierError::ForbiddenCharacter { character: '\n' })
