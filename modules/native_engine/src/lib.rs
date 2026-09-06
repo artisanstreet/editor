@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 #[path = "install.rs"]
 mod engine_core;
 pub mod grok;
