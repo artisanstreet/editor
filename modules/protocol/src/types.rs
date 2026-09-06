@@ -693,29 +693,6 @@ pub struct Hello {
     pub supports_lifecycle_control: bool,
 }
 
-impl fmt::Debug for Hello {
-    /// Formats everything except the credential bytes: only the credential
-    /// variant name is shown, so [`HelloCredential`] keeps its deliberate
-    /// lack of [`fmt::Debug`].
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Hello")
-            .field("supported_versions", &self.supported_versions)
-            .field(
-                "credential",
-                &match self.credential {
-                    HelloCredential::Initial(_) => "Initial(..)",
-                    HelloCredential::Reconnect(_) => "Reconnect(..)",
-                },
-            )
-            .field(
-                "supports_lifecycle_control",
-                &self.supports_lifecycle_control,
-            )
-            .finish()
-    }
-}
-
 /// Successful application protocol negotiation.
 #[derive(Eq, PartialEq)]
 pub struct Welcome {
@@ -727,23 +704,6 @@ pub struct Welcome {
     pub reconnect_capability: ReconnectCapability,
     /// Whether this connection negotiated native lifecycle control support.
     pub lifecycle_control_supported: bool,
-}
-
-impl fmt::Debug for Welcome {
-    /// Formats everything except the reconnect capability bytes, so
-    /// [`ReconnectCapability`] keeps its deliberate lack of [`fmt::Debug`].
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Welcome")
-            .field("negotiated_version", &self.negotiated_version)
-            .field("connection_id", &self.connection_id)
-            .field("reconnect_capability", &"<redacted>")
-            .field(
-                "lifecycle_control_supported",
-                &self.lifecycle_control_supported,
-            )
-            .finish()
-    }
 }
 
 /// Native Forge lifecycle state reported by status and stop receipts.
@@ -1296,7 +1256,7 @@ impl From<DispatchFailure> for ProtocolFailure {
 }
 
 /// Owned application frame body.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub enum WireEnvelopeBody {
     /// Authenticated client negotiation offer.
     Hello(Hello),
@@ -1315,7 +1275,7 @@ pub enum WireEnvelopeBody {
 }
 
 /// One fully owned application-protocol frame.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct WireEnvelope {
     /// Revision stamped on this frame.
     pub protocol_version: ProtocolVersion,

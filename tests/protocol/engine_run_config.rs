@@ -1033,7 +1033,10 @@ fn every_engine_kind_round_trips_through_the_owned_envelope_with_its_wire_genera
             expected.clone(),
         );
         let encoded = encode_envelope(&value)?;
-        assert_eq!(decode_envelope(&encoded)?, value);
+        assert!(
+            decode_envelope(&encoded)? == value,
+            "wire envelope round-trip mismatch"
+        );
         assert_eq!(wire_selection_arm(&value), wire);
 
         // The configured-settings response carries the same config shape.
@@ -1044,7 +1047,10 @@ fn every_engine_kind_round_trips_through_the_owned_envelope_with_its_wire_genera
             &format!("server-{}-wire", engine.as_str()),
             &frame_id,
         );
-        assert_eq!(decode_envelope(&encode_envelope(&response)?)?, response);
+        assert!(
+            decode_envelope(&encode_envelope(&response)?)? == response,
+            "wire envelope round-trip mismatch"
+        );
     }
     Ok(())
 }
