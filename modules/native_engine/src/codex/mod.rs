@@ -1,29 +1,22 @@
 //! Finite native Codex discovery and readiness probe.
 //!
-//! This directory owns the bounded, non-billable Codex surface only:
-//! executable discovery, installed-version parsing, and CLI/account
-//! readiness classification. The full app-server adapter (handshake,
-//! `account/read` session, runs) belongs to a later packet and must not be
-//! added here.
+//! Bounded, non-billable surface only: executable discovery, installed
+//! version parsing, `codex --version` readiness, and the app-server
+//! `initialize` + `account/read` + shutdown probe. The full run adapter
+//! (threads, turns, approvals) belongs to a later packet.
 //!
-//! The controller wires this module with:
-//!
-//! ```rust,ignore
-//! pub mod codex;
-//! ```
-//!
-//! placed alongside the existing `#[path]` modules in
-//! `modules/native_engine/src/lib.rs`, plus a public re-export such as:
-//!
-//! ```rust,ignore
-//! pub use codex::{CodexProbeError, CodexReadiness, resolve_codex_executable};
-//! ```
-//!
-//! No new third-party dependencies are required; this module uses only
-//! `std` and the crate's existing `serde_json`.
+//! The controller wires this module with `pub mod codex;` alongside the
+//! existing `#[path]` modules in `modules/native_engine/src/lib.rs`. No new
+//! third-party dependencies are required.
 
+#[allow(clippy::module_name_repetitions)]
 pub mod discovery;
+#[allow(clippy::module_name_repetitions)]
 pub mod probe;
+pub mod process;
+#[allow(clippy::module_name_repetitions)]
+pub mod session;
+#[allow(clippy::module_name_repetitions)]
 pub mod version;
 
 pub use discovery::{
@@ -35,8 +28,15 @@ pub use discovery::{
 pub use probe::{
     CODEX_ACCOUNT_OUTPUT_BOUND_BYTES, CODEX_VERSION_OUTPUT_BOUND_BYTES, CODEX_VERSION_TIMEOUT,
     CodexAccountRead, CodexAccountType, CodexAuthState, CodexProbeError, CodexReadiness,
-    CodexVersion, CodexVersionFixture, classify_codex_auth, classify_version_fixture,
-    codex_readiness, parse_codex_account_read, run_codex_version, validate_codex_version_output,
+    CodexVersion, classify_codex_auth, codex_readiness, parse_codex_account_read,
+    run_codex_version, validate_codex_version_output,
+};
+pub use session::{
+    CODEX_APP_SERVER_ARGS, CODEX_MAX_INBOUND_ENVELOPES, CODEX_OPT_OUT_NOTIFICATION_METHODS,
+    CODEX_SESSION_OUTPUT_BOUND_BYTES, CODEX_SESSION_TIMEOUT, CodexAccountProbe,
+    CodexClientIdentity, CodexServerInfo, CodexSessionProbeInput, ServerEnvelope,
+    await_response_id, decode_server_envelope, make_account_read_request, make_initialize_request,
+    probe_codex_account, validate_initialize_result,
 };
 pub use version::{
     CODEX_CONTINUATION_CLI_VERSION, CODEX_INITIALIZE_METHOD, CODEX_MINIMUM_CLI_VERSION,

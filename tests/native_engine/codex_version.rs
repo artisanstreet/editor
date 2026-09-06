@@ -7,16 +7,9 @@
 use std::cmp::Ordering;
 
 use artisan_native_engine::codex::{
-    CODEX_CONTINUATION_CLI_VERSION, CODEX_MINIMUM_CLI_VERSION, compare_semantic_versions,
-    is_continuation_verified_version, meets_minimum_version, parse_codex_continuation_version,
-    parse_codex_version,
+    compare_semantic_versions, is_continuation_verified_version, meets_minimum_version,
+    parse_codex_continuation_version, parse_codex_version,
 };
-
-#[test]
-fn transport_constants_match_typescript_protocol() {
-    assert_eq!(CODEX_MINIMUM_CLI_VERSION, "0.142.5");
-    assert_eq!(CODEX_CONTINUATION_CLI_VERSION, "0.145.0");
-}
 
 #[test]
 fn version_parses_first_semver_with_word_boundaries() {

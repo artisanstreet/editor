@@ -1,23 +1,23 @@
 //! Finite native Codex readiness probe.
 //!
 //! Bounded, non-billable readiness only: run `codex --version` with byte and
-//! time bounds, parse the installed version, and classify a supplied
-//! `account/read` result into authenticated versus unauthenticated readiness.
-//! No prompt is sent, no model inference runs, and no persistent
-//! account/session state is changed.
+//! time bounds and classify an `account/read` result into authenticated
+//! versus unauthenticated readiness. No prompt is sent, no model inference
+//! runs, and no account or session state is changed.
 //!
-//! CLI text (such as a login-status message) is never treated as account
-//! evidence. Only a decoded `account/read` result counts; everything else
-//! stays `Unauthenticated` or a typed probe failure. Auth absence
-//! (`Unauthenticated`) is distinct from `Unavailable`, `Timeout`, and
-//! `InvalidBinary` failures, and every error is path- and secret-free.
+//! CLI text such as a login-status message is never account evidence. Auth
+//! absence (`Unauthenticated`) is distinct from `Unavailable`, `Timeout`,
+//! and `InvalidBinary` failures, and every error is path- and secret-free.
 
 use std::fmt;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::process::{
+    PROBE_POLL_INTERVAL, PipeDrain, PipeEvent, probe_deadline, reap_or_kill, spawn_probe_child,
+    stop_child, take_child_stderr, take_child_stdout,
+};
 use super::version::{
     CODEX_CONTINUATION_CLI_VERSION, CODEX_MINIMUM_CLI_VERSION, meets_minimum_version,
     parse_codex_version,
@@ -49,8 +49,10 @@ pub enum CodexProbeError {
     VersionUnparseable,
     /// The installed version is older than the minimum supported version.
     VersionTooOld,
-    /// An `account/read` document was malformed or used an unknown shape.
+    /// An `account/read` result did not match the account schema.
     AccountInvalid,
+    /// A protocol envelope or handshake result was malformed or unexpected.
+    Protocol,
 }
 
 impl CodexProbeError {
@@ -65,6 +67,7 @@ impl CodexProbeError {
             Self::VersionUnparseable => "version_unparseable",
             Self::VersionTooOld => "version_too_old",
             Self::AccountInvalid => "account_invalid",
+            Self::Protocol => "protocol",
         }
     }
 }
@@ -79,6 +82,7 @@ impl fmt::Display for CodexProbeError {
             Self::VersionUnparseable => "Codex version output did not contain a semantic version",
             Self::VersionTooOld => "Codex version is older than the minimum supported version",
             Self::AccountInvalid => "Codex account result is invalid",
+            Self::Protocol => "Codex protocol exchange failed",
         })
     }
 }
@@ -108,11 +112,10 @@ impl CodexAccountType {
     }
 }
 
-/// The decoded `account/read` result.
+/// A decoded `account/read` result.
 ///
-/// identifying material (email, plan metadata, credential sources) is
-/// deliberately not retained; only the account kind and the
-/// `requiresOpenaiAuth` flag survive decoding.
+/// Identifying material (email, plan metadata, credential sources) is not
+/// retained; only the account kind and the `requiresOpenaiAuth` flag survive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CodexAccountRead {
     account: Option<CodexAccountType>,
@@ -157,7 +160,7 @@ impl CodexAuthState {
 }
 
 /// Non-billable Codex readiness: installed version plus auth state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexReadiness {
     authentication: CodexAuthState,
     ready: bool,
@@ -167,13 +170,13 @@ pub struct CodexReadiness {
 impl CodexReadiness {
     /// Returns the authentication readiness.
     #[must_use]
-    pub const fn authentication(self) -> CodexAuthState {
+    pub const fn authentication(&self) -> CodexAuthState {
         self.authentication
     }
 
     /// Returns whether the engine is ready (authenticated with a supported version).
     #[must_use]
-    pub const fn ready(self) -> bool {
+    pub const fn ready(&self) -> bool {
         self.ready
     }
 
@@ -212,38 +215,45 @@ impl CodexVersion {
 
 /// Decodes one bounded `account/read` result document.
 ///
-/// Mirrors `CodexAccountReadSchema`: `account` is null or one of
-/// `apiKey` / `chatgpt` / `amazonBedrock` with their required fields, and
-/// `requiresOpenaiAuth` is a required boolean. Unknown top-level or
-/// account fields, unknown account types, and trailing content are
-/// rejected as [`CodexProbeError::AccountInvalid`].
+/// Mirrors `CodexAccountReadSchema`: the `account` key must be present with a
+/// null or one of the `apiKey` / `chatgpt` / `amazonBedrock` shapes, and
+/// `requiresOpenaiAuth` must be a boolean. Required fields follow the Effect
+/// schema; unknown fields are ignored so forward-compatible additions keep
+/// decoding, matching the schema's default excess-field policy.
 ///
 /// # Errors
 ///
 /// Returns [`CodexProbeError::AccountInvalid`] when the document exceeds
 /// [`CODEX_ACCOUNT_OUTPUT_BOUND_BYTES`], is not JSON, or does not match the
-/// account schema. No secrets or paths are retained in the error.
+/// account schema. [`CodexProbeError::OutputTooLarge`] when the byte bound is
+/// exceeded. No secrets or paths are retained in the error.
 pub fn parse_codex_account_read(bytes: &[u8]) -> Result<CodexAccountRead, CodexProbeError> {
     if bytes.len() > CODEX_ACCOUNT_OUTPUT_BOUND_BYTES {
         return Err(CodexProbeError::OutputTooLarge);
     }
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| CodexProbeError::AccountInvalid)?;
+    decode_account_value(&value)
+}
+
+/// Decodes an `account/read` result value.
+///
+/// # Errors
+///
+/// Returns [`CodexProbeError::AccountInvalid`] when the value does not match
+/// the account schema.
+pub(crate) fn decode_account_value(
+    value: &serde_json::Value,
+) -> Result<CodexAccountRead, CodexProbeError> {
     let object = value.as_object().ok_or(CodexProbeError::AccountInvalid)?;
-    if object.len() != 2
-        || !object.contains_key("account")
-        || !object.contains_key("requiresOpenaiAuth")
-    {
-        return Err(CodexProbeError::AccountInvalid);
-    }
     let requires_openai_auth = object
         .get("requiresOpenaiAuth")
         .and_then(serde_json::Value::as_bool)
         .ok_or(CodexProbeError::AccountInvalid)?;
     let account = match object.get("account") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::Object(account)) => Some(parse_account_object(account)?),
-        Some(_) => return Err(CodexProbeError::AccountInvalid),
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Object(account)) => Some(decode_account_object(account)?),
+        Some(_) | None => return Err(CodexProbeError::AccountInvalid),
     };
     Ok(CodexAccountRead {
         account,
@@ -251,7 +261,7 @@ pub fn parse_codex_account_read(bytes: &[u8]) -> Result<CodexAccountRead, CodexP
     })
 }
 
-fn parse_account_object(
+fn decode_account_object(
     account: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<CodexAccountType, CodexProbeError> {
     let account_type = account
@@ -259,27 +269,19 @@ fn parse_account_object(
         .and_then(serde_json::Value::as_str)
         .ok_or(CodexProbeError::AccountInvalid)?;
     match account_type {
-        "apiKey" => {
-            if account.len() != 1 {
-                return Err(CodexProbeError::AccountInvalid);
-            }
-            Ok(CodexAccountType::ApiKey)
-        }
+        "apiKey" => Ok(CodexAccountType::ApiKey),
         "chatgpt" => {
-            if account.len() != 3
-                || !account.contains_key("email")
-                || !account.contains_key("planType")
-            {
-                return Err(CodexProbeError::AccountInvalid);
-            }
             match account.get("email") {
                 Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => {}
-                _ => return Err(CodexProbeError::AccountInvalid),
+                Some(_) | None => return Err(CodexProbeError::AccountInvalid),
+            }
+            if !account.contains_key("planType") {
+                return Err(CodexProbeError::AccountInvalid);
             }
             Ok(CodexAccountType::ChatGpt)
         }
         "amazonBedrock" => {
-            if account.len() != 2 || !account.contains_key("credentialSource") {
+            if !account.contains_key("credentialSource") {
                 return Err(CodexProbeError::AccountInvalid);
             }
             Ok(CodexAccountType::AmazonBedrock)
@@ -324,7 +326,7 @@ pub const fn classify_codex_auth(account: CodexAccountRead) -> CodexAuthState {
 ///
 /// Returns [`CodexProbeError::VersionUnparseable`] when no semantic version
 /// is present and [`CodexProbeError::VersionTooOld`] when the version is
-/// below the minimum. Captured output itself is never echoed in the error.
+/// below the minimum. Captured output is never echoed in the error.
 pub fn validate_codex_version_output(output: &[u8]) -> Result<CodexVersion, CodexProbeError> {
     let version = parse_codex_version(output).ok_or(CodexProbeError::VersionUnparseable)?;
     if !meets_minimum_version(&version) {
@@ -348,106 +350,124 @@ pub fn codex_readiness(version: CodexVersion, account: CodexAccountRead) -> Code
     }
 }
 
-/// Fixture outcome for the `--version` spawn, for tests and later runners.
-///
-/// `exit_code` is `None` when the child never reported a normal exit;
-/// `stdout_truncated` records that the stream exceeded its byte bound before
-/// `EOF`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CodexVersionFixture {
-    /// Normal process exit code, when one was reported.
-    pub exit_code: Option<i32>,
-    /// Captured stdout bytes (already bounded by the caller).
-    pub stdout: Vec<u8>,
-    /// Whether the stream exceeded its byte bound.
-    pub stdout_truncated: bool,
-    /// Whether the spawn exceeded its deadline.
-    pub timed_out: bool,
-}
-
-/// Classifies a `--version` fixture into captured bytes or a typed failure.
-///
-/// Precedence mirrors the runner: timeout first, then output bound, then
-/// non-zero exit. This keeps timeout/output-bound/readiness-failure tests
-/// hermetic without spawning fixture processes.
-///
-/// # Errors
-///
-/// Returns [`CodexProbeError::Timeout`], [`CodexProbeError::OutputTooLarge`],
-/// or [`CodexProbeError::Unavailable`] per the fixture. Output bytes are
-/// never echoed in the error.
-pub fn classify_version_fixture(fixture: CodexVersionFixture) -> Result<Vec<u8>, CodexProbeError> {
-    if fixture.timed_out {
-        return Err(CodexProbeError::Timeout);
-    }
-    if fixture.stdout_truncated || fixture.stdout.len() > CODEX_VERSION_OUTPUT_BOUND_BYTES {
-        return Err(CodexProbeError::OutputTooLarge);
-    }
-    match fixture.exit_code {
-        Some(0) => Ok(fixture.stdout),
-        Some(_) | None => Err(CodexProbeError::Unavailable),
-    }
-}
-
 /// Runs the bounded, non-billable `codex --version` probe.
 ///
-/// Spawns `executable [--extra_args] --version` with piped stdio and a null
-/// stdin, waits up to `timeout`, kills the child on deadline, enforces
-/// [`CODEX_VERSION_OUTPUT_BOUND_BYTES`] via `max_bytes`, and maps a
-/// non-zero exit to [`CodexProbeError::Unavailable`]. Paths containing
-/// spaces are passed as an argv entry (never a shell string). No prompt,
-/// session, or account mutation is performed.
+/// Spawns `executable [...extra_args] --version` with no shell and piped
+/// stdio, drains both streams concurrently with a per-stream byte bound, and
+/// enforces one end-to-end deadline. The child is killed and reaped on every
+/// error path, so pipe-flooding or long-running children surface as
+/// [`CodexProbeError::OutputTooLarge`] or [`CodexProbeError::Timeout`]
+/// instead of hanging. No prompt, session, or account mutation is performed.
 ///
 /// # Errors
 ///
-/// Returns [`CodexProbeError::InvalidBinary`] when the executable cannot be
-/// spawned, [`CodexProbeError::Timeout`] on deadline,
-/// [`CodexProbeError::OutputTooLarge`] when either stream exceeds `max_bytes`,
-/// and [`CodexProbeError::Unavailable`] for a non-zero exit. Captured output
-/// is never echoed in an error.
+/// Returns [`CodexProbeError::InvalidBinary`] when the executable cannot
+/// start, [`CodexProbeError::Timeout`] when the deadline passes,
+/// [`CodexProbeError::OutputTooLarge`] when either stream exceeds
+/// `max_bytes`, and [`CodexProbeError::Unavailable`] for spawn-handle or
+/// stream failures and non-zero exits. Captured output is never echoed.
 pub fn run_codex_version(
     executable: &Path,
     extra_args: &[String],
     timeout: Duration,
     max_bytes: usize,
 ) -> Result<Vec<u8>, CodexProbeError> {
-    let mut command = Command::new(executable);
-    command.args(extra_args);
-    command.arg("--version");
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|_| CodexProbeError::InvalidBinary)?;
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or(CodexProbeError::Timeout)?;
+    let deadline = probe_deadline(timeout)?;
+    let mut argv = extra_args.to_vec();
+    argv.push("--version".to_owned());
+    let mut child = spawn_probe_child(executable, &argv, None)?;
+    drop(child.stdin.take());
+    let stdout_pipe = take_child_stdout(&mut child)?;
+    let stderr_pipe = take_child_stderr(&mut child)?;
+    let mut stdout_drain = PipeDrain::spawn_pipe(stdout_pipe, max_bytes);
+    let mut stderr_drain = PipeDrain::spawn_pipe(stderr_pipe, max_bytes);
+    let outcome = drive_version_drain(&mut child, &mut stdout_drain, &mut stderr_drain, deadline);
+    stdout_drain.join_or_detach();
+    stderr_drain.join_or_detach();
+    outcome
+}
+
+fn drive_version_drain(
+    child: &mut std::process::Child,
+    stdout_drain: &mut PipeDrain,
+    stderr_drain: &mut PipeDrain,
+    deadline: Instant,
+) -> Result<Vec<u8>, CodexProbeError> {
+    let mut output = Vec::new();
     loop {
+        match pump_version_stdout(stdout_drain, &mut output) {
+            Err(error) => {
+                stop_child(child);
+                return Err(error);
+            }
+            Ok(true) => {
+                let status = reap_or_kill(child, deadline)?;
+                return map_version_exit(status, output);
+            }
+            Ok(false) => {}
+        }
+        match pump_version_stderr(stderr_drain) {
+            Err(error) => {
+                stop_child(child);
+                return Err(error);
+            }
+            Ok(()) => {}
+        }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_child(child);
             return Err(CodexProbeError::Timeout);
         }
-        match child.try_wait().map_err(|_| CodexProbeError::Unavailable)? {
-            Some(_) => break,
-            None => thread::sleep(Duration::from_millis(10)),
+        thread::sleep(PROBE_POLL_INTERVAL);
+    }
+}
+
+/// Pumps available stdout events; returns true once the stream ends.
+///
+/// # Errors
+///
+/// Returns [`CodexProbeError::OutputTooLarge`] when the stream exceeds its
+/// bound and [`CodexProbeError::Unavailable`] when the stream fails. The
+/// caller kills and reaps the child.
+fn pump_version_stdout(
+    drain: &mut PipeDrain,
+    output: &mut Vec<u8>,
+) -> Result<bool, CodexProbeError> {
+    while let Ok(event) = drain.events().try_recv() {
+        match event {
+            PipeEvent::Line(line) => output.extend_from_slice(&line),
+            PipeEvent::Eof => return Ok(true),
+            PipeEvent::TooLarge => return Err(CodexProbeError::OutputTooLarge),
+            PipeEvent::Io => return Err(CodexProbeError::Unavailable),
         }
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|_| CodexProbeError::Unavailable)?;
-    if output.stdout.len() > max_bytes || output.stderr.len() > max_bytes {
-        return Err(CodexProbeError::OutputTooLarge);
+    Ok(false)
+}
+
+/// Pumps and discards available stderr events while enforcing its bound.
+///
+/// # Errors
+///
+/// Returns [`CodexProbeError::OutputTooLarge`] when the stream exceeds its
+/// bound and [`CodexProbeError::Unavailable`] when the stream fails.
+fn pump_version_stderr(drain: &mut PipeDrain) -> Result<(), CodexProbeError> {
+    while let Ok(event) = drain.events().try_recv() {
+        match event {
+            PipeEvent::Line(_) => {}
+            PipeEvent::Eof => {}
+            PipeEvent::TooLarge => return Err(CodexProbeError::OutputTooLarge),
+            PipeEvent::Io => return Err(CodexProbeError::Unavailable),
+        }
     }
-    if !output.status.success() {
-        return Err(CodexProbeError::Unavailable);
+    Ok(())
+}
+
+fn map_version_exit(
+    status: std::process::ExitStatus,
+    output: Vec<u8>,
+) -> Result<Vec<u8>, CodexProbeError> {
+    if status.success() {
+        Ok(output)
+    } else {
+        Err(CodexProbeError::Unavailable)
     }
-    Ok(output.stdout)
 }
