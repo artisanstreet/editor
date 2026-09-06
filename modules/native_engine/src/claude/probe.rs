@@ -498,7 +498,7 @@ fn spawn_bounded_reader(
         let mut reader = pipe.take(take);
         let mut bytes = Vec::new();
         match reader.read_to_end(&mut bytes) {
-            Ok(()) => BoundedStream {
+            Ok(_) => BoundedStream {
                 overflowed: bytes.len() > limit,
                 failed: false,
                 bytes,
