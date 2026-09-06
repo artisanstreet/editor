@@ -6,11 +6,18 @@ use artisan_database::entities::{
 };
 use artisan_database::{
     Repository, SessionContinuationIncompatibility, SessionContinuationLookup,
-    SessionContinuationQuery, SessionContinuationUnavailableReason, SqliteConfig, connect,
+    SessionContinuationQuery, SessionContinuationUnavailableReason, SetThreadEngineConfigInput,
+    SqliteConfig, connect,
 };
-use artisan_domain::{EngineId, EngineProfileId, RunId, ThreadId};
+use artisan_domain::{
+    ApprovalMode, ByteLimit, CodexSelection, CountLimit, EngineAgentId, EngineConfigRevision,
+    EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
+    EngineProfileId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, NetworkAccess, PermissionId, RequestId, RunId,
+    ThreadId, UnixMillis, WebSearchAccess,
+};
 use artisan_migrations::migrate_to_current;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection};
 
 const THREAD_ID: &str = "thread-continuation";
 const PROJECT_ID: &str = "project-continuation";
@@ -537,4 +544,115 @@ async fn long_thread_history_does_not_block_latest_session_continuation() {
     };
     assert_eq!(continuation.session_id.as_str(), "retained-session");
     assert_eq!(continuation.prior_run.run_id.as_str(), "run-history-065");
+}
+
+fn codex_config() -> EngineRunConfig {
+    let one = FiniteMillis::new(1).expect("one millisecond is valid");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
+        readiness_budget: one,
+        health_budget: one,
+        prompt_budget: one,
+        stream_budget: one,
+        close_budget: one,
+        max_json_body_bytes: ByteLimit::new(8_192).expect("json body limit is valid"),
+        max_sse_line_bytes: ByteLimit::new(4_096).expect("sse line limit is valid"),
+        max_sse_event_bytes: ByteLimit::new(8_192).expect("sse event limit is valid"),
+        max_readiness_line_bytes: ByteLimit::new(4_096).expect("readiness line limit is valid"),
+        max_header_count: CountLimit::new(8).expect("header count is valid"),
+        max_http_buffer_bytes: ByteLimit::new(8_192).expect("http buffer limit is valid"),
+        max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
+        observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
+    })
+    .expect("runtime relationships are valid");
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-codex").expect("permission id is valid"),
+        EngineAgentId::parse("agent-codex").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::Codex(
+            CodexSelection::new(
+                EngineProfileId::parse("profile-codex").expect("profile id is valid"),
+                Some(EngineModelId::parse("model-codex").expect("model id is valid")),
+                permission,
+                None,
+                None,
+                None,
+            )
+            .expect("codex selection is valid"),
+        ),
+        runtime,
+    )
+}
+
+#[tokio::test]
+async fn codex_run_never_continues_as_opencode2_and_reports_binding_engine() {
+    let (database, repository) = migrated_memory_database().await;
+    // Promote the thread to a Codex configuration through the public API,
+    // then snapshot that exact configuration onto a settled run row.
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("request-config-codex").expect("request id is valid"),
+            thread_id: ThreadId::parse(THREAD_ID).expect("thread id should be valid"),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                EngineConfigRevision::new(1).expect("revision is valid"),
+            ),
+            config: codex_config(),
+            accepted_at: UnixMillis::from_millis(20),
+        })
+        .await
+        .expect("codex configuration should persist");
+    seed_run(
+        &database,
+        "run-codex",
+        100,
+        AssistantRunLifecycle::Completed,
+        "profile-codex",
+        Some("session-codex"),
+        Some(1),
+    )
+    .await;
+    database
+        .execute_unprepared(
+            "UPDATE assistant_runs SET engine_run_config_version = 2, engine_run_config_revision = 2, engine_run_config = (SELECT engine_run_config FROM threads WHERE thread_id = 'thread-continuation') WHERE run_id = 'run-codex'",
+        )
+        .await
+        .expect("run snapshot should follow the thread configuration");
+
+    // An OpenCode2 query over a Codex run is engine-incompatible, never coerced.
+    let SessionContinuationLookup::Incompatible(engine_mismatch) = repository
+        .read_session_continuation(query("profile-codex", None))
+        .await
+        .expect("continuation read should succeed")
+    else {
+        panic!("codex run must be engine-incompatible with an opencode2 query");
+    };
+    assert_eq!(
+        engine_mismatch.reason,
+        SessionContinuationIncompatibility::Engine
+    );
+
+    // A Codex query reaches the binding fence, where the OpenCode2-shaped
+    // binding names another engine instead of authorizing resumption.
+    let SessionContinuationLookup::Incompatible(binding_mismatch) = repository
+        .read_session_continuation(SessionContinuationQuery {
+            thread_id: ThreadId::parse(THREAD_ID).expect("thread id should be valid"),
+            engine_id: EngineId::Codex,
+            profile_id: EngineProfileId::parse("profile-codex")
+                .expect("profile id should be valid"),
+            exclude_run_id: None,
+        })
+        .await
+        .expect("continuation read should succeed")
+    else {
+        panic!("opencode2-shaped binding must not authorize a codex continuation");
+    };
+    assert_eq!(
+        binding_mismatch.reason,
+        SessionContinuationIncompatibility::ProviderBindingEngine
+    );
 }

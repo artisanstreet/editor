@@ -261,7 +261,7 @@ pub(super) fn settings_from_thread(
         thread.engine_run_config,
     ) {
         (None, 0, None) => Ok(None),
-        (Some(1), revision, Some(blob)) => {
+        (Some(version @ (1 | 2)), revision, Some(blob)) => {
             let revision = u64::try_from(revision)
                 .ok()
                 .and_then(|value| EngineConfigRevision::new(value).ok())
@@ -274,6 +274,13 @@ pub(super) fn settings_from_thread(
                 })?;
             let config = engine_run_config::decode(blob.as_slice())
                 .map_err(|error| corrupt_data("threads", "engine_run_config", &error))?;
+            if i64::from(config.storage_codec_version()) != version {
+                return Err(corrupt_data(
+                    "threads",
+                    "engine_run_config_version",
+                    "stored codec version does not match its column",
+                ));
+            }
             Ok(Some(ThreadEngineSettings::new(revision, config)))
         }
         _ => Err(corrupt_data(
@@ -335,10 +342,12 @@ async fn update_thread_engine_config(
         .engine_run_config
         .as_ref()
         .map(|blob| blob.as_slice().to_vec());
+    let version = i64::from(input.config.storage_codec_version());
     let update = Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "UPDATE threads SET engine_run_config_version = 1, engine_run_config_revision = ?, engine_run_config = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE thread_id = ? AND engine_run_config_version IS ? AND engine_run_config_revision = ? AND engine_run_config IS ?",
+        "UPDATE threads SET engine_run_config_version = ?, engine_run_config_revision = ?, engine_run_config = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE thread_id = ? AND engine_run_config_version IS ? AND engine_run_config_revision = ? AND engine_run_config IS ?",
         [
+            Value::BigInt(Some(version)),
             Value::BigInt(Some(next_revision.as_i64())),
             Value::Bytes(Some(encoded.to_vec())),
             Value::BigInt(Some(millis(input.accepted_at))),
@@ -381,7 +390,7 @@ async fn insert_set_receipt(
         message_id: Set(None),
         body: Set(None),
         accepted_at_ms: Set(millis(input.accepted_at)),
-        engine_run_config_version: Set(Some(1)),
+        engine_run_config_version: Set(Some(i64::from(input.config.storage_codec_version()))),
         engine_run_config: Set(Some(OpaqueBytes::new(encoded.to_vec()))),
         engine_run_config_expected_revision: Set(
             expected_revision.map(EngineConfigRevision::as_i64)
@@ -432,11 +441,11 @@ fn validate_set_receipt_shape<'a>(
             "set receipt thread is null",
         )
     })?;
-    if row.engine_run_config_version != Some(1) {
+    if !matches!(row.engine_run_config_version, Some(1) | Some(2)) {
         return Err(corrupt_data(
             "command_receipts",
             "engine_run_config_version",
-            "set receipt must use version one",
+            "set receipt must use a known codec version",
         ));
     }
     Ok(persisted_thread_id)

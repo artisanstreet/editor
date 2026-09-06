@@ -1462,7 +1462,11 @@ async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execu
         Ok(runtime) => runtime,
         Err(error) => return request.fail(error),
     };
-    let selection = request.input.settings.config().selection().as_opencode2();
+    let artisan_domain::EngineSelection::OpenCode2(selection) =
+        request.input.settings.config().selection()
+    else {
+        return request.fail(EngineOperationError::Configuration);
+    };
     if request.input.launch.profile_id() != selection.profile_id().as_str() {
         return request.fail(EngineOperationError::Configuration);
     }
@@ -1699,6 +1703,15 @@ async fn create_configured_session(
     process: ConfiguredProcess,
     shutdown: &Arc<CancelHandle>,
 ) -> Result<PreparedConfiguredSession, Execution> {
+    // The configured session below is OpenCode2-shaped end to end. Any other
+    // selection fails closed instead of executing as OpenCode2.
+    if !matches!(
+        process.request.input.settings.config().selection(),
+        artisan_domain::EngineSelection::OpenCode2(_)
+    ) {
+        let ConfiguredProcess { request, .. } = process;
+        return Err(request.fail(EngineOperationError::Configuration));
+    }
     let ConfiguredProcess {
         request,
         runtime,
@@ -1715,7 +1728,26 @@ async fn create_configured_session(
         observations,
         respond,
     } = request;
-    let selection = input.settings.config().selection().as_opencode2();
+    let artisan_domain::EngineSelection::OpenCode2(selection) = input.settings.config().selection()
+    else {
+        // Unreachable after the guard above, but fails closed without
+        // coercing another engine into an OpenCode2 session.
+        return Err(finish_configured_start(
+            ConfiguredTurnRequest {
+                input,
+                deadline,
+                control,
+                prepared,
+                authorize,
+                observations,
+                respond,
+            },
+            parts,
+            EngineOperationError::Configuration,
+            runtime.limits.close,
+        )
+        .await);
+    };
     let permission = selection.permission();
     let session_details = if let Some(continuation) = input.continuation.as_ref() {
         let resume_selection = ResumeSelection::new(
@@ -1993,7 +2025,12 @@ async fn execute_authorized_configured_turn(
 
 fn stream_usage_context(input: &super::InternalTurnInput) -> Option<StreamUsageContext> {
     let thread_id = input.thread_id.as_ref()?.clone();
-    let selection = input.settings.config().selection().as_opencode2();
+    // Usage attribution is OpenCode2-shaped; other selections carry no
+    // usage scope instead of attributing as OpenCode2.
+    let artisan_domain::EngineSelection::OpenCode2(selection) = input.settings.config().selection()
+    else {
+        return None;
+    };
     Some(StreamUsageContext::new(
         input.run_id.clone(),
         thread_id,

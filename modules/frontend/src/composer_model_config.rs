@@ -62,18 +62,24 @@ pub(crate) fn config_for_policy(
         .permission
         .as_ref()
         .ok_or("Select a permission mode")?;
-    let old = previous.map(|config| config.selection().as_opencode2().permission());
+    // A previous configuration for another engine carries no OpenCode2
+    // policy to inherit; the restrictive defaults below apply instead.
+    let old = previous.and_then(|config| config.selection().as_opencode2().ok());
     // These are the Electron managed-agent modes in engines/opencode2/config.ts.
     let (approval, filesystem, network) = match option.id.as_str() {
         "restricted" => (
             ApprovalMode::Never,
             FilesystemAccess::None,
-            old.map_or(NetworkAccess::Disabled, |p| p.network()),
+            old.map_or(NetworkAccess::Disabled, |selection| {
+                selection.permission().network()
+            }),
         ),
         "autonomous" => (
             ApprovalMode::OnRequest,
             FilesystemAccess::Workspace,
-            old.map_or(NetworkAccess::Disabled, |p| p.network()),
+            old.map_or(NetworkAccess::Disabled, |selection| {
+                selection.permission().network()
+            }),
         ),
         "unrestricted" => (
             ApprovalMode::Never,
@@ -82,7 +88,9 @@ pub(crate) fn config_for_policy(
         ),
         _ => return Err("Unsupported permission mode"),
     };
-    let web = old.map_or(WebSearchAccess::Disabled, |p| p.web_search());
+    let web = old.map_or(WebSearchAccess::Disabled, |selection| {
+        selection.permission().web_search()
+    });
     let agent = format!(
         "artisan-v1-{}-{}-{}",
         option.id,

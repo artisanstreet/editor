@@ -26,8 +26,8 @@ use artisan_database::{
     RunLaunchError, RunStartKey, SessionContinuationLookup, SessionContinuationQuery,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, EngineId, IncrementalText, ItemId, PatchId, Revision,
-    RootPath, RunId, TurnId, UnixMillis,
+    AssistantBody, AssistantMessagePhase, EngineId, EngineSelection, IncrementalText, ItemId,
+    PatchId, Revision, RootPath, RunId, TurnId, UnixMillis,
 };
 use artisan_native_engine::{NativeOpenCode2Authority, VerifiedOpenCode2ProfileLaunch};
 use artisan_transport::CancelHandle;
@@ -1170,9 +1170,16 @@ async fn load_claim(
             return None;
         }
     };
+    // Only an OpenCode2 selection can reach the certified profile launch
+    // below. Newly representable engines stay explicitly unavailable: the
+    // claim requeues instead of running as OpenCode2.
+    let EngineSelection::OpenCode2(selection) = settings.config().selection() else {
+        context.requeue("engine unavailable").await;
+        return None;
+    };
     let launch = match launch_mode {
         ClaimLaunchMode::Configured => {
-            let profile_id = settings.config().selection().as_opencode2().profile_id();
+            let profile_id = selection.profile_id();
             let Ok(launch) = context
                 .config
                 .authority
@@ -1185,7 +1192,7 @@ async fn load_claim(
         }
         #[cfg(test)]
         ClaimLaunchMode::Fixture(fixture) => {
-            let configured_profile = settings.config().selection().as_opencode2().profile_id();
+            let configured_profile = selection.profile_id();
             if configured_profile.as_str() != fixture.profile_id.as_str() {
                 context.requeue("engine profile unavailable").await;
                 return None;
@@ -1210,13 +1217,10 @@ async fn resolve_continuation(
     if matches!(&claim.launch, ResolvedLaunch::Fixture(_)) {
         return Ok(None);
     }
-    let profile_id = claim
-        .settings
-        .config()
-        .selection()
-        .as_opencode2()
-        .profile_id()
-        .clone();
+    let EngineSelection::OpenCode2(selection) = claim.settings.config().selection() else {
+        return Err("engine unavailable");
+    };
+    let profile_id = selection.profile_id().clone();
     let lookup = claim
         .context
         .repository
@@ -1450,15 +1454,22 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
     if run_cancel.is_cancelled() {
         turn.cancel();
     }
-    let Some(binding_bytes) = provider_binding_bytes(
-        settings
-            .config()
-            .selection()
-            .as_opencode2()
-            .profile_id()
-            .as_str(),
-        session.session(),
-    ) else {
+    // Provider binding bytes are OpenCode2-shaped. A selection for any other
+    // engine abandons the turn here instead of binding as OpenCode2.
+    let EngineSelection::OpenCode2(selection) = settings.config().selection() else {
+        let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+        return (
+            None,
+            if custody {
+                ClaimCustody::Retained(cancellation)
+            } else {
+                ClaimCustody::Released
+            },
+        );
+    };
+    let Some(binding_bytes) =
+        provider_binding_bytes(selection.profile_id().as_str(), session.session())
+    else {
         let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
         return (
             None,

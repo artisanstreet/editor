@@ -480,6 +480,14 @@ struct EngineRunConfig {
   variant @5 :EngineVariant;
   permission @6 :EnginePermissionPolicy;
   runtime @7 :EngineRuntimeControls;
+  # Versioned per-engine selection appended without touching @0-@7.
+  # schemaVersion 1 carries `unset` and keeps the legacy OpenCode2 shape
+  # above as the authority. schemaVersion 2 carries one per-engine arm
+  # matching `engine` as the authority; the legacy fields above stay
+  # populated as diagnostic mirrors (profileId must equal the arm's
+  # profileId) so older readers still reject the frame as an unsupported
+  # engine instead of misreading it.
+  selectionV2 @8 :EngineSelectionV2;
 }
 
 struct EngineVariant {
@@ -511,6 +519,66 @@ struct EngineRuntimeControls {
   maxHttpBufferBytes @11 :UInt64;
   maxStderrBytes @12 :UInt64;
   observationCapacity @13 :UInt64;
+}
+
+# Tagged per-engine selection for EngineRunConfig.selectionV2. Each arm
+# carries the engine's explicit typed settings; there is no generic options
+# map. Empty text (and zero modelContextWindow) means the optional setting
+# is absent, mirroring the EngineVariant kind/id convention.
+struct EngineSelectionV2 {
+  union {
+    unset @0 :Void;
+    codex @1 :CodexEngineSelection;
+    claude @2 :ClaudeEngineSelection;
+    grok @3 :GrokEngineSelection;
+    cursor @4 :CursorEngineSelection;
+    hermes @5 :HermesEngineSelection;
+  }
+}
+
+struct CodexEngineSelection {
+  profileId @0 :Text;
+  modelId @1 :Text;
+  reasoningEffort @2 :Text;
+  serviceTier @3 :Text;
+  modelContextWindow @4 :UInt64;
+  permission @5 :EnginePermissionPolicy;
+}
+
+struct ClaudeEngineSelection {
+  profileId @0 :Text;
+  modelId @1 :Text;
+  effort @2 :Text;
+  permissionMode @3 :Text;
+  disableTools @4 :Bool;
+  safeMode @5 :Bool;
+  permission @6 :EnginePermissionPolicy;
+}
+
+struct GrokEngineSelection {
+  profileId @0 :Text;
+  modelId @1 :Text;
+  reasoningEffort @2 :Text;
+  permissionMode @3 :Text;
+  permission @4 :EnginePermissionPolicy;
+}
+
+struct CursorEngineSelection {
+  profileId @0 :Text;
+  modelId @1 :Text;
+  reasoningEffort @2 :Text;
+  speed @3 :Text;
+  permissionMode @4 :Text;
+  permission @5 :EnginePermissionPolicy;
+}
+
+struct HermesEngineSelection {
+  profileId @0 :Text;
+  modelId @1 :Text;
+  routeId @2 :Text;
+  reasoningEffort @3 :Text;
+  permissionMode @4 :Text;
+  fast @5 :Bool;
 }
 
 struct SetThreadEngineConfigResult {

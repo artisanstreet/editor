@@ -9,15 +9,17 @@ use artisan_database::{
     RunUsageRepositoryError, SetThreadEngineConfigInput, SqliteConfig, connect,
 };
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineConfigUpdatePrecondition,
-    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
-    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
-    FiniteMillis, MessageBody, MessageId, NetworkAccess, OpenCode2Selection, PermissionId,
-    ProjectId, RequestId, RunId, RunUsageBasis, RunUsageReport, RunUsageReportInput, ThreadId,
-    ThreadTitle, UnixMillis, WebSearchAccess,
+    ApprovalMode, ByteLimit, CodexSelection, CountLimit, EngineAgentId, EngineConfigRevision,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, MessageBody, MessageId, NetworkAccess,
+    OpenCode2Selection, PermissionId, ProjectId, RequestId, RunId, RunUsageBasis, RunUsageReport,
+    RunUsageReportInput, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, EntityTrait,
+};
 
 const PROJECT_ID: &str = "project-usage";
 const THREAD_ID: &str = "thread-usage";
@@ -73,9 +75,9 @@ async fn open_database(path: Option<&Path>) -> (DatabaseConnection, Repository) 
     (database.clone(), Repository::new(database))
 }
 
-fn config() -> EngineRunConfig {
+fn runtime() -> EngineRuntimeControls {
     let one = FiniteMillis::new(1).expect("one millisecond is valid");
-    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+    EngineRuntimeControls::new(EngineRuntimeControlsInput {
         attempt_budget: FiniteMillis::new(100).expect("attempt budget is valid"),
         readiness_budget: one,
         health_budget: one,
@@ -91,7 +93,10 @@ fn config() -> EngineRunConfig {
         max_stderr_bytes: ByteLimit::new(4_096).expect("stderr limit is valid"),
         observation_capacity: CountLimit::new(16).expect("observation capacity is valid"),
     })
-    .expect("runtime relationships are valid");
+    .expect("runtime relationships are valid")
+}
+
+fn config() -> EngineRunConfig {
     let permission = EnginePermissionPolicy::new(
         PermissionId::parse("permission-usage").expect("permission id is valid"),
         EngineAgentId::parse("agent-usage").expect("agent id is valid"),
@@ -108,7 +113,32 @@ fn config() -> EngineRunConfig {
             None,
             permission,
         )),
-        runtime,
+        runtime(),
+    )
+}
+
+fn codex_config() -> EngineRunConfig {
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-usage").expect("permission id is valid"),
+        EngineAgentId::parse("agent-usage").expect("agent id is valid"),
+        ApprovalMode::Never,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Disabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::Codex(
+            CodexSelection::new(
+                EngineProfileId::parse("profile-usage").expect("profile id is valid"),
+                Some(EngineModelId::parse("model-usage").expect("model id is valid")),
+                permission,
+                None,
+                None,
+                None,
+            )
+            .expect("codex selection is valid"),
+        ),
+        runtime(),
     )
 }
 
@@ -433,4 +463,36 @@ async fn unknown_run_is_rejected_without_creating_a_usage_row() {
         Err(RunUsageRepositoryError::RunNotFound { .. })
     ));
     drop(database);
+}
+
+#[tokio::test]
+async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
+    let (database, repository, run_id, thread_id) = seeded(None).await;
+    // Promote the thread to a Codex configuration, then snapshot that exact
+    // configuration onto the run row the way dispatch would.
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse("request-config-codex").expect("request id"),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                EngineConfigRevision::new(1).expect("revision is valid"),
+            ),
+            config: codex_config(),
+            accepted_at: UnixMillis::from_millis(4),
+        })
+        .await
+        .expect("codex configuration should persist");
+    database
+        .execute_unprepared(
+            "UPDATE assistant_runs SET engine_run_config_version = 2, engine_run_config_revision = 2, engine_run_config = (SELECT engine_run_config FROM threads WHERE thread_id = 'thread-usage') WHERE run_id = 'run-usage'",
+        )
+        .await
+        .expect("run snapshot should follow the thread configuration");
+    let first = report(4, Some(10), 10);
+    assert!(matches!(
+        repository.record_run_usage(record_command(&first)).await,
+        Err(RunUsageRepositoryError::InvalidRunSnapshot { .. })
+    ));
+    drop(database);
+    drop(run_id);
 }

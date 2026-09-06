@@ -3,32 +3,35 @@
 use artisan_domain::{
     ApprovalMode, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
     AttachProject, AuthoredText, ByteLimit, CONVERSATION_PATCH_BATCH_MAX_PATCHES,
-    CONVERSATION_QUERY_MAX_TURNS, CatalogRevision, CatalogRevisionError, Command,
-    ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
-    ConversationQuery, ConversationQueryBounds, ConversationRequest, ConversationSnapshot,
-    ConversationSnapshotError, ConversationSubscribe, ConversationSubscriptionStart,
-    ConversationTurn, ConversationUnsubscribe, CountLimit, CounterError, CreateThread,
-    DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry, DirectoryId,
-    DirectoryKind, DirectoryListing, DirectoryListingError, DirectoryPlace, DisplayName,
-    DisplayNameError, EngineAgentId, EngineConfigError, EngineConfigReason, EngineConfigRevision,
-    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, EngineVariantId, Event, FilesystemAccess, FiniteMillis, FirstMessageQueued,
-    IdentifierError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
-    ImageAttachmentRefError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
-    ListAttachedProjects, ListDirectories, ListProjectThreads, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MessageBody, MessageBodyError, MessageId, ModelFavoriteId,
-    ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError,
-    ModelFavoritesSnapshotError, MultimodalUserMessageItem, NetworkAccess, OpenCode2Selection,
-    PROJECT_LISTING_MAX_PROJECTS, PatchBatch, PatchBatchError, PatchId, PatchSequence,
-    PermissionId, PlaceKind, ProjectAttached, ProjectId, ProjectListing, ProjectListingError,
-    ProjectSummary, Query, QueryTurnCount, QueryTurnCountError, QueueFirstMessage, QueueMessage,
-    QueueMessagePayload, QueueMessagePayloadError, QueuedMessage, ReadActiveRun,
-    ReadComposerCatalog, ReadModelFavorites, ReceiptDisposition, RequestId, Revision, RootPath,
-    RootPathError, RunId, SetModelFavorite, SetThreadEngineConfig, StopRun,
-    THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing, ThreadListingError,
-    ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
-    WebSearchAccess,
+    CONVERSATION_QUERY_MAX_TURNS, CatalogRevision, CatalogRevisionError, ClaudeEffort,
+    ClaudePermissionMode, ClaudeSelection, CodexModelContextWindow, CodexReasoningEffort,
+    CodexSelection, CodexServiceTier, Command, ConversationCursor, ConversationItem,
+    ConversationLifecycle, ConversationPatch, ConversationQuery, ConversationQueryBounds,
+    ConversationRequest, ConversationSnapshot, ConversationSnapshotError, ConversationSubscribe,
+    ConversationSubscriptionStart, ConversationTurn, ConversationUnsubscribe, CountLimit,
+    CounterError, CreateThread, CursorPermissionMode, CursorReasoningEffort, CursorSelection,
+    CursorSpeed, DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry,
+    DirectoryId, DirectoryKind, DirectoryListing, DirectoryListingError, DirectoryPlace,
+    DisplayName, DisplayNameError, EngineAgentId, EngineConfigError, EngineConfigReason,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
+    EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, EngineVariantId, Event, FilesystemAccess,
+    FiniteMillis, FirstMessageQueued, GrokPermissionMode, GrokReasoningEffort, GrokSelection,
+    HermesPermissionMode, HermesReasoningEffort, HermesSelection, IdentifierError, ImageAttachment,
+    ImageAttachmentError, ImageAttachmentRef, ImageAttachmentRefError, IncrementalText,
+    IncrementalTextError, ItemId, ItemOrdinal, ListAttachedProjects, ListDirectories,
+    ListProjectThreads, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
+    MessageBody, MessageBodyError, MessageId, ModelFavoriteId, ModelFavoriteIdError,
+    ModelFavoritesRevision, ModelFavoritesRevisionError, ModelFavoritesSnapshotError,
+    MultimodalUserMessageItem, NetworkAccess, OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS,
+    PatchBatch, PatchBatchError, PatchId, PatchSequence, PermissionId, PlaceKind, ProjectAttached,
+    ProjectId, ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
+    QueryTurnCountError, QueueFirstMessage, QueueMessage, QueueMessagePayload,
+    QueueMessagePayloadError, QueuedMessage, ReadActiveRun, ReadComposerCatalog,
+    ReadModelFavorites, ReceiptDisposition, RequestId, Revision, RootPath, RootPathError, RunId,
+    SetModelFavorite, SetThreadEngineConfig, StopRun, THREAD_LISTING_MAX_THREADS, ThreadCreated,
+    ThreadId, ThreadListing, ThreadListingError, ThreadSummary, ThreadTitle, ThreadTitleError,
+    TurnId, TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -38,10 +41,10 @@ use crate::artisan_capnp::{
     self, composer_catalog_result, conversation_item, conversation_patch,
     conversation_query_request, conversation_subscribe_request, conversation_subscription_started,
     directory_listing, directory_pick_outcome, engine_config_precondition, engine_run_config,
-    envelope, event, lifecycle_request, lifecycle_response, list_directories_request,
-    model_favorites_snapshot, protocol_error, query_range, read_composer_catalog_request, request,
-    response, set_model_favorite_receipt, set_model_favorite_request,
-    set_thread_engine_config_request,
+    engine_selection_v2, envelope, event, lifecycle_request, lifecycle_response,
+    list_directories_request, model_favorites_snapshot, protocol_error, query_range,
+    read_composer_catalog_request, request, response, set_model_favorite_receipt,
+    set_model_favorite_request, set_thread_engine_config_request,
 };
 use crate::types::{
     ActiveRunResult, CatalogSnapshotWire, CatalogSnapshotWireError, ClientRequest,
@@ -1106,46 +1109,195 @@ fn encode_engine_config_precondition(
     }
 }
 
-fn encode_engine_run_config(mut builder: engine_run_config::Builder<'_>, value: &EngineRunConfig) {
-    let selection = value.selection().as_opencode2();
-    builder.set_schema_version(1);
-    builder.set_engine(artisan_domain::EngineId::OpenCode2.as_str());
-    builder.set_profile_id(selection.profile_id().as_str());
-    builder.set_model_id(selection.model_id().as_str());
-    builder.set_route_id(selection.route_id().as_str());
-    let mut variant = builder.reborrow().init_variant();
-    if let Some(id) = selection.variant_id() {
-        variant.set_kind("selected");
-        variant.set_id(id.as_str());
+fn encode_engine_variant(
+    mut builder: artisan_capnp::engine_variant::Builder<'_>,
+    variant: Option<&EngineVariantId>,
+) {
+    if let Some(id) = variant {
+        builder.set_kind("selected");
+        builder.set_id(id.as_str());
     } else {
-        variant.set_kind("none");
-        variant.set_id("");
+        builder.set_kind("none");
+        builder.set_id("");
     }
-    let permission = selection.permission();
-    let mut encoded_permission = builder.reborrow().init_permission();
-    encoded_permission.set_permission_id(permission.permission_id().as_str());
-    encoded_permission.set_agent_id(permission.agent_id().as_str());
-    encoded_permission.set_approval(permission.approval().as_str());
-    encoded_permission.set_filesystem(permission.filesystem().as_str());
-    encoded_permission.set_network(permission.network().as_str());
-    encoded_permission.set_web_search(permission.web_search().as_str());
+}
 
-    let runtime = value.runtime();
-    let mut encoded_runtime = builder.init_runtime();
-    encoded_runtime.set_attempt_budget_ms(runtime.attempt_budget().get());
-    encoded_runtime.set_readiness_budget_ms(runtime.readiness_budget().get());
-    encoded_runtime.set_health_budget_ms(runtime.health_budget().get());
-    encoded_runtime.set_prompt_budget_ms(runtime.prompt_budget().get());
-    encoded_runtime.set_stream_budget_ms(runtime.stream_budget().get());
-    encoded_runtime.set_close_budget_ms(runtime.close_budget().get());
-    encoded_runtime.set_max_json_body_bytes(runtime.max_json_body_bytes().get());
-    encoded_runtime.set_max_sse_line_bytes(runtime.max_sse_line_bytes().get());
-    encoded_runtime.set_max_sse_event_bytes(runtime.max_sse_event_bytes().get());
-    encoded_runtime.set_max_readiness_line_bytes(runtime.max_readiness_line_bytes().get());
-    encoded_runtime.set_max_header_count(runtime.max_header_count().get());
-    encoded_runtime.set_max_http_buffer_bytes(runtime.max_http_buffer_bytes().get());
-    encoded_runtime.set_max_stderr_bytes(runtime.max_stderr_bytes().get());
-    encoded_runtime.set_observation_capacity(runtime.observation_capacity().get());
+fn encode_engine_permission(
+    mut builder: artisan_capnp::engine_permission_policy::Builder<'_>,
+    permission: &EnginePermissionPolicy,
+) {
+    builder.set_permission_id(permission.permission_id().as_str());
+    builder.set_agent_id(permission.agent_id().as_str());
+    builder.set_approval(permission.approval().as_str());
+    builder.set_filesystem(permission.filesystem().as_str());
+    builder.set_network(permission.network().as_str());
+    builder.set_web_search(permission.web_search().as_str());
+}
+
+fn encode_engine_runtime(
+    mut builder: artisan_capnp::engine_runtime_controls::Builder<'_>,
+    runtime: EngineRuntimeControls,
+) {
+    builder.set_attempt_budget_ms(runtime.attempt_budget().get());
+    builder.set_readiness_budget_ms(runtime.readiness_budget().get());
+    builder.set_health_budget_ms(runtime.health_budget().get());
+    builder.set_prompt_budget_ms(runtime.prompt_budget().get());
+    builder.set_stream_budget_ms(runtime.stream_budget().get());
+    builder.set_close_budget_ms(runtime.close_budget().get());
+    builder.set_max_json_body_bytes(runtime.max_json_body_bytes().get());
+    builder.set_max_sse_line_bytes(runtime.max_sse_line_bytes().get());
+    builder.set_max_sse_event_bytes(runtime.max_sse_event_bytes().get());
+    builder.set_max_readiness_line_bytes(runtime.max_readiness_line_bytes().get());
+    builder.set_max_header_count(runtime.max_header_count().get());
+    builder.set_max_http_buffer_bytes(runtime.max_http_buffer_bytes().get());
+    builder.set_max_stderr_bytes(runtime.max_stderr_bytes().get());
+    builder.set_observation_capacity(runtime.observation_capacity().get());
+}
+
+fn encode_engine_run_config(mut builder: engine_run_config::Builder<'_>, value: &EngineRunConfig) {
+    match value.selection() {
+        EngineSelection::OpenCode2(selection) => {
+            builder.set_schema_version(1);
+            builder.set_engine(EngineId::OpenCode2.as_str());
+            builder.set_profile_id(selection.profile_id().as_str());
+            builder.set_model_id(selection.model_id().as_str());
+            builder.set_route_id(selection.route_id().as_str());
+            encode_engine_variant(builder.reborrow().init_variant(), selection.variant_id());
+            encode_engine_permission(builder.reborrow().init_permission(), selection.permission());
+            encode_engine_runtime(builder.reborrow().init_runtime(), value.runtime());
+            builder.init_selection_v2().set_unset(());
+        }
+        EngineSelection::Codex(selection) => {
+            builder.set_schema_version(2);
+            builder.set_engine(EngineId::Codex.as_str());
+            builder.set_profile_id(selection.profile_id().as_str());
+            builder.set_model_id(selection.model_id().map_or("", EngineModelId::as_str));
+            builder.set_route_id("");
+            encode_engine_variant(builder.reborrow().init_variant(), None);
+            encode_engine_permission(builder.reborrow().init_permission(), selection.permission());
+            encode_engine_runtime(builder.reborrow().init_runtime(), value.runtime());
+            let mut arm = builder.reborrow().init_selection_v2().init_codex();
+            arm.set_profile_id(selection.profile_id().as_str());
+            arm.set_model_id(selection.model_id().map_or("", EngineModelId::as_str));
+            arm.set_reasoning_effort(
+                selection
+                    .reasoning_effort()
+                    .map_or("", CodexReasoningEffort::as_str),
+            );
+            arm.set_service_tier(
+                selection
+                    .service_tier()
+                    .map_or("", CodexServiceTier::as_str),
+            );
+            arm.set_model_context_window(
+                selection
+                    .model_context_window()
+                    .map_or(0, CodexModelContextWindow::get),
+            );
+            encode_engine_permission(arm.reborrow().init_permission(), selection.permission());
+        }
+        EngineSelection::Claude(selection) => {
+            builder.set_schema_version(2);
+            builder.set_engine(EngineId::Claude.as_str());
+            builder.set_profile_id(selection.profile_id().as_str());
+            builder.set_model_id(selection.model_id().map_or("", EngineModelId::as_str));
+            builder.set_route_id("");
+            encode_engine_variant(builder.reborrow().init_variant(), None);
+            encode_engine_permission(builder.reborrow().init_permission(), selection.permission());
+            encode_engine_runtime(builder.reborrow().init_runtime(), value.runtime());
+            let mut arm = builder.reborrow().init_selection_v2().init_claude();
+            arm.set_profile_id(selection.profile_id().as_str());
+            arm.set_model_id(selection.model_id().map_or("", EngineModelId::as_str));
+            arm.set_effort(selection.effort().map_or("", ClaudeEffort::as_str));
+            arm.set_permission_mode(
+                selection
+                    .permission_mode()
+                    .map_or("", ClaudePermissionMode::as_str),
+            );
+            arm.set_disable_tools(selection.disable_tools());
+            arm.set_safe_mode(selection.safe_mode());
+            encode_engine_permission(arm.reborrow().init_permission(), selection.permission());
+        }
+        EngineSelection::Grok(selection) => {
+            builder.set_schema_version(2);
+            builder.set_engine(EngineId::Grok.as_str());
+            builder.set_profile_id(selection.profile_id().as_str());
+            builder.set_model_id(selection.model_id().map_or("", EngineModelId::as_str));
+            builder.set_route_id("");
+            encode_engine_variant(builder.reborrow().init_variant(), None);
+            encode_engine_permission(builder.reborrow().init_permission(), selection.permission());
+            encode_engine_runtime(builder.reborrow().init_runtime(), value.runtime());
+            let mut arm = builder.reborrow().init_selection_v2().init_grok();
+            arm.set_profile_id(selection.profile_id().as_str());
+            arm.set_model_id(selection.model_id().map_or("", EngineModelId::as_str));
+            arm.set_reasoning_effort(
+                selection
+                    .reasoning_effort()
+                    .map_or("", GrokReasoningEffort::as_str),
+            );
+            arm.set_permission_mode(
+                selection
+                    .permission_mode()
+                    .map_or("", GrokPermissionMode::as_str),
+            );
+            encode_engine_permission(arm.reborrow().init_permission(), selection.permission());
+        }
+        EngineSelection::Cursor(selection) => {
+            builder.set_schema_version(2);
+            builder.set_engine(EngineId::Cursor.as_str());
+            builder.set_profile_id(selection.profile_id().as_str());
+            builder.set_model_id(selection.model_id().map_or("", EngineModelId::as_str));
+            builder.set_route_id("");
+            encode_engine_variant(builder.reborrow().init_variant(), None);
+            encode_engine_permission(builder.reborrow().init_permission(), selection.permission());
+            encode_engine_runtime(builder.reborrow().init_runtime(), value.runtime());
+            let mut arm = builder.reborrow().init_selection_v2().init_cursor();
+            arm.set_profile_id(selection.profile_id().as_str());
+            arm.set_model_id(selection.model_id().map_or("", EngineModelId::as_str));
+            arm.set_reasoning_effort(
+                selection
+                    .reasoning_effort()
+                    .map_or("", CursorReasoningEffort::as_str),
+            );
+            arm.set_speed(selection.speed().map_or("", CursorSpeed::as_str));
+            arm.set_permission_mode(
+                selection
+                    .permission_mode()
+                    .map_or("", CursorPermissionMode::as_str),
+            );
+            encode_engine_permission(arm.reborrow().init_permission(), selection.permission());
+        }
+        EngineSelection::Hermes(selection) => {
+            builder.set_schema_version(2);
+            builder.set_engine(EngineId::Hermes.as_str());
+            builder.set_profile_id(selection.profile_id().as_str());
+            builder.set_model_id(selection.model_id().as_str());
+            builder.set_route_id(selection.route_id().as_str());
+            encode_engine_variant(builder.reborrow().init_variant(), None);
+            // Hermes authorization is profile-owned; the legacy mirror
+            // carries a restrictive sentinel that old readers reject along
+            // with the unknown engine instead of misreading it.
+            let mut permission = builder.reborrow().init_permission();
+            permission.set_permission_id("hermes-managed");
+            permission.set_agent_id("hermes-managed-agent");
+            permission.set_approval(ApprovalMode::Never.as_str());
+            permission.set_filesystem(FilesystemAccess::None.as_str());
+            permission.set_network(NetworkAccess::Disabled.as_str());
+            permission.set_web_search(WebSearchAccess::Disabled.as_str());
+            encode_engine_runtime(builder.reborrow().init_runtime(), value.runtime());
+            let mut arm = builder.reborrow().init_selection_v2().init_hermes();
+            arm.set_profile_id(selection.profile_id().as_str());
+            arm.set_model_id(selection.model_id().as_str());
+            arm.set_route_id(selection.route_id().as_str());
+            arm.set_reasoning_effort(
+                selection
+                    .reasoning_effort()
+                    .map_or("", HermesReasoningEffort::as_str),
+            );
+            arm.set_permission_mode(selection.permission_mode().as_str());
+            arm.set_fast(selection.fast());
+        }
+    }
 }
 
 fn encode_lifecycle_response(
@@ -2097,17 +2249,33 @@ fn decode_engine_config_precondition(
 fn decode_engine_run_config(
     value: artisan_capnp::engine_run_config::Reader<'_>,
 ) -> Result<EngineRunConfig, ProtocolDecodeError> {
-    if value.get_schema_version() != 1 {
-        return Err(engine_config_error(
+    match value.get_schema_version() {
+        1 => decode_engine_run_config_v1(value),
+        2 => decode_engine_run_config_v2(value),
+        _ => Err(engine_config_error(
             "request.setThreadEngineConfig.config.schemaVersion",
             EngineConfigReason::Unsupported,
+        )),
+    }
+}
+
+fn decode_engine_run_config_v1(
+    value: artisan_capnp::engine_run_config::Reader<'_>,
+) -> Result<EngineRunConfig, ProtocolDecodeError> {
+    if !matches!(
+        value.get_selection_v2()?.which()?,
+        engine_selection_v2::Which::Unset(())
+    ) {
+        return Err(engine_config_error(
+            "request.setThreadEngineConfig.config.selectionV2",
+            EngineConfigReason::Inconsistent,
         ));
     }
     let engine = read_text(
         value.get_engine(),
         "request.setThreadEngineConfig.config.engine",
     )?;
-    if engine != artisan_domain::EngineId::OpenCode2.as_str() {
+    if engine != EngineId::OpenCode2.as_str() {
         return Err(engine_config_error(
             "request.setThreadEngineConfig.config.engine",
             EngineConfigReason::Unsupported,
@@ -2151,6 +2319,392 @@ fn decode_engine_run_config(
             profile_id, model_id, route_id, variant, permission,
         )),
         runtime,
+    ))
+}
+
+fn decode_engine_run_config_v2(
+    value: artisan_capnp::engine_run_config::Reader<'_>,
+) -> Result<EngineRunConfig, ProtocolDecodeError> {
+    let engine = read_text(
+        value.get_engine(),
+        "request.setThreadEngineConfig.config.engine",
+    )?;
+    let engine = EngineId::parse(&engine).map_err(|_| {
+        engine_config_error(
+            "request.setThreadEngineConfig.config.engine",
+            EngineConfigReason::Unsupported,
+        )
+    })?;
+    // The legacy profile field stays populated as a diagnostic mirror; it
+    // must agree with the authority arm below.
+    let legacy_profile_id = read_text(
+        value.get_profile_id(),
+        "request.setThreadEngineConfig.config.profileId",
+    )?;
+    let runtime = decode_engine_runtime(value.get_runtime()?)?;
+    let selection = match value.get_selection_v2()?.which()? {
+        engine_selection_v2::Which::Codex(arm) => {
+            if engine != EngineId::Codex {
+                return Err(engine_config_error(
+                    "request.setThreadEngineConfig.config.selectionV2",
+                    EngineConfigReason::Inconsistent,
+                ));
+            }
+            EngineSelection::Codex(decode_codex_selection(arm?)?)
+        }
+        engine_selection_v2::Which::Claude(arm) => {
+            if engine != EngineId::Claude {
+                return Err(engine_config_error(
+                    "request.setThreadEngineConfig.config.selectionV2",
+                    EngineConfigReason::Inconsistent,
+                ));
+            }
+            EngineSelection::Claude(decode_claude_selection(arm?)?)
+        }
+        engine_selection_v2::Which::Grok(arm) => {
+            if engine != EngineId::Grok {
+                return Err(engine_config_error(
+                    "request.setThreadEngineConfig.config.selectionV2",
+                    EngineConfigReason::Inconsistent,
+                ));
+            }
+            EngineSelection::Grok(decode_grok_selection(arm?)?)
+        }
+        engine_selection_v2::Which::Cursor(arm) => {
+            if engine != EngineId::Cursor {
+                return Err(engine_config_error(
+                    "request.setThreadEngineConfig.config.selectionV2",
+                    EngineConfigReason::Inconsistent,
+                ));
+            }
+            EngineSelection::Cursor(decode_cursor_selection(arm?)?)
+        }
+        engine_selection_v2::Which::Hermes(arm) => {
+            if engine != EngineId::Hermes {
+                return Err(engine_config_error(
+                    "request.setThreadEngineConfig.config.selectionV2",
+                    EngineConfigReason::Inconsistent,
+                ));
+            }
+            EngineSelection::Hermes(decode_hermes_selection(arm?)?)
+        }
+        engine_selection_v2::Which::Unset(()) => {
+            return Err(engine_config_error(
+                "request.setThreadEngineConfig.config.selectionV2",
+                EngineConfigReason::Inconsistent,
+            ));
+        }
+    };
+    if selection.profile_id().as_str() != legacy_profile_id {
+        return Err(engine_config_error(
+            "request.setThreadEngineConfig.config.profileId",
+            EngineConfigReason::Inconsistent,
+        ));
+    }
+    Ok(EngineRunConfig::new(selection, runtime))
+}
+
+fn parse_optional_model_id(
+    value: String,
+    field: &'static str,
+) -> Result<Option<EngineModelId>, ProtocolDecodeError> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        EngineModelId::parse(value)
+            .map(Some)
+            .map_err(|_| engine_config_error(field, EngineConfigReason::InvalidIdentifier))
+    }
+}
+
+fn parse_optional_setting<T>(
+    value: String,
+    field: &'static str,
+    parse: impl FnOnce(&str) -> Result<T, EngineConfigError>,
+) -> Result<Option<T>, ProtocolDecodeError> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        parse(&value)
+            .map(Some)
+            .map_err(|error| engine_config_error(field, error.reason()))
+    }
+}
+
+fn parse_required_model_id(
+    value: String,
+    field: &'static str,
+) -> Result<EngineModelId, ProtocolDecodeError> {
+    if value.is_empty() {
+        return Err(engine_config_error(
+            field,
+            EngineConfigReason::InvalidIdentifier,
+        ));
+    }
+    EngineModelId::parse(value)
+        .map_err(|_| engine_config_error(field, EngineConfigReason::InvalidIdentifier))
+}
+
+fn parse_required_route_id(
+    value: String,
+    field: &'static str,
+) -> Result<EngineRouteId, ProtocolDecodeError> {
+    if value.is_empty() {
+        return Err(engine_config_error(
+            field,
+            EngineConfigReason::InvalidIdentifier,
+        ));
+    }
+    EngineRouteId::parse(value)
+        .map_err(|_| engine_config_error(field, EngineConfigReason::InvalidIdentifier))
+}
+
+fn decode_codex_selection(
+    arm: artisan_capnp::codex_engine_selection::Reader<'_>,
+) -> Result<CodexSelection, ProtocolDecodeError> {
+    let profile_id = parse_profile_id(
+        read_text(
+            arm.get_profile_id(),
+            "request.setThreadEngineConfig.config.selectionV2.profileId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.profileId",
+    )?;
+    let model_id = parse_optional_model_id(
+        read_text(
+            arm.get_model_id(),
+            "request.setThreadEngineConfig.config.selectionV2.modelId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.modelId",
+    )?;
+    let reasoning_effort = parse_optional_setting(
+        read_text(
+            arm.get_reasoning_effort(),
+            "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
+        CodexReasoningEffort::parse,
+    )?;
+    let service_tier = parse_optional_setting(
+        read_text(
+            arm.get_service_tier(),
+            "request.setThreadEngineConfig.config.selectionV2.serviceTier",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.serviceTier",
+        CodexServiceTier::parse,
+    )?;
+    let model_context_window = {
+        let window = arm.get_model_context_window();
+        if window == 0 {
+            None
+        } else {
+            Some(CodexModelContextWindow::new(window).map_err(|error| {
+                engine_config_error(
+                    "request.setThreadEngineConfig.config.selectionV2.modelContextWindow",
+                    error.reason(),
+                )
+            })?)
+        }
+    };
+    let permission = decode_engine_permission(arm.get_permission()?)?;
+    Ok(CodexSelection::new(
+        profile_id,
+        model_id,
+        permission,
+        reasoning_effort,
+        service_tier,
+        model_context_window,
+    )?)
+}
+
+fn decode_claude_selection(
+    arm: artisan_capnp::claude_engine_selection::Reader<'_>,
+) -> Result<ClaudeSelection, ProtocolDecodeError> {
+    let profile_id = parse_profile_id(
+        read_text(
+            arm.get_profile_id(),
+            "request.setThreadEngineConfig.config.selectionV2.profileId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.profileId",
+    )?;
+    let model_id = parse_optional_model_id(
+        read_text(
+            arm.get_model_id(),
+            "request.setThreadEngineConfig.config.selectionV2.modelId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.modelId",
+    )?;
+    let effort = parse_optional_setting(
+        read_text(
+            arm.get_effort(),
+            "request.setThreadEngineConfig.config.selectionV2.effort",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.effort",
+        ClaudeEffort::parse,
+    )?;
+    let permission_mode = parse_optional_setting(
+        read_text(
+            arm.get_permission_mode(),
+            "request.setThreadEngineConfig.config.selectionV2.permissionMode",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.permissionMode",
+        ClaudePermissionMode::parse,
+    )?;
+    let permission = decode_engine_permission(arm.get_permission()?)?;
+    Ok(ClaudeSelection::new(
+        profile_id,
+        model_id,
+        permission,
+        effort,
+        permission_mode,
+        arm.get_disable_tools(),
+        arm.get_safe_mode(),
+    )?)
+}
+
+fn decode_grok_selection(
+    arm: artisan_capnp::grok_engine_selection::Reader<'_>,
+) -> Result<GrokSelection, ProtocolDecodeError> {
+    let profile_id = parse_profile_id(
+        read_text(
+            arm.get_profile_id(),
+            "request.setThreadEngineConfig.config.selectionV2.profileId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.profileId",
+    )?;
+    let model_id = parse_optional_model_id(
+        read_text(
+            arm.get_model_id(),
+            "request.setThreadEngineConfig.config.selectionV2.modelId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.modelId",
+    )?;
+    let reasoning_effort = parse_optional_setting(
+        read_text(
+            arm.get_reasoning_effort(),
+            "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
+        GrokReasoningEffort::parse,
+    )?;
+    let permission_mode = parse_optional_setting(
+        read_text(
+            arm.get_permission_mode(),
+            "request.setThreadEngineConfig.config.selectionV2.permissionMode",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.permissionMode",
+        GrokPermissionMode::parse,
+    )?;
+    let permission = decode_engine_permission(arm.get_permission()?)?;
+    Ok(GrokSelection::new(
+        profile_id,
+        model_id,
+        permission,
+        reasoning_effort,
+        permission_mode,
+    ))
+}
+
+fn decode_cursor_selection(
+    arm: artisan_capnp::cursor_engine_selection::Reader<'_>,
+) -> Result<CursorSelection, ProtocolDecodeError> {
+    let profile_id = parse_profile_id(
+        read_text(
+            arm.get_profile_id(),
+            "request.setThreadEngineConfig.config.selectionV2.profileId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.profileId",
+    )?;
+    let model_id = parse_optional_model_id(
+        read_text(
+            arm.get_model_id(),
+            "request.setThreadEngineConfig.config.selectionV2.modelId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.modelId",
+    )?;
+    let reasoning_effort = parse_optional_setting(
+        read_text(
+            arm.get_reasoning_effort(),
+            "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
+        CursorReasoningEffort::parse,
+    )?;
+    let speed = parse_optional_setting(
+        read_text(
+            arm.get_speed(),
+            "request.setThreadEngineConfig.config.selectionV2.speed",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.speed",
+        CursorSpeed::parse,
+    )?;
+    let permission_mode = parse_optional_setting(
+        read_text(
+            arm.get_permission_mode(),
+            "request.setThreadEngineConfig.config.selectionV2.permissionMode",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.permissionMode",
+        CursorPermissionMode::parse,
+    )?;
+    let permission = decode_engine_permission(arm.get_permission()?)?;
+    Ok(CursorSelection::new(
+        profile_id,
+        model_id,
+        permission,
+        reasoning_effort,
+        speed,
+        permission_mode,
+    ))
+}
+
+fn decode_hermes_selection(
+    arm: artisan_capnp::hermes_engine_selection::Reader<'_>,
+) -> Result<HermesSelection, ProtocolDecodeError> {
+    let profile_id = parse_profile_id(
+        read_text(
+            arm.get_profile_id(),
+            "request.setThreadEngineConfig.config.selectionV2.profileId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.profileId",
+    )?;
+    let model_id = parse_required_model_id(
+        read_text(
+            arm.get_model_id(),
+            "request.setThreadEngineConfig.config.selectionV2.modelId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.modelId",
+    )?;
+    let route_id = parse_required_route_id(
+        read_text(
+            arm.get_route_id(),
+            "request.setThreadEngineConfig.config.selectionV2.routeId",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.routeId",
+    )?;
+    let reasoning_effort = parse_optional_setting(
+        read_text(
+            arm.get_reasoning_effort(),
+            "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
+        )?,
+        "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
+        HermesReasoningEffort::parse,
+    )?;
+    let permission_mode = HermesPermissionMode::parse(&read_text(
+        arm.get_permission_mode(),
+        "request.setThreadEngineConfig.config.selectionV2.permissionMode",
+    )?)
+    .map_err(|error| {
+        engine_config_error(
+            "request.setThreadEngineConfig.config.selectionV2.permissionMode",
+            error.reason(),
+        )
+    })?;
+    Ok(HermesSelection::new(
+        profile_id,
+        model_id,
+        route_id,
+        permission_mode,
+        reasoning_effort,
+        arm.get_fast(),
     ))
 }
 

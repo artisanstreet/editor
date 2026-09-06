@@ -68,10 +68,14 @@ pub use conversation::{
     UserMessageItem,
 };
 pub use engine_config::{
-    ApprovalMode, ByteLimit, CountLimit, EngineConfigError, EngineConfigReason,
-    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EnginePermissionPolicy,
-    EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection,
-    FilesystemAccess, FiniteMillis, NetworkAccess, OpenCode2Selection, WebSearchAccess,
+    ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
+    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed, EngineConfigError,
+    EngineConfigReason, EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId,
+    EnginePermissionPolicy, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FilesystemAccess, FiniteMillis, GrokPermissionMode, GrokReasoningEffort,
+    GrokSelection, HermesPermissionMode, HermesReasoningEffort, HermesSelection, NetworkAccess,
+    OpenCode2Selection, WebSearchAccess,
 };
 pub use events::{Event, FirstMessageQueued, ProjectAttached, ThreadCreated};
 pub use identifiers::{

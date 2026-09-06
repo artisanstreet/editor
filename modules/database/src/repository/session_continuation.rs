@@ -20,7 +20,6 @@ use crate::entities::{self, AssistantRunLifecycle};
 use super::{Repository, RepositoryError, corrupt_data, database_error};
 
 const PROVIDER_BINDING_VERSION: i64 = 1;
-const PROVIDER_BINDING_ENGINE: &str = "opencode2";
 const SESSION_ID_MAX_BYTES: usize = 256;
 
 /// Exact scope used to select a continuation.  The caller supplies the
@@ -318,7 +317,7 @@ async fn inspect_candidate<C: ConnectionTrait>(
 
     let config = load_run_config(&run)?;
     let config_engine = config.selection().engine_id();
-    let config_profile = config.selection().as_opencode2().profile_id();
+    let config_profile = config.selection().profile_id();
     if config_engine != query.engine_id {
         return Ok(SessionContinuationLookup::Incompatible(
             SessionContinuationIncompatible {
@@ -336,7 +335,7 @@ async fn inspect_candidate<C: ConnectionTrait>(
         ));
     }
 
-    let (binding_version, session_id, profile_id) = match decode_binding(&run)? {
+    let (binding_version, session_id, profile_id) = match decode_binding(&run, config_engine)? {
         BindingDisposition::Unbound => {
             return Ok(SessionContinuationLookup::Unavailable(
                 SessionContinuationUnavailable {
@@ -475,7 +474,7 @@ fn validate_run_row(
 fn load_run_config(
     run: &entities::assistant_run::Model,
 ) -> Result<artisan_domain::EngineRunConfig, RepositoryError> {
-    if run.engine_run_config_version != Some(1)
+    if run.engine_run_config_version != Some(1) && run.engine_run_config_version != Some(2)
         || run.engine_run_config_revision.is_none()
         || run
             .engine_run_config_revision
@@ -515,6 +514,7 @@ enum BindingDisposition {
 
 fn decode_binding(
     run: &entities::assistant_run::Model,
+    expected_engine: EngineId,
 ) -> Result<BindingDisposition, RepositoryError> {
     let (Some(version), Some(binding), Some(_bound_at_ms)) = (
         run.provider_binding_version,
@@ -552,7 +552,7 @@ fn decode_binding(
             "provider binding is not a valid bounded object",
         )
     })?;
-    if parsed.engine != PROVIDER_BINDING_ENGINE {
+    if EngineId::parse(&parsed.engine).ok() != Some(expected_engine) {
         return Ok(BindingDisposition::Incompatible(
             SessionContinuationIncompatibility::ProviderBindingEngine,
         ));

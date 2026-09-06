@@ -222,7 +222,11 @@ impl NativeApplication {
             .engine_settings
             .authoritative_config()
             .and_then(|config| {
-                let native = config.selection().as_opencode2();
+                // Saved-policy matching stays OpenCode2-shaped; another
+                // engine contributes no saved policy yet.
+                let artisan_domain::EngineSelection::OpenCode2(native) = config.selection() else {
+                    return None;
+                };
                 if snapshot.scope.as_ref()?.profile_id != native.profile_id().as_str() {
                     return None;
                 }

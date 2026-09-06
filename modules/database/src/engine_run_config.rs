@@ -9,11 +9,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CountLimit, ENGINE_CONFIG_MAX_ENCODED_BYTES, EngineAgentId,
-    EngineConfigError, EngineId, EngineModelId, EnginePermissionPolicy, EngineProfileId,
-    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis, NetworkAccess,
-    OpenCode2Selection, PermissionId, WebSearchAccess,
+    ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
+    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed,
+    ENGINE_CONFIG_MAX_ENCODED_BYTES, EngineAgentId, EngineConfigError, EngineId, EngineModelId,
+    EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
+    GrokPermissionMode, GrokReasoningEffort, GrokSelection, HermesPermissionMode,
+    HermesReasoningEffort, HermesSelection, NetworkAccess, OpenCode2Selection, PermissionId,
+    WebSearchAccess,
 };
 
 #[derive(Debug, Error)]
@@ -366,6 +370,59 @@ fn parse_web_search(value: &str) -> Result<WebSearchAccess, EngineRunConfigCodec
     }
 }
 
+fn convert_permission(
+    raw: &RawPermission,
+) -> Result<EnginePermissionPolicy, EngineRunConfigCodecError> {
+    let permission_id = PermissionId::parse(raw.permission_id.clone()).map_err(|_| {
+        EngineRunConfigCodecError::InvalidField {
+            field: "permission_id",
+        }
+    })?;
+    let agent_id = EngineAgentId::parse(raw.agent_id.clone())
+        .map_err(|_| EngineRunConfigCodecError::InvalidField { field: "agent_id" })?;
+    Ok(EnginePermissionPolicy::new(
+        permission_id,
+        agent_id,
+        parse_approval(&raw.approval)?,
+        parse_filesystem(&raw.filesystem)?,
+        parse_network(&raw.network)?,
+        parse_web_search(&raw.web_search)?,
+    ))
+}
+
+fn convert_runtime(raw: &RawRuntime) -> Result<EngineRuntimeControls, EngineRunConfigCodecError> {
+    EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: parse_millis(raw.attempt_budget_ms, "attempt_budget_ms")?,
+        readiness_budget: parse_millis(raw.readiness_budget_ms, "readiness_budget_ms")?,
+        health_budget: parse_millis(raw.health_budget_ms, "health_budget_ms")?,
+        prompt_budget: parse_millis(raw.prompt_budget_ms, "prompt_budget_ms")?,
+        stream_budget: parse_millis(raw.stream_budget_ms, "stream_budget_ms")?,
+        close_budget: parse_millis(raw.close_budget_ms, "close_budget_ms")?,
+        max_json_body_bytes: parse_bytes(raw.max_json_body_bytes, "max_json_body_bytes")?,
+        max_sse_line_bytes: parse_bytes(raw.max_sse_line_bytes, "max_sse_line_bytes")?,
+        max_sse_event_bytes: parse_bytes(raw.max_sse_event_bytes, "max_sse_event_bytes")?,
+        max_readiness_line_bytes: parse_bytes(
+            raw.max_readiness_line_bytes,
+            "max_readiness_line_bytes",
+        )?,
+        max_header_count: parse_count(raw.max_header_count, "max_header_count")?,
+        max_http_buffer_bytes: parse_bytes(raw.max_http_buffer_bytes, "max_http_buffer_bytes")?,
+        max_stderr_bytes: parse_bytes(raw.max_stderr_bytes, "max_stderr_bytes")?,
+        observation_capacity: parse_count(raw.observation_capacity, "observation_capacity")?,
+    })
+    .map_err(domain_error)
+}
+
+fn parse_optional_model(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<Option<EngineModelId>, EngineRunConfigCodecError> {
+    value
+        .map(EngineModelId::parse)
+        .transpose()
+        .map_err(|_| EngineRunConfigCodecError::InvalidField { field })
+}
+
 fn into_domain(raw: RawConfig) -> Result<EngineRunConfig, EngineRunConfigCodecError> {
     if raw.version != 1 {
         return Err(EngineRunConfigCodecError::InvalidField { field: "version" });
@@ -391,48 +448,9 @@ fn into_domain(raw: RawConfig) -> Result<EngineRunConfig, EngineRunConfigCodecEr
             field: "variant_id",
         })?;
 
-    let permission_id = PermissionId::parse(raw.permission.permission_id).map_err(|_| {
-        EngineRunConfigCodecError::InvalidField {
-            field: "permission_id",
-        }
-    })?;
-    let agent_id = EngineAgentId::parse(raw.permission.agent_id)
-        .map_err(|_| EngineRunConfigCodecError::InvalidField { field: "agent_id" })?;
-    let permission = EnginePermissionPolicy::new(
-        permission_id,
-        agent_id,
-        parse_approval(&raw.permission.approval)?,
-        parse_filesystem(&raw.permission.filesystem)?,
-        parse_network(&raw.permission.network)?,
-        parse_web_search(&raw.permission.web_search)?,
-    );
+    let permission = convert_permission(&raw.permission)?;
 
-    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
-        attempt_budget: parse_millis(raw.runtime.attempt_budget_ms, "attempt_budget_ms")?,
-        readiness_budget: parse_millis(raw.runtime.readiness_budget_ms, "readiness_budget_ms")?,
-        health_budget: parse_millis(raw.runtime.health_budget_ms, "health_budget_ms")?,
-        prompt_budget: parse_millis(raw.runtime.prompt_budget_ms, "prompt_budget_ms")?,
-        stream_budget: parse_millis(raw.runtime.stream_budget_ms, "stream_budget_ms")?,
-        close_budget: parse_millis(raw.runtime.close_budget_ms, "close_budget_ms")?,
-        max_json_body_bytes: parse_bytes(raw.runtime.max_json_body_bytes, "max_json_body_bytes")?,
-        max_sse_line_bytes: parse_bytes(raw.runtime.max_sse_line_bytes, "max_sse_line_bytes")?,
-        max_sse_event_bytes: parse_bytes(raw.runtime.max_sse_event_bytes, "max_sse_event_bytes")?,
-        max_readiness_line_bytes: parse_bytes(
-            raw.runtime.max_readiness_line_bytes,
-            "max_readiness_line_bytes",
-        )?,
-        max_header_count: parse_count(raw.runtime.max_header_count, "max_header_count")?,
-        max_http_buffer_bytes: parse_bytes(
-            raw.runtime.max_http_buffer_bytes,
-            "max_http_buffer_bytes",
-        )?,
-        max_stderr_bytes: parse_bytes(raw.runtime.max_stderr_bytes, "max_stderr_bytes")?,
-        observation_capacity: parse_count(
-            raw.runtime.observation_capacity,
-            "observation_capacity",
-        )?,
-    })
-    .map_err(domain_error)?;
+    let runtime = convert_runtime(&raw.runtime)?;
 
     Ok(EngineRunConfig::new(
         EngineSelection::OpenCode2(OpenCode2Selection::new(
@@ -442,11 +460,324 @@ fn into_domain(raw: RawConfig) -> Result<EngineRunConfig, EngineRunConfigCodecEr
     ))
 }
 
-/// Encodes one configuration into canonical bounded JSON bytes.
-pub(crate) fn encode(config: &EngineRunConfig) -> Result<Vec<u8>, EngineRunConfigCodecError> {
-    let selection = config.selection().as_opencode2();
-    let permission = selection.permission();
-    let runtime = config.runtime();
+#[derive(Serialize)]
+struct StoredCodexDetails<'a> {
+    model_id: Option<&'a str>,
+    reasoning_effort: Option<&'static str>,
+    service_tier: Option<&'static str>,
+    model_context_window: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct StoredClaudeDetails<'a> {
+    model_id: Option<&'a str>,
+    effort: Option<&'static str>,
+    permission_mode: Option<&'static str>,
+    disable_tools: bool,
+    safe_mode: bool,
+}
+
+#[derive(Serialize)]
+struct StoredGrokDetails<'a> {
+    model_id: Option<&'a str>,
+    reasoning_effort: Option<&'a str>,
+    permission_mode: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct StoredCursorDetails<'a> {
+    model_id: Option<&'a str>,
+    reasoning_effort: Option<&'a str>,
+    speed: Option<&'static str>,
+    permission_mode: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct StoredHermesDetails<'a> {
+    model_id: &'a str,
+    route_id: &'a str,
+    reasoning_effort: Option<&'a str>,
+    permission_mode: &'static str,
+    fast: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum StoredDetails<'a> {
+    Codex(StoredCodexDetails<'a>),
+    Claude(StoredClaudeDetails<'a>),
+    Grok(StoredGrokDetails<'a>),
+    Cursor(StoredCursorDetails<'a>),
+    Hermes(StoredHermesDetails<'a>),
+}
+
+#[derive(Serialize)]
+struct StoredConfigV2<'a> {
+    version: u16,
+    engine: &'static str,
+    profile_id: &'a str,
+    permission: Option<StoredPermission<'a>>,
+    runtime: StoredRuntime,
+    details: StoredDetails<'a>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfigV2 {
+    version: u16,
+    engine: String,
+    profile_id: String,
+    permission: Option<RawPermission>,
+    runtime: RawRuntime,
+    details: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCodexDetails {
+    model_id: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    model_context_window: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClaudeDetails {
+    model_id: Option<String>,
+    effort: Option<String>,
+    permission_mode: Option<String>,
+    disable_tools: bool,
+    safe_mode: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGrokDetails {
+    model_id: Option<String>,
+    reasoning_effort: Option<String>,
+    permission_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCursorDetails {
+    model_id: Option<String>,
+    reasoning_effort: Option<String>,
+    speed: Option<String>,
+    permission_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHermesDetails {
+    model_id: String,
+    route_id: String,
+    reasoning_effort: Option<String>,
+    permission_mode: String,
+    fast: bool,
+}
+
+#[derive(Deserialize)]
+struct VersionPeek {
+    version: u16,
+}
+
+fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCodecError> {
+    if raw.version != 2 {
+        return Err(EngineRunConfigCodecError::InvalidField { field: "version" });
+    }
+    let engine = EngineId::parse(&raw.engine)
+        .map_err(|_| EngineRunConfigCodecError::InvalidField { field: "engine" })?;
+    if engine == EngineId::OpenCode2 {
+        return Err(EngineRunConfigCodecError::InvalidField { field: "engine" });
+    }
+    let profile_id = EngineProfileId::parse(raw.profile_id).map_err(|_| {
+        EngineRunConfigCodecError::InvalidField {
+            field: "profile_id",
+        }
+    })?;
+    let permission = raw
+        .permission
+        .as_ref()
+        .map(convert_permission)
+        .transpose()?;
+    if engine == EngineId::Hermes && permission.is_some() {
+        return Err(EngineRunConfigCodecError::InvalidField {
+            field: "permission",
+        });
+    }
+    let runtime = convert_runtime(&raw.runtime)?;
+    let selection = match engine {
+        EngineId::OpenCode2 => {
+            return Err(EngineRunConfigCodecError::InvalidField { field: "engine" });
+        }
+        EngineId::Codex => {
+            let permission = permission.ok_or(EngineRunConfigCodecError::InvalidField {
+                field: "permission",
+            })?;
+            let details: RawCodexDetails = serde_json::from_value(raw.details)
+                .map_err(|_| EngineRunConfigCodecError::Malformed)?;
+            EngineSelection::Codex(
+                CodexSelection::new(
+                    profile_id,
+                    parse_optional_model(details.model_id, "model_id")?,
+                    permission,
+                    details
+                        .reasoning_effort
+                        .map(CodexReasoningEffort::parse)
+                        .transpose()
+                        .map_err(domain_error)?,
+                    details
+                        .service_tier
+                        .map(CodexServiceTier::parse)
+                        .transpose()
+                        .map_err(domain_error)?,
+                    details
+                        .model_context_window
+                        .map(CodexModelContextWindow::new)
+                        .transpose()
+                        .map_err(domain_error)?,
+                )
+                .map_err(domain_error)?,
+            )
+        }
+        EngineId::Claude => {
+            let permission = permission.ok_or(EngineRunConfigCodecError::InvalidField {
+                field: "permission",
+            })?;
+            let details: RawClaudeDetails = serde_json::from_value(raw.details)
+                .map_err(|_| EngineRunConfigCodecError::Malformed)?;
+            EngineSelection::Claude(
+                ClaudeSelection::new(
+                    profile_id,
+                    parse_optional_model(details.model_id, "model_id")?,
+                    permission,
+                    details
+                        .effort
+                        .map(ClaudeEffort::parse)
+                        .transpose()
+                        .map_err(domain_error)?,
+                    details
+                        .permission_mode
+                        .map(ClaudePermissionMode::parse)
+                        .transpose()
+                        .map_err(domain_error)?,
+                    details.disable_tools,
+                    details.safe_mode,
+                )
+                .map_err(domain_error)?,
+            )
+        }
+        EngineId::Grok => {
+            let permission = permission.ok_or(EngineRunConfigCodecError::InvalidField {
+                field: "permission",
+            })?;
+            let details: RawGrokDetails = serde_json::from_value(raw.details)
+                .map_err(|_| EngineRunConfigCodecError::Malformed)?;
+            EngineSelection::Grok(GrokSelection::new(
+                profile_id,
+                parse_optional_model(details.model_id, "model_id")?,
+                permission,
+                details
+                    .reasoning_effort
+                    .map(GrokReasoningEffort::parse)
+                    .transpose()
+                    .map_err(domain_error)?,
+                details
+                    .permission_mode
+                    .map(GrokPermissionMode::parse)
+                    .transpose()
+                    .map_err(domain_error)?,
+            ))
+        }
+        EngineId::Cursor => {
+            let permission = permission.ok_or(EngineRunConfigCodecError::InvalidField {
+                field: "permission",
+            })?;
+            let details: RawCursorDetails = serde_json::from_value(raw.details)
+                .map_err(|_| EngineRunConfigCodecError::Malformed)?;
+            EngineSelection::Cursor(CursorSelection::new(
+                profile_id,
+                parse_optional_model(details.model_id, "model_id")?,
+                permission,
+                details
+                    .reasoning_effort
+                    .map(CursorReasoningEffort::parse)
+                    .transpose()
+                    .map_err(domain_error)?,
+                details
+                    .speed
+                    .map(CursorSpeed::parse)
+                    .transpose()
+                    .map_err(domain_error)?,
+                details
+                    .permission_mode
+                    .map(CursorPermissionMode::parse)
+                    .transpose()
+                    .map_err(domain_error)?,
+            ))
+        }
+        EngineId::Hermes => {
+            let details: RawHermesDetails = serde_json::from_value(raw.details)
+                .map_err(|_| EngineRunConfigCodecError::Malformed)?;
+            let model_id = EngineModelId::parse(details.model_id)
+                .map_err(|_| EngineRunConfigCodecError::InvalidField { field: "model_id" })?;
+            let route_id = EngineRouteId::parse(details.route_id)
+                .map_err(|_| EngineRunConfigCodecError::InvalidField { field: "route_id" })?;
+            EngineSelection::Hermes(HermesSelection::new(
+                profile_id,
+                model_id,
+                route_id,
+                HermesPermissionMode::parse(&details.permission_mode).map_err(domain_error)?,
+                details
+                    .reasoning_effort
+                    .map(HermesReasoningEffort::parse)
+                    .transpose()
+                    .map_err(domain_error)?,
+                details.fast,
+            ))
+        }
+    };
+    Ok(EngineRunConfig::new(selection, runtime))
+}
+
+fn stored_permission(permission: &EnginePermissionPolicy) -> StoredPermission<'_> {
+    StoredPermission {
+        permission_id: permission.permission_id().as_str(),
+        agent_id: permission.agent_id().as_str(),
+        approval: permission.approval().as_str(),
+        filesystem: permission.filesystem().as_str(),
+        network: permission.network().as_str(),
+        web_search: permission.web_search().as_str(),
+    }
+}
+
+fn stored_runtime(runtime: EngineRuntimeControls) -> StoredRuntime {
+    StoredRuntime {
+        attempt_budget_ms: runtime.attempt_budget().get(),
+        readiness_budget_ms: runtime.readiness_budget().get(),
+        health_budget_ms: runtime.health_budget().get(),
+        prompt_budget_ms: runtime.prompt_budget().get(),
+        stream_budget_ms: runtime.stream_budget().get(),
+        close_budget_ms: runtime.close_budget().get(),
+        max_json_body_bytes: runtime.max_json_body_bytes().get(),
+        max_sse_line_bytes: runtime.max_sse_line_bytes().get(),
+        max_sse_event_bytes: runtime.max_sse_event_bytes().get(),
+        max_readiness_line_bytes: runtime.max_readiness_line_bytes().get(),
+        max_header_count: runtime.max_header_count().get(),
+        max_http_buffer_bytes: runtime.max_http_buffer_bytes().get(),
+        max_stderr_bytes: runtime.max_stderr_bytes().get(),
+        observation_capacity: runtime.observation_capacity().get(),
+    }
+}
+
+/// Encodes the legacy version 1 shape byte-identically to previous
+/// revisions. Only `OpenCode` 2 selections use this path.
+fn encode_v1(
+    selection: &OpenCode2Selection,
+    runtime: EngineRuntimeControls,
+) -> Result<Vec<u8>, EngineRunConfigCodecError> {
     let stored = StoredConfig {
         version: 1,
         engine: EngineId::OpenCode2.as_str(),
@@ -454,32 +785,113 @@ pub(crate) fn encode(config: &EngineRunConfig) -> Result<Vec<u8>, EngineRunConfi
         model_id: selection.model_id().as_str(),
         route_id: selection.route_id().as_str(),
         variant_id: selection.variant_id().map(EngineVariantId::as_str),
-        permission: StoredPermission {
-            permission_id: permission.permission_id().as_str(),
-            agent_id: permission.agent_id().as_str(),
-            approval: permission.approval().as_str(),
-            filesystem: permission.filesystem().as_str(),
-            network: permission.network().as_str(),
-            web_search: permission.web_search().as_str(),
-        },
-        runtime: StoredRuntime {
-            attempt_budget_ms: runtime.attempt_budget().get(),
-            readiness_budget_ms: runtime.readiness_budget().get(),
-            health_budget_ms: runtime.health_budget().get(),
-            prompt_budget_ms: runtime.prompt_budget().get(),
-            stream_budget_ms: runtime.stream_budget().get(),
-            close_budget_ms: runtime.close_budget().get(),
-            max_json_body_bytes: runtime.max_json_body_bytes().get(),
-            max_sse_line_bytes: runtime.max_sse_line_bytes().get(),
-            max_sse_event_bytes: runtime.max_sse_event_bytes().get(),
-            max_readiness_line_bytes: runtime.max_readiness_line_bytes().get(),
-            max_header_count: runtime.max_header_count().get(),
-            max_http_buffer_bytes: runtime.max_http_buffer_bytes().get(),
-            max_stderr_bytes: runtime.max_stderr_bytes().get(),
-            observation_capacity: runtime.observation_capacity().get(),
-        },
+        permission: stored_permission(selection.permission()),
+        runtime: stored_runtime(runtime),
     };
-    let encoded = serde_json::to_vec(&stored).map_err(|_| EngineRunConfigCodecError::Encode)?;
+    serde_json::to_vec(&stored).map_err(|_| EngineRunConfigCodecError::Encode)
+}
+
+fn encode_v2(
+    engine: EngineId,
+    profile_id: &str,
+    permission: Option<&EnginePermissionPolicy>,
+    runtime: EngineRuntimeControls,
+    details: StoredDetails<'_>,
+) -> Result<Vec<u8>, EngineRunConfigCodecError> {
+    let stored = StoredConfigV2 {
+        version: 2,
+        engine: engine.as_str(),
+        profile_id,
+        permission: permission.map(stored_permission),
+        runtime: stored_runtime(runtime),
+        details,
+    };
+    serde_json::to_vec(&stored).map_err(|_| EngineRunConfigCodecError::Encode)
+}
+
+/// Encodes one configuration into canonical bounded JSON bytes.
+///
+/// `OpenCode` 2 selections encode as version 1, byte-identical to previous
+/// revisions. Every other engine encodes as the tagged version 2 shape.
+pub(crate) fn encode(config: &EngineRunConfig) -> Result<Vec<u8>, EngineRunConfigCodecError> {
+    let encoded = match config.selection() {
+        EngineSelection::OpenCode2(selection) => encode_v1(selection, config.runtime())?,
+        EngineSelection::Codex(selection) => encode_v2(
+            EngineId::Codex,
+            selection.profile_id().as_str(),
+            Some(selection.permission()),
+            config.runtime(),
+            StoredDetails::Codex(StoredCodexDetails {
+                model_id: selection.model_id().map(EngineModelId::as_str),
+                reasoning_effort: selection
+                    .reasoning_effort()
+                    .map(CodexReasoningEffort::as_str),
+                service_tier: selection.service_tier().map(CodexServiceTier::as_str),
+                model_context_window: selection
+                    .model_context_window()
+                    .map(CodexModelContextWindow::get),
+            }),
+        )?,
+        EngineSelection::Claude(selection) => encode_v2(
+            EngineId::Claude,
+            selection.profile_id().as_str(),
+            Some(selection.permission()),
+            config.runtime(),
+            StoredDetails::Claude(StoredClaudeDetails {
+                model_id: selection.model_id().map(EngineModelId::as_str),
+                effort: selection.effort().map(ClaudeEffort::as_str),
+                permission_mode: selection
+                    .permission_mode()
+                    .map(ClaudePermissionMode::as_str),
+                disable_tools: selection.disable_tools(),
+                safe_mode: selection.safe_mode(),
+            }),
+        )?,
+        EngineSelection::Grok(selection) => encode_v2(
+            EngineId::Grok,
+            selection.profile_id().as_str(),
+            Some(selection.permission()),
+            config.runtime(),
+            StoredDetails::Grok(StoredGrokDetails {
+                model_id: selection.model_id().map(EngineModelId::as_str),
+                reasoning_effort: selection
+                    .reasoning_effort()
+                    .map(GrokReasoningEffort::as_str),
+                permission_mode: selection.permission_mode().map(GrokPermissionMode::as_str),
+            }),
+        )?,
+        EngineSelection::Cursor(selection) => encode_v2(
+            EngineId::Cursor,
+            selection.profile_id().as_str(),
+            Some(selection.permission()),
+            config.runtime(),
+            StoredDetails::Cursor(StoredCursorDetails {
+                model_id: selection.model_id().map(EngineModelId::as_str),
+                reasoning_effort: selection
+                    .reasoning_effort()
+                    .map(CursorReasoningEffort::as_str),
+                speed: selection.speed().map(CursorSpeed::as_str),
+                permission_mode: selection
+                    .permission_mode()
+                    .map(CursorPermissionMode::as_str),
+            }),
+        )?,
+        EngineSelection::Hermes(selection) => encode_v2(
+            EngineId::Hermes,
+            selection.profile_id().as_str(),
+            None,
+            config.runtime(),
+            StoredDetails::Hermes(StoredHermesDetails {
+                model_id: selection.model_id().as_str(),
+                route_id: selection.route_id().as_str(),
+                reasoning_effort: selection
+                    .reasoning_effort()
+                    .map(HermesReasoningEffort::as_str),
+                permission_mode: selection.permission_mode().as_str(),
+                fast: selection.fast(),
+            }),
+        )?,
+    };
     if encoded.len() > ENGINE_CONFIG_MAX_ENCODED_BYTES {
         return Err(EngineRunConfigCodecError::TooLarge);
     }
@@ -487,13 +899,31 @@ pub(crate) fn encode(config: &EngineRunConfig) -> Result<Vec<u8>, EngineRunConfi
 }
 
 /// Decodes one stored configuration and rejects any noncanonical bytes.
+///
+/// Version 1 blobs keep the exact legacy `OpenCode` 2 shape. Version 2
+/// blobs carry one tagged per-engine selection. Unknown engines and unknown
+/// versions are rejected as typed field errors, never defaulted.
 pub(crate) fn decode(bytes: &[u8]) -> Result<EngineRunConfig, EngineRunConfigCodecError> {
     if bytes.len() > ENGINE_CONFIG_MAX_ENCODED_BYTES {
         return Err(EngineRunConfigCodecError::TooLarge);
     }
-    let raw: RawConfig =
+    let peek: VersionPeek =
         serde_json::from_slice(bytes).map_err(|_| EngineRunConfigCodecError::Malformed)?;
-    let config = into_domain(raw)?;
+    let config = match peek.version {
+        1 => {
+            let raw: RawConfig =
+                serde_json::from_slice(bytes).map_err(|_| EngineRunConfigCodecError::Malformed)?;
+            into_domain(raw)?
+        }
+        2 => {
+            let raw: RawConfigV2 =
+                serde_json::from_slice(bytes).map_err(|_| EngineRunConfigCodecError::Malformed)?;
+            into_domain_v2(raw)?
+        }
+        _ => {
+            return Err(EngineRunConfigCodecError::InvalidField { field: "version" });
+        }
+    };
     let canonical = encode(&config)?;
     if canonical.as_slice() != bytes {
         return Err(EngineRunConfigCodecError::NonCanonical);

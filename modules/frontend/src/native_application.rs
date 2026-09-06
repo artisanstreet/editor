@@ -1547,9 +1547,11 @@ impl NativeApplication {
         let model_label = self
             .engine_settings
             .authoritative_config()
-            .map(|config| {
-                let artisan_domain::EngineSelection::OpenCode2(selection) = config.selection();
-                selection.model_id().as_str().to_owned()
+            .and_then(|config| match config.selection() {
+                artisan_domain::EngineSelection::OpenCode2(selection) => {
+                    Some(selection.model_id().as_str().to_owned())
+                }
+                other => other.model_id().map(|model| model.as_str().to_owned()),
             })
             .unwrap_or_else(|| "Select model".into());
         self.composer.update(cx, |composer, composer_cx| {
@@ -4205,7 +4207,7 @@ impl NativeApplication {
             return;
         };
         let profile = self.engine_settings.authoritative_config()
-            .map(|config| config.selection().as_opencode2().profile_id().clone())
+            .map(|config| config.selection().profile_id().clone())
             .or_else(|| match self.engine_settings.registry_view() {
                 crate::engine_settings::RegistryView::Present(profiles) if profiles.len() == 1 => profiles.into_iter().next(),
                 _ => None,
