@@ -490,12 +490,27 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
         .engine_run_config
         .expect("configured thread has a snapshot")
         .into_vec();
+    // The second run needs its own turn row: origin_turn_id is unique per
+    // run, so reusing the seeded turn would collide.
+    entities::conversation_turn::ActiveModel {
+        turn_id: Set("turn-codex".to_owned()),
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(1),
+        kind: Set(OrdinalKind::Turn),
+        revision: Set(0),
+        lifecycle: Set(EntityLifecycle::Pending),
+        created_at_ms: Set(2),
+        updated_at_ms: Set(2),
+    }
+    .insert(&database)
+    .await
+    .expect("codex turn should insert");
     entities::assistant_run::ActiveModel {
         run_id: Set("run-codex".to_owned()),
         thread_id: Set(THREAD_ID.to_owned()),
         run_start_key: Set(entities::OpaqueBytes::new(vec![1; 32])),
         origin_message_id: Set(MESSAGE_ID.to_owned()),
-        origin_turn_id: Set(TURN_ID.to_owned()),
+        origin_turn_id: Set("turn-codex".to_owned()),
         lifecycle: Set(AssistantRunLifecycle::Completed),
         generation: Set(1),
         owner: Set(None),
