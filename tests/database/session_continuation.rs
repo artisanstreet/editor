@@ -17,7 +17,7 @@ use artisan_domain::{
     ThreadId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 
 const THREAD_ID: &str = "thread-continuation";
 const PROJECT_ID: &str = "project-continuation";
@@ -105,7 +105,7 @@ async fn seed_thread(database: &DatabaseConnection) {
     .expect("conversation state should insert");
 }
 
-async fn seed_run(
+async fn seed_run_with_snapshot(
     database: &DatabaseConnection,
     run_id: &str,
     created_at_ms: i64,
@@ -113,6 +113,7 @@ async fn seed_run(
     profile_id: &str,
     binding: Option<&str>,
     checkpoint_sequence: Option<i64>,
+    snapshot: Option<(i64, Vec<u8>)>,
 ) {
     let message_id = format!("message-{run_id}");
     let turn_id = format!("turn-{run_id}");
@@ -176,6 +177,9 @@ async fn seed_run(
         let slot = index % run_start_key.len();
         run_start_key[slot] = run_start_key[slot].wrapping_add(byte);
     }
+    // Snapshots are write-once at launch: the version and blob come from the
+    // override when present and fall back to the legacy version 1 shape.
+    let (snapshot_version, snapshot_blob) = snapshot.unwrap_or((1, config_blob(profile_id)));
     entities::assistant_run::ActiveModel {
         run_id: Set(run_id.to_owned()),
         thread_id: Set(THREAD_ID.to_owned()),
@@ -195,9 +199,9 @@ async fn seed_run(
         created_at_ms: Set(created_at_ms),
         updated_at_ms: Set(created_at_ms + 10),
         terminal_at_ms: Set(settled.then_some(created_at_ms + 10)),
-        engine_run_config_version: Set(Some(1)),
+        engine_run_config_version: Set(Some(snapshot_version)),
         engine_run_config_revision: Set(Some(1)),
-        engine_run_config: Set(Some(OpaqueBytes::new(config_blob(profile_id)))),
+        engine_run_config: Set(Some(OpaqueBytes::new(snapshot_blob))),
     }
     .insert(database)
     .await
@@ -226,6 +230,28 @@ async fn seed_run(
         .await
         .expect("batch receipt should insert");
     }
+}
+
+async fn seed_run(
+    database: &DatabaseConnection,
+    run_id: &str,
+    created_at_ms: i64,
+    lifecycle: AssistantRunLifecycle,
+    profile_id: &str,
+    binding: Option<&str>,
+    checkpoint_sequence: Option<i64>,
+) {
+    seed_run_with_snapshot(
+        database,
+        run_id,
+        created_at_ms,
+        lifecycle,
+        profile_id,
+        binding,
+        checkpoint_sequence,
+        None,
+    )
+    .await;
 }
 
 fn is_active(lifecycle: &AssistantRunLifecycle) -> bool {
@@ -593,7 +619,9 @@ fn codex_config() -> EngineRunConfig {
 async fn codex_run_never_continues_as_opencode2_and_reports_binding_engine() {
     let (database, repository) = migrated_memory_database().await;
     // Promote the thread to a Codex configuration through the public API,
-    // then snapshot that exact configuration onto a settled run row.
+    // then snapshot that exact configuration onto a settled run row at
+    // insert time. Snapshots are write-once, so the row is inserted with
+    // the codex blob, never updated to it.
     repository
         .set_thread_engine_config(SetThreadEngineConfigInput {
             request_id: RequestId::parse("request-config-codex").expect("request id is valid"),
@@ -606,7 +634,15 @@ async fn codex_run_never_continues_as_opencode2_and_reports_binding_engine() {
         })
         .await
         .expect("codex configuration should persist");
-    seed_run(
+    let thread_blob = entities::thread::Entity::find_by_id(THREAD_ID)
+        .one(&database)
+        .await
+        .expect("thread should read")
+        .expect("thread should exist")
+        .engine_run_config
+        .expect("codex thread has a snapshot")
+        .into_vec();
+    seed_run_with_snapshot(
         &database,
         "run-codex",
         100,
@@ -614,14 +650,9 @@ async fn codex_run_never_continues_as_opencode2_and_reports_binding_engine() {
         "profile-codex",
         Some("session-codex"),
         Some(1),
+        Some((2, thread_blob)),
     )
     .await;
-    database
-        .execute_unprepared(
-            "UPDATE assistant_runs SET engine_run_config_version = 2, engine_run_config_revision = 2, engine_run_config = (SELECT engine_run_config FROM threads WHERE thread_id = 'thread-continuation') WHERE run_id = 'run-codex'",
-        )
-        .await
-        .expect("run snapshot should follow the thread configuration");
 
     // An OpenCode2 query over a Codex run is engine-incompatible, never coerced.
     let SessionContinuationLookup::Incompatible(engine_mismatch) = repository
