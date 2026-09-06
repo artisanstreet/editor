@@ -38,13 +38,11 @@ use capnp::serialize;
 use thiserror::Error;
 
 use crate::artisan_capnp::{
-    self, composer_catalog_result, conversation_item, conversation_patch,
-    conversation_query_request, conversation_subscribe_request, conversation_subscription_started,
-    directory_listing, directory_pick_outcome, engine_config_precondition, engine_run_config,
-    engine_selection_v2, envelope, event, lifecycle_request, lifecycle_response,
-    list_directories_request, model_favorites_snapshot, protocol_error, query_range,
-    read_composer_catalog_request, request, response, set_model_favorite_receipt,
-    set_model_favorite_request, set_thread_engine_config_request,
+    self, conversation_item, conversation_patch, conversation_query_request,
+    conversation_subscribe_request, conversation_subscription_started, directory_listing,
+    directory_pick_outcome, engine_config_precondition, engine_run_config, engine_selection_v2,
+    envelope, event, lifecycle_request, lifecycle_response, list_directories_request,
+    protocol_error, query_range, request, response, set_thread_engine_config_request,
 };
 use crate::types::{
     ActiveRunResult, CatalogSnapshotWire, CatalogSnapshotWireError, ClientRequest,
@@ -2584,7 +2582,7 @@ fn decode_grok_selection(
             "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
         )?,
         "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
-        GrokReasoningEffort::parse,
+        |text| GrokReasoningEffort::parse(text),
     )?;
     let permission_mode = parse_optional_setting(
         read_text(
@@ -2627,7 +2625,7 @@ fn decode_cursor_selection(
             "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
         )?,
         "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
-        CursorReasoningEffort::parse,
+        |text| CursorReasoningEffort::parse(text),
     )?;
     let speed = parse_optional_setting(
         read_text(
@@ -2686,7 +2684,7 @@ fn decode_hermes_selection(
             "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
         )?,
         "request.setThreadEngineConfig.config.selectionV2.reasoningEffort",
-        HermesReasoningEffort::parse,
+        |text| HermesReasoningEffort::parse(text),
     )?;
     let permission_mode = HermesPermissionMode::parse(&read_text(
         arm.get_permission_mode(),
