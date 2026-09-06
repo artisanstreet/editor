@@ -491,7 +491,17 @@ async fn non_opencode2_snapshot_cannot_authorize_usage_as_opencode2() {
         .expect("configured thread has a snapshot")
         .into_vec();
     // The second run needs its own turn row: origin_turn_id is unique per
-    // run, so reusing the seeded turn would collide.
+    // run, so reusing the seeded turn would collide. The turn row belongs
+    // to its ordinal row, so that comes first like in the seed template.
+    entities::conversation_ordinal::ActiveModel {
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(1),
+        kind: Set(OrdinalKind::Turn),
+        entity_id: Set("turn-codex".to_owned()),
+    }
+    .insert(&database)
+    .await
+    .expect("codex turn ordinal should insert");
     entities::conversation_turn::ActiveModel {
         turn_id: Set("turn-codex".to_owned()),
         thread_id: Set(THREAD_ID.to_owned()),
