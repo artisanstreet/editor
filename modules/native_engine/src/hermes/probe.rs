@@ -32,6 +32,13 @@ pub const DEFAULT_PROBE_DEADLINE: Duration = Duration::from_secs(30);
 /// Poll interval while waiting for the `--version` child to exit.
 pub const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Grace period for drain threads to observe pipe EOF after a kill.
+///
+/// A killed child's grandchildren can outlive it while holding the pipe write
+/// ends open, so pipe EOF may arrive long after the kill. Past this grace the
+/// probe detaches instead of blocking its return.
+pub const DRAIN_JOIN_GRACE: Duration = Duration::from_secs(1);
+
 /// Byte and time bounds for one `--version` spawn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProbeLimits {
@@ -338,12 +345,33 @@ fn kill_and_reap(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Joins a drain thread within a bounded grace, then detaches.
+///
+/// After a kill, an orphaned grandchild may keep the pipe write ends open, so
+/// the drain's blocking `read()` may not observe EOF promptly. This polls for
+/// thread completion up to `DRAIN_JOIN_GRACE` and then drops the handle,
+/// detaching the drain: the thread keeps its owned pipe handle and exits on
+/// its own when EOF finally arrives, while the probe returns immediately.
+/// Dropping the handle retains no child output.
+fn join_or_detach(thread: thread::JoinHandle<Result<Vec<u8>, HermesProbeError>>) {
+    let start = Instant::now();
+    while !thread.is_finished() {
+        if start.elapsed() >= DRAIN_JOIN_GRACE {
+            return;
+        }
+        thread::sleep(PROBE_POLL_INTERVAL);
+    }
+    let _ = thread.join();
+}
+
 /// Spawns one executable with the given arguments and captures both streams.
 ///
 /// Both pipes drain concurrently on helper threads under the per-stream byte
 /// bound while the caller waits for exit under the deadline. The child is
-/// killed and reaped on timeout and on any plumbing failure; the observed
-/// exit path reaps via wait before the drain results are collected.
+/// killed and reaped on timeout and on any plumbing failure, and the drain
+/// threads are then joined only within a bounded grace (an orphaned
+/// grandchild may hold the pipes open past the kill); the observed exit path
+/// reaps via wait before the drain results are collected.
 ///
 /// # Errors
 ///
@@ -388,8 +416,8 @@ pub fn spawn_capture(
             Ok(None) => {
                 if Instant::now() >= deadline {
                     kill_and_reap(&mut child);
-                    let _ = stdout_thread.join();
-                    let _ = stderr_thread.join();
+                    join_or_detach(stdout_thread);
+                    join_or_detach(stderr_thread);
                     return Err(HermesProbeError::ProbeTimeout);
                 }
                 thread::sleep(PROBE_POLL_INTERVAL);
@@ -397,8 +425,8 @@ pub fn spawn_capture(
             }
             Err(_) => {
                 kill_and_reap(&mut child);
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
+                join_or_detach(stdout_thread);
+                join_or_detach(stderr_thread);
                 return Err(HermesProbeError::SpawnFailed);
             }
         };
