@@ -60,6 +60,10 @@ use crate::native_composer::{NativeComposer, NativeComposerEvent};
 use crate::native_composer_controls::{
     NativeComposerControls, NativeComposerControlsEvent, NativeComposerControlsSnapshot,
 };
+use crate::native_composer_material::{
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
 use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
 use crate::native_model_catalog::NativeModelCatalog;
 use crate::native_model_selector::{NativeModelSelector, NativeModelSelectorStatus};
@@ -1125,6 +1129,7 @@ impl NativeApplication {
 
     fn desktop_profile(&self, cx: &Context<Self>) -> Div {
         let theme = self.desktop_theme;
+        let profile_feedback = self.theme.colors.foreground.with_alpha(0.08).to_paint();
         let origin = self.profile_origin.clone();
         let avatar_theme = self.theme;
         let name = self.profile_name.clone();
@@ -1161,16 +1166,20 @@ impl NativeApplication {
             .p(px(5.0))
             .border_1()
             .border_color(theme.line)
-            .bg(if self.profile_menu.is_open() {
-                theme.selected
-            } else {
-                theme.field
+            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+            .bg(glass_foreground_base(self.theme))
+            .when(self.profile_menu.is_open(), move |style| {
+                style.bg(profile_feedback)
             })
-            .hover(move |style| style.bg(theme.selected))
+            .hover(move |style| style.bg(profile_feedback))
+            .shadow(glass_card_shadows())
             .focus(move |style| style.border_color(theme.secondary))
             .flex()
             .items_center()
             .gap(px(8.0))
+            .relative()
+            .child(glass_material_layer(GlassStrength::Quiet, px(8.0)))
+            .child(glass_highlight_layer(GlassStrength::Quiet, px(8.0)))
             .child(
                 div()
                     .size(px(32.0))
@@ -1281,11 +1290,16 @@ impl NativeApplication {
                 .w(px(248.0))
                 .p(px(6.0))
                 .rounded(px(12.0))
-                .bg(theme.field)
+                .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+                .bg(glass_foreground_base(self.theme))
                 .border_1()
                 .border_color(theme.line)
+                .shadow(glass_card_shadows())
                 .flex()
                 .flex_col()
+                .relative()
+                .child(glass_material_layer(GlassStrength::Quiet, px(12.0)))
+                .child(glass_highlight_layer(GlassStrength::Quiet, px(12.0)))
                 .block_mouse_except_scroll()
                 .on_mouse_down_out(cx.listener(|app, event: &gpui::MouseDownEvent, _, cx| {
                     let trigger = app.profile_origin.get();
@@ -1335,12 +1349,11 @@ impl NativeApplication {
                         .gap(px(8.0))
                         .rounded(px(6.0))
                         .cursor_pointer()
-                        .bg(if self.profile_menu.highlighted_index() == Some(index) {
-                            theme.selected
-                        } else {
-                            theme.field
-                        })
-                        .hover(|style| style.bg(theme.selected))
+                        .when(
+                            self.profile_menu.highlighted_index() == Some(index),
+                            move |style| style.bg(profile_feedback),
+                        )
+                        .hover(move |style| style.bg(profile_feedback))
                         .child(desktop_nav_glyph(icon, theme))
                         .child(desktop_muted(theme, label))
                         .on_click(cx.listener(move |app, _, window, cx| {
