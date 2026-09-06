@@ -19,12 +19,11 @@
 //!   is transient — resolved fresh every frame and restored after the
 //!   delegated paint returns normally — so a later parent recolor cannot go stale through
 //!   a frozen refinement.
-//! - **Full-color** assets render through `img()` with an explicitly
-//!   constructed [`ImageSource::Resource`] of the [`gpui::Resource::Embedded`]
-//!   variant. The explicit variant matters: upstream `From<&str>`
-//!   classifies bare catalog keys such as `"svgl.gitlab"` as URIs (they parse
-//!   as `http_client::Uri`), which would send rendering off to HTTP instead
-//!   of the embedded bytes.
+//! - **Full-color** assets use the local [`FullColorSvg`] element. It resolves
+//!   the catalog bytes explicitly, parses each SVG once, and asks GPUI's public
+//!   [`gpui::SvgRenderer`] to produce a bounded, size-specific raster at the
+//!   actual laid-out glyph size. This avoids routing bare catalog keys through
+//!   the general image loader, where they can be interpreted as URIs.
 //!
 //! Both pipelines resolve their bytes through [`CatalogAssetSource`], the
 //! ui-owned, stateless [`AssetSource`] installed during app assembly with
@@ -44,19 +43,25 @@
 //!   its [`AssetSource`] signatures require (`gpui::Result`), and the
 //!   stateless design never constructs an error, so no first-party `anyhow`
 //!   dependency arises.
-//! - Element-level color and layout behavior (alpha-mask tinting, sprite
-//!   caching, SVG rasterization scale) is owned by pinned GPUI internals and
-//!   is not reimplemented here.
+//! - Element-level color and layout behavior (alpha-mask tinting and sprite
+//!   compositing) remains owned by pinned GPUI internals. Full-color SVG
+//!   parsing and its bounded size-specific raster cache are the one deliberate
+//!   exception, because intrinsic-size rasterization is too coarse for these
+//!   small catalog marks.
 
 use std::borrow::Cow;
 use std::panic::Location;
 
 use artisan_assets::AssetId;
 use gpui::{
-    App, AssetSource, Bounds, Element, ElementId, GlobalElementId, Hitbox, ImageSource, Img,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Resource, SharedString, StyleRefinement,
-    Styled, Svg, TextStyleRefinement, Window, img, svg,
+    App, AssetSource, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId,
+    IntoElement, LayoutId, Pixels, SharedString, StyleRefinement, Styled, Svg, TextStyleRefinement,
+    Window, svg,
 };
+
+#[path = "full_color_svg.rs"]
+mod full_color_svg;
+use self::full_color_svg::FullColorSvg;
 
 // White-box unit tests for this module's private tinted-route helper live
 // externally in `tests/ui/tinted_svg.rs`; they are compiled as a child
@@ -86,8 +91,8 @@ enum GlyphRoute {
     /// Tintable alpha-mask element for a monochrome asset, wrapped so the
     /// ambient Window text color reaches the inner [`Svg`] at paint time.
     Tinted(TintedSvg),
-    /// Full-color element backed by explicitly embedded bytes.
-    FullColor(Img),
+    /// Full-color element backed by explicitly resolved catalog bytes.
+    FullColor(FullColorSvg),
 }
 
 /// Delegating tinted-route element around the seam's alpha-mask [`Svg`].
@@ -282,13 +287,7 @@ pub fn asset_glyph(id: AssetId) -> AssetGlyph {
         Presentation::Tinted => AssetGlyph(GlyphRoute::Tinted(TintedSvg {
             svg: svg().path(id.as_str()),
         })),
-        Presentation::FullColor => {
-            // Explicitly embedded: `img(key)` alone would misclassify the key
-            // as a URI and attempt an HTTP fetch.
-            AssetGlyph(GlyphRoute::FullColor(img(ImageSource::Resource(
-                Resource::Embedded(SharedString::from(id.as_str())),
-            ))))
-        }
+        Presentation::FullColor => AssetGlyph(GlyphRoute::FullColor(FullColorSvg::new(id))),
     }
 }
 
