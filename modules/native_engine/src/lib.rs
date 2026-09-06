@@ -4,6 +4,7 @@ pub mod claude;
 pub mod codex;
 #[path = "install.rs"]
 mod engine_core;
+pub mod grok;
 #[path = "files.rs"]
 mod io;
 #[path = "profile.rs"]

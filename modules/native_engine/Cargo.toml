@@ -42,3 +42,11 @@ path = "../../tests/native_engine/claude_discovery.rs"
 [[test]]
 name = "claude_probe"
 path = "../../tests/native_engine/claude_probe.rs"
+
+[[test]]
+name = "grok_discovery"
+path = "../../tests/native_engine/grok_discovery.rs"
+
+[[test]]
+name = "grok_probe"
+path = "../../tests/native_engine/grok_probe.rs"
