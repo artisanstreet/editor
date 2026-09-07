@@ -1,0 +1,56 @@
+//! Direct QUIC transport for the Artisan application protocol.
+//!
+//! The low-level layers own bounded length-prefixed framing over Quinn streams
+//! ([`frame`]), typed transport failures ([`TransportError`]), endpoint
+//! construction with deterministic lifecycle helpers ([`endpoint`]), and the
+//! sole conversion seam between bounded streams and owned application
+//! envelopes ([`application`]), contiguous per-session ordering for
+//! Forge-originated server events ([`event_sequence`]), single-request
+//! server-side dispatch over one accepted stream ([`server_dispatch`]), and
+//! the exact-leaf pinned identity enforced on every client configuration
+//! ([`identity`]). Session authentication, request coordination, reconnect
+//! policy, and frontend-facing channels build above these layers. The
+//! sequential caller-driven client session leaf ([`client_session`]) owns
+//! one pinned loopback connection and its request lifecycle above them.
+
+pub mod application;
+pub mod client_session;
+pub mod deadline;
+pub mod endpoint;
+pub mod error;
+pub mod event_sequence;
+pub mod frame;
+pub mod handshake;
+pub mod identity;
+pub mod request_correlation;
+pub mod request_lifecycle;
+pub mod server_dispatch;
+
+pub use application::{EnvelopeReceiveError, EnvelopeSendError, receive_envelope, send_envelope};
+pub use client_session::{
+    ClientRequestError, ClientSession, ClientSessionError, ClientSessionLimits, DeliveryLost,
+    DeliveryReceiver, ExchangeError, HandshakeStageError, LoopbackTarget, PENDING_CAPACITY,
+    ReplyRejection, SessionTargetError,
+};
+pub use deadline::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
+pub use endpoint::{
+    ALPN_PROTOCOL, LOOPBACK_SERVER_NAME, bind_loopback_client, bind_loopback_server, client_config,
+    connect, server_config, shutdown,
+};
+pub use error::TransportError;
+pub use event_sequence::{EventSequenceError, EventSequenceTracker, validate_event_successor};
+pub use frame::{FrameError, MAX_FRAME_LEN, read_frame, write_frame};
+pub use handshake::{
+    ClientHello, HandshakeError, HandshakeMessageKind, ServerWelcome, client_handshake,
+    receive_client_hello, send_server_welcome,
+};
+pub use identity::{PinnedIdentity, PinnedIdentityError};
+pub use request_correlation::{RequestCorrelationError, RequestCorrelationRegistry};
+pub use request_lifecycle::{
+    ClientRequestLifecycle, OutcomeDelivery, OutcomeWaiter, OutcomeWaiterError, RequestOutcome,
+    ResolvedRequest,
+};
+pub use server_dispatch::{
+    IncomingRequest, ReplyValidationError, ServerDispatchError, dispatch_server_request,
+    dispatch_server_request_with_receipt,
+};

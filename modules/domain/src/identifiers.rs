@@ -1,0 +1,309 @@
+//! Validated identifiers for the first native workflow.
+//!
+//! Forge owns identity minting: directories, projects, threads, and messages
+//! all receive their identities from Forge, never from clients. Clients mint
+//! only their own stable request identities so a retried mutation can be
+//! recognized and answered with a duplicate receipt instead of a second
+//! effect (legacy mints command ids in
+//! `modules/frontend/src/lib/root/draft-thread.ts` and detects byte-exact
+//! replays in `modules/backend/src/persistence/journal-store.ts`).
+//!
+//! Every wire-facing Forge identifier shares one validation rule and one
+//! documented UTF-8 byte bound ([`IDENTIFIER_MAX_BYTES`]): non-empty, no
+//! Unicode whitespace or control characters anywhere, and bounded. The legacy
+//! `Identifier` pattern (`/^\S+$/`) is preserved and tightened with an
+//! explicit ceiling. The managed native profile identity below is a separate,
+//! narrower ASCII filename-safe type because the CLI derives a home from it.
+
+use std::fmt;
+use std::str::FromStr;
+
+use thiserror::Error;
+
+use crate::bounds::{ENGINE_PROFILE_ID_MAX_BYTES, IDENTIFIER_MAX_BYTES};
+
+/// Validation failure for a wire-facing identifier.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum IdentifierError {
+    /// The supplied value contained no characters at all.
+    #[error("identifier must not be empty")]
+    Empty,
+    /// The supplied value contained a forbidden character.
+    #[error("identifier must not contain whitespace or control characters; found {character:?}")]
+    ForbiddenCharacter {
+        /// The offending Unicode scalar value.
+        character: char,
+    },
+    /// The supplied value exceeded [`IDENTIFIER_MAX_BYTES`].
+    #[error("identifier is {length} UTF-8 bytes; the maximum is {maximum}")]
+    TooLong {
+        /// Offending length in UTF-8 bytes.
+        length: usize,
+        /// The shared identifier ceiling in UTF-8 bytes.
+        maximum: usize,
+    },
+}
+
+/// Checks an external value against the shared wire-facing identifier rule.
+///
+/// # Errors
+///
+/// Returns the first violation found: emptiness, a whitespace or control
+/// character, or a length above [`IDENTIFIER_MAX_BYTES`].
+fn validate_identifier(value: &str) -> Result<(), IdentifierError> {
+    if value.is_empty() {
+        return Err(IdentifierError::Empty);
+    }
+
+    if let Some(character) = value
+        .chars()
+        .find(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return Err(IdentifierError::ForbiddenCharacter { character });
+    }
+
+    let length = value.len();
+    if length > IDENTIFIER_MAX_BYTES {
+        return Err(IdentifierError::TooLong {
+            length,
+            maximum: IDENTIFIER_MAX_BYTES,
+        });
+    }
+
+    Ok(())
+}
+
+macro_rules! wire_identifier {
+    (
+        $(#[$type_docs:meta])*
+        $name:ident
+    ) => {
+        $(#[$type_docs])*
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Creates an identifier after validating the external value.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`IdentifierError`] when the value is empty, contains
+            /// Unicode whitespace or control characters, or exceeds
+            /// [`IDENTIFIER_MAX_BYTES`] UTF-8 bytes.
+            pub fn parse(value: impl Into<String>) -> Result<Self, IdentifierError> {
+                let value = value.into();
+                validate_identifier(&value)?;
+                Ok(Self(value))
+            }
+
+            /// Returns the validated identifier text.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = IdentifierError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::parse(value)
+            }
+        }
+    };
+}
+
+wire_identifier! {
+    /// Stable request identity minted by the client for one mutation.
+    ///
+    /// A retry of the same logical mutation replays the identical request id,
+    /// which lets Forge answer `ReceiptDisposition::Duplicate` instead of
+    /// applying the mutation twice. Legacy evidence:
+    /// `modules/frontend/src/lib/thread-interaction/commands.ts` (minted by
+    /// the route "rather than left to the transport") and
+    /// `modules/backend/src/persistence/journal-store.ts` (duplicate
+    /// detection keyed on the command id).
+    RequestId
+}
+
+wire_identifier! {
+    /// Opaque identity Forge minted for one visible directory.
+    ///
+    /// Directories are addressed only by this identity; host path data never
+    /// crosses the boundary
+    /// (`modules/protocol/src/project-directory.ts`). Legacy directory
+    /// identities were process-local registry keys, so a client holding one
+    /// across a Forge restart must expect a typed unknown-directory outcome
+    /// rather than silently reusing stale state.
+    DirectoryId
+}
+
+wire_identifier! {
+    /// Identity Forge minted for one attached project.
+    ///
+    /// Minted when a client attaches a directory; detaching and re-attaching
+    /// the same folder must resolve to the same project id (legacy keeps this
+    /// guarantee through its never-deleted project identity table,
+    /// `modules/backend/src/persistence/schema/journal.ts`).
+    ProjectId
+}
+
+wire_identifier! {
+    /// Identity Forge minted for one thread at creation time.
+    ///
+    /// Never supplied by clients: thread creation carries only a request id,
+    /// the owning project id, and a title.
+    ThreadId
+}
+
+wire_identifier! {
+    /// Identity Forge minted for one durably queued message.
+    ///
+    /// Never supplied by clients: queueing carries only a request id, the
+    /// target thread id, and the bounded body.
+    MessageId
+}
+
+wire_identifier! {
+    /// Forge-minted identity of one canonical conversation turn.
+    TurnId
+}
+
+wire_identifier! {
+    /// Forge-minted identity of one renderer-visible conversation item.
+    ItemId
+}
+
+wire_identifier! {
+    /// Forge-minted identity of one replayable conversation patch.
+    PatchId
+}
+
+wire_identifier! {
+    /// Forge-minted opaque routing identity of one assistant run.
+    ///
+    /// Nonsecret evidence of which run produced a durable assistant item;
+    /// never a run lifecycle, lease, credential, engine id, or public state
+    /// machine, and never an alias of [`MessageId`] or a protocol frame id.
+    /// Never supplied by clients.
+    RunId
+}
+
+wire_identifier! {
+    /// Validated engine model identity selected for one thread.
+    EngineModelId
+}
+
+wire_identifier! {
+    /// Validated engine route identity selected for one thread.
+    EngineRouteId
+}
+
+wire_identifier! {
+    /// Validated engine variant identity selected for one thread.
+    EngineVariantId
+}
+
+wire_identifier! {
+    /// Validated engine agent identity selected for one thread.
+    EngineAgentId
+}
+
+wire_identifier! {
+    /// Validated permission policy identity selected for one thread.
+    PermissionId
+}
+
+/// Validation failure for a managed native engine profile id.
+///
+/// The error deliberately carries no copy of the rejected value. Profile
+/// ids are later used in filesystem-derived locations, so parse diagnostics
+/// must remain safe even when the input came from an untrusted caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum EngineProfileIdError {
+    /// The supplied value was empty.
+    #[error("engine profile id must not be empty")]
+    Empty,
+    /// The supplied value exceeded the profile-id byte ceiling.
+    #[error("engine profile id is {length} bytes; the maximum is {maximum}")]
+    TooLong { length: usize, maximum: usize },
+    /// The supplied value did not match the ASCII filename-safe grammar.
+    #[error(
+        "engine profile id must start with an ASCII letter or digit and contain only ASCII letters, digits, '.', '_' or '-'"
+    )]
+    Invalid,
+}
+
+/// Explicit identity of one managed native engine profile.
+///
+/// This identity is intentionally not serializable and has no path helpers.
+/// The CLI owns the filesystem mapping, while the domain owns only the
+/// validated, bounded value that crosses that boundary.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EngineProfileId(String);
+
+impl EngineProfileId {
+    /// Parses an ASCII profile id in the form
+    /// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineProfileIdError`] when the value is empty, too long, or
+    /// contains anything outside the exact ASCII profile-id grammar.
+    pub fn parse(value: impl Into<String>) -> Result<Self, EngineProfileIdError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(EngineProfileIdError::Empty);
+        }
+        let bytes = value.as_bytes();
+        if !bytes[0].is_ascii_alphanumeric()
+            || !bytes[1..]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'-'))
+        {
+            return Err(EngineProfileIdError::Invalid);
+        }
+        if value.len() > ENGINE_PROFILE_ID_MAX_BYTES {
+            return Err(EngineProfileIdError::TooLong {
+                length: value.len(),
+                maximum: ENGINE_PROFILE_ID_MAX_BYTES,
+            });
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated profile-id text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for EngineProfileId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("EngineProfileId")
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
+
+impl fmt::Display for EngineProfileId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EngineProfileId {
+    type Err = EngineProfileIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}

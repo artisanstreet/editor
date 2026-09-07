@@ -1,0 +1,16 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "domain",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "artisan_domain",
+    edition = crate_edition(),
+    lint_config = "//:workspace_lints",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    deps = all_crate_deps(normal = True),
+    visibility = ["//visibility:public"],
+)

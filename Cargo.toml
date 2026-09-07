@@ -1,17 +1,99 @@
 [workspace]
-members = ["modules/broker", "modules/installer", "modules/cli"]
-resolver = "2"
+exclude = ["vendor/gpui-ce"]
+members = [
+    "modules/assets",
+    "modules/backend",
+    "modules/cli",
+    "modules/database",
+    "modules/domain",
+    "modules/frontend",
+    "modules/installer",
+    "modules/migrations",
+    "modules/native_engine",
+    "modules/protocol",
+    "modules/transport",
+    "modules/ui",
+    "scripts/capnp_codegen",
+]
+resolver = "3"
 
 [workspace.package]
 edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/sandersonstabo/artisan-editor"
-rust-version = "1.85"
-version = "0.2.2"
+rust-version = "1.98.0"
+version = "0.0.0"
+
+[workspace.dependencies]
+base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
+bytes = { version = "=1.12.1", default-features = false }
+capnp = "=0.27.0"
+capnpc = "=0.27.0"
+command-group = { version = "=5.0.1", default-features = false, features = ["with-tokio"] }
+fs2 = "=0.4.3"
+getrandom = { version = "=0.4.3", default-features = false }
+gpui = { package = "gpui-ce", path = "vendor/gpui-ce/crates/gpui", features = ["inspector", "test-support"] }
+gpui_platform = { package = "gpui_ce_platform", path = "vendor/gpui-ce/crates/gpui_platform", features = ["wgpu"] }
+http = { version = "=1.5.0", default-features = false, features = ["std"] }
+http-body-util = { version = "=0.1.5", default-features = false }
+hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
+native-dialog = { version = "=0.9.7", default-features = false, features = [
+    "windows_dpi_awareness",
+] }
+processkit = { version = "=3.3.4", default-features = false, features = [
+    "process-control",
+] }
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+quinn = { version = "=0.11.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-ring",
+] }
+rcgen = { version = "=0.14.9", default-features = false, features = [
+    "crypto",
+    "ring",
+] }
+rustls = { version = "=0.23.43", default-features = false, features = [
+    "logging",
+    "ring",
+    "std",
+] }
+rustls-pki-types = "=1.15.1"
+sea-orm = { version = "=2.0.2", default-features = false, features = [
+    "sqlx-sqlite",
+    "runtime-tokio",
+    "macros",
+    "sqlite-use-returning-for-3_35",
+] }
+sea-orm-migration = { version = "=2.0.2", default-features = false, features = [
+    "runtime-tokio",
+    "sqlx-sqlite",
+    "sqlite-use-returning-for-3_35",
+] }
+serde_json = "=1.0.151"
+sqlx-sqlite = { version = "=0.9.0", default-features = false, features = [
+    "offline",
+] }
+statig = "=0.4.1"
+syntect = { version = "=5.3.0", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+] }
+subtle = { version = "=2.6.1", default-features = false }
+roxmltree = "=0.20.0"
+sha2 = "=0.11.0"
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.1", default-features = false }
+toml = "=1.1.4"
+url = "=2.5.8"
+winapi-util = "=0.1.11"
+x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
+zeroize = "=1.9.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-all = "deny"
-pedantic = "deny"
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

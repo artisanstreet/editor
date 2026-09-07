@@ -1,47 +1,52 @@
 module(
     name = "artisan_editor",
-    version = "0.2.2",
+    version = "0.0.0",
 )
 
-bazel_dep(name = "aspect_rules_js", version = "3.4.0")
-bazel_dep(name = "rules_nodejs", version = "6.7.5")
+bazel_dep(name = "rules_rust", version = "0.73.0")
+bazel_dep(name = "platforms", version = "1.1.0")
 
-# bazel-lib 3.7 shells out through Bash when rules_js applies pnpm patches in a
-# package subdirectory. Keep repository patching native on Windows so Bash does
-# not become the action shell and rewrite drive paths into MSYS form.
-single_version_override(
-    module_name = "bazel_lib",
-    patch_strip = 1,
-    patches = ["//tools/bazel:bazel-lib-windows-native-patch.patch"],
-    version = "3.7.0",
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "capnp_tools_windows_x86_64",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+exports_files(["capnp.exe"])
+""",
+    sha256 = "21501909dc051347563d4e83394eb848204f558e959501c8061dbeaaf0651988",
+    strip_prefix = "capnproto-tools-win32-1.5.0",
+    urls = ["https://capnproto.org/capnproto-c++-win32-1.5.0.zip"],
 )
 
-# Node is pinned independently of the host runtime. pnpm reads the exact
-# pnpm@11.7.0 packageManager pin from the root package manifest.
-node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
-node.toolchain(node_version = "24.18.0")
-use_repo(node, "nodejs_toolchains")
-
-pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
-pnpm.pnpm(pnpm_version_from = "//:package.json")
-use_repo(pnpm, "pnpm")
-
-# The pnpm lockfile remains the source of truth for every JavaScript package,
-# including workspace links and repository-owned dependency patches.
-npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
-npm.npm_translate_lock(
-    name = "npm",
-    pnpm_lock = "//:pnpm-lock.yaml",
-    data = [
-        "//:patches/@effect__platform-node-shared@4.0.0-beta.97.patch",
-        "//:patches/pe-library@2.0.1.patch",
-    ],
-    run_lifecycle_hooks = False,
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.98.0"],
 )
-# SvelteKit reads its synthetic `$env` Markdown descriptions while generating
-# ambient types, so this package cannot use rules_js's default `*.md` pruning.
-npm.npm_exclude_package_contents(
-    package = "@sveltejs/kit",
-    presets = [],
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:Cargo.Bazel.lock",
+    manifests = ["//:Cargo.toml"],
 )
-use_repo(npm, "npm")
+# NOTE (wave3-vendor): the workspace now consumes gpui-ce via the
+# vendor/gpui-ce submodule (path dependency), not crates.io gpui 0.2.2, so
+# the old `crate.annotation(crate = "gpui", version = "0.2.2", patches =
+# ["//third_party:gpui-blur.patch"])` is removed: its version selector no
+# longer matches anything in Cargo.lock and the patch targets 0.2.2's
+# scene.rs, which does not exist in the fork (no BlurRect there).
+# Remaining Bazel work (no bazel binary on this host to verify):
+# 1. Repin Cargo.Bazel.lock against the new Cargo.lock on a Bazel host.
+# 2. Confirm crate_universe label mapping for the renamed package
+#    (gpui-ce): every `@crates//:gpui` reference in BUILD files may need to
+#    become the sanitized package label.
+# 3. The backdrop-blur scene primitive is owned by the blur lane: it must
+#    re-port third_party/gpui-blur.patch onto vendor/gpui-ce (or upstream it
+#    to artisanstreet/gpui-ce) and re-add an annotation for crate
+#    "gpui-ce" if Bazel still needs the patch at repin time.
+use_repo(crate, "crates")

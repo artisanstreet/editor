@@ -1,0 +1,22 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+exports_files([
+    "Cargo.toml",
+    "capnp_codegen.bzl",
+])
+
+rust_binary(
+    name = "capnpc_rust",
+    srcs = ["src/main.rs"],
+    crate_name = "artisan_capnpc_rust",
+    deps = [
+        "@crates//:capnp",
+        "@crates//:capnpc",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    visibility = [
+        "//:__pkg__",
+        "//modules/protocol:__pkg__",
+    ],
+)

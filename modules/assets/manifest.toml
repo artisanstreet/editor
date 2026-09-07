@@ -1,0 +1,2309 @@
+# Artisan vendored SVG asset manifest - schema version 1.
+#
+# Generated during Phase 6 asset archaeology from verified sources; maintained
+# as checked-in deterministic data (no generator ships in the repository).
+#
+# [[asset]] fields:
+#   id              stable AssetId ("<family>.<name>"); unique across the table
+#   family          artisan | brands | jetbrains | lobe | simple-icons | svgl | tabler
+#   name            original name within the source family
+#   origin_kind     package (pinned npm install) | local (checked-in legacy tree)
+#   origin_package  npm package name (package origins only)
+#   origin_version  pinned package version (package origins only)
+#   origin_path     path within the package backing store or legacy repository
+#   license_spdx    SPDX expression; LicenseRef-* marks recorded restrictions
+#   license_file    path under modules/assets/licenses/
+#   view_box        viewBox of the root svg element (empty when absent upstream)
+#   monochrome      artwork paint derivation; see docs/ui/ASSETS.md section 10
+#   source_path     normalized relative path under modules/assets/
+#   sha256          SHA-256 over the exact raw checked-in SVG file bytes;
+#                   modules/assets/.gitattributes pins svg/**/*.svg to LF so raw
+#                   byte identity holds on every platform
+#   notes           optional provenance/attribution detail
+#
+# [[use]] fields: id, channel, reachability, classification, sites (legacy paths),
+# assets (linked asset ids). Classification vocabulary:
+#   static-vendored | data-driven-native | renderer-deferred | shader-deferred | dormant.
+# shader-deferred has zero instances: the census asserts no shader-dependent SVG
+# effect exists in the legacy frontend (docs/ui/ASSETS.md section 5).
+
+schema_version = 1
+
+[[asset]]
+id = "artisan.app-icon"
+family = "artisan"
+name = "app-icon"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/barekey/artisan-app-icon.svg"
+license_spdx = "LicenseRef-First-Party"
+license_file = "licenses/artisan-first-party-NOTES.md"
+view_box = "0 0 720 720"
+monochrome = false
+source_path = "svg/artisan/app-icon.svg"
+sha256 = "902c40750ecc9275a713565eed6cb192a68904fffdd20fb7c680a1ecb89659d0"
+notes = "Contains nested base64 data-url svg image element; travels inside these bytes."
+
+[[asset]]
+id = "artisan.logo-gradient"
+family = "artisan"
+name = "logo-gradient"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/barekey/logo-gradient.svg"
+license_spdx = "LicenseRef-First-Party"
+license_file = "licenses/artisan-first-party-NOTES.md"
+view_box = "0 0 720 720"
+monochrome = false
+source_path = "svg/artisan/logo-gradient.svg"
+sha256 = "8010297f706dc438873bad37dabb14c3f2c95f0e05bc7375664ee99c0b5f2588"
+
+[[asset]]
+id = "artisan.star"
+family = "artisan"
+name = "star"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/barekey/artisan-star.svg"
+license_spdx = "LicenseRef-First-Party"
+license_file = "licenses/artisan-first-party-NOTES.md"
+view_box = "0 0 100 100"
+monochrome = true
+source_path = "svg/artisan/star.svg"
+sha256 = "6238eb7c37f16ad093105765de4152f9f1b5a189a80733bdbe88471863f37b37"
+notes = "Used as CSS luminance mask tinted by text color."
+
+[[asset]]
+id = "artisan.success-check"
+family = "artisan"
+name = "success-check"
+origin_kind = "local"
+origin_path = "modules/frontend/src/routes/components/onboarding/view.svelte"
+license_spdx = "LicenseRef-First-Party"
+license_file = "licenses/artisan-first-party-NOTES.md"
+view_box = "0 0 16 16"
+monochrome = true
+source_path = "svg/artisan/success-check.svg"
+sha256 = "d06c33503d746e5d62c9a30f09f70e6cbfb6ff593cd61019eb5b6833c499b2db"
+notes = "Legacy CSS stroke-draw animation is reimplemented natively."
+
+[[asset]]
+id = "brands.hermes"
+family = "brands"
+name = "hermes"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/brands/hermes/logo.svg"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/brands/hermes.svg"
+sha256 = "1920389adfd0a6b68d96905c8d2be0dbce751288594c9e54ad1760bf473bd1ab"
+notes = "Nous Research Hermes mark; root title element NousResearch preserved verbatim. Resembles the Lobe Icons nousresearch glyph but no in-tree license statement attests it; treated as brand mark."
+
+[[asset]]
+id = "brands.kimi"
+family = "brands"
+name = "kimi"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/brands/kimi/logo.svg"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 24 25"
+monochrome = false
+source_path = "svg/brands/kimi.svg"
+sha256 = "3821ae593eebce6940992f56e2fee3f55a08bbbba78713303c23ea714d44c5f9"
+notes = "Moonshot AI Kimi mark served through an img wrapper for provider id moonshot."
+
+[[asset]]
+id = "brands.opencode"
+family = "brands"
+name = "opencode"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/brands/opencode/logo.svg"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 240 300"
+monochrome = false
+source_path = "svg/brands/opencode.svg"
+sha256 = "adb18785e2daa330f69852fbe4e1493be4400b1cc760877b99c9c2d01571e679"
+notes = "OpenCode two-tone mark with luminance mask; serves opencode2, opencode and opencode-go provider ids."
+
+[[asset]]
+id = "brands.zai"
+family = "brands"
+name = "zai"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/brands/zai/logo.svg"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 30 30"
+monochrome = false
+source_path = "svg/brands/zai.svg"
+sha256 = "e3cc875add1f4705db0129a82882250a6d78ac20e2540893ddaa1e2215b70a2e"
+notes = "Z.ai mark serving zai and zhipu provider ids."
+
+[[asset]]
+id = "jetbrains.svelte"
+family = "jetbrains"
+name = "svelte"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/jetbrains-file-icons/dark/svelte.svg"
+license_spdx = "MIT"
+license_file = "licenses/svgl-svelte-LICENSE.txt"
+view_box = "0 0 256 308"
+monochrome = false
+source_path = "svg/jetbrains/svelte.svg"
+sha256 = "f7b529fad03e28e6277defc4e73d9d01e5a5b52046b75253ba6a308171f01d70"
+notes = "Dual provenance: svgl-svelte artwork placed in the JetBrains set because upstream maps svelte to a generic text icon; see licenses/jetbrains-file-icons-README.md."
+
+[[asset]]
+id = "jetbrains.text"
+family = "jetbrains"
+name = "text"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/jetbrains-file-icons/dark/text.svg"
+license_spdx = "Apache-2.0"
+license_file = "licenses/jetbrains-file-icons-README.md"
+view_box = "0 0 16 16"
+monochrome = true
+source_path = "svg/jetbrains/text.svg"
+sha256 = "dd893ba63600626cc491dec929cbce786dd7b7d1f48deb74bf04d4a6d07e4fe9"
+notes = "JetBrains copyright header retained in file."
+
+[[asset]]
+id = "jetbrains.ts-test"
+family = "jetbrains"
+name = "ts-test"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/jetbrains-file-icons/dark/ts-test.svg"
+license_spdx = "Apache-2.0"
+license_file = "licenses/jetbrains-file-icons-README.md"
+view_box = "0 0 16 16"
+monochrome = false
+source_path = "svg/jetbrains/ts-test.svg"
+sha256 = "435eda598732016f52e50fd72aba6c8bd95ec7fb7e551013ebb19da5ae43e227"
+notes = "JetBrains copyright header retained in file."
+
+[[asset]]
+id = "jetbrains.typescript"
+family = "jetbrains"
+name = "typescript"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/jetbrains-file-icons/dark/typescript.svg"
+license_spdx = "Apache-2.0"
+license_file = "licenses/jetbrains-file-icons-README.md"
+view_box = "0 0 16 16"
+monochrome = false
+source_path = "svg/jetbrains/typescript.svg"
+sha256 = "2dcafba28562bac74b1cbba04ccb4d567318a25db8078d8c11bc09e8f55e7459"
+notes = "JetBrains copyright header retained in file."
+
+[[asset]]
+id = "lobe.minimax"
+family = "lobe"
+name = "minimax"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/brands/minimax/logo.svelte"
+license_spdx = "MIT"
+license_file = "licenses/lobe-icons-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/lobe/minimax.svg"
+sha256 = "21bda0b6f5a2accfaa31ea70581f407fd6ac8b067d3c8682996abc14886c5478"
+notes = "Lobe Icons mark inline component."
+
+[[asset]]
+id = "lobe.nvidia"
+family = "lobe"
+name = "nvidia"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/brands/nvidia/logo.svelte"
+license_spdx = "MIT"
+license_file = "licenses/lobe-icons-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/lobe/nvidia.svg"
+sha256 = "321750491f2d878ec45bd31333bb50a2529fa8fad8e520a23c65466bce13c15c"
+notes = "Lobe Icons mark inline component."
+
+[[asset]]
+id = "lobe.tencent"
+family = "lobe"
+name = "tencent"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/brands/tencent/logo.svelte"
+license_spdx = "MIT"
+license_file = "licenses/lobe-icons-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/lobe/tencent.svg"
+sha256 = "2d675c0b3e2385072de6bebfed1fd3efce006c27e1c7539cf9d0bee9c34792a5"
+notes = "Lobe Icons mark inline component."
+
+[[asset]]
+id = "lobe.xiaomi"
+family = "lobe"
+name = "xiaomi"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/assets/brands/xiaomi/logo.svelte"
+license_spdx = "MIT"
+license_file = "licenses/lobe-icons-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/lobe/xiaomi.svg"
+sha256 = "c21fda8607ca17eebd33db07f51ee082059d8831858cb967db2147fee29e5759"
+notes = "Lobe Icons mark inline component."
+
+[[asset]]
+id = "simple-icons.bitbucket"
+family = "simple-icons"
+name = "bitbucket"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/vcs/marks/bitbucket.svelte"
+license_spdx = "CC0-1.0"
+license_file = "licenses/simple-icons-CC0.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/simple-icons/bitbucket.svg"
+sha256 = "0b31b97dd122e247ad2434e3f82302cebfaf2dc38151ea06e0d5891de1133137"
+notes = "Attestation: licenses/simple-icons-NOTES.md."
+
+[[asset]]
+id = "simple-icons.codeberg"
+family = "simple-icons"
+name = "codeberg"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/vcs/marks/codeberg.svelte"
+license_spdx = "CC0-1.0"
+license_file = "licenses/simple-icons-CC0.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/simple-icons/codeberg.svg"
+sha256 = "5a48deadbd53c32c76c33f7f325b390ae9152c0d190fac65f18c39c1122ea704"
+notes = "Attestation: licenses/simple-icons-NOTES.md."
+
+[[asset]]
+id = "simple-icons.gitea"
+family = "simple-icons"
+name = "gitea"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/vcs/marks/gitea.svelte"
+license_spdx = "CC0-1.0"
+license_file = "licenses/simple-icons-CC0.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/simple-icons/gitea.svg"
+sha256 = "a008babd9f3c4329a1e643aa1f8ab4cd5c7e0ab9e775314d36bdf4a4507aa1a2"
+notes = "Attestation: licenses/simple-icons-NOTES.md."
+
+[[asset]]
+id = "simple-icons.sourcehut"
+family = "simple-icons"
+name = "sourcehut"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/vcs/marks/sourcehut.svelte"
+license_spdx = "CC0-1.0"
+license_file = "licenses/simple-icons-CC0.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/simple-icons/sourcehut.svg"
+sha256 = "143dbdfad64d48b3ca01f9d3a1af4e51d956b9f5171629777846bbb770b41b0e"
+notes = "Attestation: licenses/simple-icons-NOTES.md."
+
+[[asset]]
+id = "svgl.claude-ai"
+family = "svgl"
+name = "claude-ai"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/ClaudeAI.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 256 257"
+monochrome = true
+source_path = "svg/svgl/claude-ai.svg"
+sha256 = "d50f14e616d5aa54d4bfceff472d2002f41ddc27189c8094735954eb77aa7ad5"
+notes = "Claude spark mark. Copyright Anthropic PBC. Single-hue clay artwork (#d97757); call sites flag it non-inverting to preserve brand color."
+
+[[asset]]
+id = "svgl.cursor"
+family = "svgl"
+name = "cursor"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/Cursor.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 466.73 532.09"
+monochrome = true
+source_path = "svg/svgl/cursor.svg"
+sha256 = "076905ef1d7074013037dd5223544518febbdbebd231457455b530a2563c4772"
+notes = "Cursor cube mark. Copyright Anysphere. Brand resources: https://cursor.com/brand."
+
+[[asset]]
+id = "svgl.deepseek"
+family = "svgl"
+name = "deepseek"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/DeepSeek.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/svgl/deepseek.svg"
+sha256 = "a88fae7340a5b97dd57bbcf4fc49bbef4b35f91f0b524d2f3a274ecf428c99ef"
+notes = "DeepSeek whale mark. Copyright DeepSeek. Single-hue artwork (#4d6bfe); call sites preserve brand color."
+
+[[asset]]
+id = "svgl.gemini"
+family = "svgl"
+name = "gemini"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/Gemini.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 296 298"
+monochrome = false
+source_path = "svg/svgl/gemini.svg"
+sha256 = "a1cae61b7c74180b8fea8321c048f081446758a34a522b0043ce3234ac1f9f9b"
+notes = "Gemini star mark. Copyright Google LLC. Four-color artwork."
+
+[[asset]]
+id = "svgl.git"
+family = "svgl"
+name = "git"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/Git.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 256 256"
+monochrome = true
+source_path = "svg/svgl/git.svg"
+sha256 = "cc43d5b0c4fae45b6e0857c17d602c0efb8526241ca9623a29863867a8f59f3a"
+notes = "Git logomark. Copyright the Git Project / Software Freedom Conservancy. Site: https://git-scm.com/. Chip fill #DE4C36 matches this artwork."
+
+[[asset]]
+id = "svgl.github"
+family = "svgl"
+name = "github"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/GitHub.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 1024 1024"
+monochrome = true
+source_path = "svg/svgl/github.svg"
+sha256 = "c10b1264b3a431e6273bb59ef4e67974be951a81195a92255ade7d94de34b565"
+notes = "GitHub octocat mark. Copyright GitHub Inc. Brand resources: https://brand.github.com/. Call-site monochrome flag true."
+
+[[asset]]
+id = "svgl.gitlab"
+family = "svgl"
+name = "gitlab"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/GitLab.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 32 32"
+monochrome = false
+source_path = "svg/svgl/gitlab.svg"
+sha256 = "f113a0879aae4d458ac1de8f6ff3c8c6f9793299069fa1e422350ca24128a1fa"
+notes = "GitLab tanuki mark. Copyright GitLab B.V. Multicolor tanuki kept non-inverted at call sites."
+
+[[asset]]
+id = "svgl.grok"
+family = "svgl"
+name = "grok"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/Grok.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 1024 1024"
+monochrome = true
+source_path = "svg/svgl/grok.svg"
+sha256 = "57cfaf9c331435b256d396d91da75634f5bae74fb4a4c78618a5ef16b276495f"
+notes = "Grok slash mark. Copyright xAI Corp. Serves provider ids grok and xai at call sites."
+
+[[asset]]
+id = "svgl.meta"
+family = "svgl"
+name = "meta"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/Meta.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 256 171"
+monochrome = false
+source_path = "svg/svgl/meta.svg"
+sha256 = "26533cd826b601cff356db2918111dd2f5d4d3680000f2954351563b18d827a6"
+notes = "Meta infinity mark. Copyright Meta Platforms Inc. Brand resources: https://about.meta.com/brand/resources/. Gradient artwork."
+
+[[asset]]
+id = "svgl.microsoft-azure"
+family = "svgl"
+name = "microsoft-azure"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/MicrosoftAzure.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 96 96"
+monochrome = false
+source_path = "svg/svgl/microsoft-azure.svg"
+sha256 = "942a851dff182edca939226bbac4d2de98c36806db466ef008699cfce22478c1"
+notes = "Microsoft Azure mark. Copyright Microsoft Corporation. Gradient artwork."
+
+[[asset]]
+id = "svgl.openai"
+family = "svgl"
+name = "openai"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/OpenAI.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 256 260"
+monochrome = true
+source_path = "svg/svgl/openai.svg"
+sha256 = "11a11b245443a1d95c214248f07d17cd0c76e2ee7c907e94eca9b90f731e15f1"
+notes = "OpenAI blossom mark. Copyright OpenAI. Serves codex, openai and openai-codex provider ids. Brand resources: https://openai.com/brand/."
+
+[[asset]]
+id = "svgl.qwen"
+family = "svgl"
+name = "qwen"
+origin_kind = "package"
+origin_package = "@selemondev/svgl-svelte"
+origin_version = "2.17.0"
+origin_path = "dist/components/Qwen.svelte"
+license_spdx = "LicenseRef-Brand-Mark"
+license_file = "licenses/svgl-brand-marks-NOTES.md"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/svgl/qwen.svg"
+sha256 = "a1a647476fe073be4634fb95e01957efc93eda9f7f14e862e577c94c90f4d882"
+notes = "Qwen mark. Copyright Alibaba Cloud. currentColor artwork; call sites preserve brand color."
+
+[[asset]]
+id = "tabler.alert-triangle"
+family = "tabler"
+name = "alert-triangle"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/alert-triangle.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/alert-triangle.svg"
+sha256 = "d7ace98a3674411065cd37840d9ba3daaac4d1042d408346dba4b21c8f50d0c0"
+
+[[asset]]
+id = "tabler.arrow-bar-to-down"
+family = "tabler"
+name = "arrow-bar-to-down"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/arrow-bar-to-down.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/arrow-bar-to-down.svg"
+sha256 = "2d5ab7f6d01a5a20caed9266b0caba1650cdfe72e332ca99fd80946576d0e662"
+
+[[asset]]
+id = "tabler.arrow-right"
+family = "tabler"
+name = "arrow-right"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/arrow-right.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/arrow-right.svg"
+sha256 = "e06ded5126b2a62a1d6e1297e3479c37c9c79ed4007752b1ed8038621f4d24d5"
+
+[[asset]]
+id = "tabler.arrow-up"
+family = "tabler"
+name = "arrow-up"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/arrow-up.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/arrow-up.svg"
+sha256 = "72a4d0bd8bfdb8b75dc479d37176932bbdd585de07bf1e05661181c16de26ab6"
+
+[[asset]]
+id = "tabler.arrows-horizontal"
+family = "tabler"
+name = "arrows-horizontal"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/arrows-horizontal.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/arrows-horizontal.svg"
+sha256 = "8348e9ecb707cba209304f5d66820c303b8d8eff7cda55892b8587772e73efde"
+
+[[asset]]
+id = "tabler.arrows-minimize"
+family = "tabler"
+name = "arrows-minimize"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/arrows-minimize.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/arrows-minimize.svg"
+sha256 = "427cebc6e884d85477fc3c678a013ff9d46c4c16d79017be9091025759dbefdd"
+
+[[asset]]
+id = "tabler.bell"
+family = "tabler"
+name = "bell"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/bell.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/bell.svg"
+sha256 = "d96de09c5cbc500df69c30c44e68e9cc37e032f9e86a46167b473753a0ffb523"
+
+[[asset]]
+id = "tabler.bolt-filled"
+family = "tabler"
+name = "bolt-filled"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/bolt-filled.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/bolt-filled.svg"
+sha256 = "a1ef50e9eba76aa9c4021788dd243db39b8204a5560d44882b6f627e2fbb9c8b"
+
+[[asset]]
+id = "tabler.bot-id"
+family = "tabler"
+name = "bot-id"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/bot-id.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/bot-id.svg"
+sha256 = "abe2b88d4dbf9be0a955f369083d684b26795dcc0b945b89a20d4e3d69bd064a"
+
+[[asset]]
+id = "tabler.brain"
+family = "tabler"
+name = "brain"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/brain.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/brain.svg"
+sha256 = "c1cddd791cb8417e35d2703fca50e3171bba4b0f75d633a7ef3c3c4926b80187"
+
+[[asset]]
+id = "tabler.brand-visual-studio"
+family = "tabler"
+name = "brand-visual-studio"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/brand-visual-studio.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/brand-visual-studio.svg"
+sha256 = "7074b1bf9d159ca12f84cb1385da3c93d4311989a8092593e509628b0bafde18"
+
+[[asset]]
+id = "tabler.bug"
+family = "tabler"
+name = "bug"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/bug.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/bug.svg"
+sha256 = "2e557f7dda8e5b2fee1bc1bf4923f675a4d1d979b52a82be04825a505f228663"
+
+[[asset]]
+id = "tabler.check"
+family = "tabler"
+name = "check"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/check.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/check.svg"
+sha256 = "668c6390f6c51ad2ef0aefddac864c0c32b81eaa30769f09a7bcac3dde188f8e"
+
+[[asset]]
+id = "tabler.checklist"
+family = "tabler"
+name = "checklist"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/checklist.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/checklist.svg"
+sha256 = "a4560d565033ccfffcfaa50faca3e518933857c59b4c4b3b80b879ca7e66fed1"
+
+[[asset]]
+id = "tabler.chevron-down"
+family = "tabler"
+name = "chevron-down"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/chevron-down.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/chevron-down.svg"
+sha256 = "fa7d6eee44f3500c79faba39163746e556d0b48dfd2465e6c055857732548695"
+
+[[asset]]
+id = "tabler.chevron-left"
+family = "tabler"
+name = "chevron-left"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/chevron-left.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/chevron-left.svg"
+sha256 = "685b703ec8f8c3bdd5caace18cad44f4f2c8a290017b7a5f41a8efc52abffb27"
+
+[[asset]]
+id = "tabler.chevron-right"
+family = "tabler"
+name = "chevron-right"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/chevron-right.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/chevron-right.svg"
+sha256 = "6ba8c6dd75ef67e2b547433e815938029f90be8eb83b6a9fe406657632661172"
+
+[[asset]]
+id = "tabler.chevron-up"
+family = "tabler"
+name = "chevron-up"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/chevron-up.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/chevron-up.svg"
+sha256 = "c0fcfab96f68dadf45636ffd9f2d960155238d2fed969adad47a3d3194387797"
+
+[[asset]]
+id = "tabler.circle-check"
+family = "tabler"
+name = "circle-check"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/circle-check.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/circle-check.svg"
+sha256 = "d07eaddba962a71082244b8b26d617d24fbd5facdcbea3c44f621b34880d401b"
+
+[[asset]]
+id = "tabler.circle-x"
+family = "tabler"
+name = "circle-x"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/circle-x.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/circle-x.svg"
+sha256 = "59a014cb4eb6bb6be325915d4dd723f8605ba1a1e3c4939635ec5479805710dc"
+
+[[asset]]
+id = "tabler.code"
+family = "tabler"
+name = "code"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/code.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/code.svg"
+sha256 = "26ed50a9bb0afe068e707a703ac2ed3d49ee01a256be8905e02c3865d295f364"
+
+[[asset]]
+id = "tabler.copy"
+family = "tabler"
+name = "copy"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/copy.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/copy.svg"
+sha256 = "52528350500078a76c4c4608563cc7ff8403528b6d223af225fc14cf83eb9316"
+
+[[asset]]
+id = "tabler.corner-down-left"
+family = "tabler"
+name = "corner-down-left"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/corner-down-left.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/corner-down-left.svg"
+sha256 = "313c8ee998c819d6dae57dd746a7d125af86d87b3edd337aa2ff418689906b60"
+
+[[asset]]
+id = "tabler.device-laptop"
+family = "tabler"
+name = "device-laptop"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/device-laptop.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/device-laptop.svg"
+sha256 = "012c24799c81e16c01d24ef5d64bd9c08b0d2cdce13f3bb481bc024fc3bac25c"
+
+[[asset]]
+id = "tabler.download"
+family = "tabler"
+name = "download"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/download.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/download.svg"
+sha256 = "af71a480a67ba467bc0cbfed9a286c4bdbc413ef50c4192c947f890855f74f77"
+
+[[asset]]
+id = "tabler.edit"
+family = "tabler"
+name = "edit"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/edit.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/edit.svg"
+sha256 = "897163f6b666f8461444c84bd801a1d89658eb19177cb525ac36fe5d8dcbf08f"
+
+[[asset]]
+id = "tabler.file-diff"
+family = "tabler"
+name = "file-diff"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/file-diff.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/file-diff.svg"
+sha256 = "4a61cedf30a10d5619195d428c4c1a69ae9eb1c1f7d296bb5569e32f6eff0497"
+
+[[asset]]
+id = "tabler.file-off"
+family = "tabler"
+name = "file-off"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/file-off.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/file-off.svg"
+sha256 = "0ac98e721b4a7c79a1aae215b9acb73ec947a00ec20b58acd9ba0bd7a6331fc7"
+
+[[asset]]
+id = "tabler.file-pencil"
+family = "tabler"
+name = "file-pencil"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/file-pencil.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/file-pencil.svg"
+sha256 = "66a4d535d7a92247b74a15bb6bbd2a772a3d30035f2a707dea77f12207d70a4f"
+
+[[asset]]
+id = "tabler.file-search"
+family = "tabler"
+name = "file-search"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/file-search.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/file-search.svg"
+sha256 = "c0dc20a657edcc367d7efd141573915e5523b9264e8c5a1e6a1db569771d060a"
+
+[[asset]]
+id = "tabler.file-text"
+family = "tabler"
+name = "file-text"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/file-text.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/file-text.svg"
+sha256 = "b56a957486a532e316dbe31a33dad099c43491e48665ddebddf1cc1293c795d2"
+
+[[asset]]
+id = "tabler.file-x"
+family = "tabler"
+name = "file-x"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/file-x.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/file-x.svg"
+sha256 = "36c5a1eea8990d8c406ab1f1a7268ebf480f1fe81c2e232cb4ebe67cfad581d5"
+
+[[asset]]
+id = "tabler.folder"
+family = "tabler"
+name = "folder"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/folder.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/folder.svg"
+sha256 = "476de2e9f2f6c18acb96a3e981cd888064ec04942c3ff16cf67d55d58b6ce941"
+
+[[asset]]
+id = "tabler.folder-code"
+family = "tabler"
+name = "folder-code"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/folder-code.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/folder-code.svg"
+sha256 = "92c227040903ac518420bd06985ede302474d5346d274daece364c8dfb59d25d"
+
+[[asset]]
+id = "tabler.folder-open"
+family = "tabler"
+name = "folder-open"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/folder-open.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/folder-open.svg"
+sha256 = "49ec5971c76137cfecb32df769e0515ee91f88a089cf0df076750fc254ddb629"
+
+[[asset]]
+id = "tabler.folder-plus"
+family = "tabler"
+name = "folder-plus"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/folder-plus.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/folder-plus.svg"
+sha256 = "835ce78bf8b0fb9a8c15607543f1f032e444372686707904e82797c75775c7af"
+
+[[asset]]
+id = "tabler.git-branch"
+family = "tabler"
+name = "git-branch"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/git-branch.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/git-branch.svg"
+sha256 = "cb6e7343d61e272299b006585a85fc930426b5acfcc3ab2eff2f6511b0c10263"
+
+[[asset]]
+id = "tabler.list-details"
+family = "tabler"
+name = "list-details"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/list-details.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/list-details.svg"
+sha256 = "6f8f984837f933014fd118f82587effe9d40b753b5f59a397f68ec2f714b3b99"
+
+[[asset]]
+id = "tabler.loader-2"
+family = "tabler"
+name = "loader-2"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/loader-2.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/loader-2.svg"
+sha256 = "1c52291c1bf5669bcfdd297ac737359e18a05b890bd862252657c03b1a9a4688"
+
+[[asset]]
+id = "tabler.lock"
+family = "tabler"
+name = "lock"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/lock.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/lock.svg"
+sha256 = "555ed84ff832c715e64a71862e2770aee55f4ec64bb291929606eb87794b41d1"
+
+[[asset]]
+id = "tabler.login"
+family = "tabler"
+name = "login"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/login.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/login.svg"
+sha256 = "9aff3650af366f0a4644a8570ec52f31a72a783783f1b16e312fe009ce45f94e"
+
+[[asset]]
+id = "tabler.maximize"
+family = "tabler"
+name = "maximize"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/maximize.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/maximize.svg"
+sha256 = "080ac45829422f219da39ce97c85168d90f917cef5dfdac596e9bb32e304a439"
+
+[[asset]]
+id = "tabler.message-circle"
+family = "tabler"
+name = "message-circle"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/message-circle.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/message-circle.svg"
+sha256 = "ba4bee8241348ffea890ed0fa021fe9adb98e3d30981ee440f40d42db0201555"
+
+[[asset]]
+id = "tabler.message-plus"
+family = "tabler"
+name = "message-plus"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/message-plus.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/message-plus.svg"
+sha256 = "d2120d9cc7fb5fc9ba99e2a2e9525638723f4178b13e038e190b0dcaea245ed0"
+
+[[asset]]
+id = "tabler.messages"
+family = "tabler"
+name = "messages"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/messages.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/messages.svg"
+sha256 = "2b844fb68f1bd9c4f7537189b8471f9ec094dc304310741d796f9176829f3199"
+
+[[asset]]
+id = "tabler.minus"
+family = "tabler"
+name = "minus"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/minus.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/minus.svg"
+sha256 = "bbf8bd7bce16b24a9446a94707c0ee64a1e50c51a4b8b9904a1d8df4c7354e34"
+
+[[asset]]
+id = "tabler.palette"
+family = "tabler"
+name = "palette"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/palette.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/palette.svg"
+sha256 = "dffc3614f1e4db0287699e4f7b7a5525a8c12ceab5c734d7500559b32e163f97"
+
+[[asset]]
+id = "tabler.pencil"
+family = "tabler"
+name = "pencil"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/pencil.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/pencil.svg"
+sha256 = "147c26f269778b9570425da6136db0ea7caa2c818ab61290fdb8a709ded739df"
+
+[[asset]]
+id = "tabler.player-play"
+family = "tabler"
+name = "player-play"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/player-play.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/player-play.svg"
+sha256 = "79683cf3e99eb915f56eeb6986a601621c36f38ce6d3129b0d862178ebaaaf6a"
+
+[[asset]]
+id = "tabler.player-stop-filled"
+family = "tabler"
+name = "player-stop-filled"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/player-stop-filled.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/player-stop-filled.svg"
+sha256 = "31e2f764c20f2129e9490c91fc3da85500152428738da39d1d305133e028c383"
+
+[[asset]]
+id = "tabler.player-track-next"
+family = "tabler"
+name = "player-track-next"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/player-track-next.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/player-track-next.svg"
+sha256 = "aee51985b14e94c45507ae99001909856698c6d8c355b7bbfd7bfbe11246cf82"
+
+[[asset]]
+id = "tabler.player-track-prev"
+family = "tabler"
+name = "player-track-prev"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/player-track-prev.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/player-track-prev.svg"
+sha256 = "252bdeea5234c49a1274a5c6ecea7b09ff7470be5e6c343f8f3c406738752cc9"
+
+[[asset]]
+id = "tabler.question-mark"
+family = "tabler"
+name = "question-mark"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/question-mark.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/question-mark.svg"
+sha256 = "51a2b194bbc99f2781e068239aaa74193fbf4c739d32c9be239d2704d6dc6137"
+
+[[asset]]
+id = "tabler.refresh"
+family = "tabler"
+name = "refresh"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/refresh.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/refresh.svg"
+sha256 = "d62fa729365289ccc5fd19fbc8415ce902078e4bce3d9ab8d1d1d7bcd93959a9"
+
+[[asset]]
+id = "tabler.rotate-clockwise"
+family = "tabler"
+name = "rotate-clockwise"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/rotate-clockwise.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/rotate-clockwise.svg"
+sha256 = "51222ade4a9a60f6ec3e41aeca12b919297ffb87e0472c92d79d375e43ad93e9"
+
+[[asset]]
+id = "tabler.search"
+family = "tabler"
+name = "search"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/search.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/search.svg"
+sha256 = "88417b0b505fcb11f81f52ed9e3e9a9a498e72adee73a1561856925ebd37ff02"
+
+[[asset]]
+id = "tabler.selector"
+family = "tabler"
+name = "selector"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/selector.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/selector.svg"
+sha256 = "2d817ff9b0aa6ba31106782766292178367a0f5b323a4e6947afcd9e94de6ae5"
+
+[[asset]]
+id = "tabler.settings"
+family = "tabler"
+name = "settings"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/settings.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/settings.svg"
+sha256 = "6acab58980cc441b2a38113331d546e10e724a7e7a7a732444d6e21da5cacf68"
+
+[[asset]]
+id = "tabler.shield-lock"
+family = "tabler"
+name = "shield-lock"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/shield-lock.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/shield-lock.svg"
+sha256 = "2908b7fa525843d488947baae3c608ded859457588063859eca038d41635cd0e"
+
+[[asset]]
+id = "tabler.shopping-bag"
+family = "tabler"
+name = "shopping-bag"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/shopping-bag.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/shopping-bag.svg"
+sha256 = "16ba8bf3ea972fce895c09cae4899c90ba04282e2f8d3c6ecfaaa4826d52329a"
+
+[[asset]]
+id = "tabler.sparkles"
+family = "tabler"
+name = "sparkles"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/sparkles.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/sparkles.svg"
+sha256 = "6598d7fe8a6af34e86d09c3aada31dffd155d11544e93be33aef8e0385a30604"
+
+[[asset]]
+id = "tabler.star"
+family = "tabler"
+name = "star"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/star.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/star.svg"
+sha256 = "a01c9f6ab47b3b59891a2bb73434dbdac33736b41c58aa05a278f944def9fcb5"
+
+[[asset]]
+id = "tabler.star-filled"
+family = "tabler"
+name = "star-filled"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/star-filled.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/star-filled.svg"
+sha256 = "e69b19a0b3e1f57652323926ef1b6910f271737d50a42625cfa9f433b1b53f1b"
+
+[[asset]]
+id = "tabler.terminal-2"
+family = "tabler"
+name = "terminal-2"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/terminal-2.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/terminal-2.svg"
+sha256 = "a7269c3fb386a2410e88e44175ddcf66cb4803bd153c4ac29409fe7c1911169e"
+
+[[asset]]
+id = "tabler.test-pipe"
+family = "tabler"
+name = "test-pipe"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/test-pipe.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/test-pipe.svg"
+sha256 = "4d54894865df23342f35b1a8d3106164000b5316058ed9ae32f70125297dbd62"
+
+[[asset]]
+id = "tabler.tool"
+family = "tabler"
+name = "tool"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/tool.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/tool.svg"
+sha256 = "865b23970db5a8361d88102daa36fc314c698a0621afcb3fea2bc9c5baf66810"
+
+[[asset]]
+id = "tabler.trash"
+family = "tabler"
+name = "trash"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/trash.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/trash.svg"
+sha256 = "17ad56678e5f3f5c1f127014faac4c6b4128f9e6763da2bddacca445be874933"
+
+[[asset]]
+id = "tabler.world"
+family = "tabler"
+name = "world"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/world.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/world.svg"
+sha256 = "e532c057b57307ad329032135f1ccf84bc624a05c4ff74c30be2a07f5f0f60db"
+
+[[asset]]
+id = "tabler.world-search"
+family = "tabler"
+name = "world-search"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/world-search.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/world-search.svg"
+sha256 = "9c43eff6ae2780d1bebbece21525b4dc5df24b526c5d95d88fe48ad67106c370"
+
+[[asset]]
+id = "tabler.x"
+family = "tabler"
+name = "x"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/x.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/x.svg"
+sha256 = "9f2db580ab5cc33ccaac5a0d4f177006337870bc41f9e46dc9dc5e4b8279bef3"
+
+[[asset]]
+id = "tabler.zoom-in"
+family = "tabler"
+name = "zoom-in"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/zoom-in.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/zoom-in.svg"
+sha256 = "a03667f9c3f0c4273da19edf914ab902ca6526a51433bbe37f9c95e8cef177c5"
+
+[[asset]]
+id = "tabler.zoom-out"
+family = "tabler"
+name = "zoom-out"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/zoom-out.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/zoom-out.svg"
+sha256 = "e2e714f24afddfe11a21b4263c2957de8e3e174983945ea67ed6c4f3ec48260c"
+
+[[use]]
+id = "tabler.alert-triangle"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte", "modules/frontend/src/routes/components/conversation-usage-interruption-card.svelte"]
+assets = ["tabler.alert-triangle"]
+
+[[use]]
+id = "tabler.arrow-bar-to-down"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/thread-hover-rail.svelte"]
+assets = ["tabler.arrow-bar-to-down"]
+
+[[use]]
+id = "tabler.arrow-right"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/onboarding/view.svelte"]
+assets = ["tabler.arrow-right"]
+
+[[use]]
+id = "tabler.arrow-up"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/composer/controls.svelte", "modules/frontend/src/routes/drafts/starting/pieces/composer.svelte"]
+assets = ["tabler.arrow-up"]
+
+[[use]]
+id = "tabler.arrows-horizontal"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/model-selector/policy-controls.svelte"]
+assets = ["tabler.arrows-horizontal"]
+
+[[use]]
+id = "tabler.arrows-minimize"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/compaction-model.svelte"]
+assets = ["tabler.arrows-minimize"]
+
+[[use]]
+id = "tabler.bell"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/nav.svelte"]
+assets = ["tabler.bell"]
+
+[[use]]
+id = "tabler.bolt-filled"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/model-selector/policy-controls.svelte"]
+assets = ["tabler.bolt-filled"]
+
+[[use]]
+id = "tabler.bot-id"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/thread-agents.svelte"]
+assets = ["tabler.bot-id"]
+
+[[use]]
+id = "tabler.brain"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/model-selector/policy-controls.svelte"]
+assets = ["tabler.brain"]
+
+[[use]]
+id = "tabler.brand-visual-studio"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-changes-card.svelte"]
+assets = ["tabler.brand-visual-studio"]
+
+[[use]]
+id = "tabler.bug"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.bug"]
+
+[[use]]
+id = "tabler.check"
+channel = "tabler-direct+barrel"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/ui/command/command-item.svelte", "modules/frontend/src/lib/components/ui/context-menu/context-menu-checkbox-item.svelte", "modules/frontend/src/lib/components/ui/context-menu/context-menu-radio-item.svelte", "modules/frontend/src/lib/components/ui/dropdown-menu/dropdown-menu-checkbox-item.svelte", "modules/frontend/src/lib/components/ui/dropdown-menu/dropdown-menu-radio-item.svelte", "modules/frontend/src/lib/components/ui/select/select-item.svelte", "modules/frontend/src/lib/components/markdown/code-snippet.svelte", "modules/frontend/src/routes/components/conversation-approval.svelte", "modules/frontend/src/routes/components/project-selector.svelte", "modules/frontend/src/routes/drafts/starting/pieces/project-menu.svelte"]
+assets = ["tabler.check"]
+
+[[use]]
+id = "tabler.checklist"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/sidebar-identity.svelte"]
+assets = ["tabler.checklist"]
+
+[[use]]
+id = "tabler.chevron-down"
+channel = "tabler-direct+barrel"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/ui/accordion/accordion-trigger.svelte", "modules/frontend/src/lib/components/ui/select/select-scroll-down-button.svelte", "modules/frontend/src/routes/components/thread-composer.svelte", "modules/frontend/src/routes/drafts/starting/pieces/composer.svelte", "modules/frontend/src/routes/drafts/starting/variants/token.svelte"]
+assets = ["tabler.chevron-down"]
+
+[[use]]
+id = "tabler.chevron-left"
+channel = "tabler-direct"
+reachability = "dev-only"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/debug/components/+page.svelte", "modules/frontend/src/routes/drafts/starting/+page.svelte", "modules/frontend/src/routes/drafts/starting/variants/deck.svelte"]
+assets = ["tabler.chevron-left"]
+
+[[use]]
+id = "tabler.chevron-right"
+channel = "tabler-direct+barrel"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/ui/context-menu/context-menu-sub-trigger.svelte", "modules/frontend/src/lib/components/ui/dropdown-menu/dropdown-menu-sub-trigger.svelte", "modules/frontend/src/routes/components/conversation-trace.svelte", "modules/frontend/src/routes/components/conversation-work-session.svelte", "modules/frontend/src/routes/components/model-selector/model-list.svelte", "modules/frontend/src/routes/components/workspace-file-tree.svelte", "modules/frontend/src/routes/debug/components/+page.svelte", "modules/frontend/src/routes/drafts/starting/+page.svelte", "modules/frontend/src/routes/drafts/starting/variants/deck.svelte", "modules/frontend/src/routes/drafts/starting/variants/hearth-fold.svelte", "modules/frontend/src/routes/drafts/starting/variants/hearth.svelte"]
+assets = ["tabler.chevron-right"]
+
+[[use]]
+id = "tabler.circle-check"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-approval.svelte", "modules/frontend/src/routes/components/onboarding/view.svelte"]
+assets = ["tabler.circle-check"]
+
+[[use]]
+id = "tabler.circle-x"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-approval.svelte", "modules/frontend/src/routes/components/conversation-error-card.svelte", "modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.circle-x"]
+
+[[use]]
+id = "tabler.code"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/sectioned-panel.svelte"]
+assets = ["tabler.code"]
+
+[[use]]
+id = "tabler.copy"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/markdown/code-snippet.svelte", "modules/frontend/src/routes/components/conversation-error-card.svelte", "modules/frontend/src/routes/components/conversation-turn-footer.svelte", "modules/frontend/src/routes/debug/emulator/+page.svelte"]
+assets = ["tabler.copy"]
+
+[[use]]
+id = "tabler.corner-down-left"
+channel = "tabler-direct"
+reachability = "dev-only"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/drafts/starting/variants/launcher.svelte"]
+assets = ["tabler.corner-down-left"]
+
+[[use]]
+id = "tabler.device-laptop"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/thread-environment-card.svelte"]
+assets = ["tabler.device-laptop"]
+
+[[use]]
+id = "tabler.download"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/onboarding/view.svelte"]
+assets = ["tabler.download"]
+
+[[use]]
+id = "tabler.edit"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/command-menu.svelte"]
+assets = ["tabler.edit"]
+
+[[use]]
+id = "tabler.file-diff"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-approval.svelte", "modules/frontend/src/routes/components/thread-environment-card.svelte"]
+assets = ["tabler.file-diff"]
+
+[[use]]
+id = "tabler.file-off"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/editor-route.svelte"]
+assets = ["tabler.file-off"]
+
+[[use]]
+id = "tabler.file-pencil"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.file-pencil"]
+
+[[use]]
+id = "tabler.file-search"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.file-search"]
+
+[[use]]
+id = "tabler.file-text"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.file-text"]
+
+[[use]]
+id = "tabler.file-x"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.file-x"]
+
+[[use]]
+id = "tabler.folder"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/project-identity-mark.svelte", "modules/frontend/src/routes/components/thread-hover-rail.svelte", "modules/frontend/src/routes/components/workspace-file-tree.svelte", "modules/frontend/src/routes/components/workspace-header.svelte", "modules/frontend/src/routes/drafts/starting/variants/attach.svelte"]
+assets = ["tabler.folder"]
+
+[[use]]
+id = "tabler.folder-code"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/thread-environment-card.svelte", "modules/frontend/src/routes/components/workspace-header.svelte"]
+assets = ["tabler.folder-code"]
+
+[[use]]
+id = "tabler.folder-open"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/workspace-file-tree.svelte"]
+assets = ["tabler.folder-open"]
+
+[[use]]
+id = "tabler.folder-plus"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/project-selector.svelte", "modules/frontend/src/routes/drafts/starting/pieces/project-menu.svelte", "modules/frontend/src/routes/drafts/starting/variants/attach.svelte", "modules/frontend/src/routes/drafts/starting/variants/bento.svelte", "modules/frontend/src/routes/drafts/starting/variants/hearth-fold.svelte", "modules/frontend/src/routes/drafts/starting/variants/hearth-rail.svelte", "modules/frontend/src/routes/drafts/starting/variants/hearth.svelte", "modules/frontend/src/routes/drafts/starting/variants/rail-quiet.svelte", "modules/frontend/src/routes/drafts/starting/variants/rail.svelte"]
+assets = ["tabler.folder-plus"]
+
+[[use]]
+id = "tabler.git-branch"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/thread-environment-card.svelte", "modules/frontend/src/routes/components/workspace-header.svelte", "modules/frontend/src/routes/drafts/starting/pieces/repo-state.svelte", "modules/frontend/src/routes/drafts/starting/variants/attach.svelte"]
+assets = ["tabler.git-branch"]
+
+[[use]]
+id = "tabler.list-details"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.list-details"]
+
+[[use]]
+id = "tabler.loader-2"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/onboarding/view.svelte"]
+assets = ["tabler.loader-2"]
+
+[[use]]
+id = "tabler.lock"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/model-selector/policy-controls.svelte"]
+assets = ["tabler.lock"]
+
+[[use]]
+id = "tabler.login"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/onboarding/view.svelte"]
+assets = ["tabler.login"]
+
+[[use]]
+id = "tabler.maximize"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/markdown/mermaid-renderer.svelte"]
+assets = ["tabler.maximize"]
+
+[[use]]
+id = "tabler.message-circle"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/command-menu.svelte", "modules/frontend/src/routes/components/sectioned-panel.svelte"]
+assets = ["tabler.message-circle"]
+
+[[use]]
+id = "tabler.message-plus"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/composer/controls.svelte"]
+assets = ["tabler.message-plus"]
+
+[[use]]
+id = "tabler.messages"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/nav.svelte"]
+assets = ["tabler.messages"]
+
+[[use]]
+id = "tabler.palette"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/nav.svelte"]
+assets = ["tabler.palette"]
+
+[[use]]
+id = "tabler.pencil"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/composer/steering-lip.svelte"]
+assets = ["tabler.pencil"]
+
+[[use]]
+id = "tabler.player-play"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/forge-connection-overlay.svelte"]
+assets = ["tabler.player-play"]
+
+[[use]]
+id = "tabler.player-stop-filled"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/composer/controls.svelte"]
+assets = ["tabler.player-stop-filled"]
+
+[[use]]
+id = "tabler.player-track-next"
+channel = "tabler-direct"
+reachability = "dev-only"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/debug/emulator/+page.svelte", "modules/frontend/src/routes/debug/overlay/+page.svelte"]
+assets = ["tabler.player-track-next"]
+
+[[use]]
+id = "tabler.player-track-prev"
+channel = "tabler-direct"
+reachability = "dev-only"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/debug/emulator/+page.svelte", "modules/frontend/src/routes/debug/overlay/+page.svelte"]
+assets = ["tabler.player-track-prev"]
+
+[[use]]
+id = "tabler.question-mark"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/engine/presentation.ts"]
+assets = ["tabler.question-mark"]
+
+[[use]]
+id = "tabler.refresh"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-usage-interruption-card.svelte", "modules/frontend/src/routes/components/conversation-work-session.svelte", "modules/frontend/src/routes/components/forge-connection-overlay.svelte", "modules/frontend/src/routes/components/settings/engine.svelte"]
+assets = ["tabler.refresh"]
+
+[[use]]
+id = "tabler.rotate-clockwise"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/appearance.svelte"]
+assets = ["tabler.rotate-clockwise"]
+
+[[use]]
+id = "tabler.search"
+channel = "tabler-direct+barrel"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/ui/command/command-input.svelte", "modules/frontend/src/routes/drafts/starting/variants/launcher.svelte"]
+assets = ["tabler.search"]
+
+[[use]]
+id = "tabler.selector"
+channel = "tabler-direct+barrel"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/ui/select/select-trigger.svelte", "modules/frontend/src/lib/components/ui/native-select/native-select.svelte", "modules/frontend/src/routes/components/model-selector/view.svelte", "modules/frontend/src/routes/components/project-selector.svelte", "modules/frontend/src/routes/components/settings/compaction-model.svelte", "modules/frontend/src/routes/components/settings/font-picker.svelte", "modules/frontend/src/routes/components/thread-environment-card.svelte"]
+assets = ["tabler.selector"]
+
+[[use]]
+id = "tabler.settings"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/command-menu.svelte", "modules/frontend/src/routes/components/sidebar-identity.svelte"]
+assets = ["tabler.settings"]
+
+[[use]]
+id = "tabler.shield-lock"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/nav.svelte"]
+assets = ["tabler.shield-lock"]
+
+[[use]]
+id = "tabler.shopping-bag"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/sectioned-panel.svelte"]
+assets = ["tabler.shopping-bag"]
+
+[[use]]
+id = "tabler.sparkles"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/nav.svelte"]
+assets = ["tabler.sparkles"]
+
+[[use]]
+id = "tabler.star"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/model-selector/model-list.svelte"]
+assets = ["tabler.star"]
+
+[[use]]
+id = "tabler.star-filled"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/models.svelte"]
+assets = ["tabler.star-filled"]
+
+[[use]]
+id = "tabler.terminal-2"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-approval.svelte", "modules/frontend/src/routes/components/conversation-trace.svelte", "modules/frontend/src/routes/components/thread-terminals.svelte"]
+assets = ["tabler.terminal-2"]
+
+[[use]]
+id = "tabler.test-pipe"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/onboarding/view.svelte"]
+assets = ["tabler.test-pipe"]
+
+[[use]]
+id = "tabler.tool"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.tool"]
+
+[[use]]
+id = "tabler.trash"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/composer/steering-lip.svelte"]
+assets = ["tabler.trash"]
+
+[[use]]
+id = "tabler.world"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/markdown/anchor.svelte"]
+assets = ["tabler.world"]
+
+[[use]]
+id = "tabler.world-search"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
+assets = ["tabler.world-search"]
+
+[[use]]
+id = "tabler.x"
+channel = "tabler-direct+barrel"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/ui/dialog/dialog-content.svelte", "modules/frontend/src/lib/components/ui/sheet/sheet-content.svelte", "modules/frontend/src/lib/components/markdown/mermaid-renderer.svelte", "modules/frontend/src/routes/components/composer/attachment-tray.svelte", "modules/frontend/src/routes/components/conversation-approval.svelte", "modules/frontend/src/routes/components/forge-connection-overlay.svelte", "modules/frontend/src/routes/components/image-viewer.svelte", "modules/frontend/src/routes/components/settings/models.svelte", "modules/frontend/src/routes/drafts/starting/variants/launcher.svelte"]
+assets = ["tabler.x"]
+
+[[use]]
+id = "tabler.zoom-in"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/markdown/mermaid-renderer.svelte"]
+assets = ["tabler.zoom-in"]
+
+[[use]]
+id = "tabler.zoom-out"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/markdown/mermaid-renderer.svelte"]
+assets = ["tabler.zoom-out"]
+
+[[use]]
+id = "tabler.chevron-up"
+channel = "tabler-barrel"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/ui/accordion/accordion-trigger.svelte", "modules/frontend/src/lib/components/ui/select/select-scroll-up-button.svelte"]
+assets = ["tabler.chevron-up"]
+
+[[use]]
+id = "tabler.minus"
+channel = "tabler-barrel"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/ui/dropdown-menu/dropdown-menu-checkbox-item.svelte"]
+assets = ["tabler.minus"]
+
+[[use]]
+id = "svgl.repository-marks"
+channel = "svgl"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/vcs/presentation.ts"]
+assets = ["svgl.github", "svgl.gitlab", "svgl.git", "svgl.microsoft-azure"]
+
+[[use]]
+id = "svgl.engine-provider-marks"
+channel = "svgl"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/engine/presentation.ts"]
+assets = ["svgl.claude-ai", "svgl.cursor", "svgl.deepseek", "svgl.gemini", "svgl.grok", "svgl.meta", "svgl.openai", "svgl.qwen"]
+
+[[use]]
+id = "notifications.system-icon"
+channel = "checked-in-svg"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/notifications/web-presenter.ts"]
+assets = ["artisan.app-icon"]
+
+[[use]]
+id = "settings.compaction-mask"
+channel = "css-mask"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/settings/compaction-model.svelte"]
+assets = ["artisan.star"]
+
+[[use]]
+id = "shell.logo-gradient"
+channel = "css-mask"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/sectioned-panel.svelte", "modules/frontend/src/routes/debug/applogo/+page.svelte"]
+assets = ["artisan.logo-gradient"]
+
+[[use]]
+id = "engine.brand-logos"
+channel = "brand-component"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/engine/presentation.ts"]
+assets = ["brands.hermes", "brands.kimi", "brands.opencode", "brands.zai"]
+
+[[use]]
+id = "conversation.file-icons"
+channel = "checked-in-svg"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/conversation/file-icon.ts"]
+assets = ["jetbrains.text", "jetbrains.ts-test", "jetbrains.typescript", "jetbrains.svelte"]
+
+[[use]]
+id = "vcs.host-marks"
+channel = "inline-component"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/vcs/marks/bitbucket.svelte", "modules/frontend/src/lib/vcs/marks/codeberg.svelte", "modules/frontend/src/lib/vcs/marks/gitea.svelte", "modules/frontend/src/lib/vcs/marks/sourcehut.svelte"]
+assets = ["simple-icons.bitbucket", "simple-icons.codeberg", "simple-icons.gitea", "simple-icons.sourcehut"]
+
+[[use]]
+id = "engine.lobe-marks"
+channel = "inline-component"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/assets/brands/minimax/logo.svelte", "modules/frontend/src/lib/assets/brands/nvidia/logo.svelte", "modules/frontend/src/lib/assets/brands/tencent/logo.svelte", "modules/frontend/src/lib/assets/brands/xiaomi/logo.svelte"]
+assets = ["lobe.minimax", "lobe.nvidia", "lobe.tencent", "lobe.xiaomi"]
+
+[[use]]
+id = "onboarding.success-check"
+channel = "inline-component"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/routes/components/onboarding/view.svelte"]
+assets = ["artisan.success-check"]
+
+[[use]]
+id = "identity.gradient-avatar"
+channel = "generated"
+reachability = "shipped"
+classification = "data-driven-native"
+sites = ["modules/frontend/src/lib/identity/gradient-avatar.ts"]
+assets = []
+
+[[use]]
+id = "context.usage-ring"
+channel = "generated"
+reachability = "shipped"
+classification = "data-driven-native"
+sites = ["modules/frontend/src/routes/components/context-usage-ring.svelte"]
+assets = []
+
+[[use]]
+id = "activity.calendar-ring"
+channel = "generated"
+reachability = "shipped"
+classification = "data-driven-native"
+sites = ["modules/frontend/src/lib/components/activity/vertical-calendar-activity-grid.svelte"]
+assets = []
+
+[[use]]
+id = "ui.fade-arc-spinner"
+channel = "inline-component"
+reachability = "shipped"
+classification = "data-driven-native"
+sites = ["modules/frontend/src/lib/components/ui/fade-arc/fade-arc.svelte"]
+assets = []
+
+[[use]]
+id = "drafts.orbit-guide"
+channel = "inline-component"
+reachability = "dev-only"
+classification = "data-driven-native"
+sites = ["modules/frontend/src/routes/drafts/starting/variants/orbit-spring.svelte"]
+assets = []
+
+[[use]]
+id = "markdown.mermaid-rendering"
+channel = "generated"
+reachability = "shipped"
+classification = "renderer-deferred"
+sites = ["modules/frontend/src/lib/components/markdown/mermaid-rendering.ts", "modules/frontend/src/lib/components/markdown/mermaid-renderer.svelte"]
+assets = []
+
+[[use]]
+id = "barekey.forge-mark"
+channel = "dormant"
+reachability = "dormant"
+classification = "dormant"
+sites = ["modules/frontend/src/lib/assets/barekey/forge.svg"]
+assets = []
+
+[[use]]
+id = "barekey.forge-app-icon"
+channel = "dormant"
+reachability = "dormant"
+classification = "dormant"
+sites = ["modules/frontend/src/lib/assets/barekey/artisan-forge-icon.svg"]
+assets = []
+
+[[use]]
+id = "routes.opencode-icon-glyph"
+channel = "dormant"
+reachability = "dormant"
+classification = "dormant"
+sites = ["modules/frontend/src/routes/components/opencode-icon.svelte"]
+assets = []

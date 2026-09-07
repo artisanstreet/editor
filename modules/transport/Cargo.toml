@@ -1,0 +1,39 @@
+[package]
+name = "artisan-transport"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+artisan-domain = { path = "../domain" }
+artisan-protocol = { path = "../protocol" }
+quinn.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+
+[dev-dependencies]
+capnp.workspace = true
+rcgen.workspace = true
+
+[[test]]
+name = "client_session"
+path = "../../tests/transport/client_session.rs"
+
+[[test]]
+name = "server_dispatch"
+path = "../../tests/transport/server_dispatch.rs"
+
+[[test]]
+name = "request_lifecycle"
+path = "../../tests/transport/request_lifecycle.rs"
+
+[[test]]
+name = "request_correlation"
+path = "../../tests/transport/request_correlation.rs"
+
+[lints]
+workspace = true

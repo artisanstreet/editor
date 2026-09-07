@@ -1,0 +1,141 @@
+{
+  "_comment": "Captured from https://api.svgl.app on 2026-08-24 during Phase 6 asset archaeology (extraction-time evidence; validation never uses the network). Entries for exactly the 12 svgl logos vendored under modules/assets/svg/svgl/. Note: upstream publishes no per-logo license field; brandUrl/url are the attribution evidence.",
+  "entries": [
+    {
+      "id": 576,
+      "title": "GitHub",
+      "category": "Software",
+      "route": {
+        "light": "https://svgl.app/library/github_light.svg",
+        "dark": "https://svgl.app/library/github_dark.svg"
+      },
+      "wordmark": {
+        "light": "https://svgl.app/library/github_wordmark_light.svg",
+        "dark": "https://svgl.app/library/github_wordmark_dark.svg"
+      },
+      "url": "https://github.com/",
+      "brandUrl": "https://brand.github.com/"
+    },
+    {
+      "id": 130,
+      "title": "GitLab",
+      "category": "Software",
+      "route": "https://svgl.app/library/gitlab.svg",
+      "url": "https://gitlab.com/"
+    },
+    {
+      "id": 166,
+      "title": "Git",
+      "category": "Software",
+      "route": "https://svgl.app/library/git.svg",
+      "url": "https://git-scm.com/"
+    },
+    {
+      "id": 139,
+      "title": "Microsoft Azure",
+      "category": [
+        "Software",
+        "Microsoft"
+      ],
+      "route": "https://svgl.app/library/azure.svg",
+      "url": "https://azure.microsoft.com/"
+    },
+    {
+      "id": 523,
+      "title": "Claude AI",
+      "category": "AI",
+      "route": "https://svgl.app/library/claude-ai-icon.svg",
+      "wordmark": {
+        "light": "https://svgl.app/library/claude-ai-wordmark-icon_light.svg",
+        "dark": "https://svgl.app/library/claude-ai-wordmark-icon_dark.svg"
+      },
+      "url": "https://claude.ai/"
+    },
+    {
+      "id": 610,
+      "title": "Cursor",
+      "category": [
+        "Software"
+      ],
+      "brandUrl": "https://cursor.com/brand",
+      "loftlyyUrl": "https://www.loftlyy.com/en/cursor",
+      "route": {
+        "light": "https://svgl.app/library/cursor_light.svg",
+        "dark": "https://svgl.app/library/cursor_dark.svg"
+      },
+      "wordmark": {
+        "light": "https://svgl.app/library/cursor_wordmark_light.svg",
+        "dark": "https://svgl.app/library/cursor_wordmark_dark.svg"
+      },
+      "url": "https://www.cursor.com"
+    },
+    {
+      "id": 551,
+      "title": "DeepSeek",
+      "category": "AI",
+      "route": "https://svgl.app/library/deepseek.svg",
+      "wordmark": "https://svgl.app/library/deepseek_wordmark.svg",
+      "url": "https://deepseek.com/"
+    },
+    {
+      "id": 562,
+      "title": "Gemini",
+      "category": [
+        "Google",
+        "AI"
+      ],
+      "route": "https://svgl.app/library/gemini.svg",
+      "wordmark": "https://svgl.app/library/gemini_wordmark.svg",
+      "url": "https://gemini.google.com/"
+    },
+    {
+      "id": 129,
+      "title": "Grok",
+      "category": "AI",
+      "route": {
+        "light": "https://svgl.app/library/grok-light.svg",
+        "dark": "https://svgl.app/library/grok-dark.svg"
+      },
+      "wordmark": {
+        "light": "https://svgl.app/library/grok-wordmark-light.svg",
+        "dark": "https://svgl.app/library/grok-wordmark-dark.svg"
+      },
+      "url": "https://grok.com/"
+    },
+    {
+      "id": 410,
+      "title": "Meta",
+      "category": "Social",
+      "route": "https://svgl.app/library/meta.svg",
+      "url": "https://about.meta.com/es/",
+      "brandUrl": "https://about.meta.com/brand/resources/"
+    },
+    {
+      "id": 266,
+      "title": "OpenAI",
+      "category": "AI",
+      "route": {
+        "light": "https://svgl.app/library/openai.svg",
+        "dark": "https://svgl.app/library/openai_dark.svg"
+      },
+      "wordmark": {
+        "light": "https://svgl.app/library/openai_wordmark_light.svg",
+        "dark": "https://svgl.app/library/openai_wordmark_dark.svg"
+      },
+      "url": "https://openai.com/",
+      "brandUrl": "https://openai.com/brand/"
+    },
+    {
+      "id": 564,
+      "title": "Qwen",
+      "category": [
+        "AI"
+      ],
+      "route": {
+        "light": "https://svgl.app/library/qwen_light.svg",
+        "dark": "https://svgl.app/library/qwen_dark.svg"
+      },
+      "url": "https://chat.qwenlm.ai/"
+    }
+  ]
+}

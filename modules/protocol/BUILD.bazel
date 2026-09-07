@@ -1,3 +1,52 @@
-load("//tools/bazel:defs.bzl", "workspace_package")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//scripts/capnp_codegen:capnp_codegen.bzl", "capnp_codegen")
 
-workspace_package()
+exports_files(["Cargo.toml"])
+
+# Phase 1 feasibility fixture: schema compilation as an explicit Bazel action.
+# `compiler`/`plugin` labels are controller-owned wiring per the work packet;
+# analysis until then fails fast with instructions from the rule.
+capnp_codegen(
+    name = "phase1_proof_codegen",
+    compiler = "@capnp_tools_windows_x86_64//:capnp.exe",
+    plugin = "//scripts/capnp_codegen:capnpc_rust",
+    srcs = ["schema/phase1_proof.capnp"],
+    out_dir = "src",
+)
+
+# Product application protocol (Phase 2): `schema/artisan.capnp`.
+# Same declared-tool action as the proof. Cargo compiles checked-in mirrors
+# of these outputs (`src/*_capnp.rs`); the glob below excludes that pattern
+# so Bazel keeps compiling fresh action outputs.
+capnp_codegen(
+    name = "artisan_protocol_codegen",
+    compiler = "@capnp_tools_windows_x86_64//:capnp.exe",
+    plugin = "//scripts/capnp_codegen:capnpc_rust",
+    srcs = ["schema/artisan.capnp"],
+    out_dir = "src",
+)
+
+rust_library(
+    name = "protocol",
+    srcs = glob(
+        ["src/**/*.rs"],
+        # Bazel-side bindings arrive as action outputs; the same pattern also
+        # matches the checked-in Cargo mirrors, so excluding it keeps Bazel
+        # on fresh action outputs while Cargo compiles the mirrors.
+        exclude = ["src/*_capnp.rs"],
+    ) + [
+        ":phase1_proof_codegen",
+        ":artisan_protocol_codegen",
+    ],
+    crate_name = "artisan_protocol",
+    deps = [
+        "//modules/domain:domain",
+        "@crates//:capnp",
+        "@crates//:subtle",
+        "@crates//:thiserror",
+        "@crates//:zeroize",
+    ],
+    edition = "2024",
+    lint_config = "//:workspace_lints",
+    visibility = ["//visibility:public"],
+)

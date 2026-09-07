@@ -1,0 +1,107 @@
+[package]
+name = "artisan-database"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+artisan-domain = { path = "../domain" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json.workspace = true
+sea-orm.workspace = true
+sha2.workspace = true
+# Crate Universe resolves SQLx's target-specific `sqlx-core/offline` edge on
+# Windows. Enabling the driver's paired feature keeps its `Executor` impl and
+# optional serde edge coherent in the Bazel graph.
+sqlx-sqlite.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+artisan-migrations = { path = "../migrations" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[test]]
+name = "file_connection"
+path = "../../tests/database/file_connection.rs"
+
+[[test]]
+name = "message_dispatch"
+path = "../../tests/database/message_dispatch.rs"
+
+[[test]]
+name = "message_dispatch_lifecycle"
+path = "../../tests/database/message_dispatch_lifecycle.rs"
+
+[[test]]
+name = "message_dispatch_payload"
+path = "../../tests/database/message_dispatch_payload.rs"
+
+[[test]]
+name = "seaorm_sqlite"
+path = "../../tests/database/seaorm_sqlite.rs"
+
+[[test]]
+name = "command_receipt_entities"
+path = "../../tests/database/command_receipt_entities.rs"
+
+[[test]]
+name = "thread_engine_config"
+path = "../../tests/database/thread_engine_config.rs"
+
+[[test]]
+name = "conversation_execution_core_entities"
+path = "../../tests/database/conversation_execution_core_entities.rs"
+
+[[test]]
+name = "conversation_execution_run_item_entities"
+path = "../../tests/database/conversation_execution_run_item_entities.rs"
+
+[[test]]
+name = "conversation_execution_patch_checkpoint_entities"
+path = "../../tests/database/conversation_execution_patch_checkpoint_entities.rs"
+
+[[test]]
+name = "project_threads"
+path = "../../tests/database/project_threads.rs"
+
+[[test]]
+name = "queue_first_message"
+path = "../../tests/database/queue_first_message.rs"
+
+[[test]]
+name = "run_launch"
+path = "../../tests/database/run_launch.rs"
+
+[[test]]
+name = "run_binding"
+path = "../../tests/database/run_binding.rs"
+
+[[test]]
+name = "run_observation"
+path = "../../tests/database/run_observation.rs"
+
+[[test]]
+name = "run_terminal"
+path = "../../tests/database/run_terminal.rs"
+
+[[test]]
+name = "project_catalog"
+path = "../../tests/database/project_catalog.rs"
+
+[[test]]
+name = "startup_reconciliation"
+path = "../../tests/database/startup_reconciliation.rs"
+
+[[test]]
+name = "startup_reconciliation_disposition"
+path = "../../tests/database/startup_reconciliation_disposition.rs"
+
+[[test]]
+name = "conversation_patch_replay"
+path = "../../tests/database/conversation_patch_replay.rs"
+
+[lints]
+workspace = true
